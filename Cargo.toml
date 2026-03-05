@@ -1,0 +1,13 @@
+[package]
+name = "speakrs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ndarray = "0.17.2"
+ort = { version = "2.0.0-rc.12", features = ["ndarray"] }
+kaldi-native-fbank = "0.1.0"
+
+[dev-dependencies]
+approx = "0.5.1"
+ndarray-npy = "0.10.0"
