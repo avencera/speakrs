@@ -5,6 +5,8 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, s};
 use ndarray_linalg::{Eigh, Inverse, UPLO};
 use ndarray_npy::read_npy;
 
+use crate::utils::l2_normalize_rows;
+
 #[derive(Debug, Clone)]
 pub struct PldaTransform {
     mean1: Array1<f32>,
@@ -72,11 +74,11 @@ impl PldaTransform {
 
     fn xvec_transform(&self, embeddings: &ArrayView2<f32>) -> Array2<f32> {
         let centered = embeddings - &self.mean1;
-        let normalized = l2_normalize_rows(&centered);
+        let normalized = l2_normalize_rows(&centered.view());
         let scaled = normalized * (self.lda.nrows() as f32).sqrt();
         let projected = scaled.dot(&self.lda);
         let centered_projected = projected - &self.mean2;
-        l2_normalize_rows(&centered_projected) * (self.lda.ncols() as f32).sqrt()
+        l2_normalize_rows(&centered_projected.view()) * (self.lda.ncols() as f32).sqrt()
     }
 
     fn plda_transform(&self, embeddings: &ArrayView2<f32>, lda_dim: usize) -> Array2<f32> {
@@ -84,17 +86,6 @@ impl PldaTransform {
         let centered = embeddings - &self.mu;
         centered.dot(&self.transform.slice(s![..lda_dim, ..]).t())
     }
-}
-
-fn l2_normalize_rows(values: &Array2<f32>) -> Array2<f32> {
-    let mut normalized = values.to_owned();
-    for mut row in normalized.rows_mut() {
-        let norm = row.dot(&row).sqrt();
-        if norm > 0.0 {
-            row /= norm;
-        }
-    }
-    normalized
 }
 
 fn read_array1_f32(path: impl AsRef<Path>) -> Result<Array1<f32>, PldaError> {

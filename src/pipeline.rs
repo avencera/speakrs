@@ -1,7 +1,7 @@
 use std::error::Error;
 use std::path::Path;
 
-use ndarray::{Array2, Array3, s};
+use ndarray::{Array2, Array3, ArrayView2, s};
 
 use crate::clustering::ahc::{AhcConfig, cluster as cluster_ahc};
 use crate::clustering::plda::PldaTransform;
@@ -27,7 +27,6 @@ pub struct DiarizationResult {
     pub speaker_count: Vec<usize>,
     pub hard_clusters: Array2<i32>,
     pub discrete_diarization: Array2<f32>,
-    pub frame_step_seconds: f64,
     pub rttm: String,
 }
 
@@ -86,7 +85,6 @@ pub fn diarize(
             speaker_count: Vec::new(),
             hard_clusters: Array2::zeros((0, 0)),
             discrete_diarization: Array2::zeros((0, 0)),
-            frame_step_seconds: FRAME_STEP_SECONDS,
             rttm: String::new(),
         });
     }
@@ -107,7 +105,6 @@ pub fn diarize(
             speaker_count,
             hard_clusters: Array2::zeros((0, 0)),
             discrete_diarization: Array2::zeros((0, 0)),
-            frame_step_seconds: FRAME_STEP_SECONDS,
             rttm: String::new(),
         });
     }
@@ -170,7 +167,6 @@ pub fn diarize(
         speaker_count,
         hard_clusters,
         discrete_diarization,
-        frame_step_seconds: FRAME_STEP_SECONDS,
         rttm,
     })
 }
@@ -199,7 +195,7 @@ fn extract_embeddings(
     for chunk_idx in 0..num_chunks {
         let chunk_audio = chunk_audio(audio, seg_model, chunk_idx);
         let chunk_segmentations = segmentations.slice(s![chunk_idx, .., ..]);
-        let clean_masks = clean_masks(&chunk_segmentations.to_owned());
+        let clean_masks = clean_masks(&chunk_segmentations);
 
         for speaker_idx in 0..num_speakers {
             let mask = chunk_segmentations.column(speaker_idx).to_owned();
@@ -241,10 +237,10 @@ fn filter_embeddings(
                 .zip(single_active.iter())
                 .filter_map(|(value, single)| single.then_some(*value))
                 .sum::<f32>();
-            let embedding = embeddings.slice(s![chunk, speaker, ..]).to_owned();
+            let embedding = embeddings.slice(s![chunk, speaker, ..]);
             let valid = embedding.iter().all(|value| value.is_finite());
             if valid && clean_frames >= 0.2 * num_frames {
-                filtered.extend(embedding.iter().copied());
+                filtered.extend(embedding.iter());
                 chunk_idx.push(chunk);
                 speaker_idx.push(speaker);
             }
@@ -294,15 +290,14 @@ fn assign_embeddings(
             }
 
             active_local.push(speaker_idx);
-            let embedding = embeddings.slice(s![chunk_idx, speaker_idx, ..]).to_owned();
+            let embedding = embeddings.slice(s![chunk_idx, speaker_idx, ..]);
             if embedding.iter().any(|value| !value.is_finite()) {
                 continue;
             }
 
             for cluster_idx in 0..num_clusters {
-                let centroid = centroids.row(cluster_idx).to_owned();
                 scores[[speaker_idx, cluster_idx]] =
-                    1.0 + cosine_similarity(&embedding.view(), &centroid.view());
+                    1.0 + cosine_similarity(&embedding, &centroids.row(cluster_idx));
             }
         }
 
@@ -402,7 +397,7 @@ fn mark_inactive_speakers(segmentations: &Array3<f32>, hard_clusters: &mut Array
     }
 }
 
-fn clean_masks(segmentations: &Array2<f32>) -> Array2<f32> {
+fn clean_masks(segmentations: &ArrayView2<f32>) -> Array2<f32> {
     let single_active: Vec<bool> = segmentations
         .rows()
         .into_iter()

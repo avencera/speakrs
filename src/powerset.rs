@@ -1,8 +1,6 @@
 use ndarray::Array2;
 
 pub struct PowersetMapping {
-    num_speakers: usize,
-    max_set_size: usize,
     mapping: Array2<f32>,
 }
 
@@ -28,19 +26,7 @@ impl PowersetMapping {
             }
         }
 
-        Self {
-            num_speakers,
-            max_set_size,
-            mapping,
-        }
-    }
-
-    pub fn num_speakers(&self) -> usize {
-        self.num_speakers
-    }
-
-    pub fn max_set_size(&self) -> usize {
-        self.max_set_size
+        Self { mapping }
     }
 
     pub fn num_powerset_classes(&self) -> usize {
