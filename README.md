@@ -53,6 +53,69 @@ Audio (16kHz f32)
 - **kaldi-native-fbank** — pure Rust fbank feature extraction
 - **ndarray** — array operations throughout
 
+## Library Usage
+
+`speakrs` expects mono 16kHz audio as `&[f32]` samples and returns a `DiarizationResult`
+
+```rust
+use std::path::Path;
+
+use speakrs::inference::embedding::EmbeddingModel;
+use speakrs::inference::segmentation::SegmentationModel;
+use speakrs::pipeline::DiarizationPipeline;
+
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let models_dir = Path::new("fixtures/models");
+
+    let mut segmentation = SegmentationModel::new(
+        models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
+        DiarizationPipeline::default_segmentation_step(),
+    )?;
+    let mut embedding = EmbeddingModel::new(
+        models_dir
+            .join("wespeaker-voxceleb-resnet34.onnx")
+            .to_str()
+            .unwrap(),
+    )?;
+
+    let mut pipeline = DiarizationPipeline::new(
+        &mut segmentation,
+        &mut embedding,
+        models_dir,
+    )?;
+
+    let audio: Vec<f32> = load_your_mono_16khz_audio_here();
+    let result = pipeline.run(&audio)?;
+
+    print!("{}", result.rttm("my-audio"));
+    Ok(())
+}
+
+fn load_your_mono_16khz_audio_here() -> Vec<f32> {
+    unimplemented!()
+}
+```
+
+The result also exposes intermediate arrays if you want them:
+
+- `result.segmentations`
+- `result.embeddings`
+- `result.speaker_count`
+- `result.hard_clusters`
+- `result.discrete_diarization`
+
+See [examples/README.md](examples/README.md) for runnable end-to-end examples, including speaker turn iteration, airtime reporting, and transcript speaker assignment
+
+## Compare
+
+`just compare` accepts a local file path, a YouTube URL, or a direct `http(s)` audio URL. It normalizes the input to mono 16kHz WAV, runs both Rust and pyannote, and prints the comparison.
+
+```bash
+just compare /path/to/audio.wav
+just compare https://youtu.be/6EjykW6rkzM
+just compare https://example.com/audio.mp3
+```
+
 ## [Contributing](CONTRIBUTING.md)
 
 ## References
