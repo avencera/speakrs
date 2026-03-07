@@ -21,16 +21,30 @@ download-models:
 generate-fixtures:
     uv run fixtures/generate.py
 
-# Download YouTube audio and run both pipelines side-by-side
-compare url:
+# Prepare local or remote audio and run both pipelines side-by-side
+compare source:
     #!/usr/bin/env bash
     set -euo pipefail
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' EXIT
-    echo "=== Downloading audio ==="
-    yt-dlp -x --audio-format wav --postprocessor-args "ffmpeg:-ar 16000 -ac 1" \
-        -o "$tmp/audio.%(ext)s" "{{url}}"
     wav="$tmp/audio.wav"
+    source="{{source}}"
+    echo "=== Preparing audio ==="
+    if [[ "$source" =~ ^https?:// ]]; then
+        if [[ "$source" =~ ^https?://(www\\.)?(youtube\\.com|youtu\\.be)/ ]]; then
+            yt-dlp -x --audio-format wav --postprocessor-args "ffmpeg:-ar 16000 -ac 1" \
+                -o "$tmp/audio.%(ext)s" "$source"
+        else
+            curl --fail --location --silent --show-error "$source" -o "$tmp/input"
+            ffmpeg -y -i "$tmp/input" -ar 16000 -ac 1 "$wav" >/dev/null 2>&1
+        fi
+    else
+        if [[ ! -f "$source" ]]; then
+            echo "Input does not exist: $source" >&2
+            exit 1
+        fi
+        ffmpeg -y -i "$source" -ar 16000 -ac 1 "$wav" >/dev/null 2>&1
+    fi
     echo ""
     echo "=== speakrs (Rust) ==="
     cargo run --release {{platform_features}} --bin diarize -- "$wav" | tee "$tmp/rust.rttm"
