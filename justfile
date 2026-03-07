@@ -35,4 +35,4 @@ compare url:
     uv run scripts/diarize_pyannote.py "$wav" | tee "$tmp/python.rttm"
     echo ""
     echo "=== Comparison ==="
-    uv run scripts/compare_rttm.py "$tmp/rust.rttm" "$tmp/python.rttm"
+    cargo run --release --bin compare_rttm -- "$tmp/rust.rttm" "$tmp/python.rttm"
