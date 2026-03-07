@@ -53,6 +53,8 @@ Audio (16kHz f32)
 - **kaldi-native-fbank** — pure Rust fbank feature extraction
 - **ndarray** — array operations throughout
 
+## [Contributing](CONTRIBUTING.md)
+
 ## References
 
 - [pyannote-audio](https://github.com/pyannote/pyannote-audio) — Python reference implementation
