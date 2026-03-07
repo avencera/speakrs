@@ -51,16 +51,39 @@ Audio (16kHz f32)
 - **kaldi-native-fbank** — pure Rust fbank feature extraction
 - **ndarray** — array operations throughout
 
+## Setup
+
+Download ONNX models and PLDA parameters (requires a [HuggingFace token](https://huggingface.co/settings/tokens) with access to the gated repos):
+
+```sh
+# accept terms at:
+#   https://huggingface.co/pyannote/segmentation-3.0
+#   https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM
+HF_TOKEN=your_token just download-models
+```
+
+Models are saved to `fixtures/models/` (gitignored).
+
 ## Testing
 
 ```sh
-cargo test
+just test
 ```
 
-Golden fixtures can be regenerated from Python (requires `HF_TOKEN`):
+End-to-end tests require the ONNX models from the setup step above.
+
+Regenerate golden test fixtures from Python (requires `HF_TOKEN`):
 
 ```sh
-HF_TOKEN=your_token uv run fixtures/generate.py
+just generate-fixtures
+```
+
+## Development
+
+```sh
+just check    # fmt + clippy + test
+just fmt      # cargo fmt
+just clippy   # cargo clippy -- -D warnings
 ```
 
 ## References
