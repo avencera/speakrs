@@ -1,0 +1,4 @@
+{
+  "segmentation": "{'min_duration_off': 0.0}",
+  "clustering": "{'threshold': 0.6, 'Fa': 0.07, 'Fb': 0.8}"
+}
