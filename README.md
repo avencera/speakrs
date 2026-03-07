@@ -6,6 +6,8 @@ Implements the full pyannote community-1 pipeline: audio → ONNX inference → 
 
 No pyannote-rs dependency — uses `ort` directly for ONNX inference to get raw logits, then does all post-processing natively in Rust.
 
+Output is numerically verified against pyannote.audio — golden test fixtures are generated from the Python reference and matched exactly.
+
 ## Pipeline
 
 ```
@@ -51,7 +53,13 @@ Audio (16kHz f32)
 - **kaldi-native-fbank** — pure Rust fbank feature extraction
 - **ndarray** — array operations throughout
 
-## Setup
+## Development
+
+Set up the Python tool environment once:
+
+```sh
+uv sync --group dev
+```
 
 Download ONNX models and PLDA parameters (requires a [HuggingFace token](https://huggingface.co/settings/tokens) with access to the gated repos):
 
@@ -64,35 +72,20 @@ HF_TOKEN=your_token just download-models
 
 Models are saved to `fixtures/models/` (gitignored).
 
-## Testing
-
-```sh
-just test
-```
-
-End-to-end tests require the ONNX models from the setup step above.
-
-All Python scripts in the repo are fully typed and type checked with `ty`.
-
 Regenerate golden test fixtures from Python (requires `HF_TOKEN`):
 
 ```sh
 just generate-fixtures
 ```
 
-## Development
-
-Set up the Python tool environment once:
-
-```sh
-uv sync --group dev
-```
-
 ```sh
 just check    # fmt + clippy + test
+just test     # run tests (e2e tests require ONNX models)
 just fmt      # cargo fmt + Python formatting
 just clippy   # cargo clippy -- -D warnings + ty check
 ```
+
+All Python scripts in the repo are fully typed and type checked with `ty`.
 
 ## References
 
