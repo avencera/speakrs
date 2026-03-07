@@ -17,6 +17,7 @@ type DynError = Box<dyn Error + Send + Sync + 'static>;
 
 pub const SEGMENTATION_WINDOW_SECONDS: f64 = 10.0;
 pub const SEGMENTATION_STEP_SECONDS: f64 = 1.0;
+pub const FRAME_DURATION_SECONDS: f64 = 0.0619375;
 pub const FRAME_STEP_SECONDS: f64 = 0.016875;
 
 #[derive(Debug, Clone)]
@@ -92,11 +93,12 @@ pub fn diarize(
 
     let decoded_windows: Vec<Array2<f32>> = raw_windows
         .iter()
-        .map(|window| powerset.soft_decode(window))
+        .map(|window| powerset.hard_decode(window))
         .collect();
     let segmentations = stack_windows(&decoded_windows);
     let start_frames = chunk_start_frames(segmentations.shape()[0]);
-    let speaker_count = speaker_count(&segmentations, &start_frames, 0);
+    let output_frames = total_output_frames(segmentations.shape()[0]);
+    let speaker_count = speaker_count(&segmentations, &start_frames, 0, output_frames);
 
     if speaker_count.iter().all(|count| *count == 0) {
         return Ok(DiarizationResult {
@@ -155,7 +157,11 @@ pub fn diarize(
         &start_frames,
         0,
     );
-    let segments = to_segments(&discrete_diarization, FRAME_STEP_SECONDS);
+    let segments = to_segments(
+        &discrete_diarization,
+        FRAME_STEP_SECONDS,
+        FRAME_DURATION_SECONDS,
+    );
     let rttm = to_rttm(&segments, file_id);
 
     Ok(DiarizationResult {
@@ -217,33 +223,24 @@ fn filter_embeddings(
     embeddings: &Array3<f32>,
 ) -> (Array2<f32>, Vec<usize>, Vec<usize>) {
     let num_frames = segmentations.shape()[1] as f32;
-    let mut single_active =
-        Array2::<f32>::zeros((segmentations.shape()[0], segmentations.shape()[1]));
-    for chunk_idx in 0..segmentations.shape()[0] {
-        for frame_idx in 0..segmentations.shape()[1] {
-            let active = segmentations
-                .slice(s![chunk_idx, frame_idx, ..])
-                .iter()
-                .filter(|value| **value > 0.5)
-                .count();
-            if active == 1 {
-                single_active[[chunk_idx, frame_idx]] = 1.0;
-            }
-        }
-    }
-
     let mut filtered = Vec::new();
     let mut chunk_idx = Vec::new();
     let mut speaker_idx = Vec::new();
 
     for chunk in 0..segmentations.shape()[0] {
+        let single_active: Vec<bool> = segmentations
+            .slice(s![chunk, .., ..])
+            .rows()
+            .into_iter()
+            .map(|row| (row.iter().copied().sum::<f32>() - 1.0).abs() < 1e-6)
+            .collect();
         for speaker in 0..segmentations.shape()[2] {
             let clean_frames = segmentations
                 .slice(s![chunk, .., speaker])
                 .iter()
-                .zip(single_active.row(chunk).iter())
-                .filter(|(value, single)| **value > 0.5 && **single > 0.5)
-                .count() as f32;
+                .zip(single_active.iter())
+                .filter_map(|(value, single)| single.then_some(*value))
+                .sum::<f32>();
             let embedding = embeddings.slice(s![chunk, speaker, ..]).to_owned();
             let valid = embedding.iter().all(|value| value.is_finite());
             if valid && clean_frames >= 0.2 * num_frames {
@@ -291,10 +288,7 @@ fn assign_embeddings(
         let mut active_local = Vec::new();
         let mut scores = Array2::<f32>::from_elem((num_speakers, num_clusters), f32::NEG_INFINITY);
         for speaker_idx in 0..num_speakers {
-            let is_active = segmentations
-                .slice(s![chunk_idx, .., speaker_idx])
-                .iter()
-                .any(|value| *value > 0.5);
+            let is_active = segmentations.slice(s![chunk_idx, .., speaker_idx]).sum() > 0.0;
             if !is_active {
                 continue;
             }
@@ -400,10 +394,7 @@ impl<'a> AssignmentSearch<'a> {
 fn mark_inactive_speakers(segmentations: &Array3<f32>, hard_clusters: &mut Array2<i32>) {
     for chunk_idx in 0..segmentations.shape()[0] {
         for speaker_idx in 0..segmentations.shape()[2] {
-            let active = segmentations
-                .slice(s![chunk_idx, .., speaker_idx])
-                .iter()
-                .any(|value| *value > 0.5);
+            let active = segmentations.slice(s![chunk_idx, .., speaker_idx]).sum() > 0.0;
             if !active {
                 hard_clusters[[chunk_idx, speaker_idx]] = -2;
             }
@@ -444,9 +435,27 @@ fn chunk_audio(audio: &[f32], seg_model: &SegmentationModel, chunk_idx: usize) -
 fn chunk_start_frames(num_chunks: usize) -> Vec<usize> {
     (0..num_chunks)
         .map(|chunk_idx| {
-            ((chunk_idx as f64 * SEGMENTATION_STEP_SECONDS) / FRAME_STEP_SECONDS).round() as usize
+            closest_frame(
+                chunk_idx as f64 * SEGMENTATION_STEP_SECONDS + 0.5 * FRAME_DURATION_SECONDS,
+            )
         })
         .collect()
+}
+
+fn total_output_frames(num_chunks: usize) -> usize {
+    if num_chunks == 0 {
+        return 0;
+    }
+
+    closest_frame(
+        SEGMENTATION_WINDOW_SECONDS
+            + (num_chunks - 1) as f64 * SEGMENTATION_STEP_SECONDS
+            + 0.5 * FRAME_DURATION_SECONDS,
+    ) + 1
+}
+
+fn closest_frame(timestamp: f64) -> usize {
+    ((timestamp - 0.5 * FRAME_DURATION_SECONDS) / FRAME_STEP_SECONDS).round() as usize
 }
 
 #[cfg(test)]
@@ -491,6 +500,11 @@ mod tests {
     #[test]
     fn chunk_start_frames_match_pyannote_rounding() {
         assert_eq!(chunk_start_frames(4), vec![0, 59, 119, 178]);
+    }
+
+    #[test]
+    fn total_output_frames_match_pyannote_aggregate_extent() {
+        assert_eq!(total_output_frames(4), 771);
     }
 
     #[test]

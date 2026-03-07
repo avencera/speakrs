@@ -34,7 +34,11 @@ impl std::fmt::Display for Segment {
 }
 
 /// Convert binary activation matrix to speaker segments
-pub fn to_segments(activations: &Array2<f32>, frame_duration: f64) -> Vec<Segment> {
+pub fn to_segments(
+    activations: &Array2<f32>,
+    frame_step: f64,
+    frame_duration: f64,
+) -> Vec<Segment> {
     let (_num_frames, num_speakers) = activations.dim();
     let mut segments = Vec::new();
 
@@ -42,28 +46,41 @@ pub fn to_segments(activations: &Array2<f32>, frame_duration: f64) -> Vec<Segmen
         let label = format!("SPEAKER_{speaker_idx:02}");
         let column = activations.column(speaker_idx);
 
-        let mut run_start: Option<usize> = None;
+        if column.is_empty() {
+            continue;
+        }
 
-        for (i, &val) in column.iter().enumerate() {
-            if val == 1.0 && run_start.is_none() {
-                run_start = Some(i);
-            } else if val != 1.0 && run_start.is_some() {
-                let start = run_start.unwrap() as f64 * frame_duration;
-                let end = i as f64 * frame_duration;
-                segments.push(Segment::new(start, end, &label));
-                run_start = None;
+        let mut start = frame_middle(0, frame_step, frame_duration);
+        let mut is_active = column[0] > 0.5;
+        let mut last_timestamp = start;
+
+        for (frame_idx, &value) in column.iter().enumerate().skip(1) {
+            let timestamp = frame_middle(frame_idx, frame_step, frame_duration);
+            last_timestamp = timestamp;
+
+            if is_active {
+                if value < 0.5 {
+                    segments.push(Segment::new(start, timestamp, &label));
+                    start = timestamp;
+                    is_active = false;
+                }
+            } else if value > 0.5 {
+                start = timestamp;
+                is_active = true;
             }
         }
 
-        if let Some(start_idx) = run_start {
-            let start = start_idx as f64 * frame_duration;
-            let end = column.len() as f64 * frame_duration;
-            segments.push(Segment::new(start, end, &label));
+        if is_active {
+            segments.push(Segment::new(start, last_timestamp, &label));
         }
     }
 
     segments.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
     segments
+}
+
+fn frame_middle(frame_idx: usize, frame_step: f64, frame_duration: f64) -> f64 {
+    frame_idx as f64 * frame_step + 0.5 * frame_duration
 }
 
 /// Merge consecutive same-speaker segments with gap smaller than max_gap
@@ -93,7 +110,7 @@ pub fn to_rttm(segments: &[Segment], file_id: &str) -> String {
         .iter()
         .map(|s| {
             format!(
-                "SPEAKER {file_id} 1 {:.3} {:.3} <NA> <NA> {} <NA> <NA>\n",
+                "SPEAKER {file_id} 1 {:.6} {:.6} <NA> <NA> {} <NA> <NA>\n",
                 s.start,
                 s.duration(),
                 s.speaker
@@ -110,25 +127,25 @@ mod tests {
     #[test]
     fn single_segment_timing() {
         let activations = array![[0.0], [1.0], [1.0], [1.0], [0.0]];
-        let segments = to_segments(&activations, 0.1);
+        let segments = to_segments(&activations, 0.1, 0.2);
 
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].speaker, "SPEAKER_00");
-        assert!((segments[0].start - 0.1).abs() < 1e-9);
-        assert!((segments[0].end - 0.4).abs() < 1e-9);
+        assert!((segments[0].start - 0.2).abs() < 1e-9);
+        assert!((segments[0].end - 0.5).abs() < 1e-9);
         assert!((segments[0].duration() - 0.3).abs() < 1e-9);
     }
 
     #[test]
     fn multi_speaker_sorted_by_start() {
         let activations = array![[0.0, 1.0], [0.0, 1.0], [1.0, 0.0], [1.0, 0.0],];
-        let segments = to_segments(&activations, 0.1);
+        let segments = to_segments(&activations, 0.1, 0.2);
 
         assert_eq!(segments.len(), 2);
         assert_eq!(segments[0].speaker, "SPEAKER_01");
-        assert!((segments[0].start - 0.0).abs() < 1e-9);
+        assert!((segments[0].start - 0.1).abs() < 1e-9);
         assert_eq!(segments[1].speaker, "SPEAKER_00");
-        assert!((segments[1].start - 0.2).abs() < 1e-9);
+        assert!((segments[1].start - 0.3).abs() < 1e-9);
     }
 
     #[test]
@@ -161,14 +178,14 @@ mod tests {
 
         assert_eq!(
             rttm,
-            "SPEAKER meeting 1 1.500 1.500 <NA> <NA> SPEAKER_00 <NA> <NA>\n"
+            "SPEAKER meeting 1 1.500000 1.500000 <NA> <NA> SPEAKER_00 <NA> <NA>\n"
         );
     }
 
     #[test]
     fn empty_input() {
         let activations = Array2::<f32>::zeros((0, 0));
-        let segments = to_segments(&activations, 0.1);
+        let segments = to_segments(&activations, 0.1, 0.2);
         assert!(segments.is_empty());
 
         let merged = merge_segments(&[], 0.1);
@@ -181,7 +198,7 @@ mod tests {
     #[test]
     fn all_zeros_no_segments() {
         let activations = array![[0.0, 0.0], [0.0, 0.0], [0.0, 0.0]];
-        let segments = to_segments(&activations, 0.1);
+        let segments = to_segments(&activations, 0.1, 0.2);
         assert!(segments.is_empty());
     }
 
