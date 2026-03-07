@@ -1,226 +1,208 @@
-use std::collections::HashMap;
+use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 
-use ndarray::{Array1, Array2, ArrayView2, Axis, s};
-
-use crate::clustering::ClusterResult;
 use crate::utils::logsumexp;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct VbxConfig {
     pub fa: f32,
     pub fb: f32,
-    pub epsilon: f64,
     pub max_iters: usize,
-    pub min_occupancy: f32,
+    pub epsilon: f64,
+    pub init_smoothing: f32,
 }
 
 impl Default for VbxConfig {
     fn default() -> Self {
         Self {
-            fa: 0.01,
-            fb: 0.04,
-            epsilon: 1e-4,
+            fa: 0.07,
+            fb: 0.8,
             max_iters: 20,
-            min_occupancy: 0.0,
+            epsilon: 1e-4,
+            init_smoothing: 7.0,
         }
     }
 }
 
-pub fn cluster(
+/// VBx clustering matching pyannote's implementation exactly
+///
+/// Takes PLDA-transformed features and per-dimension eigenvalues (Phi),
+/// plus AHC-initialized gamma responsibilities
+pub fn vbx(
     features: &ArrayView2<f32>,
-    num_speakers: usize,
-    init_labels: Option<&[usize]>,
-    config: &VbxConfig,
-) -> ClusterResult {
-    let (n_samples, dim) = (features.nrows(), features.ncols());
+    phi: &ArrayView1<f32>,
+    fa: f32,
+    fb: f32,
+    gamma_init: &Array2<f32>,
+    max_iters: usize,
+    epsilon: f64,
+) -> (Array2<f32>, Array1<f32>) {
+    let (n_samples, dim) = features.dim();
+    let n_speakers = gamma_init.ncols();
 
-    let mut models = initialize_models(features, num_speakers, init_labels, dim);
+    let mut gamma = gamma_init.clone();
+    let mut pi = Array1::from_elem(n_speakers, 1.0 / n_speakers as f32);
+
+    // precompute per-frame constant: G = -0.5 * (sum(X^2, axis=1) + D*ln(2*pi))
+    let g: Array1<f32> = features
+        .rows()
+        .into_iter()
+        .map(|row| -0.5 * (row.dot(&row) + dim as f32 * (2.0 * std::f32::consts::PI).ln()))
+        .collect();
+
+    // V = sqrt(Phi)
+    let v = phi.mapv(f32::sqrt);
+
+    // rho = X * V (element-wise broadcast)
+    let mut rho = features.to_owned();
+    for mut row in rho.rows_mut() {
+        row *= &v;
+    }
+
     let mut prev_elbo = f64::NEG_INFINITY;
 
-    for _iter in 0..config.max_iters {
-        let log_gamma = compute_log_gamma(features, &models, config);
-        let gamma = log_gamma.mapv(f32::exp);
+    for iter in 0..max_iters {
+        // M-step: compute speaker models
+        // invL[k,d] = 1.0 / (1 + Fa/Fb * N_k * Phi[d])
+        // alpha[k,d] = Fa/Fb * invL[k,d] * sum_t(gamma[t,k] * rho[t,d])
+        let n_k: Array1<f32> = gamma.sum_axis(Axis(0));
 
-        // M-step: update models, pruning low-occupancy speakers
-        let mut new_models = Vec::new();
-        for k in 0..models.nrows() {
-            let n_k: f32 = gamma.column(k).sum();
-            if n_k < config.min_occupancy {
-                continue;
+        let mut inv_l = Array2::zeros((n_speakers, dim));
+        let mut alpha = Array2::zeros((n_speakers, dim));
+
+        for k in 0..n_speakers {
+            for d in 0..dim {
+                inv_l[[k, d]] = 1.0 / (1.0 + fa / fb * n_k[k] * phi[d]);
             }
 
+            // gamma.T @ rho for speaker k
             let mut f_k = Array1::zeros(dim);
             for t in 0..n_samples {
-                f_k += &(features.row(t).to_owned() * gamma[[t, k]]);
+                f_k.scaled_add(gamma[[t, k]], &rho.row(t));
             }
 
-            new_models.push(f_k * config.fa / (1.0 + config.fa * config.fb * n_k));
+            for d in 0..dim {
+                alpha[[k, d]] = fa / fb * inv_l[[k, d]] * f_k[d];
+            }
         }
 
-        if new_models.is_empty() {
-            return ClusterResult {
-                labels: vec![0; n_samples],
-                num_clusters: 1,
-                centroids: vec![features.mean_axis(Axis(0)).unwrap()],
-            };
+        // E-step
+        // log_p_[t,k] = Fa * (rho[t] . alpha[k] - 0.5 * (invL[k] + alpha[k]^2) . Phi + G[t])
+        let mut log_p = Array2::zeros((n_samples, n_speakers));
+        for t in 0..n_samples {
+            for k in 0..n_speakers {
+                let rho_dot_alpha: f32 = rho.row(t).dot(&alpha.row(k));
+                let penalty: f32 = (0..dim)
+                    .map(|d| (inv_l[[k, d]] + alpha[[k, d]] * alpha[[k, d]]) * phi[d])
+                    .sum();
+                log_p[[t, k]] = fa * (rho_dot_alpha - 0.5 * penalty + g[t]);
+            }
         }
 
-        models = Array2::from_shape_vec(
-            (new_models.len(), dim),
-            new_models.iter().flat_map(|m| m.iter().copied()).collect(),
-        )
-        .unwrap();
+        // GMM-style update with pi priors
+        let eps = 1e-8f32;
+        let lpi: Array1<f32> = pi.mapv(|p| (p + eps).ln());
 
-        let elbo = compute_elbo(features, &models, &gamma, config);
+        // log_p_x[t] = logsumexp(log_p[t] + lpi)
+        let mut log_p_x = Array1::zeros(n_samples);
+        for t in 0..n_samples {
+            let row: Array1<f32> = log_p.row(t).to_owned() + &lpi;
+            log_p_x[t] = logsumexp(&row.view());
+        }
 
-        if prev_elbo.is_finite() && ((elbo - prev_elbo) / elbo.abs()).abs() < config.epsilon {
+        // gamma[t,k] = exp(log_p[t,k] + lpi[k] - log_p_x[t])
+        for t in 0..n_samples {
+            for k in 0..n_speakers {
+                gamma[[t, k]] = (log_p[[t, k]] + lpi[k] - log_p_x[t]).exp();
+            }
+        }
+
+        // update pi
+        pi = gamma.sum_axis(Axis(0));
+        let pi_sum = pi.sum();
+        pi /= pi_sum;
+
+        // ELBO = sum(log_p_x) + Fb * 0.5 * sum(ln(invL) - invL - alpha^2 + 1)
+        let log_px_sum: f64 = log_p_x.iter().map(|&x| x as f64).sum();
+        let reg: f64 = inv_l
+            .iter()
+            .zip(alpha.iter())
+            .map(|(&il, &a)| (il.ln() - il - a * a + 1.0) as f64)
+            .sum();
+        let elbo = log_px_sum + fb as f64 * 0.5 * reg;
+
+        if iter > 0 && elbo - prev_elbo < epsilon {
             break;
         }
         prev_elbo = elbo;
     }
 
-    // final hard assignments
-    let final_log_gamma = compute_log_gamma(features, &models, config);
-    let raw_labels: Vec<usize> = (0..n_samples)
-        .map(|t| {
-            final_log_gamma
-                .row(t)
-                .iter()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-                .map(|(idx, _)| idx)
-                .unwrap_or(0)
-        })
-        .collect();
-
-    // renumber contiguously
-    let mut label_map = HashMap::new();
-    let mut next_label = 0usize;
-    let labels: Vec<usize> = raw_labels
-        .into_iter()
-        .map(|l| {
-            *label_map.entry(l).or_insert_with(|| {
-                let v = next_label;
-                next_label += 1;
-                v
-            })
-        })
-        .collect();
-
-    let num_clusters = label_map.len();
-    let centroids = (0..num_clusters)
-        .map(|c| {
-            let mut sum = Array1::zeros(dim);
-            let mut count = 0.0f32;
-            for (t, &l) in labels.iter().enumerate() {
-                if l == c {
-                    sum += &features.row(t).to_owned();
-                    count += 1.0;
-                }
-            }
-            if count > 0.0 { sum / count } else { sum }
-        })
-        .collect();
-
-    ClusterResult {
-        labels,
-        num_clusters,
-        centroids,
-    }
+    (gamma, pi)
 }
 
-fn compute_log_gamma(
+pub fn cluster_vbx(
+    ahc_labels: &[usize],
     features: &ArrayView2<f32>,
-    models: &Array2<f32>,
+    phi: &ArrayView1<f32>,
     config: &VbxConfig,
-) -> Array2<f32> {
-    let n_samples = features.nrows();
-    let n_models = models.nrows();
-    let mut log_gamma = Array2::zeros((n_samples, n_models));
-
-    for t in 0..n_samples {
-        for k in 0..n_models {
-            let dot: f32 = features.row(t).dot(&models.row(k));
-            let norm_sq: f32 = models.row(k).dot(&models.row(k));
-            log_gamma[[t, k]] = config.fa * dot - 0.5 * config.fa * config.fb * norm_sq;
-        }
-
-        let row = log_gamma.row(t).to_owned();
-        let lse = logsumexp(&row.view());
-        for k in 0..n_models {
-            log_gamma[[t, k]] -= lse;
-        }
-    }
-
-    log_gamma
+) -> (Array2<f32>, Array1<f32>) {
+    let gamma_init = build_gamma_init(ahc_labels, config.init_smoothing);
+    vbx(
+        features,
+        phi,
+        config.fa,
+        config.fb,
+        &gamma_init,
+        config.max_iters,
+        config.epsilon,
+    )
 }
 
-fn initialize_models(
-    features: &ArrayView2<f32>,
-    num_speakers: usize,
-    init_labels: Option<&[usize]>,
-    dim: usize,
-) -> Array2<f32> {
-    match init_labels {
-        Some(labels) => {
-            let mut models = Array2::zeros((num_speakers, dim));
-            let mut counts = vec![0.0f32; num_speakers];
+fn build_gamma_init(labels: &[usize], smoothing: f32) -> Array2<f32> {
+    let num_samples = labels.len();
+    let num_speakers = labels.iter().copied().max().unwrap_or(0) + 1;
+    let mut gamma = Array2::<f32>::zeros((num_samples, num_speakers));
 
-            for (t, &label) in labels.iter().enumerate() {
-                if label < num_speakers {
-                    for d in 0..dim {
-                        models[[label, d]] += features[[t, d]];
-                    }
-                    counts[label] += 1.0;
-                }
-            }
-
-            for k in 0..num_speakers {
-                if counts[k] > 0.0 {
-                    for d in 0..dim {
-                        models[[k, d]] /= counts[k];
-                    }
-                }
-            }
-            models
-        }
-        None => {
-            let n = num_speakers.min(features.nrows());
-            features.slice(s![..n, ..]).to_owned()
-        }
+    for (row, &label) in labels.iter().enumerate() {
+        gamma[[row, label]] = 1.0;
     }
-}
 
-fn compute_elbo(
-    features: &ArrayView2<f32>,
-    models: &Array2<f32>,
-    gamma: &Array2<f32>,
-    config: &VbxConfig,
-) -> f64 {
-    let mut elbo = 0.0f64;
+    if smoothing < 0.0 {
+        return gamma;
+    }
 
-    for t in 0..features.nrows() {
-        for k in 0..models.nrows() {
-            let g = gamma[[t, k]] as f64;
-            if g > 1e-10 {
-                let dot: f32 = features.row(t).dot(&models.row(k));
-                let norm_sq: f32 = models.row(k).dot(&models.row(k));
-                let log_like = (config.fa * dot - 0.5 * config.fa * config.fb * norm_sq) as f64;
-                elbo += g * (log_like - g.ln());
-            }
+    for mut row in gamma.rows_mut() {
+        let scaled = row.mapv(|value| value * smoothing);
+        let max = scaled.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        let mut denom = 0.0;
+        for value in &scaled {
+            denom += (*value - max).exp();
+        }
+        for (slot, value) in row.iter_mut().zip(scaled.iter()) {
+            *slot = (*value - max).exp() / denom;
         }
     }
 
-    elbo
+    gamma
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::array;
+    use approx::assert_abs_diff_eq;
+    use ndarray::{Array1, Array2, array};
+    use ndarray_npy::ReadNpyExt;
+    use std::fs::File;
+    use std::path::PathBuf;
+
+    fn fixture_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures")
+            .join(name)
+    }
 
     #[test]
-    fn two_well_separated_clusters() {
+    fn two_clusters_with_vbx() {
+        // two well-separated clusters in 2D
         let features = array![
             [10.0, 0.0],
             [10.1, 0.1],
@@ -230,64 +212,88 @@ mod tests {
             [-9.9, -0.1],
         ];
 
-        let config = VbxConfig::default();
-        let result = cluster(&features.view(), 2, None, &config);
+        let phi = array![1.0, 1.0];
 
-        assert_eq!(result.labels[0], result.labels[1]);
-        assert_eq!(result.labels[0], result.labels[2]);
-        assert_eq!(result.labels[3], result.labels[4]);
-        assert_eq!(result.labels[3], result.labels[5]);
-        assert_ne!(result.labels[0], result.labels[3]);
+        // AHC-like init: first 3 → speaker 0, last 3 → speaker 1
+        let mut gamma_init = Array2::zeros((6, 2));
+        for t in 0..3 {
+            gamma_init[[t, 0]] = 0.999;
+            gamma_init[[t, 1]] = 0.001;
+        }
+        for t in 3..6 {
+            gamma_init[[t, 0]] = 0.001;
+            gamma_init[[t, 1]] = 0.999;
+        }
+
+        let (gamma, _pi) = vbx(
+            &features.view(),
+            &phi.view(),
+            0.07,
+            0.8,
+            &gamma_init,
+            20,
+            1e-4,
+        );
+
+        // check hard assignments
+        let labels: Vec<usize> = gamma
+            .rows()
+            .into_iter()
+            .map(|row| {
+                row.iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                    .unwrap()
+                    .0
+            })
+            .collect();
+
+        assert_eq!(labels[0], labels[1]);
+        assert_eq!(labels[0], labels[2]);
+        assert_eq!(labels[3], labels[4]);
+        assert_eq!(labels[3], labels[5]);
+        assert_ne!(labels[0], labels[3]);
     }
 
     #[test]
-    fn single_speaker_input() {
-        let features = array![[1.0, 0.0], [1.1, 0.1], [0.9, -0.1]];
-
-        let config = VbxConfig::default();
-        let result = cluster(&features.view(), 1, None, &config);
-
-        assert!(result.labels.iter().all(|&l| l == 0));
-        assert_eq!(result.num_clusters, 1);
+    fn gamma_init_is_smoothed_one_hot() {
+        let gamma = build_gamma_init(&[0, 0, 1], 7.0);
+        assert_eq!(gamma.dim(), (3, 2));
+        assert!(gamma[[0, 0]] > gamma[[0, 1]]);
+        assert!(gamma[[2, 1]] > gamma[[2, 0]]);
     }
 
     #[test]
-    fn elbo_convergence() {
-        let features = array![[5.0, 0.0], [5.1, 0.1], [-5.0, 0.0], [-5.1, 0.1],];
+    fn cluster_vbx_matches_python_fixture() {
+        let ahc_labels: Array1<i64> =
+            Array1::read_npy(File::open(fixture_path("pipeline_ahc_clusters.npy")).unwrap())
+                .unwrap();
+        let features: Array2<f64> =
+            Array2::read_npy(File::open(fixture_path("pipeline_plda_features.npy")).unwrap())
+                .unwrap();
+        let phi: Array1<f64> =
+            Array1::read_npy(File::open(fixture_path("pipeline_plda_phi.npy")).unwrap()).unwrap();
+        let expected_gamma: Array2<f64> =
+            Array2::read_npy(File::open(fixture_path("pipeline_vbx_gamma.npy")).unwrap()).unwrap();
+        let expected_pi: Array1<f64> =
+            Array1::read_npy(File::open(fixture_path("pipeline_vbx_pi.npy")).unwrap()).unwrap();
 
-        let config = VbxConfig {
-            max_iters: 50,
-            ..Default::default()
-        };
-        let result = cluster(&features.view(), 2, None, &config);
-        assert_eq!(result.num_clusters, 2);
-    }
+        let ahc_labels: Vec<usize> = ahc_labels.iter().map(|value| *value as usize).collect();
+        let features = features.mapv(|value| value as f32);
+        let phi = phi.mapv(|value| value as f32);
+        let (gamma, pi) = cluster_vbx(
+            &ahc_labels,
+            &features.view(),
+            &phi.view(),
+            &VbxConfig::default(),
+        );
 
-    #[test]
-    fn with_init_labels() {
-        let features = array![[10.0, 0.0], [10.1, 0.1], [-10.0, 0.0], [-10.1, 0.1],];
+        for (lhs, rhs) in gamma.iter().zip(expected_gamma.iter()) {
+            assert_abs_diff_eq!(*lhs, *rhs as f32, epsilon = 1e-4);
+        }
 
-        let init_labels = vec![0, 0, 1, 1];
-        let config = VbxConfig::default();
-        let result = cluster(&features.view(), 2, Some(&init_labels), &config);
-
-        assert_eq!(result.labels[0], result.labels[1]);
-        assert_eq!(result.labels[2], result.labels[3]);
-        assert_ne!(result.labels[0], result.labels[2]);
-    }
-
-    #[test]
-    fn convergence_within_max_iters() {
-        let features = array![[20.0, 0.0], [20.1, 0.1], [0.0, 20.0], [0.1, 20.1],];
-
-        // use init labels to guarantee proper starting point
-        let init_labels = vec![0, 0, 1, 1];
-        let config = VbxConfig {
-            max_iters: 100,
-            epsilon: 1e-6,
-            ..Default::default()
-        };
-        let result = cluster(&features.view(), 2, Some(&init_labels), &config);
-        assert_eq!(result.num_clusters, 2);
+        for (lhs, rhs) in pi.iter().zip(expected_pi.iter()) {
+            assert_abs_diff_eq!(*lhs, *rhs as f32, epsilon = 1e-5);
+        }
     }
 }

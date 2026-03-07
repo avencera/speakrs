@@ -1,0 +1,22 @@
+[project]
+name = "speakrs-python"
+version = "0.0.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "huggingface-hub",
+    "numpy",
+    "onnx",
+    "onnxruntime",
+    "pyannote.audio>=3.3",
+    "soundfile",
+    "torch>=2.6",
+]
+
+[dependency-groups]
+dev = [
+    "ruff",
+    "ty",
+]
+
+[tool.uv]
+package = false

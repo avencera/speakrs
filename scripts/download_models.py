@@ -20,13 +20,16 @@ Requires accepting terms at:
 
 import os
 import sys
+from typing import Any, cast
 
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torchaudio.compliance.kaldi import get_mel_banks
 
 
-def main():
+def main() -> None:
     models_dir = sys.argv[1]
     token = os.environ["HF_TOKEN"]
     os.makedirs(models_dir, exist_ok=True)
@@ -37,6 +40,7 @@ def main():
     pipeline = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-community-1", token=token
     )
+    assert pipeline is not None
     pipeline.to(torch.device("cpu"))
 
     export_segmentation(pipeline, models_dir)
@@ -46,7 +50,7 @@ def main():
     print("Done!")
 
 
-def export_segmentation(pipeline, models_dir):
+def export_segmentation(pipeline: Any, models_dir: str) -> None:
     print("Exporting segmentation model...")
     seg_model = pipeline._segmentation.model
     seg_model.eval()
@@ -55,7 +59,7 @@ def export_segmentation(pipeline, models_dir):
     with torch.no_grad():
         torch.onnx.export(
             seg_model,
-            dummy,
+            (dummy,),
             os.path.join(models_dir, "segmentation-3.0.onnx"),
             input_names=["input"],
             output_names=["output"],
@@ -68,43 +72,112 @@ def export_segmentation(pipeline, models_dir):
     print(f"  segmentation-3.0.onnx ({sz:.1f} MB)")
 
 
-def export_embedding(pipeline, models_dir):
-    """Export the ResNet backbone only -- fbank is computed in Rust"""
+def export_embedding(pipeline: Any, models_dir: str) -> None:
+    """Export the exact WeSpeaker embedding path with fixed-shape fbank preprocessing"""
     print("Exporting embedding model...")
 
-    class ResNetWrapper(nn.Module):
-        def __init__(self, resnet):
+    class ExactEmbeddingWrapper(nn.Module):
+        def __init__(self, model: Any) -> None:
             super().__init__()
-            self.resnet = resnet
+            self.resnet = model.resnet
+            self.scale = float(1 << 15)
+            self.preemph = 0.97
 
-        def forward(self, fbank):
-            return self.resnet(fbank)[1]
+            window = torch.hamming_window(400, periodic=False, alpha=0.54, beta=0.46)
+            mel, _ = get_mel_banks(80, 512, 16000.0, 20.0, 0.0, 100.0, -500.0, 1.0)
+
+            self.register_buffer("window", window)
+            self.register_buffer("mel", F.pad(mel, (0, 1), value=0.0).T.contiguous())
+            self.register_buffer("eps", torch.tensor(torch.finfo(torch.float32).eps))
+
+        def compute_fbank(self, waveforms: torch.Tensor) -> torch.Tensor:
+            window = cast(torch.Tensor, self.window)
+            mel_filters = cast(torch.Tensor, self.mel)
+            eps = cast(torch.Tensor, self.eps)
+
+            frames = waveforms[:, 0, :] * self.scale
+            frames = frames.unfold(1, 400, 160)
+            frames = frames - frames.mean(dim=2, keepdim=True)
+
+            previous = F.pad(frames, (1, 0), mode="replicate")[..., :-1]
+            frames = frames - self.preemph * previous
+            frames = frames * window.view(1, 1, -1)
+            frames = F.pad(frames, (0, 112))
+
+            spectrum = torch.fft.rfft(frames, dim=2).abs().pow(2.0)
+            mel = torch.matmul(spectrum, mel_filters.to(dtype=spectrum.dtype))
+            mel = torch.clamp_min(mel, eps.to(device=mel.device, dtype=mel.dtype)).log()
+            return mel - mel.mean(dim=1, keepdim=True)
+
+        def pool(self, sequences: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+            weights = weights.unsqueeze(1)
+            num_frames = sequences.size(-1)
+            if weights.size(-1) != num_frames:
+                weights = F.interpolate(weights, size=num_frames, mode="nearest")
+
+            weight_sum = weights.sum(dim=2)
+            safe_sum = torch.where(
+                weight_sum > 0.0, weight_sum, torch.ones_like(weight_sum)
+            )
+            mean = torch.sum(sequences * weights, dim=2) / safe_sum
+            dx2 = torch.square(sequences - mean.unsqueeze(2))
+            weight_sq_sum = torch.square(weights).sum(dim=2)
+            denom = safe_sum - weight_sq_sum / safe_sum + 1e-8
+            var = torch.sum(dx2 * weights, dim=2) / denom
+            std = torch.sqrt(torch.clamp_min(var, 1e-10))
+
+            stats = torch.cat([mean, std], dim=-1)
+            zero_stats = torch.cat(
+                [torch.zeros_like(mean), torch.full_like(std, 1e-5)], dim=-1
+            )
+            zero_mask = (weight_sum <= 0.0).repeat(1, stats.size(1))
+            return torch.where(zero_mask, zero_stats, stats)
+
+        def forward(self, waveforms: torch.Tensor, weights: torch.Tensor) -> Any:
+            fbank = self.compute_fbank(waveforms)
+            frames = self.resnet.forward_frames(fbank)
+            frames = frames.reshape(
+                frames.size(0), frames.size(1) * frames.size(2), frames.size(3)
+            )
+            stats = self.pool(frames, weights)
+            embed_a = self.resnet.seg_1(stats)
+            if self.resnet.two_emb_layer:
+                out = F.relu(embed_a)
+                out = self.resnet.seg_bn_1(out)
+                return self.resnet.seg_2(out)
+
+            return embed_a
 
     emb_model = pipeline._embedding.model_
     emb_model.eval()
-    wrapper = ResNetWrapper(emb_model.resnet)
+    wrapper = ExactEmbeddingWrapper(emb_model)
     wrapper.eval()
 
-    dummy_fbank = torch.randn(1, 200, 80)
+    dummy_waveform = torch.randn(1, 1, 160000)
+    dummy_weights = torch.ones(1, 589)
     with torch.no_grad():
         torch.onnx.export(
             wrapper,
-            dummy_fbank,
+            (dummy_waveform, dummy_weights),
             os.path.join(models_dir, "wespeaker-voxceleb-resnet34.onnx"),
-            input_names=["input"],
+            input_names=["waveform", "weights"],
             output_names=["output"],
-            dynamic_axes={"input": {1: "frames"}},
-            opset_version=14,
-            dynamo=False,
+            opset_version=18,
+            dynamo=True,
         )
 
-    sz = os.path.getsize(
-        os.path.join(models_dir, "wespeaker-voxceleb-resnet34.onnx")
-    ) / 1e6
+    sz = (
+        os.path.getsize(os.path.join(models_dir, "wespeaker-voxceleb-resnet34.onnx"))
+        / 1e6
+    )
     print(f"  wespeaker-voxceleb-resnet34.onnx ({sz:.1f} MB)")
+    with open(
+        os.path.join(models_dir, "wespeaker-voxceleb-resnet34.min_num_samples.txt"), "w"
+    ) as f:
+        f.write(f"{pipeline._embedding.min_num_samples}\n")
 
 
-def export_plda(models_dir):
+def export_plda(models_dir: str) -> None:
     """Extract PLDA params from the cached pipeline blobs"""
     print("Extracting PLDA params...")
     blobs_dir = os.path.expanduser(

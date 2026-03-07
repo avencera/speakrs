@@ -9,11 +9,12 @@
 
 import os
 import sys
+from typing import Any
 
 import torch
 
 
-def main():
+def main() -> None:
     if len(sys.argv) != 2:
         print("Usage: diarize_pyannote.py <path/to/audio.wav>", file=sys.stderr)
         sys.exit(1)
@@ -40,12 +41,13 @@ def main():
     pipeline = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-community-1", token=token
     )
+    assert pipeline is not None
     if torch.backends.mps.is_available():
         pipeline.to(torch.device("mps"))
     else:
         pipeline.to(torch.device("cpu"))
 
-    result = pipeline({"audio": wav_path})
+    result: Any = pipeline({"audio": wav_path})
 
     # handle both old Annotation and new DiarizeOutput APIs
     annotation = result

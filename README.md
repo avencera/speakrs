@@ -72,6 +72,8 @@ just test
 
 End-to-end tests require the ONNX models from the setup step above.
 
+All Python scripts in the repo are fully typed and type checked with `ty`.
+
 Regenerate golden test fixtures from Python (requires `HF_TOKEN`):
 
 ```sh
@@ -80,10 +82,16 @@ just generate-fixtures
 
 ## Development
 
+Set up the Python tool environment once:
+
+```sh
+uv sync --group dev
+```
+
 ```sh
 just check    # fmt + clippy + test
-just fmt      # cargo fmt
-just clippy   # cargo clippy -- -D warnings
+just fmt      # cargo fmt + Python formatting
+just clippy   # cargo clippy -- -D warnings + ty check
 ```
 
 ## References
