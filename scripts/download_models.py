@@ -1,3 +1,13 @@
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#     "pyannote.audio>=3.3",
+#     "torch>=2.6",
+#     "numpy",
+#     "onnx",
+#     "onnxscript",
+# ]
+# ///
 """Download and export ONNX models + PLDA params for speakrs.
 
 Args: models_dir (path to fixtures/models/)
