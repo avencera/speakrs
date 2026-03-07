@@ -45,6 +45,15 @@ mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::{Array2, array};
+    use ndarray_npy::ReadNpyExt;
+    use std::fs::File;
+    use std::path::PathBuf;
+
+    fn fixture_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures")
+            .join(name)
+    }
 
     #[test]
     fn cosine_similarity_identical_vectors() {
@@ -133,6 +142,22 @@ mod tests {
             for j in 0..3 {
                 assert_abs_diff_eq!(dist[[i, j]], dist[[j, i]], epsilon = 1e-6);
             }
+        }
+    }
+
+    #[test]
+    fn cosine_distance_matrix_matches_fixture() {
+        let input: Array2<f32> =
+            Array2::read_npy(File::open(fixture_path("cosine_sim_input.npy")).unwrap()).unwrap();
+        let expected_sim: Array2<f32> =
+            Array2::read_npy(File::open(fixture_path("cosine_sim_expected.npy")).unwrap()).unwrap();
+
+        let result = cosine_distance_matrix(&input.view());
+        let expected_dist = 1.0 - expected_sim;
+
+        assert_eq!(result.shape(), expected_dist.shape());
+        for (a, b) in result.iter().zip(expected_dist.iter()) {
+            assert_abs_diff_eq!(a, b, epsilon = 1e-5);
         }
     }
 }

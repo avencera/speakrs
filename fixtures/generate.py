@@ -6,6 +6,8 @@
 #     "numpy",
 #     "soundfile",
 #     "huggingface-hub",
+#     "onnx",
+#     "onnxruntime",
 # ]
 # ///
 """Generate golden test fixtures for speakrs parity testing.
@@ -71,13 +73,6 @@ def get_test_audio(output: Path) -> Path:
     if wav_path.exists():
         wav_path.unlink()
 
-    # download LibriSpeech test-clean sample (public domain, real speech)
-    url = "https://www.openslr.org/resources/12/test-clean-wav.tar.gz"
-    # that's too large; use a single utterance from the LibriSpeech test set via
-    # a publicly accessible direct link
-
-    # try TTS-generated speech as fallback — use espeak or gtts
-    # simplest: use macOS say command to generate real speech
     import subprocess
     import tempfile
 
@@ -130,7 +125,6 @@ def get_test_audio(output: Path) -> Path:
     # arrange: speaker 0 talks, then speaker 1, then both overlap, then speaker 0 again
     gap = np.zeros(int(0.5 * sr), dtype=np.float32)  # 0.5s silence gap
 
-    # pad audio2 to be at least as long as audio1 for the overlap section
     overlap_len = min(len(audio1) // 4, len(audio2) // 4, 3 * sr)
 
     # build timeline:
@@ -170,6 +164,267 @@ def get_test_audio(output: Path) -> Path:
     return wav_path
 
 
+def tts_to_wav(voice: str, text: str, tmpdir: str, name: str, rate: int = 180) -> str:
+    """Generate speech with macOS TTS and convert to 16kHz mono WAV"""
+    import subprocess
+
+    aiff = os.path.join(tmpdir, f"{name}.aiff")
+    wav = os.path.join(tmpdir, f"{name}.wav")
+
+    subprocess.run(
+        ["say", "-v", voice, "-o", aiff, "--rate", str(rate), text],
+        check=True,
+    )
+    subprocess.run(
+        ["afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1", aiff, wav],
+        check=True,
+    )
+    return wav
+
+
+def generate_three_speaker_audio(output: Path) -> Path:
+    """Three speakers taking turns with some overlap"""
+    import soundfile as sf
+    import tempfile
+
+    sr = 16000
+    wav_path = output / "test_3speakers.wav"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        wav1 = tts_to_wav("Samantha", (
+            "Good morning everyone. Let us begin the standup. "
+            "Yesterday I worked on the new authentication module. "
+            "Today I plan to finish the integration tests."
+        ), tmpdir, "s1")
+
+        wav2 = tts_to_wav("Daniel", (
+            "Thanks for the update. On my end, I have been debugging "
+            "the deployment pipeline. The issue was a misconfigured "
+            "environment variable in the staging cluster."
+        ), tmpdir, "s2", rate=170)
+
+        wav3 = tts_to_wav("Fred", (
+            "I have a quick question about the authentication changes. "
+            "Will they affect the existing API keys? "
+            "We need to make sure nothing breaks for current users."
+        ), tmpdir, "s3", rate=175)
+
+        audio1, _ = sf.read(wav1, dtype="float32")
+        audio2, _ = sf.read(wav2, dtype="float32")
+        audio3, _ = sf.read(wav3, dtype="float32")
+
+    gap = np.zeros(int(0.3 * sr), dtype=np.float32)
+    overlap_len = min(len(audio1) // 6, len(audio3) // 6, sr)
+
+    # timeline: s1 → gap → s2 → gap → s3 → s1+s3 overlap → gap → s2 again
+    parts = [
+        audio1, gap, audio2, gap, audio3,
+    ]
+
+    # overlap section between s1 and s3
+    s1_tail = audio1[:overlap_len] * 0.7
+    s3_head = audio3[:overlap_len] * 0.7
+    overlap = s1_tail + s3_head
+    parts.extend([overlap, gap, audio2[:len(audio2) // 2]])
+
+    audio = np.concatenate(parts)
+    audio = np.clip(audio, -1.0, 1.0)
+    sf.write(str(wav_path), audio, sr)
+    print(f"  Generated 3-speaker audio ({len(audio)/sr:.1f}s): {wav_path}")
+    return wav_path
+
+
+def generate_single_speaker_audio(output: Path) -> Path:
+    """Single speaker monologue — edge case"""
+    import soundfile as sf
+    import tempfile
+
+    sr = 16000
+    wav_path = output / "test_single_speaker.wav"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        wav = tts_to_wav("Samantha", (
+            "Welcome to this lecture on distributed systems. "
+            "Today we will cover consensus algorithms, "
+            "including Paxos and Raft. "
+            "These algorithms are fundamental to building "
+            "reliable distributed databases and services. "
+            "Let us start with the basics of fault tolerance."
+        ), tmpdir, "mono", rate=160)
+
+        audio, _ = sf.read(wav, dtype="float32")
+
+    sf.write(str(wav_path), audio, sr)
+    print(f"  Generated single-speaker audio ({len(audio)/sr:.1f}s): {wav_path}")
+    return wav_path
+
+
+def generate_short_clip_audio(output: Path) -> Path:
+    """Very short clip (~5s) to test partial window handling"""
+    import soundfile as sf
+    import tempfile
+
+    sr = 16000
+    wav_path = output / "test_short.wav"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        wav1 = tts_to_wav("Samantha", "Hello, how are you?", tmpdir, "s1")
+        wav2 = tts_to_wav("Daniel", "I am fine, thanks.", tmpdir, "s2", rate=170)
+
+        audio1, _ = sf.read(wav1, dtype="float32")
+        audio2, _ = sf.read(wav2, dtype="float32")
+
+    gap = np.zeros(int(0.2 * sr), dtype=np.float32)
+    audio = np.concatenate([audio1, gap, audio2])
+    audio = np.clip(audio, -1.0, 1.0)
+    sf.write(str(wav_path), audio, sr)
+    print(f"  Generated short clip ({len(audio)/sr:.1f}s): {wav_path}")
+    return wav_path
+
+
+def run_pipeline_on_audio(pipeline, wav_path: Path, output: Path, prefix: str):
+    """Run the diarization pipeline on an audio file and save fixtures"""
+    from pyannote.audio.pipelines.utils.hook import ArtifactHook
+
+    file = {"audio": str(wav_path)}
+    with ArtifactHook() as hook:
+        result = pipeline(file, hook=hook)
+
+    artifacts = file.get("artifact", {})
+    print(f"  [{prefix}] Artifact keys: {list(artifacts.keys())}")
+
+    for step_name, artifact in artifacts.items():
+        if hasattr(artifact, "data"):
+            np.save(output / f"{prefix}_{step_name}_data.npy", artifact.data)
+            if hasattr(artifact, "sliding_window"):
+                sw = artifact.sliding_window
+                with open(output / f"{prefix}_{step_name}_window.json", "w") as f:
+                    json.dump(
+                        {"start": sw.start, "duration": sw.duration, "step": sw.step},
+                        f,
+                        indent=2,
+                    )
+        elif isinstance(artifact, np.ndarray):
+            np.save(output / f"{prefix}_{step_name}.npy", artifact)
+        elif isinstance(artifact, torch.Tensor):
+            np.save(output / f"{prefix}_{step_name}.npy", artifact.numpy(force=True))
+
+    # save RTTM
+    annotation = result
+    if hasattr(result, "speaker_diarization"):
+        annotation = result.speaker_diarization
+    elif not hasattr(result, "itertracks"):
+        for attr in ("annotation", "diarization", "output"):
+            if hasattr(result, attr):
+                annotation = getattr(result, attr)
+                break
+
+    rttm_path = output / f"{prefix}_expected.rttm"
+    with open(rttm_path, "w") as f:
+        if hasattr(annotation, "itertracks"):
+            for seg, _, speaker in annotation.itertracks(yield_label=True):
+                f.write(
+                    f"SPEAKER {prefix} 1 {seg.start:.6f} {seg.duration:.6f} "
+                    f"<NA> <NA> {speaker} <NA> <NA>\n"
+                )
+        else:
+            f.write(str(annotation) if annotation else str(result))
+
+    print(f"  [{prefix}] RTTM saved to {rttm_path}")
+
+
+def export_onnx_models(output: Path, hf_token: str):
+    """Download ONNX models from HuggingFace Hub"""
+    from huggingface_hub import hf_hub_download
+
+    models_dir = output / "models"
+    models_dir.mkdir(exist_ok=True)
+
+    # segmentation model
+    try:
+        seg_onnx = hf_hub_download(
+            repo_id="pyannote/segmentation-3.0",
+            filename="onnx/model.onnx",
+            token=hf_token,
+        )
+        shutil.copy2(seg_onnx, models_dir / "segmentation-3.0.onnx")
+        print(f"  Segmentation ONNX: {models_dir / 'segmentation-3.0.onnx'}")
+    except Exception as e:
+        print(f"  Could not download segmentation ONNX: {e}")
+
+    # embedding model (WeSpeaker)
+    try:
+        emb_onnx = hf_hub_download(
+            repo_id="pyannote/wespeaker-vox-ceb-cnceleb-resnet34",
+            filename="onnx/model.onnx",
+            token=hf_token,
+        )
+        shutil.copy2(emb_onnx, models_dir / "wespeaker-voxceleb-resnet34.onnx")
+        print(f"  Embedding ONNX: {models_dir / 'wespeaker-voxceleb-resnet34.onnx'}")
+    except Exception as e:
+        print(f"  Could not download embedding ONNX: {e}")
+
+
+def export_plda_params(pipeline, output: Path):
+    """Extract and save PLDA parameters from the clustering component"""
+    models_dir = output / "models"
+    models_dir.mkdir(exist_ok=True)
+
+    # walk the pipeline to find PLDA params
+    clustering = None
+    for attr in ("_clustering", "clustering", "klustering"):
+        if hasattr(pipeline, attr):
+            clustering = getattr(pipeline, attr)
+            break
+
+    if clustering is None:
+        print("  Could not find clustering component on pipeline")
+        print(f"  Pipeline attributes: {[a for a in dir(pipeline) if not a.startswith('__')]}")
+        return
+
+    print(f"  Clustering component: {type(clustering).__name__}")
+    print(f"  Clustering attributes: {[a for a in dir(clustering) if not a.startswith('__')]}")
+
+    # look for PLDA parameters in various locations
+    plda = None
+    for obj in (clustering, pipeline):
+        for attr in ("plda", "_plda", "plda_model"):
+            if hasattr(obj, attr):
+                plda = getattr(obj, attr)
+                break
+        if plda is not None:
+            break
+
+    if plda is not None:
+        print(f"  PLDA object: {type(plda).__name__}")
+        print(f"  PLDA attributes: {[a for a in dir(plda) if not a.startswith('__')]}")
+
+        for param_name, file_name in [("mu", "plda_mu.npy"), ("phi", "plda_phi.npy")]:
+            val = None
+            for attr in (param_name, f"_{param_name}", f"plda_{param_name}"):
+                if hasattr(plda, attr):
+                    val = getattr(plda, attr)
+                    break
+
+            if val is not None:
+                if isinstance(val, torch.Tensor):
+                    val = val.numpy(force=True)
+                elif not isinstance(val, np.ndarray):
+                    val = np.array(val)
+                np.save(models_dir / file_name, val)
+                print(f"  Saved {file_name}: shape={val.shape}")
+            else:
+                print(f"  Could not find PLDA {param_name}")
+    else:
+        print("  Could not find PLDA model in clustering component")
+
+        # try to extract from pipeline params directly
+        params = pipeline.parameters(instantiated=True)
+        for k, v in params.items():
+            if "plda" in k.lower():
+                print(f"  Found PLDA-related param: {k} = {v}")
+
+
 def generate_pipeline_fixtures(output: Path, hf_token: str):
     """Generate fixtures from running the full pipeline"""
     from pyannote.audio import Pipeline
@@ -196,80 +451,31 @@ def generate_pipeline_fixtures(output: Path, hf_token: str):
     # force CPU
     pipeline.to(torch.device("cpu"))
 
-    file = {"audio": str(wav_path)}
-    with ArtifactHook() as hook:
-        result = pipeline(file, hook=hook)
+    # export ONNX models and PLDA params
+    export_onnx_models(output, hf_token)
+    export_plda_params(pipeline, output)
 
-    artifacts = file.get("artifact", {})
-    print(f"  Captured stages: {list(artifacts.keys())}")
+    # run pipeline on main 2-speaker test audio
+    run_pipeline_on_audio(pipeline, wav_path, output, "pipeline")
 
-    # save each intermediate
-    for step_name, artifact in artifacts.items():
-        if hasattr(artifact, "data"):
-            np.save(output / f"pipeline_{step_name}_data.npy", artifact.data)
-            if hasattr(artifact, "sliding_window"):
-                sw = artifact.sliding_window
-                with open(output / f"pipeline_{step_name}_window.json", "w") as f:
-                    json.dump(
-                        {"start": sw.start, "duration": sw.duration, "step": sw.step},
-                        f,
-                        indent=2,
-                    )
-        elif isinstance(artifact, np.ndarray):
-            np.save(output / f"pipeline_{step_name}.npy", artifact)
-        elif isinstance(artifact, torch.Tensor):
-            np.save(output / f"pipeline_{step_name}.npy", artifact.numpy(force=True))
+    # generate and run on additional audio scenarios
+    scenarios = [
+        ("3speakers", generate_three_speaker_audio),
+        ("single_speaker", generate_single_speaker_audio),
+        ("short", generate_short_clip_audio),
+    ]
+
+    for name, gen_fn in scenarios:
+        try:
+            scenario_wav = gen_fn(output)
+            run_pipeline_on_audio(pipeline, scenario_wav, output, name)
+        except Exception as e:
+            print(f"  [{name}] Failed: {e}")
 
     # save pipeline params
     params = pipeline.parameters(instantiated=True)
     with open(output / "pipeline_params.json", "w") as f:
         json.dump({k: str(v) for k, v in params.items()}, f, indent=2)
-
-    # save final RTTM
-    # result may be an Annotation or a DiarizeOutput wrapping one
-    annotation = result
-    if hasattr(result, "speaker_diarization"):
-        annotation = result.speaker_diarization
-    elif not hasattr(result, "itertracks"):
-        # try common attribute names
-        for attr in ("annotation", "diarization", "output"):
-            if hasattr(result, attr):
-                annotation = getattr(result, attr)
-                break
-
-    with open(output / "expected.rttm", "w") as f:
-        if hasattr(annotation, "itertracks"):
-            for seg, _, speaker in annotation.itertracks(yield_label=True):
-                f.write(
-                    f"SPEAKER file1 1 {seg.start:.6f} {seg.duration:.6f} "
-                    f"<NA> <NA> {speaker} <NA> <NA>\n"
-                )
-        else:
-            # write the result's string representation as RTTM
-            rttm_str = str(annotation) if annotation else str(result)
-            f.write(rttm_str)
-
-    # export ONNX models
-    models_dir = output / "models"
-    models_dir.mkdir(exist_ok=True)
-
-    # try to export segmentation model
-    try:
-        seg_model = pipeline._segmentation.model_
-        if hasattr(seg_model, "config") and hasattr(seg_model.config, "_name_or_path"):
-            from huggingface_hub import hf_hub_download
-
-            try:
-                seg_onnx = hf_hub_download(
-                    repo_id="pyannote/segmentation-3.0",
-                    filename="pytorch_model.bin",
-                    token=hf_token,
-                )
-                print(f"  Segmentation model: {seg_onnx}")
-            except Exception as e:
-                print(f"  Could not download segmentation ONNX: {e}")
-    except Exception as e:
-        print(f"  Could not export segmentation model: {e}")
 
     print(f"  Pipeline fixtures saved to {output}")
 
