@@ -40,7 +40,10 @@ def main():
     pipeline = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-community-1", token=token
     )
-    pipeline.to(torch.device("cpu"))
+    if torch.backends.mps.is_available():
+        pipeline.to(torch.device("mps"))
+    else:
+        pipeline.to(torch.device("cpu"))
 
     result = pipeline({"audio": wav_path})
 
