@@ -3,6 +3,12 @@ name = "speakrs"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+coreml = ["ort/coreml"]
+cuda = ["ort/cuda"]
+directml = ["ort/directml"]
+tensorrt = ["ort/tensorrt"]
+
 [dependencies]
 ndarray = "0.17.2"
 ort = { version = "2.0.0-rc.12", features = ["ndarray"] }

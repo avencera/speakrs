@@ -1,3 +1,5 @@
+platform_features := if os() == "macos" { "--features coreml" } else if os() == "windows" { "--features directml" } else { "" }
+
 fmt:
     cargo fmt
 
@@ -29,7 +31,7 @@ compare url:
     wav="$tmp/audio.wav"
     echo ""
     echo "=== speakrs (Rust) ==="
-    cargo run --release --bin diarize -- "$wav" | tee "$tmp/rust.rttm"
+    cargo run --release {{platform_features}} --bin diarize -- "$wav" | tee "$tmp/rust.rttm"
     echo ""
     echo "=== pyannote (Python) ==="
     uv run scripts/diarize_pyannote.py "$wav" | tee "$tmp/python.rttm"

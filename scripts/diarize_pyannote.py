@@ -44,7 +44,17 @@ def main():
 
     result = pipeline({"audio": wav_path})
 
-    for seg, _, speaker in result.itertracks(yield_label=True):
+    # handle both old Annotation and new DiarizeOutput APIs
+    annotation = result
+    if hasattr(result, "speaker_diarization"):
+        annotation = result.speaker_diarization
+    elif not hasattr(result, "itertracks"):
+        for attr in ("annotation", "diarization", "output"):
+            if hasattr(result, attr):
+                annotation = getattr(result, attr)
+                break
+
+    for seg, _, speaker in annotation.itertracks(yield_label=True):
         print(
             f"SPEAKER file1 1 {seg.start:.6f} {seg.duration:.6f} "
             f"<NA> <NA> {speaker} <NA> <NA>"
