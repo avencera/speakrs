@@ -1,7 +1,6 @@
-use kaldi_native_fbank::FrameOptions;
-use kaldi_native_fbank::fbank::{FbankComputer, FbankOptions};
-use kaldi_native_fbank::mel::MelOptions;
-use kaldi_native_fbank::online::{FeatureComputer, OnlineFeature};
+use std::fs;
+use std::path::Path;
+
 use ndarray::Array1;
 use ort::session::Session;
 use ort::value::Tensor;
@@ -9,18 +8,26 @@ use ort::value::Tensor;
 pub struct EmbeddingModel {
     session: Session,
     sample_rate: usize,
-    num_mel_bins: usize,
+    window_samples: usize,
+    mask_frames: usize,
+    min_num_samples: usize,
 }
 
 impl EmbeddingModel {
-    /// Load a WeSpeaker ONNX embedding model
+    /// Load the fixed-shape WeSpeaker embedding model
     pub fn new(model_path: &str) -> Result<Self, ort::Error> {
         let session = Session::builder()?.commit_from_file(model_path)?;
+        let metadata_path = Path::new(model_path)
+            .with_extension("min_num_samples.txt")
+            .to_string_lossy()
+            .into_owned();
 
         Ok(Self {
             session,
-            sample_rate: 16000,
-            num_mel_bins: 80,
+            sample_rate: 16_000,
+            window_samples: 160_000,
+            mask_frames: 589,
+            min_num_samples: read_min_num_samples(&metadata_path).unwrap_or(400),
         })
     }
 
@@ -28,61 +35,120 @@ impl EmbeddingModel {
         self.sample_rate
     }
 
-    /// Extract a 256-dim embedding from an audio segment
+    pub fn min_num_samples(&self) -> usize {
+        self.min_num_samples
+    }
+
     pub fn embed(&mut self, audio: &[f32]) -> Result<Array1<f32>, ort::Error> {
-        let features = self.compute_fbank(audio);
+        self.embed_waveform(audio, &Array1::ones(self.mask_frames))
+    }
 
-        if features.is_empty() {
-            return Ok(Array1::zeros(256));
-        }
+    pub fn embed_masked(
+        &mut self,
+        audio: &[f32],
+        mask: &[f32],
+        clean_mask: Option<&[f32]>,
+    ) -> Result<Array1<f32>, ort::Error> {
+        let used_mask = select_mask(mask, clean_mask, audio.len(), self.min_num_samples);
+        self.embed_waveform(audio, &Array1::from_vec(used_mask.to_vec()))
+    }
 
-        let num_frames = features.len() / self.num_mel_bins;
-        let input_array =
-            ndarray::Array3::from_shape_vec((1, num_frames, self.num_mel_bins), features).unwrap();
-        let input_tensor = Tensor::from_array(input_array)?;
+    fn embed_waveform(
+        &mut self,
+        audio: &[f32],
+        weights: &Array1<f32>,
+    ) -> Result<Array1<f32>, ort::Error> {
+        let waveform = self.prepare_waveform(audio);
+        let waveform_tensor = Tensor::from_array(
+            waveform
+                .view()
+                .insert_axis(ndarray::Axis(0))
+                .insert_axis(ndarray::Axis(0))
+                .to_owned(),
+        )?;
+        let weights_tensor = Tensor::from_array(
+            self.prepare_weights(weights)
+                .view()
+                .insert_axis(ndarray::Axis(0))
+                .to_owned(),
+        )?;
 
-        let outputs = self.session.run(ort::inputs![input_tensor])?;
+        let outputs = self
+            .session
+            .run(ort::inputs!["waveform" => waveform_tensor, "weights" => weights_tensor])?;
         let (_shape, data) = outputs[0].try_extract_tensor::<f32>()?;
-
         Ok(Array1::from_vec(data.to_vec()))
     }
 
-    fn compute_fbank(&self, audio: &[f32]) -> Vec<f32> {
-        let frame_opts = FrameOptions {
-            samp_freq: self.sample_rate as f32,
-            frame_shift_ms: 10.0,
-            frame_length_ms: 25.0,
-            dither: 0.0,
-            ..Default::default()
-        };
+    fn prepare_waveform(&self, audio: &[f32]) -> Array1<f32> {
+        let mut waveform = vec![0.0f32; self.window_samples];
+        let copy_len = audio.len().min(self.window_samples);
+        waveform[..copy_len].copy_from_slice(&audio[..copy_len]);
+        Array1::from_vec(waveform)
+    }
 
-        let mel_opts = MelOptions {
-            num_bins: self.num_mel_bins,
-            ..Default::default()
-        };
-
-        let fbank_opts = FbankOptions {
-            frame_opts,
-            mel_opts,
-            use_energy: false,
-            ..Default::default()
-        };
-
-        let computer = FbankComputer::new(fbank_opts).expect("failed to create fbank computer");
-        let mut online = OnlineFeature::new(FeatureComputer::Fbank(computer));
-
-        online.accept_waveform(self.sample_rate as f32, audio);
-        online.input_finished();
-
-        let num_frames = online.num_frames_ready();
-        let mut all_features = Vec::with_capacity(num_frames * self.num_mel_bins);
-
-        for i in 0..num_frames {
-            if let Some(frame) = online.get_frame(i) {
-                all_features.extend_from_slice(frame);
-            }
+    fn prepare_weights(&self, weights: &Array1<f32>) -> Array1<f32> {
+        if weights.len() == self.mask_frames {
+            return weights.clone();
         }
 
-        all_features
+        let mut padded = vec![0.0f32; self.mask_frames];
+        let copy_len = weights.len().min(self.mask_frames);
+        if let Some(values) = weights.as_slice() {
+            padded[..copy_len].copy_from_slice(&values[..copy_len]);
+        }
+        Array1::from_vec(padded)
+    }
+}
+
+fn read_min_num_samples(path: &str) -> Option<usize> {
+    fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+fn select_mask<'a>(
+    mask: &'a [f32],
+    clean_mask: Option<&'a [f32]>,
+    num_samples: usize,
+    min_num_samples: usize,
+) -> &'a [f32] {
+    let Some(clean_mask) = clean_mask else {
+        return mask;
+    };
+
+    if clean_mask.len() != mask.len() || num_samples == 0 {
+        return mask;
+    }
+
+    let min_mask_frames = (mask.len() * min_num_samples).div_ceil(num_samples) as f32;
+    let clean_weight: f32 = clean_mask.iter().copied().sum();
+    if clean_weight > min_mask_frames {
+        clean_mask
+    } else {
+        mask
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn select_mask_prefers_clean_mask_when_it_is_long_enough() {
+        let mask = [1.0, 1.0, 1.0, 0.0];
+        let clean = [1.0, 1.0, 1.0, 0.0];
+
+        let selected = select_mask(&mask, Some(&clean), 16_000, 6_000);
+
+        assert_eq!(selected, clean);
+    }
+
+    #[test]
+    fn select_mask_falls_back_to_full_mask_when_clean_mask_is_too_short() {
+        let mask = [1.0, 1.0, 1.0, 0.0];
+        let clean = [1.0, 0.0, 0.0, 0.0];
+
+        let selected = select_mask(&mask, Some(&clean), 16_000, 6_000);
+
+        assert_eq!(selected, mask);
     }
 }

@@ -2,9 +2,11 @@ platform_features := if os() == "macos" { "--features coreml" } else if os() == 
 
 fmt:
     cargo fmt
+    uv run --group dev ruff format scripts fixtures
 
 clippy:
     cargo clippy -- -D warnings
+    uv run --group dev ty check --python .venv scripts fixtures
 
 test *args:
     cargo test {{args}}

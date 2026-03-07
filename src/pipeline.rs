@@ -1,0 +1,621 @@
+use std::error::Error;
+use std::path::Path;
+
+use ndarray::{Array2, Array3, s};
+
+use crate::clustering::ahc::{AhcConfig, cluster as cluster_ahc};
+use crate::clustering::plda::PldaTransform;
+use crate::clustering::vbx::{VbxConfig, cluster_vbx};
+use crate::inference::embedding::EmbeddingModel;
+use crate::inference::segmentation::SegmentationModel;
+use crate::powerset::PowersetMapping;
+use crate::reconstruct::{reconstruct, speaker_count};
+use crate::segment::{to_rttm, to_segments};
+use crate::utils::cosine_similarity;
+
+type DynError = Box<dyn Error + Send + Sync + 'static>;
+
+pub const SEGMENTATION_WINDOW_SECONDS: f64 = 10.0;
+pub const SEGMENTATION_STEP_SECONDS: f64 = 1.0;
+pub const FRAME_STEP_SECONDS: f64 = 0.016875;
+
+#[derive(Debug, Clone)]
+pub struct DiarizationResult {
+    pub segmentations: Array3<f32>,
+    pub embeddings: Array3<f32>,
+    pub speaker_count: Vec<usize>,
+    pub hard_clusters: Array2<i32>,
+    pub discrete_diarization: Array2<f32>,
+    pub frame_step_seconds: f64,
+    pub rttm: String,
+}
+
+pub struct DiarizationPipeline<'a> {
+    seg_model: &'a mut SegmentationModel,
+    emb_model: &'a mut EmbeddingModel,
+    plda: PldaTransform,
+}
+
+impl<'a> DiarizationPipeline<'a> {
+    pub fn new(
+        seg_model: &'a mut SegmentationModel,
+        emb_model: &'a mut EmbeddingModel,
+        models_dir: &Path,
+    ) -> Result<Self, DynError> {
+        Ok(Self {
+            seg_model,
+            emb_model,
+            plda: PldaTransform::from_dir(models_dir)?,
+        })
+    }
+
+    pub fn default_segmentation_step() -> f32 {
+        SEGMENTATION_STEP_SECONDS as f32
+    }
+
+    pub fn run(&mut self, audio: &[f32]) -> Result<DiarizationResult, DynError> {
+        diarize(self.seg_model, self.emb_model, &self.plda, audio, "file1")
+    }
+}
+
+impl DiarizationResult {
+    pub fn rttm(&self, file_id: &str) -> String {
+        if file_id == "file1" {
+            return self.rttm.clone();
+        }
+
+        self.rttm
+            .replace("SPEAKER file1 1", &format!("SPEAKER {file_id} 1"))
+    }
+}
+
+pub fn diarize(
+    seg_model: &mut SegmentationModel,
+    emb_model: &mut EmbeddingModel,
+    plda: &PldaTransform,
+    audio: &[f32],
+    file_id: &str,
+) -> Result<DiarizationResult, DynError> {
+    let powerset = PowersetMapping::new(3, 2);
+    let raw_windows = seg_model.run(audio)?;
+    if raw_windows.is_empty() {
+        return Ok(DiarizationResult {
+            segmentations: Array3::zeros((0, 0, 0)),
+            embeddings: Array3::zeros((0, 0, 0)),
+            speaker_count: Vec::new(),
+            hard_clusters: Array2::zeros((0, 0)),
+            discrete_diarization: Array2::zeros((0, 0)),
+            frame_step_seconds: FRAME_STEP_SECONDS,
+            rttm: String::new(),
+        });
+    }
+
+    let decoded_windows: Vec<Array2<f32>> = raw_windows
+        .iter()
+        .map(|window| powerset.soft_decode(window))
+        .collect();
+    let segmentations = stack_windows(&decoded_windows);
+    let start_frames = chunk_start_frames(segmentations.shape()[0]);
+    let speaker_count = speaker_count(&segmentations, &start_frames, 0);
+
+    if speaker_count.iter().all(|count| *count == 0) {
+        return Ok(DiarizationResult {
+            segmentations,
+            embeddings: Array3::zeros((0, 0, 0)),
+            speaker_count,
+            hard_clusters: Array2::zeros((0, 0)),
+            discrete_diarization: Array2::zeros((0, 0)),
+            frame_step_seconds: FRAME_STEP_SECONDS,
+            rttm: String::new(),
+        });
+    }
+
+    let embeddings = extract_embeddings(seg_model, emb_model, audio, &segmentations)?;
+    let (train_embeddings, _train_chunk_idx, _train_speaker_idx) =
+        filter_embeddings(&segmentations, &embeddings);
+
+    let hard_clusters = if train_embeddings.nrows() < 2 {
+        let mut clusters =
+            Array2::<i32>::zeros((segmentations.shape()[0], segmentations.shape()[2]));
+        mark_inactive_speakers(&segmentations, &mut clusters);
+        clusters
+    } else {
+        let ahc_labels = cluster_ahc(&train_embeddings.view(), AhcConfig::default());
+        let plda_features = plda.transform(&train_embeddings.view(), 128);
+        let (gamma, pi) = cluster_vbx(
+            &ahc_labels,
+            &plda_features.view(),
+            &plda.phi().slice(s![..128]),
+            &VbxConfig::default(),
+        );
+        let mut kept_speakers: Vec<usize> = pi
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, weight)| (*weight > 1e-7).then_some(idx))
+            .collect();
+        if kept_speakers.is_empty() && !pi.is_empty() {
+            let best = pi
+                .iter()
+                .enumerate()
+                .max_by(|lhs, rhs| lhs.1.partial_cmp(rhs.1).unwrap())
+                .map(|(idx, _)| idx)
+                .unwrap();
+            kept_speakers.push(best);
+        }
+        let centroids = weighted_centroids(&train_embeddings, &gamma, &kept_speakers);
+        let mut clusters = assign_embeddings(&segmentations, &embeddings, &centroids);
+        mark_inactive_speakers(&segmentations, &mut clusters);
+        clusters
+    };
+
+    let discrete_diarization = reconstruct(
+        &segmentations,
+        &hard_clusters,
+        &speaker_count,
+        &start_frames,
+        0,
+    );
+    let segments = to_segments(&discrete_diarization, FRAME_STEP_SECONDS);
+    let rttm = to_rttm(&segments, file_id);
+
+    Ok(DiarizationResult {
+        segmentations,
+        embeddings,
+        speaker_count,
+        hard_clusters,
+        discrete_diarization,
+        frame_step_seconds: FRAME_STEP_SECONDS,
+        rttm,
+    })
+}
+
+fn stack_windows(decoded_windows: &[Array2<f32>]) -> Array3<f32> {
+    let frames_per_window = decoded_windows[0].nrows();
+    let num_speakers = decoded_windows[0].ncols();
+    let mut stacked =
+        Array3::<f32>::zeros((decoded_windows.len(), frames_per_window, num_speakers));
+    for (window_idx, window) in decoded_windows.iter().enumerate() {
+        stacked.slice_mut(s![window_idx, .., ..]).assign(window);
+    }
+    stacked
+}
+
+fn extract_embeddings(
+    seg_model: &SegmentationModel,
+    emb_model: &mut EmbeddingModel,
+    audio: &[f32],
+    segmentations: &Array3<f32>,
+) -> Result<Array3<f32>, DynError> {
+    let num_chunks = segmentations.shape()[0];
+    let num_speakers = segmentations.shape()[2];
+    let mut embeddings = Array3::<f32>::from_elem((num_chunks, num_speakers, 256), f32::NAN);
+
+    for chunk_idx in 0..num_chunks {
+        let chunk_audio = chunk_audio(audio, seg_model, chunk_idx);
+        let chunk_segmentations = segmentations.slice(s![chunk_idx, .., ..]);
+        let clean_masks = clean_masks(&chunk_segmentations.to_owned());
+
+        for speaker_idx in 0..num_speakers {
+            let mask = chunk_segmentations.column(speaker_idx).to_owned();
+            let clean_mask = clean_masks.column(speaker_idx).to_owned();
+            let embedding = emb_model.embed_masked(
+                &chunk_audio,
+                mask.as_slice().unwrap(),
+                Some(clean_mask.as_slice().unwrap()),
+            )?;
+            embeddings
+                .slice_mut(s![chunk_idx, speaker_idx, ..])
+                .assign(&embedding);
+        }
+    }
+
+    Ok(embeddings)
+}
+
+fn filter_embeddings(
+    segmentations: &Array3<f32>,
+    embeddings: &Array3<f32>,
+) -> (Array2<f32>, Vec<usize>, Vec<usize>) {
+    let num_frames = segmentations.shape()[1] as f32;
+    let mut single_active =
+        Array2::<f32>::zeros((segmentations.shape()[0], segmentations.shape()[1]));
+    for chunk_idx in 0..segmentations.shape()[0] {
+        for frame_idx in 0..segmentations.shape()[1] {
+            let active = segmentations
+                .slice(s![chunk_idx, frame_idx, ..])
+                .iter()
+                .filter(|value| **value > 0.5)
+                .count();
+            if active == 1 {
+                single_active[[chunk_idx, frame_idx]] = 1.0;
+            }
+        }
+    }
+
+    let mut filtered = Vec::new();
+    let mut chunk_idx = Vec::new();
+    let mut speaker_idx = Vec::new();
+
+    for chunk in 0..segmentations.shape()[0] {
+        for speaker in 0..segmentations.shape()[2] {
+            let clean_frames = segmentations
+                .slice(s![chunk, .., speaker])
+                .iter()
+                .zip(single_active.row(chunk).iter())
+                .filter(|(value, single)| **value > 0.5 && **single > 0.5)
+                .count() as f32;
+            let embedding = embeddings.slice(s![chunk, speaker, ..]).to_owned();
+            let valid = embedding.iter().all(|value| value.is_finite());
+            if valid && clean_frames >= 0.2 * num_frames {
+                filtered.extend(embedding.iter().copied());
+                chunk_idx.push(chunk);
+                speaker_idx.push(speaker);
+            }
+        }
+    }
+
+    let filtered_embeddings =
+        Array2::from_shape_vec((chunk_idx.len(), embeddings.shape()[2]), filtered).unwrap();
+    (filtered_embeddings, chunk_idx, speaker_idx)
+}
+
+fn weighted_centroids(
+    train_embeddings: &Array2<f32>,
+    gamma: &Array2<f32>,
+    kept_speakers: &[usize],
+) -> Array2<f32> {
+    let mut centroids = Array2::<f32>::zeros((kept_speakers.len(), train_embeddings.ncols()));
+    for (out_idx, &speaker_idx) in kept_speakers.iter().enumerate() {
+        let weights = gamma.column(speaker_idx);
+        let weight_sum = weights.sum().max(1e-8);
+        for (row_idx, weight) in weights.iter().enumerate() {
+            centroids
+                .row_mut(out_idx)
+                .scaled_add(*weight / weight_sum, &train_embeddings.row(row_idx));
+        }
+    }
+    centroids
+}
+
+fn assign_embeddings(
+    segmentations: &Array3<f32>,
+    embeddings: &Array3<f32>,
+    centroids: &Array2<f32>,
+) -> Array2<i32> {
+    let num_chunks = embeddings.shape()[0];
+    let num_speakers = embeddings.shape()[1];
+    let num_clusters = centroids.nrows();
+    let mut labels = Array2::<i32>::from_elem((num_chunks, num_speakers), -2);
+
+    for chunk_idx in 0..num_chunks {
+        let mut active_local = Vec::new();
+        let mut scores = Array2::<f32>::from_elem((num_speakers, num_clusters), f32::NEG_INFINITY);
+        for speaker_idx in 0..num_speakers {
+            let is_active = segmentations
+                .slice(s![chunk_idx, .., speaker_idx])
+                .iter()
+                .any(|value| *value > 0.5);
+            if !is_active {
+                continue;
+            }
+
+            active_local.push(speaker_idx);
+            let embedding = embeddings.slice(s![chunk_idx, speaker_idx, ..]).to_owned();
+            if embedding.iter().any(|value| !value.is_finite()) {
+                continue;
+            }
+
+            for cluster_idx in 0..num_clusters {
+                let centroid = centroids.row(cluster_idx).to_owned();
+                scores[[speaker_idx, cluster_idx]] =
+                    1.0 + cosine_similarity(&embedding.view(), &centroid.view());
+            }
+        }
+
+        let assignments = best_assignment(&scores, &active_local, num_clusters);
+        for (speaker_idx, cluster_idx) in assignments {
+            labels[[chunk_idx, speaker_idx]] = cluster_idx as i32;
+        }
+    }
+
+    labels
+}
+
+fn best_assignment(
+    scores: &Array2<f32>,
+    active_local: &[usize],
+    num_clusters: usize,
+) -> Vec<(usize, usize)> {
+    let target = active_local.len().min(num_clusters);
+    let mut search = AssignmentSearch::new(scores, active_local, target, num_clusters);
+    search.run(0, 0.0);
+    search.best
+}
+
+struct AssignmentSearch<'a> {
+    scores: &'a Array2<f32>,
+    active_local: &'a [usize],
+    target: usize,
+    used_clusters: Vec<bool>,
+    current: Vec<(usize, usize)>,
+    best_score: f32,
+    best: Vec<(usize, usize)>,
+}
+
+impl<'a> AssignmentSearch<'a> {
+    fn new(
+        scores: &'a Array2<f32>,
+        active_local: &'a [usize],
+        target: usize,
+        num_clusters: usize,
+    ) -> Self {
+        Self {
+            scores,
+            active_local,
+            target,
+            used_clusters: vec![false; num_clusters],
+            current: Vec::new(),
+            best_score: f32::NEG_INFINITY,
+            best: Vec::new(),
+        }
+    }
+
+    fn run(&mut self, position: usize, current_score: f32) {
+        if self.current.len() == self.target {
+            if current_score > self.best_score {
+                self.best_score = current_score;
+                self.best = self.current.clone();
+            }
+            return;
+        }
+
+        if position == self.active_local.len() {
+            return;
+        }
+
+        let remaining_local = self.active_local.len() - position;
+        let remaining_needed = self.target - self.current.len();
+        if remaining_local > remaining_needed {
+            self.run(position + 1, current_score);
+        }
+
+        let speaker_idx = self.active_local[position];
+        for cluster_idx in 0..self.used_clusters.len() {
+            if self.used_clusters[cluster_idx] {
+                continue;
+            }
+
+            self.used_clusters[cluster_idx] = true;
+            self.current.push((speaker_idx, cluster_idx));
+            self.run(
+                position + 1,
+                current_score + self.scores[[speaker_idx, cluster_idx]],
+            );
+            self.current.pop();
+            self.used_clusters[cluster_idx] = false;
+        }
+    }
+}
+
+fn mark_inactive_speakers(segmentations: &Array3<f32>, hard_clusters: &mut Array2<i32>) {
+    for chunk_idx in 0..segmentations.shape()[0] {
+        for speaker_idx in 0..segmentations.shape()[2] {
+            let active = segmentations
+                .slice(s![chunk_idx, .., speaker_idx])
+                .iter()
+                .any(|value| *value > 0.5);
+            if !active {
+                hard_clusters[[chunk_idx, speaker_idx]] = -2;
+            }
+        }
+    }
+}
+
+fn clean_masks(segmentations: &Array2<f32>) -> Array2<f32> {
+    let single_active: Vec<bool> = segmentations
+        .rows()
+        .into_iter()
+        .map(|row| row.iter().copied().sum::<f32>() < 2.0)
+        .collect();
+    let mut clean = Array2::<f32>::zeros(segmentations.raw_dim());
+    for (frame_idx, is_single_active) in single_active.iter().enumerate() {
+        if !*is_single_active {
+            continue;
+        }
+
+        clean
+            .slice_mut(s![frame_idx, ..])
+            .assign(&segmentations.slice(s![frame_idx, ..]));
+    }
+    clean
+}
+
+fn chunk_audio(audio: &[f32], seg_model: &SegmentationModel, chunk_idx: usize) -> Vec<f32> {
+    let step_samples = (SEGMENTATION_STEP_SECONDS * seg_model.sample_rate() as f64) as usize;
+    let start = chunk_idx * step_samples;
+    let end = (start + seg_model.window_samples()).min(audio.len());
+    let mut padded = vec![0.0f32; seg_model.window_samples()];
+    if start < audio.len() {
+        padded[..end - start].copy_from_slice(&audio[start..end]);
+    }
+    padded
+}
+
+fn chunk_start_frames(num_chunks: usize) -> Vec<usize> {
+    (0..num_chunks)
+        .map(|chunk_idx| {
+            ((chunk_idx as f64 * SEGMENTATION_STEP_SECONDS) / FRAME_STEP_SECONDS).round() as usize
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use ndarray::{Array1, Array2, Array3, array};
+    use ndarray_npy::ReadNpyExt;
+    use std::fs::File;
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+
+    fn fixture_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures")
+            .join(name)
+    }
+
+    fn load_wav_samples(path: &Path) -> (Vec<f32>, u32) {
+        let data = std::fs::read(path).unwrap();
+        let sample_rate = u32::from_le_bytes(data[24..28].try_into().unwrap());
+        let bits_per_sample = u16::from_le_bytes(data[34..36].try_into().unwrap());
+        assert_eq!(bits_per_sample, 16);
+
+        let mut pos = 12;
+        while pos + 8 < data.len() {
+            let chunk_id = &data[pos..pos + 4];
+            let chunk_size =
+                u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize;
+            if chunk_id == b"data" {
+                let samples = data[pos + 8..pos + 8 + chunk_size]
+                    .chunks_exact(2)
+                    .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / 32768.0)
+                    .collect();
+                return (samples, sample_rate);
+            }
+            pos += 8 + chunk_size;
+        }
+
+        panic!("no data chunk found in WAV");
+    }
+
+    #[test]
+    fn chunk_start_frames_match_pyannote_rounding() {
+        assert_eq!(chunk_start_frames(4), vec![0, 59, 119, 178]);
+    }
+
+    #[test]
+    fn best_assignment_handles_more_speakers_than_clusters() {
+        let scores = array![[0.9, 0.1], [0.8, 0.2], [0.1, 0.95]];
+        let assignment = best_assignment(&scores, &[0, 1, 2], 2);
+        assert_eq!(assignment.len(), 2);
+        assert!(assignment.contains(&(0, 0)) || assignment.contains(&(1, 0)));
+        assert!(assignment.contains(&(2, 1)));
+    }
+
+    #[test]
+    fn filter_embeddings_matches_python_fixture() {
+        let segmentations: Array3<f32> =
+            Array3::read_npy(File::open(fixture_path("pipeline_segmentation_data.npy")).unwrap())
+                .unwrap();
+        let embeddings: Array3<f32> =
+            Array3::read_npy(File::open(fixture_path("pipeline_embeddings_data.npy")).unwrap())
+                .unwrap();
+        let expected_train_embeddings: Array2<f32> =
+            Array2::read_npy(File::open(fixture_path("pipeline_train_embeddings.npy")).unwrap())
+                .unwrap();
+        let expected_chunk_idx: Array1<i64> =
+            Array1::read_npy(File::open(fixture_path("pipeline_train_chunk_idx.npy")).unwrap())
+                .unwrap();
+        let expected_speaker_idx: Array1<i64> =
+            Array1::read_npy(File::open(fixture_path("pipeline_train_speaker_idx.npy")).unwrap())
+                .unwrap();
+
+        let (train_embeddings, chunk_idx, speaker_idx) =
+            filter_embeddings(&segmentations, &embeddings);
+
+        assert_eq!(chunk_idx.len(), expected_chunk_idx.len());
+        assert_eq!(speaker_idx.len(), expected_speaker_idx.len());
+        for (lhs, rhs) in chunk_idx.iter().zip(expected_chunk_idx.iter()) {
+            assert_eq!(*lhs as i64, *rhs);
+        }
+        for (lhs, rhs) in speaker_idx.iter().zip(expected_speaker_idx.iter()) {
+            assert_eq!(*lhs as i64, *rhs);
+        }
+        for (lhs, rhs) in train_embeddings
+            .iter()
+            .zip(expected_train_embeddings.iter())
+        {
+            approx::assert_abs_diff_eq!(*lhs, *rhs, epsilon = 1e-5);
+        }
+    }
+
+    #[test]
+    fn assign_embeddings_matches_python_fixture() {
+        let segmentations: Array3<f32> =
+            Array3::read_npy(File::open(fixture_path("pipeline_segmentation_data.npy")).unwrap())
+                .unwrap();
+        let embeddings: Array3<f32> =
+            Array3::read_npy(File::open(fixture_path("pipeline_embeddings_data.npy")).unwrap())
+                .unwrap();
+        let train_embeddings: Array2<f32> =
+            Array2::read_npy(File::open(fixture_path("pipeline_train_embeddings.npy")).unwrap())
+                .unwrap();
+        let gamma: Array2<f64> =
+            Array2::read_npy(File::open(fixture_path("pipeline_vbx_gamma.npy")).unwrap()).unwrap();
+        let pi: Array1<f64> =
+            Array1::read_npy(File::open(fixture_path("pipeline_vbx_pi.npy")).unwrap()).unwrap();
+        let expected: Array2<i8> =
+            Array2::read_npy(File::open(fixture_path("pipeline_hard_clusters.npy")).unwrap())
+                .unwrap();
+
+        let kept_speakers: Vec<usize> = pi
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, weight)| (*weight > 1e-7).then_some(idx))
+            .collect();
+        let centroids = weighted_centroids(
+            &train_embeddings,
+            &gamma.mapv(|value| value as f32),
+            &kept_speakers,
+        );
+        let mut hard_clusters = assign_embeddings(&segmentations, &embeddings, &centroids);
+        mark_inactive_speakers(&segmentations, &mut hard_clusters);
+
+        assert_eq!(hard_clusters.dim(), expected.dim());
+        for (lhs, rhs) in hard_clusters.iter().zip(expected.iter()) {
+            assert_eq!(*lhs as i8, *rhs);
+        }
+    }
+
+    #[test]
+    fn extract_embeddings_matches_python_fixture() {
+        let models_dir = fixture_path("models");
+        let seg_model = SegmentationModel::new(
+            models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
+            SEGMENTATION_STEP_SECONDS as f32,
+        )
+        .unwrap();
+        let mut emb_model = EmbeddingModel::new(
+            models_dir
+                .join("wespeaker-voxceleb-resnet34.onnx")
+                .to_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let segmentations: Array3<f32> =
+            Array3::read_npy(File::open(fixture_path("pipeline_segmentation_data.npy")).unwrap())
+                .unwrap();
+        let expected: Array3<f32> =
+            Array3::read_npy(File::open(fixture_path("pipeline_embeddings_data.npy")).unwrap())
+                .unwrap();
+        let (audio, sample_rate) = load_wav_samples(&fixture_path("test.wav"));
+        assert_eq!(sample_rate, 16_000);
+
+        let embeddings =
+            extract_embeddings(&seg_model, &mut emb_model, &audio, &segmentations).unwrap();
+
+        for chunk_idx in 0..embeddings.shape()[0] {
+            for speaker_idx in 0..embeddings.shape()[1] {
+                for dim_idx in 0..embeddings.shape()[2] {
+                    let lhs = embeddings[[chunk_idx, speaker_idx, dim_idx]];
+                    let rhs = expected[[chunk_idx, speaker_idx, dim_idx]];
+                    if (lhs - rhs).abs() > 5e-4 || lhs.is_nan() != rhs.is_nan() {
+                        panic!(
+                            "chunk={chunk_idx} speaker={speaker_idx} dim={dim_idx} left={lhs} right={rhs}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

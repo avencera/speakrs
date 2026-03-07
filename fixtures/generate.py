@@ -23,12 +23,13 @@ import json
 import os
 import shutil
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import torch
 
 
-def generate_model_free_fixtures(output: Path):
+def generate_model_free_fixtures(output: Path) -> None:
     """Generate fixtures that don't need any models"""
     from pyannote.audio.utils.powerset import Powerset
 
@@ -38,7 +39,10 @@ def generate_model_free_fixtures(output: Path):
     for nc in range(2, 5):
         for ms in range(1, nc + 1):
             ps = Powerset(nc, ms)
-            np.save(output / f"powerset_mapping_{nc}_{ms}.npy", ps.mapping.numpy())
+            mapping = torch.as_tensor(ps.mapping)
+            np.save(
+                output / f"powerset_mapping_{nc}_{ms}.npy", mapping.numpy(force=True)
+            )
 
     # powerset decode test with synthetic logits
     ps3 = Powerset(num_classes=3, max_set_size=2)
@@ -110,9 +114,12 @@ def get_test_audio(output: Path) -> Path:
             subprocess.run(
                 [
                     "afconvert",
-                    "-f", "WAVE",
-                    "-d", "LEI16@16000",
-                    "-c", "1",
+                    "-f",
+                    "WAVE",
+                    "-d",
+                    "LEI16@16000",
+                    "-c",
+                    "1",
                     src,
                     dst,
                 ],
@@ -134,7 +141,9 @@ def get_test_audio(output: Path) -> Path:
     # [len1+gap+len2..+overlap]: both speakers overlapping
     # [+overlap..+gap+tail]: speaker 0 final segment
 
-    total = len(audio1) + len(gap) + len(audio2) + overlap_len + len(gap) + len(audio1) // 2
+    total = (
+        len(audio1) + len(gap) + len(audio2) + overlap_len + len(gap) + len(audio1) // 2
+    )
     audio = np.zeros(total, dtype=np.float32)
 
     pos = 0
@@ -147,8 +156,8 @@ def get_test_audio(output: Path) -> Path:
     pos += len(audio2)
 
     # overlap section: both speakers
-    s0_overlap = audio1[: overlap_len]
-    s1_overlap = audio2[: overlap_len]
+    s0_overlap = audio1[:overlap_len]
+    s1_overlap = audio2[:overlap_len]
     audio[pos : pos + overlap_len] += s0_overlap * 0.7
     audio[pos : pos + overlap_len] += s1_overlap * 0.7
     pos += overlap_len + len(gap)
@@ -156,11 +165,11 @@ def get_test_audio(output: Path) -> Path:
     # speaker 0 final segment
     tail = audio1[: len(audio1) // 2]
     end = min(pos + len(tail), total)
-    audio[pos : end] += tail[: end - pos]
+    audio[pos:end] += tail[: end - pos]
 
     audio = np.clip(audio, -1.0, 1.0)
     sf.write(str(wav_path), audio, sr)
-    print(f"  Generated TTS test audio ({len(audio)/sr:.1f}s): {wav_path}")
+    print(f"  Generated TTS test audio ({len(audio) / sr:.1f}s): {wav_path}")
     return wav_path
 
 
@@ -191,23 +200,40 @@ def generate_three_speaker_audio(output: Path) -> Path:
     wav_path = output / "test_3speakers.wav"
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        wav1 = tts_to_wav("Samantha", (
-            "Good morning everyone. Let us begin the standup. "
-            "Yesterday I worked on the new authentication module. "
-            "Today I plan to finish the integration tests."
-        ), tmpdir, "s1")
+        wav1 = tts_to_wav(
+            "Samantha",
+            (
+                "Good morning everyone. Let us begin the standup. "
+                "Yesterday I worked on the new authentication module. "
+                "Today I plan to finish the integration tests."
+            ),
+            tmpdir,
+            "s1",
+        )
 
-        wav2 = tts_to_wav("Daniel", (
-            "Thanks for the update. On my end, I have been debugging "
-            "the deployment pipeline. The issue was a misconfigured "
-            "environment variable in the staging cluster."
-        ), tmpdir, "s2", rate=170)
+        wav2 = tts_to_wav(
+            "Daniel",
+            (
+                "Thanks for the update. On my end, I have been debugging "
+                "the deployment pipeline. The issue was a misconfigured "
+                "environment variable in the staging cluster."
+            ),
+            tmpdir,
+            "s2",
+            rate=170,
+        )
 
-        wav3 = tts_to_wav("Fred", (
-            "I have a quick question about the authentication changes. "
-            "Will they affect the existing API keys? "
-            "We need to make sure nothing breaks for current users."
-        ), tmpdir, "s3", rate=175)
+        wav3 = tts_to_wav(
+            "Fred",
+            (
+                "I have a quick question about the authentication changes. "
+                "Will they affect the existing API keys? "
+                "We need to make sure nothing breaks for current users."
+            ),
+            tmpdir,
+            "s3",
+            rate=175,
+        )
 
         audio1, _ = sf.read(wav1, dtype="float32")
         audio2, _ = sf.read(wav2, dtype="float32")
@@ -218,19 +244,23 @@ def generate_three_speaker_audio(output: Path) -> Path:
 
     # timeline: s1 → gap → s2 → gap → s3 → s1+s3 overlap → gap → s2 again
     parts = [
-        audio1, gap, audio2, gap, audio3,
+        audio1,
+        gap,
+        audio2,
+        gap,
+        audio3,
     ]
 
     # overlap section between s1 and s3
     s1_tail = audio1[:overlap_len] * 0.7
     s3_head = audio3[:overlap_len] * 0.7
     overlap = s1_tail + s3_head
-    parts.extend([overlap, gap, audio2[:len(audio2) // 2]])
+    parts.extend([overlap, gap, audio2[: len(audio2) // 2]])
 
     audio = np.concatenate(parts)
     audio = np.clip(audio, -1.0, 1.0)
     sf.write(str(wav_path), audio, sr)
-    print(f"  Generated 3-speaker audio ({len(audio)/sr:.1f}s): {wav_path}")
+    print(f"  Generated 3-speaker audio ({len(audio) / sr:.1f}s): {wav_path}")
     return wav_path
 
 
@@ -243,19 +273,25 @@ def generate_single_speaker_audio(output: Path) -> Path:
     wav_path = output / "test_single_speaker.wav"
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        wav = tts_to_wav("Samantha", (
-            "Welcome to this lecture on distributed systems. "
-            "Today we will cover consensus algorithms, "
-            "including Paxos and Raft. "
-            "These algorithms are fundamental to building "
-            "reliable distributed databases and services. "
-            "Let us start with the basics of fault tolerance."
-        ), tmpdir, "mono", rate=160)
+        wav = tts_to_wav(
+            "Samantha",
+            (
+                "Welcome to this lecture on distributed systems. "
+                "Today we will cover consensus algorithms, "
+                "including Paxos and Raft. "
+                "These algorithms are fundamental to building "
+                "reliable distributed databases and services. "
+                "Let us start with the basics of fault tolerance."
+            ),
+            tmpdir,
+            "mono",
+            rate=160,
+        )
 
         audio, _ = sf.read(wav, dtype="float32")
 
     sf.write(str(wav_path), audio, sr)
-    print(f"  Generated single-speaker audio ({len(audio)/sr:.1f}s): {wav_path}")
+    print(f"  Generated single-speaker audio ({len(audio) / sr:.1f}s): {wav_path}")
     return wav_path
 
 
@@ -278,19 +314,21 @@ def generate_short_clip_audio(output: Path) -> Path:
     audio = np.concatenate([audio1, gap, audio2])
     audio = np.clip(audio, -1.0, 1.0)
     sf.write(str(wav_path), audio, sr)
-    print(f"  Generated short clip ({len(audio)/sr:.1f}s): {wav_path}")
+    print(f"  Generated short clip ({len(audio) / sr:.1f}s): {wav_path}")
     return wav_path
 
 
-def run_pipeline_on_audio(pipeline, wav_path: Path, output: Path, prefix: str):
+def run_pipeline_on_audio(
+    pipeline: Any, wav_path: Path, output: Path, prefix: str
+) -> None:
     """Run the diarization pipeline on an audio file and save fixtures"""
     from pyannote.audio.pipelines.utils.hook import ArtifactHook
 
-    file = {"audio": str(wav_path)}
+    file: dict[str, Any] = {"audio": str(wav_path)}
     with ArtifactHook() as hook:
         result = pipeline(file, hook=hook)
 
-    artifacts = file.get("artifact", {})
+    artifacts = cast(dict[str, Any], file.get("artifact", {}))
     print(f"  [{prefix}] Artifact keys: {list(artifacts.keys())}")
 
     for step_name, artifact in artifacts.items():
@@ -333,7 +371,7 @@ def run_pipeline_on_audio(pipeline, wav_path: Path, output: Path, prefix: str):
     print(f"  [{prefix}] RTTM saved to {rttm_path}")
 
 
-def export_onnx_models(output: Path, hf_token: str):
+def export_onnx_models(output: Path, hf_token: str) -> None:
     """Download ONNX models from HuggingFace Hub"""
     from huggingface_hub import hf_hub_download
 
@@ -365,7 +403,7 @@ def export_onnx_models(output: Path, hf_token: str):
         print(f"  Could not download embedding ONNX: {e}")
 
 
-def export_plda_params(pipeline, output: Path):
+def export_plda_params(pipeline: Any, output: Path) -> None:
     """Extract and save PLDA parameters from the clustering component"""
     models_dir = output / "models"
     models_dir.mkdir(exist_ok=True)
@@ -379,11 +417,15 @@ def export_plda_params(pipeline, output: Path):
 
     if clustering is None:
         print("  Could not find clustering component on pipeline")
-        print(f"  Pipeline attributes: {[a for a in dir(pipeline) if not a.startswith('__')]}")
+        print(
+            f"  Pipeline attributes: {[a for a in dir(pipeline) if not a.startswith('__')]}"
+        )
         return
 
     print(f"  Clustering component: {type(clustering).__name__}")
-    print(f"  Clustering attributes: {[a for a in dir(clustering) if not a.startswith('__')]}")
+    print(
+        f"  Clustering attributes: {[a for a in dir(clustering) if not a.startswith('__')]}"
+    )
 
     # look for PLDA parameters in various locations
     plda = None
@@ -425,7 +467,7 @@ def export_plda_params(pipeline, output: Path):
                 print(f"  Found PLDA-related param: {k} = {v}")
 
 
-def generate_pipeline_fixtures(output: Path, hf_token: str):
+def generate_pipeline_fixtures(output: Path, hf_token: str) -> None:
     """Generate fixtures from running the full pipeline"""
     from pyannote.audio import Pipeline
     from pyannote.audio.pipelines.utils.hook import ArtifactHook
@@ -447,6 +489,7 @@ def generate_pipeline_fixtures(output: Path, hf_token: str):
             token=hf_token,
         )
         print("  Falling back to 3.1 pipeline (AHC)")
+    assert pipeline is not None
 
     # force CPU
     pipeline.to(torch.device("cpu"))
@@ -480,7 +523,7 @@ def generate_pipeline_fixtures(output: Path, hf_token: str):
     print(f"  Pipeline fixtures saved to {output}")
 
 
-def main():
+def main() -> None:
     output = Path(__file__).parent
     output.mkdir(parents=True, exist_ok=True)
 
