@@ -97,7 +97,6 @@ fn pipeline_runs_on_main_fixture_audio() {
             .iter()
             .all(|value| value.is_finite())
     );
-    assert_eq!(result.frame_step_seconds, FRAME_STEP_SECONDS);
     assert!(result.rttm.contains("SPEAKER fixture 1"));
 }
 

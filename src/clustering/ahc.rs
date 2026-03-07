@@ -1,7 +1,7 @@
 use kodama::{Method, Step, linkage};
 use ndarray::{Array2, ArrayView2};
 
-use crate::utils::l2_normalize;
+use crate::utils::l2_normalize_rows;
 
 #[derive(Debug, Clone, Copy)]
 pub struct AhcConfig {
@@ -27,15 +27,6 @@ pub fn cluster(embeddings: &ArrayView2<f32>, config: AhcConfig) -> Vec<usize> {
     let mut condensed = condensed_euclidean(&normalized);
     let dendrogram = linkage(&mut condensed, observations, Method::Centroid);
     flat_clusters(observations, dendrogram.steps(), config.threshold)
-}
-
-fn l2_normalize_rows(embeddings: &ArrayView2<f32>) -> Array2<f32> {
-    let mut normalized = embeddings.to_owned();
-    for mut row in normalized.rows_mut() {
-        let normalized_row = l2_normalize(&row.view());
-        row.assign(&normalized_row);
-    }
-    normalized
 }
 
 fn condensed_euclidean(embeddings: &Array2<f32>) -> Vec<f32> {

@@ -48,27 +48,6 @@ pub fn overlap_add(windows: &Array3<f32>, step_frames: usize, warmup_frames: usi
     )
 }
 
-pub fn aggregate(
-    windows: &Array3<f32>,
-    step_frames: usize,
-    warmup_frames: usize,
-    use_hamming: bool,
-    skip_average: bool,
-) -> Array2<f32> {
-    let start_frames: Vec<usize> = (0..windows.shape()[0]).map(|i| i * step_frames).collect();
-    aggregate_at(
-        windows,
-        &start_frames,
-        AggregateOptions {
-            use_hamming,
-            skip_average,
-            warmup_left: warmup_frames,
-            warmup_right: warmup_frames,
-            ..Default::default()
-        },
-    )
-}
-
 pub fn aggregate_at(
     windows: &Array3<f32>,
     start_frames: &[usize],
@@ -261,7 +240,14 @@ mod tests {
     #[test]
     fn aggregate_without_hamming_and_average_sums_windows() {
         let windows = array![[[1.0], [2.0]], [[3.0], [4.0]]];
-        let result = aggregate(&windows, 1, 0, false, true);
+        let result = aggregate_at(
+            &windows,
+            &[0, 1],
+            AggregateOptions {
+                skip_average: true,
+                ..Default::default()
+            },
+        );
 
         assert_eq!(result[[0, 0]], 1.0);
         assert_eq!(result[[1, 0]], 5.0);

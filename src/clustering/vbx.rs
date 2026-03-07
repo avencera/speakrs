@@ -30,14 +30,14 @@ impl Default for VbxConfig {
 pub fn vbx(
     features: &ArrayView2<f32>,
     phi: &ArrayView1<f32>,
-    fa: f32,
-    fb: f32,
     gamma_init: &Array2<f32>,
-    max_iters: usize,
-    epsilon: f64,
+    config: &VbxConfig,
 ) -> (Array2<f32>, Array1<f32>) {
     let (n_samples, dim) = features.dim();
     let n_speakers = gamma_init.ncols();
+    let fa = config.fa;
+    let fb = config.fb;
+    let fa_over_fb = fa / fb;
 
     let mut gamma = gamma_init.clone();
     let mut pi = Array1::from_elem(n_speakers, 1.0 / n_speakers as f32);
@@ -59,8 +59,9 @@ pub fn vbx(
     }
 
     let mut prev_elbo = f64::NEG_INFINITY;
+    let mut scratch = Array1::<f32>::zeros(n_speakers);
 
-    for iter in 0..max_iters {
+    for iter in 0..config.max_iters {
         // M-step: compute speaker models
         // invL[k,d] = 1.0 / (1 + Fa/Fb * N_k * Phi[d])
         // alpha[k,d] = Fa/Fb * invL[k,d] * sum_t(gamma[t,k] * rho[t,d])
@@ -71,7 +72,7 @@ pub fn vbx(
 
         for k in 0..n_speakers {
             for d in 0..dim {
-                inv_l[[k, d]] = 1.0 / (1.0 + fa / fb * n_k[k] * phi[d]);
+                inv_l[[k, d]] = 1.0 / (1.0 + fa_over_fb * n_k[k] * phi[d]);
             }
 
             // gamma.T @ rho for speaker k
@@ -81,7 +82,7 @@ pub fn vbx(
             }
 
             for d in 0..dim {
-                alpha[[k, d]] = fa / fb * inv_l[[k, d]] * f_k[d];
+                alpha[[k, d]] = fa_over_fb * inv_l[[k, d]] * f_k[d];
             }
         }
 
@@ -105,8 +106,9 @@ pub fn vbx(
         // log_p_x[t] = logsumexp(log_p[t] + lpi)
         let mut log_p_x = Array1::zeros(n_samples);
         for t in 0..n_samples {
-            let row: Array1<f32> = log_p.row(t).to_owned() + &lpi;
-            log_p_x[t] = logsumexp(&row.view());
+            scratch.assign(&log_p.row(t));
+            scratch += &lpi;
+            log_p_x[t] = logsumexp(&scratch.view());
         }
 
         // gamma[t,k] = exp(log_p[t,k] + lpi[k] - log_p_x[t])
@@ -130,7 +132,7 @@ pub fn vbx(
             .sum();
         let elbo = log_px_sum + fb as f64 * 0.5 * reg;
 
-        if iter > 0 && elbo - prev_elbo < epsilon {
+        if iter > 0 && elbo - prev_elbo < config.epsilon {
             break;
         }
         prev_elbo = elbo;
@@ -146,15 +148,7 @@ pub fn cluster_vbx(
     config: &VbxConfig,
 ) -> (Array2<f32>, Array1<f32>) {
     let gamma_init = build_gamma_init(ahc_labels, config.init_smoothing);
-    vbx(
-        features,
-        phi,
-        config.fa,
-        config.fb,
-        &gamma_init,
-        config.max_iters,
-        config.epsilon,
-    )
+    vbx(features, phi, &gamma_init, config)
 }
 
 fn build_gamma_init(labels: &[usize], smoothing: f32) -> Array2<f32> {
@@ -171,15 +165,11 @@ fn build_gamma_init(labels: &[usize], smoothing: f32) -> Array2<f32> {
     }
 
     for mut row in gamma.rows_mut() {
-        let scaled = row.mapv(|value| value * smoothing);
-        let max = scaled.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        let mut denom = 0.0;
-        for value in &scaled {
-            denom += (*value - max).exp();
-        }
-        for (slot, value) in row.iter_mut().zip(scaled.iter()) {
-            *slot = (*value - max).exp() / denom;
-        }
+        row *= smoothing;
+        let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        row.mapv_inplace(|v| (v - max).exp());
+        let denom = row.sum();
+        row /= denom;
     }
 
     gamma
@@ -228,11 +218,8 @@ mod tests {
         let (gamma, _pi) = vbx(
             &features.view(),
             &phi.view(),
-            0.07,
-            0.8,
             &gamma_init,
-            20,
-            1e-4,
+            &VbxConfig::default(),
         );
 
         // check hard assignments
