@@ -939,6 +939,7 @@ dependencies = [
  "ndarray",
  "ndarray-npy",
  "ort",
+ "serde_json",
 ]
 
 [[package]]

@@ -67,26 +67,10 @@ impl PowersetMapping {
         one_hot.dot(&self.mapping)
     }
 
-    /// Soft decode powerset logits to speaker probabilities
-    pub fn soft_decode(&self, logits: &Array2<f32>) -> Array2<f32> {
-        let num_frames = logits.nrows();
-        let num_classes = self.num_powerset_classes();
-
-        let mut probs = Array2::zeros((num_frames, num_classes));
-        for i in 0..num_frames {
-            let row = logits.row(i);
-            let max_val = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-
-            let exp: Vec<f32> = row.iter().map(|&x| (x - max_val).exp()).collect();
-            let sum: f32 = exp.iter().sum();
-
-            for (j, &e) in exp.iter().enumerate() {
-                probs[[i, j]] = e / sum;
-            }
-        }
-
-        let result = probs.dot(&self.mapping);
-        result.mapv(|x| x.clamp(0.0, 1.0))
+    /// Soft decode powerset log-probabilities to speaker activations
+    pub fn soft_decode(&self, log_probs: &Array2<f32>) -> Array2<f32> {
+        let probs = log_probs.mapv(|x| x.exp());
+        probs.dot(&self.mapping)
     }
 
     /// Encode binary multilabel matrix to powerset one-hot
@@ -147,7 +131,17 @@ fn combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ndarray::Array3;
     use ndarray::array;
+    use ndarray_npy::ReadNpyExt;
+    use std::fs::File;
+    use std::path::PathBuf;
+
+    fn fixture_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures")
+            .join(name)
+    }
 
     #[test]
     fn mapping_matrix_3_2() {
@@ -208,15 +202,13 @@ mod tests {
     fn soft_decode_uniform() {
         let pm = PowersetMapping::new(3, 2);
 
-        // uniform logits → softmax gives equal probability to all classes
+        // uniform log-probs of 0 → exp(0) = 1 for all classes
+        // each speaker appears in 3 of 7 classes, so activation = 3.0
         let logits = array![[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
         let result = pm.soft_decode(&logits);
 
-        // each speaker appears in 3 of 7 classes (1 singleton + 2 pairs)
-        // so each speaker probability = 3/7
-        let expected_prob = 3.0 / 7.0;
         for &val in result.iter() {
-            assert!((val - expected_prob).abs() < 1e-5);
+            assert!((val - 3.0).abs() < 1e-5);
         }
     }
 
@@ -238,6 +230,81 @@ mod tests {
                     "roundtrip failed for num_speakers={nc}, max_set_size={ms}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn mapping_matrices_match_fixtures() {
+        let cases = [
+            (2, 1),
+            (2, 2),
+            (3, 1),
+            (3, 2),
+            (3, 3),
+            (4, 1),
+            (4, 2),
+            (4, 3),
+            (4, 4),
+        ];
+
+        for (nc, ms) in cases {
+            let pm = PowersetMapping::new(nc, ms);
+            let filename = format!("powerset_mapping_{nc}_{ms}.npy");
+            let expected: Array2<f32> =
+                Array2::read_npy(File::open(fixture_path(&filename)).unwrap()).unwrap();
+
+            assert_eq!(
+                pm.mapping.shape(),
+                expected.shape(),
+                "shape mismatch for nc={nc}, ms={ms}"
+            );
+            for (a, b) in pm.mapping.iter().zip(expected.iter()) {
+                assert!(
+                    (a - b).abs() < 1e-6,
+                    "value mismatch for nc={nc}, ms={ms}: {a} vs {b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hard_decode_matches_fixture() {
+        let logits_3d: Array3<f32> =
+            Array3::read_npy(File::open(fixture_path("powerset_input_logits.npy")).unwrap())
+                .unwrap();
+        let expected_3d: Array3<f32> =
+            Array3::read_npy(File::open(fixture_path("powerset_hard_output.npy")).unwrap())
+                .unwrap();
+
+        // squeeze batch dimension
+        let logits = logits_3d.index_axis(ndarray::Axis(0), 0).to_owned();
+        let expected = expected_3d.index_axis(ndarray::Axis(0), 0).to_owned();
+
+        let pm = PowersetMapping::new(3, 2);
+        let result = pm.hard_decode(&logits);
+
+        assert_eq!(result.shape(), expected.shape());
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn soft_decode_matches_fixture() {
+        let logits_3d: Array3<f32> =
+            Array3::read_npy(File::open(fixture_path("powerset_input_logits.npy")).unwrap())
+                .unwrap();
+        let expected_3d: Array3<f32> =
+            Array3::read_npy(File::open(fixture_path("powerset_soft_output.npy")).unwrap())
+                .unwrap();
+
+        let logits = logits_3d.index_axis(ndarray::Axis(0), 0).to_owned();
+        let expected = expected_3d.index_axis(ndarray::Axis(0), 0).to_owned();
+
+        let pm = PowersetMapping::new(3, 2);
+        let result = pm.soft_decode(&logits);
+
+        assert_eq!(result.shape(), expected.shape());
+        for (a, b) in result.iter().zip(expected.iter()) {
+            assert!((a - b).abs() < 1e-5, "soft_decode mismatch: {a} vs {b}");
         }
     }
 }
