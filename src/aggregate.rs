@@ -7,6 +7,7 @@ pub struct AggregateOptions {
     pub missing: f32,
     pub warmup_left: usize,
     pub warmup_right: usize,
+    pub output_frames: Option<usize>,
 }
 
 impl Default for AggregateOptions {
@@ -17,6 +18,7 @@ impl Default for AggregateOptions {
             missing: 0.0,
             warmup_left: 0,
             warmup_right: 0,
+            output_frames: None,
         }
     }
 }
@@ -86,7 +88,13 @@ pub fn aggregate_at(
         "start_frames length must match number of windows"
     );
 
-    let total_frames = start_frames[num_windows - 1] + frames_per_window;
+    let total_frames = options
+        .output_frames
+        .unwrap_or(start_frames[num_windows - 1] + frames_per_window);
+    assert!(
+        total_frames >= start_frames[num_windows - 1] + frames_per_window,
+        "output_frames must cover the last window"
+    );
 
     let mut weights = if options.use_hamming {
         hamming_window(frames_per_window)
@@ -270,5 +278,21 @@ mod tests {
         assert_eq!(result[[1, 0]], 0.0);
         assert_eq!(result[[2, 0]], 2.0);
         assert_eq!(result[[3, 0]], 3.0);
+    }
+
+    #[test]
+    fn aggregate_at_respects_explicit_output_frames() {
+        let windows = array![[[1.0], [2.0]], [[3.0], [4.0]]];
+        let result = aggregate_at(
+            &windows,
+            &[0, 1],
+            AggregateOptions {
+                output_frames: Some(4),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(result.nrows(), 4);
+        assert_eq!(result[[3, 0]], 0.0);
     }
 }

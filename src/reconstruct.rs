@@ -6,6 +6,7 @@ pub fn speaker_count(
     binarized_segmentations: &Array3<f32>,
     start_frames: &[usize],
     warmup_frames: usize,
+    output_frames: usize,
 ) -> Vec<usize> {
     let chunk_count = binarized_segmentations
         .sum_axis(Axis(2))
@@ -16,6 +17,7 @@ pub fn speaker_count(
         AggregateOptions {
             warmup_left: warmup_frames,
             warmup_right: warmup_frames,
+            output_frames: Some(output_frames),
             ..Default::default()
         },
     );
@@ -23,7 +25,7 @@ pub fn speaker_count(
     aggregated
         .column(0)
         .iter()
-        .map(|value| value.round().max(0.0) as usize)
+        .map(|value| round_ties_even(*value).max(0.0) as usize)
         .collect()
 }
 
@@ -78,6 +80,7 @@ pub fn reconstruct(
             skip_average: true,
             warmup_left: warmup_frames,
             warmup_right: warmup_frames,
+            output_frames: Some(speaker_count.len()),
             ..Default::default()
         },
     );
@@ -137,6 +140,26 @@ fn top_k_indices(matrix: &Array2<f32>, frame_idx: usize, k: usize) -> Vec<usize>
     indexed.into_iter().take(k).map(|(idx, _)| idx).collect()
 }
 
+fn round_ties_even(value: f32) -> f32 {
+    let lower = value.floor();
+    let fraction = value - lower;
+    let epsilon = 1e-6;
+
+    if fraction < 0.5 - epsilon {
+        return lower;
+    }
+
+    if fraction > 0.5 + epsilon {
+        return value.ceil();
+    }
+
+    if lower as i64 % 2 == 0 {
+        lower
+    } else {
+        lower + 1.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,9 +172,17 @@ mod tests {
             [[0.0, 1.0], [1.0, 0.0], [1.0, 0.0]],
         ];
 
-        let count = speaker_count(&segmentations, &[0, 1], 0);
+        let count = speaker_count(&segmentations, &[0, 1], 0, 4);
 
         assert_eq!(count, vec![1, 2, 1, 1]);
+    }
+
+    #[test]
+    fn round_ties_even_matches_numpy_rint_behavior() {
+        assert_eq!(round_ties_even(0.5), 0.0);
+        assert_eq!(round_ties_even(1.5), 2.0);
+        assert_eq!(round_ties_even(2.5), 2.0);
+        assert_eq!(round_ties_even(3.5), 4.0);
     }
 
     #[test]

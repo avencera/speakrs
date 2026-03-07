@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-
-use kodama::{Method, linkage};
+use kodama::{Method, Step, linkage};
 use ndarray::{Array2, ArrayView2};
 
 use crate::utils::l2_normalize;
@@ -28,11 +26,7 @@ pub fn cluster(embeddings: &ArrayView2<f32>, config: AhcConfig) -> Vec<usize> {
     let normalized = l2_normalize_rows(embeddings);
     let mut condensed = condensed_euclidean(&normalized);
     let dendrogram = linkage(&mut condensed, observations, Method::Centroid);
-    dense_relabel(flat_clusters(
-        observations,
-        dendrogram.steps(),
-        config.threshold,
-    ))
+    flat_clusters(observations, dendrogram.steps(), config.threshold)
 }
 
 fn l2_normalize_rows(embeddings: &ArrayView2<f32>) -> Array2<f32> {
@@ -66,52 +60,96 @@ fn condensed_euclidean(embeddings: &Array2<f32>) -> Vec<f32> {
     condensed
 }
 
-fn flat_clusters(observations: usize, steps: &[kodama::Step<f32>], threshold: f32) -> Vec<usize> {
-    let mut parents: Vec<usize> = (0..(observations * 2).saturating_sub(1)).collect();
-    let mut next_cluster = observations;
-
-    for step in steps {
-        if step.dissimilarity > threshold {
-            break;
-        }
-
-        let left = find(&mut parents, step.cluster1);
-        let right = find(&mut parents, step.cluster2);
-        parents[left] = next_cluster;
-        parents[right] = next_cluster;
-        next_cluster += 1;
+fn flat_clusters(observations: usize, steps: &[Step<f32>], threshold: f32) -> Vec<usize> {
+    if observations == 0 {
+        return Vec::new();
+    }
+    if observations == 1 {
+        return vec![0];
     }
 
-    (0..observations)
-        .map(|idx| find(&mut parents, idx))
-        .collect()
-}
+    let total_nodes = observations + steps.len();
+    let mut children = vec![None; total_nodes];
+    let mut heights = vec![f32::INFINITY; total_nodes];
 
-fn find(parents: &mut [usize], idx: usize) -> usize {
-    let parent = parents[idx];
-    if parent == idx {
-        return idx;
+    for (step_idx, step) in steps.iter().enumerate() {
+        let node_idx = observations + step_idx;
+        children[node_idx] = Some((step.cluster1, step.cluster2));
+        heights[node_idx] = step.dissimilarity;
     }
 
-    let root = find(parents, parent);
-    parents[idx] = root;
-    root
-}
-
-fn dense_relabel(labels: Vec<usize>) -> Vec<usize> {
-    let mut mapping = HashMap::new();
-    let mut next = 0usize;
-
+    let root = total_nodes - 1;
+    let mut labels = vec![usize::MAX; observations];
+    let mut next_label = 0usize;
+    assign_flat_labels(
+        root,
+        observations,
+        threshold,
+        &children,
+        &heights,
+        &mut labels,
+        &mut next_label,
+    );
     labels
-        .into_iter()
-        .map(|label| {
-            *mapping.entry(label).or_insert_with(|| {
-                let value = next;
-                next += 1;
-                value
-            })
-        })
-        .collect()
+}
+
+fn assign_flat_labels(
+    node_idx: usize,
+    observations: usize,
+    threshold: f32,
+    children: &[Option<(usize, usize)>],
+    heights: &[f32],
+    labels: &mut [usize],
+    next_label: &mut usize,
+) {
+    if node_idx < observations {
+        labels[node_idx] = *next_label;
+        *next_label += 1;
+        return;
+    }
+
+    if heights[node_idx] <= threshold {
+        label_subtree(node_idx, observations, children, labels, *next_label);
+        *next_label += 1;
+        return;
+    }
+
+    let (left, right) = children[node_idx].unwrap();
+    assign_flat_labels(
+        left,
+        observations,
+        threshold,
+        children,
+        heights,
+        labels,
+        next_label,
+    );
+    assign_flat_labels(
+        right,
+        observations,
+        threshold,
+        children,
+        heights,
+        labels,
+        next_label,
+    );
+}
+
+fn label_subtree(
+    node_idx: usize,
+    observations: usize,
+    children: &[Option<(usize, usize)>],
+    labels: &mut [usize],
+    label: usize,
+) {
+    if node_idx < observations {
+        labels[node_idx] = label;
+        return;
+    }
+
+    let (left, right) = children[node_idx].unwrap();
+    label_subtree(left, observations, children, labels, label);
+    label_subtree(right, observations, children, labels, label);
 }
 
 #[cfg(test)]
@@ -141,9 +179,25 @@ mod tests {
     }
 
     #[test]
-    fn dense_relabel_compacts_ids() {
-        let labels = dense_relabel(vec![7, 7, 12, 18, 12]);
-        assert_eq!(labels, vec![0, 0, 1, 2, 1]);
+    fn flat_clusters_follow_scipy_leader_order() {
+        let steps = vec![
+            Step::new(2, 3, 0.1, 2),
+            Step::new(0, 1, 1.0, 2),
+            Step::new(4, 5, 10.45, 4),
+        ];
+
+        let labels = flat_clusters(4, &steps, 1.0);
+
+        assert_eq!(labels, vec![1, 1, 0, 0]);
+    }
+
+    #[test]
+    fn cluster_matches_scipy_label_order_on_toy_example() {
+        let embeddings = array![[1.0, 0.0], [0.9, 0.3], [0.0, 1.0], [0.05, 1.0],];
+
+        let labels = cluster(&embeddings.view(), AhcConfig { threshold: 0.6 });
+
+        assert_eq!(labels, vec![1, 1, 0, 0]);
     }
 
     #[test]
