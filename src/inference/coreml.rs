@@ -51,6 +51,7 @@ impl CoreMlModel {
 
         let config = unsafe { MLModelConfiguration::new() };
         unsafe { config.setComputeUnits(compute_units) };
+        unsafe { config.setAllowLowPrecisionAccumulationOnGPU(true) };
 
         let model = unsafe { MLModel::modelWithContentsOfURL_configuration_error(&url, &config) }
             .map_err(|e| CoreMlError::LoadFailed(format!("{e}")))?;
@@ -103,13 +104,19 @@ impl CoreMlModel {
         extract_output(&output_array)
     }
 
-    /// Preferred compute units: CPUAndNeuralEngine unless SPEAKRS_COREML_NO_ANE is set
+    /// Default: CPU+GPU (FP32 models can't use ANE)
+    /// Set SPEAKRS_COREML_ANE=1 to opt into CPUAndNeuralEngine (only useful with FP16 models)
     pub fn default_compute_units() -> MLComputeUnits {
-        if std::env::var("SPEAKRS_COREML_NO_ANE").is_ok() {
-            MLComputeUnits::CPUAndGPU
-        } else {
+        if std::env::var("SPEAKRS_COREML_ANE").is_ok() {
             MLComputeUnits(3) // CPUAndNeuralEngine
+        } else {
+            MLComputeUnits::CPUAndGPU
         }
+    }
+
+    /// Compute units for FP16 models: CPU+GPU+ANE
+    pub fn fp16_compute_units() -> MLComputeUnits {
+        MLComputeUnits(3) // CPUAndNeuralEngine
     }
 }
 
@@ -175,4 +182,11 @@ pub(crate) fn coreml_model_path(onnx_path: &str) -> std::path::PathBuf {
     let path = Path::new(onnx_path);
     let stem = path.file_stem().unwrap().to_str().unwrap();
     path.with_file_name(format!("{stem}.mlmodelc"))
+}
+
+/// Resolve FP16 .mlmodelc path (-f16 suffix) next to an .onnx file
+pub(crate) fn coreml_model_path_f16(onnx_path: &str) -> std::path::PathBuf {
+    let path = Path::new(onnx_path);
+    let stem = path.file_stem().unwrap().to_str().unwrap();
+    path.with_file_name(format!("{stem}-f16.mlmodelc"))
 }

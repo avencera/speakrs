@@ -10,40 +10,22 @@ use ort::session::builder::SessionBuilder;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionMode {
     ExactCpu,
-    CoreMl,
+    CoreMl,     // FP32 native CoreML, CPU+GPU, exact parity with pyannote
+    MiniCoreMl, // FP16 native CoreML, CPU+GPU+ANE, faster but may drift
     Cuda,
-    NativeCoreML,
 }
 
 /// Map execution mode to ORT execution providers
 ///
-/// NativeCoreML uses ORT CPU for any sessions that still go through ORT (e.g. FBANK),
+/// CoreMl and MiniCoreMl use ORT CPU for any sessions that still go through ORT (e.g. FBANK),
 /// while segmentation/embedding tail sessions use native CoreML directly.
 pub fn with_execution_mode(
     builder: SessionBuilder,
     mode: ExecutionMode,
 ) -> Result<SessionBuilder, ort::Error> {
     match mode {
-        ExecutionMode::ExactCpu | ExecutionMode::NativeCoreML => Ok(builder
+        ExecutionMode::ExactCpu | ExecutionMode::CoreMl | ExecutionMode::MiniCoreMl => Ok(builder
             .with_execution_providers([ep::CPU::default().with_arena_allocator(false).build()])?),
-        ExecutionMode::CoreMl => {
-            #[cfg(feature = "coreml")]
-            {
-                let cache_dir = std::env::temp_dir().join("speakrs-coreml-cache");
-                let _ = std::fs::create_dir_all(&cache_dir);
-                Ok(builder.with_execution_providers([ep::CoreML::default()
-                    .with_static_input_shapes(true)
-                    .with_model_cache_dir(cache_dir.display().to_string())
-                    .build()])?)
-            }
-
-            #[cfg(not(feature = "coreml"))]
-            {
-                Ok(builder.with_execution_providers([ep::CPU::default()
-                    .with_arena_allocator(false)
-                    .build()])?)
-            }
-        }
         ExecutionMode::Cuda => {
             #[cfg(feature = "cuda")]
             {

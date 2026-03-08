@@ -6,7 +6,7 @@ use ort::session::Session;
 use ort::value::TensorRef;
 
 #[cfg(feature = "native-coreml")]
-use crate::inference::coreml::{CoreMlModel, coreml_model_path};
+use crate::inference::coreml::{CoreMlModel, coreml_model_path, coreml_model_path_f16};
 use crate::inference::{ExecutionMode, with_execution_mode};
 
 const PRIMARY_BATCH_SIZE: usize = 32;
@@ -75,16 +75,9 @@ impl EmbeddingModel {
         let split_tail_batched_path = split_tail_model_path(model_path, CHUNK_SPEAKER_BATCH_SIZE);
         let split_primary_tail_batched_path = split_tail_model_path(model_path, PRIMARY_BATCH_SIZE);
         let use_split_backend = (mode == ExecutionMode::CoreMl
-            || mode == ExecutionMode::NativeCoreML)
+            || mode == ExecutionMode::MiniCoreMl)
             && split_fbank_path.exists()
             && split_tail_path.exists();
-
-        // for NativeCoreML, ORT sessions use CPU; native CoreML handles the tail
-        let ort_mode = if mode == ExecutionMode::NativeCoreML {
-            ExecutionMode::ExactCpu
-        } else {
-            mode
-        };
 
         Ok(Self {
             model_path: model_path.to_owned(),
@@ -110,17 +103,17 @@ impl EmbeddingModel {
                 })
                 .transpose()?,
             split_tail_session: use_split_backend
-                .then(|| Self::build_session(split_tail_path.to_str().unwrap(), ort_mode))
+                .then(|| Self::build_session(split_tail_path.to_str().unwrap(), mode))
                 .transpose()?,
             split_tail_batched_session: use_split_backend
                 .then_some(split_tail_batched_path)
                 .filter(|path| path.exists())
-                .map(|path| Self::build_session(path.to_str().unwrap(), ort_mode))
+                .map(|path| Self::build_session(path.to_str().unwrap(), mode))
                 .transpose()?,
             split_primary_tail_batched_session: use_split_backend
                 .then_some(split_primary_tail_batched_path)
                 .filter(|path| path.exists())
-                .map(|path| Self::build_session(path.to_str().unwrap(), ort_mode))
+                .map(|path| Self::build_session(path.to_str().unwrap(), mode))
                 .transpose()?,
             #[cfg(feature = "native-coreml")]
             native_tail_session: Self::load_native_tail(model_path, mode, 1),
@@ -186,9 +179,8 @@ impl EmbeddingModel {
 
     fn single_execution_mode(mode: ExecutionMode) -> ExecutionMode {
         match mode {
-            // keep single embeddings on the CPU path until the CoreML session
-            // reproduces the Python fixture numerically
-            ExecutionMode::CoreMl | ExecutionMode::NativeCoreML => ExecutionMode::ExactCpu,
+            // keep single embeddings on the CPU path; native CoreML handles the tail
+            ExecutionMode::CoreMl | ExecutionMode::MiniCoreMl => ExecutionMode::ExactCpu,
             _ => mode,
         }
     }
@@ -235,14 +227,9 @@ impl EmbeddingModel {
         let split_primary_tail_batched_path =
             split_tail_model_path(&self.model_path, PRIMARY_BATCH_SIZE);
         let use_split_backend = (self.mode == ExecutionMode::CoreMl
-            || self.mode == ExecutionMode::NativeCoreML)
+            || self.mode == ExecutionMode::MiniCoreMl)
             && split_fbank_path.exists()
             && split_tail_path.exists();
-        let ort_mode = if self.mode == ExecutionMode::NativeCoreML {
-            ExecutionMode::ExactCpu
-        } else {
-            self.mode
-        };
         let split_fbank_batched_path = split_fbank_batched_model_path(&self.model_path);
         self.split_fbank_session = use_split_backend
             .then(|| {
@@ -258,17 +245,17 @@ impl EmbeddingModel {
             .map(|path| Self::build_fbank_session(path.to_str().unwrap(), ExecutionMode::ExactCpu))
             .transpose()?;
         self.split_tail_session = use_split_backend
-            .then(|| Self::build_session(split_tail_path.to_str().unwrap(), ort_mode))
+            .then(|| Self::build_session(split_tail_path.to_str().unwrap(), self.mode))
             .transpose()?;
         self.split_tail_batched_session = use_split_backend
             .then_some(split_tail_batched_path)
             .filter(|path| path.exists())
-            .map(|path| Self::build_session(path.to_str().unwrap(), ort_mode))
+            .map(|path| Self::build_session(path.to_str().unwrap(), self.mode))
             .transpose()?;
         self.split_primary_tail_batched_session = use_split_backend
             .then_some(split_primary_tail_batched_path)
             .filter(|path| path.exists())
-            .map(|path| Self::build_session(path.to_str().unwrap(), ort_mode))
+            .map(|path| Self::build_session(path.to_str().unwrap(), self.mode))
             .transpose()?;
         #[cfg(feature = "native-coreml")]
         {
@@ -741,11 +728,13 @@ impl EmbeddingModel {
         mode: ExecutionMode,
         batch_size: usize,
     ) -> Option<CoreMlModel> {
-        if mode != ExecutionMode::NativeCoreML {
-            return None;
-        }
+        let (resolve_path, compute_units): (fn(&str) -> std::path::PathBuf, _) = match mode {
+            ExecutionMode::CoreMl => (coreml_model_path, CoreMlModel::default_compute_units()),
+            ExecutionMode::MiniCoreMl => (coreml_model_path_f16, CoreMlModel::fp16_compute_units()),
+            _ => return None,
+        };
         let tail_onnx = split_tail_model_path(model_path, batch_size);
-        let coreml_path = coreml_model_path(tail_onnx.to_str().unwrap());
+        let coreml_path = resolve_path(tail_onnx.to_str().unwrap());
         if !coreml_path.exists() {
             if batch_size == 1 {
                 eprintln!(
@@ -755,7 +744,7 @@ impl EmbeddingModel {
             }
             return None;
         }
-        match CoreMlModel::load(&coreml_path, CoreMlModel::default_compute_units(), "output") {
+        match CoreMlModel::load(&coreml_path, compute_units, "output") {
             Ok(model) => Some(model),
             Err(e) => {
                 eprintln!("warning: failed to load native CoreML tail (batch={batch_size}): {e}");

@@ -3,8 +3,10 @@ use ort::session::Session;
 use ort::value::TensorRef;
 
 #[cfg(feature = "native-coreml")]
-use crate::inference::coreml::{CoreMlModel, coreml_model_path};
+use crate::inference::coreml::{CoreMlModel, coreml_model_path, coreml_model_path_f16};
 use crate::inference::{ExecutionMode, with_execution_mode};
+#[cfg(feature = "native-coreml")]
+use objc2_core_ml::MLComputeUnits;
 
 const PRIMARY_BATCH_SIZE: usize = 32;
 
@@ -204,11 +206,25 @@ impl SegmentationModel {
     }
 
     #[cfg(feature = "native-coreml")]
-    fn load_native_coreml(model_path: &str, mode: ExecutionMode) -> Option<CoreMlModel> {
-        if mode != ExecutionMode::NativeCoreML {
-            return None;
+    fn resolve_coreml_path(model_path: &str, mode: ExecutionMode) -> Option<std::path::PathBuf> {
+        match mode {
+            ExecutionMode::CoreMl => Some(coreml_model_path(model_path)),
+            ExecutionMode::MiniCoreMl => Some(coreml_model_path_f16(model_path)),
+            _ => None,
         }
-        let coreml_path = coreml_model_path(model_path);
+    }
+
+    #[cfg(feature = "native-coreml")]
+    fn compute_units_for_mode(mode: ExecutionMode) -> MLComputeUnits {
+        match mode {
+            ExecutionMode::MiniCoreMl => CoreMlModel::fp16_compute_units(),
+            _ => CoreMlModel::default_compute_units(),
+        }
+    }
+
+    #[cfg(feature = "native-coreml")]
+    fn load_native_coreml(model_path: &str, mode: ExecutionMode) -> Option<CoreMlModel> {
+        let coreml_path = Self::resolve_coreml_path(model_path, mode)?;
         if !coreml_path.exists() {
             eprintln!(
                 "warning: native CoreML model not found at {}, falling back to ORT CPU",
@@ -216,7 +232,7 @@ impl SegmentationModel {
             );
             return None;
         }
-        match CoreMlModel::load(&coreml_path, CoreMlModel::default_compute_units(), "output") {
+        match CoreMlModel::load(&coreml_path, Self::compute_units_for_mode(mode), "output") {
             Ok(model) => Some(model),
             Err(e) => {
                 eprintln!("warning: failed to load native CoreML segmentation: {e}");
@@ -227,15 +243,19 @@ impl SegmentationModel {
 
     #[cfg(feature = "native-coreml")]
     fn load_native_coreml_batched(model_path: &str, mode: ExecutionMode) -> Option<CoreMlModel> {
-        if mode != ExecutionMode::NativeCoreML {
+        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::MiniCoreMl) {
             return None;
         }
         let batched_onnx = batched_model_path(model_path, PRIMARY_BATCH_SIZE)?;
-        let coreml_path = coreml_model_path(batched_onnx.to_str().unwrap());
+        let onnx_str = batched_onnx.to_str().unwrap();
+        let coreml_path = match mode {
+            ExecutionMode::MiniCoreMl => coreml_model_path_f16(onnx_str),
+            _ => coreml_model_path(onnx_str),
+        };
         if !coreml_path.exists() {
             return None;
         }
-        match CoreMlModel::load(&coreml_path, CoreMlModel::default_compute_units(), "output") {
+        match CoreMlModel::load(&coreml_path, Self::compute_units_for_mode(mode), "output") {
             Ok(model) => Some(model),
             Err(e) => {
                 eprintln!("warning: failed to load native CoreML batched segmentation: {e}");
