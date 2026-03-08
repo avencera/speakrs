@@ -1,6 +1,4 @@
-use ndarray::{Array2, Array3, Axis, s};
-
-use crate::aggregate::{AggregateOptions, aggregate_at};
+use ndarray::{Array2, Array3, s};
 
 pub fn speaker_count(
     binarized_segmentations: &Array3<f32>,
@@ -8,24 +6,41 @@ pub fn speaker_count(
     warmup_frames: usize,
     output_frames: usize,
 ) -> Vec<usize> {
-    let chunk_count = binarized_segmentations
-        .sum_axis(Axis(2))
-        .insert_axis(Axis(2));
-    let aggregated = aggregate_at(
-        &chunk_count,
-        start_frames,
-        AggregateOptions {
-            warmup_left: warmup_frames,
-            warmup_right: warmup_frames,
-            output_frames: Some(output_frames),
-            ..Default::default()
-        },
-    );
+    let num_chunks = binarized_segmentations.shape()[0];
+    if num_chunks == 0 {
+        return Vec::new();
+    }
 
-    aggregated
-        .column(0)
-        .iter()
-        .map(|value| round_ties_even(*value).max(0.0) as usize)
+    let num_frames = binarized_segmentations.shape()[1];
+    let warmup_end = num_frames.saturating_sub(warmup_frames);
+    let mut numerator = vec![0.0f32; output_frames];
+    let mut denominator = vec![0.0f32; output_frames];
+
+    for (chunk_idx, &start_frame) in start_frames.iter().enumerate().take(num_chunks) {
+        for frame_idx in warmup_frames..warmup_end {
+            let out_frame = start_frame + frame_idx;
+            if out_frame >= output_frames {
+                continue;
+            }
+
+            numerator[out_frame] += binarized_segmentations
+                .slice(s![chunk_idx, frame_idx, ..])
+                .iter()
+                .sum::<f32>();
+            denominator[out_frame] += 1.0;
+        }
+    }
+
+    numerator
+        .into_iter()
+        .zip(denominator)
+        .map(|(sum, weight)| {
+            if weight == 0.0 {
+                0
+            } else {
+                round_ties_even(sum / weight).max(0.0) as usize
+            }
+        })
         .collect()
 }
 
@@ -44,46 +59,39 @@ pub fn reconstruct(
         .filter(|cluster| *cluster >= 0)
         .max()
         .map_or(0, |cluster| cluster as usize + 1);
-    let mut clustered_segmentations = Array3::<f32>::zeros((num_chunks, num_frames, num_clusters));
+    let warmup_end = num_frames.saturating_sub(warmup_frames);
+    let mut activations = Array2::<f32>::zeros((speaker_count.len(), num_clusters));
 
-    for chunk_idx in 0..num_chunks {
+    for (chunk_idx, &start_frame) in start_frames.iter().enumerate().take(num_chunks) {
         let chunk_labels = hard_clusters.row(chunk_idx);
         let chunk_segmentations = segmentations.slice(s![chunk_idx, .., ..]);
+        let mut local_by_cluster = vec![Vec::new(); num_clusters];
 
-        for cluster_idx in 0..num_clusters {
-            let local_indices: Vec<usize> = chunk_labels
-                .iter()
-                .enumerate()
-                .filter_map(|(local_idx, &label)| {
-                    (label == cluster_idx as i32).then_some(local_idx)
-                })
-                .collect();
+        for (local_idx, &label) in chunk_labels.iter().enumerate() {
+            if label >= 0 {
+                local_by_cluster[label as usize].push(local_idx);
+            }
+        }
 
+        for (cluster_idx, local_indices) in local_by_cluster.iter().enumerate() {
             if local_indices.is_empty() {
                 continue;
             }
 
-            for frame_idx in 0..num_frames {
+            for frame_idx in warmup_frames..warmup_end {
+                let out_frame = start_frame + frame_idx;
+                if out_frame >= speaker_count.len() {
+                    continue;
+                }
+
                 let mut score = 0.0f32;
-                for &local_idx in &local_indices {
+                for &local_idx in local_indices {
                     score = score.max(chunk_segmentations[[frame_idx, local_idx]]);
                 }
-                clustered_segmentations[[chunk_idx, frame_idx, cluster_idx]] = score;
+                activations[[out_frame, cluster_idx]] += score;
             }
         }
     }
-
-    let mut activations = aggregate_at(
-        &clustered_segmentations,
-        start_frames,
-        AggregateOptions {
-            skip_average: true,
-            warmup_left: warmup_frames,
-            warmup_right: warmup_frames,
-            output_frames: Some(speaker_count.len()),
-            ..Default::default()
-        },
-    );
 
     let max_speakers_per_frame = speaker_count.iter().copied().max().unwrap_or(0);
     if activations.ncols() < max_speakers_per_frame {

@@ -15,6 +15,7 @@ ndarray-linalg = { version = "0.18.1", features = ["openblas-static"] }
 ndarray-npy = "0.10.0"
 ort = { version = "2.0.0-rc.12", features = ["ndarray"] }
 kodama = "0.3.0"
+mimalloc = "0.1.48"
 
 [dev-dependencies]
 approx = "0.5.1"

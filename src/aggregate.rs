@@ -88,8 +88,10 @@ pub fn aggregate_at(
     }
 
     let mut numerator = Array2::<f32>::zeros((total_frames, num_speakers));
-    let mut denominator = Array2::<f32>::zeros((total_frames, num_speakers));
-    let mut mask = Array2::<f32>::zeros((total_frames, num_speakers));
+    let mut denominator =
+        (!options.skip_average).then(|| Array2::<f32>::zeros((total_frames, num_speakers)));
+    let mut mask =
+        (options.missing != 0.0).then(|| Array2::<f32>::zeros((total_frames, num_speakers)));
 
     for (i, start_frame) in start_frames.iter().copied().enumerate().take(num_windows) {
         for j in 0..frames_per_window {
@@ -104,13 +106,17 @@ pub fn aggregate_at(
                 }
 
                 numerator[[out_frame, s]] += w * value;
-                denominator[[out_frame, s]] += w;
-                mask[[out_frame, s]] = 1.0;
+                if let Some(denominator) = denominator.as_mut() {
+                    denominator[[out_frame, s]] += w;
+                }
+                if let Some(mask) = mask.as_mut() {
+                    mask[[out_frame, s]] = 1.0;
+                }
             }
         }
     }
 
-    if !options.skip_average {
+    if let Some(denominator) = denominator.as_ref() {
         for frame in 0..total_frames {
             for s in 0..num_speakers {
                 let weight = denominator[[frame, s]];
@@ -121,10 +127,12 @@ pub fn aggregate_at(
         }
     }
 
-    for frame in 0..total_frames {
-        for s in 0..num_speakers {
-            if mask[[frame, s]] == 0.0 {
-                numerator[[frame, s]] = options.missing;
+    if let Some(mask) = mask.as_ref() {
+        for frame in 0..total_frames {
+            for s in 0..num_speakers {
+                if mask[[frame, s]] == 0.0 {
+                    numerator[[frame, s]] = options.missing;
+                }
             }
         }
     }

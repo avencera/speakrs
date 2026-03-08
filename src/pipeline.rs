@@ -6,7 +6,7 @@ use ndarray::{Array2, Array3, ArrayView2, s};
 use crate::clustering::ahc::{AhcConfig, cluster as cluster_ahc};
 use crate::clustering::plda::PldaTransform;
 use crate::clustering::vbx::{VbxConfig, cluster_vbx};
-use crate::inference::embedding::EmbeddingModel;
+use crate::inference::embedding::{EmbeddingModel, MaskedEmbeddingInput};
 use crate::inference::segmentation::SegmentationModel;
 use crate::powerset::PowersetMapping;
 use crate::reconstruct::{reconstruct, speaker_count};
@@ -19,6 +19,14 @@ pub const SEGMENTATION_WINDOW_SECONDS: f64 = 10.0;
 pub const SEGMENTATION_STEP_SECONDS: f64 = 1.0;
 pub const FRAME_DURATION_SECONDS: f64 = 0.0619375;
 pub const FRAME_STEP_SECONDS: f64 = 0.016875;
+
+struct PendingEmbedding<'a> {
+    chunk_idx: usize,
+    speaker_idx: usize,
+    audio: &'a [f32],
+    mask: Vec<f32>,
+    clean_mask: Vec<f32>,
+}
 
 #[derive(Debug, Clone)]
 pub struct DiarizationResult {
@@ -89,11 +97,7 @@ pub fn diarize(
         });
     }
 
-    let decoded_windows: Vec<Array2<f32>> = raw_windows
-        .iter()
-        .map(|window| powerset.hard_decode(window))
-        .collect();
-    let segmentations = stack_windows(&decoded_windows);
+    let segmentations = decode_windows(raw_windows, &powerset);
     let start_frames = chunk_start_frames(segmentations.shape()[0]);
     let output_frames = total_output_frames(segmentations.shape()[0]);
     let speaker_count = speaker_count(&segmentations, &start_frames, 0, output_frames);
@@ -171,13 +175,18 @@ pub fn diarize(
     })
 }
 
-fn stack_windows(decoded_windows: &[Array2<f32>]) -> Array3<f32> {
-    let frames_per_window = decoded_windows[0].nrows();
-    let num_speakers = decoded_windows[0].ncols();
-    let mut stacked =
-        Array3::<f32>::zeros((decoded_windows.len(), frames_per_window, num_speakers));
-    for (window_idx, window) in decoded_windows.iter().enumerate() {
-        stacked.slice_mut(s![window_idx, .., ..]).assign(window);
+fn decode_windows(raw_windows: Vec<Array2<f32>>, powerset: &PowersetMapping) -> Array3<f32> {
+    let num_windows = raw_windows.len();
+    let mut windows = raw_windows.into_iter();
+    let first = powerset.hard_decode(&windows.next().unwrap());
+    let mut stacked = Array3::<f32>::zeros((num_windows, first.nrows(), first.ncols()));
+    stacked.slice_mut(s![0, .., ..]).assign(&first);
+
+    for (window_idx, window) in windows.enumerate() {
+        let decoded = powerset.hard_decode(&window);
+        stacked
+            .slice_mut(s![window_idx + 1, .., ..])
+            .assign(&decoded);
     }
     stacked
 }
@@ -191,6 +200,7 @@ fn extract_embeddings(
     let num_chunks = segmentations.shape()[0];
     let num_speakers = segmentations.shape()[2];
     let mut embeddings = Array3::<f32>::from_elem((num_chunks, num_speakers, 256), f32::NAN);
+    let mut pending = Vec::with_capacity(emb_model.primary_batch_size());
 
     for chunk_idx in 0..num_chunks {
         let chunk_audio = chunk_audio(audio, seg_model, chunk_idx);
@@ -198,20 +208,51 @@ fn extract_embeddings(
         let clean_masks = clean_masks(&chunk_segmentations);
 
         for speaker_idx in 0..num_speakers {
-            let mask = chunk_segmentations.column(speaker_idx).to_owned();
-            let clean_mask = clean_masks.column(speaker_idx).to_owned();
-            let embedding = emb_model.embed_masked(
-                &chunk_audio,
-                mask.as_slice().unwrap(),
-                Some(clean_mask.as_slice().unwrap()),
-            )?;
-            embeddings
-                .slice_mut(s![chunk_idx, speaker_idx, ..])
-                .assign(&embedding);
+            pending.push(PendingEmbedding {
+                chunk_idx,
+                speaker_idx,
+                audio: chunk_audio,
+                mask: chunk_segmentations.column(speaker_idx).to_vec(),
+                clean_mask: clean_masks.column(speaker_idx).to_vec(),
+            });
+            if pending.len() == emb_model.primary_batch_size() {
+                flush_embedding_batch(emb_model, &pending, &mut embeddings)?;
+                pending.clear();
+            }
         }
     }
 
+    while !pending.is_empty() {
+        let batch_len = emb_model.best_batch_len(pending.len());
+        flush_embedding_batch(emb_model, &pending[..batch_len], &mut embeddings)?;
+        pending.drain(..batch_len);
+    }
+
     Ok(embeddings)
+}
+
+fn flush_embedding_batch(
+    emb_model: &mut EmbeddingModel,
+    pending: &[PendingEmbedding<'_>],
+    embeddings: &mut Array3<f32>,
+) -> Result<(), DynError> {
+    let batch_inputs: Vec<_> = pending
+        .iter()
+        .map(|item| MaskedEmbeddingInput {
+            audio: item.audio,
+            mask: &item.mask,
+            clean_mask: Some(&item.clean_mask),
+        })
+        .collect();
+    let batch_embeddings = emb_model.embed_batch(&batch_inputs)?;
+
+    for (batch_idx, item) in pending.iter().enumerate() {
+        embeddings
+            .slice_mut(s![item.chunk_idx, item.speaker_idx, ..])
+            .assign(&batch_embeddings.row(batch_idx));
+    }
+
+    Ok(())
 }
 
 fn filter_embeddings(
@@ -416,15 +457,15 @@ fn clean_masks(segmentations: &ArrayView2<f32>) -> Array2<f32> {
     clean
 }
 
-fn chunk_audio(audio: &[f32], seg_model: &SegmentationModel, chunk_idx: usize) -> Vec<f32> {
+fn chunk_audio<'a>(audio: &'a [f32], seg_model: &SegmentationModel, chunk_idx: usize) -> &'a [f32] {
     let step_samples = (SEGMENTATION_STEP_SECONDS * seg_model.sample_rate() as f64) as usize;
     let start = chunk_idx * step_samples;
     let end = (start + seg_model.window_samples()).min(audio.len());
-    let mut padded = vec![0.0f32; seg_model.window_samples()];
     if start < audio.len() {
-        padded[..end - start].copy_from_slice(&audio[start..end]);
+        &audio[start..end]
+    } else {
+        &[]
     }
-    padded
 }
 
 fn chunk_start_frames(num_chunks: usize) -> Vec<usize> {

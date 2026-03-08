@@ -1,9 +1,12 @@
 use ndarray::Array2;
+use ort::ep;
 use ort::session::Session;
-use ort::value::Tensor;
+use ort::value::TensorRef;
 
 pub struct SegmentationModel {
+    model_path: String,
     session: Session,
+    input_buffer: ndarray::Array3<f32>,
     window_samples: usize,
     step_samples: usize,
     sample_rate: usize,
@@ -12,19 +15,35 @@ pub struct SegmentationModel {
 impl SegmentationModel {
     /// Load a segmentation-3.0 ONNX model
     pub fn new(model_path: &str, step_duration: f32) -> Result<Self, ort::Error> {
-        let session = Session::builder()?.commit_from_file(model_path)?;
-
         let sample_rate = 16000;
         let window_duration = 10.0;
         let window_samples = (window_duration * sample_rate as f32) as usize;
         let step_samples = (step_duration * sample_rate as f32) as usize;
 
         Ok(Self {
-            session,
+            model_path: model_path.to_owned(),
+            session: Self::build_session(model_path)?,
+            input_buffer: ndarray::Array3::zeros((1, 1, window_samples)),
             window_samples,
             step_samples,
             sample_rate,
         })
+    }
+
+    fn build_session(model_path: &str) -> Result<Session, ort::Error> {
+        let mut builder = Session::builder()?
+            .with_independent_thread_pool()?
+            .with_intra_threads(Self::available_threads().min(6))?
+            .with_inter_threads(1)?
+            .with_memory_pattern(false)?
+            .with_execution_providers([ep::CPU::default().with_arena_allocator(false).build()])?;
+        builder.commit_from_file(model_path)
+    }
+
+    fn available_threads() -> usize {
+        std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
     }
 
     pub fn sample_rate(&self) -> usize {
@@ -37,6 +56,11 @@ impl SegmentationModel {
 
     pub fn step_samples(&self) -> usize {
         self.step_samples
+    }
+
+    pub fn reset_session(&mut self) -> Result<(), ort::Error> {
+        self.session = Self::build_session(&self.model_path)?;
+        Ok(())
     }
 
     /// Run segmentation on audio, returning raw logits per window
@@ -66,9 +90,11 @@ impl SegmentationModel {
     }
 
     fn run_window(&mut self, window: &[f32]) -> Result<Array2<f32>, ort::Error> {
-        let input_array =
-            ndarray::Array3::from_shape_vec((1, 1, self.window_samples), window.to_vec()).unwrap();
-        let input_tensor = Tensor::from_array(input_array)?;
+        self.input_buffer.fill(0.0);
+        self.input_buffer
+            .slice_mut(ndarray::s![0, 0, ..window.len()])
+            .assign(&ndarray::ArrayView1::from(window));
+        let input_tensor = TensorRef::from_array_view(self.input_buffer.view())?;
 
         let outputs = self.session.run(ort::inputs![input_tensor])?;
         let (shape, data) = outputs[0].try_extract_tensor::<f32>()?;
