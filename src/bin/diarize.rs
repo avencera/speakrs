@@ -64,13 +64,14 @@ fn parse_args(args: &[String]) -> (CliMode, &str) {
                 "exact" => CliMode::Native(ExecutionMode::ExactCpu),
                 "coreml" => CliMode::Native(ExecutionMode::CoreMl),
                 "cuda" => CliMode::Native(ExecutionMode::Cuda),
+                "native-coreml" => CliMode::Native(ExecutionMode::NativeCoreML),
                 "pyannote-cpu" => CliMode::PyannoteDevice("cpu"),
                 "pyannote-mps" => CliMode::PyannoteDevice("mps"),
                 "pyannote-cuda" => CliMode::PyannoteDevice("cuda"),
                 _ => {
                     eprintln!("Unknown mode: {mode}");
                     eprintln!(
-                        "Usage: diarize [--mode exact|coreml|cuda|pyannote-cpu|pyannote-mps|pyannote-cuda] <path/to/audio.wav>"
+                        "Usage: diarize [--mode exact|coreml|native-coreml|cuda|pyannote-cpu|pyannote-mps|pyannote-cuda] <path/to/audio.wav>"
                     );
                     return (CliMode::Native(ExecutionMode::ExactCpu), "");
                 }
@@ -79,7 +80,7 @@ fn parse_args(args: &[String]) -> (CliMode, &str) {
         }
         _ => {
             eprintln!(
-                "Usage: diarize [--mode exact|coreml|cuda|pyannote-cpu|pyannote-mps|pyannote-cuda] <path/to/audio.wav>"
+                "Usage: diarize [--mode exact|coreml|native-coreml|cuda|pyannote-cpu|pyannote-mps|pyannote-cuda] <path/to/audio.wav>"
             );
             (CliMode::Native(ExecutionMode::ExactCpu), "")
         }

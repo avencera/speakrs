@@ -8,6 +8,7 @@ coreml = ["ort/coreml"]
 cuda = ["ort/cuda"]
 directml = ["ort/directml"]
 tensorrt = ["ort/tensorrt"]
+native-coreml = ["dep:objc2", "dep:objc2-core-ml", "dep:objc2-foundation", "dep:block2"]
 
 [dependencies]
 ndarray = "0.17.2"
@@ -16,6 +17,22 @@ ndarray-npy = "0.10.0"
 ort = { version = "2.0.0-rc.12", features = ["ndarray"] }
 kodama = "0.3.0"
 mimalloc = "0.1.48"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", optional = true }
+block2 = { version = "0.6", optional = true }
+objc2-core-ml = { version = "0.3", optional = true, features = [
+    "MLModel", "MLMultiArray",
+    "MLModelConfiguration",
+    "MLDictionaryFeatureProvider", "MLFeatureValue",
+    "MLFeatureProvider", "MLPredictionOptions",
+    "alloc", "block2",
+] }
+objc2-foundation = { version = "0.3", optional = true, features = [
+    "NSArray", "NSDictionary", "NSError",
+    "NSObject", "NSString", "NSURL", "NSValue",
+    "NSSet", "NSEnumerator", "NSObjCRuntime",
+] }
 
 [dev-dependencies]
 approx = "0.5.1"

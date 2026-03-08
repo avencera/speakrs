@@ -1,6 +1,9 @@
 pub mod embedding;
 pub mod segmentation;
 
+#[cfg(feature = "native-coreml")]
+pub(crate) mod coreml;
+
 use ort::ep;
 use ort::session::builder::SessionBuilder;
 
@@ -9,14 +12,19 @@ pub enum ExecutionMode {
     ExactCpu,
     CoreMl,
     Cuda,
+    NativeCoreML,
 }
 
+/// Map execution mode to ORT execution providers
+///
+/// NativeCoreML uses ORT CPU for any sessions that still go through ORT (e.g. FBANK),
+/// while segmentation/embedding tail sessions use native CoreML directly.
 pub fn with_execution_mode(
     builder: SessionBuilder,
     mode: ExecutionMode,
 ) -> Result<SessionBuilder, ort::Error> {
     match mode {
-        ExecutionMode::ExactCpu => Ok(builder
+        ExecutionMode::ExactCpu | ExecutionMode::NativeCoreML => Ok(builder
             .with_execution_providers([ep::CPU::default().with_arena_allocator(false).build()])?),
         ExecutionMode::CoreMl => {
             #[cfg(feature = "coreml")]
