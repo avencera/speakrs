@@ -1,0 +1,16 @@
+[project]
+name = "speakrs-native-coreml"
+version = "0.1.0"
+requires-python = "==3.10.12"
+dependencies = [
+    "coremltools==9.0b1",
+    "huggingface-hub>=0.23,<1.0",
+    "librosa>=0.10.2",
+    "matplotlib>=3.8",
+    "numpy",
+    "pyannote.audio==4.0.0",
+    "scipy>=1.10",
+    "soundfile>=0.12.1",
+    "torch==2.8.0",
+    "torchaudio==2.8.0",
+]

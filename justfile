@@ -11,9 +11,20 @@ test *args:
 
 check: fmt clippy test
 
-# Download ONNX models and PLDA params (requires HF_TOKEN or huggingface-cli login)
+# Download ONNX models and PLDA params, then build native CoreML bundles on macOS
 download-models:
+    #!/usr/bin/env bash
+    set -euo pipefail
     uv run scripts/download_models.py fixtures/models
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        uv run --project scripts/native_coreml python scripts/native_coreml/convert_coreml.py --output-dir fixtures/models
+    fi
+
+download-models-coreml:
+    uv run --project scripts/native_coreml python scripts/native_coreml/convert_coreml.py --output-dir fixtures/models
+
+compare-models-coreml:
+    uv run --project scripts/native_coreml python scripts/native_coreml/compare_coreml.py --output-dir fixtures/models
 
 # Run fixtures/generate.py to regenerate test fixtures
 generate-fixtures:
