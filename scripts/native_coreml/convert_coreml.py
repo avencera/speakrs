@@ -10,8 +10,15 @@ import numpy as np
 import torch
 
 from common import (
+    FBANK_BATCH_SIZES,
+    FBANK_BATCHED_STEM,
     FBANK_FEATURES,
     FBANK_FRAMES,
+    FBANK_STEM,
+    FUSED_B32_STEM,
+    FUSED_B3_STEM,
+    FUSED_BATCH_SIZES,
+    FUSED_STEM,
     SEGMENTATION_BATCHED_STEM,
     SEGMENTATION_BATCH_SIZES,
     SEGMENTATION_FRAMES,
@@ -22,7 +29,10 @@ from common import (
     TAIL_BATCH_SIZES,
     TAIL_STEM,
     build_fbank_wrapper,
+    build_fused_wrapper,
     build_tail_wrapper,
+    fbank_package_path,
+    fused_package_path,
     load_pipeline,
     patch_sincnet_encoder_for_tracing,
     save_model_artifacts,
@@ -235,11 +245,165 @@ def export_tail(pipeline: Any, output_dir: Path) -> None:
     )
 
 
+def export_fbank(output_dir: Path) -> None:
+    fbank_wrapper = build_fbank_wrapper()
+    dummy_waveform = torch.randn(32, 1, SEGMENTATION_SAMPLES)
+
+    with torch.inference_mode():
+        traced = torch.jit.trace(fbank_wrapper, dummy_waveform)
+
+    fbank_compiled_paths = [
+        output_dir / f"{FBANK_STEM}.mlmodelc",
+        output_dir / f"{FBANK_BATCHED_STEM}.mlmodelc",
+    ]
+
+    # FP32 — CPU+GPU
+    mlmodel = ct.convert(
+        traced,
+        convert_to="mlprogram",
+        inputs=[
+            ct.TensorType(
+                name="waveform",
+                shape=ct.EnumeratedShapes(
+                    shapes=[(bs, 1, SEGMENTATION_SAMPLES) for bs in FBANK_BATCH_SIZES],
+                    default=(32, 1, SEGMENTATION_SAMPLES),
+                ),
+                dtype=np.float32,
+            )
+        ],
+        outputs=[ct.TensorType(name="output", dtype=np.float32)],
+        compute_units=ct.ComputeUnit.CPU_AND_GPU,
+        minimum_deployment_target=deployment_target(),
+        compute_precision=ct.precision.FLOAT32,
+    )
+
+    print("Saving fbank CoreML artifacts (FP32)...")
+    save_model_artifacts(
+        mlmodel,
+        fbank_package_path(output_dir),
+        fbank_compiled_paths,
+    )
+
+    # FP16
+    mlmodel_f16 = ct.convert(
+        traced,
+        convert_to="mlprogram",
+        inputs=[
+            ct.TensorType(
+                name="waveform",
+                shape=ct.EnumeratedShapes(
+                    shapes=[(bs, 1, SEGMENTATION_SAMPLES) for bs in FBANK_BATCH_SIZES],
+                    default=(32, 1, SEGMENTATION_SAMPLES),
+                ),
+                dtype=np.float32,
+            )
+        ],
+        outputs=[ct.TensorType(name="output", dtype=np.float32)],
+        compute_units=ct.ComputeUnit.CPU_AND_GPU,
+        minimum_deployment_target=deployment_target(),
+        compute_precision=ct.precision.FLOAT16,
+    )
+
+    print("Saving fbank CoreML artifacts (FP16)...")
+    save_model_artifacts(
+        mlmodel_f16,
+        _f16_package_path(fbank_package_path(output_dir)),
+        _f16_compiled_paths(fbank_compiled_paths),
+    )
+
+
+def export_fused_embedding(pipeline: Any, output_dir: Path) -> None:
+    fused_wrapper = build_fused_wrapper(pipeline)
+    dummy_waveform = torch.randn(32, 1, SEGMENTATION_SAMPLES)
+    dummy_weights = torch.ones(32, SEGMENTATION_FRAMES)
+
+    with torch.inference_mode():
+        traced = torch.jit.trace(fused_wrapper, (dummy_waveform, dummy_weights))
+
+    fused_compiled_paths = [
+        output_dir / f"{FUSED_STEM}.mlmodelc",
+        output_dir / f"{FUSED_B3_STEM}.mlmodelc",
+        output_dir / f"{FUSED_B32_STEM}.mlmodelc",
+    ]
+
+    # FP32 — CPU+GPU
+    mlmodel = ct.convert(
+        traced,
+        convert_to="mlprogram",
+        inputs=[
+            ct.TensorType(
+                name="waveform",
+                shape=ct.EnumeratedShapes(
+                    shapes=[(bs, 1, SEGMENTATION_SAMPLES) for bs in FUSED_BATCH_SIZES],
+                    default=(32, 1, SEGMENTATION_SAMPLES),
+                ),
+                dtype=np.float32,
+            ),
+            ct.TensorType(
+                name="weights",
+                shape=ct.EnumeratedShapes(
+                    shapes=[(bs, SEGMENTATION_FRAMES) for bs in FUSED_BATCH_SIZES],
+                    default=(32, SEGMENTATION_FRAMES),
+                ),
+                dtype=np.float32,
+            ),
+        ],
+        outputs=[ct.TensorType(name="output", dtype=np.float32)],
+        compute_units=ct.ComputeUnit.CPU_AND_GPU,
+        minimum_deployment_target=deployment_target(),
+        compute_precision=ct.precision.FLOAT32,
+    )
+
+    print("Saving fused embedding CoreML artifacts (FP32)...")
+    save_model_artifacts(
+        mlmodel,
+        fused_package_path(output_dir),
+        fused_compiled_paths,
+    )
+
+    # FP16
+    mlmodel_f16 = ct.convert(
+        traced,
+        convert_to="mlprogram",
+        inputs=[
+            ct.TensorType(
+                name="waveform",
+                shape=ct.EnumeratedShapes(
+                    shapes=[(bs, 1, SEGMENTATION_SAMPLES) for bs in FUSED_BATCH_SIZES],
+                    default=(32, 1, SEGMENTATION_SAMPLES),
+                ),
+                dtype=np.float32,
+            ),
+            ct.TensorType(
+                name="weights",
+                shape=ct.EnumeratedShapes(
+                    shapes=[(bs, SEGMENTATION_FRAMES) for bs in FUSED_BATCH_SIZES],
+                    default=(32, SEGMENTATION_FRAMES),
+                ),
+                dtype=np.float32,
+            ),
+        ],
+        outputs=[ct.TensorType(name="output", dtype=np.float32)],
+        compute_units=ct.ComputeUnit.CPU_AND_GPU,
+        minimum_deployment_target=deployment_target(),
+        compute_precision=ct.precision.FLOAT16,
+    )
+
+    print("Saving fused embedding CoreML artifacts (FP16)...")
+    save_model_artifacts(
+        mlmodel_f16,
+        _f16_package_path(fused_package_path(output_dir)),
+        _f16_compiled_paths(fused_compiled_paths),
+    )
+
+
 def main() -> None:
     args = parse_args()
     pipeline = load_pipeline()
     export_segmentation(pipeline, args.output_dir)
     export_tail(pipeline, args.output_dir)
+    export_fbank(args.output_dir)
+    export_fused_embedding(pipeline, args.output_dir)
     print("CoreML conversion complete")
 
 

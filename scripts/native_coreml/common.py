@@ -24,6 +24,13 @@ SEGMENTATION_BATCHED_STEM = "segmentation-3.0-b32"
 TAIL_STEM = "wespeaker-voxceleb-resnet34-tail"
 TAIL_B3_STEM = "wespeaker-voxceleb-resnet34-tail-b3"
 TAIL_B32_STEM = "wespeaker-voxceleb-resnet34-tail-b32"
+FBANK_STEM = "wespeaker-fbank"
+FBANK_BATCHED_STEM = "wespeaker-fbank-b32"
+FBANK_BATCH_SIZES = (1, 32)
+FUSED_STEM = "wespeaker-voxceleb-resnet34-fused"
+FUSED_B3_STEM = "wespeaker-voxceleb-resnet34-fused-b3"
+FUSED_B32_STEM = "wespeaker-voxceleb-resnet34-fused-b32"
+FUSED_BATCH_SIZES = (1, 3, 32)
 PACKAGES_DIRNAME = "coreml-packages"
 
 
@@ -97,29 +104,59 @@ class FbankWrapper(nn.Module):
         super().__init__()
         self.scale = float(1 << 15)
         self.preemph = 0.97
+        self.frame_len = 400
+        self.frame_shift = 160
+        self.fft_size = 512
 
         window = torch.hamming_window(400, periodic=False, alpha=0.54, beta=0.46)
         mel, _ = get_mel_banks(80, 512, 16000.0, 20.0, 0.0, 100.0, -500.0, 1.0)
 
+        # identity kernel for conv1d-based framing (replaces unfold)
+        identity = torch.eye(self.frame_len).unsqueeze(1)  # [400, 1, 400]
+
+        # precomputed DFT matrix for real FFT (replaces torch.fft.rfft)
+        n = self.fft_size
+        n_rfft = n // 2 + 1
+        k = torch.arange(n_rfft).float()
+        t = torch.arange(n).float()
+        angles = 2.0 * torch.pi * k.unsqueeze(1) * t.unsqueeze(0) / n  # [n_rfft, n]
+        dft_cos = torch.cos(angles)  # [n_rfft, n]
+        dft_sin = torch.sin(angles)  # [n_rfft, n]
+
+        self.register_buffer("identity_kernel", identity)
         self.register_buffer("window", window)
         self.register_buffer("mel", F.pad(mel, (0, 1), value=0.0).T.contiguous())
         self.register_buffer("eps", torch.tensor(torch.finfo(torch.float32).eps))
+        self.register_buffer("dft_cos", dft_cos)
+        self.register_buffer("dft_sin", dft_sin)
 
     def forward(self, waveforms: torch.Tensor) -> torch.Tensor:
+        identity_kernel = cast(torch.Tensor, self.identity_kernel)
         window = cast(torch.Tensor, self.window)
         mel_filters = cast(torch.Tensor, self.mel)
         eps = cast(torch.Tensor, self.eps)
+        dft_cos = cast(torch.Tensor, self.dft_cos)
+        dft_sin = cast(torch.Tensor, self.dft_sin)
 
-        frames = waveforms[:, 0, :] * self.scale
-        frames = frames.unfold(1, 400, 160)
+        # framing via conv1d with identity kernel (coremltools-compatible unfold)
+        signal = waveforms[:, 0:1, :] * self.scale  # [batch, 1, samples]
+        frames = F.conv1d(
+            signal, identity_kernel, stride=self.frame_shift
+        )  # [batch, 400, num_frames]
+        frames = frames.permute(0, 2, 1)  # [batch, num_frames, 400]
+
         frames = frames - frames.mean(dim=2, keepdim=True)
 
         previous = F.pad(frames, (1, 0), mode="replicate")[..., :-1]
         frames = frames - self.preemph * previous
         frames = frames * window.view(1, 1, -1)
-        frames = F.pad(frames, (0, 112))
+        frames = F.pad(frames, (0, 112))  # zero-pad to 512
 
-        spectrum = torch.fft.rfft(frames, dim=2).abs().pow(2.0)
+        # real DFT via matrix multiply (coremltools-compatible rfft)
+        real_part = torch.matmul(frames, dft_cos.T)  # [batch, num_frames, n_rfft]
+        imag_part = torch.matmul(frames, dft_sin.T)  # [batch, num_frames, n_rfft]
+        spectrum = real_part.pow(2.0) + imag_part.pow(2.0)
+
         mel = torch.matmul(spectrum, mel_filters.to(dtype=spectrum.dtype))
         mel = torch.clamp_min(mel, eps.to(device=mel.device, dtype=mel.dtype)).log()
         return mel - mel.mean(dim=1, keepdim=True)
@@ -179,6 +216,35 @@ def build_tail_wrapper(pipeline: Any) -> EmbeddingTailWrapper:
 
 def build_fbank_wrapper() -> FbankWrapper:
     wrapper = FbankWrapper()
+    wrapper.eval()
+    return wrapper
+
+
+def fbank_package_path(output_dir: Path) -> Path:
+    return coreml_packages_dir(output_dir) / f"{FBANK_STEM}.mlpackage"
+
+
+def fused_package_path(output_dir: Path) -> Path:
+    return coreml_packages_dir(output_dir) / f"{FUSED_STEM}.mlpackage"
+
+
+class FusedEmbeddingWrapper(nn.Module):
+    """Fbank + embedding tail in a single model: waveform → embedding"""
+
+    def __init__(self, fbank: FbankWrapper, tail: EmbeddingTailWrapper) -> None:
+        super().__init__()
+        self.fbank = fbank
+        self.tail = tail
+
+    def forward(self, waveform: torch.Tensor, weights: torch.Tensor) -> Any:
+        fbank = self.fbank(waveform)
+        return self.tail(fbank, weights)
+
+
+def build_fused_wrapper(pipeline: Any) -> FusedEmbeddingWrapper:
+    fbank = build_fbank_wrapper()
+    tail = build_tail_wrapper(pipeline)
+    wrapper = FusedEmbeddingWrapper(fbank, tail)
     wrapper.eval()
     return wrapper
 

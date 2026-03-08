@@ -3,7 +3,7 @@ use ort::session::Session;
 use ort::value::TensorRef;
 
 #[cfg(feature = "native-coreml")]
-use crate::inference::coreml::{CoreMlModel, coreml_model_path, coreml_model_path_f16};
+use crate::inference::coreml::{CoreMlModel, coreml_model_path};
 use crate::inference::{ExecutionMode, with_execution_mode};
 #[cfg(feature = "native-coreml")]
 use objc2_core_ml::MLComputeUnits;
@@ -208,18 +208,18 @@ impl SegmentationModel {
     #[cfg(feature = "native-coreml")]
     fn resolve_coreml_path(model_path: &str, mode: ExecutionMode) -> Option<std::path::PathBuf> {
         match mode {
-            ExecutionMode::CoreMl => Some(coreml_model_path(model_path)),
-            ExecutionMode::MiniCoreMl => Some(coreml_model_path_f16(model_path)),
+            // LSTM-based segmentation runs poorly on ANE — always use FP32 CPU+GPU
+            ExecutionMode::CoreMl | ExecutionMode::MiniCoreMl => {
+                Some(coreml_model_path(model_path))
+            }
             _ => None,
         }
     }
 
     #[cfg(feature = "native-coreml")]
-    fn compute_units_for_mode(mode: ExecutionMode) -> MLComputeUnits {
-        match mode {
-            ExecutionMode::MiniCoreMl => CoreMlModel::fp16_compute_units(),
-            _ => CoreMlModel::default_compute_units(),
-        }
+    fn compute_units_for_mode(_mode: ExecutionMode) -> MLComputeUnits {
+        // segmentation is LSTM-based, always best on CPU+GPU regardless of mode
+        CoreMlModel::default_compute_units()
     }
 
     #[cfg(feature = "native-coreml")]
@@ -248,10 +248,8 @@ impl SegmentationModel {
         }
         let batched_onnx = batched_model_path(model_path, PRIMARY_BATCH_SIZE)?;
         let onnx_str = batched_onnx.to_str().unwrap();
-        let coreml_path = match mode {
-            ExecutionMode::MiniCoreMl => coreml_model_path_f16(onnx_str),
-            _ => coreml_model_path(onnx_str),
-        };
+        // always FP32 for LSTM-based segmentation
+        let coreml_path = coreml_model_path(onnx_str);
         if !coreml_path.exists() {
             return None;
         }
