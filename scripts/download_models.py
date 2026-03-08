@@ -6,7 +6,6 @@
 #     "numpy",
 #     "onnx",
 #     "onnxscript",
-#     "coremltools>=8.0",
 # ]
 # ///
 """Download and export ONNX models + PLDA params for speakrs.
@@ -20,8 +19,6 @@ Requires accepting terms at:
 """
 
 import os
-import platform
-import shutil
 import sys
 from typing import Any, cast
 
@@ -31,27 +28,40 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torchaudio.compliance.kaldi import get_mel_banks
 
+os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
+
 
 def main() -> None:
     models_dir = sys.argv[1]
-    token = os.environ["HF_TOKEN"]
+    token = os.environ.get("HF_TOKEN")
     os.makedirs(models_dir, exist_ok=True)
 
     print("Loading community-1 pipeline...")
     from pyannote.audio import Pipeline
 
-    pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-community-1", token=token
-    )
+    from_pretrained: Any = Pipeline.from_pretrained
+    if token:
+        try:
+            pipeline = from_pretrained(
+                "pyannote/speaker-diarization-community-1", token=token
+            )
+        except TypeError:
+            try:
+                legacy_kwargs: dict[str, Any] = {"use_auth_token": token}
+                pipeline = from_pretrained(
+                    "pyannote/speaker-diarization-community-1",
+                    **legacy_kwargs,
+                )
+            except TypeError:
+                pipeline = from_pretrained("pyannote/speaker-diarization-community-1")
+    else:
+        pipeline = from_pretrained("pyannote/speaker-diarization-community-1")
     assert pipeline is not None
     pipeline.to(torch.device("cpu"))
 
     export_segmentation(pipeline, models_dir)
     export_embedding(pipeline, models_dir)
     export_plda(models_dir)
-
-    if platform.system() == "Darwin":
-        export_coreml_models(pipeline, models_dir)
 
     print("Done!")
 
@@ -343,99 +353,6 @@ def export_plda(models_dir: str) -> None:
                             print(f"  plda_{name}.npy: shape={arr.shape}")
         except Exception:
             pass
-
-
-def export_coreml_models(pipeline: Any, models_dir: str) -> None:
-    """Convert PyTorch models to compiled CoreML .mlmodelc bundles (FP32 MLProgram)"""
-    import coremltools as ct
-
-    seg_model = pipeline._segmentation.model
-    seg_model.eval()
-    emb_model = pipeline._embedding.model_
-    emb_model.eval()
-    fbank_wrapper = FbankWrapper(emb_model)
-    fbank_wrapper.eval()
-    tail_wrapper = EmbeddingTailWrapper(emb_model)
-    tail_wrapper.eval()
-
-    print("Converting models to CoreML...")
-
-    _convert_traced(
-        seg_model,
-        (torch.randn(1, 1, 160000),),
-        [ct.TensorType(name="input", shape=(1, 1, 160000))],
-        os.path.join(models_dir, "segmentation-3.0.mlmodelc"),
-        ct,
-    )
-
-    _convert_traced(
-        seg_model,
-        (torch.randn(32, 1, 160000),),
-        [ct.TensorType(name="input", shape=(32, 1, 160000))],
-        os.path.join(models_dir, "segmentation-3.0-b32.mlmodelc"),
-        ct,
-    )
-
-    dummy_fbank = fbank_wrapper(torch.randn(1, 1, 160000))
-
-    _convert_traced(
-        tail_wrapper,
-        (dummy_fbank, torch.ones(1, 589)),
-        [
-            ct.TensorType(name="fbank", shape=(1, 998, 80)),
-            ct.TensorType(name="weights", shape=(1, 589)),
-        ],
-        os.path.join(models_dir, "wespeaker-voxceleb-resnet34-tail.mlmodelc"),
-        ct,
-    )
-
-    _convert_traced(
-        tail_wrapper,
-        (dummy_fbank.repeat(3, 1, 1), torch.ones(3, 589)),
-        [
-            ct.TensorType(name="fbank", shape=(3, 998, 80)),
-            ct.TensorType(name="weights", shape=(3, 589)),
-        ],
-        os.path.join(models_dir, "wespeaker-voxceleb-resnet34-tail-b3.mlmodelc"),
-        ct,
-    )
-
-    _convert_traced(
-        tail_wrapper,
-        (dummy_fbank.repeat(32, 1, 1), torch.ones(32, 589)),
-        [
-            ct.TensorType(name="fbank", shape=(32, 998, 80)),
-            ct.TensorType(name="weights", shape=(32, 589)),
-        ],
-        os.path.join(models_dir, "wespeaker-voxceleb-resnet34-tail-b32.mlmodelc"),
-        ct,
-    )
-
-
-def _convert_traced(
-    model: nn.Module,
-    example_inputs: tuple[torch.Tensor, ...],
-    ct_inputs: list[Any],
-    output_path: str,
-    ct: Any,
-) -> None:
-    stem = os.path.basename(output_path)
-    if os.path.exists(output_path):
-        shutil.rmtree(output_path)
-
-    with torch.no_grad():
-        traced = torch.jit.trace(model, example_inputs)
-
-    mlmodel = ct.convert(
-        traced,
-        convert_to="mlprogram",
-        compute_precision=ct.precision.FLOAT32,
-        inputs=ct_inputs,
-    )
-
-    compiled_dir = mlmodel.get_compiled_model_path()
-    shutil.copytree(compiled_dir, output_path)
-    print(f"  {stem}")
 
 
 if __name__ == "__main__":
