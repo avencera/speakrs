@@ -55,13 +55,7 @@ compare source python_device="cpu" rust_mode="exact":
         ffmpeg -y -i "$source" -ar 16000 -ac 1 "$wav" >/dev/null 2>&1
     fi
     rust_features=()
-    if [[ "{{rust_mode}}" == "coreml" ]]; then
-        if [[ "$(uname -s)" == "Darwin" ]]; then
-            rust_features=(--features coreml)
-        elif [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]] || [[ "${OS:-}" == "Windows_NT" ]]; then
-            rust_features=(--features directml)
-        fi
-    elif [[ "{{rust_mode}}" == "native-coreml" ]]; then
+    if [[ "{{rust_mode}}" == "coreml" || "{{rust_mode}}" == "mini-coreml" ]]; then
         rust_features=(--features native-coreml)
     elif [[ "{{rust_mode}}" == "cuda" ]]; then
         rust_features=(--features cuda)
@@ -101,13 +95,7 @@ benchmark source python_device="auto" runs="1" warmups="1" rust_mode="exact":
         ffmpeg -y -i "$source" -ar 16000 -ac 1 "$wav" >/dev/null 2>&1
     fi
     rust_features=()
-    if [[ "{{rust_mode}}" == "coreml" ]]; then
-        if [[ "$(uname -s)" == "Darwin" ]]; then
-            rust_features=(--features coreml)
-        elif [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]] || [[ "${OS:-}" == "Windows_NT" ]]; then
-            rust_features=(--features directml)
-        fi
-    elif [[ "{{rust_mode}}" == "native-coreml" ]]; then
+    if [[ "{{rust_mode}}" == "coreml" || "{{rust_mode}}" == "mini-coreml" ]]; then
         rust_features=(--features native-coreml)
     elif [[ "{{rust_mode}}" == "cuda" ]]; then
         rust_features=(--features cuda)
@@ -152,14 +140,7 @@ compare-apple-accuracy source rust_mode="pyannote-mps":
     fi
     rust_features=()
     case "{{rust_mode}}" in
-        coreml)
-            if [[ "$(uname -s)" == "Darwin" ]]; then
-                rust_features=(--features coreml)
-            elif [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]] || [[ "${OS:-}" == "Windows_NT" ]]; then
-                rust_features=(--features directml)
-            fi
-            ;;
-        native-coreml)
+        coreml|mini-coreml)
             rust_features=(--features native-coreml)
             ;;
         cuda)

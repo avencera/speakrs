@@ -19,6 +19,7 @@ from common import (
     SEGMENTATION_STEM,
     TAIL_B32_STEM,
     TAIL_B3_STEM,
+    TAIL_BATCH_SIZES,
     TAIL_STEM,
     build_fbank_wrapper,
     build_tail_wrapper,
@@ -31,6 +32,10 @@ from common import (
 
 
 def deployment_target() -> object:
+    return getattr(ct.target, "macOS15", ct.target.iOS18)
+
+
+def legacy_deployment_target() -> object:
     return getattr(ct.target, "macOS14", ct.target.iOS17)
 
 
@@ -45,6 +50,14 @@ def parse_args() -> argparse.Namespace:
         help="Directory where compiled .mlmodelc bundles should be written",
     )
     return parser.parse_args()
+
+
+def _f16_package_path(package_path: Path) -> Path:
+    return package_path.with_name(package_path.stem + "-f16" + package_path.suffix)
+
+
+def _f16_compiled_paths(compiled_paths: list[Path]) -> list[Path]:
+    return [p.with_name(p.stem + "-f16" + p.suffix) for p in compiled_paths]
 
 
 def export_segmentation(pipeline: Any, output_dir: Path) -> None:
@@ -64,7 +77,43 @@ def export_segmentation(pipeline: Any, output_dir: Path) -> None:
             method="trace",
         )
 
+    seg_compiled_paths = [
+        output_dir / f"{SEGMENTATION_STEM}.mlmodelc",
+        output_dir / f"{SEGMENTATION_BATCHED_STEM}.mlmodelc",
+    ]
+
+    # FP32 — CPU+GPU optimized
     mlmodel = ct.convert(
+        traced,
+        convert_to="mlprogram",
+        inputs=[
+            ct.TensorType(
+                name="input",
+                shape=ct.EnumeratedShapes(
+                    shapes=[
+                        (batch_size, 1, SEGMENTATION_SAMPLES)
+                        for batch_size in SEGMENTATION_BATCH_SIZES
+                    ],
+                    default=(32, 1, SEGMENTATION_SAMPLES),
+                ),
+                dtype=np.float32,
+            )
+        ],
+        outputs=[ct.TensorType(name="output", dtype=np.float32)],
+        compute_units=ct.ComputeUnit.CPU_AND_GPU,
+        minimum_deployment_target=deployment_target(),
+        compute_precision=ct.precision.FLOAT32,
+    )
+
+    print("Saving segmentation CoreML artifacts (FP32)...")
+    save_model_artifacts(
+        mlmodel,
+        segmentation_package_path(output_dir),
+        seg_compiled_paths,
+    )
+
+    # FP16 — ANE-eligible
+    mlmodel_f16 = ct.convert(
         traced,
         convert_to="mlprogram",
         inputs=[
@@ -83,17 +132,14 @@ def export_segmentation(pipeline: Any, output_dir: Path) -> None:
         outputs=[ct.TensorType(name="output", dtype=np.float32)],
         compute_units=ct.ComputeUnit.ALL,
         minimum_deployment_target=deployment_target(),
-        compute_precision=ct.precision.FLOAT32,
+        compute_precision=ct.precision.FLOAT16,
     )
 
-    print("Saving segmentation CoreML artifacts...")
+    print("Saving segmentation CoreML artifacts (FP16)...")
     save_model_artifacts(
-        mlmodel,
-        segmentation_package_path(output_dir),
-        [
-            output_dir / f"{SEGMENTATION_STEM}.mlmodelc",
-            output_dir / f"{SEGMENTATION_BATCHED_STEM}.mlmodelc",
-        ],
+        mlmodel_f16,
+        _f16_package_path(segmentation_package_path(output_dir)),
+        _f16_compiled_paths(seg_compiled_paths),
     )
 
 
@@ -107,36 +153,85 @@ def export_tail(pipeline: Any, output_dir: Path) -> None:
     with torch.inference_mode():
         traced = torch.jit.trace(tail_wrapper, (dummy_fbank, dummy_weights))
 
+    tail_compiled_paths = [
+        output_dir / f"{TAIL_STEM}.mlmodelc",
+        output_dir / f"{TAIL_B3_STEM}.mlmodelc",
+        output_dir / f"{TAIL_B32_STEM}.mlmodelc",
+    ]
+
+    # FP32 — CPU+GPU optimized, EnumeratedShapes for better GPU kernels
+    # (multiple EnumeratedShapes inputs require iOS 18+ / macOS 15+)
     mlmodel = ct.convert(
         traced,
         convert_to="mlprogram",
         inputs=[
             ct.TensorType(
                 name="fbank",
-                shape=(ct.RangeDim(1, 32), FBANK_FRAMES, FBANK_FEATURES),
+                shape=ct.EnumeratedShapes(
+                    shapes=[
+                        (bs, FBANK_FRAMES, FBANK_FEATURES) for bs in TAIL_BATCH_SIZES
+                    ],
+                    default=(32, FBANK_FRAMES, FBANK_FEATURES),
+                ),
                 dtype=np.float32,
             ),
             ct.TensorType(
                 name="weights",
-                shape=(ct.RangeDim(1, 32), SEGMENTATION_FRAMES),
+                shape=ct.EnumeratedShapes(
+                    shapes=[(bs, SEGMENTATION_FRAMES) for bs in TAIL_BATCH_SIZES],
+                    default=(32, SEGMENTATION_FRAMES),
+                ),
+                dtype=np.float32,
+            ),
+        ],
+        outputs=[ct.TensorType(name="output", dtype=np.float32)],
+        compute_units=ct.ComputeUnit.CPU_AND_GPU,
+        minimum_deployment_target=deployment_target(),
+        compute_precision=ct.precision.FLOAT32,
+    )
+
+    print("Saving embedding tail CoreML artifacts (FP32)...")
+    save_model_artifacts(
+        mlmodel,
+        tail_package_path(output_dir),
+        tail_compiled_paths,
+    )
+
+    # FP16 — ANE-eligible
+    mlmodel_f16 = ct.convert(
+        traced,
+        convert_to="mlprogram",
+        inputs=[
+            ct.TensorType(
+                name="fbank",
+                shape=ct.EnumeratedShapes(
+                    shapes=[
+                        (bs, FBANK_FRAMES, FBANK_FEATURES) for bs in TAIL_BATCH_SIZES
+                    ],
+                    default=(32, FBANK_FRAMES, FBANK_FEATURES),
+                ),
+                dtype=np.float32,
+            ),
+            ct.TensorType(
+                name="weights",
+                shape=ct.EnumeratedShapes(
+                    shapes=[(bs, SEGMENTATION_FRAMES) for bs in TAIL_BATCH_SIZES],
+                    default=(32, SEGMENTATION_FRAMES),
+                ),
                 dtype=np.float32,
             ),
         ],
         outputs=[ct.TensorType(name="output", dtype=np.float32)],
         compute_units=ct.ComputeUnit.ALL,
         minimum_deployment_target=deployment_target(),
-        compute_precision=ct.precision.FLOAT32,
+        compute_precision=ct.precision.FLOAT16,
     )
 
-    print("Saving embedding tail CoreML artifacts...")
+    print("Saving embedding tail CoreML artifacts (FP16)...")
     save_model_artifacts(
-        mlmodel,
-        tail_package_path(output_dir),
-        [
-            output_dir / f"{TAIL_STEM}.mlmodelc",
-            output_dir / f"{TAIL_B3_STEM}.mlmodelc",
-            output_dir / f"{TAIL_B32_STEM}.mlmodelc",
-        ],
+        mlmodel_f16,
+        _f16_package_path(tail_package_path(output_dir)),
+        _f16_compiled_paths(tail_compiled_paths),
     )
 
 
