@@ -50,6 +50,8 @@ compare source python_device="cpu" rust_mode="exact":
         elif [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]] || [[ "${OS:-}" == "Windows_NT" ]]; then
             rust_features=(--features directml)
         fi
+    elif [[ "{{rust_mode}}" == "native-coreml" ]]; then
+        rust_features=(--features native-coreml)
     elif [[ "{{rust_mode}}" == "cuda" ]]; then
         rust_features=(--features cuda)
     fi
@@ -94,6 +96,8 @@ benchmark source python_device="auto" runs="1" warmups="1" rust_mode="exact":
         elif [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]] || [[ "${OS:-}" == "Windows_NT" ]]; then
             rust_features=(--features directml)
         fi
+    elif [[ "{{rust_mode}}" == "native-coreml" ]]; then
+        rust_features=(--features native-coreml)
     elif [[ "{{rust_mode}}" == "cuda" ]]; then
         rust_features=(--features cuda)
     fi
@@ -143,6 +147,9 @@ compare-apple-accuracy source rust_mode="pyannote-mps":
             elif [[ "$(uname -s)" =~ MINGW|MSYS|CYGWIN ]] || [[ "${OS:-}" == "Windows_NT" ]]; then
                 rust_features=(--features directml)
             fi
+            ;;
+        native-coreml)
+            rust_features=(--features native-coreml)
             ;;
         cuda)
             rust_features=(--features cuda)

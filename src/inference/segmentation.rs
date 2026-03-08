@@ -2,6 +2,8 @@ use ndarray::Array2;
 use ort::session::Session;
 use ort::value::TensorRef;
 
+#[cfg(feature = "native-coreml")]
+use crate::inference::coreml::{CoreMlModel, coreml_model_path};
 use crate::inference::{ExecutionMode, with_execution_mode};
 
 const PRIMARY_BATCH_SIZE: usize = 32;
@@ -11,6 +13,10 @@ pub struct SegmentationModel {
     mode: ExecutionMode,
     session: Session,
     primary_batched_session: Option<Session>,
+    #[cfg(feature = "native-coreml")]
+    native_session: Option<CoreMlModel>,
+    #[cfg(feature = "native-coreml")]
+    native_batched_session: Option<CoreMlModel>,
     input_buffer: ndarray::Array3<f32>,
     primary_batch_input_buffer: ndarray::Array3<f32>,
     window_samples: usize,
@@ -43,6 +49,10 @@ impl SegmentationModel {
                 .filter(|path| path.exists())
                 .map(|path| Self::build_session(path.to_str().unwrap(), mode))
                 .transpose()?,
+            #[cfg(feature = "native-coreml")]
+            native_session: Self::load_native_coreml(model_path, mode),
+            #[cfg(feature = "native-coreml")]
+            native_batched_session: Self::load_native_coreml_batched(model_path, mode),
             input_buffer: ndarray::Array3::zeros((1, 1, window_samples)),
             primary_batch_input_buffer: ndarray::Array3::zeros((
                 PRIMARY_BATCH_SIZE,
@@ -89,6 +99,12 @@ impl SegmentationModel {
             .filter(|path| path.exists())
             .map(|path| Self::build_session(path.to_str().unwrap(), self.mode))
             .transpose()?;
+        #[cfg(feature = "native-coreml")]
+        {
+            self.native_session = Self::load_native_coreml(&self.model_path, self.mode);
+            self.native_batched_session =
+                Self::load_native_coreml_batched(&self.model_path, self.mode);
+        }
         Ok(())
     }
 
@@ -132,6 +148,11 @@ impl SegmentationModel {
     }
 
     fn run_window(&mut self, window: &[f32]) -> Result<Array2<f32>, ort::Error> {
+        #[cfg(feature = "native-coreml")]
+        if let Some(ref native) = self.native_session {
+            return Self::run_native_single(native, window, &mut self.input_buffer);
+        }
+
         self.input_buffer.fill(0.0);
         self.input_buffer
             .slice_mut(ndarray::s![0, 0, ..window.len()])
@@ -141,7 +162,6 @@ impl SegmentationModel {
         let outputs = self.session.run(ort::inputs![input_tensor])?;
         let (shape, data) = outputs[0].try_extract_tensor::<f32>()?;
 
-        // Shape derefs to [i64], index directly
         let frames = shape[1] as usize;
         let classes = shape[2] as usize;
 
@@ -149,6 +169,11 @@ impl SegmentationModel {
     }
 
     fn run_batch(&mut self, windows: &[Vec<f32>]) -> Result<Vec<Array2<f32>>, ort::Error> {
+        #[cfg(feature = "native-coreml")]
+        if let Some(ref native) = self.native_batched_session {
+            return Self::run_native_batch(native, windows, &mut self.primary_batch_input_buffer);
+        }
+
         self.primary_batch_input_buffer.fill(0.0);
         for (batch_idx, window) in windows.iter().enumerate() {
             self.primary_batch_input_buffer
@@ -174,6 +199,101 @@ impl SegmentationModel {
                 let start = batch_idx * frames * classes;
                 let end = start + frames * classes;
                 Array2::from_shape_vec((frames, classes), flat[start..end].to_vec()).unwrap()
+            })
+            .collect())
+    }
+
+    #[cfg(feature = "native-coreml")]
+    fn load_native_coreml(model_path: &str, mode: ExecutionMode) -> Option<CoreMlModel> {
+        if mode != ExecutionMode::NativeCoreML {
+            return None;
+        }
+        let coreml_path = coreml_model_path(model_path);
+        if !coreml_path.exists() {
+            eprintln!(
+                "warning: native CoreML model not found at {}, falling back to ORT CPU",
+                coreml_path.display()
+            );
+            return None;
+        }
+        match CoreMlModel::load(&coreml_path, CoreMlModel::default_compute_units(), "output") {
+            Ok(model) => Some(model),
+            Err(e) => {
+                eprintln!("warning: failed to load native CoreML segmentation: {e}");
+                None
+            }
+        }
+    }
+
+    #[cfg(feature = "native-coreml")]
+    fn load_native_coreml_batched(model_path: &str, mode: ExecutionMode) -> Option<CoreMlModel> {
+        if mode != ExecutionMode::NativeCoreML {
+            return None;
+        }
+        let batched_onnx = batched_model_path(model_path, PRIMARY_BATCH_SIZE)?;
+        let coreml_path = coreml_model_path(batched_onnx.to_str().unwrap());
+        if !coreml_path.exists() {
+            return None;
+        }
+        match CoreMlModel::load(&coreml_path, CoreMlModel::default_compute_units(), "output") {
+            Ok(model) => Some(model),
+            Err(e) => {
+                eprintln!("warning: failed to load native CoreML batched segmentation: {e}");
+                None
+            }
+        }
+    }
+
+    #[cfg(feature = "native-coreml")]
+    fn run_native_single(
+        native: &CoreMlModel,
+        window: &[f32],
+        buffer: &mut ndarray::Array3<f32>,
+    ) -> Result<Array2<f32>, ort::Error> {
+        buffer.fill(0.0);
+        buffer
+            .slice_mut(ndarray::s![0, 0, ..window.len()])
+            .assign(&ndarray::ArrayView1::from(window));
+        let input_data = buffer.as_slice().unwrap();
+        let shape = [buffer.shape()[0], buffer.shape()[1], buffer.shape()[2]];
+
+        let (data, out_shape) = native
+            .predict(&[("input", &shape, input_data)])
+            .map_err(|e| ort::Error::new(e.to_string()))?;
+
+        let frames = out_shape[1];
+        let classes = out_shape[2];
+        Ok(Array2::from_shape_vec((frames, classes), data).unwrap())
+    }
+
+    #[cfg(feature = "native-coreml")]
+    fn run_native_batch(
+        native: &CoreMlModel,
+        windows: &[Vec<f32>],
+        buffer: &mut ndarray::Array3<f32>,
+    ) -> Result<Vec<Array2<f32>>, ort::Error> {
+        buffer.fill(0.0);
+        for (batch_idx, window) in windows.iter().enumerate() {
+            buffer
+                .slice_mut(ndarray::s![batch_idx, 0, ..window.len()])
+                .assign(&ndarray::ArrayView1::from(window.as_slice()));
+        }
+        let input_data = buffer.as_slice().unwrap();
+        let shape = [buffer.shape()[0], buffer.shape()[1], buffer.shape()[2]];
+
+        let (data, out_shape) = native
+            .predict(&[("input", &shape, input_data)])
+            .map_err(|e| ort::Error::new(e.to_string()))?;
+
+        let batch = out_shape[0];
+        let frames = out_shape[1];
+        let classes = out_shape[2];
+
+        Ok((0..batch)
+            .map(|batch_idx| {
+                let start = batch_idx * frames * classes;
+                let end = start + frames * classes;
+                Array2::from_shape_vec((frames, classes), data[start..end].to_vec()).unwrap()
             })
             .collect())
     }
