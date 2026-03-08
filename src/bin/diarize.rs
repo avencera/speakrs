@@ -1,32 +1,44 @@
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::process::Command;
 
 use speakrs::clustering::plda::PldaTransform;
+use speakrs::inference::ExecutionMode;
 use speakrs::inference::embedding::EmbeddingModel;
 use speakrs::inference::segmentation::SegmentationModel;
 use speakrs::pipeline::{SEGMENTATION_STEP_SECONDS, diarize};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 2 {
-        eprintln!("Usage: diarize <path/to/audio.wav>");
+    let (mode, wav_path) = parse_args(&args);
+    if wav_path.is_empty() {
         std::process::exit(1);
     }
 
-    let wav_path = &args[1];
+    if let CliMode::PyannoteDevice(device) = mode {
+        let output = run_pyannote_sidecar(device, wav_path).expect("pyannote sidecar failed");
+        print!("{output}");
+        return;
+    }
+
+    let CliMode::Native(mode) = mode else {
+        unreachable!();
+    };
     let models_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/models");
 
-    let mut seg_model = SegmentationModel::new(
+    let mut seg_model = SegmentationModel::with_mode(
         models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
         SEGMENTATION_STEP_SECONDS as f32,
+        mode,
     )
     .expect("failed to load segmentation model");
-    let mut emb_model = EmbeddingModel::new(
+    let mut emb_model = EmbeddingModel::with_mode(
         models_dir
             .join("wespeaker-voxceleb-resnet34.onnx")
             .to_str()
             .unwrap(),
+        mode,
     )
     .expect("failed to load embedding model");
     let plda = PldaTransform::from_dir(&models_dir).expect("failed to load PLDA parameters");
@@ -37,6 +49,62 @@ fn main() {
     let result = diarize(&mut seg_model, &mut emb_model, &plda, &samples, "file1")
         .expect("diarization failed");
     print!("{}", result.rttm);
+}
+
+enum CliMode {
+    Native(ExecutionMode),
+    PyannoteDevice(&'static str),
+}
+
+fn parse_args(args: &[String]) -> (CliMode, &str) {
+    match args {
+        [_, wav_path] => (CliMode::Native(ExecutionMode::ExactCpu), wav_path),
+        [_, flag, mode, wav_path] if flag == "--mode" => {
+            let parsed = match mode.as_str() {
+                "exact" => CliMode::Native(ExecutionMode::ExactCpu),
+                "coreml" => CliMode::Native(ExecutionMode::CoreMl),
+                "cuda" => CliMode::Native(ExecutionMode::Cuda),
+                "pyannote-cpu" => CliMode::PyannoteDevice("cpu"),
+                "pyannote-mps" => CliMode::PyannoteDevice("mps"),
+                "pyannote-cuda" => CliMode::PyannoteDevice("cuda"),
+                _ => {
+                    eprintln!("Unknown mode: {mode}");
+                    eprintln!(
+                        "Usage: diarize [--mode exact|coreml|cuda|pyannote-cpu|pyannote-mps|pyannote-cuda] <path/to/audio.wav>"
+                    );
+                    return (CliMode::Native(ExecutionMode::ExactCpu), "");
+                }
+            };
+            (parsed, wav_path)
+        }
+        _ => {
+            eprintln!(
+                "Usage: diarize [--mode exact|coreml|cuda|pyannote-cpu|pyannote-mps|pyannote-cuda] <path/to/audio.wav>"
+            );
+            (CliMode::Native(ExecutionMode::ExactCpu), "")
+        }
+    }
+}
+
+fn run_pyannote_sidecar(
+    device: &'static str,
+    wav_path: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync + 'static>> {
+    let script_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/diarize_pyannote.py");
+    let output = Command::new("uv")
+        .arg("run")
+        .arg(script_path)
+        .arg("--device")
+        .arg(device)
+        .arg(wav_path)
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("pyannote sidecar exited with {}: {stderr}", output.status).into());
+    }
+
+    Ok(String::from_utf8(output.stdout)?)
 }
 
 fn load_wav_samples(path: &str) -> (Vec<f32>, u32) {

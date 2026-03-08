@@ -1,12 +1,18 @@
 use ndarray::Array2;
-use ort::ep;
 use ort::session::Session;
 use ort::value::TensorRef;
 
+use crate::inference::{ExecutionMode, with_execution_mode};
+
+const PRIMARY_BATCH_SIZE: usize = 32;
+
 pub struct SegmentationModel {
     model_path: String,
+    mode: ExecutionMode,
     session: Session,
+    primary_batched_session: Option<Session>,
     input_buffer: ndarray::Array3<f32>,
+    primary_batch_input_buffer: ndarray::Array3<f32>,
     window_samples: usize,
     step_samples: usize,
     sample_rate: usize,
@@ -15,6 +21,15 @@ pub struct SegmentationModel {
 impl SegmentationModel {
     /// Load a segmentation-3.0 ONNX model
     pub fn new(model_path: &str, step_duration: f32) -> Result<Self, ort::Error> {
+        Self::with_mode(model_path, step_duration, ExecutionMode::ExactCpu)
+    }
+
+    /// Load a segmentation-3.0 ONNX model with the requested execution mode
+    pub fn with_mode(
+        model_path: &str,
+        step_duration: f32,
+        mode: ExecutionMode,
+    ) -> Result<Self, ort::Error> {
         let sample_rate = 16000;
         let window_duration = 10.0;
         let window_samples = (window_duration * sample_rate as f32) as usize;
@@ -22,21 +37,31 @@ impl SegmentationModel {
 
         Ok(Self {
             model_path: model_path.to_owned(),
-            session: Self::build_session(model_path)?,
+            mode,
+            session: Self::build_session(model_path, mode)?,
+            primary_batched_session: batched_model_path(model_path, PRIMARY_BATCH_SIZE)
+                .filter(|path| path.exists())
+                .map(|path| Self::build_session(path.to_str().unwrap(), mode))
+                .transpose()?,
             input_buffer: ndarray::Array3::zeros((1, 1, window_samples)),
+            primary_batch_input_buffer: ndarray::Array3::zeros((
+                PRIMARY_BATCH_SIZE,
+                1,
+                window_samples,
+            )),
             window_samples,
             step_samples,
             sample_rate,
         })
     }
 
-    fn build_session(model_path: &str) -> Result<Session, ort::Error> {
-        let mut builder = Session::builder()?
+    fn build_session(model_path: &str, mode: ExecutionMode) -> Result<Session, ort::Error> {
+        let builder = Session::builder()?
             .with_independent_thread_pool()?
             .with_intra_threads(Self::available_threads().min(6))?
             .with_inter_threads(1)?
-            .with_memory_pattern(false)?
-            .with_execution_providers([ep::CPU::default().with_arena_allocator(false).build()])?;
+            .with_memory_pattern(false)?;
+        let mut builder = with_execution_mode(builder, mode)?;
         builder.commit_from_file(model_path)
     }
 
@@ -59,7 +84,11 @@ impl SegmentationModel {
     }
 
     pub fn reset_session(&mut self) -> Result<(), ort::Error> {
-        self.session = Self::build_session(&self.model_path)?;
+        self.session = Self::build_session(&self.model_path, self.mode)?;
+        self.primary_batched_session = batched_model_path(&self.model_path, PRIMARY_BATCH_SIZE)
+            .filter(|path| path.exists())
+            .map(|path| Self::build_session(path.to_str().unwrap(), self.mode))
+            .transpose()?;
         Ok(())
     }
 
@@ -67,13 +96,11 @@ impl SegmentationModel {
     ///
     /// Returns Vec<Array2<f32>> where each element is [frames, 7] logits
     pub fn run(&mut self, audio: &[f32]) -> Result<Vec<Array2<f32>>, ort::Error> {
-        let mut results = Vec::new();
+        let mut windows = Vec::new();
         let mut offset = 0;
 
         while offset + self.window_samples <= audio.len() {
-            let window = &audio[offset..offset + self.window_samples];
-            let logits = self.run_window(window)?;
-            results.push(logits);
+            windows.push(audio[offset..offset + self.window_samples].to_vec());
             offset += self.step_samples;
         }
 
@@ -82,8 +109,23 @@ impl SegmentationModel {
             let mut padded = vec![0.0f32; self.window_samples];
             let remaining = audio.len() - offset;
             padded[..remaining].copy_from_slice(&audio[offset..]);
-            let logits = self.run_window(&padded)?;
+            windows.push(padded);
+        }
+
+        let mut results = Vec::with_capacity(windows.len());
+        let mut next_idx = 0;
+        while next_idx < windows.len() {
+            let remaining = windows.len() - next_idx;
+            if remaining >= PRIMARY_BATCH_SIZE && self.primary_batched_session.is_some() {
+                let batch = self.run_batch(&windows[next_idx..next_idx + PRIMARY_BATCH_SIZE])?;
+                results.extend(batch);
+                next_idx += PRIMARY_BATCH_SIZE;
+                continue;
+            }
+
+            let logits = self.run_window(&windows[next_idx])?;
             results.push(logits);
+            next_idx += 1;
         }
 
         Ok(results)
@@ -105,4 +147,41 @@ impl SegmentationModel {
 
         Ok(Array2::from_shape_vec((frames, classes), data.to_vec()).unwrap())
     }
+
+    fn run_batch(&mut self, windows: &[Vec<f32>]) -> Result<Vec<Array2<f32>>, ort::Error> {
+        self.primary_batch_input_buffer.fill(0.0);
+        for (batch_idx, window) in windows.iter().enumerate() {
+            self.primary_batch_input_buffer
+                .slice_mut(ndarray::s![batch_idx, 0, ..window.len()])
+                .assign(&ndarray::ArrayView1::from(window.as_slice()));
+        }
+        let input_tensor = TensorRef::from_array_view(self.primary_batch_input_buffer.view())?;
+
+        let outputs = self
+            .primary_batched_session
+            .as_mut()
+            .unwrap()
+            .run(ort::inputs![input_tensor])?;
+        let (shape, data) = outputs[0].try_extract_tensor::<f32>()?;
+
+        let batch = shape[0] as usize;
+        let frames = shape[1] as usize;
+        let classes = shape[2] as usize;
+        let flat = data.to_vec();
+
+        Ok((0..batch)
+            .map(|batch_idx| {
+                let start = batch_idx * frames * classes;
+                let end = start + frames * classes;
+                Array2::from_shape_vec((frames, classes), flat[start..end].to_vec()).unwrap()
+            })
+            .collect())
+    }
+}
+
+fn batched_model_path(model_path: &str, batch_size: usize) -> Option<std::path::PathBuf> {
+    let path = std::path::Path::new(model_path);
+    let file_name = path.file_name()?.to_str()?;
+    let stem = file_name.strip_suffix(".onnx")?;
+    Some(path.with_file_name(format!("{stem}-b{batch_size}.onnx")))
 }

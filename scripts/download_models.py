@@ -67,19 +67,29 @@ def export_segmentation(pipeline: Any, models_dir: str) -> None:
             opset_version=14,
             dynamo=False,
         )
+        torch.onnx.export(
+            seg_model,
+            (torch.randn(32, 1, 160000),),
+            os.path.join(models_dir, "segmentation-3.0-b32.onnx"),
+            input_names=["input"],
+            output_names=["output"],
+            opset_version=14,
+            dynamo=False,
+        )
 
     sz = os.path.getsize(os.path.join(models_dir, "segmentation-3.0.onnx")) / 1e6
     print(f"  segmentation-3.0.onnx ({sz:.1f} MB)")
+    bsz = os.path.getsize(os.path.join(models_dir, "segmentation-3.0-b32.onnx")) / 1e6
+    print(f"  segmentation-3.0-b32.onnx ({bsz:.1f} MB)")
 
 
 def export_embedding(pipeline: Any, models_dir: str) -> None:
-    """Export the exact WeSpeaker embedding path for batch-1 and batch-16 inference"""
+    """Export the exact WeSpeaker embedding path for batch-1 and batch-32 inference"""
     print("Exporting embedding model...")
 
-    class ExactEmbeddingWrapper(nn.Module):
+    class FbankWrapper(nn.Module):
         def __init__(self, model: Any) -> None:
             super().__init__()
-            self.resnet = model.resnet
             self.scale = float(1 << 15)
             self.preemph = 0.97
 
@@ -109,6 +119,14 @@ def export_embedding(pipeline: Any, models_dir: str) -> None:
             mel = torch.clamp_min(mel, eps.to(device=mel.device, dtype=mel.dtype)).log()
             return mel - mel.mean(dim=1, keepdim=True)
 
+        def forward(self, waveforms: torch.Tensor) -> torch.Tensor:
+            return self.compute_fbank(waveforms)
+
+    class EmbeddingTailWrapper(nn.Module):
+        def __init__(self, model: Any) -> None:
+            super().__init__()
+            self.resnet = model.resnet
+
         def pool(self, sequences: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
             weights = weights.unsqueeze(1)
             num_frames = sequences.size(-1)
@@ -133,8 +151,7 @@ def export_embedding(pipeline: Any, models_dir: str) -> None:
             zero_mask = (weight_sum <= 0.0).repeat(1, stats.size(1))
             return torch.where(zero_mask, zero_stats, stats)
 
-        def forward(self, waveforms: torch.Tensor, weights: torch.Tensor) -> Any:
-            fbank = self.compute_fbank(waveforms)
+        def forward(self, fbank: torch.Tensor, weights: torch.Tensor) -> Any:
             frames = self.resnet.forward_frames(fbank)
             frames = frames.reshape(
                 frames.size(0), frames.size(1) * frames.size(2), frames.size(3)
@@ -150,17 +167,77 @@ def export_embedding(pipeline: Any, models_dir: str) -> None:
 
     emb_model = pipeline._embedding.model_
     emb_model.eval()
-    wrapper = ExactEmbeddingWrapper(emb_model)
-    wrapper.eval()
+    fbank_wrapper = FbankWrapper(emb_model)
+    fbank_wrapper.eval()
+    tail_wrapper = EmbeddingTailWrapper(emb_model)
+    tail_wrapper.eval()
+
+    dummy_waveform = torch.randn(1, 1, 160000)
+    dummy_weights = torch.ones(1, 589)
+    dummy_fbank = fbank_wrapper(dummy_waveform)
+
+    with torch.no_grad():
+        torch.onnx.export(
+            fbank_wrapper,
+            (dummy_waveform,),
+            os.path.join(models_dir, "wespeaker-fbank.onnx"),
+            input_names=["waveform"],
+            output_names=["fbank"],
+            opset_version=18,
+            dynamo=True,
+            external_data=False,
+        )
+        torch.onnx.export(
+            fbank_wrapper,
+            (torch.randn(32, 1, 160000),),
+            os.path.join(models_dir, "wespeaker-fbank-b32.onnx"),
+            input_names=["waveform"],
+            output_names=["fbank"],
+            opset_version=18,
+            dynamo=True,
+            external_data=False,
+        )
+    fbank_sz = os.path.getsize(os.path.join(models_dir, "wespeaker-fbank.onnx")) / 1e6
+    print(f"  wespeaker-fbank.onnx ({fbank_sz:.1f} MB)")
+    fbank_b32_sz = (
+        os.path.getsize(os.path.join(models_dir, "wespeaker-fbank-b32.onnx")) / 1e6
+    )
+    print(f"  wespeaker-fbank-b32.onnx ({fbank_b32_sz:.1f} MB)")
 
     export_embedding_model(
-        wrapper, models_dir, "wespeaker-voxceleb-resnet34.onnx", batch_size=1
+        fbank_wrapper,
+        tail_wrapper,
+        models_dir,
+        "wespeaker-voxceleb-resnet34.onnx",
+        batch_size=1,
     )
     export_embedding_model(
-        wrapper, models_dir, "wespeaker-voxceleb-resnet34-b32.onnx", batch_size=32
+        fbank_wrapper,
+        tail_wrapper,
+        models_dir,
+        "wespeaker-voxceleb-resnet34-b32.onnx",
+        batch_size=32,
     )
-    export_embedding_model(
-        wrapper, models_dir, "wespeaker-voxceleb-resnet34-b16.onnx", batch_size=16
+    export_embedding_tail_model(
+        tail_wrapper,
+        models_dir,
+        "wespeaker-voxceleb-resnet34-tail.onnx",
+        dummy_fbank,
+        dummy_weights,
+    )
+    export_embedding_tail_model(
+        tail_wrapper,
+        models_dir,
+        "wespeaker-voxceleb-resnet34-tail-b3.onnx",
+        dummy_fbank.repeat(3, 1, 1),
+        dummy_weights.repeat(3, 1),
+    )
+    export_embedding_tail_model(
+        tail_wrapper,
+        models_dir,
+        "wespeaker-voxceleb-resnet34-tail-b32.onnx",
+        dummy_fbank.repeat(32, 1, 1),
+        dummy_weights.repeat(32, 1),
     )
     with open(
         os.path.join(models_dir, "wespeaker-voxceleb-resnet34.min_num_samples.txt"), "w"
@@ -169,10 +246,28 @@ def export_embedding(pipeline: Any, models_dir: str) -> None:
 
 
 def export_embedding_model(
-    wrapper: nn.Module, models_dir: str, filename: str, batch_size: int
+    fbank_wrapper: nn.Module,
+    tail_wrapper: nn.Module,
+    models_dir: str,
+    filename: str,
+    batch_size: int,
 ) -> None:
     dummy_waveform = torch.randn(batch_size, 1, 160000)
     dummy_weights = torch.ones(batch_size, 589)
+    dummy_fbank = fbank_wrapper(dummy_waveform)
+
+    class ExactEmbeddingWrapper(nn.Module):
+        def __init__(self, fbank_model: nn.Module, tail_model: nn.Module) -> None:
+            super().__init__()
+            self.fbank_model = fbank_model
+            self.tail_model = tail_model
+
+        def forward(self, waveforms: torch.Tensor, weights: torch.Tensor) -> Any:
+            fbank = self.fbank_model(waveforms)
+            return self.tail_model(fbank, weights)
+
+    wrapper = ExactEmbeddingWrapper(fbank_wrapper, tail_wrapper)
+    wrapper.eval()
     output_path = os.path.join(models_dir, filename)
     with torch.no_grad():
         torch.onnx.export(
@@ -180,6 +275,30 @@ def export_embedding_model(
             (dummy_waveform, dummy_weights),
             output_path,
             input_names=["waveform", "weights"],
+            output_names=["output"],
+            opset_version=18,
+            dynamo=True,
+            external_data=False,
+        )
+
+    sz = os.path.getsize(output_path) / 1e6
+    print(f"  {filename} ({sz:.1f} MB)")
+
+
+def export_embedding_tail_model(
+    wrapper: nn.Module,
+    models_dir: str,
+    filename: str,
+    dummy_fbank: torch.Tensor,
+    dummy_weights: torch.Tensor,
+) -> None:
+    output_path = os.path.join(models_dir, filename)
+    with torch.no_grad():
+        torch.onnx.export(
+            wrapper,
+            (dummy_fbank, dummy_weights),
+            output_path,
+            input_names=["fbank", "weights"],
             output_names=["output"],
             opset_version=18,
             dynamo=True,

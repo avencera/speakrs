@@ -20,7 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("wav_path")
     parser.add_argument(
         "--device",
-        choices=("auto", "cpu", "mps"),
+        choices=("auto", "cpu", "mps", "cuda"),
         default=os.environ.get("PYANNOTE_DEVICE", "auto"),
         help="Execution device for pyannote",
     )
@@ -42,6 +42,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_device(name: str) -> torch.device:
+    if name == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA requested but not available")
+        return torch.device("cuda")
+
     if name == "mps":
         if not torch.backends.mps.is_available():
             raise RuntimeError("MPS requested but not available")
@@ -49,6 +54,9 @@ def resolve_device(name: str) -> torch.device:
 
     if name == "cpu":
         return torch.device("cpu")
+
+    if torch.cuda.is_available():
+        return torch.device("cuda")
 
     if torch.backends.mps.is_available():
         return torch.device("mps")
@@ -58,7 +66,8 @@ def resolve_device(name: str) -> torch.device:
 
 def configure_torch(device: torch.device) -> None:
     if hasattr(torch, "set_float32_matmul_precision"):
-        torch.set_float32_matmul_precision("high")
+        precision = "highest" if device.type == "cuda" else "high"
+        torch.set_float32_matmul_precision(precision)
 
     if device.type == "cpu":
         cpu_count = os.cpu_count() or 1
@@ -68,6 +77,12 @@ def configure_torch(device: torch.device) -> None:
             torch.set_num_interop_threads(interop_threads)
         except RuntimeError:
             pass
+        return
+
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
 
 
 def main() -> None:

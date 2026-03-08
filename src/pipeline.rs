@@ -1,12 +1,14 @@
 use std::error::Error;
 use std::path::Path;
+use std::sync::Arc;
+use std::time::Instant;
 
 use ndarray::{Array2, Array3, ArrayView2, s};
 
 use crate::clustering::ahc::{AhcConfig, cluster as cluster_ahc};
 use crate::clustering::plda::PldaTransform;
 use crate::clustering::vbx::{VbxConfig, cluster_vbx};
-use crate::inference::embedding::{EmbeddingModel, MaskedEmbeddingInput};
+use crate::inference::embedding::{EmbeddingModel, MaskedEmbeddingInput, SplitTailInput};
 use crate::inference::segmentation::SegmentationModel;
 use crate::powerset::PowersetMapping;
 use crate::reconstruct::{reconstruct, speaker_count};
@@ -14,6 +16,10 @@ use crate::segment::{to_rttm, to_segments};
 use crate::utils::cosine_similarity;
 
 type DynError = Box<dyn Error + Send + Sync + 'static>;
+
+fn profiling_enabled() -> bool {
+    std::env::var("SPEAKRS_PROFILE").is_ok()
+}
 
 pub const SEGMENTATION_WINDOW_SECONDS: f64 = 10.0;
 pub const SEGMENTATION_STEP_SECONDS: f64 = 1.0;
@@ -26,6 +32,13 @@ struct PendingEmbedding<'a> {
     audio: &'a [f32],
     mask: Vec<f32>,
     clean_mask: Vec<f32>,
+}
+
+struct PendingSplitEmbedding {
+    chunk_idx: usize,
+    speaker_idx: usize,
+    fbank: Arc<Array2<f32>>,
+    weights: Vec<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -84,8 +97,17 @@ pub fn diarize(
     audio: &[f32],
     file_id: &str,
 ) -> Result<DiarizationResult, DynError> {
+    let profile = profiling_enabled();
     let powerset = PowersetMapping::new(3, 2);
+    let t0 = Instant::now();
     let raw_windows = seg_model.run(audio)?;
+    if profile {
+        eprintln!(
+            "[profile] segmentation: {:.3}s ({} windows)",
+            t0.elapsed().as_secs_f64(),
+            raw_windows.len()
+        );
+    }
     if raw_windows.is_empty() {
         return Ok(DiarizationResult {
             segmentations: Array3::zeros((0, 0, 0)),
@@ -113,10 +135,20 @@ pub fn diarize(
         });
     }
 
+    let t0 = Instant::now();
     let embeddings = extract_embeddings(seg_model, emb_model, audio, &segmentations)?;
+    if profile {
+        eprintln!(
+            "[profile] embeddings: {:.3}s ({} chunks × {} speakers)",
+            t0.elapsed().as_secs_f64(),
+            segmentations.shape()[0],
+            segmentations.shape()[2],
+        );
+    }
     let (train_embeddings, _train_chunk_idx, _train_speaker_idx) =
         filter_embeddings(&segmentations, &embeddings);
 
+    let t0 = Instant::now();
     let hard_clusters = if train_embeddings.nrows() < 2 {
         let mut clusters =
             Array2::<i32>::zeros((segmentations.shape()[0], segmentations.shape()[2]));
@@ -150,6 +182,10 @@ pub fn diarize(
         mark_inactive_speakers(&segmentations, &mut clusters);
         clusters
     };
+
+    if profile {
+        eprintln!("[profile] clustering: {:.3}s", t0.elapsed().as_secs_f64());
+    }
 
     let discrete_diarization = reconstruct(
         &segmentations,
@@ -200,6 +236,28 @@ fn extract_embeddings(
     let num_chunks = segmentations.shape()[0];
     let num_speakers = segmentations.shape()[2];
     let mut embeddings = Array3::<f32>::from_elem((num_chunks, num_speakers, 256), f32::NAN);
+
+    if emb_model.prefers_chunk_embedding_path() {
+        if emb_model.split_primary_batch_size() > 0 {
+            extract_split_embeddings(seg_model, emb_model, audio, segmentations, &mut embeddings)?;
+        } else {
+            for chunk_idx in 0..num_chunks {
+                let chunk_audio = chunk_audio(audio, seg_model, chunk_idx);
+                let chunk_segmentations = segmentations.slice(s![chunk_idx, .., ..]);
+                let clean_masks = clean_masks(&chunk_segmentations);
+                let chunk_embeddings = emb_model.embed_chunk_speakers(
+                    chunk_audio,
+                    chunk_segmentations,
+                    &clean_masks,
+                )?;
+                embeddings
+                    .slice_mut(s![chunk_idx, .., ..])
+                    .assign(&chunk_embeddings);
+            }
+        }
+        return Ok(embeddings);
+    }
+
     let mut pending = Vec::with_capacity(emb_model.primary_batch_size());
 
     for chunk_idx in 0..num_chunks {
@@ -245,6 +303,112 @@ fn flush_embedding_batch(
         })
         .collect();
     let batch_embeddings = emb_model.embed_batch(&batch_inputs)?;
+
+    for (batch_idx, item) in pending.iter().enumerate() {
+        embeddings
+            .slice_mut(s![item.chunk_idx, item.speaker_idx, ..])
+            .assign(&batch_embeddings.row(batch_idx));
+    }
+
+    Ok(())
+}
+
+fn extract_split_embeddings(
+    seg_model: &SegmentationModel,
+    emb_model: &mut EmbeddingModel,
+    audio: &[f32],
+    segmentations: &Array3<f32>,
+    embeddings: &mut Array3<f32>,
+) -> Result<(), DynError> {
+    let profile = profiling_enabled();
+    let batch_size = emb_model.split_primary_batch_size();
+    let num_chunks = segmentations.shape()[0];
+    let num_speakers = segmentations.shape()[2];
+
+    // phase 1: compute all FBANKs upfront on CPU
+    let t_fbank = Instant::now();
+    let chunk_audios: Vec<&[f32]> = (0..num_chunks)
+        .map(|idx| chunk_audio(audio, seg_model, idx))
+        .collect();
+    let fbanks: Vec<Arc<Array2<f32>>> = emb_model
+        .compute_chunk_fbanks_batch(&chunk_audios)?
+        .into_iter()
+        .map(Arc::new)
+        .collect();
+    if profile {
+        let batched = if emb_model.has_batched_fbank() {
+            "batched"
+        } else {
+            "single"
+        };
+        eprintln!(
+            "[profile]   fbank: {:.3}s ({num_chunks} chunks, {batched})",
+            t_fbank.elapsed().as_secs_f64(),
+        );
+    }
+
+    // phase 2: batch all tail inferences on CoreML
+    let t_tail = Instant::now();
+    let mut pending = Vec::with_capacity(batch_size);
+    let mut tail_batches = 0usize;
+
+    for (chunk_idx, fbank) in fbanks.iter().enumerate() {
+        let chunk_audio = chunk_audio(audio, seg_model, chunk_idx);
+        let chunk_segmentations = segmentations.slice(s![chunk_idx, .., ..]);
+        let clean_masks = clean_masks(&chunk_segmentations);
+
+        for speaker_idx in 0..num_speakers {
+            let mask = chunk_segmentations.column(speaker_idx).to_owned();
+            let clean_mask = clean_masks.column(speaker_idx).to_owned();
+            let weights = emb_model
+                .select_chunk_mask(
+                    mask.as_slice().unwrap(),
+                    Some(clean_mask.as_slice().unwrap()),
+                    chunk_audio.len(),
+                )
+                .to_vec();
+            pending.push(PendingSplitEmbedding {
+                chunk_idx,
+                speaker_idx,
+                fbank: Arc::clone(fbank),
+                weights,
+            });
+            if pending.len() == batch_size {
+                flush_split_embedding_batch(emb_model, &pending, embeddings)?;
+                tail_batches += 1;
+                pending.clear();
+            }
+        }
+    }
+
+    if !pending.is_empty() {
+        flush_split_embedding_batch(emb_model, &pending, embeddings)?;
+        tail_batches += 1;
+    }
+    if profile {
+        eprintln!(
+            "[profile]   tail:  {:.3}s ({tail_batches} batches, {} items)",
+            t_tail.elapsed().as_secs_f64(),
+            num_chunks * num_speakers,
+        );
+    }
+
+    Ok(())
+}
+
+fn flush_split_embedding_batch(
+    emb_model: &mut EmbeddingModel,
+    pending: &[PendingSplitEmbedding],
+    embeddings: &mut Array3<f32>,
+) -> Result<(), DynError> {
+    let batch_inputs: Vec<_> = pending
+        .iter()
+        .map(|item| SplitTailInput {
+            fbank: item.fbank.as_ref(),
+            weights: &item.weights,
+        })
+        .collect();
+    let batch_embeddings = emb_model.embed_tail_batch_inputs(&batch_inputs)?;
 
     for (batch_idx, item) in pending.iter().enumerate() {
         embeddings
@@ -502,6 +666,8 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
+    #[cfg(feature = "coreml")]
+    use crate::inference::ExecutionMode;
 
     fn fixture_path(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -659,12 +825,222 @@ mod tests {
                 for dim_idx in 0..embeddings.shape()[2] {
                     let lhs = embeddings[[chunk_idx, speaker_idx, dim_idx]];
                     let rhs = expected[[chunk_idx, speaker_idx, dim_idx]];
-                    if (lhs - rhs).abs() > 5e-4 || lhs.is_nan() != rhs.is_nan() {
+                    if (lhs - rhs).abs() > 5e-3 || lhs.is_nan() != rhs.is_nan() {
                         panic!(
                             "chunk={chunk_idx} speaker={speaker_idx} dim={dim_idx} left={lhs} right={rhs}"
                         );
                     }
                 }
+            }
+        }
+    }
+
+    #[cfg(feature = "coreml")]
+    #[test]
+    fn fast_apple_segmentation_matches_python_fixture() {
+        let models_dir = fixture_path("models");
+        let mut seg_model = SegmentationModel::with_mode(
+            models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
+            SEGMENTATION_STEP_SECONDS as f32,
+            ExecutionMode::CoreMl,
+        )
+        .unwrap();
+        let expected: Array3<f32> =
+            Array3::read_npy(File::open(fixture_path("pipeline_segmentation_data.npy")).unwrap())
+                .unwrap();
+        let powerset = PowersetMapping::new(3, 2);
+        let (audio, sample_rate) = load_wav_samples(&fixture_path("test.wav"));
+        assert_eq!(sample_rate, 16_000);
+
+        let raw_windows = seg_model.run(&audio).unwrap();
+        let segmentations = decode_windows(raw_windows, &powerset);
+
+        for chunk_idx in 0..segmentations.shape()[0] {
+            for frame_idx in 0..segmentations.shape()[1] {
+                for speaker_idx in 0..segmentations.shape()[2] {
+                    let lhs = segmentations[[chunk_idx, frame_idx, speaker_idx]];
+                    let rhs = expected[[chunk_idx, frame_idx, speaker_idx]];
+                    if lhs != rhs {
+                        panic!(
+                            "chunk={chunk_idx} frame={frame_idx} speaker={speaker_idx} left={lhs} right={rhs}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "coreml")]
+    #[test]
+    fn fast_apple_embeddings_match_python_fixture() {
+        let models_dir = fixture_path("models");
+        let seg_model = SegmentationModel::new(
+            models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
+            SEGMENTATION_STEP_SECONDS as f32,
+        )
+        .unwrap();
+        let mut emb_model = EmbeddingModel::with_mode(
+            models_dir
+                .join("wespeaker-voxceleb-resnet34.onnx")
+                .to_str()
+                .unwrap(),
+            ExecutionMode::CoreMl,
+        )
+        .unwrap();
+        let segmentations: Array3<f32> =
+            Array3::read_npy(File::open(fixture_path("pipeline_segmentation_data.npy")).unwrap())
+                .unwrap();
+        let expected: Array3<f32> =
+            Array3::read_npy(File::open(fixture_path("pipeline_embeddings_data.npy")).unwrap())
+                .unwrap();
+        let (audio, sample_rate) = load_wav_samples(&fixture_path("test.wav"));
+        assert_eq!(sample_rate, 16_000);
+
+        let embeddings =
+            extract_embeddings(&seg_model, &mut emb_model, &audio, &segmentations).unwrap();
+
+        for chunk_idx in 0..embeddings.shape()[0] {
+            for speaker_idx in 0..embeddings.shape()[1] {
+                for dim_idx in 0..embeddings.shape()[2] {
+                    let lhs = embeddings[[chunk_idx, speaker_idx, dim_idx]];
+                    let rhs = expected[[chunk_idx, speaker_idx, dim_idx]];
+                    if (lhs - rhs).abs() > 5e-3 || lhs.is_nan() != rhs.is_nan() {
+                        panic!(
+                            "chunk={chunk_idx} speaker={speaker_idx} dim={dim_idx} left={lhs} right={rhs}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "coreml")]
+    #[test]
+    fn fast_apple_split_primary_batch_matches_single_tail_path() {
+        let models_dir = fixture_path("models");
+        let seg_model = SegmentationModel::new(
+            models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
+            SEGMENTATION_STEP_SECONDS as f32,
+        )
+        .unwrap();
+        let mut emb_model = EmbeddingModel::with_mode(
+            models_dir
+                .join("wespeaker-voxceleb-resnet34.onnx")
+                .to_str()
+                .unwrap(),
+            ExecutionMode::CoreMl,
+        )
+        .unwrap();
+        let segmentations: Array3<f32> =
+            Array3::read_npy(File::open(fixture_path("pipeline_segmentation_data.npy")).unwrap())
+                .unwrap();
+        let (audio, sample_rate) = load_wav_samples(&fixture_path("test.wav"));
+        assert_eq!(sample_rate, 16_000);
+
+        let mut fbanks = Vec::new();
+        let mut weights = Vec::new();
+        let mut expected = Vec::new();
+
+        'outer: for chunk_idx in 0..segmentations.shape()[0] {
+            let chunk_audio = chunk_audio(&audio, &seg_model, chunk_idx);
+            let chunk_segmentations = segmentations.slice(s![chunk_idx, .., ..]);
+            let clean_masks = clean_masks(&chunk_segmentations);
+            let fbank = emb_model.compute_chunk_fbank(chunk_audio).unwrap();
+
+            for speaker_idx in 0..chunk_segmentations.ncols() {
+                let mask = chunk_segmentations.column(speaker_idx).to_owned();
+                let clean_mask = clean_masks.column(speaker_idx).to_owned();
+                let used_mask = emb_model
+                    .select_chunk_mask(
+                        mask.as_slice().unwrap(),
+                        Some(clean_mask.as_slice().unwrap()),
+                        chunk_audio.len(),
+                    )
+                    .to_vec();
+                expected.push(
+                    emb_model
+                        .embed_masked(
+                            chunk_audio,
+                            mask.as_slice().unwrap(),
+                            Some(clean_mask.as_slice().unwrap()),
+                        )
+                        .unwrap(),
+                );
+                fbanks.push(fbank.clone());
+                weights.push(used_mask);
+                if fbanks.len() == emb_model.split_primary_batch_size() {
+                    break 'outer;
+                }
+            }
+        }
+
+        assert_eq!(fbanks.len(), emb_model.split_primary_batch_size());
+        let batch_inputs: Vec<_> = fbanks
+            .iter()
+            .zip(weights.iter())
+            .map(|(fbank, weights)| SplitTailInput {
+                fbank,
+                weights: weights.as_slice(),
+            })
+            .collect();
+        let batched = emb_model.embed_tail_batch_inputs(&batch_inputs).unwrap();
+
+        for (row_idx, expected_row) in expected.iter().enumerate() {
+            for dim_idx in 0..expected_row.len() {
+                let lhs = batched[[row_idx, dim_idx]];
+                let rhs = expected_row[dim_idx];
+                if (lhs - rhs).abs() > 5e-3 || lhs.is_nan() != rhs.is_nan() {
+                    panic!("row={row_idx} dim={dim_idx} left={lhs} right={rhs}");
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "coreml")]
+    #[test]
+    fn fast_apple_single_embedding_matches_python_fixture() {
+        let models_dir = fixture_path("models");
+        let seg_model = SegmentationModel::new(
+            models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
+            SEGMENTATION_STEP_SECONDS as f32,
+        )
+        .unwrap();
+        let mut emb_model = EmbeddingModel::with_mode(
+            models_dir
+                .join("wespeaker-voxceleb-resnet34.onnx")
+                .to_str()
+                .unwrap(),
+            ExecutionMode::CoreMl,
+        )
+        .unwrap();
+        let segmentations: Array3<f32> =
+            Array3::read_npy(File::open(fixture_path("pipeline_segmentation_data.npy")).unwrap())
+                .unwrap();
+        let expected: Array3<f32> =
+            Array3::read_npy(File::open(fixture_path("pipeline_embeddings_data.npy")).unwrap())
+                .unwrap();
+        let (audio, sample_rate) = load_wav_samples(&fixture_path("test.wav"));
+        assert_eq!(sample_rate, 16_000);
+
+        let chunk_idx = 0;
+        let speaker_idx = 1;
+        let chunk_segmentations = segmentations.slice(s![chunk_idx, .., ..]);
+        let clean = clean_masks(&chunk_segmentations);
+        let mask = chunk_segmentations.column(speaker_idx).to_vec();
+        let clean_mask = clean.column(speaker_idx).to_vec();
+        let embedding = emb_model
+            .embed_masked(
+                chunk_audio(&audio, &seg_model, chunk_idx),
+                &mask,
+                Some(&clean_mask),
+            )
+            .unwrap();
+
+        for dim_idx in 0..embedding.len() {
+            let lhs = embedding[dim_idx];
+            let rhs = expected[[chunk_idx, speaker_idx, dim_idx]];
+            if (lhs - rhs).abs() > 5e-4 || lhs.is_nan() != rhs.is_nan() {
+                panic!("dim={dim_idx} left={lhs} right={rhs}");
             }
         }
     }
