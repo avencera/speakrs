@@ -6,7 +6,9 @@ Implements the full pyannote community-1 pipeline: audio → ONNX inference → 
 
 No pyannote-rs dependency — uses `ort` directly for ONNX inference to get raw logits, then does all post-processing natively in Rust.
 
-Output is numerically verified against pyannote.audio — golden test fixtures are generated from the Python reference and matched exactly.
+The native `exact` path is numerically verified against `pyannote.audio` CPU — golden test fixtures are generated from the Python reference and matched exactly.
+
+For accelerator-backed parity, `speakrs` also exposes `pyannote-*` sidecar modes that run the upstream Python pipeline on `cpu`, `mps`, or `cuda` behind the same CLI.
 
 ## Pipeline
 
@@ -126,32 +128,47 @@ The result also exposes intermediate arrays if you want them:
 
 See [examples/README.md](examples/README.md) for runnable end-to-end examples, including speaker turn iteration, airtime reporting, and transcript speaker assignment
 
+## CLI Modes
+
+The `diarize` binary supports both native Rust inference and upstream `pyannote` sidecar modes:
+
+- `exact`: native Rust, CPU, parity-first reference path
+- `fast-apple`: native Rust, CoreML segmentation + CPU embeddings
+- `cuda`: native Rust, ONNX Runtime CUDA path
+- `pyannote-cpu`: run upstream Python `pyannote` on CPU
+- `pyannote-mps`: run upstream Python `pyannote` on Apple `mps`
+- `pyannote-cuda`: run upstream Python `pyannote` on CUDA
+
+On macOS, the practical parity + speed path today is `pyannote-mps`.
+
 ## Benchmark
 
 `just benchmark` prepares one mono 16kHz WAV, then measures both the Rust binary and the Python pyannote reference on the exact same input.
 
 ```bash
 just benchmark /path/to/audio.wav
-just benchmark https://www.youtube.com/watch?v=8-OP15Rggos mps 1 1
+just benchmark /path/to/audio.wav cpu 1 0 pyannote-mps
+just benchmark https://www.youtube.com/watch?v=8-OP15Rggos cpu 1 1 pyannote-mps
 ```
 
-Benchmark policy used below:
+Short benchmark used during the Apple-native parity investigation:
 
 - machine: Apple M4 Mac
-- Python device: `mps`
+- Rust mode: `pyannote-mps`
+- Python device: `cpu`
 - measured runs: `1`
-- warmup runs: `1`
-- source: `https://www.youtube.com/watch?v=8-OP15Rggos`
-- prepared audio duration: `81.01 minutes` (`4860.8s`)
+- warmup runs: `0`
+- source: `/tmp/speakrs-short-1min.wav`
+- prepared audio duration: `1.00 minutes` (`60.0s`)
 
-Warm-cache result:
+Observed result:
 
 | Name | Mean (s) | Speed |
 |------|----------|-------|
-| Rust | `239.261` | `20.32x` realtime |
-| Python | `319.485` | `15.21x` realtime |
+| Rust (`pyannote-mps`) | `13.757` | `4.36x` realtime |
+| Python (`cpu`) | `54.714` | `1.10x` realtime |
 
-The Python benchmark path is also tuned for Apple Silicon: [scripts/diarize_pyannote.py](/Users/praveen/code/speakrs/scripts/diarize_pyannote.py) defaults to device auto-detection, supports explicit `mps`, and exposes separate segmentation and embedding batch sizes so the reference run is not artificially handicapped.
+The Python reference script is tuned for accelerator parity work: [scripts/diarize_pyannote.py](/Users/praveen/code/speakrs/scripts/diarize_pyannote.py) supports explicit `cpu`, `mps`, and `cuda`, and exposes separate segmentation and embedding batch sizes.
 
 ## Compare
 
@@ -159,8 +176,22 @@ The Python benchmark path is also tuned for Apple Silicon: [scripts/diarize_pyan
 
 ```bash
 just compare /path/to/audio.wav
+just compare /path/to/audio.wav cpu pyannote-mps
 just compare https://youtu.be/6EjykW6rkzM
 just compare https://example.com/audio.mp3
+```
+
+For Apple-native quality checks against the CPU gold reference and FluidAudio on the same clip:
+
+```bash
+just compare-apple-accuracy /path/to/audio.wav
+```
+
+For NVIDIA parity work on a CUDA machine:
+
+```bash
+just compare /path/to/audio.wav cuda pyannote-cuda
+just benchmark /path/to/audio.wav cuda 1 0 pyannote-cuda
 ```
 
 ## [Contributing](CONTRIBUTING.md)

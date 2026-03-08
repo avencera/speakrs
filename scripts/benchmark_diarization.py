@@ -34,10 +34,22 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("wav_path")
     parser.add_argument("--rust-binary", required=True)
+    parser.add_argument(
+        "--rust-mode",
+        choices=(
+            "exact",
+            "coreml",
+            "cuda",
+            "pyannote-cpu",
+            "pyannote-mps",
+            "pyannote-cuda",
+        ),
+        default="exact",
+    )
     parser.add_argument("--python-script", required=True)
     parser.add_argument(
         "--python-device",
-        choices=("auto", "cpu", "mps"),
+        choices=("auto", "cpu", "mps", "cuda"),
         default="auto",
     )
     parser.add_argument("--runs", type=int, default=1)
@@ -81,7 +93,7 @@ def main() -> None:
 
     rust_result = benchmark(
         "Rust",
-        [args.rust_binary, str(wav_path)],
+        [args.rust_binary, "--mode", args.rust_mode, str(wav_path)],
         runs=args.runs,
         warmups=args.warmups,
     )
@@ -101,6 +113,7 @@ def main() -> None:
 
     print(f"Audio duration: {audio_seconds / 60.0:.2f} minutes ({audio_seconds:.1f}s)")
     print(f"Runs: {args.runs} measured, {args.warmups} warmup")
+    print(f"Rust mode: {args.rust_mode}")
     print(f"Python device: {args.python_device}")
     print()
     print("Name\tmean_s\tmin_s\tspeed")
