@@ -54,3 +54,39 @@ compare source:
     echo ""
     echo "=== Comparison ==="
     cargo run --release --bin compare_rttm -- "$tmp/rust.rttm" "$tmp/python.rttm"
+
+# Benchmark Rust and pyannote diarization on the same prepared WAV
+benchmark source python_device="auto" runs="1" warmups="1":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tmp=$(mktemp -d)
+    trap 'rm -rf "$tmp"' EXIT
+    wav="$tmp/audio.wav"
+    source="{{source}}"
+    echo "=== Preparing audio ==="
+    if [[ "$source" =~ ^https?:// ]]; then
+        if [[ "$source" =~ ^https?://(www\\.)?(youtube\\.com|youtu\\.be)/ ]]; then
+            yt-dlp -x --audio-format wav --postprocessor-args "ffmpeg:-ar 16000 -ac 1" \
+                -o "$tmp/audio.%(ext)s" "$source"
+        else
+            curl --fail --location --silent --show-error "$source" -o "$tmp/input"
+            ffmpeg -y -i "$tmp/input" -ar 16000 -ac 1 "$wav" >/dev/null 2>&1
+        fi
+    else
+        if [[ ! -f "$source" ]]; then
+            echo "Input does not exist: $source" >&2
+            exit 1
+        fi
+        ffmpeg -y -i "$source" -ar 16000 -ac 1 "$wav" >/dev/null 2>&1
+    fi
+    echo ""
+    echo "=== Building Rust binary ==="
+    cargo build --release {{platform_features}} --bin diarize
+    echo ""
+    echo "=== Benchmark ==="
+    uv run scripts/benchmark_diarization.py "$wav" \
+        --rust-binary target/release/diarize \
+        --python-script scripts/diarize_pyannote.py \
+        --python-device "{{python_device}}" \
+        --runs "{{runs}}" \
+        --warmups "{{warmups}}"

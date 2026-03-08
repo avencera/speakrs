@@ -53,6 +53,24 @@ Audio (16kHz f32)
 - **kaldi-native-fbank** — pure Rust fbank feature extraction
 - **ndarray** — array operations throughout
 
+## Model Setup
+
+The repo does not commit the generated ONNX and PLDA artifacts in `fixtures/models`. Download them with:
+
+```bash
+just download-models
+```
+
+Authentication requirements:
+
+- set `HF_TOKEN` in the environment, or
+- run `huggingface-cli login` first
+
+You must also accept access terms for:
+
+- `pyannote/segmentation-3.0`
+- `pyannote/wespeaker-voxceleb-resnet34-LM`
+
 ## Library Usage
 
 `speakrs` expects mono 16kHz audio as `&[f32]` samples and returns a `DiarizationResult`
@@ -96,6 +114,8 @@ fn load_your_mono_16khz_audio_here() -> Vec<f32> {
 }
 ```
 
+Run `just download-models` first if `fixtures/models` is not populated yet.
+
 The result also exposes intermediate arrays if you want them:
 
 - `result.segmentations`
@@ -105,6 +125,33 @@ The result also exposes intermediate arrays if you want them:
 - `result.discrete_diarization`
 
 See [examples/README.md](examples/README.md) for runnable end-to-end examples, including speaker turn iteration, airtime reporting, and transcript speaker assignment
+
+## Benchmark
+
+`just benchmark` prepares one mono 16kHz WAV, then measures both the Rust binary and the Python pyannote reference on the exact same input.
+
+```bash
+just benchmark /path/to/audio.wav
+just benchmark https://www.youtube.com/watch?v=8-OP15Rggos mps 1 1
+```
+
+Benchmark policy used below:
+
+- machine: Apple M4 Mac
+- Python device: `mps`
+- measured runs: `1`
+- warmup runs: `1`
+- source: `https://www.youtube.com/watch?v=8-OP15Rggos`
+- prepared audio duration: `81.01 minutes` (`4860.8s`)
+
+Warm-cache result:
+
+| Name | Mean (s) | Speed |
+|------|----------|-------|
+| Rust | `239.261` | `20.32x` realtime |
+| Python | `319.485` | `15.21x` realtime |
+
+The Python benchmark path is also tuned for Apple Silicon: [scripts/diarize_pyannote.py](/Users/praveen/code/speakrs/scripts/diarize_pyannote.py) defaults to device auto-detection, supports explicit `mps`, and exposes separate segmentation and embedding batch sizes so the reference run is not artificially handicapped.
 
 ## Compare
 

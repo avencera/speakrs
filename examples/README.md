@@ -12,6 +12,12 @@ All examples expect:
 - a models directory containing `segmentation-3.0.onnx`, `wespeaker-voxceleb-resnet34.onnx`, and the PLDA `.npy` files
 - a mono 16kHz 16-bit PCM WAV input
 
+Populate `fixtures/models` with:
+
+```bash
+just download-models
+```
+
 ## Run diarization and print RTTM
 
 ```bash

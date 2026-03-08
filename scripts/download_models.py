@@ -73,7 +73,7 @@ def export_segmentation(pipeline: Any, models_dir: str) -> None:
 
 
 def export_embedding(pipeline: Any, models_dir: str) -> None:
-    """Export the exact WeSpeaker embedding path with fixed-shape fbank preprocessing"""
+    """Export the exact WeSpeaker embedding path for batch-1 and batch-16 inference"""
     print("Exporting embedding model...")
 
     class ExactEmbeddingWrapper(nn.Module):
@@ -153,28 +153,41 @@ def export_embedding(pipeline: Any, models_dir: str) -> None:
     wrapper = ExactEmbeddingWrapper(emb_model)
     wrapper.eval()
 
-    dummy_waveform = torch.randn(1, 1, 160000)
-    dummy_weights = torch.ones(1, 589)
-    with torch.no_grad():
-        torch.onnx.export(
-            wrapper,
-            (dummy_waveform, dummy_weights),
-            os.path.join(models_dir, "wespeaker-voxceleb-resnet34.onnx"),
-            input_names=["waveform", "weights"],
-            output_names=["output"],
-            opset_version=18,
-            dynamo=True,
-        )
-
-    sz = (
-        os.path.getsize(os.path.join(models_dir, "wespeaker-voxceleb-resnet34.onnx"))
-        / 1e6
+    export_embedding_model(
+        wrapper, models_dir, "wespeaker-voxceleb-resnet34.onnx", batch_size=1
     )
-    print(f"  wespeaker-voxceleb-resnet34.onnx ({sz:.1f} MB)")
+    export_embedding_model(
+        wrapper, models_dir, "wespeaker-voxceleb-resnet34-b32.onnx", batch_size=32
+    )
+    export_embedding_model(
+        wrapper, models_dir, "wespeaker-voxceleb-resnet34-b16.onnx", batch_size=16
+    )
     with open(
         os.path.join(models_dir, "wespeaker-voxceleb-resnet34.min_num_samples.txt"), "w"
     ) as f:
         f.write(f"{pipeline._embedding.min_num_samples}\n")
+
+
+def export_embedding_model(
+    wrapper: nn.Module, models_dir: str, filename: str, batch_size: int
+) -> None:
+    dummy_waveform = torch.randn(batch_size, 1, 160000)
+    dummy_weights = torch.ones(batch_size, 589)
+    output_path = os.path.join(models_dir, filename)
+    with torch.no_grad():
+        torch.onnx.export(
+            wrapper,
+            (dummy_waveform, dummy_weights),
+            output_path,
+            input_names=["waveform", "weights"],
+            output_names=["output"],
+            opset_version=18,
+            dynamo=True,
+            external_data=False,
+        )
+
+    sz = os.path.getsize(output_path) / 1e6
+    print(f"  {filename} ({sz:.1f} MB)")
 
 
 def export_plda(models_dir: str) -> None:
