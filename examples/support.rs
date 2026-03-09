@@ -17,29 +17,25 @@ pub fn file_id_from_path(path: &Path) -> String {
         .to_owned()
 }
 
-pub fn load_models(models_dir: &Path) -> ExampleResult<(SegmentationModel, EmbeddingModel)> {
+pub fn load_models(path: &Path) -> ExampleResult<(SegmentationModel, EmbeddingModel)> {
     let segmentation = SegmentationModel::new(
-        models_dir
-            .join("segmentation-3.0.onnx")
+        path.join("segmentation-3.0.onnx")
             .to_str()
             .ok_or_else(|| {
                 format!(
                     "segmentation model path is not valid UTF-8: {}",
-                    models_dir.join("segmentation-3.0.onnx").display()
+                    path.join("segmentation-3.0.onnx").display()
                 )
             })?,
         DiarizationPipeline::default_segmentation_step(),
     )?;
     let embedding = EmbeddingModel::new(
-        models_dir
-            .join("wespeaker-voxceleb-resnet34.onnx")
+        path.join("wespeaker-voxceleb-resnet34.onnx")
             .to_str()
             .ok_or_else(|| {
                 format!(
                     "embedding model path is not valid UTF-8: {}",
-                    models_dir
-                        .join("wespeaker-voxceleb-resnet34.onnx")
-                        .display()
+                    path.join("wespeaker-voxceleb-resnet34.onnx").display()
                 )
             })?,
     )?;
