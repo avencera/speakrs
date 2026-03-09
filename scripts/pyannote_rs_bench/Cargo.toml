@@ -1,0 +1,14 @@
+[package]
+name = "pyannote-rs-bench"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "diarize-pyannote-rs"
+path = "src/main.rs"
+
+[dependencies]
+pyannote-rs = "0.3"
+eyre = "0.6"
+ort = { version = "=2.0.0-rc.10", features = ["ndarray"] }
+ndarray = "0.16"

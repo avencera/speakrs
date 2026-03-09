@@ -223,6 +223,7 @@ benchmark-der max_files="10" max_minutes="30":
 
     echo ""
     echo "=== Running DER benchmark ==="
+    export SPEAKRS_MODELS_DIR="$PWD/fixtures/models"
     uv run scripts/benchmark_der.py "$vox_dir" \
         --speakrs-binary target/release/diarize \
         --pyannote-rs-binary scripts/pyannote_rs_bench/target/release/diarize-pyannote-rs \

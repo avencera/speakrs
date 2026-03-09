@@ -4,3 +4,4 @@ fixtures/models/
 fixtures/voxconverse/
 notes
 /scripts/pyannote_rs_bench/target
+__pycache__/
