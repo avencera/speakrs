@@ -23,7 +23,7 @@ impl Default for VbxConfig {
     }
 }
 
-/// VBx clustering matching pyannote's implementation exactly
+/// VBx clustering matching pyannote's algorithm
 ///
 /// Takes PLDA-transformed features and per-dimension eigenvalues (Phi),
 /// plus AHC-initialized gamma responsibilities. All computation is done
