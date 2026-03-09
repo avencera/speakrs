@@ -1,10 +1,23 @@
 # speakrs
 
-Speaker diarization in Rust. Audio in, RTTM segments out. **63x realtime** on Apple Silicon, **bit-exact with pyannote** on CPU/CUDA.
+Speaker diarization in Rust. Put audio in, get RTTM segments out. Runs up to **63x realtime** on Apple Silicon and is **bit-exact with pyannote** on CPU/CUDA.
 
-Implements the full pyannote community-1 pipeline (segmentation, powerset decode, aggregation, binarization, embedding, PLDA, VBx clustering) with no Python dependency. Inference runs on ONNX Runtime or native CoreML, all post-processing is pure Rust.
+`speakrs` implements the full pyannote community-1 pipeline in Rust: segmentation, powerset decode, aggregation, binarization, embedding, PLDA, and VBx clustering. There is no Python dependency. Inference runs on ONNX Runtime or native CoreML, and all post-processing stays in Rust.
 
-Numerically verified against `pyannote.audio` — CPU and CUDA modes produce **identical RTTM** on all tested files. CoreML GPU mode runs the same algorithm but GPU floating-point non-determinism means a small number of files may differ (9/10 matched exactly on VoxConverse dev set).
+The outputs have been checked against `pyannote.audio`. CPU and CUDA modes produce **identical RTTM** on all tested files. CoreML runs the same algorithm, but GPU floating-point non-determinism can change a small number of results. On the VoxConverse dev set, 9 out of 10 files matched exactly.
+
+## Table of Contents
+
+- [Pipeline](#pipeline)
+- [Execution Modes](#execution-modes)
+- [Benchmarks](#benchmarks)
+- [Accuracy (DER)](#accuracy-der)
+- [Modules](#modules)
+- [Quick Start](#quick-start)
+- [CLI Usage](#cli-usage)
+- [Why Not pyannote-rs?](#why-not-pyannote-rs)
+- [Contributing](#contributing)
+- [References](#references)
 
 ## Pipeline
 
@@ -41,11 +54,11 @@ Audio (16kHz f32)
 | `coreml-lite` | Native CoreML | 2s | FP16+ANE | Speed (63x realtime) |
 | `cuda` | ORT CUDA | 1s | FP32 | NVIDIA GPU, bit-exact with pyannote CPU |
 
-`coreml-lite` trades a wider step (2s vs 1s) and FP16 ANE inference for ~2x speed. On most clips it matches `coreml` exactly, but on some inputs the coarser step drops a few segments (see 10.5-min benchmark below).
+`coreml-lite` uses a wider step (2s instead of 1s) and FP16 ANE inference to get about 2x more speed. That follows the same throughput-first tradeoff FluidAudio uses on Apple hardware. It matches `coreml` on most clips, but on some inputs the coarser step drops a few segments. The 10.5-minute benchmark below shows one example.
 
 ## Benchmarks
 
-All benchmarks on Apple M4 Pro, macOS 26.3.
+All benchmarks were run on an Apple M4 Pro with macOS 26.3.
 
 ### 7-min clip (424.8s)
 
@@ -71,7 +84,7 @@ All benchmarks on Apple M4 Pro, macOS 26.3.
 | `coreml` (FP32) | 2 | 722 | 100% | 72.1s | 37x |
 | pyannote MPS | 2 | 720 | reference | 145.3s | 19x |
 
-Coverage is measured as mutual speech overlap with pyannote. Minor segment count differences (e.g. 79 vs 81) are due to f32 accumulation order at frame boundaries, no speech is lost or added. The 10.5-min clip shows `coreml-lite` dropping 3 segments (99.7% coverage) due to the coarser 2s step.
+Coverage is measured as mutual speech overlap with pyannote. Small segment count differences, such as 79 vs 81, come from f32 accumulation order at frame boundaries. No speech is lost or added in those cases. In the 10.5-minute clip, `coreml-lite` drops 3 segments and reaches 99.7% coverage because of the wider 2-second step.
 
 ## Accuracy (DER)
 
@@ -84,7 +97,7 @@ Evaluated on VoxConverse dev set (10 files, collar=0ms):
 | pyannote CPU | 14.0% | Reference |
 | pyannote MPS | 14.0% | Reference |
 
-The `cpu` mode produces **bit-exact output** with pyannote's CPU backend — identical RTTM on every test file. The `coreml` gap comes from GPU execution producing slightly different embedding vectors due to non-deterministic accumulation order and fused multiply-add instructions, inherent to GPU computation (not a correctness issue). Both CoreML and pyannote's MPS run on the same Apple GPU but use different software stacks (CoreML vs Metal Performance Shaders), so they diverge from CPU in different ways. On 9/10 files CoreML matches CPU exactly; one file (gwtwd) sees embedding differences that push a marginal speaker cluster below the VBx threshold.
+The `cpu` mode produces **bit-exact output** with pyannote's CPU backend. The RTTM is identical on every test file. The small `coreml` gap comes from GPU execution producing slightly different embedding vectors because accumulation order and fused multiply-add behavior are not deterministic. That is expected GPU behavior, not a correctness bug. CoreML and pyannote's MPS also use different software stacks on the same Apple GPU, so they drift from CPU in different ways. On 9 out of 10 files, CoreML matches CPU exactly. On one file (`gwtwd`), the embedding difference is enough to move a borderline speaker cluster below the VBx threshold.
 
 ## Modules
 
@@ -106,13 +119,13 @@ The `cpu` mode produces **bit-exact output** with pyannote's CPU backend — ide
 
 ### Models
 
-Models download automatically on first use from [avencera/speakrs-models](https://huggingface.co/avencera/speakrs-models) on HuggingFace. To use a custom model directory, set `SPEAKRS_MODELS_DIR`.
+Models download automatically on first use from [avencera/speakrs-models](https://huggingface.co/avencera/speakrs-models) on HuggingFace. If you want a custom model directory, set `SPEAKRS_MODELS_DIR`.
 
-For development, `just download-models` exports the ONNX models and converts to CoreML (requires Python via `uv`).
+For development, `just download-models` exports the ONNX models and converts them to CoreML. That command requires Python through `uv`.
 
 ### Library Usage
 
-`speakrs` expects mono 16kHz audio as `&[f32]` samples and returns a `DiarizationResult`:
+`speakrs` takes mono 16kHz audio as `&[f32]` samples and returns a `DiarizationResult`:
 
 ```rust
 use speakrs::models::Mode;
@@ -133,7 +146,7 @@ fn load_your_mono_16khz_audio_here() -> Vec<f32> {
 }
 ```
 
-The result also exposes intermediate data:
+The result also gives you access to intermediate data:
 - `result.segmentations`
 - `result.embeddings`
 - `result.speaker_count`
@@ -160,7 +173,7 @@ just compare audio.wav
 
 ## Why Not pyannote-rs?
 
-[pyannote-rs](https://github.com/thewh1teagle/pyannote-rs) is another Rust diarization crate, but it implements a simplified pipeline rather than the full pyannote algorithm:
+[pyannote-rs](https://github.com/thewh1teagle/pyannote-rs) is another Rust diarization crate, but it uses a simpler pipeline instead of the full pyannote algorithm:
 
 | | speakrs | pyannote-rs |
 |---|---------|-------------|
@@ -170,20 +183,22 @@ just compare audio.wav
 | Embedding model | WeSpeaker ResNet34 (same as pyannote) | WeSpeaker CAM++ (only ONNX model they ship) |
 | Clustering | PLDA + VBx (Bayesian HMM) | Cosine similarity with fixed 0.5 threshold |
 | Speaker count | VBx EM estimation | Capped by max_speakers parameter |
-| pyannote parity | Bit-exact on CPU/CUDA | No — different algorithm, different embedding model |
+| pyannote parity | Bit-exact on CPU/CUDA | No, different algorithm and different embedding model |
 
-On VoxConverse dev set (33 files where pyannote-rs produces output, 186 min total, collar=0ms):
+On the VoxConverse dev set, using the 33 files where pyannote-rs produces output (186 minutes total, collar=0ms):
 
 | | DER | Missed | False Alarm | Confusion |
 |---|-----|--------|-------------|-----------|
 | speakrs CoreML | 11.5% | 3.8% | 3.6% | 4.1% |
 | pyannote-rs | 80.2% | 34.9% | 7.4% | 37.9% |
 
-pyannote-rs produces 0 segments on 183/216 VoxConverse files (segments only close on speech→silence transitions, so continuous speech with no silence gaps yields no output). The 33 files above are the subset where it produces 5+ segments.
+pyannote-rs produces 0 segments on 183 out of 216 VoxConverse files. Its segments only close on speech to silence transitions, so continuous speech without silence gaps yields no output. The 33 files above are the subset where it produces at least 5 segments.
 
-Note: pyannote-rs's README claims to use `wespeaker-voxceleb-resnet34-LM` but their [build instructions](https://github.com/thewh1teagle/pyannote-rs/blob/main/BUILDING.md) and [GitHub release](https://github.com/thewh1teagle/pyannote-rs/releases/tag/v0.1.0) only ship `wespeaker_en_voxceleb_CAM++.onnx`. No ONNX export of ResNet34-LM exists — the [HuggingFace repo](https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM) only contains `pytorch_model.bin`. Our benchmark uses pyannote-rs as documented in their setup instructions.
+Note: pyannote-rs's README says it uses `wespeaker-voxceleb-resnet34-LM`, but their [build instructions](https://github.com/thewh1teagle/pyannote-rs/blob/main/BUILDING.md) and [GitHub release](https://github.com/thewh1teagle/pyannote-rs/releases/tag/v0.1.0) only ship `wespeaker_en_voxceleb_CAM++.onnx`. There is no ONNX export of ResNet34-LM. The [HuggingFace repo](https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM) only contains `pytorch_model.bin`. The benchmark here uses pyannote-rs exactly as documented in their setup instructions.
 
 ## [Contributing](CONTRIBUTING.md)
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, model downloads, fixture generation, and the standard check commands used in this repo.
 
 ## References
 
