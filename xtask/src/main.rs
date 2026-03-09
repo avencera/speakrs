@@ -3,6 +3,8 @@ mod cargo;
 mod cmd;
 mod commands;
 mod compare_rttm;
+mod convert;
+mod datasets;
 mod fluidaudio;
 mod python;
 
@@ -107,8 +109,11 @@ enum BenchmarkCmd {
         #[arg(long, default_value_t = 1)]
         warmups: u32,
     },
-    /// DER evaluation on VoxConverse dev set
+    /// DER evaluation on benchmark datasets
     Der {
+        /// Dataset to evaluate (use "all" for all datasets, "list" to show available)
+        #[arg(long, default_value = "voxconverse-dev")]
+        dataset: String,
         #[arg(long, default_value_t = 10)]
         max_files: u32,
         #[arg(long, default_value_t = 30)]
@@ -171,9 +176,10 @@ fn main() -> Result<()> {
                 warmups,
             } => commands::benchmark::compare(&source, runs, warmups),
             BenchmarkCmd::Der {
+                dataset,
                 max_files,
                 max_minutes,
-            } => commands::benchmark::der(max_files, max_minutes),
+            } => commands::benchmark::der(&dataset, max_files, max_minutes),
         },
         Command::Gpu { cmd } => match cmd {
             GpuCmd::Setup => commands::gpu::setup(),

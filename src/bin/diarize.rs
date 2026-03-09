@@ -37,7 +37,7 @@ fn main() {
     let models_dir = resolve_models_dir(mode);
 
     let step = match mode_name {
-        "coreml-fast" | "coreml-fast-lite" => FAST_SEGMENTATION_STEP_SECONDS,
+        "coreml-fast" => FAST_SEGMENTATION_STEP_SECONDS,
         _ => SEGMENTATION_STEP_SECONDS,
     };
     let mut seg_model = SegmentationModel::with_mode(
@@ -89,7 +89,6 @@ fn resolve_models_dir(mode: ExecutionMode) -> PathBuf {
             ExecutionMode::Cpu => speakrs::models::Mode::Cpu,
             ExecutionMode::CoreMl => speakrs::models::Mode::CoreMl,
             ExecutionMode::CoreMlFast => speakrs::models::Mode::CoreMlFast,
-            ExecutionMode::CoreMlFastLite => speakrs::models::Mode::CoreMlFastLite,
             ExecutionMode::Cuda => speakrs::models::Mode::Cuda,
         };
         manager.ensure(hf_mode).expect("failed to download models")
@@ -110,18 +109,13 @@ enum CliMode {
 }
 
 fn parse_args(args: &[String]) -> (CliMode, Vec<&str>) {
-    const USAGE: &str = "Usage: diarize [--mode cpu|coreml|coreml-fast|coreml-f16|coreml-fast-lite|cuda|pyannote-cpu|pyannote-mps|pyannote-cuda] <wav_files...>";
+    const USAGE: &str = "Usage: diarize [--mode cpu|coreml|coreml-fast|cuda|pyannote-cpu|pyannote-mps|pyannote-cuda] <wav_files...>";
 
     fn parse_mode(mode: &str) -> Option<CliMode> {
         match mode {
             "cpu" => Some(CliMode::Native(ExecutionMode::Cpu, "cpu")),
             "coreml" => Some(CliMode::Native(ExecutionMode::CoreMl, "coreml")),
             "coreml-fast" => Some(CliMode::Native(ExecutionMode::CoreMlFast, "coreml-fast")),
-            "coreml-f16" => Some(CliMode::Native(ExecutionMode::CoreMlFastLite, "coreml-f16")),
-            "coreml-fast-lite" => Some(CliMode::Native(
-                ExecutionMode::CoreMlFastLite,
-                "coreml-fast-lite",
-            )),
             "cuda" => Some(CliMode::Native(ExecutionMode::Cuda, "cuda")),
             "pyannote-cpu" => Some(CliMode::PyannoteDevice("cpu")),
             "pyannote-mps" => Some(CliMode::PyannoteDevice("mps")),

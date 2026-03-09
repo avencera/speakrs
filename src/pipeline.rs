@@ -27,6 +27,10 @@ pub const FAST_SEGMENTATION_STEP_SECONDS: f64 = 2.0;
 pub const FRAME_DURATION_SECONDS: f64 = 0.0619375;
 pub const FRAME_STEP_SECONDS: f64 = 0.016875;
 
+/// Minimum speaker activity (sum of weights) to run embedding inference.
+/// Speakers below this threshold are skipped — their NaN embedding is filtered out later
+const MIN_SPEAKER_ACTIVITY: f32 = 10.0;
+
 struct PendingEmbedding<'a> {
     chunk_idx: usize,
     speaker_idx: usize,
@@ -79,14 +83,11 @@ impl OwnedDiarizationPipeline {
             crate::models::Mode::Cpu => ExecutionMode::Cpu,
             crate::models::Mode::CoreMl => ExecutionMode::CoreMl,
             crate::models::Mode::CoreMlFast => ExecutionMode::CoreMlFast,
-            crate::models::Mode::CoreMlFastLite => ExecutionMode::CoreMlFastLite,
             crate::models::Mode::Cuda => ExecutionMode::Cuda,
         };
 
         let step = match execution_mode {
-            ExecutionMode::CoreMlFast | ExecutionMode::CoreMlFastLite => {
-                FAST_SEGMENTATION_STEP_SECONDS
-            }
+            ExecutionMode::CoreMlFast => FAST_SEGMENTATION_STEP_SECONDS,
             _ => SEGMENTATION_STEP_SECONDS,
         };
 
@@ -368,11 +369,17 @@ fn extract_embeddings(
         let clean_masks = clean_masks(&chunk_segmentations);
 
         for speaker_idx in 0..num_speakers {
+            let mask = chunk_segmentations.column(speaker_idx);
+            let activity: f32 = mask.iter().sum();
+            if activity < MIN_SPEAKER_ACTIVITY {
+                continue;
+            }
+
             pending.push(PendingEmbedding {
                 chunk_idx,
                 speaker_idx,
                 audio: chunk_audio,
-                mask: chunk_segmentations.column(speaker_idx).to_vec(),
+                mask: mask.to_vec(),
                 clean_mask: clean_masks.column(speaker_idx).to_vec(),
             });
             if pending.len() == emb_model.primary_batch_size() {
@@ -436,6 +443,7 @@ fn extract_split_embeddings(
     let mut pending: Vec<PendingSplitEmbedding> = Vec::with_capacity(batch_size);
     let mut fbanks: Vec<Array2<f32>> = Vec::new();
     let mut tail_batches = 0usize;
+    let mut active_items = 0usize;
 
     // stream: compute fbank per chunk, immediately enqueue speaker tail items
     for chunk_idx in 0..num_chunks {
@@ -449,6 +457,11 @@ fn extract_split_embeddings(
 
         for speaker_idx in 0..num_speakers {
             let mask_col = chunk_segmentations.column(speaker_idx);
+            let activity: f32 = mask_col.iter().sum();
+            if activity < MIN_SPEAKER_ACTIVITY {
+                continue;
+            }
+
             let clean_col = clean.column(speaker_idx);
             let use_clean = should_use_clean_mask(
                 &clean_col,
@@ -461,6 +474,7 @@ fn extract_split_embeddings(
             } else {
                 mask_col.iter().copied().collect()
             };
+            active_items += 1;
             pending.push(PendingSplitEmbedding {
                 chunk_idx,
                 speaker_idx,
@@ -491,7 +505,8 @@ fn extract_split_embeddings(
     }
     tracing::info!(
         batches = tail_batches,
-        items = num_chunks * num_speakers,
+        active_items,
+        total_items = num_chunks * num_speakers,
         "Split embeddings complete (fbank+tail streaming)"
     );
 
@@ -536,6 +551,7 @@ fn extract_fused_embeddings(
 
     let mut pending: Vec<PendingFusedEmbedding<'_>> = Vec::with_capacity(batch_size);
     let mut fused_batches = 0usize;
+    let mut active_items = 0usize;
 
     let min_num_samples = emb_model.min_num_samples();
 
@@ -546,6 +562,11 @@ fn extract_fused_embeddings(
 
         for speaker_idx in 0..num_speakers {
             let mask_col = chunk_segmentations.column(speaker_idx);
+            let activity: f32 = mask_col.iter().sum();
+            if activity < MIN_SPEAKER_ACTIVITY {
+                continue;
+            }
+
             let clean_col = clean.column(speaker_idx);
             let use_clean = should_use_clean_mask(
                 &clean_col,
@@ -558,6 +579,7 @@ fn extract_fused_embeddings(
             } else {
                 mask_col.iter().copied().collect()
             };
+            active_items += 1;
             pending.push(PendingFusedEmbedding {
                 chunk_idx,
                 speaker_idx,
@@ -578,7 +600,8 @@ fn extract_fused_embeddings(
     }
     tracing::info!(
         batches = fused_batches,
-        items = num_chunks * num_speakers,
+        active_items,
+        total_items = num_chunks * num_speakers,
         "Fused embeddings complete"
     );
 
