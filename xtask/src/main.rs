@@ -40,6 +40,11 @@ enum Command {
         #[command(subcommand)]
         cmd: BenchmarkCmd,
     },
+    /// Remote GPU benchmarking on Vast.ai
+    Gpu {
+        #[command(subcommand)]
+        cmd: GpuCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -111,6 +116,22 @@ enum BenchmarkCmd {
     },
 }
 
+#[derive(Subcommand)]
+enum GpuCmd {
+    /// Rent a GPU instance, install deps, and build the project
+    Setup,
+    /// Run benchmarks on the remote GPU instance
+    Benchmark {
+        /// Arguments passed to `cargo xtask benchmark` on the remote
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
+    },
+    /// Open an interactive SSH session to the GPU instance
+    Ssh,
+    /// Tear down the GPU instance
+    Destroy,
+}
+
 fn main() -> Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
@@ -153,6 +174,12 @@ fn main() -> Result<()> {
                 max_files,
                 max_minutes,
             } => commands::benchmark::der(max_files, max_minutes),
+        },
+        Command::Gpu { cmd } => match cmd {
+            GpuCmd::Setup => commands::gpu::setup(),
+            GpuCmd::Benchmark { args } => commands::gpu::benchmark(&args),
+            GpuCmd::Ssh => commands::gpu::ssh(),
+            GpuCmd::Destroy => commands::gpu::destroy(),
         },
     }
 }
