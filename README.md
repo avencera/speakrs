@@ -91,17 +91,11 @@ Coverage is measured as mutual speech overlap with pyannote. Minor segment count
 
 ## Quick Start
 
-### Model Setup
+### Models
 
-Download ONNX models and PLDA artifacts:
+speakrs requires ONNX models and PLDA artifacts at runtime. These are gated on HuggingFace and require accepting access terms for [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0) and [pyannote/wespeaker-voxceleb-resnet34-LM](https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM).
 
-```bash
-just download-models
-```
-
-Requires `HF_TOKEN` in the environment (or `huggingface-cli login`) and accepted access terms for:
-- `pyannote/segmentation-3.0`
-- `pyannote/wespeaker-voxceleb-resnet34-LM`
+For development, `just download-models` exports the ONNX models and converts to CoreML (requires Python via `uv`).
 
 ### Library Usage
 
