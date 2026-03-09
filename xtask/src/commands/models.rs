@@ -1,0 +1,74 @@
+use std::process::Command;
+
+use color_eyre::eyre::Result;
+
+use crate::cmd::{project_root, run_cmd};
+use crate::python::{uv_run, uv_run_project};
+
+pub fn download() -> Result<()> {
+    uv_run(&["scripts/download_models.py", "fixtures/models"])?;
+
+    if cfg!(target_os = "macos") {
+        download_coreml()?;
+    }
+
+    Ok(())
+}
+
+pub fn download_coreml() -> Result<()> {
+    uv_run_project(
+        "scripts/native_coreml",
+        "scripts/native_coreml/convert_coreml.py",
+        &["--output-dir", "fixtures/models"],
+    )
+}
+
+pub fn compare_coreml() -> Result<()> {
+    uv_run_project(
+        "scripts/native_coreml",
+        "scripts/native_coreml/compare_coreml.py",
+        &["--output-dir", "fixtures/models"],
+    )
+}
+
+pub fn deploy() -> Result<()> {
+    let root = project_root();
+
+    // create repo (ignore error if it already exists)
+    let _ = Command::new("hf")
+        .args([
+            "repo",
+            "create",
+            "avencera/speakrs-models",
+            "--type",
+            "model",
+        ])
+        .current_dir(&root)
+        .status();
+
+    run_cmd(
+        Command::new("hf")
+            .args(["upload", "avencera/speakrs-models", "fixtures/models", "."])
+            .args([
+                "--include",
+                "plda_*.npy",
+                "wespeaker-voxceleb-resnet34.min_num_samples.txt",
+                "segmentation-3.0.onnx",
+                "segmentation-3.0-b32.onnx",
+                "wespeaker-voxceleb-resnet34.onnx",
+                "wespeaker-voxceleb-resnet34.onnx.data",
+                "wespeaker-fbank.onnx",
+                "wespeaker-fbank-b32.onnx",
+                "wespeaker-voxceleb-resnet34-tail.onnx",
+                "wespeaker-voxceleb-resnet34-tail-b3.onnx",
+                "wespeaker-voxceleb-resnet34-tail-b32.onnx",
+                "segmentation-3.0.mlmodelc/**",
+                "segmentation-3.0-b32.mlmodelc/**",
+                "wespeaker-fbank.mlmodelc/**",
+                "wespeaker-fbank-b32.mlmodelc/**",
+                "wespeaker-voxceleb-resnet34-tail*.mlmodelc/**",
+                "wespeaker-voxceleb-resnet34-fused*.mlmodelc/**",
+            ])
+            .current_dir(&root),
+    )
+}
