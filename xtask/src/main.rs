@@ -3,6 +3,7 @@ mod cargo;
 mod cmd;
 mod commands;
 mod compare_rttm;
+mod fluidaudio;
 mod python;
 
 use std::path::PathBuf;
@@ -43,10 +44,10 @@ enum Command {
 
 #[derive(Subcommand)]
 enum ModelsCmd {
-    /// Download ONNX models and PLDA params, then build native CoreML bundles on macOS
-    Download,
+    /// Export ONNX models and PLDA params, then build native CoreML bundles on macOS
+    Export,
     /// Run CoreML model conversion only
-    DownloadCoreml,
+    ExportCoreml,
     /// Compare CoreML vs ONNX model outputs
     CompareCoreml,
     /// Upload models to HuggingFace Hub
@@ -116,8 +117,8 @@ fn main() -> Result<()> {
 
     match cli.cmd {
         Command::Models { cmd } => match cmd {
-            ModelsCmd::Download => commands::models::download(),
-            ModelsCmd::DownloadCoreml => commands::models::download_coreml(),
+            ModelsCmd::Export => commands::models::export(),
+            ModelsCmd::ExportCoreml => commands::models::export_coreml(),
             ModelsCmd::CompareCoreml => commands::models::compare_coreml(),
             ModelsCmd::Deploy => commands::models::deploy(),
         },

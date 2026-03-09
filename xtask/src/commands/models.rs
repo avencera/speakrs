@@ -5,17 +5,17 @@ use color_eyre::eyre::Result;
 use crate::cmd::{project_root, run_cmd};
 use crate::python::{uv_run, uv_run_project};
 
-pub fn download() -> Result<()> {
-    uv_run(&["scripts/download_models.py", "fixtures/models"])?;
+pub fn export() -> Result<()> {
+    uv_run(&["scripts/export_models.py", "fixtures/models"])?;
 
     if cfg!(target_os = "macos") {
-        download_coreml()?;
+        export_coreml()?;
     }
 
     Ok(())
 }
 
-pub fn download_coreml() -> Result<()> {
+pub fn export_coreml() -> Result<()> {
     uv_run_project(
         "scripts/native_coreml",
         "scripts/native_coreml/convert_coreml.py",
