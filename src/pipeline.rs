@@ -14,7 +14,7 @@ use crate::inference::embedding::{EmbeddingModel, MaskedEmbeddingInput, SplitTai
 use crate::inference::segmentation::SegmentationModel;
 use crate::powerset::PowersetMapping;
 use crate::reconstruct::{reconstruct, speaker_count};
-use crate::segment::{to_rttm, to_segments};
+use crate::segment::{merge_segments, to_rttm, to_segments};
 use crate::utils::cosine_similarity;
 
 type DynError = Box<dyn Error + Send + Sync + 'static>;
@@ -209,6 +209,7 @@ pub fn diarize(
         FRAME_STEP_SECONDS,
         FRAME_DURATION_SECONDS,
     );
+    let segments = merge_segments(&segments, 0.0);
     let rttm = to_rttm(&segments, file_id);
 
     Ok(DiarizationResult {
