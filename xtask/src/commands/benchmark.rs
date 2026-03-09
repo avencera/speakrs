@@ -405,7 +405,12 @@ fn parse_rttm_intervals(rttm: &str) -> Vec<(f64, f64)> {
 // benchmark der — DER evaluation on VoxConverse dev set
 // ---------------------------------------------------------------------------
 
-pub fn der(dataset_id: &str, max_files: u32, max_minutes: u32) -> Result<()> {
+pub fn der(
+    dataset_id: &str,
+    max_files: u32,
+    max_minutes: u32,
+    description: Option<&str>,
+) -> Result<()> {
     if dataset_id == "list" {
         println!("Available datasets:");
         for id in crate::datasets::list_dataset_ids() {
@@ -477,6 +482,10 @@ pub fn der(dataset_id: &str, max_files: u32, max_minutes: u32) -> Result<()> {
         };
         fs::create_dir_all(&run_dir)?;
 
+        if let Some(desc) = description {
+            fs::write(run_dir.join("README.md"), format!("{desc}\n"))?;
+        }
+
         println!(
             "Found {} files, {total_audio_minutes:.1} min total audio",
             files.len()
@@ -495,6 +504,7 @@ pub fn der(dataset_id: &str, max_files: u32, max_minutes: u32) -> Result<()> {
             &files,
             total_audio_minutes,
             0.0,
+            description,
         )?;
     }
 
@@ -798,6 +808,7 @@ fn save_der_results(
     files: &[(PathBuf, PathBuf)],
     total_audio_minutes: f64,
     collar: f64,
+    description: Option<&str>,
 ) -> Result<()> {
     let mut json_results = serde_json::Map::new();
     for (name, _) in implementations {
@@ -806,7 +817,7 @@ fn save_der_results(
         }
     }
 
-    let data = serde_json::json!({
+    let mut data = serde_json::json!({
         "dataset": dataset_name,
         "run_id": run_dir.file_name().unwrap().to_string_lossy(),
         "timestamp": chrono::Utc::now().to_rfc3339(),
@@ -817,6 +828,10 @@ fn save_der_results(
         "results": json_results,
     });
 
+    if let Some(desc) = description {
+        data["description"] = serde_json::Value::String(desc.to_string());
+    }
+
     let json_path = run_dir.join("results.json");
     fs::write(&json_path, serde_json::to_string_pretty(&data)? + "\n")?;
 
@@ -826,6 +841,9 @@ fn save_der_results(
         "{dataset_name} DER ({} files, {total_audio_minutes:.1} min, collar={collar:.0}ms)",
         files.len()
     ));
+    if let Some(desc) = description {
+        lines.push(format!("Description: {desc}"));
+    }
     lines.push(String::new());
 
     let name_w = 22;
