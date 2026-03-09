@@ -8,7 +8,7 @@ use crate::cmd::{project_root, run_cmd, tee_cmd};
 /// Map a diarization mode to the cargo feature flags needed
 pub fn features_for_mode(mode: &str) -> Vec<String> {
     match mode {
-        "coreml" | "coreml-lite" | "coreml-f16" => vec!["native-coreml".to_string()],
+        "coreml" | "coreml-fast" => vec!["native-coreml".to_string()],
         "cuda" => vec!["cuda".to_string()],
         _ => vec![],
     }

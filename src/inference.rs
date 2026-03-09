@@ -10,25 +10,21 @@ use ort::session::builder::SessionBuilder;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionMode {
     Cpu,
-    CoreMl,         // FP32 native CoreML, CPU+GPU, 1s step
-    CoreMlFast,     // FP32 native CoreML, CPU+GPU, 2s step
-    CoreMlFastLite, // FP16 native CoreML, CPU+GPU+ANE, 2s step, may drift
+    CoreMl,     // FP32 native CoreML, CPU+GPU, 1s step
+    CoreMlFast, // FP32 native CoreML, CPU+GPU, 2s step
     Cuda,
 }
 
 /// Map execution mode to ORT execution providers
 ///
-/// CoreMl and CoreMlFastLite use ORT CPU for any sessions that still go through ORT (e.g. FBANK),
-/// while segmentation/embedding tail sessions use native CoreML directly.
+/// CoreMl modes use ORT CPU for any sessions that still go through ORT (e.g. FBANK),
+/// while segmentation/embedding tail sessions use native CoreML directly
 pub fn with_execution_mode(
     builder: SessionBuilder,
     mode: ExecutionMode,
 ) -> Result<SessionBuilder, ort::Error> {
     match mode {
-        ExecutionMode::Cpu
-        | ExecutionMode::CoreMl
-        | ExecutionMode::CoreMlFast
-        | ExecutionMode::CoreMlFastLite => Ok(builder
+        ExecutionMode::Cpu | ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => Ok(builder
             .with_execution_providers([ep::CPU::default().with_arena_allocator(false).build()])?),
         ExecutionMode::Cuda => {
             #[cfg(feature = "cuda")]

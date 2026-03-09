@@ -190,34 +190,6 @@ fn der_coreml_fp32() {
 
 #[test]
 #[cfg(feature = "native-coreml")]
-fn der_coreml_fast_lite() {
-    let (results, elapsed) = voxconverse_der(
-        ExecutionMode::CoreMlFastLite,
-        FAST_SEGMENTATION_STEP_SECONDS,
-    );
-    let avg_der: f64 = results.iter().map(|(_, d)| d).sum::<f64>() / results.len() as f64;
-    eprintln!(
-        "CoreML FastLite (FP16+2s) avg DER: {:.1}%, total: {:.1}s",
-        avg_der * 100.0,
-        elapsed.as_secs_f64()
-    );
-
-    assert!(
-        avg_der < 0.30,
-        "CoreML FastLite avg DER {:.1}% exceeds 30%",
-        avg_der * 100.0
-    );
-    for (name, der) in &results {
-        assert!(
-            *der < 0.80,
-            "CoreML FastLite {name}: DER {:.1}% exceeds 80%",
-            der * 100.0
-        );
-    }
-}
-
-#[test]
-#[cfg(feature = "native-coreml")]
 fn der_coreml_fast() {
     let (results, elapsed) =
         voxconverse_der(ExecutionMode::CoreMlFast, FAST_SEGMENTATION_STEP_SECONDS);

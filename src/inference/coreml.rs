@@ -200,15 +200,6 @@ impl CoreMlModel {
     pub fn default_compute_units() -> MLComputeUnits {
         MLComputeUnits::All
     }
-
-    /// All compute units: CoreML decides per-op precision (CPU+GPU+ANE)
-    ///
-    /// Unlike CPUAndNeuralEngine with FP16 models, this lets CoreML keep
-    /// precision-sensitive ops (like L2 norm) in FP32 while auto-FP16
-    /// for bulk computation (convolutions)
-    pub fn all_compute_units() -> MLComputeUnits {
-        MLComputeUnits::All
-    }
 }
 
 /// Create an MLMultiArray wrapping a data pointer with a shared no-op deallocator
