@@ -44,7 +44,7 @@ Audio (16kHz f32)
 | `pyannote-mps` | Python sidecar | 1s | varies | Upstream comparison (Apple GPU) |
 | `pyannote-cuda` | Python sidecar | 1s | varies | Upstream comparison (NVIDIA) |
 
-Both `coreml` and `mini-coreml` produce identical speaker counts and 100% mutual speech coverage with pyannote. `mini-coreml` trades a wider step (2s vs 1s) and FP16 ANE inference for ~2x speed.
+`mini-coreml` trades a wider step (2s vs 1s) and FP16 ANE inference for ~2x speed. On most clips it matches `coreml` exactly, but on some inputs the coarser step drops a few segments (see 10.5-min benchmark below).
 
 ## Benchmarks
 
@@ -58,6 +58,14 @@ All benchmarks on Apple M4 Pro, macOS 26.3.
 | `coreml` (FP32) | 6 | 79 | 100% | 11.5s | 37x |
 | pyannote MPS | 6 | 81 | reference | 28.8s | 15x |
 
+### 10.5-min clip (635.7s, 3 speakers)
+
+| Mode | Speakers | Segments | Coverage | Time | RTFx |
+|------|----------|----------|----------|------|------|
+| `mini-coreml` (FP16) | 3 | 247 | 99.7% | 5.4s | **118x** |
+| `coreml` (FP32) | 3 | 250 | 100% | 16.3s | 39x |
+| pyannote MPS | 3 | 250 | reference | 36.9s | 17x |
+
 ### 45-min clip (2700.0s)
 
 | Mode | Speakers | Segments | Coverage | Time | RTFx |
@@ -66,7 +74,7 @@ All benchmarks on Apple M4 Pro, macOS 26.3.
 | `coreml` (FP32) | 2 | 722 | 100% | 72.1s | 37x |
 | pyannote MPS | 2 | 720 | reference | 145.3s | 19x |
 
-Coverage is measured as mutual speech overlap between speakrs and pyannote output. Minor segment count differences (79 vs 81) are due to f32 accumulation order at frame boundaries. No speech is lost or added.
+Coverage is measured as mutual speech overlap with pyannote. Minor segment count differences (e.g. 79 vs 81) are due to f32 accumulation order at frame boundaries, no speech is lost or added. The 10.5-min clip shows `mini-coreml` dropping 3 segments (99.7% coverage) due to the coarser 2s step.
 
 ## Modules
 
