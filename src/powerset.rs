@@ -53,12 +53,6 @@ impl PowersetMapping {
         one_hot.dot(&self.mapping)
     }
 
-    /// Soft decode powerset log-probabilities to speaker activations
-    pub fn soft_decode(&self, log_probs: &Array2<f32>) -> Array2<f32> {
-        let probs = log_probs.mapv(|x| x.exp());
-        probs.dot(&self.mapping)
-    }
-
     /// Encode binary multilabel matrix to powerset one-hot
     pub fn encode(&self, multilabel: &Array2<f32>) -> Array2<f32> {
         let num_frames = multilabel.nrows();
@@ -185,20 +179,6 @@ mod tests {
     }
 
     #[test]
-    fn soft_decode_uniform() {
-        let pm = PowersetMapping::new(3, 2);
-
-        // uniform log-probs of 0 → exp(0) = 1 for all classes
-        // each speaker appears in 3 of 7 classes, so activation = 3.0
-        let logits = array![[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
-        let result = pm.soft_decode(&logits);
-
-        for &val in result.iter() {
-            assert!((val - 3.0).abs() < 1e-5);
-        }
-    }
-
-    #[test]
     fn roundtrip_encode_hard_decode() {
         for nc in 2..5 {
             for ms in 1..=nc {
@@ -271,26 +251,5 @@ mod tests {
 
         assert_eq!(result.shape(), expected.shape());
         assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn soft_decode_matches_fixture() {
-        let logits_3d: Array3<f32> =
-            Array3::read_npy(File::open(fixture_path("powerset_input_logits.npy")).unwrap())
-                .unwrap();
-        let expected_3d: Array3<f32> =
-            Array3::read_npy(File::open(fixture_path("powerset_soft_output.npy")).unwrap())
-                .unwrap();
-
-        let logits = logits_3d.index_axis(ndarray::Axis(0), 0).to_owned();
-        let expected = expected_3d.index_axis(ndarray::Axis(0), 0).to_owned();
-
-        let pm = PowersetMapping::new(3, 2);
-        let result = pm.soft_decode(&logits);
-
-        assert_eq!(result.shape(), expected.shape());
-        for (a, b) in result.iter().zip(expected.iter()) {
-            assert!((a - b).abs() < 1e-5, "soft_decode mismatch: {a} vs {b}");
-        }
     }
 }

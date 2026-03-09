@@ -53,11 +53,6 @@ def generate_model_free_fixtures(output: Path) -> None:
         output / "powerset_hard_output.npy",
         ps3.to_multilabel(torch.from_numpy(logits), soft=False).numpy(),
     )
-    np.save(
-        output / "powerset_soft_output.npy",
-        ps3.to_multilabel(torch.from_numpy(logits), soft=True).numpy(),
-    )
-
     # cosine similarity
     vecs = rng.randn(10, 256).astype(np.float32)
     vecs_norm = vecs / np.linalg.norm(vecs, axis=1, keepdims=True)
