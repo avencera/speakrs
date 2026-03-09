@@ -5,6 +5,7 @@ pub mod aggregate;
 pub mod binarize;
 pub mod clustering;
 pub mod inference;
+pub mod metrics;
 #[cfg(feature = "online")]
 pub mod models;
 pub mod pipeline;
