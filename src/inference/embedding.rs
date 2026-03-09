@@ -6,7 +6,9 @@ use ort::session::Session;
 use ort::value::TensorRef;
 
 #[cfg(feature = "native-coreml")]
-use crate::inference::coreml::{CoreMlModel, coreml_model_path, coreml_model_path_f16};
+use crate::inference::coreml::{
+    CachedInputShape, CoreMlModel, coreml_model_path, coreml_model_path_f16,
+};
 use crate::inference::{ExecutionMode, with_execution_mode};
 
 const PRIMARY_BATCH_SIZE: usize = 32;
@@ -57,6 +59,14 @@ pub struct EmbeddingModel {
     native_fused_batched_session: Option<CoreMlModel>,
     #[cfg(feature = "native-coreml")]
     native_fused_primary_batched_session: Option<CoreMlModel>,
+    #[cfg(feature = "native-coreml")]
+    cached_tail_fbank_shape: CachedInputShape,
+    #[cfg(feature = "native-coreml")]
+    cached_tail_weights_shape: CachedInputShape,
+    #[cfg(feature = "native-coreml")]
+    cached_fused_waveform_shape: CachedInputShape,
+    #[cfg(feature = "native-coreml")]
+    cached_fused_weights_shape: CachedInputShape,
     waveform_buffer: Array3<f32>,
     weights_buffer: Array2<f32>,
     primary_batch_waveform_buffer: Array3<f32>,
@@ -166,6 +176,23 @@ impl EmbeddingModel {
                 model_path,
                 mode,
                 PRIMARY_BATCH_SIZE,
+            ),
+            #[cfg(feature = "native-coreml")]
+            cached_tail_fbank_shape: CachedInputShape::new(
+                "fbank",
+                &[PRIMARY_BATCH_SIZE, FBANK_FRAMES, FBANK_FEATURES],
+            ),
+            #[cfg(feature = "native-coreml")]
+            cached_tail_weights_shape: CachedInputShape::new("weights", &[PRIMARY_BATCH_SIZE, 589]),
+            #[cfg(feature = "native-coreml")]
+            cached_fused_waveform_shape: CachedInputShape::new(
+                "waveform",
+                &[PRIMARY_BATCH_SIZE, 1, 160_000],
+            ),
+            #[cfg(feature = "native-coreml")]
+            cached_fused_weights_shape: CachedInputShape::new(
+                "weights",
+                &[PRIMARY_BATCH_SIZE, 589],
             ),
             waveform_buffer: Array3::zeros((1, 1, 160_000)),
             weights_buffer: Array2::zeros((1, 589)),
@@ -451,9 +478,6 @@ impl EmbeddingModel {
         mut waveform_buffer: ndarray::ArrayViewMut3<f32>,
         mut weights_buffer: ndarray::ArrayViewMut2<f32>,
     ) -> Result<Array2<f32>, ort::Error> {
-        waveform_buffer.fill(0.0);
-        weights_buffer.fill(0.0);
-
         for (batch_idx, input) in inputs.iter().enumerate() {
             let used_mask = select_mask(
                 input.mask,
@@ -476,12 +500,15 @@ impl EmbeddingModel {
     }
 
     fn embed_single(&mut self, audio: &[f32], weights: &[f32]) -> Result<Array1<f32>, ort::Error> {
-        self.waveform_buffer.fill(0.0);
-        self.weights_buffer.fill(0.0);
         let copy_len = audio.len().min(self.window_samples);
         self.waveform_buffer
             .slice_mut(s![0, 0, ..copy_len])
             .assign(&ndarray::ArrayView1::from(&audio[..copy_len]));
+        if copy_len < self.window_samples {
+            self.waveform_buffer
+                .slice_mut(s![0, 0, copy_len..])
+                .fill(0.0);
+        }
         self.prepare_single_weights(weights);
 
         let waveform_tensor = TensorRef::from_array_view(self.waveform_buffer.view())?;
@@ -494,11 +521,15 @@ impl EmbeddingModel {
     }
 
     pub fn compute_chunk_fbank(&mut self, audio: &[f32]) -> Result<Array2<f32>, ort::Error> {
-        self.split_waveform_buffer.fill(0.0);
         let copy_len = audio.len().min(self.window_samples);
         self.split_waveform_buffer
             .slice_mut(s![0, 0, ..copy_len])
             .assign(&ndarray::ArrayView1::from(&audio[..copy_len]));
+        if copy_len < self.window_samples {
+            self.split_waveform_buffer
+                .slice_mut(s![0, 0, copy_len..])
+                .fill(0.0);
+        }
 
         #[cfg(feature = "native-coreml")]
         if let Some(ref native) = self.native_fbank_session {
@@ -543,12 +574,16 @@ impl EmbeddingModel {
             let batch = &audios[batch_start..batch_end];
 
             if batch.len() == PRIMARY_BATCH_SIZE {
-                self.split_fbank_batch_buffer.fill(0.0);
                 for (idx, audio) in batch.iter().enumerate() {
                     let copy_len = audio.len().min(self.window_samples);
                     self.split_fbank_batch_buffer
                         .slice_mut(s![idx, 0, ..copy_len])
                         .assign(&ndarray::ArrayView1::from(&audio[..copy_len]));
+                    if copy_len < self.window_samples {
+                        self.split_fbank_batch_buffer
+                            .slice_mut(s![idx, 0, copy_len..])
+                            .fill(0.0);
+                    }
                 }
 
                 #[cfg(feature = "native-coreml")]
@@ -631,10 +666,8 @@ impl EmbeddingModel {
     ) -> Result<Array2<f32>, ort::Error> {
         debug_assert!(inputs.len() <= PRIMARY_BATCH_SIZE);
 
-        self.split_primary_feature_batch_buffer.fill(0.0);
-        self.split_primary_weights_batch_buffer.fill(0.0);
-
         for (batch_idx, input) in inputs.iter().enumerate() {
+            debug_assert_eq!(input.fbank.ncols(), FBANK_FEATURES);
             self.split_primary_feature_batch_buffer
                 .slice_mut(s![batch_idx, ..input.fbank.nrows(), ..input.fbank.ncols()])
                 .assign(input.fbank);
@@ -645,17 +678,21 @@ impl EmbeddingModel {
                 &mut self.split_primary_weights_batch_buffer.view_mut(),
             );
         }
+        // zero unused weight rows so weighted pooling produces sentinel embeddings
+        if inputs.len() < PRIMARY_BATCH_SIZE {
+            self.split_primary_weights_batch_buffer
+                .slice_mut(s![inputs.len().., ..])
+                .fill(0.0);
+        }
 
         #[cfg(feature = "native-coreml")]
         if let Some(ref native) = self.native_tail_primary_batched_session {
             let fbank_data = self.split_primary_feature_batch_buffer.as_slice().unwrap();
             let weights_data = self.split_primary_weights_batch_buffer.as_slice().unwrap();
-            let fbank_shape = [PRIMARY_BATCH_SIZE, FBANK_FRAMES, FBANK_FEATURES];
-            let weights_shape = [PRIMARY_BATCH_SIZE, self.mask_frames];
             let (data, _) = native
-                .predict(&[
-                    ("fbank", &fbank_shape, fbank_data),
-                    ("weights", &weights_shape, weights_data),
+                .predict_cached(&[
+                    (&self.cached_tail_fbank_shape, fbank_data),
+                    (&self.cached_tail_weights_shape, weights_data),
                 ])
                 .map_err(|e| ort::Error::new(e.to_string()))?;
             let batch = Array2::from_shape_vec((PRIMARY_BATCH_SIZE, 256), data).unwrap();
@@ -689,15 +726,17 @@ impl EmbeddingModel {
         let native = self.native_fused_primary_batched_session.as_ref().unwrap();
         debug_assert!(inputs.len() <= PRIMARY_BATCH_SIZE);
 
-        // fill waveform buffer
-        self.primary_batch_waveform_buffer.fill(0.0);
-        self.primary_batch_weights_buffer.fill(0.0);
-
         for (batch_idx, input) in inputs.iter().enumerate() {
             let copy_len = input.audio.len().min(self.window_samples);
             self.primary_batch_waveform_buffer
                 .slice_mut(s![batch_idx, 0, ..copy_len])
                 .assign(&ndarray::ArrayView1::from(&input.audio[..copy_len]));
+            // zero waveform tail if audio is shorter than window
+            if copy_len < self.window_samples {
+                self.primary_batch_waveform_buffer
+                    .slice_mut(s![batch_idx, 0, copy_len..])
+                    .fill(0.0);
+            }
             Self::prepare_weights(
                 batch_idx,
                 input.weights,
@@ -705,21 +744,18 @@ impl EmbeddingModel {
                 &mut self.primary_batch_weights_buffer.view_mut(),
             );
         }
+        if inputs.len() < PRIMARY_BATCH_SIZE {
+            self.primary_batch_weights_buffer
+                .slice_mut(s![inputs.len().., ..])
+                .fill(0.0);
+        }
 
         let waveform_data = self.primary_batch_waveform_buffer.as_slice().unwrap();
         let weights_data = self.primary_batch_weights_buffer.as_slice().unwrap();
         let (data, _) = native
-            .predict(&[
-                (
-                    "waveform",
-                    &[PRIMARY_BATCH_SIZE, 1, self.window_samples],
-                    waveform_data,
-                ),
-                (
-                    "weights",
-                    &[PRIMARY_BATCH_SIZE, self.mask_frames],
-                    weights_data,
-                ),
+            .predict_cached(&[
+                (&self.cached_fused_waveform_shape, waveform_data),
+                (&self.cached_fused_weights_shape, weights_data),
             ])
             .map_err(|e| ort::Error::new(e.to_string()))?;
         let batch = Array2::from_shape_vec((PRIMARY_BATCH_SIZE, 256), data).unwrap();
@@ -731,8 +767,6 @@ impl EmbeddingModel {
         fbank: &Array2<f32>,
         weights: &[f32],
     ) -> Result<Array1<f32>, ort::Error> {
-        self.split_feature_batch_buffer.fill(0.0);
-        self.split_weights_batch_buffer.fill(0.0);
         self.split_feature_batch_buffer
             .slice_mut(s![0, ..fbank.nrows(), ..fbank.ncols()])
             .assign(fbank);
@@ -778,9 +812,6 @@ impl EmbeddingModel {
         clean_masks: &Array2<f32>,
         num_samples: usize,
     ) -> Result<Array2<f32>, ort::Error> {
-        self.split_feature_batch_buffer.fill(0.0);
-        self.split_weights_batch_buffer.fill(0.0);
-
         for speaker_idx in 0..segmentations.ncols() {
             self.split_feature_batch_buffer
                 .slice_mut(s![speaker_idx, ..fbank.nrows(), ..fbank.ncols()])
@@ -836,6 +867,11 @@ impl EmbeddingModel {
         waveform_buffer
             .slice_mut(s![batch_idx, 0, ..copy_len])
             .assign(&ndarray::ArrayView1::from(&audio[..copy_len]));
+        if copy_len < window_samples {
+            waveform_buffer
+                .slice_mut(s![batch_idx, 0, copy_len..])
+                .fill(0.0);
+        }
     }
 
     fn prepare_weights(
@@ -878,12 +914,15 @@ impl EmbeddingModel {
         weights: &[f32],
     ) -> Result<Array1<f32>, ort::Error> {
         let native = self.native_fused_session.as_ref().unwrap();
-        self.split_waveform_buffer.fill(0.0);
         let copy_len = audio.len().min(self.window_samples);
         self.split_waveform_buffer
             .slice_mut(s![0, 0, ..copy_len])
             .assign(&ndarray::ArrayView1::from(&audio[..copy_len]));
-        self.split_weights_batch_buffer.fill(0.0);
+        if copy_len < self.window_samples {
+            self.split_waveform_buffer
+                .slice_mut(s![0, 0, copy_len..])
+                .fill(0.0);
+        }
         Self::prepare_weights(
             0,
             weights,
@@ -913,18 +952,18 @@ impl EmbeddingModel {
         let native = self.native_fused_batched_session.as_ref().unwrap();
         let batch = CHUNK_SPEAKER_BATCH_SIZE;
 
-        // fill waveform buffer — same audio for all speakers
-        self.split_fbank_batch_buffer
-            .slice_mut(s![0..batch, .., ..])
-            .fill(0.0);
         let copy_len = audio.len().min(self.window_samples);
         for speaker_idx in 0..batch {
             self.split_fbank_batch_buffer
                 .slice_mut(s![speaker_idx, 0, ..copy_len])
                 .assign(&ndarray::ArrayView1::from(&audio[..copy_len]));
+            if copy_len < self.window_samples {
+                self.split_fbank_batch_buffer
+                    .slice_mut(s![speaker_idx, 0, copy_len..])
+                    .fill(0.0);
+            }
         }
 
-        self.split_weights_batch_buffer.fill(0.0);
         for speaker_idx in 0..segmentations.ncols() {
             let mask = segmentations.column(speaker_idx).to_owned();
             let clean_mask = clean_masks.column(speaker_idx).to_owned();
