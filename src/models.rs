@@ -8,7 +8,8 @@ const HF_REPO: &str = "avencera/speakrs-models";
 pub enum Mode {
     Cpu,
     CoreMl,
-    CoreMlLite,
+    CoreMlFast,
+    CoreMlFastLite,
     Cuda,
 }
 
@@ -84,7 +85,7 @@ fn required_files(mode: Mode) -> Vec<&'static str> {
         Mode::Cpu | Mode::Cuda => {
             files.extend_from_slice(ONNX_FILES);
         }
-        Mode::CoreMl => {
+        Mode::CoreMl | Mode::CoreMlFast => {
             // CoreML modes still need the ONNX segmentation model for the constructor
             files.push("segmentation-3.0.onnx");
             files.push("wespeaker-voxceleb-resnet34.onnx");
@@ -109,8 +110,16 @@ fn required_files(mode: Mode) -> Vec<&'static str> {
                 "wespeaker-voxceleb-resnet34-tail-b32.mlmodelc",
             ));
             files.extend(mlmodelc_files("wespeaker-voxceleb-resnet34-tail.mlmodelc"));
+            // fused CoreML models (fbank+tail in one model, preferred fast path)
+            files.extend(mlmodelc_files("wespeaker-voxceleb-resnet34-fused.mlmodelc"));
+            files.extend(mlmodelc_files(
+                "wespeaker-voxceleb-resnet34-fused-b3.mlmodelc",
+            ));
+            files.extend(mlmodelc_files(
+                "wespeaker-voxceleb-resnet34-fused-b32.mlmodelc",
+            ));
         }
-        Mode::CoreMlLite => {
+        Mode::CoreMlFastLite => {
             // same ONNX base as CoreMl
             files.push("segmentation-3.0.onnx");
             files.push("wespeaker-voxceleb-resnet34.onnx");
@@ -135,6 +144,16 @@ fn required_files(mode: Mode) -> Vec<&'static str> {
             ));
             files.extend(mlmodelc_files(
                 "wespeaker-voxceleb-resnet34-tail-f16.mlmodelc",
+            ));
+            // fused FP16 CoreML models (fbank+tail in one model, preferred fast path)
+            files.extend(mlmodelc_files(
+                "wespeaker-voxceleb-resnet34-fused-f16.mlmodelc",
+            ));
+            files.extend(mlmodelc_files(
+                "wespeaker-voxceleb-resnet34-fused-b3-f16.mlmodelc",
+            ));
+            files.extend(mlmodelc_files(
+                "wespeaker-voxceleb-resnet34-fused-b32-f16.mlmodelc",
             ));
         }
     }

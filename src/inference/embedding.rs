@@ -6,9 +6,7 @@ use ort::session::Session;
 use ort::value::TensorRef;
 
 #[cfg(feature = "native-coreml")]
-use crate::inference::coreml::{
-    CachedInputShape, CoreMlModel, GpuPrecision, coreml_model_path, coreml_model_path_f16,
-};
+use crate::inference::coreml::{CachedInputShape, CoreMlModel, GpuPrecision, coreml_model_path};
 use crate::inference::{ExecutionMode, with_execution_mode};
 
 const PRIMARY_BATCH_SIZE: usize = 32;
@@ -105,7 +103,8 @@ impl EmbeddingModel {
         let split_tail_batched_path = split_tail_model_path(model_path, CHUNK_SPEAKER_BATCH_SIZE);
         let split_primary_tail_batched_path = split_tail_model_path(model_path, PRIMARY_BATCH_SIZE);
         let use_split_backend = (mode == ExecutionMode::CoreMl
-            || mode == ExecutionMode::CoreMlLite)
+            || mode == ExecutionMode::CoreMlFast
+            || mode == ExecutionMode::CoreMlFastLite)
             && split_fbank_path.exists()
             && split_tail_path.exists();
 
@@ -254,7 +253,9 @@ impl EmbeddingModel {
     fn single_execution_mode(mode: ExecutionMode) -> ExecutionMode {
         match mode {
             // keep single embeddings on the CPU path; native CoreML handles the tail
-            ExecutionMode::CoreMl | ExecutionMode::CoreMlLite => ExecutionMode::Cpu,
+            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast | ExecutionMode::CoreMlFastLite => {
+                ExecutionMode::Cpu
+            }
             _ => mode,
         }
     }
@@ -301,7 +302,8 @@ impl EmbeddingModel {
         let split_primary_tail_batched_path =
             split_tail_model_path(&self.model_path, PRIMARY_BATCH_SIZE);
         let use_split_backend = (self.mode == ExecutionMode::CoreMl
-            || self.mode == ExecutionMode::CoreMlLite)
+            || self.mode == ExecutionMode::CoreMlFast
+            || self.mode == ExecutionMode::CoreMlFastLite)
             && split_fbank_path.exists()
             && split_tail_path.exists();
         let split_fbank_batched_path = split_fbank_batched_model_path(&self.model_path);
@@ -1029,13 +1031,13 @@ impl EmbeddingModel {
         batch_size: usize,
     ) -> Option<CoreMlModel> {
         let (resolve_path, compute_units) = match mode {
-            ExecutionMode::CoreMl => (
+            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => (
                 coreml_model_path as fn(&str) -> std::path::PathBuf,
                 CoreMlModel::default_compute_units(),
             ),
-            ExecutionMode::CoreMlLite => (
-                coreml_model_path_f16 as fn(&str) -> std::path::PathBuf,
-                CoreMlModel::fp16_compute_units(),
+            ExecutionMode::CoreMlFastLite => (
+                coreml_model_path as fn(&str) -> std::path::PathBuf,
+                CoreMlModel::all_compute_units(),
             ),
             _ => return None,
         };
@@ -1065,7 +1067,10 @@ impl EmbeddingModel {
         mode: ExecutionMode,
         batch_size: usize,
     ) -> Option<CoreMlModel> {
-        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlLite) {
+        if !matches!(
+            mode,
+            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast | ExecutionMode::CoreMlFastLite
+        ) {
             return None;
         }
         let fbank_onnx = if batch_size == 1 {
@@ -1102,7 +1107,7 @@ impl EmbeddingModel {
         let onnx_str = fused_onnx.to_str().unwrap();
 
         match mode {
-            ExecutionMode::CoreMl => {
+            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => {
                 // FP32 fused: fbank DFT matmul is accurate on CPU+GPU
                 let coreml_path = coreml_model_path(onnx_str);
                 if !coreml_path.exists() {
@@ -1123,22 +1128,23 @@ impl EmbeddingModel {
                     }
                 }
             }
-            ExecutionMode::CoreMlLite if std::env::var("SPEAKRS_FUSED_F16").is_ok() => {
-                // experimental: FP16 fused on ANE, trades fbank accuracy for fewer round-trips
-                let coreml_path = coreml_model_path_f16(onnx_str);
+            ExecutionMode::CoreMlFastLite => {
+                // FP32 fused with .all — CoreML auto-FP16 for convolutions,
+                // keeps precision-sensitive ops (L2 norm) in FP32
+                let coreml_path = coreml_model_path(onnx_str);
                 if !coreml_path.exists() {
                     return None;
                 }
                 match CoreMlModel::load(
                     &coreml_path,
-                    CoreMlModel::fp16_compute_units(),
+                    CoreMlModel::all_compute_units(),
                     "output",
                     GpuPrecision::Low,
                 ) {
                     Ok(model) => Some(model),
                     Err(e) => {
                         eprintln!(
-                            "warning: failed to load native CoreML fused-f16 (batch={batch_size}): {e}"
+                            "warning: failed to load native CoreML fused (batch={batch_size}): {e}"
                         );
                         None
                     }

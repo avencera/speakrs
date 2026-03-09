@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 
 use speakrs::clustering::plda::PldaTransform;
 use speakrs::inference::ExecutionMode;
@@ -18,25 +19,25 @@ fn main() {
         .init();
 
     let args: Vec<String> = std::env::args().collect();
-    let (mode, wav_path) = parse_args(&args);
-    if wav_path.is_empty() {
+    let (mode, wav_paths) = parse_args(&args);
+    if wav_paths.is_empty() {
         std::process::exit(1);
     }
 
     if let CliMode::PyannoteDevice(device) = mode {
-        let output = run_pyannote_sidecar(device, wav_path).expect("pyannote sidecar failed");
+        let output = run_pyannote_sidecar(device, wav_paths[0]).expect("pyannote sidecar failed");
         print!("{output}");
         return;
     }
 
-    let CliMode::Native(mode) = mode else {
+    let CliMode::Native(mode, mode_name) = mode else {
         unreachable!();
     };
 
     let models_dir = resolve_models_dir(mode);
 
-    let step = match mode {
-        ExecutionMode::CoreMlLite => FAST_SEGMENTATION_STEP_SECONDS,
+    let step = match mode_name {
+        "coreml-fast" | "coreml-fast-lite" => FAST_SEGMENTATION_STEP_SECONDS,
         _ => SEGMENTATION_STEP_SECONDS,
     };
     let mut seg_model = SegmentationModel::with_mode(
@@ -55,12 +56,25 @@ fn main() {
     .expect("failed to load embedding model");
     let plda = PldaTransform::from_dir(&models_dir).expect("failed to load PLDA parameters");
 
-    let (samples, sr) = load_wav_samples(wav_path);
-    assert_eq!(sr, 16000, "expected 16kHz WAV, got {sr}Hz");
+    for wav_path in &wav_paths {
+        let file_id = Path::new(wav_path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file1".to_string());
 
-    let result = diarize(&mut seg_model, &mut emb_model, &plda, &samples, "file1")
-        .expect("diarization failed");
-    print!("{}", result.rttm);
+        let (samples, sr) = load_wav_samples(wav_path);
+        assert_eq!(sr, 16000, "expected 16kHz WAV, got {sr}Hz");
+
+        let start = Instant::now();
+        let result = diarize(&mut seg_model, &mut emb_model, &plda, &samples, &file_id)
+            .expect("diarization failed");
+        let elapsed = start.elapsed();
+
+        if wav_paths.len() > 1 {
+            eprintln!("{file_id}: {:.3}s", elapsed.as_secs_f64());
+        }
+        print!("{}", result.rttm);
+    }
 }
 
 fn resolve_models_dir(mode: ExecutionMode) -> PathBuf {
@@ -74,7 +88,8 @@ fn resolve_models_dir(mode: ExecutionMode) -> PathBuf {
         let hf_mode = match mode {
             ExecutionMode::Cpu => speakrs::models::Mode::Cpu,
             ExecutionMode::CoreMl => speakrs::models::Mode::CoreMl,
-            ExecutionMode::CoreMlLite => speakrs::models::Mode::CoreMlLite,
+            ExecutionMode::CoreMlFast => speakrs::models::Mode::CoreMlFast,
+            ExecutionMode::CoreMlFastLite => speakrs::models::Mode::CoreMlFastLite,
             ExecutionMode::Cuda => speakrs::models::Mode::Cuda,
         };
         manager.ensure(hf_mode).expect("failed to download models")
@@ -90,39 +105,50 @@ fn resolve_models_dir(mode: ExecutionMode) -> PathBuf {
 }
 
 enum CliMode {
-    Native(ExecutionMode),
+    Native(ExecutionMode, &'static str),
     PyannoteDevice(&'static str),
 }
 
-fn parse_args(args: &[String]) -> (CliMode, &str) {
-    match args {
-        [_, wav_path] => (CliMode::Native(ExecutionMode::Cpu), wav_path),
-        [_, flag, mode, wav_path] if flag == "--mode" => {
-            let parsed = match mode.as_str() {
-                "cpu" => CliMode::Native(ExecutionMode::Cpu),
-                "coreml" => CliMode::Native(ExecutionMode::CoreMl),
-                "coreml-lite" => CliMode::Native(ExecutionMode::CoreMlLite),
-                "cuda" => CliMode::Native(ExecutionMode::Cuda),
-                "pyannote-cpu" => CliMode::PyannoteDevice("cpu"),
-                "pyannote-mps" => CliMode::PyannoteDevice("mps"),
-                "pyannote-cuda" => CliMode::PyannoteDevice("cuda"),
-                _ => {
-                    eprintln!("Unknown mode: {mode}");
-                    eprintln!(
-                        "Usage: diarize [--mode cpu|coreml|coreml-lite|cuda|pyannote-cpu|pyannote-mps|pyannote-cuda] <path/to/audio.wav>"
-                    );
-                    return (CliMode::Native(ExecutionMode::Cpu), "");
-                }
-            };
-            (parsed, wav_path)
-        }
-        _ => {
-            eprintln!(
-                "Usage: diarize [--mode cpu|coreml|coreml-lite|cuda|pyannote-cpu|pyannote-mps|pyannote-cuda] <path/to/audio.wav>"
-            );
-            (CliMode::Native(ExecutionMode::Cpu), "")
+fn parse_args(args: &[String]) -> (CliMode, Vec<&str>) {
+    const USAGE: &str = "Usage: diarize [--mode cpu|coreml|coreml-fast|coreml-f16|coreml-fast-lite|cuda|pyannote-cpu|pyannote-mps|pyannote-cuda] <wav_files...>";
+
+    fn parse_mode(mode: &str) -> Option<CliMode> {
+        match mode {
+            "cpu" => Some(CliMode::Native(ExecutionMode::Cpu, "cpu")),
+            "coreml" => Some(CliMode::Native(ExecutionMode::CoreMl, "coreml")),
+            "coreml-fast" => Some(CliMode::Native(ExecutionMode::CoreMlFast, "coreml-fast")),
+            "coreml-f16" => Some(CliMode::Native(ExecutionMode::CoreMlFastLite, "coreml-f16")),
+            "coreml-fast-lite" => Some(CliMode::Native(
+                ExecutionMode::CoreMlFastLite,
+                "coreml-fast-lite",
+            )),
+            "cuda" => Some(CliMode::Native(ExecutionMode::Cuda, "cuda")),
+            "pyannote-cpu" => Some(CliMode::PyannoteDevice("cpu")),
+            "pyannote-mps" => Some(CliMode::PyannoteDevice("mps")),
+            "pyannote-cuda" => Some(CliMode::PyannoteDevice("cuda")),
+            _ => None,
         }
     }
+
+    if args.len() < 2 {
+        eprintln!("{USAGE}");
+        return (CliMode::Native(ExecutionMode::Cpu, "cpu"), vec![]);
+    }
+
+    // diarize --mode <mode> file1.wav file2.wav ...
+    if args.len() >= 4 && args[1] == "--mode" {
+        let Some(parsed) = parse_mode(&args[2]) else {
+            eprintln!("Unknown mode: {}", args[2]);
+            eprintln!("{USAGE}");
+            return (CliMode::Native(ExecutionMode::Cpu, "cpu"), vec![]);
+        };
+        let paths: Vec<&str> = args[3..].iter().map(|s| s.as_str()).collect();
+        return (parsed, paths);
+    }
+
+    // diarize file1.wav file2.wav ...
+    let paths: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
+    (CliMode::Native(ExecutionMode::Cpu, "cpu"), paths)
 }
 
 fn run_pyannote_sidecar(

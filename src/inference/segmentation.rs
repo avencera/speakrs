@@ -250,7 +250,7 @@ impl SegmentationModel {
     fn resolve_coreml_path(model_path: &str, mode: ExecutionMode) -> Option<std::path::PathBuf> {
         match mode {
             // LSTM-based segmentation runs poorly on ANE — always use FP32 CPU+GPU
-            ExecutionMode::CoreMl | ExecutionMode::CoreMlLite => {
+            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast | ExecutionMode::CoreMlFastLite => {
                 Some(coreml_model_path(model_path))
             }
             _ => None,
@@ -289,7 +289,10 @@ impl SegmentationModel {
 
     #[cfg(feature = "native-coreml")]
     fn load_native_coreml_batched(model_path: &str, mode: ExecutionMode) -> Option<CoreMlModel> {
-        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlLite) {
+        if !matches!(
+            mode,
+            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast | ExecutionMode::CoreMlFastLite
+        ) {
             return None;
         }
         let batched_onnx = batched_model_path(model_path, PRIMARY_BATCH_SIZE)?;
