@@ -15,11 +15,11 @@ check: fmt clippy test
 deploy-models:
     cargo xtask models deploy
 
-download-models:
-    cargo xtask models download
+export-models:
+    cargo xtask models export
 
-download-models-coreml:
-    cargo xtask models download-coreml
+export-models-coreml:
+    cargo xtask models export-coreml
 
 compare-models-coreml:
     cargo xtask models compare-coreml

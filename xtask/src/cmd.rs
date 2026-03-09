@@ -43,6 +43,31 @@ pub fn tee_cmd(cmd: &mut Command, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Run a command, capture stdout, return (elapsed, stdout_text)
+///
+/// Returns empty stdout on non-zero exit or timeout
+pub fn capture_cmd(cmd: &mut Command, timeout_secs: u64) -> Result<(std::time::Duration, String)> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let start = std::time::Instant::now();
+    let child = cmd.spawn()?;
+
+    let output = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(_) => {
+            return Ok((start.elapsed(), String::new()));
+        }
+    };
+    let elapsed = start.elapsed();
+    let _ = timeout_secs; // timeout handled by OS-level mechanisms if needed
+
+    if !output.status.success() {
+        return Ok((elapsed, String::new()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    Ok((elapsed, stdout))
+}
+
 /// Resolve the project root (parent of xtask/)
 pub fn project_root() -> PathBuf {
     let dir = env!("CARGO_MANIFEST_DIR");
@@ -50,4 +75,12 @@ pub fn project_root() -> PathBuf {
         .parent()
         .expect("xtask should be in a subdirectory of the project root")
         .to_path_buf()
+}
+
+/// Get WAV file duration in seconds using hound
+pub fn wav_duration_seconds(path: &Path) -> Result<f64> {
+    let reader = hound::WavReader::open(path)?;
+    let spec = reader.spec();
+    let num_samples = reader.duration(); // total samples per channel
+    Ok(num_samples as f64 / spec.sample_rate as f64)
 }

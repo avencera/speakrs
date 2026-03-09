@@ -7,6 +7,7 @@ use crate::audio::prepare_audio;
 use crate::cargo::{cargo_run, features_for_mode};
 use crate::cmd::{project_root, run_cmd, tee_cmd};
 use crate::compare_rttm::compare_rttm_files;
+use crate::fluidaudio;
 
 pub fn run(source: &str, python_device: &str, rust_mode: &str) -> Result<()> {
     let (wav, tmp) = prepare_audio(source)?;
@@ -91,9 +92,6 @@ pub fn accuracy(source: &str, rust_mode: &str) -> Result<()> {
     println!();
     println!("=== FluidAudio ===");
     let fluidaudio_path = find_fluidaudio();
-    let fluidaudio_json_str = fluidaudio_json.to_string_lossy().to_string();
-    let fluidaudio_rttm_str = fluidaudio_rttm.to_string_lossy().to_string();
-
     run_cmd(
         Command::new("swift")
             .args(["run", "--package-path"])
@@ -101,20 +99,11 @@ pub fn accuracy(source: &str, rust_mode: &str) -> Result<()> {
             .args(["fluidaudiocli", "process"])
             .arg(wav_str.as_ref())
             .args(["--mode", "offline", "--output"])
-            .arg(&fluidaudio_json_str),
+            .arg(&fluidaudio_json),
     )?;
-    run_cmd(
-        Command::new("uv")
-            .args([
-                "run",
-                "scripts/fluidaudio_json_to_rttm.py",
-                &fluidaudio_json_str,
-                "--output",
-                &fluidaudio_rttm_str,
-            ])
-            .current_dir(project_root()),
-    )?;
-    print!("{}", std::fs::read_to_string(&fluidaudio_rttm)?);
+    let rttm_text = fluidaudio::json_to_rttm(&fluidaudio_json, "file1")?;
+    std::fs::write(&fluidaudio_rttm, &rttm_text)?;
+    print!("{rttm_text}");
 
     println!();
     println!("=== speakrs vs pyannote CPU ===");
