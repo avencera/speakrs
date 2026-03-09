@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::fs;
+use std::path::Path;
+
+use color_eyre::eyre::Result;
 
 struct Segment {
     start: f64,
@@ -7,12 +9,7 @@ struct Segment {
     speaker: String,
 }
 
-fn parse_rttm(path: &str) -> Vec<Segment> {
-    let content = fs::read_to_string(path).unwrap_or_else(|e| {
-        eprintln!("failed to read {path}: {e}");
-        std::process::exit(1);
-    });
-
+fn parse_rttm(content: &str) -> Vec<Segment> {
     content
         .lines()
         .filter_map(|line| {
@@ -88,65 +85,60 @@ fn timeline_overlap(segs_a: &[Segment], segs_b: &[Segment]) -> f64 {
     covered
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() != 3 {
-        eprintln!("Usage: compare_rttm <rust.rttm> <python.rttm>");
-        std::process::exit(1);
-    }
+/// Compare two RTTM files and print a summary table
+pub fn compare_rttm_files(a: &Path, b: &Path) -> Result<()> {
+    let a_content = std::fs::read_to_string(a)?;
+    let b_content = std::fs::read_to_string(b)?;
 
-    let rust_segs = parse_rttm(&args[1]);
-    let py_segs = parse_rttm(&args[2]);
+    let a_segs = parse_rttm(&a_content);
+    let b_segs = parse_rttm(&b_content);
 
-    let rust_total = total_speech(&rust_segs);
-    let py_total = total_speech(&py_segs);
-    let rust_speakers = speaker_durations(&rust_segs);
-    let py_speakers = speaker_durations(&py_segs);
+    let a_total = total_speech(&a_segs);
+    let b_total = total_speech(&b_segs);
+    let a_speakers = speaker_durations(&a_segs);
+    let b_speakers = speaker_durations(&b_segs);
 
-    println!("{:30} {:>10} {:>10}", "", "Rust", "Python");
+    println!("{:30} {:>10} {:>10}", "", "A", "B");
     println!("{}", "─".repeat(52));
-    println!(
-        "{:30} {:10} {:10}",
-        "Segments",
-        rust_segs.len(),
-        py_segs.len()
-    );
+    println!("{:30} {:10} {:10}", "Segments", a_segs.len(), b_segs.len());
     println!(
         "{:30} {:10} {:10}",
         "Speakers",
-        rust_speakers.len(),
-        py_speakers.len()
+        a_speakers.len(),
+        b_speakers.len()
     );
     println!(
         "{:30} {:>10.1} {:>10.1}",
-        "Total speech (s)", rust_total, py_total
+        "Total speech (s)", a_total, b_total
     );
     println!();
 
     println!("Per-speaker duration:");
-    println!("  Rust:   {}", format_speaker_durations(&rust_speakers));
-    println!("  Python: {}", format_speaker_durations(&py_speakers));
+    println!("  A: {}", format_speaker_durations(&a_speakers));
+    println!("  B: {}", format_speaker_durations(&b_speakers));
     println!();
 
-    if rust_total > 0.0 && py_total > 0.0 {
-        let rust_covered = timeline_overlap(&rust_segs, &py_segs);
-        let py_covered = timeline_overlap(&py_segs, &rust_segs);
+    if a_total > 0.0 && b_total > 0.0 {
+        let a_covered = timeline_overlap(&a_segs, &b_segs);
+        let b_covered = timeline_overlap(&b_segs, &a_segs);
         println!(
             "{:30} {:>9.1}%",
-            "Rust speech covered by Python",
-            rust_covered / rust_total * 100.0
+            "A speech covered by B",
+            a_covered / a_total * 100.0
         );
         println!(
             "{:30} {:>9.1}%",
-            "Python speech covered by Rust",
-            py_covered / py_total * 100.0
+            "B speech covered by A",
+            b_covered / b_total * 100.0
         );
 
-        let audio_end = rust_segs
+        let audio_end = a_segs
             .iter()
-            .chain(py_segs.iter())
+            .chain(b_segs.iter())
             .map(|s| s.start + s.duration)
             .fold(0.0_f64, f64::max);
         println!("{:30} {:>10.1}", "Audio span (s)", audio_end);
     }
+
+    Ok(())
 }
