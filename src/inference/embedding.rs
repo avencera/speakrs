@@ -7,7 +7,7 @@ use ort::value::TensorRef;
 
 #[cfg(feature = "native-coreml")]
 use crate::inference::coreml::{
-    CachedInputShape, CoreMlModel, coreml_model_path, coreml_model_path_f16,
+    CachedInputShape, CoreMlModel, GpuPrecision, coreml_model_path, coreml_model_path_f16,
 };
 use crate::inference::{ExecutionMode, with_execution_mode};
 
@@ -67,6 +67,10 @@ pub struct EmbeddingModel {
     cached_fused_waveform_shape: CachedInputShape,
     #[cfg(feature = "native-coreml")]
     cached_fused_weights_shape: CachedInputShape,
+    #[cfg(feature = "native-coreml")]
+    cached_fbank_single_shape: CachedInputShape,
+    #[cfg(feature = "native-coreml")]
+    cached_fbank_batch_shape: CachedInputShape,
     waveform_buffer: Array3<f32>,
     weights_buffer: Array2<f32>,
     primary_batch_waveform_buffer: Array3<f32>,
@@ -86,7 +90,7 @@ pub struct EmbeddingModel {
 impl EmbeddingModel {
     /// Load the WeSpeaker embedding model
     pub fn new(model_path: &str) -> Result<Self, ort::Error> {
-        Self::with_mode(model_path, ExecutionMode::ExactCpu)
+        Self::with_mode(model_path, ExecutionMode::Cpu)
     }
 
     /// Load the WeSpeaker embedding model with the requested execution mode
@@ -101,7 +105,7 @@ impl EmbeddingModel {
         let split_tail_batched_path = split_tail_model_path(model_path, CHUNK_SPEAKER_BATCH_SIZE);
         let split_primary_tail_batched_path = split_tail_model_path(model_path, PRIMARY_BATCH_SIZE);
         let use_split_backend = (mode == ExecutionMode::CoreMl
-            || mode == ExecutionMode::MiniCoreMl)
+            || mode == ExecutionMode::CoreMlLite)
             && split_fbank_path.exists()
             && split_tail_path.exists();
 
@@ -117,16 +121,14 @@ impl EmbeddingModel {
                 .then(|| {
                     Self::build_fbank_session(
                         split_fbank_path.to_str().unwrap(),
-                        ExecutionMode::ExactCpu,
+                        ExecutionMode::Cpu,
                     )
                 })
                 .transpose()?,
             split_fbank_batched_session: use_split_backend
                 .then_some(split_fbank_batched_path)
                 .filter(|path| path.exists())
-                .map(|path| {
-                    Self::build_fbank_session(path.to_str().unwrap(), ExecutionMode::ExactCpu)
-                })
+                .map(|path| Self::build_fbank_session(path.to_str().unwrap(), ExecutionMode::Cpu))
                 .transpose()?,
             split_tail_session: use_split_backend
                 .then(|| Self::build_session(split_tail_path.to_str().unwrap(), mode))
@@ -194,6 +196,13 @@ impl EmbeddingModel {
                 "weights",
                 &[PRIMARY_BATCH_SIZE, 589],
             ),
+            #[cfg(feature = "native-coreml")]
+            cached_fbank_single_shape: CachedInputShape::new("waveform", &[1, 1, 160_000]),
+            #[cfg(feature = "native-coreml")]
+            cached_fbank_batch_shape: CachedInputShape::new(
+                "waveform",
+                &[PRIMARY_BATCH_SIZE, 1, 160_000],
+            ),
             waveform_buffer: Array3::zeros((1, 1, 160_000)),
             weights_buffer: Array2::zeros((1, 589)),
             primary_batch_waveform_buffer: Array3::zeros((PRIMARY_BATCH_SIZE, 1, 160_000)),
@@ -224,7 +233,7 @@ impl EmbeddingModel {
             .with_independent_thread_pool()?
             .with_intra_threads(1)?
             .with_inter_threads(1)?
-            .with_memory_pattern(false)?;
+            .with_memory_pattern(true)?;
         let mut builder = with_execution_mode(builder, mode)?;
         builder.commit_from_file(model_path)
     }
@@ -237,7 +246,7 @@ impl EmbeddingModel {
             .with_independent_thread_pool()?
             .with_intra_threads(threads)?
             .with_inter_threads(1)?
-            .with_memory_pattern(false)?;
+            .with_memory_pattern(true)?;
         let mut builder = with_execution_mode(builder, mode)?;
         builder.commit_from_file(model_path)
     }
@@ -245,7 +254,7 @@ impl EmbeddingModel {
     fn single_execution_mode(mode: ExecutionMode) -> ExecutionMode {
         match mode {
             // keep single embeddings on the CPU path; native CoreML handles the tail
-            ExecutionMode::CoreMl | ExecutionMode::MiniCoreMl => ExecutionMode::ExactCpu,
+            ExecutionMode::CoreMl | ExecutionMode::CoreMlLite => ExecutionMode::Cpu,
             _ => mode,
         }
     }
@@ -292,22 +301,19 @@ impl EmbeddingModel {
         let split_primary_tail_batched_path =
             split_tail_model_path(&self.model_path, PRIMARY_BATCH_SIZE);
         let use_split_backend = (self.mode == ExecutionMode::CoreMl
-            || self.mode == ExecutionMode::MiniCoreMl)
+            || self.mode == ExecutionMode::CoreMlLite)
             && split_fbank_path.exists()
             && split_tail_path.exists();
         let split_fbank_batched_path = split_fbank_batched_model_path(&self.model_path);
         self.split_fbank_session = use_split_backend
             .then(|| {
-                Self::build_fbank_session(
-                    split_fbank_path.to_str().unwrap(),
-                    ExecutionMode::ExactCpu,
-                )
+                Self::build_fbank_session(split_fbank_path.to_str().unwrap(), ExecutionMode::Cpu)
             })
             .transpose()?;
         self.split_fbank_batched_session = use_split_backend
             .then_some(split_fbank_batched_path)
             .filter(|path| path.exists())
-            .map(|path| Self::build_fbank_session(path.to_str().unwrap(), ExecutionMode::ExactCpu))
+            .map(|path| Self::build_fbank_session(path.to_str().unwrap(), ExecutionMode::Cpu))
             .transpose()?;
         self.split_tail_session = use_split_backend
             .then(|| Self::build_session(split_tail_path.to_str().unwrap(), self.mode))
@@ -535,7 +541,7 @@ impl EmbeddingModel {
         if let Some(ref mut native) = self.native_fbank_session {
             let input_data = self.split_waveform_buffer.as_slice().unwrap();
             let (data, out_shape) = native
-                .predict(&[("waveform", &[1, 1, self.window_samples], input_data)])
+                .predict_cached(&[(&self.cached_fbank_single_shape, input_data)])
                 .map_err(|e| ort::Error::new(e.to_string()))?;
             let frames = out_shape[1];
             let features = out_shape[2];
@@ -590,11 +596,7 @@ impl EmbeddingModel {
                 if let Some(ref mut native) = self.native_fbank_batched_session {
                     let input_data = self.split_fbank_batch_buffer.as_slice().unwrap();
                     let (data, out_shape) = native
-                        .predict(&[(
-                            "waveform",
-                            &[PRIMARY_BATCH_SIZE, 1, self.window_samples],
-                            input_data,
-                        )])
+                        .predict_cached(&[(&self.cached_fbank_batch_shape, input_data)])
                         .map_err(|e| ort::Error::new(e.to_string()))?;
                     let frames = out_shape[1];
                     let features = out_shape[2];
@@ -651,6 +653,7 @@ impl EmbeddingModel {
         has
     }
 
+    #[cfg(feature = "coreml")]
     pub(crate) fn select_chunk_mask<'a>(
         &self,
         mask: &'a [f32],
@@ -666,11 +669,24 @@ impl EmbeddingModel {
     ) -> Result<Array2<f32>, ort::Error> {
         debug_assert!(inputs.len() <= PRIMARY_BATCH_SIZE);
 
+        let row_stride = FBANK_FRAMES * FBANK_FEATURES;
         for (batch_idx, input) in inputs.iter().enumerate() {
             debug_assert_eq!(input.fbank.ncols(), FBANK_FEATURES);
-            self.split_primary_feature_batch_buffer
-                .slice_mut(s![batch_idx, ..input.fbank.nrows(), ..input.fbank.ncols()])
-                .assign(input.fbank);
+
+            // reuse previous copy if consecutive items share the same fbank
+            if batch_idx > 0 && std::ptr::eq(input.fbank, inputs[batch_idx - 1].fbank) {
+                let buf = self
+                    .split_primary_feature_batch_buffer
+                    .as_slice_mut()
+                    .unwrap();
+                let prev_start = (batch_idx - 1) * row_stride;
+                buf.copy_within(prev_start..prev_start + row_stride, batch_idx * row_stride);
+            } else {
+                self.split_primary_feature_batch_buffer
+                    .slice_mut(s![batch_idx, ..input.fbank.nrows(), ..input.fbank.ncols()])
+                    .assign(input.fbank);
+            }
+
             Self::prepare_weights(
                 batch_idx,
                 input.weights,
@@ -812,21 +828,34 @@ impl EmbeddingModel {
         clean_masks: &Array2<f32>,
         num_samples: usize,
     ) -> Result<Array2<f32>, ort::Error> {
+        // copy fbank once to slot 0, then replicate via copy_within
+        self.split_feature_batch_buffer
+            .slice_mut(s![0, ..fbank.nrows(), ..fbank.ncols()])
+            .assign(fbank);
+        let row_stride = FBANK_FRAMES * FBANK_FEATURES;
+        let fbank_elems = fbank.nrows() * fbank.ncols();
+        let buf = self.split_feature_batch_buffer.as_slice_mut().unwrap();
+        for speaker_idx in 1..segmentations.ncols() {
+            buf.copy_within(0..fbank_elems, speaker_idx * row_stride);
+        }
+
         for speaker_idx in 0..segmentations.ncols() {
-            self.split_feature_batch_buffer
-                .slice_mut(s![speaker_idx, ..fbank.nrows(), ..fbank.ncols()])
-                .assign(fbank);
-            let mask = segmentations.column(speaker_idx).to_owned();
-            let clean_mask = clean_masks.column(speaker_idx).to_owned();
-            let used_mask = select_mask(
-                mask.as_slice().unwrap(),
-                Some(clean_mask.as_slice().unwrap()),
+            let mask_col = segmentations.column(speaker_idx);
+            let clean_col = clean_masks.column(speaker_idx);
+            let use_clean = should_use_clean_mask(
+                &clean_col,
+                mask_col.len(),
                 num_samples,
                 self.min_num_samples,
             );
+            let weights: Vec<f32> = if use_clean {
+                clean_col.iter().copied().collect()
+            } else {
+                mask_col.iter().copied().collect()
+            };
             Self::prepare_weights(
                 speaker_idx,
-                used_mask,
+                &weights,
                 self.mask_frames,
                 &mut self.split_weights_batch_buffer.view_mut(),
             );
@@ -999,9 +1028,15 @@ impl EmbeddingModel {
         mode: ExecutionMode,
         batch_size: usize,
     ) -> Option<CoreMlModel> {
-        let (resolve_path, compute_units): (fn(&str) -> std::path::PathBuf, _) = match mode {
-            ExecutionMode::CoreMl => (coreml_model_path, CoreMlModel::default_compute_units()),
-            ExecutionMode::MiniCoreMl => (coreml_model_path_f16, CoreMlModel::fp16_compute_units()),
+        let (resolve_path, compute_units) = match mode {
+            ExecutionMode::CoreMl => (
+                coreml_model_path as fn(&str) -> std::path::PathBuf,
+                CoreMlModel::default_compute_units(),
+            ),
+            ExecutionMode::CoreMlLite => (
+                coreml_model_path_f16 as fn(&str) -> std::path::PathBuf,
+                CoreMlModel::fp16_compute_units(),
+            ),
             _ => return None,
         };
         let tail_onnx = split_tail_model_path(model_path, batch_size);
@@ -1015,7 +1050,7 @@ impl EmbeddingModel {
             }
             return None;
         }
-        match CoreMlModel::load(&coreml_path, compute_units, "output") {
+        match CoreMlModel::load(&coreml_path, compute_units, "output", GpuPrecision::Low) {
             Ok(model) => Some(model),
             Err(e) => {
                 eprintln!("warning: failed to load native CoreML tail (batch={batch_size}): {e}");
@@ -1030,7 +1065,7 @@ impl EmbeddingModel {
         mode: ExecutionMode,
         batch_size: usize,
     ) -> Option<CoreMlModel> {
-        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::MiniCoreMl) {
+        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlLite) {
             return None;
         }
         let fbank_onnx = if batch_size == 1 {
@@ -1043,7 +1078,12 @@ impl EmbeddingModel {
         if !coreml_path.exists() {
             return None;
         }
-        match CoreMlModel::load(&coreml_path, CoreMlModel::default_compute_units(), "output") {
+        match CoreMlModel::load(
+            &coreml_path,
+            CoreMlModel::default_compute_units(),
+            "output",
+            GpuPrecision::Low,
+        ) {
             Ok(model) => Some(model),
             Err(e) => {
                 eprintln!("warning: failed to load native CoreML fbank (batch={batch_size}): {e}");
@@ -1072,6 +1112,7 @@ impl EmbeddingModel {
                     &coreml_path,
                     CoreMlModel::default_compute_units(),
                     "output",
+                    GpuPrecision::Low,
                 ) {
                     Ok(model) => Some(model),
                     Err(e) => {
@@ -1082,13 +1123,18 @@ impl EmbeddingModel {
                     }
                 }
             }
-            ExecutionMode::MiniCoreMl if std::env::var("SPEAKRS_FUSED_F16").is_ok() => {
+            ExecutionMode::CoreMlLite if std::env::var("SPEAKRS_FUSED_F16").is_ok() => {
                 // experimental: FP16 fused on ANE, trades fbank accuracy for fewer round-trips
                 let coreml_path = coreml_model_path_f16(onnx_str);
                 if !coreml_path.exists() {
                     return None;
                 }
-                match CoreMlModel::load(&coreml_path, CoreMlModel::fp16_compute_units(), "output") {
+                match CoreMlModel::load(
+                    &coreml_path,
+                    CoreMlModel::fp16_compute_units(),
+                    "output",
+                    GpuPrecision::Low,
+                ) {
                     Ok(model) => Some(model),
                     Err(e) => {
                         eprintln!(
@@ -1168,6 +1214,21 @@ fn select_mask<'a>(
     } else {
         mask
     }
+}
+
+/// Decide whether clean mask has enough weight, working directly on column views
+pub(crate) fn should_use_clean_mask(
+    clean_col: &ndarray::ArrayView1<f32>,
+    mask_len: usize,
+    num_samples: usize,
+    min_num_samples: usize,
+) -> bool {
+    if num_samples == 0 {
+        return false;
+    }
+    let min_mask_frames = (mask_len * min_num_samples).div_ceil(num_samples) as f32;
+    let clean_weight: f32 = clean_col.iter().copied().sum();
+    clean_weight > min_mask_frames
 }
 
 #[cfg(test)]
