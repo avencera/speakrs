@@ -160,17 +160,28 @@ just compare audio.wav
 
 ## Why Not pyannote-rs?
 
-[pyannote-rs](https://github.com/thewh1teagle/pyannote-rs) is another Rust diarization crate, but it implements a simplified pipeline with significant differences:
+[pyannote-rs](https://github.com/thewh1teagle/pyannote-rs) is another Rust diarization crate, but it implements a simplified pipeline rather than the full pyannote algorithm:
 
 | | speakrs | pyannote-rs |
 |---|---------|-------------|
-| Clustering | PLDA + VBx (Bayesian HMM) | Cosine similarity threshold |
-| Embedding model | WeSpeaker ResNet34 (same as pyannote) | CAM++ (different model) |
-| VAD | Powerset decode + hysteresis binarization | argmax-based, only emits on speech→silence transitions |
-| Speaker count | VBx EM estimation | Fixed threshold |
-| pyannote parity | Bit-exact on CPU | No — different algorithm, different models |
+| Segmentation | Powerset decode → 3-speaker activations | Raw argmax on logits (binary speech/non-speech) |
+| Aggregation | Hamming-windowed overlap-add | None (per-window only) |
+| Binarization | Hysteresis + min-duration filtering | None |
+| Embedding model | WeSpeaker ResNet34 (same as pyannote) | WeSpeaker CAM++ (only ONNX model they ship) |
+| Clustering | PLDA + VBx (Bayesian HMM) | Cosine similarity with fixed 0.5 threshold |
+| Speaker count | VBx EM estimation | Capped by max_speakers parameter |
+| pyannote parity | Bit-exact on CPU/CUDA | No — different algorithm, different embedding model |
 
-In practice, pyannote-rs finds 10 speakers on a 3-speaker file (simple clustering oversplits), and returns 0 segments on continuous speech without silence gaps (VAD bug). speakrs matches pyannote's speaker count and segment boundaries exactly.
+On VoxConverse dev set (33 files where pyannote-rs produces output, 186 min total, collar=0ms):
+
+| | DER | Missed | False Alarm | Confusion |
+|---|-----|--------|-------------|-----------|
+| speakrs CoreML | 11.5% | 3.8% | 3.6% | 4.1% |
+| pyannote-rs | 80.2% | 34.9% | 7.4% | 37.9% |
+
+pyannote-rs produces 0 segments on 183/216 VoxConverse files (segments only close on speech→silence transitions, so continuous speech with no silence gaps yields no output). The 33 files above are the subset where it produces 5+ segments.
+
+Note: pyannote-rs's README claims to use `wespeaker-voxceleb-resnet34-LM` but their [build instructions](https://github.com/thewh1teagle/pyannote-rs/blob/main/BUILDING.md) and [GitHub release](https://github.com/thewh1teagle/pyannote-rs/releases/tag/v0.1.0) only ship `wespeaker_en_voxceleb_CAM++.onnx`. No ONNX export of ResNet34-LM exists — the [HuggingFace repo](https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM) only contains `pytorch_model.bin`. Our benchmark uses pyannote-rs as documented in their setup instructions.
 
 ## [Contributing](CONTRIBUTING.md)
 
