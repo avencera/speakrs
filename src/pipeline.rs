@@ -238,13 +238,31 @@ pub fn diarize(
         clusters
     } else {
         let ahc_labels = cluster_ahc(&train_embeddings.view(), AhcConfig::default());
+        tracing::debug!(
+            rows = train_embeddings.nrows(),
+            cols = train_embeddings.ncols(),
+            "train_embeddings shape"
+        );
+        {
+            let unique: std::collections::BTreeSet<_> = ahc_labels.iter().copied().collect();
+            tracing::debug!(num_clusters = unique.len(), "AHC pre-clustering");
+            for &k in &unique {
+                let count = ahc_labels.iter().filter(|&&v| v == k).count();
+                tracing::debug!(cluster = k, count, "AHC cluster size");
+            }
+        }
+
         let plda_features = plda.transform(&train_embeddings.view(), 128);
+        let phi = plda.phi();
         let (gamma, pi) = cluster_vbx(
             &ahc_labels,
             &plda_features.view(),
-            &plda.phi().slice(s![..128]),
+            &phi.slice(s![..128]),
             &VbxConfig::default(),
         );
+
+        tracing::debug!(?pi, "VBx speaker priors");
+
         let mut kept_speakers: Vec<usize> = pi
             .iter()
             .enumerate()
@@ -259,9 +277,23 @@ pub fn diarize(
                 .unwrap();
             kept_speakers.push(best);
         }
+
+        tracing::debug!(?kept_speakers, "VBx kept speakers");
+
         let centroids = weighted_centroids(&train_embeddings, &gamma, &kept_speakers);
+        for i in 0..centroids.nrows() {
+            let norm: f32 = centroids.row(i).dot(&centroids.row(i)).sqrt();
+            tracing::debug!(cluster = i, norm, "centroid");
+        }
+
         let mut clusters = assign_embeddings(&segmentations, &embeddings, &centroids);
         mark_inactive_speakers(&segmentations, &mut clusters);
+        tracing::debug!(
+            rows = clusters.nrows(),
+            cols = clusters.ncols(),
+            "hard_clusters shape"
+        );
+
         clusters
     };
 
@@ -699,6 +731,18 @@ fn assign_embeddings(
         }
 
         let assignments = best_assignment(&scores, &active_local, num_clusters);
+        if tracing::enabled!(tracing::Level::TRACE) {
+            tracing::trace!(
+                chunk = chunk_idx,
+                ?active_local,
+                ?assignments,
+                "chunk assignment"
+            );
+            for speaker_idx in 0..num_speakers {
+                let row: Vec<f32> = scores.row(speaker_idx).to_vec();
+                tracing::trace!(chunk = chunk_idx, speaker = speaker_idx, ?row, "scores");
+            }
+        }
         for (speaker_idx, cluster_idx) in assignments {
             labels[[chunk_idx, speaker_idx]] = cluster_idx as i32;
         }
