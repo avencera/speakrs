@@ -1,14 +1,14 @@
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 
-use crate::utils::logsumexp;
+use crate::utils::logsumexp_f64;
 
 #[derive(Debug, Clone, Copy)]
 pub struct VbxConfig {
-    pub fa: f32,
-    pub fb: f32,
+    pub fa: f64,
+    pub fb: f64,
     pub max_iters: usize,
     pub epsilon: f64,
-    pub init_smoothing: f32,
+    pub init_smoothing: f64,
 }
 
 impl Default for VbxConfig {
@@ -26,7 +26,8 @@ impl Default for VbxConfig {
 /// VBx clustering matching pyannote's implementation exactly
 ///
 /// Takes PLDA-transformed features and per-dimension eigenvalues (Phi),
-/// plus AHC-initialized gamma responsibilities
+/// plus AHC-initialized gamma responsibilities. All computation is done
+/// in f64 to match pyannote's numpy default precision
 pub fn vbx(
     features: &ArrayView2<f32>,
     phi: &ArrayView1<f32>,
@@ -39,44 +40,48 @@ pub fn vbx(
     let fb = config.fb;
     let fa_over_fb = fa / fb;
 
-    let mut gamma = gamma_init.clone();
-    let mut pi = Array1::from_elem(n_speakers, 1.0 / n_speakers as f32);
+    // promote all working arrays to f64 to match pyannote precision
+    let features_f64 = features.mapv(|v| v as f64);
+    let phi_f64: Array1<f64> = phi.mapv(|v| v as f64);
+
+    let mut gamma = gamma_init.mapv(|v| v as f64);
+    let mut pi = Array1::from_elem(n_speakers, 1.0 / n_speakers as f64);
 
     // precompute per-frame constant: G = -0.5 * (sum(X^2, axis=1) + D*ln(2*pi))
-    let g: Array1<f32> = features
+    let g: Array1<f64> = features_f64
         .rows()
         .into_iter()
-        .map(|row| -0.5 * (row.dot(&row) + dim as f32 * (2.0 * std::f32::consts::PI).ln()))
+        .map(|row| -0.5 * (row.dot(&row) + dim as f64 * (2.0 * std::f64::consts::PI).ln()))
         .collect();
 
     // V = sqrt(Phi)
-    let v = phi.mapv(f32::sqrt);
+    let v = phi_f64.mapv(f64::sqrt);
 
     // rho = X * V (element-wise broadcast)
-    let mut rho = features.to_owned();
+    let mut rho = features_f64;
     for mut row in rho.rows_mut() {
         row *= &v;
     }
 
     let mut prev_elbo = f64::NEG_INFINITY;
-    let mut scratch = Array1::<f32>::zeros(n_speakers);
+    let mut scratch = Array1::<f64>::zeros(n_speakers);
 
     for iter in 0..config.max_iters {
         // M-step: compute speaker models
         // invL[k,d] = 1.0 / (1 + Fa/Fb * N_k * Phi[d])
         // alpha[k,d] = Fa/Fb * invL[k,d] * sum_t(gamma[t,k] * rho[t,d])
-        let n_k: Array1<f32> = gamma.sum_axis(Axis(0));
+        let n_k: Array1<f64> = gamma.sum_axis(Axis(0));
 
         let mut inv_l = Array2::zeros((n_speakers, dim));
         let mut alpha = Array2::zeros((n_speakers, dim));
 
         for k in 0..n_speakers {
             for d in 0..dim {
-                inv_l[[k, d]] = 1.0 / (1.0 + fa_over_fb * n_k[k] * phi[d]);
+                inv_l[[k, d]] = 1.0 / (1.0 + fa_over_fb * n_k[k] * phi_f64[d]);
             }
 
             // gamma.T @ rho for speaker k
-            let mut f_k = Array1::zeros(dim);
+            let mut f_k = Array1::<f64>::zeros(dim);
             for t in 0..n_samples {
                 f_k.scaled_add(gamma[[t, k]], &rho.row(t));
             }
@@ -88,27 +93,26 @@ pub fn vbx(
 
         // E-step
         // log_p_[t,k] = Fa * (rho[t] . alpha[k] - 0.5 * (invL[k] + alpha[k]^2) . Phi + G[t])
-        let mut log_p = Array2::zeros((n_samples, n_speakers));
+        let mut log_p = Array2::<f64>::zeros((n_samples, n_speakers));
         for t in 0..n_samples {
             for k in 0..n_speakers {
-                let rho_dot_alpha: f32 = rho.row(t).dot(&alpha.row(k));
-                let penalty: f32 = (0..dim)
-                    .map(|d| (inv_l[[k, d]] + alpha[[k, d]] * alpha[[k, d]]) * phi[d])
+                let rho_dot_alpha: f64 = rho.row(t).dot(&alpha.row(k));
+                let penalty: f64 = (0..dim)
+                    .map(|d| (inv_l[[k, d]] + alpha[[k, d]] * alpha[[k, d]]) * phi_f64[d])
                     .sum();
                 log_p[[t, k]] = fa * (rho_dot_alpha - 0.5 * penalty + g[t]);
             }
         }
 
         // GMM-style update with pi priors
-        let eps = 1e-8f32;
-        let lpi: Array1<f32> = pi.mapv(|p| (p + eps).ln());
+        let lpi: Array1<f64> = pi.mapv(|p| (p + 1e-8).ln());
 
         // log_p_x[t] = logsumexp(log_p[t] + lpi)
-        let mut log_p_x = Array1::zeros(n_samples);
+        let mut log_p_x = Array1::<f64>::zeros(n_samples);
         for t in 0..n_samples {
             scratch.assign(&log_p.row(t));
             scratch += &lpi;
-            log_p_x[t] = logsumexp(&scratch.view());
+            log_p_x[t] = logsumexp_f64(&scratch.view());
         }
 
         // gamma[t,k] = exp(log_p[t,k] + lpi[k] - log_p_x[t])
@@ -124,13 +128,13 @@ pub fn vbx(
         pi /= pi_sum;
 
         // ELBO = sum(log_p_x) + Fb * 0.5 * sum(ln(invL) - invL - alpha^2 + 1)
-        let log_px_sum: f64 = log_p_x.iter().map(|&x| x as f64).sum();
+        let log_px_sum: f64 = log_p_x.sum();
         let reg: f64 = inv_l
             .iter()
             .zip(alpha.iter())
-            .map(|(&il, &a)| (il.ln() - il - a * a + 1.0) as f64)
+            .map(|(&il, &a)| il.ln() - il - a * a + 1.0)
             .sum();
-        let elbo = log_px_sum + fb as f64 * 0.5 * reg;
+        let elbo = log_px_sum + fb * 0.5 * reg;
 
         if iter > 0 && elbo - prev_elbo < config.epsilon {
             break;
@@ -138,7 +142,10 @@ pub fn vbx(
         prev_elbo = elbo;
     }
 
-    (gamma, pi)
+    // convert back to f32 for downstream consumption
+    let gamma_f32 = gamma.mapv(|v| v as f32);
+    let pi_f32 = pi.mapv(|v| v as f32);
+    (gamma_f32, pi_f32)
 }
 
 pub fn cluster_vbx(
@@ -151,7 +158,7 @@ pub fn cluster_vbx(
     vbx(features, phi, &gamma_init, config)
 }
 
-fn build_gamma_init(labels: &[usize], smoothing: f32) -> Array2<f32> {
+fn build_gamma_init(labels: &[usize], smoothing: f64) -> Array2<f32> {
     let num_samples = labels.len();
     let num_speakers = labels.iter().copied().max().unwrap_or(0) + 1;
     let mut gamma = Array2::<f32>::zeros((num_samples, num_speakers));
@@ -164,8 +171,9 @@ fn build_gamma_init(labels: &[usize], smoothing: f32) -> Array2<f32> {
         return gamma;
     }
 
+    let smoothing_f32 = smoothing as f32;
     for mut row in gamma.rows_mut() {
-        row *= smoothing;
+        row *= smoothing_f32;
         let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         row.mapv_inplace(|v| (v - max).exp());
         let denom = row.sum();
