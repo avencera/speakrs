@@ -40,9 +40,6 @@ Audio (16kHz f32)
 | `coreml` | Native CoreML | 1s | FP32 | Accuracy (100% pyannote coverage) |
 | `mini-coreml` | Native CoreML | 2s | FP16+ANE | Speed (63x realtime) |
 | `cuda` | ORT CUDA | 1s | FP32 | NVIDIA GPU |
-| `pyannote-cpu` | Python sidecar | 1s | FP32 | Upstream comparison |
-| `pyannote-mps` | Python sidecar | 1s | varies | Upstream comparison (Apple GPU) |
-| `pyannote-cuda` | Python sidecar | 1s | varies | Upstream comparison (NVIDIA) |
 
 `mini-coreml` trades a wider step (2s vs 1s) and FP16 ANE inference for ~2x speed. On most clips it matches `coreml` exactly, but on some inputs the coarser step drops a few segments (see 10.5-min benchmark below).
 
