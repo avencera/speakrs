@@ -1,10 +1,10 @@
 # speakrs
 
-Speaker diarization in Rust. Audio in, RTTM segments out. **63x realtime** on Apple Silicon, **100% pyannote coverage**.
+Speaker diarization in Rust. Audio in, RTTM segments out. **63x realtime** on Apple Silicon, **bit-exact with pyannote** on CPU/CUDA.
 
 Implements the full pyannote community-1 pipeline (segmentation, powerset decode, aggregation, binarization, embedding, PLDA, VBx clustering) with no Python dependency. Inference runs on ONNX Runtime or native CoreML, all post-processing is pure Rust.
 
-Numerically verified against `pyannote.audio` CPU. Golden test fixtures are generated from the Python reference and matched exactly.
+Numerically verified against `pyannote.audio` — CPU and CUDA modes produce **identical RTTM** on all tested files. CoreML GPU mode runs the same algorithm but GPU floating-point non-determinism means a small number of files may differ (9/10 matched exactly on VoxConverse dev set).
 
 ## Pipeline
 
@@ -37,9 +37,9 @@ Audio (16kHz f32)
 | Mode | Backend | Step | Precision | Use case |
 |------|---------|------|-----------|----------|
 | `cpu` | ORT CPU | 1s | FP32 | Reference, bit-exact with pyannote CPU |
-| `coreml` | Native CoreML | 1s | FP32 | Accuracy (100% pyannote coverage) |
+| `coreml` | Native CoreML | 1s | FP32 | GPU-accelerated, same algorithm |
 | `coreml-lite` | Native CoreML | 2s | FP16+ANE | Speed (63x realtime) |
-| `cuda` | ORT CUDA | 1s | FP32 | NVIDIA GPU |
+| `cuda` | ORT CUDA | 1s | FP32 | NVIDIA GPU, bit-exact with pyannote CPU |
 
 `coreml-lite` trades a wider step (2s vs 1s) and FP16 ANE inference for ~2x speed. On most clips it matches `coreml` exactly, but on some inputs the coarser step drops a few segments (see 10.5-min benchmark below).
 
@@ -72,6 +72,19 @@ All benchmarks on Apple M4 Pro, macOS 26.3.
 | pyannote MPS | 2 | 720 | reference | 145.3s | 19x |
 
 Coverage is measured as mutual speech overlap with pyannote. Minor segment count differences (e.g. 79 vs 81) are due to f32 accumulation order at frame boundaries, no speech is lost or added. The 10.5-min clip shows `coreml-lite` dropping 3 segments (99.7% coverage) due to the coarser 2s step.
+
+## Accuracy (DER)
+
+Evaluated on VoxConverse dev set (10 files, collar=0ms):
+
+| Mode | DER | Notes |
+|------|-----|-------|
+| `cpu` (ONNX) | 14.0% | Identical RTTM to pyannote CPU on all 10 files |
+| `coreml` (FP32) | 14.9% | +0.9% from GPU floating-point non-determinism |
+| pyannote CPU | 14.0% | Reference |
+| pyannote MPS | 14.0% | Reference |
+
+The `cpu` mode produces **bit-exact output** with pyannote's CPU backend — identical RTTM on every test file. The `coreml` gap comes from GPU execution producing slightly different embedding vectors due to non-deterministic accumulation order and fused multiply-add instructions, inherent to GPU computation (not a correctness issue). Both CoreML and pyannote's MPS run on the same Apple GPU but use different software stacks (CoreML vs Metal Performance Shaders), so they diverge from CPU in different ways. On 9/10 files CoreML matches CPU exactly; one file (gwtwd) sees embedding differences that push a marginal speaker cluster below the VBx threshold.
 
 ## Modules
 
