@@ -118,6 +118,9 @@ enum BenchmarkCmd {
         max_files: u32,
         #[arg(long, default_value_t = 30)]
         max_minutes: u32,
+        /// Description of what this benchmark run is testing
+        #[arg(long, short = 'd')]
+        description: Option<String>,
     },
 }
 
@@ -179,7 +182,8 @@ fn main() -> Result<()> {
                 dataset,
                 max_files,
                 max_minutes,
-            } => commands::benchmark::der(&dataset, max_files, max_minutes),
+                description,
+            } => commands::benchmark::der(&dataset, max_files, max_minutes, description.as_deref()),
         },
         Command::Gpu { cmd } => match cmd {
             GpuCmd::Setup => commands::gpu::setup(),

@@ -42,5 +42,5 @@ benchmark source python_device="auto" runs="1" warmups="1" rust_mode="cpu":
 benchmark-compare source runs="1" warmups="1":
     cargo xtask benchmark compare {{source}} --runs {{runs}} --warmups {{warmups}}
 
-benchmark-der max_files="10" max_minutes="30":
-    cargo xtask benchmark der --max-files {{max_files}} --max-minutes {{max_minutes}}
+benchmark-der max_files="10" max_minutes="30" *args="":
+    cargo xtask benchmark der --max-files {{max_files}} --max-minutes {{max_minutes}} {{args}}
