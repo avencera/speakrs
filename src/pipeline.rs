@@ -665,6 +665,7 @@ fn assign_embeddings(
     let mut labels = Array2::<i32>::from_elem((num_chunks, num_speakers), -2);
 
     for chunk_idx in 0..num_chunks {
+        // compute similarity scores for all active speakers against all centroids
         let mut active_local = Vec::new();
         let mut scores = Array2::<f32>::from_elem((num_speakers, num_clusters), f32::NEG_INFINITY);
         for speaker_idx in 0..num_speakers {
@@ -683,6 +684,18 @@ fn assign_embeddings(
                 scores[[speaker_idx, cluster_idx]] =
                     1.0 + cosine_similarity(&embedding, &centroids.row(cluster_idx));
             }
+        }
+
+        // mask inactive/invalid speakers to min - 1 instead of NEG_INFINITY,
+        // matching pyannote's constrained_argmax masking behavior
+        let finite_min = scores
+            .iter()
+            .copied()
+            .filter(|v| v.is_finite())
+            .fold(f32::INFINITY, f32::min);
+        if finite_min.is_finite() {
+            let mask_value = finite_min - 1.0;
+            scores.mapv_inplace(|v| if v.is_finite() { v } else { mask_value });
         }
 
         let assignments = best_assignment(&scores, &active_local, num_clusters);

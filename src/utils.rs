@@ -35,6 +35,16 @@ pub fn logsumexp(a: &ArrayView1<f32>) -> f32 {
     max + sum_exp.ln()
 }
 
+pub fn logsumexp_f64(a: &ArrayView1<f64>) -> f64 {
+    let max = a.fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
+    if max.is_infinite() {
+        return max;
+    }
+
+    let sum_exp = a.mapv(|x| (x - max).exp()).sum();
+    max + sum_exp.ln()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
