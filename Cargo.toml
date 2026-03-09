@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
+default = ["online"]
+online = ["dep:hf-hub", "hf-hub/ureq", "hf-hub/native-tls"]
 coreml = ["ort/coreml"]
 cuda = ["ort/cuda"]
 directml = ["ort/directml"]
@@ -11,6 +13,7 @@ tensorrt = ["ort/tensorrt"]
 native-coreml = ["dep:objc2", "dep:objc2-core-ml", "dep:objc2-foundation", "dep:block2"]
 
 [dependencies]
+hf-hub = { version = "0.5", optional = true, default-features = false }
 ndarray = "0.17.2"
 ndarray-linalg = { version = "0.18.1", features = ["openblas-static"] }
 ndarray-npy = "0.10.0"
