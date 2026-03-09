@@ -532,7 +532,7 @@ impl EmbeddingModel {
         }
 
         #[cfg(feature = "native-coreml")]
-        if let Some(ref native) = self.native_fbank_session {
+        if let Some(ref mut native) = self.native_fbank_session {
             let input_data = self.split_waveform_buffer.as_slice().unwrap();
             let (data, out_shape) = native
                 .predict(&[("waveform", &[1, 1, self.window_samples], input_data)])
@@ -587,7 +587,7 @@ impl EmbeddingModel {
                 }
 
                 #[cfg(feature = "native-coreml")]
-                if let Some(ref native) = self.native_fbank_batched_session {
+                if let Some(ref mut native) = self.native_fbank_batched_session {
                     let input_data = self.split_fbank_batch_buffer.as_slice().unwrap();
                     let (data, out_shape) = native
                         .predict(&[(
@@ -686,7 +686,7 @@ impl EmbeddingModel {
         }
 
         #[cfg(feature = "native-coreml")]
-        if let Some(ref native) = self.native_tail_primary_batched_session {
+        if let Some(ref mut native) = self.native_tail_primary_batched_session {
             let fbank_data = self.split_primary_feature_batch_buffer.as_slice().unwrap();
             let weights_data = self.split_primary_weights_batch_buffer.as_slice().unwrap();
             let (data, _) = native
@@ -723,7 +723,7 @@ impl EmbeddingModel {
         &mut self,
         inputs: &[FusedEmbeddingInput<'_>],
     ) -> Result<Array2<f32>, ort::Error> {
-        let native = self.native_fused_primary_batched_session.as_ref().unwrap();
+        let native = self.native_fused_primary_batched_session.as_mut().unwrap();
         debug_assert!(inputs.len() <= PRIMARY_BATCH_SIZE);
 
         for (batch_idx, input) in inputs.iter().enumerate() {
@@ -778,7 +778,7 @@ impl EmbeddingModel {
         );
 
         #[cfg(feature = "native-coreml")]
-        if let Some(ref native) = self.native_tail_session {
+        if let Some(ref mut native) = self.native_tail_session {
             let feature_slice = self.split_feature_batch_buffer.slice(s![0..1, .., ..]);
             let weight_slice = self.split_weights_batch_buffer.slice(s![0..1, ..]);
             let fbank_data = feature_slice.as_slice().unwrap();
@@ -833,7 +833,7 @@ impl EmbeddingModel {
         }
 
         #[cfg(feature = "native-coreml")]
-        if let Some(ref native) = self.native_tail_batched_session {
+        if let Some(ref mut native) = self.native_tail_batched_session {
             let fbank_data = self.split_feature_batch_buffer.as_slice().unwrap();
             let weights_data = self.split_weights_batch_buffer.as_slice().unwrap();
             let batch = CHUNK_SPEAKER_BATCH_SIZE;
@@ -913,7 +913,7 @@ impl EmbeddingModel {
         audio: &[f32],
         weights: &[f32],
     ) -> Result<Array1<f32>, ort::Error> {
-        let native = self.native_fused_session.as_ref().unwrap();
+        let native = self.native_fused_session.as_mut().unwrap();
         let copy_len = audio.len().min(self.window_samples);
         self.split_waveform_buffer
             .slice_mut(s![0, 0, ..copy_len])
@@ -949,7 +949,7 @@ impl EmbeddingModel {
         segmentations: &ArrayView2<'_, f32>,
         clean_masks: &Array2<f32>,
     ) -> Result<Array2<f32>, ort::Error> {
-        let native = self.native_fused_batched_session.as_ref().unwrap();
+        let native = self.native_fused_batched_session.as_mut().unwrap();
         let batch = CHUNK_SPEAKER_BATCH_SIZE;
 
         let copy_len = audio.len().min(self.window_samples);
@@ -1058,22 +1058,47 @@ impl EmbeddingModel {
         mode: ExecutionMode,
         batch_size: usize,
     ) -> Option<CoreMlModel> {
-        // fused includes fbank (DFT matmul) which needs FP32 — only use for CoreMl mode
-        // MiniCoreMl benefits more from FP16 ANE tail, so it uses separate fbank+tail
-        if mode != ExecutionMode::CoreMl {
-            return None;
-        }
         let fused_onnx = fused_model_path(model_path, batch_size);
-        let coreml_path = coreml_model_path(fused_onnx.to_str().unwrap());
-        if !coreml_path.exists() {
-            return None;
-        }
-        match CoreMlModel::load(&coreml_path, CoreMlModel::default_compute_units(), "output") {
-            Ok(model) => Some(model),
-            Err(e) => {
-                eprintln!("warning: failed to load native CoreML fused (batch={batch_size}): {e}");
-                None
+        let onnx_str = fused_onnx.to_str().unwrap();
+
+        match mode {
+            ExecutionMode::CoreMl => {
+                // FP32 fused: fbank DFT matmul is accurate on CPU+GPU
+                let coreml_path = coreml_model_path(onnx_str);
+                if !coreml_path.exists() {
+                    return None;
+                }
+                match CoreMlModel::load(
+                    &coreml_path,
+                    CoreMlModel::default_compute_units(),
+                    "output",
+                ) {
+                    Ok(model) => Some(model),
+                    Err(e) => {
+                        eprintln!(
+                            "warning: failed to load native CoreML fused (batch={batch_size}): {e}"
+                        );
+                        None
+                    }
+                }
             }
+            ExecutionMode::MiniCoreMl if std::env::var("SPEAKRS_FUSED_F16").is_ok() => {
+                // experimental: FP16 fused on ANE, trades fbank accuracy for fewer round-trips
+                let coreml_path = coreml_model_path_f16(onnx_str);
+                if !coreml_path.exists() {
+                    return None;
+                }
+                match CoreMlModel::load(&coreml_path, CoreMlModel::fp16_compute_units(), "output") {
+                    Ok(model) => Some(model),
+                    Err(e) => {
+                        eprintln!(
+                            "warning: failed to load native CoreML fused-f16 (batch={batch_size}): {e}"
+                        );
+                        None
+                    }
+                }
+            }
+            _ => None,
         }
     }
 }

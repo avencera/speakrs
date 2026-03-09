@@ -74,6 +74,9 @@ impl CachedInputShape {
 pub(crate) struct CoreMlModel {
     model: Retained<MLModel>,
     output_name: String,
+    output_key: Retained<NSString>,
+    noop_deallocator: RcBlock<dyn Fn(NonNull<c_void>)>,
+    input_dict: Retained<NSMutableDictionary<NSString, AnyObject>>,
 }
 
 impl CoreMlModel {
@@ -95,6 +98,9 @@ impl CoreMlModel {
 
         Ok(Self {
             model,
+            output_key: NSString::from_str(output_name),
+            noop_deallocator: RcBlock::new(|_ptr: NonNull<c_void>| {}),
+            input_dict: NSMutableDictionary::new(),
             output_name: output_name.to_owned(),
         })
     }
@@ -103,26 +109,26 @@ impl CoreMlModel {
     ///
     /// Each input is (name, shape, flat_data). The data slice must outlive this call.
     pub fn predict(
-        &self,
+        &mut self,
         inputs: &[(&str, &[usize], &[f32])],
     ) -> Result<(Vec<f32>, Vec<usize>), CoreMlError> {
-        let dict: Retained<NSMutableDictionary<NSString, AnyObject>> = NSMutableDictionary::new();
+        self.input_dict.removeAllObjects();
 
         for &(name, shape, data) in inputs {
-            let multi_array = create_multi_array(data, shape)?;
+            let multi_array =
+                create_multi_array_with_deallocator(data, shape, &self.noop_deallocator)?;
             let feature_value = unsafe { MLFeatureValue::featureValueWithMultiArray(&multi_array) };
             let key = NSString::from_str(name);
             let key_copy: &ProtocolObject<dyn NSCopying> = ProtocolObject::from_ref(&*key);
-            // SAFETY: MLFeatureValue is an NSObject subclass, valid as AnyObject
             let value_ref: &AnyObject =
                 unsafe { &*((&*feature_value) as *const MLFeatureValue as *const AnyObject) };
-            unsafe { dict.setObject_forKey(value_ref, key_copy) };
+            unsafe { self.input_dict.setObject_forKey(value_ref, key_copy) };
         }
 
         let provider = unsafe {
             MLDictionaryFeatureProvider::initWithDictionary_error(
                 MLDictionaryFeatureProvider::alloc(),
-                &dict,
+                &self.input_dict,
             )
         }
         .map_err(|e| CoreMlError::PredictionFailed(format!("feature provider: {e}")))?;
@@ -132,8 +138,7 @@ impl CoreMlModel {
         let output = unsafe { self.model.predictionFromFeatures_error(input_ref) }
             .map_err(|e| CoreMlError::PredictionFailed(format!("{e}")))?;
 
-        let output_key = NSString::from_str(&self.output_name);
-        let output_value = unsafe { output.featureValueForName(&output_key) }
+        let output_value = unsafe { output.featureValueForName(&self.output_key) }
             .ok_or_else(|| CoreMlError::OutputNotFound(self.output_name.clone()))?;
         let output_array = unsafe { output_value.multiArrayValue() }
             .ok_or_else(|| CoreMlError::OutputNotFound(self.output_name.clone()))?;
@@ -143,25 +148,26 @@ impl CoreMlModel {
 
     /// Run prediction with pre-cached shape/strides objects (avoids per-call NSNumber allocation)
     pub fn predict_cached(
-        &self,
+        &mut self,
         inputs: &[(&CachedInputShape, &[f32])],
     ) -> Result<(Vec<f32>, Vec<usize>), CoreMlError> {
-        let dict: Retained<NSMutableDictionary<NSString, AnyObject>> = NSMutableDictionary::new();
+        self.input_dict.removeAllObjects();
 
         for &(cached, data) in inputs {
             debug_assert_eq!(data.len(), cached.total_elements);
-            let multi_array = create_multi_array_cached(data, cached)?;
+            let multi_array =
+                create_multi_array_cached_with_deallocator(data, cached, &self.noop_deallocator)?;
             let feature_value = unsafe { MLFeatureValue::featureValueWithMultiArray(&multi_array) };
             let key_copy: &ProtocolObject<dyn NSCopying> = ProtocolObject::from_ref(&*cached.name);
             let value_ref: &AnyObject =
                 unsafe { &*((&*feature_value) as *const MLFeatureValue as *const AnyObject) };
-            unsafe { dict.setObject_forKey(value_ref, key_copy) };
+            unsafe { self.input_dict.setObject_forKey(value_ref, key_copy) };
         }
 
         let provider = unsafe {
             MLDictionaryFeatureProvider::initWithDictionary_error(
                 MLDictionaryFeatureProvider::alloc(),
-                &dict,
+                &self.input_dict,
             )
         }
         .map_err(|e| CoreMlError::PredictionFailed(format!("feature provider: {e}")))?;
@@ -171,8 +177,7 @@ impl CoreMlModel {
         let output = unsafe { self.model.predictionFromFeatures_error(input_ref) }
             .map_err(|e| CoreMlError::PredictionFailed(format!("{e}")))?;
 
-        let output_key = NSString::from_str(&self.output_name);
-        let output_value = unsafe { output.featureValueForName(&output_key) }
+        let output_value = unsafe { output.featureValueForName(&self.output_key) }
             .ok_or_else(|| CoreMlError::OutputNotFound(self.output_name.clone()))?;
         let output_array = unsafe { output_value.multiArrayValue() }
             .ok_or_else(|| CoreMlError::OutputNotFound(self.output_name.clone()))?;
@@ -196,10 +201,11 @@ impl CoreMlModel {
     }
 }
 
-/// Create an MLMultiArray wrapping a data pointer (zero-copy for the input side)
-fn create_multi_array(
+/// Create an MLMultiArray wrapping a data pointer with a shared no-op deallocator
+fn create_multi_array_with_deallocator(
     data: &[f32],
     shape: &[usize],
+    deallocator: &RcBlock<dyn Fn(NonNull<c_void>)>,
 ) -> Result<Retained<MLMultiArray>, CoreMlError> {
     let shape_nums: Vec<Retained<NSNumber>> = shape
         .iter()
@@ -207,7 +213,6 @@ fn create_multi_array(
         .collect();
     let ns_shape = NSArray::from_retained_slice(&shape_nums);
 
-    // row-major strides
     let mut strides = vec![1usize; shape.len()];
     for i in (0..shape.len().saturating_sub(1)).rev() {
         strides[i] = strides[i + 1] * shape[i + 1];
@@ -221,9 +226,6 @@ fn create_multi_array(
     let ptr = NonNull::new(data.as_ptr() as *mut c_void)
         .ok_or_else(|| CoreMlError::ArrayCreationFailed("null data pointer".into()))?;
 
-    // no-op deallocator — Rust owns the buffer and it outlives this synchronous call
-    let deallocator = RcBlock::new(|_ptr: NonNull<c_void>| {});
-
     #[allow(deprecated)]
     unsafe {
         MLMultiArray::initWithDataPointer_shape_dataType_strides_deallocator_error(
@@ -232,21 +234,20 @@ fn create_multi_array(
             &ns_shape,
             MLMultiArrayDataType::Float32,
             &ns_strides,
-            Some(&deallocator),
+            Some(deallocator),
         )
     }
     .map_err(|e| CoreMlError::ArrayCreationFailed(format!("{e}")))
 }
 
-/// Create an MLMultiArray using pre-cached shape and strides (zero-copy input)
-fn create_multi_array_cached(
+/// Create an MLMultiArray using pre-cached shape/strides and a shared deallocator
+fn create_multi_array_cached_with_deallocator(
     data: &[f32],
     cached: &CachedInputShape,
+    deallocator: &RcBlock<dyn Fn(NonNull<c_void>)>,
 ) -> Result<Retained<MLMultiArray>, CoreMlError> {
     let ptr = NonNull::new(data.as_ptr() as *mut c_void)
         .ok_or_else(|| CoreMlError::ArrayCreationFailed("null data pointer".into()))?;
-
-    let deallocator = RcBlock::new(|_ptr: NonNull<c_void>| {});
 
     #[allow(deprecated)]
     unsafe {
@@ -256,7 +257,7 @@ fn create_multi_array_cached(
             &cached.ns_shape,
             MLMultiArrayDataType::Float32,
             &cached.ns_strides,
-            Some(&deallocator),
+            Some(deallocator),
         )
     }
     .map_err(|e| CoreMlError::ArrayCreationFailed(format!("{e}")))
