@@ -158,6 +158,20 @@ cargo run --release --bin diarize -- --mode cpu audio.wav
 just compare audio.wav
 ```
 
+## Why Not pyannote-rs?
+
+[pyannote-rs](https://github.com/thewh1teagle/pyannote-rs) is another Rust diarization crate, but it implements a simplified pipeline with significant differences:
+
+| | speakrs | pyannote-rs |
+|---|---------|-------------|
+| Clustering | PLDA + VBx (Bayesian HMM) | Cosine similarity threshold |
+| Embedding model | WeSpeaker ResNet34 (same as pyannote) | CAM++ (different model) |
+| VAD | Powerset decode + hysteresis binarization | argmax-based, only emits on speech→silence transitions |
+| Speaker count | VBx EM estimation | Fixed threshold |
+| pyannote parity | Bit-exact on CPU | No — different algorithm, different models |
+
+In practice, pyannote-rs finds 10 speakers on a 3-speaker file (simple clustering oversplits), and returns 0 segments on continuous speech without silence gaps (VAD bug). speakrs matches pyannote's speaker count and segment boundaries exactly.
+
 ## [Contributing](CONTRIBUTING.md)
 
 ## References
