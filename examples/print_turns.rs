@@ -1,4 +1,4 @@
-#[path = "support/mod.rs"]
+#[path = "support.rs"]
 mod support;
 
 use std::path::Path;
