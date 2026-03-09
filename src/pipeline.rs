@@ -25,6 +25,7 @@ fn profiling_enabled() -> bool {
 
 pub const SEGMENTATION_WINDOW_SECONDS: f64 = 10.0;
 pub const SEGMENTATION_STEP_SECONDS: f64 = 1.0;
+pub const FAST_SEGMENTATION_STEP_SECONDS: f64 = 2.0;
 pub const FRAME_DURATION_SECONDS: f64 = 0.0619375;
 pub const FRAME_STEP_SECONDS: f64 = 0.016875;
 
@@ -87,6 +88,10 @@ impl<'a> DiarizationPipeline<'a> {
     pub fn run(&mut self, audio: &[f32]) -> Result<DiarizationResult, DynError> {
         diarize(self.seg_model, self.emb_model, &self.plda, audio, "file1")
     }
+
+    pub fn segmentation_step(&self) -> f64 {
+        self.seg_model.step_seconds()
+    }
 }
 
 impl DiarizationResult {
@@ -129,9 +134,10 @@ pub fn diarize(
         });
     }
 
+    let step_seconds = seg_model.step_seconds();
     let segmentations = decode_windows(raw_windows, &powerset);
-    let start_frames = chunk_start_frames(segmentations.shape()[0]);
-    let output_frames = total_output_frames(segmentations.shape()[0]);
+    let start_frames = chunk_start_frames(segmentations.shape()[0], step_seconds);
+    let output_frames = total_output_frames(segmentations.shape()[0], step_seconds);
     let speaker_count = speaker_count(&segmentations, &start_frames, 0, output_frames);
 
     if speaker_count.iter().all(|count| *count == 0) {
@@ -724,8 +730,7 @@ fn clean_masks(segmentations: &ArrayView2<f32>) -> Array2<f32> {
 }
 
 fn chunk_audio<'a>(audio: &'a [f32], seg_model: &SegmentationModel, chunk_idx: usize) -> &'a [f32] {
-    let step_samples = (SEGMENTATION_STEP_SECONDS * seg_model.sample_rate() as f64) as usize;
-    let start = chunk_idx * step_samples;
+    let start = chunk_idx * seg_model.step_samples();
     let end = (start + seg_model.window_samples()).min(audio.len());
     if start < audio.len() {
         &audio[start..end]
@@ -734,24 +739,22 @@ fn chunk_audio<'a>(audio: &'a [f32], seg_model: &SegmentationModel, chunk_idx: u
     }
 }
 
-fn chunk_start_frames(num_chunks: usize) -> Vec<usize> {
+fn chunk_start_frames(num_chunks: usize, step_seconds: f64) -> Vec<usize> {
     (0..num_chunks)
         .map(|chunk_idx| {
-            closest_frame(
-                chunk_idx as f64 * SEGMENTATION_STEP_SECONDS + 0.5 * FRAME_DURATION_SECONDS,
-            )
+            closest_frame(chunk_idx as f64 * step_seconds + 0.5 * FRAME_DURATION_SECONDS)
         })
         .collect()
 }
 
-fn total_output_frames(num_chunks: usize) -> usize {
+fn total_output_frames(num_chunks: usize, step_seconds: f64) -> usize {
     if num_chunks == 0 {
         return 0;
     }
 
     closest_frame(
         SEGMENTATION_WINDOW_SECONDS
-            + (num_chunks - 1) as f64 * SEGMENTATION_STEP_SECONDS
+            + (num_chunks - 1) as f64 * step_seconds
             + 0.5 * FRAME_DURATION_SECONDS,
     ) + 1
 }
@@ -803,12 +806,15 @@ mod tests {
 
     #[test]
     fn chunk_start_frames_match_pyannote_rounding() {
-        assert_eq!(chunk_start_frames(4), vec![0, 59, 119, 178]);
+        assert_eq!(
+            chunk_start_frames(4, SEGMENTATION_STEP_SECONDS),
+            vec![0, 59, 119, 178]
+        );
     }
 
     #[test]
     fn total_output_frames_match_pyannote_aggregate_extent() {
-        assert_eq!(total_output_frames(4), 771);
+        assert_eq!(total_output_frames(4, SEGMENTATION_STEP_SECONDS), 771);
     }
 
     #[test]

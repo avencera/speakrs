@@ -95,6 +95,10 @@ impl SegmentationModel {
         self.step_samples
     }
 
+    pub fn step_seconds(&self) -> f64 {
+        self.step_samples as f64 / self.sample_rate as f64
+    }
+
     pub fn reset_session(&mut self) -> Result<(), ort::Error> {
         self.session = Self::build_session(&self.model_path, self.mode)?;
         self.primary_batched_session = batched_model_path(&self.model_path, PRIMARY_BATCH_SIZE)
@@ -151,7 +155,7 @@ impl SegmentationModel {
 
     fn run_window(&mut self, window: &[f32]) -> Result<Array2<f32>, ort::Error> {
         #[cfg(feature = "native-coreml")]
-        if let Some(ref native) = self.native_session {
+        if let Some(ref mut native) = self.native_session {
             return Self::run_native_single(native, window, &mut self.input_buffer);
         }
 
@@ -172,7 +176,7 @@ impl SegmentationModel {
 
     fn run_batch(&mut self, windows: &[Vec<f32>]) -> Result<Vec<Array2<f32>>, ort::Error> {
         #[cfg(feature = "native-coreml")]
-        if let Some(ref native) = self.native_batched_session {
+        if let Some(ref mut native) = self.native_batched_session {
             return Self::run_native_batch(native, windows, &mut self.primary_batch_input_buffer);
         }
 
@@ -264,7 +268,7 @@ impl SegmentationModel {
 
     #[cfg(feature = "native-coreml")]
     fn run_native_single(
-        native: &CoreMlModel,
+        native: &mut CoreMlModel,
         window: &[f32],
         buffer: &mut ndarray::Array3<f32>,
     ) -> Result<Array2<f32>, ort::Error> {
@@ -286,7 +290,7 @@ impl SegmentationModel {
 
     #[cfg(feature = "native-coreml")]
     fn run_native_batch(
-        native: &CoreMlModel,
+        native: &mut CoreMlModel,
         windows: &[Vec<f32>],
         buffer: &mut ndarray::Array3<f32>,
     ) -> Result<Vec<Array2<f32>>, ort::Error> {

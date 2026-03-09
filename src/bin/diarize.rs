@@ -7,7 +7,7 @@ use speakrs::clustering::plda::PldaTransform;
 use speakrs::inference::ExecutionMode;
 use speakrs::inference::embedding::EmbeddingModel;
 use speakrs::inference::segmentation::SegmentationModel;
-use speakrs::pipeline::{SEGMENTATION_STEP_SECONDS, diarize};
+use speakrs::pipeline::{FAST_SEGMENTATION_STEP_SECONDS, SEGMENTATION_STEP_SECONDS, diarize};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -27,9 +27,13 @@ fn main() {
     };
     let models_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/models");
 
+    let step = match mode {
+        ExecutionMode::CoreMl | ExecutionMode::MiniCoreMl => FAST_SEGMENTATION_STEP_SECONDS,
+        _ => SEGMENTATION_STEP_SECONDS,
+    };
     let mut seg_model = SegmentationModel::with_mode(
         models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
-        SEGMENTATION_STEP_SECONDS as f32,
+        step as f32,
         mode,
     )
     .expect("failed to load segmentation model");
