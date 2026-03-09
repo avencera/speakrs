@@ -54,7 +54,7 @@ Requires the `native-coreml` Cargo feature. Uses Apple's CoreML framework for GP
 | `coreml` | Native CoreML | 1s | FP32 | Best accuracy, GPU-accelerated |
 | `coreml-lite` | Native CoreML | 2s | FP16+ANE | Best speed (63x realtime) |
 
-`coreml-lite` uses a wider step (2s instead of 1s) and FP16 ANE inference to get about 2x more speed. That follows the same throughput-first tradeoff FluidAudio uses on Apple hardware. It matches `coreml` on most clips, but on some inputs the coarser step drops a few segments. The 10.5-minute benchmark below shows one example.
+`coreml-lite` uses a wider step (2s instead of 1s) and FP16 ANE inference to get about 2x more speed. That follows the same throughput-first tradeoff [FluidAudio](https://github.com/FluidInference/FluidAudio) uses on Apple hardware. It matches `coreml` on most clips, but on some inputs the coarser step drops a few segments. The 10.5-minute benchmark below shows one example.
 
 ### Benchmarks
 
