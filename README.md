@@ -1,10 +1,10 @@
 # speakrs
 
-Speaker diarization in Rust — **63x realtime** on Apple Silicon with **100% pyannote coverage**.
+Speaker diarization in Rust. Audio in, RTTM segments out. **63x realtime** on Apple Silicon, **100% pyannote coverage**.
 
-Full implementation of the pyannote community-1 pipeline: audio → segmentation → powerset decode → aggregation → binarization → embedding → PLDA → VBx clustering → RTTM segments. No Python dependency — uses ONNX Runtime or native CoreML directly, with all post-processing in Rust.
+Implements the full pyannote community-1 pipeline (segmentation, powerset decode, aggregation, binarization, embedding, PLDA, VBx clustering) with no Python dependency. Inference runs on ONNX Runtime or native CoreML, all post-processing is pure Rust.
 
-The native path is numerically verified against `pyannote.audio` CPU — golden test fixtures are generated from the Python reference and matched exactly.
+Numerically verified against `pyannote.audio` CPU. Golden test fixtures are generated from the Python reference and matched exactly.
 
 ## Pipeline
 
@@ -66,7 +66,7 @@ All benchmarks on Apple M4 Pro, macOS 26.3.
 | `coreml` (FP32) | 2 | 722 | 100% | 72.1s | 37x |
 | pyannote MPS | 2 | 720 | reference | 145.3s | 19x |
 
-Coverage is measured as mutual speech overlap between speakrs and pyannote output. Minor segment count differences (79 vs 81) are due to f32 accumulation order at frame boundaries — no speech is lost or added.
+Coverage is measured as mutual speech overlap between speakrs and pyannote output. Minor segment count differences (79 vs 81) are due to f32 accumulation order at frame boundaries. No speech is lost or added.
 
 ## Modules
 
@@ -170,6 +170,6 @@ just compare audio.wav
 
 ## References
 
-- [pyannote-audio](https://github.com/pyannote/pyannote-audio) — Python reference implementation
-- [pyannote community-1](https://huggingface.co/pyannote/speaker-diarization-community-1) — VBx + PLDA pipeline
-- [FluidAudio](https://github.com/FluidInference/FluidAudio) — Swift reference (same VBx architecture)
+- [pyannote-audio](https://github.com/pyannote/pyannote-audio) - Python reference implementation
+- [pyannote community-1](https://huggingface.co/pyannote/speaker-diarization-community-1) - VBx + PLDA pipeline
+- [FluidAudio](https://github.com/FluidInference/FluidAudio) - Swift reference (same VBx architecture)
