@@ -36,12 +36,12 @@ Audio (16kHz f32)
 
 | Mode | Backend | Step | Precision | Use case |
 |------|---------|------|-----------|----------|
-| `exact` | ORT CPU | 1s | FP32 | Reference, bit-exact with pyannote CPU |
+| `cpu` | ORT CPU | 1s | FP32 | Reference, bit-exact with pyannote CPU |
 | `coreml` | Native CoreML | 1s | FP32 | Accuracy (100% pyannote coverage) |
-| `mini-coreml` | Native CoreML | 2s | FP16+ANE | Speed (63x realtime) |
+| `coreml-lite` | Native CoreML | 2s | FP16+ANE | Speed (63x realtime) |
 | `cuda` | ORT CUDA | 1s | FP32 | NVIDIA GPU |
 
-`mini-coreml` trades a wider step (2s vs 1s) and FP16 ANE inference for ~2x speed. On most clips it matches `coreml` exactly, but on some inputs the coarser step drops a few segments (see 10.5-min benchmark below).
+`coreml-lite` trades a wider step (2s vs 1s) and FP16 ANE inference for ~2x speed. On most clips it matches `coreml` exactly, but on some inputs the coarser step drops a few segments (see 10.5-min benchmark below).
 
 ## Benchmarks
 
@@ -51,7 +51,7 @@ All benchmarks on Apple M4 Pro, macOS 26.3.
 
 | Mode | Speakers | Segments | Coverage | Time | RTFx |
 |------|----------|----------|----------|------|------|
-| `mini-coreml` (FP16) | 6 | 79 | 100% | 6.7s | **63x** |
+| `coreml-lite` (FP16) | 6 | 79 | 100% | 6.7s | **63x** |
 | `coreml` (FP32) | 6 | 79 | 100% | 11.5s | 37x |
 | pyannote MPS | 6 | 81 | reference | 28.8s | 15x |
 
@@ -59,7 +59,7 @@ All benchmarks on Apple M4 Pro, macOS 26.3.
 
 | Mode | Speakers | Segments | Coverage | Time | RTFx |
 |------|----------|----------|----------|------|------|
-| `mini-coreml` (FP16) | 3 | 247 | 99.7% | 5.4s | **118x** |
+| `coreml-lite` (FP16) | 3 | 247 | 99.7% | 5.4s | **118x** |
 | `coreml` (FP32) | 3 | 250 | 100% | 16.3s | 39x |
 | pyannote MPS | 3 | 250 | reference | 36.9s | 17x |
 
@@ -67,11 +67,11 @@ All benchmarks on Apple M4 Pro, macOS 26.3.
 
 | Mode | Speakers | Segments | Coverage | Time | RTFx |
 |------|----------|----------|----------|------|------|
-| `mini-coreml` (FP16) | 2 | 722 | 100% | 42.3s | **64x** |
+| `coreml-lite` (FP16) | 2 | 722 | 100% | 42.3s | **64x** |
 | `coreml` (FP32) | 2 | 722 | 100% | 72.1s | 37x |
 | pyannote MPS | 2 | 720 | reference | 145.3s | 19x |
 
-Coverage is measured as mutual speech overlap with pyannote. Minor segment count differences (e.g. 79 vs 81) are due to f32 accumulation order at frame boundaries, no speech is lost or added. The 10.5-min clip shows `mini-coreml` dropping 3 segments (99.7% coverage) due to the coarser 2s step.
+Coverage is measured as mutual speech overlap with pyannote. Minor segment count differences (e.g. 79 vs 81) are due to f32 accumulation order at frame boundaries, no speech is lost or added. The 10.5-min clip shows `coreml-lite` dropping 3 segments (99.7% coverage) due to the coarser 2s step.
 
 ## Modules
 
@@ -93,7 +93,7 @@ Coverage is measured as mutual speech overlap with pyannote. Minor segment count
 
 ### Models
 
-speakrs requires ONNX models and PLDA artifacts at runtime. These are gated on HuggingFace and require accepting access terms for [pyannote/segmentation-3.0](https://huggingface.co/pyannote/segmentation-3.0) and [pyannote/wespeaker-voxceleb-resnet34-LM](https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM).
+Models download automatically on first use from [avencera/speakrs-models](https://huggingface.co/avencera/speakrs-models) on HuggingFace. To use a custom model directory, set `SPEAKRS_MODELS_DIR`.
 
 For development, `just download-models` exports the ONNX models and converts to CoreML (requires Python via `uv`).
 
@@ -102,31 +102,11 @@ For development, `just download-models` exports the ONNX models and converts to 
 `speakrs` expects mono 16kHz audio as `&[f32]` samples and returns a `DiarizationResult`:
 
 ```rust
-use std::path::Path;
-
-use speakrs::inference::embedding::EmbeddingModel;
-use speakrs::inference::segmentation::SegmentationModel;
-use speakrs::pipeline::DiarizationPipeline;
+use speakrs::models::Mode;
+use speakrs::pipeline::OwnedDiarizationPipeline;
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let models_dir = Path::new("fixtures/models");
-
-    let mut segmentation = SegmentationModel::new(
-        models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
-        DiarizationPipeline::default_segmentation_step(),
-    )?;
-    let mut embedding = EmbeddingModel::new(
-        models_dir
-            .join("wespeaker-voxceleb-resnet34.onnx")
-            .to_str()
-            .unwrap(),
-    )?;
-
-    let mut pipeline = DiarizationPipeline::new(
-        &mut segmentation,
-        &mut embedding,
-        models_dir,
-    )?;
+    let mut pipeline = OwnedDiarizationPipeline::from_pretrained(Mode::Cpu)?;
 
     let audio: Vec<f32> = load_your_mono_16khz_audio_here();
     let result = pipeline.run(&audio)?;
@@ -153,13 +133,13 @@ See [examples/README.md](examples/README.md) for runnable end-to-end examples, i
 
 ```bash
 # Native CoreML (fastest)
-cargo run --release --features native-coreml --bin diarize -- --mode mini-coreml audio.wav
+cargo run --release --features native-coreml --bin diarize -- --mode coreml-lite audio.wav
 
 # Native CoreML (accuracy)
 cargo run --release --features native-coreml --bin diarize -- --mode coreml audio.wav
 
 # CPU reference
-cargo run --release --bin diarize -- --mode exact audio.wav
+cargo run --release --bin diarize -- --mode cpu audio.wav
 
 # Compare with pyannote
 just compare audio.wav

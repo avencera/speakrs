@@ -1,12 +1,14 @@
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use speakrs::clustering::plda::PldaTransform;
 use speakrs::inference::ExecutionMode;
 use speakrs::inference::embedding::EmbeddingModel;
 use speakrs::inference::segmentation::SegmentationModel;
+#[cfg(feature = "online")]
+use speakrs::models::ModelManager;
 use speakrs::pipeline::{FAST_SEGMENTATION_STEP_SECONDS, SEGMENTATION_STEP_SECONDS, diarize};
 
 fn main() {
@@ -25,10 +27,11 @@ fn main() {
     let CliMode::Native(mode) = mode else {
         unreachable!();
     };
-    let models_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/models");
+
+    let models_dir = resolve_models_dir(mode);
 
     let step = match mode {
-        ExecutionMode::CoreMl | ExecutionMode::MiniCoreMl => FAST_SEGMENTATION_STEP_SECONDS,
+        ExecutionMode::CoreMlLite => FAST_SEGMENTATION_STEP_SECONDS,
         _ => SEGMENTATION_STEP_SECONDS,
     };
     let mut seg_model = SegmentationModel::with_mode(
@@ -55,6 +58,32 @@ fn main() {
     print!("{}", result.rttm);
 }
 
+fn resolve_models_dir(mode: ExecutionMode) -> PathBuf {
+    if let Ok(dir) = std::env::var("SPEAKRS_MODELS_DIR") {
+        return PathBuf::from(dir);
+    }
+
+    #[cfg(feature = "online")]
+    {
+        let manager = ModelManager::new().expect("failed to initialize model manager");
+        let hf_mode = match mode {
+            ExecutionMode::Cpu => speakrs::models::Mode::Cpu,
+            ExecutionMode::CoreMl => speakrs::models::Mode::CoreMl,
+            ExecutionMode::CoreMlLite => speakrs::models::Mode::CoreMlLite,
+            ExecutionMode::Cuda => speakrs::models::Mode::Cuda,
+        };
+        manager.ensure(hf_mode).expect("failed to download models")
+    }
+
+    #[cfg(not(feature = "online"))]
+    {
+        let _ = mode;
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/models")
+            .to_path_buf()
+    }
+}
+
 enum CliMode {
     Native(ExecutionMode),
     PyannoteDevice(&'static str),
@@ -62,12 +91,12 @@ enum CliMode {
 
 fn parse_args(args: &[String]) -> (CliMode, &str) {
     match args {
-        [_, wav_path] => (CliMode::Native(ExecutionMode::ExactCpu), wav_path),
+        [_, wav_path] => (CliMode::Native(ExecutionMode::Cpu), wav_path),
         [_, flag, mode, wav_path] if flag == "--mode" => {
             let parsed = match mode.as_str() {
-                "exact" => CliMode::Native(ExecutionMode::ExactCpu),
+                "cpu" => CliMode::Native(ExecutionMode::Cpu),
                 "coreml" => CliMode::Native(ExecutionMode::CoreMl),
-                "mini-coreml" => CliMode::Native(ExecutionMode::MiniCoreMl),
+                "coreml-lite" => CliMode::Native(ExecutionMode::CoreMlLite),
                 "cuda" => CliMode::Native(ExecutionMode::Cuda),
                 "pyannote-cpu" => CliMode::PyannoteDevice("cpu"),
                 "pyannote-mps" => CliMode::PyannoteDevice("mps"),
@@ -75,18 +104,18 @@ fn parse_args(args: &[String]) -> (CliMode, &str) {
                 _ => {
                     eprintln!("Unknown mode: {mode}");
                     eprintln!(
-                        "Usage: diarize [--mode exact|coreml|mini-coreml|cuda|pyannote-cpu|pyannote-mps|pyannote-cuda] <path/to/audio.wav>"
+                        "Usage: diarize [--mode cpu|coreml|coreml-lite|cuda|pyannote-cpu|pyannote-mps|pyannote-cuda] <path/to/audio.wav>"
                     );
-                    return (CliMode::Native(ExecutionMode::ExactCpu), "");
+                    return (CliMode::Native(ExecutionMode::Cpu), "");
                 }
             };
             (parsed, wav_path)
         }
         _ => {
             eprintln!(
-                "Usage: diarize [--mode exact|coreml|mini-coreml|cuda|pyannote-cpu|pyannote-mps|pyannote-cuda] <path/to/audio.wav>"
+                "Usage: diarize [--mode cpu|coreml|coreml-lite|cuda|pyannote-cpu|pyannote-mps|pyannote-cuda] <path/to/audio.wav>"
             );
-            (CliMode::Native(ExecutionMode::ExactCpu), "")
+            (CliMode::Native(ExecutionMode::Cpu), "")
         }
     }
 }

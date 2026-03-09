@@ -13,6 +13,15 @@ use objc2_core_ml::{
 };
 use objc2_foundation::{NSArray, NSCopying, NSMutableDictionary, NSNumber, NSString, NSURL};
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum GpuPrecision {
+    /// FP16 intermediate accumulations on GPU (matches pyannote MPS behavior)
+    Low,
+    /// Full FP32 accumulation on GPU
+    #[expect(dead_code)]
+    Full,
+}
+
 #[derive(Debug)]
 pub(crate) enum CoreMlError {
     LoadFailed(String),
@@ -85,13 +94,15 @@ impl CoreMlModel {
         path: &Path,
         compute_units: MLComputeUnits,
         output_name: &str,
+        gpu_precision: GpuPrecision,
     ) -> Result<Self, CoreMlError> {
         let path_str = NSString::from_str(&path.to_string_lossy());
         let url = NSURL::fileURLWithPath_isDirectory(&path_str, true);
 
         let config = unsafe { MLModelConfiguration::new() };
         unsafe { config.setComputeUnits(compute_units) };
-        unsafe { config.setAllowLowPrecisionAccumulationOnGPU(true) };
+        let low_precision = matches!(gpu_precision, GpuPrecision::Low);
+        unsafe { config.setAllowLowPrecisionAccumulationOnGPU(low_precision) };
 
         let model = unsafe { MLModel::modelWithContentsOfURL_configuration_error(&url, &config) }
             .map_err(|e| CoreMlError::LoadFailed(format!("{e}")))?;

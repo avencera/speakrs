@@ -1,0 +1,143 @@
+use std::path::PathBuf;
+
+use hf_hub::api::sync::{Api, ApiBuilder, ApiRepo};
+
+const HF_REPO: &str = "avencera/speakrs-models";
+
+#[derive(Debug, Clone, Copy)]
+pub enum Mode {
+    Cpu,
+    CoreMl,
+    CoreMlLite,
+    Cuda,
+}
+
+pub struct ModelManager {
+    repo: ApiRepo,
+}
+
+impl ModelManager {
+    pub fn new() -> Result<Self, hf_hub::api::sync::ApiError> {
+        let api = Api::new()?;
+        let repo = api.model(HF_REPO.to_string());
+        Ok(Self { repo })
+    }
+
+    pub fn with_cache_dir(cache_dir: PathBuf) -> Result<Self, hf_hub::api::sync::ApiError> {
+        let api = ApiBuilder::from_cache(hf_hub::Cache::new(cache_dir)).build()?;
+        let repo = api.model(HF_REPO.to_string());
+        Ok(Self { repo })
+    }
+
+    /// Download a single file, returns path to cached copy
+    pub fn get(&self, filename: &str) -> Result<PathBuf, hf_hub::api::sync::ApiError> {
+        self.repo.get(filename)
+    }
+
+    /// Ensure all files for a mode are downloaded, return base models dir
+    pub fn ensure(&self, mode: Mode) -> Result<PathBuf, hf_hub::api::sync::ApiError> {
+        let files = required_files(mode);
+        for f in &files {
+            self.repo.get(f)?;
+        }
+        // all files land in the same snapshot dir
+        let first = self.repo.get(files[0])?;
+        Ok(first.parent().unwrap().to_path_buf())
+    }
+}
+
+const PLDA_FILES: &[&str] = &[
+    "plda_lda.npy",
+    "plda_tr.npy",
+    "plda_mu.npy",
+    "plda_psi.npy",
+    "plda_mean1.npy",
+    "plda_mean2.npy",
+    "wespeaker-voxceleb-resnet34.min_num_samples.txt",
+];
+
+const ONNX_FILES: &[&str] = &[
+    "segmentation-3.0.onnx",
+    "wespeaker-voxceleb-resnet34.onnx",
+    "wespeaker-voxceleb-resnet34.onnx.data",
+];
+
+fn mlmodelc_files(name: &str) -> Vec<&'static str> {
+    // each .mlmodelc dir has these 4 files
+    // we leak the strings since they're constructed at runtime
+    let paths = [
+        format!("{name}/model.mil"),
+        format!("{name}/coremldata.bin"),
+        format!("{name}/weights/weight.bin"),
+        format!("{name}/analytics/coremldata.bin"),
+    ];
+    paths
+        .into_iter()
+        .map(|s| &*Box::leak(s.into_boxed_str()))
+        .collect()
+}
+
+fn required_files(mode: Mode) -> Vec<&'static str> {
+    let mut files: Vec<&str> = PLDA_FILES.to_vec();
+
+    match mode {
+        Mode::Cpu | Mode::Cuda => {
+            files.extend_from_slice(ONNX_FILES);
+        }
+        Mode::CoreMl => {
+            // CoreML modes still need the ONNX segmentation model for the constructor
+            files.push("segmentation-3.0.onnx");
+            files.push("wespeaker-voxceleb-resnet34.onnx");
+            files.push("wespeaker-voxceleb-resnet34.onnx.data");
+            // b32 batched ONNX for segmentation
+            files.push("segmentation-3.0-b32.onnx");
+            // split ONNX models for embedding
+            files.push("wespeaker-fbank.onnx");
+            files.push("wespeaker-fbank-b32.onnx");
+            files.push("wespeaker-voxceleb-resnet34-tail.onnx");
+            files.push("wespeaker-voxceleb-resnet34-tail-b3.onnx");
+            files.push("wespeaker-voxceleb-resnet34-tail-b32.onnx");
+            // FP32 CoreML models
+            files.extend(mlmodelc_files("segmentation-3.0-b32.mlmodelc"));
+            files.extend(mlmodelc_files("segmentation-3.0.mlmodelc"));
+            files.extend(mlmodelc_files("wespeaker-fbank-b32.mlmodelc"));
+            files.extend(mlmodelc_files("wespeaker-fbank.mlmodelc"));
+            files.extend(mlmodelc_files(
+                "wespeaker-voxceleb-resnet34-tail-b3.mlmodelc",
+            ));
+            files.extend(mlmodelc_files(
+                "wespeaker-voxceleb-resnet34-tail-b32.mlmodelc",
+            ));
+            files.extend(mlmodelc_files("wespeaker-voxceleb-resnet34-tail.mlmodelc"));
+        }
+        Mode::CoreMlLite => {
+            // same ONNX base as CoreMl
+            files.push("segmentation-3.0.onnx");
+            files.push("wespeaker-voxceleb-resnet34.onnx");
+            files.push("wespeaker-voxceleb-resnet34.onnx.data");
+            files.push("segmentation-3.0-b32.onnx");
+            files.push("wespeaker-fbank.onnx");
+            files.push("wespeaker-fbank-b32.onnx");
+            files.push("wespeaker-voxceleb-resnet34-tail.onnx");
+            files.push("wespeaker-voxceleb-resnet34-tail-b3.onnx");
+            files.push("wespeaker-voxceleb-resnet34-tail-b32.onnx");
+            // FP32 segmentation + fbank CoreML (LSTM needs FP32)
+            files.extend(mlmodelc_files("segmentation-3.0-b32.mlmodelc"));
+            files.extend(mlmodelc_files("segmentation-3.0.mlmodelc"));
+            files.extend(mlmodelc_files("wespeaker-fbank-b32.mlmodelc"));
+            files.extend(mlmodelc_files("wespeaker-fbank.mlmodelc"));
+            // FP16 tail models for speed
+            files.extend(mlmodelc_files(
+                "wespeaker-voxceleb-resnet34-tail-b3-f16.mlmodelc",
+            ));
+            files.extend(mlmodelc_files(
+                "wespeaker-voxceleb-resnet34-tail-b32-f16.mlmodelc",
+            ));
+            files.extend(mlmodelc_files(
+                "wespeaker-voxceleb-resnet34-tail-f16.mlmodelc",
+            ));
+        }
+    }
+
+    files
+}
