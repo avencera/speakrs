@@ -1,6 +1,5 @@
 use std::error::Error;
 use std::path::Path;
-use std::time::Instant;
 
 use ndarray::{Array2, Array3, ArrayView2, s};
 
@@ -21,10 +20,6 @@ use crate::segment::{merge_segments, to_rttm, to_segments};
 use crate::utils::cosine_similarity;
 
 type DynError = Box<dyn Error + Send + Sync + 'static>;
-
-fn profiling_enabled() -> bool {
-    std::env::var("SPEAKRS_PROFILE").is_ok()
-}
 
 pub const SEGMENTATION_WINDOW_SECONDS: f64 = 10.0;
 pub const SEGMENTATION_STEP_SECONDS: f64 = 1.0;
@@ -178,17 +173,9 @@ pub fn diarize(
     audio: &[f32],
     file_id: &str,
 ) -> Result<DiarizationResult, DynError> {
-    let profile = profiling_enabled();
     let powerset = PowersetMapping::new(3, 2);
-    let t0 = Instant::now();
     let raw_windows = seg_model.run(audio)?;
-    if profile {
-        eprintln!(
-            "[profile] segmentation: {:.3}s ({} windows)",
-            t0.elapsed().as_secs_f64(),
-            raw_windows.len()
-        );
-    }
+    tracing::info!(windows = raw_windows.len(), "Segmentation complete");
     if raw_windows.is_empty() {
         return Ok(DiarizationResult {
             segmentations: Array3::zeros((0, 0, 0)),
@@ -217,20 +204,15 @@ pub fn diarize(
         });
     }
 
-    let t0 = Instant::now();
     let embeddings = extract_embeddings(seg_model, emb_model, audio, &segmentations)?;
-    if profile {
-        eprintln!(
-            "[profile] embeddings: {:.3}s ({} chunks × {} speakers)",
-            t0.elapsed().as_secs_f64(),
-            segmentations.shape()[0],
-            segmentations.shape()[2],
-        );
-    }
+    tracing::info!(
+        chunks = segmentations.shape()[0],
+        speakers = segmentations.shape()[2],
+        "Embeddings complete"
+    );
     let (train_embeddings, _train_chunk_idx, _train_speaker_idx) =
         filter_embeddings(&segmentations, &embeddings);
 
-    let t0 = Instant::now();
     let hard_clusters = if train_embeddings.nrows() < 2 {
         let mut clusters =
             Array2::<i32>::zeros((segmentations.shape()[0], segmentations.shape()[2]));
@@ -297,9 +279,11 @@ pub fn diarize(
         clusters
     };
 
-    if profile {
-        eprintln!("[profile] clustering: {:.3}s", t0.elapsed().as_secs_f64());
-    }
+    tracing::info!(
+        rows = hard_clusters.nrows(),
+        cols = hard_clusters.ncols(),
+        "Clustering complete"
+    );
 
     let discrete_diarization = reconstruct(
         &segmentations,
@@ -441,13 +425,11 @@ fn extract_split_embeddings(
         return extract_fused_embeddings(seg_model, emb_model, audio, segmentations, embeddings);
     }
 
-    let profile = profiling_enabled();
     let batch_size = emb_model.split_primary_batch_size();
     let num_chunks = segmentations.shape()[0];
     let num_speakers = segmentations.shape()[2];
     let min_num_samples = emb_model.min_num_samples();
 
-    let t0 = Instant::now();
     let mut pending: Vec<PendingSplitEmbedding> = Vec::with_capacity(batch_size);
     let mut fbanks: Vec<Array2<f32>> = Vec::new();
     let mut tail_batches = 0usize;
@@ -504,13 +486,11 @@ fn extract_split_embeddings(
         flush_split_embedding_batch(emb_model, &pending, &fbanks, embeddings)?;
         tail_batches += 1;
     }
-    if profile {
-        eprintln!(
-            "[profile]   fbank+tail: {:.3}s ({tail_batches} batches, {} items, streaming)",
-            t0.elapsed().as_secs_f64(),
-            num_chunks * num_speakers,
-        );
-    }
+    tracing::info!(
+        batches = tail_batches,
+        items = num_chunks * num_speakers,
+        "Split embeddings complete (fbank+tail streaming)"
+    );
 
     Ok(())
 }
@@ -547,12 +527,10 @@ fn extract_fused_embeddings(
     segmentations: &Array3<f32>,
     embeddings: &mut Array3<f32>,
 ) -> Result<(), DynError> {
-    let profile = profiling_enabled();
     let batch_size = emb_model.split_primary_batch_size();
     let num_chunks = segmentations.shape()[0];
     let num_speakers = segmentations.shape()[2];
 
-    let t_fused = Instant::now();
     let mut pending: Vec<PendingFusedEmbedding<'_>> = Vec::with_capacity(batch_size);
     let mut fused_batches = 0usize;
 
@@ -595,13 +573,11 @@ fn extract_fused_embeddings(
         flush_fused_embedding_batch(emb_model, &pending, embeddings)?;
         fused_batches += 1;
     }
-    if profile {
-        eprintln!(
-            "[profile]   fused: {:.3}s ({fused_batches} batches, {} items)",
-            t_fused.elapsed().as_secs_f64(),
-            num_chunks * num_speakers,
-        );
-    }
+    tracing::info!(
+        batches = fused_batches,
+        items = num_chunks * num_speakers,
+        "Fused embeddings complete"
+    );
 
     Ok(())
 }

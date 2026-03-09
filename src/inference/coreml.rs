@@ -15,7 +15,7 @@ use objc2_foundation::{NSArray, NSCopying, NSMutableDictionary, NSNumber, NSStri
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum GpuPrecision {
-    /// FP16 intermediate accumulations on GPU (matches pyannote MPS behavior)
+    /// FP16 intermediate accumulations on GPU
     Low,
     /// Full FP32 accumulation on GPU
     #[expect(dead_code)]

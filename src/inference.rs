@@ -10,7 +10,7 @@ use ort::session::builder::SessionBuilder;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionMode {
     Cpu,
-    CoreMl,     // FP32 native CoreML, CPU+GPU, exact parity with pyannote
+    CoreMl,     // FP32 native CoreML, CPU+GPU
     CoreMlLite, // FP16 native CoreML, CPU+GPU+ANE, faster but may drift
     Cuda,
 }
