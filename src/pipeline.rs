@@ -78,12 +78,15 @@ impl OwnedDiarizationPipeline {
         let execution_mode = match mode {
             crate::models::Mode::Cpu => ExecutionMode::Cpu,
             crate::models::Mode::CoreMl => ExecutionMode::CoreMl,
-            crate::models::Mode::CoreMlLite => ExecutionMode::CoreMlLite,
+            crate::models::Mode::CoreMlFast => ExecutionMode::CoreMlFast,
+            crate::models::Mode::CoreMlFastLite => ExecutionMode::CoreMlFastLite,
             crate::models::Mode::Cuda => ExecutionMode::Cuda,
         };
 
         let step = match execution_mode {
-            ExecutionMode::CoreMlLite => FAST_SEGMENTATION_STEP_SECONDS,
+            ExecutionMode::CoreMlFast | ExecutionMode::CoreMlFastLite => {
+                FAST_SEGMENTATION_STEP_SECONDS
+            }
             _ => SEGMENTATION_STEP_SECONDS,
         };
 
