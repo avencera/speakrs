@@ -5,26 +5,29 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, s};
 use ndarray_linalg::{Eigh, Inverse, UPLO};
 use ndarray_npy::read_npy;
 
-use crate::utils::l2_normalize_rows;
+use crate::utils::l2_normalize_rows_f64;
 
+/// PLDA transform computed entirely in f64 to match pyannote's numpy precision.
+/// Parameters are stored as f64 internally; the transform method returns f32
+/// for downstream consumption
 #[derive(Debug, Clone)]
 pub struct PldaTransform {
-    mean1: Array1<f32>,
-    mean2: Array1<f32>,
-    lda: Array2<f32>,
-    mu: Array1<f32>,
-    transform: Array2<f32>,
-    phi: Array1<f32>,
+    mean1: Array1<f64>,
+    mean2: Array1<f64>,
+    lda: Array2<f64>,
+    mu: Array1<f64>,
+    transform: Array2<f64>,
+    phi: Array1<f64>,
 }
 
 impl PldaTransform {
     pub fn from_dir(models_dir: &Path) -> Result<Self, PldaError> {
-        let mean1 = read_array1_f32(models_dir.join("plda_mean1.npy"))?;
-        let mean2 = read_array1_f32(models_dir.join("plda_mean2.npy"))?;
-        let lda = read_array2_f32(models_dir.join("plda_lda.npy"))?;
-        let mu = read_array1_f32(models_dir.join("plda_mu.npy"))?;
-        let tr = read_array2_f32(models_dir.join("plda_tr.npy"))?;
-        let psi = read_array1_f32(models_dir.join("plda_psi.npy"))?;
+        let mean1 = read_array1_f64(models_dir.join("plda_mean1.npy"))?;
+        let mean2 = read_array1_f64(models_dir.join("plda_mean2.npy"))?;
+        let lda = read_array2_f64(models_dir.join("plda_lda.npy"))?;
+        let mu = read_array1_f64(models_dir.join("plda_mu.npy"))?;
+        let tr = read_array2_f64(models_dir.join("plda_tr.npy"))?;
+        let psi = read_array1_f64(models_dir.join("plda_psi.npy"))?;
 
         let w = tr.t().dot(&tr).inv()?;
 
@@ -40,8 +43,8 @@ impl PldaTransform {
         let (eigenvalues, (eigenvectors, _)) = (b, w).eigh(UPLO::Lower)?;
 
         let dim = lda.ncols();
-        let mut phi = Array1::<f32>::zeros(dim);
-        let mut transform = Array2::<f32>::zeros((dim, dim));
+        let mut phi = Array1::<f64>::zeros(dim);
+        let mut transform = Array2::<f64>::zeros((dim, dim));
         for idx in 0..dim {
             let src = eigenvalues.len() - 1 - idx;
             phi[idx] = eigenvalues[src];
@@ -58,13 +61,19 @@ impl PldaTransform {
         })
     }
 
-    pub fn phi(&self) -> &Array1<f32> {
+    pub fn phi(&self) -> Array1<f32> {
+        self.phi.mapv(|v| v as f32)
+    }
+
+    pub fn phi_f64(&self) -> &Array1<f64> {
         &self.phi
     }
 
     pub fn transform(&self, embeddings: &ArrayView2<f32>, lda_dim: usize) -> Array2<f32> {
-        let xvec = self.xvec_transform(embeddings);
-        self.plda_transform(&xvec.view(), lda_dim)
+        let embeddings_f64 = embeddings.mapv(|v| v as f64);
+        let xvec = self.xvec_transform(&embeddings_f64.view());
+        let result = self.plda_transform(&xvec.view(), lda_dim);
+        result.mapv(|v| v as f32)
     }
 
     pub fn transform_one(&self, embedding: &ArrayView1<f32>, lda_dim: usize) -> Array1<f32> {
@@ -72,41 +81,41 @@ impl PldaTransform {
         self.transform(&batch.view(), lda_dim).row(0).to_owned()
     }
 
-    fn xvec_transform(&self, embeddings: &ArrayView2<f32>) -> Array2<f32> {
+    fn xvec_transform(&self, embeddings: &ArrayView2<f64>) -> Array2<f64> {
         let centered = embeddings - &self.mean1;
-        let normalized = l2_normalize_rows(&centered.view());
-        let scaled = normalized * (self.lda.nrows() as f32).sqrt();
+        let normalized = l2_normalize_rows_f64(&centered.view());
+        let scaled = normalized * (self.lda.nrows() as f64).sqrt();
         let projected = scaled.dot(&self.lda);
         let centered_projected = projected - &self.mean2;
-        l2_normalize_rows(&centered_projected.view()) * (self.lda.ncols() as f32).sqrt()
+        l2_normalize_rows_f64(&centered_projected.view()) * (self.lda.ncols() as f64).sqrt()
     }
 
-    fn plda_transform(&self, embeddings: &ArrayView2<f32>, lda_dim: usize) -> Array2<f32> {
+    fn plda_transform(&self, embeddings: &ArrayView2<f64>, lda_dim: usize) -> Array2<f64> {
         let lda_dim = lda_dim.min(self.transform.nrows());
         let centered = embeddings - &self.mu;
         centered.dot(&self.transform.slice(s![..lda_dim, ..]).t())
     }
 }
 
-fn read_array1_f32(path: impl AsRef<Path>) -> Result<Array1<f32>, PldaError> {
+fn read_array1_f64(path: impl AsRef<Path>) -> Result<Array1<f64>, PldaError> {
     let path = path.as_ref();
     match read_npy(path) {
         Ok(values) => Ok(values),
         Err(ndarray_npy::ReadNpyError::WrongDescriptor(_)) => {
-            let values: Array1<f64> = read_npy(path)?;
-            Ok(values.mapv(|value| value as f32))
+            let values: Array1<f32> = read_npy(path)?;
+            Ok(values.mapv(|value| value as f64))
         }
         Err(err) => Err(PldaError::Io(err)),
     }
 }
 
-fn read_array2_f32(path: impl AsRef<Path>) -> Result<Array2<f32>, PldaError> {
+fn read_array2_f64(path: impl AsRef<Path>) -> Result<Array2<f64>, PldaError> {
     let path = path.as_ref();
     match read_npy(path) {
         Ok(values) => Ok(values),
         Err(ndarray_npy::ReadNpyError::WrongDescriptor(_)) => {
-            let values: Array2<f64> = read_npy(path)?;
-            Ok(values.mapv(|value| value as f32))
+            let values: Array2<f32> = read_npy(path)?;
+            Ok(values.mapv(|value| value as f64))
         }
         Err(err) => Err(PldaError::Io(err)),
     }

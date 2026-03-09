@@ -12,6 +12,11 @@ use speakrs::models::ModelManager;
 use speakrs::pipeline::{FAST_SEGMENTATION_STEP_SECONDS, SEGMENTATION_STEP_SECONDS, diarize};
 
 fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
+
     let args: Vec<String> = std::env::args().collect();
     let (mode, wav_path) = parse_args(&args);
     if wav_path.is_empty() {

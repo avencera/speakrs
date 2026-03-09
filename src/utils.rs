@@ -19,6 +19,17 @@ pub fn l2_normalize_rows(embeddings: &ArrayView2<f32>) -> Array2<f32> {
     normalized
 }
 
+pub fn l2_normalize_rows_f64(embeddings: &ArrayView2<f64>) -> Array2<f64> {
+    let mut normalized = embeddings.to_owned();
+    for mut row in normalized.rows_mut() {
+        let norm = row.dot(&row).sqrt();
+        if norm > 0.0 {
+            row /= norm;
+        }
+    }
+    normalized
+}
+
 pub fn cosine_similarity(a: &ArrayView1<f32>, b: &ArrayView1<f32>) -> f32 {
     let a_norm = l2_normalize(a);
     let b_norm = l2_normalize(b);
