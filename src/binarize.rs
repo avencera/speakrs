@@ -1,5 +1,6 @@
 use ndarray::Array2;
 
+#[derive(Debug, Clone)]
 pub struct BinarizeConfig {
     pub onset: f32,
     pub offset: f32,
