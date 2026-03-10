@@ -10,7 +10,7 @@ const INSTANCE_FILE: &str = ".vastai-instance";
 
 const SETUP_SCRIPT: &str = r#"
 set -euo pipefail
-apt-get update && apt-get install -y build-essential pkg-config libssl-dev git cmake curl
+apt-get update && apt-get install -y build-essential pkg-config libssl-dev git cmake curl python3-pip
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source $HOME/.cargo/env
 if [ -d /workspace/speakrs ]; then
@@ -21,6 +21,18 @@ else
 fi
 cargo build --release --features cuda
 cargo build --release -p xtask
+
+# download ONNX models from HuggingFace
+pip install huggingface-hub
+if [ -n "${HF_TOKEN:-}" ]; then
+    huggingface-cli login --token "$HF_TOKEN"
+fi
+mkdir -p fixtures/models
+huggingface-cli download avencera/speakrs-models --local-dir fixtures/models \
+    --include "segmentation-3.0.onnx" "wespeaker-voxceleb-resnet34.onnx" \
+    "wespeaker-voxceleb-resnet34.onnx.data" "plda_*.npy" \
+    "wespeaker-voxceleb-resnet34.min_num_samples.txt"
+
 echo "=== Setup complete ==="
 "#;
 
@@ -48,6 +60,10 @@ fn save_instance_id(id: &str) -> Result<()> {
 }
 
 /// Parse SSH connection details from `vastai ssh-url`
+///
+/// Handles both formats:
+///   old: `ssh -p PORT root@HOST`
+///   new: `ssh://root@HOST:PORT`
 fn get_ssh_args(instance_id: &str) -> Result<Vec<String>> {
     let output = Command::new("vastai")
         .args(["ssh-url", instance_id])
@@ -60,14 +76,24 @@ fn get_ssh_args(instance_id: &str) -> Result<Vec<String>> {
 
     let ssh_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-    // vastai ssh-url returns something like: ssh -p PORT root@HOST
-    let parts: Vec<&str> = ssh_url.split_whitespace().collect();
-    if parts.len() < 4 {
-        bail!("Unexpected ssh-url format: {ssh_url}");
+    if let Some(rest) = ssh_url.strip_prefix("ssh://") {
+        // ssh://root@HOST:PORT → ["-p", "PORT", "root@HOST"]
+        let (user_host, port) = rest
+            .rsplit_once(':')
+            .ok_or_else(|| color_eyre::eyre::eyre!("No port in ssh URL: {ssh_url}"))?;
+        Ok(vec![
+            "-p".to_string(),
+            port.to_string(),
+            user_host.to_string(),
+        ])
+    } else {
+        // ssh -p PORT root@HOST
+        let parts: Vec<&str> = ssh_url.split_whitespace().collect();
+        if parts.len() < 4 {
+            bail!("Unexpected ssh-url format: {ssh_url}");
+        }
+        Ok(parts[1..].iter().map(|s| s.to_string()).collect())
     }
-
-    // extract -p PORT root@HOST
-    Ok(parts[1..].iter().map(|s| s.to_string()).collect())
 }
 
 fn ssh_cmd(instance_id: &str) -> Result<Command> {
@@ -93,7 +119,49 @@ fn ssh_user_host(ssh_args: &[String]) -> &str {
     ssh_args.last().expect("ssh args should have user@host")
 }
 
-pub fn setup() -> Result<()> {
+pub fn setup(new: bool) -> Result<()> {
+    let instance_id = if new {
+        provision_instance()?
+    } else {
+        pick_instance()?
+    };
+
+    wait_for_instance(&instance_id)?;
+    run_setup_script(&instance_id)?;
+
+    println!("GPU instance ready! Use `cargo xtask gpu ssh` to connect");
+    Ok(())
+}
+
+fn pick_instance() -> Result<String> {
+    let output = Command::new("bash")
+        .args([
+            "-c",
+            r#"vastai show instances --raw | jq -r '.[] | "\(.id)\t\(.actual_status)\t\(.gpu_name)\t$\(.dph_total)/hr"' | fzf --header='Pick an instance'"#,
+        ])
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .output()?;
+
+    if !output.status.success() {
+        bail!("No instance selected");
+    }
+
+    let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let instance_id = selected
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| color_eyre::eyre::eyre!("Could not parse instance ID from selection"))?
+        .to_string();
+
+    save_instance_id(&instance_id)?;
+    println!("Selected instance {instance_id}");
+
+    Ok(instance_id)
+}
+
+fn provision_instance() -> Result<String> {
     println!("Searching for GPU offers...");
     let output = Command::new("vastai")
         .args([
@@ -156,14 +224,19 @@ pub fn setup() -> Result<()> {
     }
 
     save_instance_id(&instance_id)?;
-    println!("Instance {instance_id} created, waiting for it to start...");
+    println!("Instance {instance_id} created");
 
-    // poll until running
+    Ok(instance_id)
+}
+
+fn wait_for_instance(instance_id: &str) -> Result<()> {
+    println!("Waiting for instance {instance_id} to be running...");
+
     for i in 0..60 {
         std::thread::sleep(std::time::Duration::from_secs(5));
 
         let output = Command::new("vastai")
-            .args(["show", "instance", &instance_id, "--raw"])
+            .args(["show", "instance", instance_id, "--raw"])
             .output()?;
 
         if output.status.success() {
@@ -171,33 +244,40 @@ pub fn setup() -> Result<()> {
             let status = info["actual_status"].as_str().unwrap_or("");
             if status == "running" {
                 println!("Instance is running! (took ~{}s)", (i + 1) * 5);
-                break;
+                return Ok(());
             }
             if i % 6 == 0 {
                 println!("  status: {status}, waiting...");
             }
         }
-
-        if i == 59 {
-            bail!("Instance did not start within 5 minutes");
-        }
     }
 
+    bail!("Instance did not start within 5 minutes");
+}
+
+fn run_setup_script(instance_id: &str) -> Result<()> {
     println!("Running setup script on remote...");
-    let mut cmd = ssh_cmd(&instance_id)?;
+    let mut cmd = ssh_cmd(instance_id)?;
+
+    // forward HF_TOKEN so the remote can download gated models
+    let setup_script = if let Ok(token) = std::env::var("HF_TOKEN") {
+        format!("export HF_TOKEN={token}\n{SETUP_SCRIPT}")
+    } else {
+        SETUP_SCRIPT.to_string()
+    };
+
     cmd.arg("bash -s").stdin(std::process::Stdio::piped());
 
     let mut child = cmd.spawn()?;
     if let Some(ref mut stdin) = child.stdin {
         use std::io::Write;
-        stdin.write_all(SETUP_SCRIPT.as_bytes())?;
+        stdin.write_all(setup_script.as_bytes())?;
     }
     let status = child.wait()?;
     if !status.success() {
         bail!("Remote setup failed");
     }
 
-    println!("GPU instance ready! Use `cargo xtask gpu ssh` to connect");
     Ok(())
 }
 

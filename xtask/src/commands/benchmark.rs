@@ -503,12 +503,14 @@ fn parse_rttm_intervals(rttm: &str) -> Vec<(f64, f64)> {
 const IMPL_REGISTRY: &[(&str, &str, ImplType)] = &[
     ("pyannote", "pyannote MPS", ImplType::Pyannote("mps")),
     ("pyannote-cpu", "pyannote CPU", ImplType::Pyannote("cpu")),
+    ("pyannote-cuda", "pyannote CUDA", ImplType::Pyannote("cuda")),
     ("coreml", "speakrs CoreML", ImplType::Speakrs("coreml")),
     (
         "coreml-fast",
         "speakrs CoreML Fast",
         ImplType::Speakrs("coreml-fast"),
     ),
+    ("cuda", "speakrs CUDA", ImplType::Speakrs("cuda")),
     ("cpu", "speakrs CPU", ImplType::Speakrs("cpu")),
     ("fluidaudio", "FluidAudio", ImplType::FluidAudioBench),
     ("pyannote-rs", "pyannote-rs", ImplType::PyannoteRs),
@@ -563,7 +565,8 @@ pub fn der(
     let root = project_root();
 
     println!("=== Building binaries ===");
-    cargo_build_xtask(&["coreml".to_string()])?;
+    let build_features = der_build_features(impls);
+    cargo_build_xtask(&build_features)?;
     if let Err(e) = run_cmd(
         Command::new("cargo")
             .args(["build", "--release"])
@@ -1130,6 +1133,36 @@ fn capture_benchmark_cmd(cmd: &mut Command) -> Result<(f64, String)> {
     }
 
     Ok((elapsed, String::from_utf8_lossy(&output.stdout).to_string()))
+}
+
+/// Derive cargo features needed for the selected DER implementations
+fn der_build_features(impls: &[String]) -> Vec<String> {
+    let active_impls: Vec<&ImplType> = if impls.is_empty() {
+        IMPL_REGISTRY.iter().map(|(_, _, t)| t).collect()
+    } else {
+        IMPL_REGISTRY
+            .iter()
+            .filter(|(cli_id, _, _)| impls.iter().any(|i| i == cli_id))
+            .map(|(_, _, t)| t)
+            .collect()
+    };
+
+    let mut features = Vec::new();
+    let needs_coreml = active_impls
+        .iter()
+        .any(|t| matches!(t, ImplType::Speakrs(m) if m.starts_with("coreml")));
+    let needs_cuda = active_impls
+        .iter()
+        .any(|t| matches!(t, ImplType::Speakrs("cuda")));
+
+    if needs_coreml {
+        features.push("coreml".to_string());
+    }
+    if needs_cuda {
+        features.push("cuda".to_string());
+    }
+
+    features
 }
 
 fn der_skip_reason(
