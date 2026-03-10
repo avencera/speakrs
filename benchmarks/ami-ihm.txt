@@ -1,0 +1,6 @@
+AMI IHM DER (3 files, 47.2 min, collar=0ms)
+
+Implementation             DER%    Missed%   FalseAlarm%   Confusion%     Time
+──────────────────────────────────────────────────────────────────────────────
+pyannote MPS              16.0%       8.6%          4.2%         3.2%   145.1s
+speakrs CoreML            16.0%       8.6%          4.2%         3.2%    46.2s

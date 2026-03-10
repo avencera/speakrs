@@ -16,8 +16,38 @@ All benchmarks run on Apple M4 Pro, macOS 26.3, collar=0ms
 
 ## Results
 
-- [VoxConverse Dev](voxconverse-dev.txt) — 39 files, 53 min
-- [VoxConverse Test](voxconverse-test.txt) — 39 files, 74 min
+### VoxConverse Dev (39 files, 53 min)
+
+| Implementation | DER | Missed | False Alarm | Confusion | Time |
+|---|---|---|---|---|---|
+| pyannote MPS | 6.4% | 2.4% | 2.0% | 2.1% | 128.4s |
+| speakrs CoreML | 6.4% | 2.4% | 2.0% | 2.0% | 66.8s |
+| speakrs CoreML Fast | 9.0% | 2.3% | 2.0% | 4.7% | 40.2s |
+| FluidAudio | 16.1% | 5.3% | 1.8% | 8.9% | 29.3s |
+| pyannote-rs | 92.4% | 84.1% | 1.0% | 7.3% | 16.9s |
+
+### VoxConverse Test (39 files, 74 min)
+
+| Implementation | DER | Missed | False Alarm | Confusion | Time |
+|---|---|---|---|---|---|
+| pyannote MPS | 11.2% | 5.0% | 2.0% | 4.2% | 177.1s |
+| speakrs CoreML | 11.1% | 5.0% | 2.0% | 4.1% | 66.1s |
+| speakrs CoreML Fast | 13.9% | 5.1% | 2.0% | 6.8% | 37.9s |
+| FluidAudio | 26.6% | 9.1% | 1.8% | 15.7% | 35.0s |
+| pyannote-rs | 89.3% | 80.3% | 0.7% | 8.3% | 21.7s |
+
+### AMI IHM (3 files, 47 min)
+
+| Implementation | DER | Missed | False Alarm | Confusion | Time |
+|---|---|---|---|---|---|
+| pyannote MPS | 16.0% | 8.6% | 4.2% | 3.2% | 145.1s |
+| speakrs CoreML | 16.0% | 8.6% | 4.2% | 3.2% | 46.2s |
+
+### Raw Data
+
+- [VoxConverse Dev](voxconverse-dev.txt)
+- [VoxConverse Test](voxconverse-test.txt)
+- [AMI IHM](ami-ihm.txt)
 
 ## Reproduce
 
@@ -29,6 +59,9 @@ cargo xtask benchmark der --dataset voxconverse-dev --max-files 39 --max-minutes
 
 # full test set, all implementations
 cargo xtask benchmark der --dataset voxconverse-test --max-files 39 --max-minutes 80
+
+# AMI IHM
+cargo xtask benchmark der --dataset ami-ihm --max-files 3 --max-minutes 50
 
 # specific implementations only
 cargo xtask benchmark der --max-files 39 --max-minutes 60 --impl pyannote --impl coreml
