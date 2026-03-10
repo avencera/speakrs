@@ -8,7 +8,7 @@ All benchmarks run on Apple M4 Pro, macOS 26.3, collar=0ms
 
 | Name | Description |
 |------|-------------|
-| pyannote MPS | pyannote.audio on Apple GPU (MPS) — reference |
+| pyannote community-1 (MPS) | [`pyannote/speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1) on Apple GPU (MPS) — reference |
 | speakrs CoreML | speakrs with native CoreML, 1s step, FP32   |
 | speakrs CoreML Fast | speakrs with native CoreML, 2s step, FP32 |
 | FluidAudio | [FluidAudio](https://github.com/FluidInference/FluidAudio) Swift implementation |
@@ -20,7 +20,7 @@ All benchmarks run on Apple M4 Pro, macOS 26.3, collar=0ms
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time |
 |---|---|---|---|---|---|
-| pyannote MPS | 6.4% | 2.4% | 2.0% | 2.1% | 128.4s |
+| pyannote community-1 (MPS) | 6.4% | 2.4% | 2.0% | 2.1% | 128.4s |
 | speakrs CoreML | 6.4% | 2.4% | 2.0% | 2.0% | 66.8s |
 | speakrs CoreML Fast | 9.0% | 2.3% | 2.0% | 4.7% | 40.2s |
 | FluidAudio | 16.1% | 5.3% | 1.8% | 8.9% | 29.3s |
@@ -30,7 +30,7 @@ All benchmarks run on Apple M4 Pro, macOS 26.3, collar=0ms
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time |
 |---|---|---|---|---|---|
-| pyannote MPS | 11.2% | 5.0% | 2.0% | 4.2% | 177.1s |
+| pyannote community-1 (MPS) | 11.2% | 5.0% | 2.0% | 4.2% | 177.1s |
 | speakrs CoreML | 11.1% | 5.0% | 2.0% | 4.1% | 66.1s |
 | speakrs CoreML Fast | 13.9% | 5.1% | 2.0% | 6.8% | 37.9s |
 | FluidAudio | 26.6% | 9.1% | 1.8% | 15.7% | 35.0s |
@@ -40,7 +40,7 @@ All benchmarks run on Apple M4 Pro, macOS 26.3, collar=0ms
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time |
 |---|---|---|---|---|---|
-| pyannote MPS | 16.0% | 8.6% | 4.2% | 3.2% | 145.1s |
+| pyannote community-1 (MPS) | 16.0% | 8.6% | 4.2% | 3.2% | 145.1s |
 | speakrs CoreML | 16.0% | 8.6% | 4.2% | 3.2% | 46.2s |
 | speakrs CoreML Fast | 16.2% | 8.6% | 4.3% | 3.3% | 23.1s |
 | FluidAudio | 40.1% | 14.3% | 3.1% | 22.6% | 19.3s |

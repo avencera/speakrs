@@ -1,4 +1,3 @@
-#[path = "support.rs"]
 mod support;
 
 use std::collections::BTreeMap;
