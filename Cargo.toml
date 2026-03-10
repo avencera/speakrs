@@ -1,5 +1,6 @@
 [workspace]
 members = ["xtask"]
+exclude = ["scripts/"]
 
 [package]
 name = "speakrs"
@@ -31,16 +32,27 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 objc2 = { version = "0.6", optional = true }
 block2 = { version = "0.6", optional = true }
 objc2-core-ml = { version = "0.3", optional = true, features = [
-    "MLModel", "MLMultiArray",
+    "MLModel",
+    "MLMultiArray",
     "MLModelConfiguration",
-    "MLDictionaryFeatureProvider", "MLFeatureValue",
-    "MLFeatureProvider", "MLPredictionOptions",
-    "alloc", "block2",
+    "MLDictionaryFeatureProvider",
+    "MLFeatureValue",
+    "MLFeatureProvider",
+    "MLPredictionOptions",
+    "alloc",
+    "block2",
 ] }
 objc2-foundation = { version = "0.3", optional = true, features = [
-    "NSArray", "NSDictionary", "NSError",
-    "NSObject", "NSString", "NSURL", "NSValue",
-    "NSSet", "NSEnumerator", "NSObjCRuntime",
+    "NSArray",
+    "NSDictionary",
+    "NSError",
+    "NSObject",
+    "NSString",
+    "NSURL",
+    "NSValue",
+    "NSSet",
+    "NSEnumerator",
+    "NSObjCRuntime",
 ] }
 
 [dev-dependencies]
