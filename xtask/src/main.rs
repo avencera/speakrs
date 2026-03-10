@@ -160,8 +160,12 @@ enum BenchmarkCmd {
 
 #[derive(Subcommand)]
 enum GpuCmd {
-    /// Rent a GPU instance, install deps, and build the project
-    Setup,
+    /// Pick an existing instance (or provision a new one with --new), install deps, and build
+    Setup {
+        /// Provision a new GPU instance instead of picking an existing one
+        #[arg(long)]
+        new: bool,
+    },
     /// Run benchmarks on the remote GPU instance
     Benchmark {
         /// Arguments passed to `cargo xtask benchmark` on the remote
@@ -227,7 +231,7 @@ fn main() -> Result<()> {
             ),
         },
         Command::Gpu { cmd } => match cmd {
-            GpuCmd::Setup => commands::gpu::setup(),
+            GpuCmd::Setup { new } => commands::gpu::setup(new),
             GpuCmd::Benchmark { args } => commands::gpu::benchmark(&args),
             GpuCmd::Ssh => commands::gpu::ssh(),
             GpuCmd::Destroy => commands::gpu::destroy(),
