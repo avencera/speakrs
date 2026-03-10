@@ -5,7 +5,7 @@ use ndarray::{Array1, Array2, Array3, ArrayView2, s};
 use ort::session::Session;
 use ort::value::TensorRef;
 
-#[cfg(feature = "native-coreml")]
+#[cfg(feature = "coreml")]
 use crate::inference::coreml::{CachedInputShape, CoreMlModel, GpuPrecision, coreml_model_path};
 use crate::inference::{ExecutionMode, with_execution_mode};
 
@@ -25,7 +25,7 @@ pub(crate) struct SplitTailInput<'a> {
     pub weights: &'a [f32],
 }
 
-#[cfg(feature = "native-coreml")]
+#[cfg(feature = "coreml")]
 pub(crate) struct FusedEmbeddingInput<'a> {
     pub audio: &'a [f32],
     pub weights: &'a [f32],
@@ -41,33 +41,33 @@ pub struct EmbeddingModel {
     split_tail_session: Option<Session>,
     split_tail_batched_session: Option<Session>,
     split_primary_tail_batched_session: Option<Session>,
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     native_tail_session: Option<CoreMlModel>,
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     native_tail_batched_session: Option<CoreMlModel>,
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     native_tail_primary_batched_session: Option<CoreMlModel>,
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     native_fbank_session: Option<CoreMlModel>,
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     native_fbank_batched_session: Option<CoreMlModel>,
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     native_fused_session: Option<CoreMlModel>,
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     native_fused_batched_session: Option<CoreMlModel>,
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     native_fused_primary_batched_session: Option<CoreMlModel>,
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     cached_tail_fbank_shape: CachedInputShape,
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     cached_tail_weights_shape: CachedInputShape,
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     cached_fused_waveform_shape: CachedInputShape,
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     cached_fused_weights_shape: CachedInputShape,
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     cached_fbank_single_shape: CachedInputShape,
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     cached_fbank_batch_shape: CachedInputShape,
     waveform_buffer: Array3<f32>,
     weights_buffer: Array2<f32>,
@@ -141,62 +141,62 @@ impl EmbeddingModel {
                 .filter(|path| path.exists())
                 .map(|path| Self::build_session(path.to_str().unwrap(), mode))
                 .transpose()?,
-            #[cfg(feature = "native-coreml")]
+            #[cfg(feature = "coreml")]
             native_tail_session: Self::load_native_tail(model_path, mode, 1),
-            #[cfg(feature = "native-coreml")]
+            #[cfg(feature = "coreml")]
             native_tail_batched_session: Self::load_native_tail(
                 model_path,
                 mode,
                 CHUNK_SPEAKER_BATCH_SIZE,
             ),
-            #[cfg(feature = "native-coreml")]
+            #[cfg(feature = "coreml")]
             native_tail_primary_batched_session: Self::load_native_tail(
                 model_path,
                 mode,
                 PRIMARY_BATCH_SIZE,
             ),
-            #[cfg(feature = "native-coreml")]
+            #[cfg(feature = "coreml")]
             native_fbank_session: Self::load_native_fbank(model_path, mode, 1),
-            #[cfg(feature = "native-coreml")]
+            #[cfg(feature = "coreml")]
             native_fbank_batched_session: Self::load_native_fbank(
                 model_path,
                 mode,
                 PRIMARY_BATCH_SIZE,
             ),
-            #[cfg(feature = "native-coreml")]
+            #[cfg(feature = "coreml")]
             native_fused_session: Self::load_native_fused(model_path, mode, 1),
-            #[cfg(feature = "native-coreml")]
+            #[cfg(feature = "coreml")]
             native_fused_batched_session: Self::load_native_fused(
                 model_path,
                 mode,
                 CHUNK_SPEAKER_BATCH_SIZE,
             ),
-            #[cfg(feature = "native-coreml")]
+            #[cfg(feature = "coreml")]
             native_fused_primary_batched_session: Self::load_native_fused(
                 model_path,
                 mode,
                 PRIMARY_BATCH_SIZE,
             ),
-            #[cfg(feature = "native-coreml")]
+            #[cfg(feature = "coreml")]
             cached_tail_fbank_shape: CachedInputShape::new(
                 "fbank",
                 &[PRIMARY_BATCH_SIZE, FBANK_FRAMES, FBANK_FEATURES],
             ),
-            #[cfg(feature = "native-coreml")]
+            #[cfg(feature = "coreml")]
             cached_tail_weights_shape: CachedInputShape::new("weights", &[PRIMARY_BATCH_SIZE, 589]),
-            #[cfg(feature = "native-coreml")]
+            #[cfg(feature = "coreml")]
             cached_fused_waveform_shape: CachedInputShape::new(
                 "waveform",
                 &[PRIMARY_BATCH_SIZE, 1, 160_000],
             ),
-            #[cfg(feature = "native-coreml")]
+            #[cfg(feature = "coreml")]
             cached_fused_weights_shape: CachedInputShape::new(
                 "weights",
                 &[PRIMARY_BATCH_SIZE, 589],
             ),
-            #[cfg(feature = "native-coreml")]
+            #[cfg(feature = "coreml")]
             cached_fbank_single_shape: CachedInputShape::new("waveform", &[1, 1, 160_000]),
-            #[cfg(feature = "native-coreml")]
+            #[cfg(feature = "coreml")]
             cached_fbank_batch_shape: CachedInputShape::new(
                 "waveform",
                 &[PRIMARY_BATCH_SIZE, 1, 160_000],
@@ -326,7 +326,7 @@ impl EmbeddingModel {
             .filter(|path| path.exists())
             .map(|path| Self::build_session(path.to_str().unwrap(), self.mode))
             .transpose()?;
-        #[cfg(feature = "native-coreml")]
+        #[cfg(feature = "coreml")]
         {
             self.native_tail_session = Self::load_native_tail(&self.model_path, self.mode, 1);
             self.native_tail_batched_session =
@@ -347,7 +347,7 @@ impl EmbeddingModel {
 
     pub fn prefers_chunk_embedding_path(&self) -> bool {
         let ort_split = self.split_fbank_session.is_some() && self.split_tail_session.is_some();
-        #[cfg(feature = "native-coreml")]
+        #[cfg(feature = "coreml")]
         let ort_split =
             ort_split || self.native_tail_session.is_some() || self.native_fused_session.is_some();
         ort_split
@@ -357,7 +357,7 @@ impl EmbeddingModel {
         if self.split_primary_tail_batched_session.is_some() {
             return PRIMARY_BATCH_SIZE;
         }
-        #[cfg(feature = "native-coreml")]
+        #[cfg(feature = "coreml")]
         if self.native_tail_primary_batched_session.is_some()
             || self.native_fused_primary_batched_session.is_some()
         {
@@ -428,7 +428,7 @@ impl EmbeddingModel {
         }
 
         // fused path: waveform + weights → embedding (no separate fbank)
-        #[cfg(feature = "native-coreml")]
+        #[cfg(feature = "coreml")]
         if self.native_fused_session.is_some() {
             let has_batched_fused = self.native_fused_batched_session.is_some();
             if speaker_count == CHUNK_SPEAKER_BATCH_SIZE && has_batched_fused {
@@ -451,7 +451,7 @@ impl EmbeddingModel {
 
         let fbank = self.compute_chunk_fbank(audio)?;
         let has_batched_tail = self.split_tail_batched_session.is_some();
-        #[cfg(feature = "native-coreml")]
+        #[cfg(feature = "coreml")]
         let has_batched_tail = has_batched_tail || self.native_tail_batched_session.is_some();
         if speaker_count == CHUNK_SPEAKER_BATCH_SIZE && has_batched_tail {
             return self.embed_tail_batch(&fbank, &segmentations, clean_masks, audio.len());
@@ -535,7 +535,7 @@ impl EmbeddingModel {
                 .fill(0.0);
         }
 
-        #[cfg(feature = "native-coreml")]
+        #[cfg(feature = "coreml")]
         if let Some(ref mut native) = self.native_fbank_session {
             let input_data = self.split_waveform_buffer.as_slice().unwrap();
             let (data, out_shape) = native
@@ -563,7 +563,7 @@ impl EmbeddingModel {
         audios: &[&[f32]],
     ) -> Result<Vec<Array2<f32>>, ort::Error> {
         let has_batched = self.split_fbank_batched_session.is_some();
-        #[cfg(feature = "native-coreml")]
+        #[cfg(feature = "coreml")]
         let has_batched = has_batched || self.native_fbank_batched_session.is_some();
         if !has_batched {
             return audios
@@ -590,7 +590,7 @@ impl EmbeddingModel {
                     }
                 }
 
-                #[cfg(feature = "native-coreml")]
+                #[cfg(feature = "coreml")]
                 if let Some(ref mut native) = self.native_fbank_batched_session {
                     let input_data = self.split_fbank_batch_buffer.as_slice().unwrap();
                     let (data, out_shape) = native
@@ -646,7 +646,7 @@ impl EmbeddingModel {
 
     pub fn has_batched_fbank(&self) -> bool {
         let has = self.split_fbank_batched_session.is_some();
-        #[cfg(feature = "native-coreml")]
+        #[cfg(feature = "coreml")]
         let has = has || self.native_fbank_batched_session.is_some();
         has
     }
@@ -699,7 +699,7 @@ impl EmbeddingModel {
                 .fill(0.0);
         }
 
-        #[cfg(feature = "native-coreml")]
+        #[cfg(feature = "coreml")]
         if let Some(ref mut native) = self.native_tail_primary_batched_session {
             let fbank_data = self.split_primary_feature_batch_buffer.as_slice().unwrap();
             let weights_data = self.split_primary_weights_batch_buffer.as_slice().unwrap();
@@ -727,12 +727,12 @@ impl EmbeddingModel {
         Ok(batch.slice(s![0..inputs.len(), ..]).to_owned())
     }
 
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     pub(crate) fn has_fused_primary_batch(&self) -> bool {
         self.native_fused_primary_batched_session.is_some()
     }
 
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     pub(crate) fn embed_fused_batch_inputs(
         &mut self,
         inputs: &[FusedEmbeddingInput<'_>],
@@ -791,7 +791,7 @@ impl EmbeddingModel {
             &mut self.split_weights_batch_buffer.view_mut(),
         );
 
-        #[cfg(feature = "native-coreml")]
+        #[cfg(feature = "coreml")]
         if let Some(ref mut native) = self.native_tail_session {
             let feature_slice = self.split_feature_batch_buffer.slice(s![0..1, .., ..]);
             let weight_slice = self.split_weights_batch_buffer.slice(s![0..1, ..]);
@@ -859,7 +859,7 @@ impl EmbeddingModel {
             );
         }
 
-        #[cfg(feature = "native-coreml")]
+        #[cfg(feature = "coreml")]
         if let Some(ref mut native) = self.native_tail_batched_session {
             let fbank_data = self.split_feature_batch_buffer.as_slice().unwrap();
             let weights_data = self.split_weights_batch_buffer.as_slice().unwrap();
@@ -934,7 +934,7 @@ impl EmbeddingModel {
             .assign(&ndarray::ArrayView1::from(&weights[..copy_len]));
     }
 
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     fn embed_fused_single(
         &mut self,
         audio: &[f32],
@@ -969,7 +969,7 @@ impl EmbeddingModel {
         Ok(Array1::from_vec(data))
     }
 
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     fn embed_fused_batch(
         &mut self,
         audio: &[f32],
@@ -1020,7 +1020,7 @@ impl EmbeddingModel {
         Ok(Array2::from_shape_vec((segmentations.ncols(), 256), data).unwrap())
     }
 
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     fn load_native_tail(
         model_path: &str,
         mode: ExecutionMode,
@@ -1053,7 +1053,7 @@ impl EmbeddingModel {
         }
     }
 
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     fn load_native_fbank(
         model_path: &str,
         mode: ExecutionMode,
@@ -1086,7 +1086,7 @@ impl EmbeddingModel {
         }
     }
 
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     fn load_native_fused(
         model_path: &str,
         mode: ExecutionMode,
@@ -1150,7 +1150,7 @@ fn split_tail_model_path(model_path: &str, batch_size: usize) -> std::path::Path
     }
 }
 
-#[cfg(feature = "native-coreml")]
+#[cfg(feature = "coreml")]
 fn fused_model_path(model_path: &str, batch_size: usize) -> std::path::PathBuf {
     let path = Path::new(model_path);
     if batch_size == 1 {

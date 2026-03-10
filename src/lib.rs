@@ -1,6 +1,3 @@
-#[global_allocator]
-static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 pub mod aggregate;
 pub mod binarize;
 pub mod clustering;

@@ -1,6 +1,6 @@
 # speakrs
 
-Speaker diarization in Rust. Put audio in, get RTTM segments out. Runs up to **63x realtime** on Apple Silicon, matching or beating pyannote accuracy at ~9x speed.
+Speaker diarization in Rust. Put audio in, get RTTM segments out. Runs **48–79x realtime** on Apple Silicon, matching pyannote accuracy at the high end and trading some accuracy for speed at the low end.
 
 `speakrs` implements the full pyannote community-1 pipeline in Rust: segmentation, powerset decode, aggregation, binarization, embedding, PLDA, and VBx clustering — plus temporal smoothing during reconstruction. There is no Python dependency. Inference runs on ONNX Runtime or native CoreML, and all post-processing stays in Rust.
 
@@ -45,16 +45,16 @@ Audio (16kHz f32)
 
 ## macOS / iOS (CoreML)
 
-Requires the `native-coreml` Cargo feature. Uses Apple's CoreML framework for GPU/ANE-accelerated inference.
+Requires the `coreml` Cargo feature. Uses Apple's CoreML framework for GPU/ANE-accelerated inference.
 
 ### Execution Modes
 
 | Mode | Backend | Step | Precision | Use case |
 |------|---------|------|-----------|----------|
-| `coreml` | Native CoreML | 1s | FP32 | Best accuracy, GPU-accelerated |
-| `coreml-lite` | Native CoreML | 2s | FP16+ANE | Best speed (63x realtime) |
+| `coreml` | Native CoreML | 1s | FP32 | Best accuracy (48x realtime) |
+| `coreml-fast` | Native CoreML | 2s | FP32 | Best speed (79x realtime) |
 
-`coreml-lite` uses a wider step (2s instead of 1s) and FP16 ANE inference to get about 2x more speed. That follows the same throughput-first tradeoff [FluidAudio](https://github.com/FluidInference/FluidAudio) uses on Apple hardware. It matches `coreml` on most clips, but on some inputs the coarser step drops a few segments. The 10.5-minute benchmark below shows one example.
+`coreml-fast` uses a wider step (2s instead of 1s) to get about 2x more speed. That follows the same throughput-first tradeoff [FluidAudio](https://github.com/FluidInference/FluidAudio) uses on Apple hardware. It matches `coreml` on most clips, but on some inputs the coarser step drops a few segments. The 10.5-minute benchmark below shows one example.
 
 ### Benchmarks
 
@@ -64,27 +64,27 @@ All benchmarks were run on an Apple M4 Pro with macOS 26.3.
 
 | Mode | Speakers | Segments | Coverage | Time | RTFx |
 |------|----------|----------|----------|------|------|
-| `coreml-lite` (FP16) | 6 | 79 | 100% | 6.7s | **63x** |
-| `coreml` (FP32) | 6 | 79 | 100% | 11.5s | 37x |
+| `coreml-fast` | 6 | 79 | 100% | 6.7s | **63x** |
+| `coreml` | 6 | 79 | 100% | 11.5s | 37x |
 | pyannote MPS | 6 | 81 | reference | 28.8s | 15x |
 
 #### 10.5-min clip (635.7s, 3 speakers)
 
 | Mode | Speakers | Segments | Coverage | Time | RTFx |
 |------|----------|----------|----------|------|------|
-| `coreml-lite` (FP16) | 3 | 247 | 99.7% | 5.4s | **118x** |
-| `coreml` (FP32) | 3 | 250 | 100% | 16.3s | 39x |
+| `coreml-fast` | 3 | 247 | 99.7% | 5.4s | **118x** |
+| `coreml` | 3 | 250 | 100% | 16.3s | 39x |
 | pyannote MPS | 3 | 250 | reference | 36.9s | 17x |
 
 #### 45-min clip (2700.0s)
 
 | Mode | Speakers | Segments | Coverage | Time | RTFx |
 |------|----------|----------|----------|------|------|
-| `coreml-lite` (FP16) | 2 | 722 | 100% | 42.3s | **64x** |
-| `coreml` (FP32) | 2 | 722 | 100% | 72.1s | 37x |
+| `coreml-fast` | 2 | 722 | 100% | 42.3s | **64x** |
+| `coreml` | 2 | 722 | 100% | 72.1s | 37x |
 | pyannote MPS | 2 | 720 | reference | 145.3s | 19x |
 
-Coverage is measured as mutual speech overlap with pyannote. Small segment count differences, such as 79 vs 81, come from f32 accumulation order at frame boundaries. No speech is lost or added in those cases. In the 10.5-minute clip, `coreml-lite` drops 3 segments and reaches 99.7% coverage because of the wider 2-second step.
+Coverage is measured as mutual speech overlap with pyannote. Small segment count differences, such as 79 vs 81, come from f32 accumulation order at frame boundaries. No speech is lost or added in those cases. In the 10.5-minute clip, `coreml-fast` drops 3 segments and reaches 99.7% coverage because of the wider 2-second step.
 
 ### Accuracy (DER)
 
@@ -92,8 +92,8 @@ Evaluated on VoxConverse dev set (39 files, 53 min, collar=0ms):
 
 | Mode | DER | Notes |
 |------|-----|-------|
-| `coreml` (FP32) | 6.4% | Matches pyannote MPS |
-| `coreml-lite` (FP16) | 9.0% | 2s step, ~2x faster |
+| `coreml` | 6.4% | Matches pyannote MPS |
+| `coreml-fast` | 9.0% | 2s step, ~2x faster |
 | pyannote MPS | 6.4% | Reference |
 
 CoreML may differ slightly from CPU due to GPU floating-point non-determinism in accumulation order and fused multiply-add behavior.
@@ -122,11 +122,11 @@ fn load_your_mono_16khz_audio_here() -> Vec<f32> {
 ### CLI Usage
 
 ```bash
-# Native CoreML (fastest)
-cargo run --release --features native-coreml --bin diarize -- --mode coreml-lite audio.wav
+# CoreML (fastest)
+cargo run --release -p xtask --features coreml --bin diarize -- --mode coreml-fast audio.wav
 
-# Native CoreML (accuracy)
-cargo run --release --features native-coreml --bin diarize -- --mode coreml audio.wav
+# CoreML (best accuracy)
+cargo run --release -p xtask --features coreml --bin diarize -- --mode coreml audio.wav
 
 # Compare with pyannote
 just compare audio.wav
@@ -189,10 +189,10 @@ fn load_your_mono_16khz_audio_here() -> Vec<f32> {
 
 ```bash
 # CPU reference
-cargo run --release --bin diarize -- --mode cpu audio.wav
+cargo run --release -p xtask --bin diarize -- --mode cpu audio.wav
 
 # CUDA (NVIDIA GPU)
-cargo run --release --features cuda --bin diarize -- --mode cuda audio.wav
+cargo run --release -p xtask --features cuda --bin diarize -- --mode cuda audio.wav
 ```
 
 The result also gives you access to intermediate data:

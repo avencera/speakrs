@@ -145,7 +145,7 @@ pub fn compare(source: &str, runs: u32, warmups: u32) -> Result<()> {
 
     println!();
     println!("=== Building binaries ===");
-    cargo_build("diarize", &["native-coreml".to_string()])?;
+    cargo_build("diarize", &["coreml".to_string()])?;
     run_cmd(
         Command::new("cargo")
             .args(["build", "--release"])
@@ -232,13 +232,13 @@ pub fn compare(source: &str, runs: u32, warmups: u32) -> Result<()> {
 
     if let Some(fluidaudio_path) = &fluidaudio_path {
         for _ in 0..warmups {
-            run_fluidaudio_impl(&fluidaudio_path, &wav_str);
+            run_fluidaudio_impl(fluidaudio_path, &wav_str);
         }
 
         let mut best_time = f64::INFINITY;
         let mut best_rttm = String::new();
         for _ in 0..runs {
-            let (elapsed, rttm) = run_fluidaudio_impl(&fluidaudio_path, &wav_str);
+            let (elapsed, rttm) = run_fluidaudio_impl(fluidaudio_path, &wav_str);
             if elapsed < best_time {
                 best_time = elapsed;
                 best_rttm = rttm;
@@ -463,7 +463,7 @@ pub fn der(
     let root = project_root();
 
     println!("=== Building binaries ===");
-    cargo_build("diarize", &["native-coreml".to_string()])?;
+    cargo_build("diarize", &["coreml".to_string()])?;
     if let Err(e) = run_cmd(
         Command::new("cargo")
             .args(["build", "--release"])
@@ -828,6 +828,7 @@ fn discover_files(
     Ok(selected)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn save_der_results(
     run_dir: &Path,
     dataset_name: &str,
