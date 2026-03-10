@@ -42,6 +42,8 @@ All benchmarks run on Apple M4 Pro, macOS 26.3, collar=0ms
 |---|---|---|---|---|---|
 | pyannote MPS | 16.0% | 8.6% | 4.2% | 3.2% | 145.1s |
 | speakrs CoreML | 16.0% | 8.6% | 4.2% | 3.2% | 46.2s |
+| speakrs CoreML Fast | 16.2% | 8.6% | 4.3% | 3.3% | 23.1s |
+| FluidAudio | 40.1% | 14.3% | 3.1% | 22.6% | 19.3s |
 
 ### Raw Data
 
