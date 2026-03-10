@@ -6,12 +6,15 @@ publish = false
 
 [features]
 coreml = ["speakrs/coreml"]
+cuda = ["speakrs/cuda"]
 
 [dependencies]
 chrono = "0.4.44"
 clap = { version = "4", features = ["derive"] }
+console = "0.16"
 color-eyre = "0.6"
 hound = "3.5.1"
+indicatif = "0.18.4"
 mimalloc = "0.1.48"
 ndarray = "0.17.2"
 ort = { version = "2.0.0-rc.12", features = ["ndarray"] }

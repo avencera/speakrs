@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use clap::ValueEnum;
 use color_eyre::eyre::{Result, bail, ensure};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use speakrs::clustering::plda::PldaTransform;
 use speakrs::inference::ExecutionMode;
 use speakrs::inference::embedding::EmbeddingModel;
@@ -88,6 +89,13 @@ pub fn run(mode: DiarizeMode, wav_files: Vec<PathBuf>) -> Result<()> {
     )?;
     let plda = PldaTransform::from_dir(&models_dir)?;
 
+    let pb = ProgressBar::with_draw_target(
+        Some(wav_files.len() as u64),
+        ProgressDrawTarget::term_like_with_hz(Box::new(console::Term::stderr()), 20),
+    );
+    pb.set_style(ProgressStyle::with_template("  {pos}/{len} ETA {eta}  {msg}").unwrap());
+    pb.tick();
+
     for wav_path in &wav_files {
         let file_id = wav_path
             .file_stem()
@@ -101,12 +109,12 @@ pub fn run(mode: DiarizeMode, wav_files: Vec<PathBuf>) -> Result<()> {
         let result = diarize(&mut seg_model, &mut emb_model, &plda, &samples, &file_id)?;
         let elapsed = start.elapsed();
 
-        if wav_files.len() > 1 {
-            eprintln!("{file_id}: {:.3}s", elapsed.as_secs_f64());
-        }
+        pb.println(format!("{file_id}: {:.3}s", elapsed.as_secs_f64()));
+        pb.inc(1);
         print!("{}", result.rttm);
     }
 
+    pb.finish_and_clear();
     Ok(())
 }
 

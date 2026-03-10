@@ -35,14 +35,14 @@ All benchmarks run on Apple M4 Pro, macOS 26.3, collar=0ms.
 | speakrs CoreML Fast | 11.9% | 3.3% | 4.1% | 4.5% | 1093.2s | 143x |
 | FluidAudio | 32.6% | 5.4% | 3.4% | 23.8% | 1044.2s | **150x** |
 
-### AMI IHM (3 files, 47 min)
+### AMI IHM (34 files, 1123.8 min)
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
-| **pyannote community-1 (MPS)** | **16.0%** | 8.6% | 4.2% | 3.2% | 145.1s | 20x |
-| **speakrs CoreML** | **16.0%** | 8.6% | 4.2% | 3.2% | 46.2s | 61x |
-| speakrs CoreML Fast | 16.2% | 8.6% | 4.3% | 3.3% | 23.1s | 123x |
-| FluidAudio | 40.1% | 14.3% | 3.1% | 22.6% | 19.3s | **147x** |
+| pyannote community-1 (MPS) | 17.0% | 8.1% | 4.3% | 4.5% | 3326.2s | 20x |
+| **speakrs CoreML** | **16.9%** | 8.1% | 4.3% | 4.5% | 1086.3s | 62x |
+| speakrs CoreML Fast | 17.0% | 8.2% | 4.3% | 4.6% | 540.0s | 125x |
+| FluidAudio | 59.4% | 16.7% | 3.1% | 39.6% | 464.5s | **145x** |
 
 ### Earnings-21 (44 files, 2355.8 min)
 
