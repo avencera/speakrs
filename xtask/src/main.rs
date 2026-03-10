@@ -7,11 +7,13 @@ mod convert;
 mod datasets;
 mod fluidaudio;
 mod python;
+mod wav;
 
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::Result;
+use commands::diarize::DiarizeMode;
 
 #[derive(Parser)]
 #[command(name = "xtask", about = "Development tasks for speakrs")]
@@ -46,6 +48,35 @@ enum Command {
     Gpu {
         #[command(subcommand)]
         cmd: GpuCmd,
+    },
+    /// Run speaker diarization on WAV files
+    Diarize {
+        #[arg(long, default_value = "cpu")]
+        mode: DiarizeMode,
+        /// WAV files to diarize
+        wav_files: Vec<PathBuf>,
+    },
+    /// Profile ORT embedding inference strategies
+    ProfileOrtEmbedding {
+        /// Mode: borrow, owned, prealloc, stream-borrow, stream-owned, stream-prealloc, stream-batched
+        mode: String,
+        /// Path to WAV file
+        wav_path: PathBuf,
+        #[arg(long, default_value_t = 100)]
+        iterations: usize,
+        #[arg(long, default_value_t = 100)]
+        log_every: usize,
+    },
+    /// Profile pipeline stages
+    ProfileStages {
+        /// Mode: seg-only, embed-stream, embed-store, embed-repeat
+        mode: String,
+        /// Path to WAV file
+        wav_path: PathBuf,
+        #[arg(long, default_value_t = 100)]
+        iterations: usize,
+        #[arg(long, default_value_t = 100)]
+        log_every: usize,
     },
 }
 
@@ -201,5 +232,25 @@ fn main() -> Result<()> {
             GpuCmd::Ssh => commands::gpu::ssh(),
             GpuCmd::Destroy => commands::gpu::destroy(),
         },
+        Command::Diarize { mode, wav_files } => commands::diarize::run(mode, wav_files),
+        Command::ProfileOrtEmbedding {
+            mode,
+            wav_path,
+            iterations,
+            log_every,
+        } => commands::profile_ort_embedding::run(
+            &mode,
+            &wav_path.to_string_lossy(),
+            iterations,
+            log_every,
+        ),
+        Command::ProfileStages {
+            mode,
+            wav_path,
+            iterations,
+            log_every,
+        } => {
+            commands::profile_stages::run(&mode, &wav_path.to_string_lossy(), iterations, log_every)
+        }
     }
 }
