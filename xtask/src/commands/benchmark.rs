@@ -506,9 +506,9 @@ pub fn der(
 
         let run_id = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
         let run_dir = if datasets.len() > 1 {
-            root.join("benchmarks").join(&run_id).join(dataset.id())
+            root.join("_benchmarks").join(&run_id).join(dataset.id())
         } else {
-            root.join("benchmarks").join(&run_id)
+            root.join("_benchmarks").join(&run_id)
         };
         fs::create_dir_all(&run_dir)?;
 

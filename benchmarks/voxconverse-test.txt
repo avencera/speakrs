@@ -1,0 +1,10 @@
+VoxConverse Test DER (39 files, 74.0 min, collar=0ms)
+
+Implementation             DER%    Missed%   FalseAlarm%   Confusion%     Time
+──────────────────────────────────────────────────────────────────────────────
+pyannote MPS              11.2%       5.0%          2.0%         4.2%   590.6s
+speakrs CoreML            11.2%       5.0%          2.0%         4.1%    67.5s
+speakrs CoreML Fast       13.9%       5.1%          2.0%         6.8%    37.9s
+SpeakRs                   11.1%       5.0%          2.0%         4.1%    66.1s
+FluidAudio                26.6%       9.1%          1.8%        15.7%    35.0s
+pyannote-rs               89.3%      80.3%          0.7%         8.3%    21.7s

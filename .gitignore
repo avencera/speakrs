@@ -6,5 +6,6 @@ notes
 /scripts/pyannote_rs_bench/target
 __pycache__/
 /scripts/fluidaudio-bench/.build
-benchmarks/
+_benchmarks/
 .vastai-instance
+/fixtures
