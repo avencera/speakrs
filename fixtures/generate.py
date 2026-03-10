@@ -496,6 +496,22 @@ def generate_pipeline_fixtures(output: Path, hf_token: str) -> None:
     # run pipeline on main 2-speaker test audio
     run_pipeline_on_audio(pipeline, wav_path, output, "pipeline")
 
+    # match speakrs' skip-inactive-speaker optimization: set embeddings to NaN
+    # for speakers with total segmentation activity < 10.0 frames
+    min_speaker_activity = 10.0
+    seg_path = output / "pipeline_segmentation_data.npy"
+    emb_path = output / "pipeline_embeddings_data.npy"
+    if seg_path.exists() and emb_path.exists():
+        seg = np.load(seg_path)
+        emb = np.load(emb_path)
+        for chunk_idx in range(seg.shape[0]):
+            for speaker_idx in range(seg.shape[2]):
+                activity = seg[chunk_idx, :, speaker_idx].sum()
+                if activity < min_speaker_activity:
+                    emb[chunk_idx, speaker_idx, :] = np.nan
+        np.save(emb_path, emb)
+        print("  Applied inactive-speaker NaN masking to embeddings fixture")
+
     # generate and run on additional audio scenarios
     scenarios = [
         ("3speakers", generate_three_speaker_audio),
