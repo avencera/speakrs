@@ -1,8 +1,7 @@
-use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use color_eyre::eyre::{Result, bail, ensure};
 use ndarray::{Array2, Array3, ArrayView2, s};
 use ort::ep;
 use ort::memory::Allocator;
@@ -12,32 +11,24 @@ use speakrs::inference::segmentation::SegmentationModel;
 use speakrs::pipeline::SEGMENTATION_STEP_SECONDS;
 use speakrs::powerset::PowersetMapping;
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 || args.len() > 5 {
-        eprintln!(
-            "Usage: profile_ort_embedding <borrow|owned|prealloc|stream-borrow|stream-owned|stream-prealloc|stream-batched> <path/to/audio.wav> [iterations_or_log_every] [log_every]"
-        );
-        std::process::exit(1);
-    }
+use crate::wav;
 
-    let mode = &args[1];
-    let wav_path = &args[2];
+pub fn run(mode: &str, wav_path: &str, iterations: usize, log_every: usize) -> Result<()> {
     let iterations = if mode.starts_with("stream-") {
         0
+    } else if iterations == 0 {
+        5000
     } else {
-        args.get(3)
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(5000)
+        iterations
     };
-    let log_every = if mode.starts_with("stream-") {
-        args.get(3)
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(200)
+    let log_every = if log_every == 0 {
+        if mode.starts_with("stream-") {
+            200
+        } else {
+            250
+        }
     } else {
-        args.get(4)
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(250)
+        log_every
     };
 
     let models_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -47,32 +38,31 @@ fn main() {
     let mut seg_model = SegmentationModel::new(
         models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
         SEGMENTATION_STEP_SECONDS as f32,
-    )
-    .expect("failed to load segmentation model");
+    )?;
     let powerset = PowersetMapping::new(3, 2);
 
-    let (samples, sample_rate) = load_wav_samples(wav_path);
-    assert_eq!(
-        sample_rate, 16_000,
+    let (samples, sample_rate) = wav::load_wav_samples(wav_path)?;
+    ensure!(
+        sample_rate == 16_000,
         "expected 16kHz WAV, got {sample_rate}Hz"
     );
 
-    let raw_windows = seg_model.run(&samples).expect("segmentation failed");
+    let raw_windows = seg_model.run(&samples)?;
     let segmentations = decode_windows(raw_windows, &powerset);
     let model_path = std::env::var_os("SPEAKRS_PROFILE_ORT_MODEL_PATH")
-        .map(std::path::PathBuf::from)
+        .map(PathBuf::from)
         .unwrap_or_else(|| models_dir.join("wespeaker-voxceleb-resnet34.onnx"));
-    let mut session = build_embedding_session(&model_path);
+    let mut session = build_embedding_session(&model_path)?;
 
     eprintln!("start rss_mb={:.1}", rss_mb());
     let output_name = session.outputs()[0].name().to_owned();
     let run_options = RunOptions::new()
-        .expect("failed to create run options")
+        .map_err(|e| color_eyre::eyre::eyre!("{e}"))?
         .with_outputs(
             OutputSelector::no_default().with(&output_name).preallocate(
                 &output_name,
                 Tensor::<f32>::new(&Allocator::default(), [1_usize, 256])
-                    .expect("failed to allocate output tensor"),
+                    .map_err(|e| color_eyre::eyre::eyre!("{e}"))?,
             ),
         );
 
@@ -228,35 +218,37 @@ fn main() {
             }
         }
     } else {
-        eprintln!("Unknown mode: {mode}");
-        std::process::exit(1);
+        bail!("unknown mode: {mode}");
     }
+
+    Ok(())
 }
 
-fn build_embedding_session(model_path: &Path) -> Session {
+fn build_embedding_session(model_path: &Path) -> Result<Session> {
+    use color_eyre::eyre::eyre;
+
     if std::env::var_os("SPEAKRS_PROFILE_ORT_DEFAULTS").is_some() {
-        return Session::builder()
-            .expect("failed to create session builder")
+        return Ok(Session::builder()
+            .map_err(|e| eyre!("{e}"))?
             .commit_from_file(model_path)
-            .expect("failed to load embedding session");
+            .map_err(|e| eyre!("{e}"))?);
     }
 
-    let builder = Session::builder()
-        .expect("failed to create session builder")
+    let mut builder = Session::builder()
+        .map_err(|e| eyre!("{e}"))?
         .with_independent_thread_pool()
-        .expect("failed to configure thread pool")
+        .map_err(|e| eyre!("{e}"))?
         .with_intra_threads(1)
-        .expect("failed to configure intra threads")
+        .map_err(|e| eyre!("{e}"))?
         .with_inter_threads(1)
-        .expect("failed to configure inter threads")
+        .map_err(|e| eyre!("{e}"))?
         .with_memory_pattern(false)
-        .expect("failed to disable memory pattern")
+        .map_err(|e| eyre!("{e}"))?
         .with_execution_providers([ep::CPU::default().with_arena_allocator(false).build()])
-        .expect("failed to configure execution provider");
-    let mut builder = builder;
-    builder
+        .map_err(|e| eyre!("{e}"))?;
+    Ok(builder
         .commit_from_file(model_path)
-        .expect("failed to load embedding session")
+        .map_err(|e| eyre!("{e}"))?)
 }
 
 fn run_one_embedding(
@@ -408,90 +400,4 @@ fn rss_mb() -> f64 {
         .parse::<f64>()
         .unwrap_or(0.0);
     rss_kb / 1024.0
-}
-
-fn load_wav_samples(path: &str) -> (Vec<f32>, u32) {
-    let file = File::open(path).expect("failed to open WAV file");
-    let mut reader = BufReader::new(file);
-    let mut riff_header = [0u8; 12];
-    reader
-        .read_exact(&mut riff_header)
-        .expect("failed to read WAV header");
-    assert_eq!(&riff_header[0..4], b"RIFF", "expected RIFF WAV");
-    assert_eq!(&riff_header[8..12], b"WAVE", "expected WAVE file");
-
-    let mut sample_rate = None;
-    let mut channels = None;
-    let mut bits_per_sample = None;
-
-    loop {
-        let mut chunk_header = [0u8; 8];
-        if reader.read_exact(&mut chunk_header).is_err() {
-            break;
-        }
-
-        let chunk_id = &chunk_header[0..4];
-        let chunk_size = u32::from_le_bytes(chunk_header[4..8].try_into().unwrap()) as usize;
-
-        match chunk_id {
-            b"fmt " => {
-                let mut fmt = vec![0u8; chunk_size];
-                reader
-                    .read_exact(&mut fmt)
-                    .expect("failed to read fmt chunk");
-                let audio_format = u16::from_le_bytes(fmt[0..2].try_into().unwrap());
-                let chunk_channels = u16::from_le_bytes(fmt[2..4].try_into().unwrap());
-                let chunk_sample_rate = u32::from_le_bytes(fmt[4..8].try_into().unwrap());
-                let chunk_bits_per_sample = u16::from_le_bytes(fmt[14..16].try_into().unwrap());
-
-                assert_eq!(audio_format, 1, "expected PCM WAV");
-                channels = Some(chunk_channels);
-                sample_rate = Some(chunk_sample_rate);
-                bits_per_sample = Some(chunk_bits_per_sample);
-            }
-            b"data" => {
-                let sample_rate = sample_rate.expect("fmt chunk must appear before data chunk");
-                let channels = channels.expect("missing channel count");
-                let bits_per_sample = bits_per_sample.expect("missing bits per sample");
-                assert_eq!(channels, 1, "expected mono WAV");
-                assert_eq!(bits_per_sample, 16, "expected 16-bit PCM WAV");
-
-                let mut samples = Vec::with_capacity(chunk_size / 2);
-                let mut remaining = chunk_size;
-                let mut buffer = [0u8; 8192];
-
-                while remaining > 0 {
-                    let to_read = remaining.min(buffer.len());
-                    reader
-                        .read_exact(&mut buffer[..to_read])
-                        .expect("failed to read WAV samples");
-                    for bytes in buffer[..to_read].chunks_exact(2) {
-                        samples.push(i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / 32768.0);
-                    }
-                    remaining -= to_read;
-                }
-
-                if chunk_size % 2 == 1 {
-                    reader
-                        .seek(SeekFrom::Current(1))
-                        .expect("failed to skip WAV padding");
-                }
-
-                return (samples, sample_rate);
-            }
-            _ => {
-                reader
-                    .seek(SeekFrom::Current(chunk_size as i64))
-                    .expect("failed to skip WAV chunk");
-            }
-        }
-
-        if chunk_size % 2 == 1 {
-            reader
-                .seek(SeekFrom::Current(1))
-                .expect("failed to skip WAV padding");
-        }
-    }
-
-    panic!("no data chunk found in WAV");
 }

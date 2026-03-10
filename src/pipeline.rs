@@ -1,4 +1,3 @@
-use std::error::Error;
 use std::path::Path;
 
 use ndarray::{Array2, Array3, ArrayView2, s};
@@ -20,7 +19,24 @@ use crate::reconstruct::{reconstruct, reconstruct_smoothed, speaker_count};
 use crate::segment::{merge_segments, to_rttm, to_segments};
 use crate::utils::cosine_similarity;
 
-type DynError = Box<dyn Error + Send + Sync + 'static>;
+#[derive(Debug, thiserror::Error)]
+pub enum PipelineError {
+    #[error("{0}")]
+    Ort(String),
+    #[error("{0}")]
+    Plda(#[from] crate::clustering::plda::PldaError),
+    #[cfg(feature = "online")]
+    #[error("{0}")]
+    HfHub(#[from] hf_hub::api::sync::ApiError),
+    #[error("{0}")]
+    Other(String),
+}
+
+impl From<ort::Error> for PipelineError {
+    fn from(e: ort::Error) -> Self {
+        Self::Ort(e.to_string())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ReconstructMethod {
@@ -107,7 +123,7 @@ pub struct OwnedDiarizationPipeline {
 #[cfg(feature = "online")]
 impl OwnedDiarizationPipeline {
     /// Download models from HuggingFace and build the pipeline
-    pub fn from_pretrained(mode: crate::models::Mode) -> Result<Self, DynError> {
+    pub fn from_pretrained(mode: crate::models::Mode) -> Result<Self, PipelineError> {
         let manager = crate::models::ModelManager::new()?;
         let models_dir = manager.ensure(mode)?;
 
@@ -144,7 +160,7 @@ impl OwnedDiarizationPipeline {
         })
     }
 
-    pub fn run(&mut self, audio: &[f32]) -> Result<DiarizationResult, DynError> {
+    pub fn run(&mut self, audio: &[f32]) -> Result<DiarizationResult, PipelineError> {
         diarize(
             &mut self.seg_model,
             &mut self.emb_model,
@@ -170,7 +186,7 @@ impl<'a> DiarizationPipeline<'a> {
         seg_model: &'a mut SegmentationModel,
         emb_model: &'a mut EmbeddingModel,
         models_dir: &Path,
-    ) -> Result<Self, DynError> {
+    ) -> Result<Self, PipelineError> {
         Ok(Self {
             seg_model,
             emb_model,
@@ -182,7 +198,7 @@ impl<'a> DiarizationPipeline<'a> {
         SEGMENTATION_STEP_SECONDS as f32
     }
 
-    pub fn run(&mut self, audio: &[f32]) -> Result<DiarizationResult, DynError> {
+    pub fn run(&mut self, audio: &[f32]) -> Result<DiarizationResult, PipelineError> {
         diarize(self.seg_model, self.emb_model, &self.plda, audio, "file1")
     }
 
@@ -208,7 +224,7 @@ pub fn diarize(
     plda: &PldaTransform,
     audio: &[f32],
     file_id: &str,
-) -> Result<DiarizationResult, DynError> {
+) -> Result<DiarizationResult, PipelineError> {
     diarize_with_config(
         seg_model,
         emb_model,
@@ -226,7 +242,7 @@ pub fn diarize_with_config(
     audio: &[f32],
     file_id: &str,
     config: &PipelineConfig,
-) -> Result<DiarizationResult, DynError> {
+) -> Result<DiarizationResult, PipelineError> {
     let powerset = PowersetMapping::new(3, 2);
     let raw_windows = seg_model.run(audio)?;
     tracing::info!(windows = raw_windows.len(), "Segmentation complete");
@@ -272,7 +288,7 @@ pub fn diarize_from_intermediates(
     file_id: &str,
     plda: &PldaTransform,
     config: &PipelineConfig,
-) -> Result<DiarizationResult, DynError> {
+) -> Result<DiarizationResult, PipelineError> {
     let start_frames = chunk_start_frames(segmentations.shape()[0], step_seconds);
     let output_frames = total_output_frames(segmentations.shape()[0], step_seconds);
     let speaker_count = speaker_count(segmentations, &start_frames, 0, output_frames);
@@ -424,7 +440,7 @@ fn extract_embeddings(
     emb_model: &mut EmbeddingModel,
     audio: &[f32],
     segmentations: &Array3<f32>,
-) -> Result<Array3<f32>, DynError> {
+) -> Result<Array3<f32>, PipelineError> {
     let num_chunks = segmentations.shape()[0];
     let num_speakers = segmentations.shape()[2];
     let mut embeddings = Array3::<f32>::from_elem((num_chunks, num_speakers, 256), f32::NAN);
@@ -491,7 +507,7 @@ fn flush_embedding_batch(
     emb_model: &mut EmbeddingModel,
     pending: &[PendingEmbedding<'_>],
     embeddings: &mut Array3<f32>,
-) -> Result<(), DynError> {
+) -> Result<(), PipelineError> {
     let batch_inputs: Vec<_> = pending
         .iter()
         .map(|item| MaskedEmbeddingInput {
@@ -517,7 +533,7 @@ fn extract_split_embeddings(
     audio: &[f32],
     segmentations: &Array3<f32>,
     embeddings: &mut Array3<f32>,
-) -> Result<(), DynError> {
+) -> Result<(), PipelineError> {
     // fused path: waveform+weights → embedding in one CoreML call, no separate fbank
     #[cfg(feature = "coreml")]
     if emb_model.has_fused_primary_batch() {
@@ -607,7 +623,7 @@ fn flush_split_embedding_batch(
     pending: &[PendingSplitEmbedding],
     fbanks: &[Array2<f32>],
     embeddings: &mut Array3<f32>,
-) -> Result<(), DynError> {
+) -> Result<(), PipelineError> {
     let batch_inputs: Vec<_> = pending
         .iter()
         .map(|item| SplitTailInput {
@@ -633,7 +649,7 @@ fn extract_fused_embeddings(
     audio: &[f32],
     segmentations: &Array3<f32>,
     embeddings: &mut Array3<f32>,
-) -> Result<(), DynError> {
+) -> Result<(), PipelineError> {
     let batch_size = emb_model.split_primary_batch_size();
     let num_chunks = segmentations.shape()[0];
     let num_speakers = segmentations.shape()[2];
@@ -702,7 +718,7 @@ fn flush_fused_embedding_batch(
     emb_model: &mut EmbeddingModel,
     pending: &[PendingFusedEmbedding<'_>],
     embeddings: &mut Array3<f32>,
-) -> Result<(), DynError> {
+) -> Result<(), PipelineError> {
     let batch_inputs: Vec<_> = pending
         .iter()
         .map(|item| FusedEmbeddingInput {
