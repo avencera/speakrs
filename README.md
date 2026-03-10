@@ -4,7 +4,7 @@ Speaker diarization in Rust. Put audio in, get RTTM segments out. Runs **48–79
 
 `speakrs` implements the full pyannote community-1 pipeline in Rust: segmentation, powerset decode, aggregation, binarization, embedding, PLDA, and VBx clustering — plus temporal smoothing during reconstruction. There is no Python dependency. Inference runs on ONNX Runtime or native CoreML, and all post-processing stays in Rust.
 
-The outputs have been checked against `pyannote.audio`. On the VoxConverse dev set (39 files), CoreML FP32 matches pyannote MPS at 6.4% DER. CoreML may differ slightly from CPU due to GPU floating-point non-determinism.
+The outputs have been checked against `pyannote.audio`. On the VoxConverse dev set (39 files), CoreML FP32 matches pyannote community-1 (MPS) at 6.4% DER. CoreML may differ slightly from CPU due to GPU floating-point non-determinism.
 
 ## Table of Contents
 
@@ -66,7 +66,7 @@ All benchmarks were run on an Apple M4 Pro with macOS 26.3.
 |------|----------|----------|----------|------|------|
 | `coreml-fast` | 6 | 79 | 100% | 6.7s | **63x** |
 | `coreml` | 6 | 79 | 100% | 11.5s | 37x |
-| pyannote MPS | 6 | 81 | reference | 28.8s | 15x |
+| pyannote community-1 (MPS) | 6 | 81 | reference | 28.8s | 15x |
 
 #### 10.5-min clip (635.7s, 3 speakers)
 
@@ -74,7 +74,7 @@ All benchmarks were run on an Apple M4 Pro with macOS 26.3.
 |------|----------|----------|----------|------|------|
 | `coreml-fast` | 3 | 247 | 99.7% | 5.4s | **118x** |
 | `coreml` | 3 | 250 | 100% | 16.3s | 39x |
-| pyannote MPS | 3 | 250 | reference | 36.9s | 17x |
+| pyannote community-1 (MPS) | 3 | 250 | reference | 36.9s | 17x |
 
 #### 45-min clip (2700.0s)
 
@@ -82,7 +82,7 @@ All benchmarks were run on an Apple M4 Pro with macOS 26.3.
 |------|----------|----------|----------|------|------|
 | `coreml-fast` | 2 | 722 | 100% | 42.3s | **64x** |
 | `coreml` | 2 | 722 | 100% | 72.1s | 37x |
-| pyannote MPS | 2 | 720 | reference | 145.3s | 19x |
+| pyannote community-1 (MPS) | 2 | 720 | reference | 145.3s | 19x |
 
 Coverage is measured as mutual speech overlap with pyannote. Small segment count differences, such as 79 vs 81, come from f32 accumulation order at frame boundaries. No speech is lost or added in those cases. In the 10.5-minute clip, `coreml-fast` drops 3 segments and reaches 99.7% coverage because of the wider 2-second step.
 
@@ -92,9 +92,9 @@ Evaluated on VoxConverse dev set (39 files, 53 min, collar=0ms):
 
 | Mode | DER | Notes |
 |------|-----|-------|
-| `coreml` | 6.4% | Matches pyannote MPS |
+| `coreml` | 6.4% | Matches pyannote community-1 (MPS) |
 | `coreml-fast` | 9.0% | 2s step, ~2x faster |
-| pyannote MPS | 6.4% | Reference |
+| pyannote community-1 (MPS) | 6.4% | Reference |
 
 CoreML may differ slightly from CPU due to GPU floating-point non-determinism in accumulation order and fused multiply-add behavior.
 
@@ -140,8 +140,8 @@ Works on any platform with ONNX Runtime. No special Cargo features needed for CP
 
 | Mode | Backend | Step | Precision | Use case |
 |------|---------|------|-----------|----------|
-| `cpu` | ORT CPU | 1s | FP32 | Reference, bit-exact with pyannote CPU |
-| `cuda` | ORT CUDA | 1s | FP32 | NVIDIA GPU, bit-exact with pyannote CPU |
+| `cpu` | ORT CPU | 1s | FP32 | Reference, bit-exact with pyannote community-1 (CPU) |
+| `cuda` | ORT CUDA | 1s | FP32 | NVIDIA GPU, bit-exact with pyannote community-1 (CPU) |
 
 Additional Cargo features are available for `directml` (Windows) and `tensorrt` (NVIDIA TensorRT).
 
@@ -158,11 +158,11 @@ Evaluated on VoxConverse dev set (39 files, 53 min, collar=0ms):
 
 | Mode | DER | Notes |
 |------|-----|-------|
-| `cpu` (ONNX) | 6.4% | Matches or slightly improves on pyannote CPU |
-| `cuda` (ONNX) | 6.4% | Matches or slightly improves on pyannote CPU |
-| pyannote CPU | 6.4% | Reference |
+| `cpu` (ONNX) | 6.4% | Matches or slightly improves on pyannote community-1 (CPU) |
+| `cuda` (ONNX) | 6.4% | Matches or slightly improves on pyannote community-1 (CPU) |
+| pyannote community-1 (CPU) | 6.4% | Reference |
 
-With temporal smoothing enabled by default, CPU/CUDA output matches or slightly improves on pyannote's CPU backend.
+With temporal smoothing enabled by default, CPU/CUDA output matches or slightly improves on pyannote community-1's CPU backend.
 
 ### Library Usage
 

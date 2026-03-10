@@ -2,10 +2,12 @@
 .venv/
 fixtures/models/
 fixtures/voxconverse/
+fixtures/voxconverse-dev
+fixtures/voxconverse-test/
+fixtures/ami-ihm/
 notes
 /scripts/pyannote_rs_bench/target
 __pycache__/
 /scripts/fluidaudio-bench/.build
 _benchmarks/
 .vastai-instance
-/fixtures
