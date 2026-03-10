@@ -170,6 +170,41 @@ impl OwnedDiarizationPipeline {
         )
     }
 
+    /// Build the pipeline from a local models directory
+    pub fn from_dir(models_dir: &Path, mode: crate::models::Mode) -> Result<Self, PipelineError> {
+        let execution_mode = match mode {
+            crate::models::Mode::Cpu => ExecutionMode::Cpu,
+            crate::models::Mode::CoreMl => ExecutionMode::CoreMl,
+            crate::models::Mode::CoreMlFast => ExecutionMode::CoreMlFast,
+            crate::models::Mode::Cuda => ExecutionMode::Cuda,
+        };
+
+        let step = match execution_mode {
+            ExecutionMode::CoreMlFast => FAST_SEGMENTATION_STEP_SECONDS,
+            _ => SEGMENTATION_STEP_SECONDS,
+        };
+
+        let seg_model = SegmentationModel::with_mode(
+            models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
+            step as f32,
+            execution_mode,
+        )?;
+        let emb_model = EmbeddingModel::with_mode(
+            models_dir
+                .join("wespeaker-voxceleb-resnet34.onnx")
+                .to_str()
+                .unwrap(),
+            execution_mode,
+        )?;
+        let plda = PldaTransform::from_dir(models_dir)?;
+
+        Ok(Self {
+            seg_model,
+            emb_model,
+            plda,
+        })
+    }
+
     pub fn segmentation_step(&self) -> f64 {
         self.seg_model.step_seconds()
     }
