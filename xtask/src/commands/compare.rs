@@ -1,11 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use color_eyre::eyre::Result;
 
 use crate::audio::prepare_audio;
 use crate::cargo::{cargo_run, features_for_mode};
-use crate::cmd::{project_root, run_cmd, tee_cmd};
+use crate::cmd::{find_fluidaudio, project_root, run_cmd, tee_cmd};
 use crate::compare_rttm::compare_rttm_files;
 use crate::fluidaudio;
 
@@ -91,7 +91,11 @@ pub fn accuracy(source: &str, rust_mode: &str) -> Result<()> {
 
     println!();
     println!("=== FluidAudio ===");
-    let fluidaudio_path = find_fluidaudio();
+    let fluidaudio_path = find_fluidaudio().ok_or_else(|| {
+        color_eyre::eyre::eyre!(
+            "FluidAudio not found. Set FLUIDAUDIO_PATH or clone to ~/.cache/cmd/repos/github.com/FluidInference/FluidAudio"
+        )
+    })?;
     run_cmd(
         Command::new("swift")
             .args(["run", "--package-path"])
@@ -114,12 +118,4 @@ pub fn accuracy(source: &str, rust_mode: &str) -> Result<()> {
     compare_rttm_files(&fluidaudio_rttm, &python_cpu_rttm)?;
 
     Ok(())
-}
-
-fn find_fluidaudio() -> PathBuf {
-    if let Ok(path) = std::env::var("FLUIDAUDIO_PATH") {
-        return PathBuf::from(path);
-    }
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".cache/cmd/repos/github.com/FluidInference/FluidAudio")
 }

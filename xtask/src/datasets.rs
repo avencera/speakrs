@@ -41,12 +41,5 @@ pub fn find_dataset(id: &str) -> Option<Box<dyn Dataset>> {
 }
 
 pub fn list_dataset_ids() -> Vec<&'static str> {
-    vec![
-        "voxconverse-dev",
-        "voxconverse-test",
-        "ami-ihm",
-        "aishell4",
-        "earnings21",
-        "alimeeting",
-    ]
+    all_datasets().iter().map(|d| d.id()).collect()
 }
