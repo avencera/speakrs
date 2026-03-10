@@ -2,12 +2,13 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Result, bail};
 
 use crate::audio::prepare_audio;
 use crate::cargo::{cargo_build_xtask, features_for_mode};
-use crate::cmd::{capture_cmd, find_fluidaudio, project_root, run_cmd, wav_duration_seconds};
+use crate::cmd::{find_fluidaudio, project_root, run_cmd, wav_duration_seconds};
 use crate::fluidaudio;
 
 // ---------------------------------------------------------------------------
@@ -98,12 +99,12 @@ fn bench_tool(name: &str, command: &[&str], runs: u32, warmups: u32) -> Result<V
 }
 
 fn run_once(command: &[&str], cwd: &Path) -> Result<f64> {
-    let (elapsed, _) = capture_cmd(
+    let (elapsed, _) = capture_benchmark_cmd(
         Command::new(command[0])
             .args(&command[1..])
             .current_dir(cwd),
     )?;
-    Ok(elapsed.as_secs_f64())
+    Ok(elapsed)
 }
 
 // ---------------------------------------------------------------------------
@@ -112,14 +113,15 @@ fn run_once(command: &[&str], cwd: &Path) -> Result<f64> {
 
 struct RunResult {
     name: String,
-    seconds: f64,
+    mean_seconds: f64,
+    min_seconds: f64,
     rttm: String,
     speakers: usize,
     segments: usize,
 }
 
 impl RunResult {
-    fn new(name: &str, seconds: f64, rttm: String) -> Self {
+    fn new(name: &str, mean_seconds: f64, min_seconds: f64, rttm: String) -> Self {
         let mut speakers_set = std::collections::HashSet::new();
         let mut segments = 0;
         for line in rttm.lines() {
@@ -131,12 +133,19 @@ impl RunResult {
         }
         Self {
             name: name.to_string(),
-            seconds,
+            mean_seconds,
+            min_seconds,
             rttm,
             speakers: speakers_set.len(),
             segments,
         }
     }
+}
+
+enum CompareOutcome {
+    Completed(RunResult),
+    Skipped { name: String, reason: String },
+    Failed { name: String, reason: String },
 }
 
 pub fn compare(source: &str, runs: u32, warmups: u32) -> Result<()> {
@@ -147,11 +156,11 @@ pub fn compare(source: &str, runs: u32, warmups: u32) -> Result<()> {
     println!();
     println!("=== Building binaries ===");
     cargo_build_xtask(&["coreml".to_string()])?;
-    run_cmd(
+    let pyannote_rs_build = run_cmd(
         Command::new("cargo")
             .args(["build", "--release"])
             .current_dir(root.join("scripts/pyannote_rs_bench")),
-    )?;
+    );
 
     let audio_seconds = wav_duration_seconds(&wav)?;
     let models_dir = root.join("fixtures/models");
@@ -189,70 +198,110 @@ pub fn compare(source: &str, runs: u32, warmups: u32) -> Result<()> {
             ],
         ),
         (
-            "speakrs MiniCoreML",
+            "speakrs CoreML Fast",
             vec![
                 speakrs_binary.to_string_lossy().into(),
                 "diarize".into(),
                 "--mode".into(),
-                "mini-coreml".into(),
+                "coreml-fast".into(),
                 wav_str.to_string(),
-            ],
-        ),
-        (
-            "pyannote-rs",
-            vec![
-                pyannote_rs_binary.to_string_lossy().into(),
-                wav_str.to_string(),
-                seg_model.to_string_lossy().into(),
-                emb_model.to_string_lossy().into(),
             ],
         ),
     ];
 
     let fluidaudio_path = find_fluidaudio();
+    let pyannote_rs_available = pyannote_rs_build.is_ok() && pyannote_rs_binary.exists();
 
-    let mut results: Vec<RunResult> = Vec::new();
+    let mut results: Vec<CompareOutcome> = Vec::new();
 
     for (name, cmd_args) in &implementations {
         let cmd_refs: Vec<&str> = cmd_args.iter().map(String::as_str).collect();
 
-        for _ in 0..warmups {
-            run_capture_impl(&cmd_refs, &root);
-        }
-
-        let mut best_time = f64::INFINITY;
-        let mut best_rttm = String::new();
-        for _ in 0..runs {
-            let (elapsed, rttm) = run_capture_impl(&cmd_refs, &root);
-            if elapsed < best_time {
-                best_time = elapsed;
-                best_rttm = rttm;
+        match run_compare_impl(name, warmups, runs, || run_capture_impl(&cmd_refs, &root)) {
+            Ok(result) => {
+                println!(
+                    "  {name}: mean {:.2}s, min {:.2}s",
+                    result.mean_seconds, result.min_seconds
+                );
+                results.push(CompareOutcome::Completed(result));
+            }
+            Err(err) => {
+                println!("  {name}: FAILED ({err})");
+                results.push(CompareOutcome::Failed {
+                    name: (*name).to_string(),
+                    reason: err.to_string(),
+                });
             }
         }
-        results.push(RunResult::new(name, best_time, best_rttm));
-        println!("  {name}: {best_time:.2}s");
     }
 
     if let Some(fluidaudio_path) = &fluidaudio_path {
-        for _ in 0..warmups {
-            run_fluidaudio_impl(fluidaudio_path, &wav_str);
-        }
-
-        let mut best_time = f64::INFINITY;
-        let mut best_rttm = String::new();
-        for _ in 0..runs {
-            let (elapsed, rttm) = run_fluidaudio_impl(fluidaudio_path, &wav_str);
-            if elapsed < best_time {
-                best_time = elapsed;
-                best_rttm = rttm;
+        match run_compare_impl("FluidAudio", warmups, runs, || {
+            run_fluidaudio_impl(fluidaudio_path, &wav_str)
+        }) {
+            Ok(result) => {
+                println!(
+                    "  FluidAudio: mean {:.2}s, min {:.2}s",
+                    result.mean_seconds, result.min_seconds
+                );
+                results.push(CompareOutcome::Completed(result));
+            }
+            Err(err) => {
+                println!("  FluidAudio: FAILED ({err})");
+                results.push(CompareOutcome::Failed {
+                    name: "FluidAudio".to_string(),
+                    reason: err.to_string(),
+                });
             }
         }
-        results.push(RunResult::new("FluidAudio", best_time, best_rttm));
-        println!("  FluidAudio: {best_time:.2}s");
+    } else {
+        results.push(CompareOutcome::Skipped {
+            name: "FluidAudio".to_string(),
+            reason: "fluidaudio checkout not found".to_string(),
+        });
     }
 
-    // pyannote MPS is the reference
-    let ref_rttm = results[0].rttm.clone();
+    if pyannote_rs_available {
+        let cmd_args = [
+            pyannote_rs_binary.to_string_lossy().to_string(),
+            wav_str.to_string(),
+            seg_model.to_string_lossy().to_string(),
+            emb_model.to_string_lossy().to_string(),
+        ];
+        let cmd_refs: Vec<&str> = cmd_args.iter().map(String::as_str).collect();
+        match run_compare_impl("pyannote-rs", warmups, runs, || {
+            run_capture_impl(&cmd_refs, &root)
+        }) {
+            Ok(result) => {
+                println!(
+                    "  pyannote-rs: mean {:.2}s, min {:.2}s",
+                    result.mean_seconds, result.min_seconds
+                );
+                results.push(CompareOutcome::Completed(result));
+            }
+            Err(err) => {
+                println!("  pyannote-rs: FAILED ({err})");
+                results.push(CompareOutcome::Failed {
+                    name: "pyannote-rs".to_string(),
+                    reason: err.to_string(),
+                });
+            }
+        }
+    } else {
+        let reason = pyannote_rs_build
+            .err()
+            .map(|err| format!("pyannote-rs bench build failed: {err}"))
+            .unwrap_or_else(|| "pyannote-rs bench binary not found".to_string());
+        results.push(CompareOutcome::Skipped {
+            name: "pyannote-rs".to_string(),
+            reason,
+        });
+    }
+
+    let ref_rttm = results.iter().find_map(|result| match result {
+        CompareOutcome::Completed(run) if run.name == "pyannote MPS" => Some(run.rttm.clone()),
+        _ => None,
+    });
 
     let minutes = (audio_seconds / 60.0) as u32;
     let secs = audio_seconds % 60.0;
@@ -264,41 +313,58 @@ pub fn compare(source: &str, runs: u32, warmups: u32) -> Result<()> {
 
     let name_w = 22;
     println!(
-        "{:<name_w$} {:>8} {:>9} {:>9} {:>10}",
-        "Implementation", "Time", "Speakers", "Segments", "Parity %"
+        "{:<name_w$} {:>9} {:>9} {:>9} {:>9} {:>10}  Status",
+        "Implementation", "Mean", "Min", "Speakers", "Segments", "Parity %"
     );
-    println!("{}", "─".repeat(name_w + 8 + 9 + 9 + 10 + 4));
+    println!("{}", "─".repeat(name_w + 9 + 9 + 9 + 9 + 10 + 10));
 
-    for (i, result) in results.iter().enumerate() {
-        let time_str = format!("{:.2}s", result.seconds);
-        let speakers_str = if result.segments > 0 {
-            result.speakers.to_string()
-        } else {
-            "—".to_string()
-        };
-        let segments_str = result.segments.to_string();
+    for result in &results {
+        match result {
+            CompareOutcome::Completed(run) => {
+                let mean_str = format!("{:.2}s", run.mean_seconds);
+                let min_str = format!("{:.2}s", run.min_seconds);
+                let speakers_str = if run.segments > 0 {
+                    run.speakers.to_string()
+                } else {
+                    "—".to_string()
+                };
+                let segments_str = run.segments.to_string();
+                let parity_str = match ref_rttm.as_ref() {
+                    Some(_) if run.name == "pyannote MPS" => "(reference)".to_string(),
+                    Some(reference) if run.segments > 0 => {
+                        timeline_overlap_pct(reference, &run.rttm)
+                            .map(|pct| format!("{pct:.1}%"))
+                            .unwrap_or_else(|| "N/A".to_string())
+                    }
+                    _ => "N/A".to_string(),
+                };
 
-        let parity_str = if i == 0 {
-            "(reference)".to_string()
-        } else if result.segments == 0 {
-            "N/A".to_string()
-        } else {
-            match timeline_overlap_pct(&ref_rttm, &result.rttm) {
-                Some(pct) => format!("{pct:.1}%"),
-                None => "N/A".to_string(),
+                println!(
+                    "{:<name_w$} {:>9} {:>9} {:>9} {:>9} {:>10}  ok",
+                    run.name, mean_str, min_str, speakers_str, segments_str, parity_str
+                );
             }
-        };
-
-        println!(
-            "{:<name_w$} {:>8} {:>9} {:>9} {:>10}",
-            result.name, time_str, speakers_str, segments_str, parity_str
-        );
+            CompareOutcome::Skipped { name, reason } => {
+                println!(
+                    "{:<name_w$} {:>9} {:>9} {:>9} {:>9} {:>10}  skipped ({reason})",
+                    name, "—", "—", "—", "—", "N/A"
+                );
+            }
+            CompareOutcome::Failed { name, reason } => {
+                println!(
+                    "{:<name_w$} {:>9} {:>9} {:>9} {:>9} {:>10}  failed ({reason})",
+                    name, "—", "—", "—", "—", "N/A"
+                );
+            }
+        }
     }
 
-    if results
-        .iter()
-        .any(|r| r.name == "pyannote-rs" && r.segments == 0)
-    {
+    if results.iter().any(|result| {
+        matches!(
+            result,
+            CompareOutcome::Completed(run) if run.name == "pyannote-rs" && run.segments == 0
+        )
+    }) {
         println!();
         println!("Note: pyannote-rs returned 0 segments. It only emits segments when");
         println!("speech→silence transitions occur; continuous speech files produce no output.");
@@ -307,23 +373,56 @@ pub fn compare(source: &str, runs: u32, warmups: u32) -> Result<()> {
     Ok(())
 }
 
-fn run_capture_impl(command: &[&str], cwd: &Path) -> (f64, String) {
-    let result = capture_cmd(
+fn run_compare_impl(
+    name: &str,
+    warmups: u32,
+    runs: u32,
+    mut runner: impl FnMut() -> Result<(f64, String)>,
+) -> Result<RunResult> {
+    if runs == 0 {
+        bail!("runs must be greater than 0");
+    }
+
+    for _ in 0..warmups {
+        runner()?;
+    }
+
+    let mut measurements = Vec::with_capacity(runs as usize);
+    let mut representative_rttm = None;
+    for _ in 0..runs {
+        let (elapsed, rttm) = runner()?;
+        if representative_rttm.is_none() {
+            representative_rttm = Some(rttm);
+        }
+        measurements.push(elapsed);
+    }
+
+    let representative_rttm = representative_rttm.unwrap_or_default();
+    Ok(summarize_compare_runs(
+        name,
+        &measurements,
+        representative_rttm,
+    ))
+}
+
+fn summarize_compare_runs(name: &str, measurements: &[f64], rttm: String) -> RunResult {
+    let mean_seconds = measurements.iter().sum::<f64>() / measurements.len() as f64;
+    let min_seconds = measurements.iter().copied().fold(f64::INFINITY, f64::min);
+    RunResult::new(name, mean_seconds, min_seconds, rttm)
+}
+
+fn run_capture_impl(command: &[&str], cwd: &Path) -> Result<(f64, String)> {
+    capture_benchmark_cmd(
         Command::new(command[0])
             .args(&command[1..])
             .current_dir(cwd),
-    );
-    match result {
-        Ok((elapsed, stdout)) => (elapsed.as_secs_f64(), stdout),
-        Err(_) => (0.0, String::new()),
-    }
+    )
 }
 
-fn run_fluidaudio_impl(fluidaudio_path: &Path, wav_path: &str) -> (f64, String) {
+fn run_fluidaudio_impl(fluidaudio_path: &Path, wav_path: &str) -> Result<(f64, String)> {
     let json_tmp = std::env::temp_dir().join(format!("fa-{}.json", std::process::id()));
 
-    let start = std::time::Instant::now();
-    let result = capture_cmd(
+    let (elapsed, _) = capture_benchmark_cmd(
         Command::new("swift")
             .args(["run", "-c", "release", "--package-path"])
             .arg(fluidaudio_path)
@@ -331,17 +430,15 @@ fn run_fluidaudio_impl(fluidaudio_path: &Path, wav_path: &str) -> (f64, String) 
             .arg(wav_path)
             .args(["--mode", "offline", "--output"])
             .arg(&json_tmp),
-    );
-    let elapsed = start.elapsed().as_secs_f64();
+    )?;
 
-    if result.is_err() || !json_tmp.exists() {
-        let _ = fs::remove_file(&json_tmp);
-        return (elapsed, String::new());
+    if !json_tmp.exists() {
+        bail!("fluidaudio did not produce output JSON");
     }
 
-    let rttm = fluidaudio::json_to_rttm(&json_tmp, "file1").unwrap_or_default();
+    let rttm = fluidaudio::json_to_rttm(&json_tmp, "file1")?;
     let _ = fs::remove_file(&json_tmp);
-    (elapsed, rttm)
+    Ok((elapsed, rttm))
 }
 
 fn timeline_overlap_pct(ref_rttm: &str, test_rttm: &str) -> Option<f64> {
@@ -538,6 +635,8 @@ pub fn der(
             total_audio_minutes,
             0.0,
             description,
+            max_files,
+            max_minutes,
         )?;
     }
 
@@ -561,32 +660,15 @@ fn run_der_implementations(
         root.join("scripts/pyannote_rs_bench/target/release/diarize-pyannote-rs");
 
     let fluidaudio_bench_dir = root.join("scripts/fluidaudio-bench");
-    let has_fluidaudio_bench = fluidaudio_bench_dir.join("Package.swift").exists();
-    let has_pyannote_rs = pyannote_rs_binary.exists() && seg_model.exists() && emb_model.exists();
-
-    let is_available = |impl_type: &ImplType| -> bool {
-        match impl_type {
-            ImplType::Pyannote(_) => root.join("scripts/diarize_pyannote.py").exists(),
-            ImplType::Speakrs(_) => true,
-            ImplType::FluidAudioBench => has_fluidaudio_bench,
-            ImplType::PyannoteRs => has_pyannote_rs,
-        }
-    };
-
     let implementations: Vec<(&str, ImplType)> = if impls.is_empty() {
-        // default: all available implementations
         IMPL_REGISTRY
             .iter()
-            .filter(|(_, _, impl_type)| is_available(impl_type))
             .map(|(_, display_name, impl_type)| (*display_name, *impl_type))
             .collect()
     } else {
-        // only requested implementations that are available
         IMPL_REGISTRY
             .iter()
-            .filter(|(cli_id, _, impl_type)| {
-                impls.iter().any(|i| i == cli_id) && is_available(impl_type)
-            })
+            .filter(|(cli_id, _, _)| impls.iter().any(|i| i == cli_id))
             .map(|(_, display_name, impl_type)| (*display_name, *impl_type))
             .collect()
     };
@@ -597,18 +679,35 @@ fn run_der_implementations(
     for (impl_name, impl_type) in &implementations {
         println!("Running {impl_name}...");
 
-        let (total_time, per_file_rttm) = match impl_type {
-            ImplType::Speakrs(mode) => run_speakrs_batch(&speakrs_binary, mode, &wav_paths)?,
+        if let Some(reason) = der_skip_reason(
+            root,
+            impl_type,
+            &fluidaudio_bench_dir,
+            &pyannote_rs_binary,
+            seg_model,
+            emb_model,
+        ) {
+            println!("  → skipped: {reason}");
+            println!();
+            all_results.insert(impl_name.to_string(), DerImplResult::skipped(reason));
+            continue;
+        }
+
+        let benchmark_result = match impl_type {
+            ImplType::Speakrs(mode) => run_speakrs_batch(&speakrs_binary, mode, &wav_paths),
             ImplType::FluidAudioBench => {
-                run_cmd(
+                if let Err(err) = run_cmd(
                     Command::new("swift")
                         .args(["build", "-c", "release", "--package-path"])
                         .arg(&fluidaudio_bench_dir),
-                )?;
-                run_batch_binary(
-                    &fluidaudio_bench_dir.join(".build/release/fluidaudio-bench"),
-                    &wav_paths,
-                )?
+                ) {
+                    Err(err)
+                } else {
+                    run_batch_binary(
+                        &fluidaudio_bench_dir.join(".build/release/fluidaudio-bench"),
+                        &wav_paths,
+                    )
+                }
             }
             ImplType::PyannoteRs => run_per_file(files, |wav| {
                 let cmd_args = [
@@ -619,8 +718,21 @@ fn run_der_implementations(
                 ];
                 let refs: Vec<&str> = cmd_args.iter().map(String::as_str).collect();
                 run_capture_impl(&refs, root)
-            })?,
-            ImplType::Pyannote(device) => run_pyannote_batch(root, device, &wav_paths)?,
+            }),
+            ImplType::Pyannote(device) => run_pyannote_batch(root, device, &wav_paths),
+        };
+
+        let (total_time, per_file_rttm) = match benchmark_result {
+            Ok(result) => result,
+            Err(err) => {
+                println!("  → failed: {err}");
+                println!();
+                all_results.insert(
+                    impl_name.to_string(),
+                    DerImplResult::failed(err.to_string()),
+                );
+                continue;
+            }
         };
 
         let mut total_missed = 0.0;
@@ -674,14 +786,7 @@ fn run_der_implementations(
 
         all_results.insert(
             impl_name.to_string(),
-            DerImplResult {
-                der: der_pct,
-                missed: miss_pct,
-                false_alarm: fa_pct,
-                confusion: conf_pct,
-                time: total_time,
-                files: file_count,
-            },
+            DerImplResult::completed(der_pct, miss_pct, fa_pct, conf_pct, total_time, file_count),
         );
     }
 
@@ -696,21 +801,79 @@ enum ImplType {
     FluidAudioBench,
 }
 
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DerImplStatus {
+    Completed,
+    Skipped,
+    Failed,
+}
+
 #[derive(serde::Serialize)]
 struct DerImplResult {
+    status: DerImplStatus,
+    reason: Option<String>,
     der: Option<f64>,
     missed: Option<f64>,
     false_alarm: Option<f64>,
     confusion: Option<f64>,
-    time: f64,
+    time: Option<f64>,
     files: usize,
 }
 
+impl DerImplResult {
+    fn completed(
+        der: Option<f64>,
+        missed: Option<f64>,
+        false_alarm: Option<f64>,
+        confusion: Option<f64>,
+        time: f64,
+        files: usize,
+    ) -> Self {
+        Self {
+            status: DerImplStatus::Completed,
+            reason: None,
+            der,
+            missed,
+            false_alarm,
+            confusion,
+            time: Some(time),
+            files,
+        }
+    }
+
+    fn skipped(reason: String) -> Self {
+        Self {
+            status: DerImplStatus::Skipped,
+            reason: Some(reason),
+            der: None,
+            missed: None,
+            false_alarm: None,
+            confusion: None,
+            time: None,
+            files: 0,
+        }
+    }
+
+    fn failed(reason: String) -> Self {
+        Self {
+            status: DerImplStatus::Failed,
+            reason: Some(reason),
+            der: None,
+            missed: None,
+            false_alarm: None,
+            confusion: None,
+            time: None,
+            files: 0,
+        }
+    }
+}
+
 fn run_batch_cmd(cmd: &mut Command) -> Result<(f64, HashMap<String, String>)> {
-    let (elapsed, stdout) = capture_cmd(cmd)?;
+    let (elapsed, stdout) = capture_benchmark_cmd(cmd)?;
     let per_file = split_rttm_by_file_id(&stdout);
-    println!("  batch: {:.1}s", elapsed.as_secs_f64());
-    Ok((elapsed.as_secs_f64(), per_file))
+    println!("  batch: {:.1}s", elapsed);
+    Ok((elapsed, per_file))
 }
 
 fn run_speakrs_batch(
@@ -750,13 +913,13 @@ fn run_batch_binary(binary: &Path, wav_paths: &[&Path]) -> Result<(f64, HashMap<
 
 fn run_per_file(
     files: &[(PathBuf, PathBuf)],
-    runner: impl Fn(&Path) -> (f64, String),
+    runner: impl Fn(&Path) -> Result<(f64, String)>,
 ) -> Result<(f64, HashMap<String, String>)> {
     let mut total_time = 0.0;
     let mut per_file = HashMap::new();
 
     for (wav_path, _) in files {
-        let (elapsed, rttm) = runner(wav_path);
+        let (elapsed, rttm) = runner(wav_path)?;
         total_time += elapsed;
         let stem = wav_path.file_stem().unwrap().to_string_lossy().to_string();
         per_file.insert(stem.clone(), rttm);
@@ -811,24 +974,7 @@ fn discover_files(
         }
     }
 
-    // sort by duration (shortest first)
-    pairs.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
-
-    let mut selected = Vec::new();
-    let mut total_minutes = 0.0;
-
-    for (wav, rttm, dur) in pairs {
-        if selected.len() >= max_files as usize {
-            break;
-        }
-        if total_minutes + dur / 60.0 > max_minutes && !selected.is_empty() {
-            break;
-        }
-        selected.push((wav, rttm));
-        total_minutes += dur / 60.0;
-    }
-
-    Ok(selected)
+    Ok(select_pairs_for_benchmark(pairs, max_files, max_minutes))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -841,7 +987,15 @@ fn save_der_results(
     total_audio_minutes: f64,
     collar: f64,
     description: Option<&str>,
+    max_files: u32,
+    max_minutes: u32,
 ) -> Result<()> {
+    let file_list = files
+        .iter()
+        .map(|(w, _)| w.file_stem().unwrap().to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    let pyannote_segmentation_batch_size = pyannote_segmentation_batch_size();
+    let pyannote_embedding_batch_size = pyannote_embedding_batch_size();
     let mut json_results = serde_json::Map::new();
     for (name, _) in implementations {
         if let Some(r) = results.get(*name) {
@@ -856,7 +1010,16 @@ fn save_der_results(
         "files": files.len(),
         "total_audio_minutes": (total_audio_minutes * 10.0).round() / 10.0,
         "collar": collar,
-        "file_list": files.iter().map(|(w, _)| w.file_stem().unwrap().to_string_lossy().to_string()).collect::<Vec<_>>(),
+        "selection_policy": "shortest_first_by_duration",
+        "selection_limits": {
+            "max_files": max_files,
+            "max_minutes": max_minutes,
+        },
+        "pyannote_batch_sizes": {
+            "segmentation": pyannote_segmentation_batch_size,
+            "embedding": pyannote_embedding_batch_size,
+        },
+        "file_list": file_list,
         "results": json_results,
     });
 
@@ -873,6 +1036,13 @@ fn save_der_results(
         "{dataset_name} DER ({} files, {total_audio_minutes:.1} min, collar={collar:.0}ms)",
         files.len()
     ));
+    lines.push(format!(
+        "Selection: shortest-first by duration, capped at max_files={max_files}, max_minutes={max_minutes}"
+    ));
+    lines.push(format!(
+        "pyannote batch sizes: segmentation={pyannote_segmentation_batch_size}, embedding={pyannote_embedding_batch_size}"
+    ));
+    lines.push(format!("Files: {}", file_list.join(", ")));
     if let Some(desc) = description {
         lines.push(format!("Description: {desc}"));
     }
@@ -880,8 +1050,8 @@ fn save_der_results(
 
     let name_w = 22;
     let header = format!(
-        "{:<name_w$} {:>8} {:>10} {:>13} {:>12} {:>8}",
-        "Implementation", "DER%", "Missed%", "FalseAlarm%", "Confusion%", "Time"
+        "{:<name_w$} {:>8} {:>10} {:>13} {:>12} {:>8}  {}",
+        "Implementation", "DER%", "Missed%", "FalseAlarm%", "Confusion%", "Time", "Status"
     );
     lines.push(header.clone());
     lines.push("─".repeat(header.len()));
@@ -902,10 +1072,24 @@ fn save_der_results(
                     "—".to_string(),
                 ),
             };
-            let time_str = format!("{:.1}s", r.time);
+            let time_str = r
+                .time
+                .map(|time| format!("{time:.1}s"))
+                .unwrap_or_else(|| "—".to_string());
+            let status_str = match r.status {
+                DerImplStatus::Completed => "ok".to_string(),
+                DerImplStatus::Skipped => format!(
+                    "skipped ({})",
+                    r.reason.as_deref().unwrap_or("no reason recorded")
+                ),
+                DerImplStatus::Failed => format!(
+                    "failed ({})",
+                    r.reason.as_deref().unwrap_or("no reason recorded")
+                ),
+            };
             lines.push(format!(
-                "{:<name_w$} {:>8} {:>10} {:>13} {:>12} {:>8}",
-                impl_name, der_str, miss_str, fa_str, conf_str, time_str
+                "{:<name_w$} {:>8} {:>10} {:>13} {:>12} {:>8}  {}",
+                impl_name, der_str, miss_str, fa_str, conf_str, time_str, status_str
             ));
         }
     }
@@ -923,6 +1107,103 @@ fn save_der_results(
     Ok(())
 }
 
+fn capture_benchmark_cmd(cmd: &mut Command) -> Result<(f64, String)> {
+    let start = Instant::now();
+    let output = cmd.output()?;
+    let elapsed = start.elapsed().as_secs_f64();
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            bail!(
+                "{} failed with {}",
+                cmd.get_program().to_string_lossy(),
+                output.status
+            );
+        }
+        bail!(
+            "{} failed with {}: {}",
+            cmd.get_program().to_string_lossy(),
+            output.status,
+            stderr
+        );
+    }
+
+    Ok((elapsed, String::from_utf8_lossy(&output.stdout).to_string()))
+}
+
+fn der_skip_reason(
+    root: &Path,
+    impl_type: &ImplType,
+    fluidaudio_bench_dir: &Path,
+    pyannote_rs_binary: &Path,
+    seg_model: &Path,
+    emb_model: &Path,
+) -> Option<String> {
+    match impl_type {
+        ImplType::Pyannote(_) => (!root.join("scripts/diarize_pyannote.py").exists())
+            .then(|| "scripts/diarize_pyannote.py not found".to_string()),
+        ImplType::Speakrs(_) => None,
+        ImplType::FluidAudioBench => (!fluidaudio_bench_dir.join("Package.swift").exists())
+            .then(|| "scripts/fluidaudio-bench/Package.swift not found".to_string()),
+        ImplType::PyannoteRs => {
+            if !pyannote_rs_binary.exists() {
+                Some("pyannote-rs bench binary not found".to_string())
+            } else if !seg_model.exists() {
+                Some(format!(
+                    "segmentation model not found: {}",
+                    seg_model.display()
+                ))
+            } else if !emb_model.exists() {
+                Some(format!(
+                    "embedding model not found: {}",
+                    emb_model.display()
+                ))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn select_pairs_for_benchmark(
+    mut pairs: Vec<(PathBuf, PathBuf, f64)>,
+    max_files: u32,
+    max_minutes: f64,
+) -> Vec<(PathBuf, PathBuf)> {
+    pairs.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+
+    let mut selected = Vec::new();
+    let mut total_minutes = 0.0;
+
+    for (wav, rttm, dur) in pairs {
+        if selected.len() >= max_files as usize {
+            break;
+        }
+        if total_minutes + dur / 60.0 > max_minutes && !selected.is_empty() {
+            break;
+        }
+        selected.push((wav, rttm));
+        total_minutes += dur / 60.0;
+    }
+
+    selected
+}
+
+fn pyannote_segmentation_batch_size() -> usize {
+    std::env::var("PYANNOTE_SEGMENTATION_BATCH_SIZE")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(16)
+}
+
+fn pyannote_embedding_batch_size() -> usize {
+    std::env::var("PYANNOTE_EMBEDDING_BATCH_SIZE")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(16)
+}
+
 // ---------------------------------------------------------------------------
 // shared helpers
 // ---------------------------------------------------------------------------
@@ -938,4 +1219,68 @@ fn ensure_pyannote_rs_emb_model(path: &Path) -> Result<()> {
             .arg(path)
             .arg("https://github.com/thewh1teagle/pyannote-rs/releases/download/v0.1.0/wespeaker_en_voxceleb_CAM++.onnx"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summarize_compare_runs_uses_mean_and_min() {
+        let result = summarize_compare_runs(
+            "speakrs CoreML",
+            &[6.0, 4.0, 5.0],
+            "SPEAKER file1 1 0.000000 1.000000 <NA> <NA> spk1 <NA> <NA>\n".to_string(),
+        );
+
+        assert_eq!(result.name, "speakrs CoreML");
+        assert_eq!(result.mean_seconds, 5.0);
+        assert_eq!(result.min_seconds, 4.0);
+        assert_eq!(result.segments, 1);
+        assert_eq!(result.speakers, 1);
+    }
+
+    #[test]
+    fn select_pairs_for_benchmark_prefers_shortest_files() {
+        let pairs = vec![
+            (PathBuf::from("long.wav"), PathBuf::from("long.rttm"), 180.0),
+            (
+                PathBuf::from("short.wav"),
+                PathBuf::from("short.rttm"),
+                30.0,
+            ),
+            (
+                PathBuf::from("medium.wav"),
+                PathBuf::from("medium.rttm"),
+                60.0,
+            ),
+        ];
+
+        let selected = select_pairs_for_benchmark(pairs, 2, 2.0);
+        let names = selected
+            .iter()
+            .map(|(wav, _)| wav.file_stem().unwrap().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["short".to_string(), "medium".to_string()]);
+    }
+
+    #[test]
+    fn split_rttm_by_file_id_groups_lines() {
+        let grouped = split_rttm_by_file_id(concat!(
+            "SPEAKER a 1 0.0 1.0 <NA> <NA> spk1 <NA> <NA>\n",
+            "SPEAKER b 1 0.5 1.0 <NA> <NA> spk2 <NA> <NA>\n",
+            "SPEAKER a 1 1.0 0.5 <NA> <NA> spk1 <NA> <NA>\n",
+        ));
+
+        assert_eq!(
+            grouped.get("a").unwrap(),
+            "SPEAKER a 1 0.0 1.0 <NA> <NA> spk1 <NA> <NA>\n\
+SPEAKER a 1 1.0 0.5 <NA> <NA> spk1 <NA> <NA>\n"
+        );
+        assert_eq!(
+            grouped.get("b").unwrap(),
+            "SPEAKER b 1 0.5 1.0 <NA> <NA> spk2 <NA> <NA>\n"
+        );
+    }
 }
