@@ -9,9 +9,10 @@ use speakrs::clustering::plda::PldaTransform;
 use speakrs::inference::ExecutionMode;
 use speakrs::inference::embedding::EmbeddingModel;
 use speakrs::inference::segmentation::SegmentationModel;
-#[cfg(feature = "online")]
-use speakrs::models::ModelManager;
 use speakrs::pipeline::{FAST_SEGMENTATION_STEP_SECONDS, SEGMENTATION_STEP_SECONDS, diarize};
+
+#[global_allocator]
+static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(Parser)]
 #[command(about = "Speaker diarization CLI")]
@@ -87,7 +88,7 @@ fn main() {
     }
 
     let execution_mode = cli.mode.execution_mode();
-    let models_dir = resolve_models_dir(execution_mode);
+    let models_dir = resolve_models_dir();
 
     let step = cli.mode.step_seconds();
     let mut seg_model = SegmentationModel::with_mode(
@@ -127,37 +128,27 @@ fn main() {
     }
 }
 
-fn resolve_models_dir(mode: ExecutionMode) -> PathBuf {
+fn resolve_models_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("SPEAKRS_MODELS_DIR") {
         return PathBuf::from(dir);
     }
 
-    #[cfg(feature = "online")]
-    {
-        let manager = ModelManager::new().expect("failed to initialize model manager");
-        let hf_mode = match mode {
-            ExecutionMode::Cpu => speakrs::models::Mode::Cpu,
-            ExecutionMode::CoreMl => speakrs::models::Mode::CoreMl,
-            ExecutionMode::CoreMlFast => speakrs::models::Mode::CoreMlFast,
-            ExecutionMode::Cuda => speakrs::models::Mode::Cuda,
-        };
-        manager.ensure(hf_mode).expect("failed to download models")
-    }
-
-    #[cfg(not(feature = "online"))]
-    {
-        let _ = mode;
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("fixtures/models")
-            .to_path_buf()
-    }
+    // xtask binary — CARGO_MANIFEST_DIR is xtask/, models are in the workspace root
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("fixtures/models")
+        .to_path_buf()
 }
 
 fn run_pyannote_sidecar(
     device: &str,
     wav_path: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync + 'static>> {
-    let script_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/diarize_pyannote.py");
+    let script_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("scripts/diarize_pyannote.py");
     let output = Command::new("uv")
         .arg("run")
         .arg(script_path)

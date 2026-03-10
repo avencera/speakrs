@@ -9,7 +9,7 @@ use crate::clustering::plda::PldaTransform;
 use crate::clustering::vbx::{VbxConfig, cluster_vbx};
 #[cfg(any(feature = "online", feature = "coreml"))]
 use crate::inference::ExecutionMode;
-#[cfg(feature = "native-coreml")]
+#[cfg(feature = "coreml")]
 use crate::inference::embedding::FusedEmbeddingInput;
 use crate::inference::embedding::{
     EmbeddingModel, MaskedEmbeddingInput, SplitTailInput, should_use_clean_mask,
@@ -78,7 +78,7 @@ struct PendingSplitEmbedding {
     weights: Vec<f32>,
 }
 
-#[cfg(feature = "native-coreml")]
+#[cfg(feature = "coreml")]
 struct PendingFusedEmbedding<'a> {
     chunk_idx: usize,
     speaker_idx: usize,
@@ -519,7 +519,7 @@ fn extract_split_embeddings(
     embeddings: &mut Array3<f32>,
 ) -> Result<(), DynError> {
     // fused path: waveform+weights → embedding in one CoreML call, no separate fbank
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     if emb_model.has_fused_primary_batch() {
         return extract_fused_embeddings(seg_model, emb_model, audio, segmentations, embeddings);
     }
@@ -626,7 +626,7 @@ fn flush_split_embedding_batch(
     Ok(())
 }
 
-#[cfg(feature = "native-coreml")]
+#[cfg(feature = "coreml")]
 fn extract_fused_embeddings(
     seg_model: &SegmentationModel,
     emb_model: &mut EmbeddingModel,
@@ -697,7 +697,7 @@ fn extract_fused_embeddings(
     Ok(())
 }
 
-#[cfg(feature = "native-coreml")]
+#[cfg(feature = "coreml")]
 fn flush_fused_embedding_batch(
     emb_model: &mut EmbeddingModel,
     pending: &[PendingFusedEmbedding<'_>],

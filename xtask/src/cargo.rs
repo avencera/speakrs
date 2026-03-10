@@ -8,7 +8,7 @@ use crate::cmd::{project_root, run_cmd, tee_cmd};
 /// Map a diarization mode to the cargo feature flags needed
 pub fn features_for_mode(mode: &str) -> Vec<String> {
     match mode {
-        "coreml" | "coreml-fast" => vec!["native-coreml".to_string()],
+        "coreml" | "coreml-fast" => vec!["coreml".to_string()],
         "cuda" => vec!["cuda".to_string()],
         _ => vec![],
     }
@@ -22,10 +22,12 @@ fn cargo_features_args(features: &[String]) -> Vec<String> {
 }
 
 /// Build a binary with the given features in release mode
+///
+/// Binaries live in the xtask package, so we pass `-p xtask`
 pub fn cargo_build(bin: &str, features: &[String]) -> Result<()> {
     let mut cmd = Command::new("cargo");
     cmd.current_dir(project_root())
-        .args(["build", "--release", "--bin", bin]);
+        .args(["build", "--release", "-p", "xtask", "--bin", bin]);
     for arg in cargo_features_args(features) {
         cmd.arg(arg);
     }
@@ -43,7 +45,7 @@ pub fn cargo_run(
 ) -> Result<()> {
     let mut cmd = Command::new("cargo");
     cmd.current_dir(project_root())
-        .args(["run", "--release", "--bin", bin]);
+        .args(["run", "--release", "-p", "xtask", "--bin", bin]);
     for arg in cargo_features_args(features) {
         cmd.arg(arg);
     }

@@ -1,7 +1,7 @@
 pub mod embedding;
 pub mod segmentation;
 
-#[cfg(feature = "native-coreml")]
+#[cfg(feature = "coreml")]
 pub(crate) mod coreml;
 
 use ort::ep;

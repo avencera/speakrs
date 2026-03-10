@@ -40,7 +40,10 @@ fn main() {
             .unwrap_or(250)
     };
 
-    let models_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/models");
+    let models_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("fixtures/models");
     let mut seg_model = SegmentationModel::new(
         models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
         SEGMENTATION_STEP_SECONDS as f32,
@@ -231,34 +234,6 @@ fn main() {
 }
 
 fn build_embedding_session(model_path: &Path) -> Session {
-    if std::env::var_os("SPEAKRS_PROFILE_ORT_COREML").is_some() {
-        #[cfg(feature = "coreml")]
-        {
-            let cache_dir = std::env::temp_dir().join("speakrs-coreml-cache");
-            std::fs::create_dir_all(&cache_dir).expect("failed to create coreml cache dir");
-            let builder = Session::builder()
-                .expect("failed to create session builder")
-                .with_independent_thread_pool()
-                .expect("failed to configure thread pool")
-                .with_intra_threads(1)
-                .expect("failed to configure intra threads")
-                .with_inter_threads(1)
-                .expect("failed to configure inter threads")
-                .with_execution_providers([ep::CoreML::default()
-                    .with_static_input_shapes(true)
-                    .with_model_cache_dir(cache_dir.display().to_string())
-                    .build()])
-                .expect("failed to configure execution provider");
-            let mut builder = builder;
-            return builder
-                .commit_from_file(model_path)
-                .expect("failed to load embedding session");
-        }
-
-        #[cfg(not(feature = "coreml"))]
-        panic!("SPEAKRS_PROFILE_ORT_COREML requires the coreml feature");
-    }
-
     if std::env::var_os("SPEAKRS_PROFILE_ORT_DEFAULTS").is_some() {
         return Session::builder()
             .expect("failed to create session builder")

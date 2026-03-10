@@ -2209,10 +2209,8 @@ version = "0.1.0"
 dependencies = [
  "approx",
  "block2",
- "clap",
  "hf-hub",
  "kodama",
- "mimalloc",
  "ndarray",
  "ndarray-linalg",
  "ndarray-npy",
@@ -2222,7 +2220,6 @@ dependencies = [
  "ort",
  "serde_json",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -3147,9 +3144,13 @@ dependencies = [
  "clap",
  "color-eyre",
  "hound",
+ "mimalloc",
+ "ndarray",
+ "ort",
  "serde",
  "serde_json",
  "speakrs",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -37,7 +37,10 @@ fn main() {
         0
     };
 
-    let models_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/models");
+    let models_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("fixtures/models");
     let mut seg_model = SegmentationModel::new(
         models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
         SEGMENTATION_STEP_SECONDS as f32,

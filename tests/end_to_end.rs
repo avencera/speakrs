@@ -164,7 +164,7 @@ fn voxconverse_der(mode: ExecutionMode, step: f64) -> (Vec<(String, f64)>, Durat
 }
 
 #[test]
-#[cfg(feature = "native-coreml")]
+#[cfg(feature = "coreml")]
 fn der_coreml_fp32() {
     let (results, elapsed) = voxconverse_der(ExecutionMode::CoreMl, SEGMENTATION_STEP_SECONDS);
     let avg_der: f64 = results.iter().map(|(_, d)| d).sum::<f64>() / results.len() as f64;
@@ -189,7 +189,7 @@ fn der_coreml_fp32() {
 }
 
 #[test]
-#[cfg(feature = "native-coreml")]
+#[cfg(feature = "coreml")]
 fn der_coreml_fast() {
     let (results, elapsed) =
         voxconverse_der(ExecutionMode::CoreMlFast, FAST_SEGMENTATION_STEP_SECONDS);

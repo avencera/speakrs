@@ -2,10 +2,10 @@ use ndarray::Array2;
 use ort::session::Session;
 use ort::value::TensorRef;
 
-#[cfg(feature = "native-coreml")]
+#[cfg(feature = "coreml")]
 use crate::inference::coreml::{CachedInputShape, CoreMlModel, GpuPrecision, coreml_model_path};
 use crate::inference::{ExecutionMode, with_execution_mode};
-#[cfg(feature = "native-coreml")]
+#[cfg(feature = "coreml")]
 use objc2_core_ml::MLComputeUnits;
 
 const PRIMARY_BATCH_SIZE: usize = 32;
@@ -15,13 +15,13 @@ pub struct SegmentationModel {
     mode: ExecutionMode,
     session: Session,
     primary_batched_session: Option<Session>,
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     native_session: Option<CoreMlModel>,
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     native_batched_session: Option<CoreMlModel>,
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     cached_single_input_shape: CachedInputShape,
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     cached_batch_input_shape: CachedInputShape,
     input_buffer: ndarray::Array3<f32>,
     primary_batch_input_buffer: ndarray::Array3<f32>,
@@ -55,13 +55,13 @@ impl SegmentationModel {
                 .filter(|path| path.exists())
                 .map(|path| Self::build_session(path.to_str().unwrap(), mode))
                 .transpose()?,
-            #[cfg(feature = "native-coreml")]
+            #[cfg(feature = "coreml")]
             native_session: Self::load_native_coreml(model_path, mode),
-            #[cfg(feature = "native-coreml")]
+            #[cfg(feature = "coreml")]
             native_batched_session: Self::load_native_coreml_batched(model_path, mode),
-            #[cfg(feature = "native-coreml")]
+            #[cfg(feature = "coreml")]
             cached_single_input_shape: CachedInputShape::new("input", &[1, 1, window_samples]),
-            #[cfg(feature = "native-coreml")]
+            #[cfg(feature = "coreml")]
             cached_batch_input_shape: CachedInputShape::new(
                 "input",
                 &[PRIMARY_BATCH_SIZE, 1, window_samples],
@@ -116,7 +116,7 @@ impl SegmentationModel {
             .filter(|path| path.exists())
             .map(|path| Self::build_session(path.to_str().unwrap(), self.mode))
             .transpose()?;
-        #[cfg(feature = "native-coreml")]
+        #[cfg(feature = "coreml")]
         {
             self.native_session = Self::load_native_coreml(&self.model_path, self.mode);
             self.native_batched_session =
@@ -181,7 +181,7 @@ impl SegmentationModel {
     }
 
     fn run_window(&mut self, window: &[f32]) -> Result<Array2<f32>, ort::Error> {
-        #[cfg(feature = "native-coreml")]
+        #[cfg(feature = "coreml")]
         if let Some(ref mut native) = self.native_session {
             return Self::run_native_single(
                 native,
@@ -207,7 +207,7 @@ impl SegmentationModel {
     }
 
     fn run_batch(&mut self, windows: &[&[f32]]) -> Result<Vec<Array2<f32>>, ort::Error> {
-        #[cfg(feature = "native-coreml")]
+        #[cfg(feature = "coreml")]
         if let Some(ref mut native) = self.native_batched_session {
             return Self::run_native_batch(
                 native,
@@ -246,7 +246,7 @@ impl SegmentationModel {
             .collect())
     }
 
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     fn resolve_coreml_path(model_path: &str, mode: ExecutionMode) -> Option<std::path::PathBuf> {
         match mode {
             // LSTM-based segmentation runs poorly on ANE — always use FP32 CPU+GPU
@@ -257,13 +257,13 @@ impl SegmentationModel {
         }
     }
 
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     fn compute_units_for_mode(_mode: ExecutionMode) -> MLComputeUnits {
         // segmentation is LSTM-based, always best on CPU+GPU regardless of mode
         CoreMlModel::default_compute_units()
     }
 
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     fn load_native_coreml(model_path: &str, mode: ExecutionMode) -> Option<CoreMlModel> {
         let coreml_path = Self::resolve_coreml_path(model_path, mode)?;
         if !coreml_path.exists() {
@@ -287,7 +287,7 @@ impl SegmentationModel {
         }
     }
 
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     fn load_native_coreml_batched(model_path: &str, mode: ExecutionMode) -> Option<CoreMlModel> {
         if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
             return None;
@@ -313,7 +313,7 @@ impl SegmentationModel {
         }
     }
 
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     fn run_native_single(
         native: &mut CoreMlModel,
         window: &[f32],
@@ -335,7 +335,7 @@ impl SegmentationModel {
         Ok(Array2::from_shape_vec((frames, classes), data).unwrap())
     }
 
-    #[cfg(feature = "native-coreml")]
+    #[cfg(feature = "coreml")]
     fn run_native_batch(
         native: &mut CoreMlModel,
         windows: &[&[f32]],

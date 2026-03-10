@@ -10,11 +10,10 @@ edition = "2024"
 [features]
 default = ["online"]
 online = ["dep:hf-hub", "hf-hub/ureq", "hf-hub/native-tls"]
-coreml = ["ort/coreml"]
+coreml = ["dep:objc2", "dep:objc2-core-ml", "dep:objc2-foundation", "dep:block2"]
 cuda = ["ort/cuda"]
 directml = ["ort/directml"]
 tensorrt = ["ort/tensorrt"]
-native-coreml = ["dep:objc2", "dep:objc2-core-ml", "dep:objc2-foundation", "dep:block2"]
 
 [dependencies]
 hf-hub = { version = "0.5", optional = true, default-features = false }
@@ -22,11 +21,8 @@ ndarray = "0.17.2"
 ndarray-linalg = { version = "0.18.1", features = ["openblas-static"] }
 ndarray-npy = "0.10.0"
 ort = { version = "2.0.0-rc.12", features = ["ndarray"] }
-clap = { version = "4", features = ["derive"] }
 kodama = "0.3.0"
-mimalloc = "0.1.48"
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6", optional = true }

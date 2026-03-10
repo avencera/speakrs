@@ -4,11 +4,18 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[features]
+coreml = ["speakrs/coreml"]
+
 [dependencies]
 chrono = "0.4.44"
 clap = { version = "4", features = ["derive"] }
 color-eyre = "0.6"
 hound = "3.5.1"
+mimalloc = "0.1.48"
+ndarray = "0.17.2"
+ort = { version = "2.0.0-rc.12", features = ["ndarray"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 speakrs = { path = "..", default-features = false }
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
