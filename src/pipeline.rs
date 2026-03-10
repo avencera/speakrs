@@ -6,7 +6,7 @@ use crate::binarize::BinarizeConfig;
 use crate::clustering::ahc::{AhcConfig, cluster as cluster_ahc};
 use crate::clustering::plda::PldaTransform;
 use crate::clustering::vbx::{VbxConfig, cluster_vbx};
-#[cfg(any(feature = "online", feature = "coreml"))]
+#[cfg(feature = "online")]
 use crate::inference::ExecutionMode;
 #[cfg(feature = "coreml")]
 use crate::inference::embedding::FusedEmbeddingInput;

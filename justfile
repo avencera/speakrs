@@ -3,7 +3,7 @@ fmt:
     uv run --group dev ruff format scripts fixtures
 
 clippy:
-    cargo clippy --all --all-targets --workspace -- -D warnings
+    cargo clippy --all --all-targets --all-features --workspace -- -D warnings
     uv run --group dev ty check --python .venv --exclude 'scripts/pyannote_rs_bench/target' scripts fixtures
 
 test *args:
