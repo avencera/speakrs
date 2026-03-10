@@ -4,7 +4,7 @@ Speaker diarization in Rust. Put audio in, get RTTM segments out. Runs **48–79
 
 `speakrs` implements the full pyannote community-1 pipeline in Rust: segmentation, powerset decode, aggregation, binarization, embedding, PLDA, and VBx clustering — plus temporal smoothing during reconstruction. There is no Python dependency. Inference runs on ONNX Runtime or native CoreML, and all post-processing stays in Rust.
 
-The outputs have been checked against `pyannote.audio`. On the VoxConverse dev set (39 files), CoreML FP32 matches pyannote community-1 (MPS) at 6.4% DER. CoreML may differ slightly from CPU due to GPU floating-point non-determinism.
+On the full VoxConverse dev set (216 files), speakrs CoreML achieves **7.0% DER vs pyannote's 7.2%** — slightly better accuracy at 3x the speed on Apple Silicon. On the test set (232 files) both match at 11.1% DER. See [benchmarks/](benchmarks/) for full results.
 
 ## Table of Contents
 
@@ -88,15 +88,15 @@ Coverage is measured as mutual speech overlap with pyannote. Small segment count
 
 ### Accuracy (DER)
 
-Evaluated on VoxConverse dev set (39 files, 53 min, collar=0ms):
+Evaluated on the full VoxConverse dev set (216 files, 1217.8 min, collar=0ms):
 
 | Mode | DER | Notes |
 |------|-----|-------|
-| `coreml` | 6.4% | Matches pyannote community-1 (MPS) |
-| `coreml-fast` | 9.0% | 2s step, ~2x faster |
-| pyannote community-1 (MPS) | 6.4% | Reference |
+| `coreml` | **7.0%** | Lower DER than pyannote community-1 (MPS) |
+| `coreml-fast` | 7.8% | 2s step, ~2x faster |
+| pyannote community-1 (MPS) | 7.2% | Reference |
 
-CoreML may differ slightly from CPU due to GPU floating-point non-determinism in accumulation order and fused multiply-add behavior.
+CoreML may differ slightly from CPU due to GPU floating-point non-determinism in accumulation order and fused multiply-add behavior. See [benchmarks/](benchmarks/) for results across multiple datasets.
 
 ### Library Usage
 
@@ -154,15 +154,7 @@ Benchmarks coming soon.
 
 ### Accuracy (DER)
 
-Evaluated on VoxConverse dev set (39 files, 53 min, collar=0ms):
-
-| Mode | DER | Notes |
-|------|-----|-------|
-| `cpu` (ONNX) | 6.4% | Matches or slightly improves on pyannote community-1 (CPU) |
-| `cuda` (ONNX) | 6.4% | Matches or slightly improves on pyannote community-1 (CPU) |
-| pyannote community-1 (CPU) | 6.4% | Reference |
-
-With temporal smoothing enabled by default, CPU/CUDA output matches or slightly improves on pyannote community-1's CPU backend.
+CPU and CUDA modes produce bit-exact output matching pyannote community-1 (CPU). With temporal smoothing enabled by default, DER matches or slightly improves on pyannote. See [benchmarks/](benchmarks/) for dataset-level results.
 
 ### Library Usage
 
