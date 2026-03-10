@@ -176,10 +176,22 @@ enum GpuCmd {
     },
     /// Run benchmarks on the remote GPU instance
     Benchmark {
+        /// Run in a detached tmux session (returns immediately)
+        #[arg(long)]
+        detach: bool,
+        /// Replace a running detached benchmark (requires --detach)
+        #[arg(long)]
+        force: bool,
         /// Arguments passed to `cargo xtask benchmark` on the remote
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
     },
+    /// Check if a detached benchmark is still running and show recent output
+    Status,
+    /// Reconnect to a running detached benchmark session
+    Attach,
+    /// Download benchmark results from the remote instance
+    PullResults,
     /// Open an interactive SSH session to the GPU instance
     Ssh,
     /// Tear down the GPU instance
@@ -244,7 +256,14 @@ fn main() -> Result<()> {
                 bare,
                 min_tflops,
             } => commands::gpu::setup(new, bare, min_tflops),
-            GpuCmd::Benchmark { args } => commands::gpu::benchmark(&args),
+            GpuCmd::Benchmark {
+                detach,
+                args,
+                force,
+            } => commands::gpu::benchmark(&args, detach, force),
+            GpuCmd::Status => commands::gpu::status(),
+            GpuCmd::Attach => commands::gpu::attach(),
+            GpuCmd::PullResults => commands::gpu::pull_results(),
             GpuCmd::Ssh => commands::gpu::ssh(),
             GpuCmd::Destroy => commands::gpu::destroy(),
         },
