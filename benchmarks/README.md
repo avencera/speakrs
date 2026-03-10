@@ -44,6 +44,15 @@ All benchmarks run on Apple M4 Pro, macOS 26.3, collar=0ms.
 | speakrs CoreML Fast | 16.2% | 8.6% | 4.3% | 3.3% | 23.1s | 123x |
 | FluidAudio | 40.1% | 14.3% | 3.1% | 22.6% | 19.3s | **147x** |
 
+### Earnings-21 (44 files, 2355.8 min)
+
+| Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
+|---|---|---|---|---|---|---|
+| **pyannote community-1 (MPS)** | **9.7%** | 2.6% | 2.4% | 4.7% | 8009.6s | 18x |
+| **speakrs CoreML** | **9.7%** | 2.6% | 2.4% | 4.7% | 1752.1s | 81x |
+| speakrs CoreML Fast | 10.9% | 2.5% | 2.5% | 5.9% | 866.3s | **163x** |
+| FluidAudio | 43.1% | 4.4% | 2.2% | 36.5% | 1042.7s | 136x |
+
 ### Other implementations
 
 [pyannote-rs](https://github.com/thewh1teagle/pyannote-rs) was tested on a 39-file subset and scored 89–92% DER across VoxConverse Dev and Test. See [Why Not pyannote-rs?](../README.md#why-not-pyannote-rs) for details.
@@ -53,6 +62,7 @@ All benchmarks run on Apple M4 Pro, macOS 26.3, collar=0ms.
 - [VoxConverse Dev](voxconverse-dev.txt)
 - [VoxConverse Test](voxconverse-test.txt)
 - [AMI IHM](ami-ihm.txt)
+- [Earnings-21](earnings-21.txt)
 
 ## Reproduce
 
