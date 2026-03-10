@@ -1,8 +1,10 @@
 # Benchmarks
 
-DER (Diarization Error Rate) evaluation on standard datasets, comparing speakrs against pyannote and other implementations
+DER (Diarization Error Rate) evaluation on standard datasets, comparing speakrs against pyannote and other implementations.
 
-All benchmarks run on Apple M4 Pro, macOS 26.3, collar=0ms
+On VoxConverse, speakrs CoreML matches or beats pyannote community-1 (MPS) on accuracy while running ~3x faster on Apple Silicon.
+
+All benchmarks run on Apple M4 Pro, macOS 26.3, collar=0ms.
 
 ## Implementations
 
@@ -12,29 +14,26 @@ All benchmarks run on Apple M4 Pro, macOS 26.3, collar=0ms
 | speakrs CoreML | speakrs with native CoreML, 1s step, FP32   |
 | speakrs CoreML Fast | speakrs with native CoreML, 2s step, FP32 |
 | FluidAudio | [FluidAudio](https://github.com/FluidInference/FluidAudio) Swift implementation |
-| pyannote-rs | [pyannote-rs](https://github.com/thewh1teagle/pyannote-rs) Rust implementation |
 
 ## Results
 
-### VoxConverse Dev (39 files, 53 min)
+### VoxConverse Dev (216 files, 1217.8 min)
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time |
 |---|---|---|---|---|---|
-| pyannote community-1 (MPS) | 6.4% | 2.4% | 2.0% | 2.1% | 128.4s |
-| speakrs CoreML | 6.4% | 2.4% | 2.0% | 2.0% | 66.8s |
-| speakrs CoreML Fast | 9.0% | 2.3% | 2.0% | 4.7% | 40.2s |
-| FluidAudio | 16.1% | 5.3% | 1.8% | 8.9% | 29.3s |
-| pyannote-rs | 92.4% | 84.1% | 1.0% | 7.3% | 16.9s |
+| pyannote community-1 (MPS) | 7.2% | 2.3% | 2.3% | 2.6% | 2998.8s |
+| **speakrs CoreML** | **7.0%** | 2.3% | 2.3% | 2.4% | 1009.1s |
+| speakrs CoreML Fast | 7.8% | 2.3% | 2.3% | 3.3% | 524.0s |
+| FluidAudio | 22.3% | 5.3% | 1.6% | 15.5% | 500.9s |
 
-### VoxConverse Test (39 files, 74 min)
+### VoxConverse Test (232 files, 2612.2 min)
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time |
 |---|---|---|---|---|---|
-| pyannote community-1 (MPS) | 11.2% | 5.0% | 2.0% | 4.2% | 177.1s |
-| speakrs CoreML | 11.1% | 5.0% | 2.0% | 4.1% | 66.1s |
-| speakrs CoreML Fast | 13.9% | 5.1% | 2.0% | 6.8% | 37.9s |
-| FluidAudio | 26.6% | 9.1% | 1.8% | 15.7% | 35.0s |
-| pyannote-rs | 89.3% | 80.3% | 0.7% | 8.3% | 21.7s |
+| pyannote community-1 (MPS) | 11.1% | 3.4% | 4.1% | 3.7% | 6705.3s |
+| speakrs CoreML | 11.1% | 3.4% | 4.1% | 3.7% | 2133.5s |
+| speakrs CoreML Fast | 11.9% | 3.3% | 4.1% | 4.5% | 1093.2s |
+| FluidAudio | 32.6% | 5.4% | 3.4% | 23.8% | 1044.2s |
 
 ### AMI IHM (3 files, 47 min)
 
@@ -45,6 +44,10 @@ All benchmarks run on Apple M4 Pro, macOS 26.3, collar=0ms
 | speakrs CoreML Fast | 16.2% | 8.6% | 4.3% | 3.3% | 23.1s |
 | FluidAudio | 40.1% | 14.3% | 3.1% | 22.6% | 19.3s |
 
+### Other implementations
+
+[pyannote-rs](https://github.com/thewh1teagle/pyannote-rs) was tested on a 39-file subset and scored 89–92% DER across VoxConverse Dev and Test. See [Why Not pyannote-rs?](../README.md#why-not-pyannote-rs) for details.
+
 ### Raw Data
 
 - [VoxConverse Dev](voxconverse-dev.txt)
@@ -53,20 +56,20 @@ All benchmarks run on Apple M4 Pro, macOS 26.3, collar=0ms
 
 ## Reproduce
 
-Requires models (`just export-models`) and VoxConverse dataset (auto-downloaded on first run)
+Requires models (`just export-models`) and datasets (auto-downloaded on first run).
 
 ```bash
-# full dev set, all implementations
-cargo xtask benchmark der --dataset voxconverse-dev --max-files 39 --max-minutes 60
+# full VoxConverse dev set
+cargo xtask benchmark der --dataset voxconverse-dev --impl pyannote --impl coreml --impl coreml-fast --impl fluidaudio
 
-# full test set, all implementations
-cargo xtask benchmark der --dataset voxconverse-test --max-files 39 --max-minutes 80
+# full VoxConverse test set
+cargo xtask benchmark der --dataset voxconverse-test --impl pyannote --impl coreml --impl coreml-fast --impl fluidaudio
 
 # AMI IHM
-cargo xtask benchmark der --dataset ami-ihm --max-files 3 --max-minutes 50
+cargo xtask benchmark der --dataset ami-ihm --impl pyannote --impl coreml --impl coreml-fast --impl fluidaudio
 
 # specific implementations only
-cargo xtask benchmark der --max-files 39 --max-minutes 60 --impl pyannote --impl coreml
+cargo xtask benchmark der --dataset voxconverse-dev --impl pyannote --impl coreml
 
 # list available implementations
 cargo xtask benchmark der --impl list
