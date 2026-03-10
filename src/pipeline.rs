@@ -3,6 +3,7 @@ use std::path::Path;
 
 use ndarray::{Array2, Array3, ArrayView2, s};
 
+use crate::binarize::BinarizeConfig;
 use crate::clustering::ahc::{AhcConfig, cluster as cluster_ahc};
 use crate::clustering::plda::PldaTransform;
 use crate::clustering::vbx::{VbxConfig, cluster_vbx};
@@ -15,11 +16,42 @@ use crate::inference::embedding::{
 };
 use crate::inference::segmentation::SegmentationModel;
 use crate::powerset::PowersetMapping;
-use crate::reconstruct::{reconstruct, speaker_count};
+use crate::reconstruct::{reconstruct, reconstruct_smoothed, speaker_count};
 use crate::segment::{merge_segments, to_rttm, to_segments};
 use crate::utils::cosine_similarity;
 
 type DynError = Box<dyn Error + Send + Sync + 'static>;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ReconstructMethod {
+    /// Standard top-K selection (pyannote-compatible)
+    Standard,
+    /// Temporal smoothing — when scores are within epsilon, prefer previous frame's speaker
+    Smoothed { epsilon: f32 },
+}
+
+#[derive(Debug, Clone)]
+pub struct PipelineConfig {
+    pub binarize: BinarizeConfig,
+    pub ahc: AhcConfig,
+    pub vbx: VbxConfig,
+    pub merge_gap: f64,
+    pub speaker_keep_threshold: f64,
+    pub reconstruct_method: ReconstructMethod,
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self {
+            binarize: BinarizeConfig::default(),
+            ahc: AhcConfig::default(),
+            vbx: VbxConfig::default(),
+            merge_gap: 0.0,
+            speaker_keep_threshold: 1e-7,
+            reconstruct_method: ReconstructMethod::Smoothed { epsilon: 0.1 },
+        }
+    }
+}
 
 pub const SEGMENTATION_WINDOW_SECONDS: f64 = 10.0;
 pub const SEGMENTATION_STEP_SECONDS: f64 = 1.0;
@@ -177,6 +209,24 @@ pub fn diarize(
     audio: &[f32],
     file_id: &str,
 ) -> Result<DiarizationResult, DynError> {
+    diarize_with_config(
+        seg_model,
+        emb_model,
+        plda,
+        audio,
+        file_id,
+        &PipelineConfig::default(),
+    )
+}
+
+pub fn diarize_with_config(
+    seg_model: &mut SegmentationModel,
+    emb_model: &mut EmbeddingModel,
+    plda: &PldaTransform,
+    audio: &[f32],
+    file_id: &str,
+    config: &PipelineConfig,
+) -> Result<DiarizationResult, DynError> {
     let powerset = PowersetMapping::new(3, 2);
     let raw_windows = seg_model.run(audio)?;
     tracing::info!(windows = raw_windows.len(), "Segmentation complete");
@@ -193,14 +243,44 @@ pub fn diarize(
 
     let step_seconds = seg_model.step_seconds();
     let segmentations = decode_windows(raw_windows, &powerset);
+    let embeddings = extract_embeddings(seg_model, emb_model, audio, &segmentations)?;
+    tracing::info!(
+        chunks = segmentations.shape()[0],
+        speakers = segmentations.shape()[2],
+        "Embeddings complete"
+    );
+
+    diarize_from_intermediates(
+        &segmentations,
+        &embeddings,
+        step_seconds,
+        file_id,
+        plda,
+        config,
+    )
+}
+
+/// Run post-inference pipeline from cached segmentations + embeddings.
+///
+/// Takes precomputed segmentations and embeddings; runs binarize → filter →
+/// AHC → PLDA → VBx → reconstruct → RTTM. Used for grid search
+/// where inference is cached and only post-inference params vary
+pub fn diarize_from_intermediates(
+    segmentations: &Array3<f32>,
+    embeddings: &Array3<f32>,
+    step_seconds: f64,
+    file_id: &str,
+    plda: &PldaTransform,
+    config: &PipelineConfig,
+) -> Result<DiarizationResult, DynError> {
     let start_frames = chunk_start_frames(segmentations.shape()[0], step_seconds);
     let output_frames = total_output_frames(segmentations.shape()[0], step_seconds);
-    let speaker_count = speaker_count(&segmentations, &start_frames, 0, output_frames);
+    let speaker_count = speaker_count(segmentations, &start_frames, 0, output_frames);
 
     if speaker_count.iter().all(|count| *count == 0) {
         return Ok(DiarizationResult {
-            segmentations,
-            embeddings: Array3::zeros((0, 0, 0)),
+            segmentations: segmentations.clone(),
+            embeddings: embeddings.clone(),
             speaker_count,
             hard_clusters: Array2::zeros((0, 0)),
             discrete_diarization: Array2::zeros((0, 0)),
@@ -208,22 +288,16 @@ pub fn diarize(
         });
     }
 
-    let embeddings = extract_embeddings(seg_model, emb_model, audio, &segmentations)?;
-    tracing::info!(
-        chunks = segmentations.shape()[0],
-        speakers = segmentations.shape()[2],
-        "Embeddings complete"
-    );
     let (train_embeddings, _train_chunk_idx, _train_speaker_idx) =
-        filter_embeddings(&segmentations, &embeddings);
+        filter_embeddings(segmentations, embeddings);
 
     let hard_clusters = if train_embeddings.nrows() < 2 {
         let mut clusters =
             Array2::<i32>::zeros((segmentations.shape()[0], segmentations.shape()[2]));
-        mark_inactive_speakers(&segmentations, &mut clusters);
+        mark_inactive_speakers(segmentations, &mut clusters);
         clusters
     } else {
-        let ahc_labels = cluster_ahc(&train_embeddings.view(), AhcConfig::default());
+        let ahc_labels = cluster_ahc(&train_embeddings.view(), config.ahc);
         tracing::debug!(
             rows = train_embeddings.nrows(),
             cols = train_embeddings.ncols(),
@@ -240,11 +314,12 @@ pub fn diarize(
 
         let plda_features = plda.transform(&train_embeddings.view(), 128);
         let phi = plda.phi();
-        let (gamma, pi) = cluster_vbx(
+
+        let (gamma, pi): (Array2<f32>, ndarray::Array1<f32>) = cluster_vbx(
             &ahc_labels,
             &plda_features.view(),
             &phi.slice(s![..128]),
-            &VbxConfig::default(),
+            &config.vbx,
         );
 
         tracing::debug!(?pi, "VBx speaker priors");
@@ -252,7 +327,9 @@ pub fn diarize(
         let mut kept_speakers: Vec<usize> = pi
             .iter()
             .enumerate()
-            .filter_map(|(idx, weight)| (*weight > 1e-7).then_some(idx))
+            .filter_map(|(idx, weight)| {
+                (*weight > config.speaker_keep_threshold as f32).then_some(idx)
+            })
             .collect();
         if kept_speakers.is_empty() && !pi.is_empty() {
             let best = pi
@@ -272,8 +349,9 @@ pub fn diarize(
             tracing::debug!(cluster = i, norm, "centroid");
         }
 
-        let mut clusters = assign_embeddings(&segmentations, &embeddings, &centroids);
-        mark_inactive_speakers(&segmentations, &mut clusters);
+        let mut clusters = assign_embeddings(segmentations, embeddings, &centroids);
+
+        mark_inactive_speakers(segmentations, &mut clusters);
         tracing::debug!(
             rows = clusters.nrows(),
             cols = clusters.ncols(),
@@ -289,24 +367,35 @@ pub fn diarize(
         "Clustering complete"
     );
 
-    let discrete_diarization = reconstruct(
-        &segmentations,
-        &hard_clusters,
-        &speaker_count,
-        &start_frames,
-        0,
-    );
+    let discrete_diarization = match config.reconstruct_method {
+        ReconstructMethod::Smoothed { epsilon } => reconstruct_smoothed(
+            segmentations,
+            &hard_clusters,
+            &speaker_count,
+            &start_frames,
+            0,
+            epsilon,
+        ),
+        ReconstructMethod::Standard => reconstruct(
+            segmentations,
+            &hard_clusters,
+            &speaker_count,
+            &start_frames,
+            0,
+        ),
+    };
+
     let segments = to_segments(
         &discrete_diarization,
         FRAME_STEP_SECONDS,
         FRAME_DURATION_SECONDS,
     );
-    let segments = merge_segments(&segments, 0.0);
+    let segments = merge_segments(&segments, config.merge_gap);
     let rttm = to_rttm(&segments, file_id);
 
     Ok(DiarizationResult {
-        segmentations,
-        embeddings,
+        segmentations: segmentations.clone(),
+        embeddings: embeddings.clone(),
         speaker_count,
         hard_clusters,
         discrete_diarization,

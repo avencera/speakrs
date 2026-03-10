@@ -44,7 +44,9 @@ pub fn speaker_count(
         .collect()
 }
 
-pub fn reconstruct(
+/// Accumulate per-cluster activation scores from chunk segmentations,
+/// padding to at least max_speakers_per_frame columns
+fn accumulate_activations(
     segmentations: &Array3<f32>,
     hard_clusters: &Array2<i32>,
     speaker_count: &[usize],
@@ -102,6 +104,24 @@ pub fn reconstruct(
         activations = padded;
     }
 
+    activations
+}
+
+pub fn reconstruct(
+    segmentations: &Array3<f32>,
+    hard_clusters: &Array2<i32>,
+    speaker_count: &[usize],
+    start_frames: &[usize],
+    warmup_frames: usize,
+) -> Array2<f32> {
+    let activations = accumulate_activations(
+        segmentations,
+        hard_clusters,
+        speaker_count,
+        start_frames,
+        warmup_frames,
+    );
+
     let mut discrete = Array2::<f32>::zeros(activations.raw_dim());
     for (frame_idx, &count) in speaker_count.iter().enumerate() {
         for speaker_idx in top_k_indices(&activations, frame_idx, count) {
@@ -146,6 +166,71 @@ fn top_k_indices(matrix: &Array2<f32>, frame_idx: usize, k: usize) -> Vec<usize>
     indexed.sort_by(|lhs, rhs| rhs.1.partial_cmp(&lhs.1).unwrap());
 
     indexed.into_iter().take(k).map(|(idx, _)| idx).collect()
+}
+
+/// Top-K with temporal smoothing: when scores are within epsilon,
+/// prefer speakers that were active in the previous frame to reduce flicker
+fn top_k_indices_smoothed(
+    matrix: &Array2<f32>,
+    frame_idx: usize,
+    k: usize,
+    prev_speakers: &[usize],
+    epsilon: f32,
+) -> Vec<usize> {
+    let ncols = matrix.ncols();
+    if k >= ncols {
+        return (0..ncols).collect();
+    }
+
+    let mut indexed: Vec<(usize, f32)> = (0..ncols)
+        .map(|col_idx| (col_idx, matrix[[frame_idx, col_idx]]))
+        .collect();
+
+    // sort by score descending, tie-break by previous-frame presence
+    indexed.sort_by(|lhs, rhs| {
+        let score_diff = rhs.1 - lhs.1;
+        if score_diff.abs() < epsilon {
+            let lhs_prev = prev_speakers.contains(&lhs.0);
+            let rhs_prev = prev_speakers.contains(&rhs.0);
+            rhs_prev.cmp(&lhs_prev)
+        } else {
+            rhs.1.partial_cmp(&lhs.1).unwrap()
+        }
+    });
+
+    indexed.into_iter().take(k).map(|(idx, _)| idx).collect()
+}
+
+/// Reconstruct with temporal smoothing to reduce single-frame speaker flickers
+pub fn reconstruct_smoothed(
+    segmentations: &Array3<f32>,
+    hard_clusters: &Array2<i32>,
+    speaker_count: &[usize],
+    start_frames: &[usize],
+    warmup_frames: usize,
+    epsilon: f32,
+) -> Array2<f32> {
+    let activations = accumulate_activations(
+        segmentations,
+        hard_clusters,
+        speaker_count,
+        start_frames,
+        warmup_frames,
+    );
+
+    let mut discrete = Array2::<f32>::zeros(activations.raw_dim());
+    let mut prev_speakers: Vec<usize> = Vec::new();
+
+    for (frame_idx, &count) in speaker_count.iter().enumerate() {
+        let current =
+            top_k_indices_smoothed(&activations, frame_idx, count, &prev_speakers, epsilon);
+        for &speaker_idx in &current {
+            discrete[[frame_idx, speaker_idx]] = 1.0;
+        }
+        prev_speakers = current;
+    }
+
+    discrete
 }
 
 fn round_ties_even(value: f32) -> f32 {
