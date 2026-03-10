@@ -90,7 +90,7 @@ impl Dataset for AmiIhm {
                 "=== Downloading {} AMI IHM Mix-Headset WAV files ===",
                 missing.len()
             );
-            let base_url = "https://datashare.ed.ac.uk/bitstream/handle/10283/3338";
+            let base_url = "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus";
 
             let tmp_dir = std::env::temp_dir().join("ami-wav-download");
             fs::create_dir_all(&tmp_dir)?;
@@ -98,7 +98,7 @@ impl Dataset for AmiIhm {
             let mut failed = Vec::new();
             for stem in &missing {
                 let remote_name = format!("{stem}.Mix-Headset.wav");
-                let url = format!("{base_url}/{remote_name}");
+                let url = format!("{base_url}/{stem}/audio/{remote_name}");
                 let tmp_path = tmp_dir.join(&remote_name);
 
                 print!("  {stem}...");
