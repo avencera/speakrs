@@ -1,8 +1,8 @@
 # speakrs
 
-Speaker diarization in Rust. Put audio in, get RTTM segments out. Runs **48–79x realtime** on Apple Silicon, matching pyannote accuracy at the high end and trading some accuracy for speed at the low end.
+Speaker diarization in Rust. Runs **72–139x realtime** on Apple Silicon, matching pyannote accuracy at the high end and trading some accuracy for speed at the low end. On Apple Silicon you can choose `CoreML` mode for max accuracy, or `CoreMlFast` for 2x speed improvement trading off some accuracy for some workloads.
 
-`speakrs` implements the full pyannote community-1 pipeline in Rust: segmentation, powerset decode, aggregation, binarization, embedding, PLDA, and VBx clustering, plus temporal smoothing during reconstruction. There is no Python dependency. Inference runs on ONNX Runtime or native CoreML, and all post-processing stays in Rust.
+`speakrs` implements the full pyannote `community-1` pipeline in Rust: segmentation, powerset decode, aggregation, binarization, embedding, PLDA, and VBx clustering, plus temporal smoothing during reconstruction. There is no Python dependency. Inference runs on ONNX Runtime or native CoreML, and all post-processing stays in Rust.
 
 On the full VoxConverse dev set (216 files), speakrs CoreML achieves **7.0% DER vs pyannote's 7.2%**, slightly better accuracy at 3x the speed on Apple Silicon. On the test set (232 files) both match at 11.1% DER. See [benchmarks/](benchmarks/) for full results.
 
@@ -49,54 +49,35 @@ Requires the `coreml` Cargo feature. Uses Apple's CoreML framework for GPU/ANE-a
 
 ### Execution Modes
 
-| Mode | Backend | Step | Precision | Use case |
-|------|---------|------|-----------|----------|
-| `coreml` | Native CoreML | 1s | FP32 | Best accuracy (48x realtime) |
-| `coreml-fast` | Native CoreML | 2s | FP32 | Best speed (79x realtime) |
+| Mode          | Backend       | Step | Precision | Use case                     |
+| ------------- | ------------- | ---- | --------- | ---------------------------- |
+| `coreml`      | Native CoreML | 1s   | FP32      | Best accuracy (72x realtime) |
+| `coreml-fast` | Native CoreML | 2s   | FP32      | Best speed (139x realtime)   |
 
-`coreml-fast` uses a wider step (2s instead of 1s) to get about 2x more speed. That follows the same throughput-first tradeoff [FluidAudio](https://github.com/FluidInference/FluidAudio) uses on Apple hardware. It matches `coreml` on most clips, but on some inputs the coarser step drops a few segments. The 10.5-minute benchmark below shows one example.
+`coreml-fast` uses a wider step (2s instead of 1s) to get about 2x more speed. That follows the same throughput-first tradeoff [FluidAudio](https://github.com/FluidInference/FluidAudio) uses on Apple hardware. It matches `coreml` on most clips, but on some inputs the coarser step loses temporal resolution at speaker boundaries.
 
 ### Benchmarks
 
-All benchmarks were run on an Apple M4 Pro with macOS 26.3.
+All benchmarks on Apple M4 Pro, macOS 26.3, evaluated on VoxConverse dev (216 files, 1217.8 min, collar=0ms):
 
-#### 7-min clip (424.8s)
+| Mode | DER | Time | RTFx |
+|------|-----|------|------|
+| `coreml` | **7.0%** | 1009s | 72x |
+| `coreml-fast` | 7.8% | 524s | 139x |
+| pyannote community-1 (MPS) | 7.2% | 2999s | 24x |
+| FluidAudio | 22.3% | 501s | **146x** |
 
-| Mode | Speakers | Segments | Coverage | Time | RTFx |
-|------|----------|----------|----------|------|------|
-| `coreml-fast` | 6 | 79 | 100% | 6.7s | **63x** |
-| `coreml` | 6 | 79 | 100% | 11.5s | 37x |
-| pyannote community-1 (MPS) | 6 | 81 | reference | 28.8s | 15x |
+On VoxConverse test (232 files, 2612.2 min), both `coreml` and pyannote score 11.1% DER, with `coreml` at 73x realtime vs pyannote's 23x. FluidAudio scores 32.6% DER on the test set.
 
-#### 10.5-min clip (635.7s, 3 speakers)
+CoreML may differ slightly from CPU due to GPU floating-point non-determinism. See [benchmarks/](benchmarks/) for full results across multiple datasets.
 
-| Mode | Speakers | Segments | Coverage | Time | RTFx |
-|------|----------|----------|----------|------|------|
-| `coreml-fast` | 3 | 247 | 99.7% | 5.4s | **118x** |
-| `coreml` | 3 | 250 | 100% | 16.3s | 39x |
-| pyannote community-1 (MPS) | 3 | 250 | reference | 36.9s | 17x |
+### Choosing a mode
 
-#### 45-min clip (2700.0s)
+The accuracy gap between `coreml` and `coreml-fast` depends on the type of audio. On meeting recordings with orderly turn-taking (AMI), CoreML Fast matches CoreML within 0.2% DER — the 2x speed boost comes at essentially no accuracy cost. On broadcast content with frequent speaker changes (VoxConverse), the gap widens to ~0.8%. On earnings calls with many Q&A participants, expect ~1% difference.
 
-| Mode | Speakers | Segments | Coverage | Time | RTFx |
-|------|----------|----------|----------|------|------|
-| `coreml-fast` | 2 | 722 | 100% | 42.3s | **64x** |
-| `coreml` | 2 | 722 | 100% | 72.1s | 37x |
-| pyannote community-1 (MPS) | 2 | 720 | reference | 145.3s | 19x |
+The gap comes entirely from speaker confusion at boundaries — the coarser 2-second step loses some temporal resolution. Missed speech and false alarm rates are identical across both modes.
 
-Coverage is measured as mutual speech overlap with pyannote. Small segment count differences, such as 79 vs 81, come from f32 accumulation order at frame boundaries. No speech is lost or added in those cases. In the 10.5-minute clip, `coreml-fast` drops 3 segments and reaches 99.7% coverage because of the wider 2-second step.
-
-### Accuracy (DER)
-
-Evaluated on the full VoxConverse dev set (216 files, 1217.8 min, collar=0ms):
-
-| Mode | DER | Notes |
-|------|-----|-------|
-| `coreml` | **7.0%** | Lower DER than pyannote community-1 (MPS) |
-| `coreml-fast` | 7.8% | 2s step, ~2x faster |
-| pyannote community-1 (MPS) | 7.2% | Reference |
-
-CoreML may differ slightly from CPU due to GPU floating-point non-determinism in accumulation order and fused multiply-add behavior. See [benchmarks/](benchmarks/) for results across multiple datasets.
+See [benchmarks/](benchmarks/) for full results across all datasets.
 
 ### Library Usage
 
@@ -138,10 +119,10 @@ Works on any platform with ONNX Runtime. No special Cargo features needed for CP
 
 ### Execution Modes
 
-| Mode | Backend | Step | Precision | Use case |
-|------|---------|------|-----------|----------|
-| `cpu` | ORT CPU | 1s | FP32 | Reference |
-| `cuda` | ORT CUDA | 1s | FP32 | NVIDIA GPU |
+| Mode   | Backend  | Step | Precision | Use case   |
+| ------ | -------- | ---- | --------- | ---------- |
+| `cpu`  | ORT CPU  | 1s   | FP32      | Reference  |
+| `cuda` | ORT CUDA | 1s   | FP32      | NVIDIA GPU |
 
 Additional Cargo features are available for `directml` (Windows) and `tensorrt` (NVIDIA TensorRT).
 
@@ -188,6 +169,7 @@ cargo run --release -p xtask --features cuda --bin diarize -- --mode cuda audio.
 ```
 
 The result also gives you access to intermediate data:
+
 - `result.segmentations`
 - `result.embeddings`
 - `result.speaker_count`
@@ -204,40 +186,40 @@ For development, `just download-models` exports the ONNX models and converts the
 
 ## Modules
 
-| Module | Description |
-|--------|-------------|
-| `inference::segmentation` | Sliding window segmentation (ONNX or CoreML) |
-| `inference::embedding` | WeSpeaker embedding with fbank feature extraction |
-| `inference::coreml` | Native CoreML wrapper with cached allocation |
-| `powerset` | 7-class → 3-speaker powerset decoding |
-| `aggregate` | Hamming-windowed overlap-add with warmup trimming |
-| `binarize` | Hysteresis binarization + min-duration + padding |
-| `clustering::plda` | PLDA whitening/dimensionality reduction (256→128) |
-| `clustering::vbx` | VBx Bayesian HMM EM clustering |
-| `reconstruct` | Cluster-to-frame mapping, top-K selection, temporal smoothing |
-| `segment` | Time segments, merging, RTTM formatting |
-| `utils` | Cosine similarity, L2 norm, logsumexp, centroids |
+| Module                    | Description                                                   |
+| ------------------------- | ------------------------------------------------------------- |
+| `inference::segmentation` | Sliding window segmentation (ONNX or CoreML)                  |
+| `inference::embedding`    | WeSpeaker embedding with fbank feature extraction             |
+| `inference::coreml`       | Native CoreML wrapper with cached allocation                  |
+| `powerset`                | 7-class → 3-speaker powerset decoding                         |
+| `aggregate`               | Hamming-windowed overlap-add with warmup trimming             |
+| `binarize`                | Hysteresis binarization + min-duration + padding              |
+| `clustering::plda`        | PLDA whitening/dimensionality reduction (256→128)             |
+| `clustering::vbx`         | VBx Bayesian HMM EM clustering                                |
+| `reconstruct`             | Cluster-to-frame mapping, top-K selection, temporal smoothing |
+| `segment`                 | Time segments, merging, RTTM formatting                       |
+| `utils`                   | Cosine similarity, L2 norm, logsumexp, centroids              |
 
 ## Why Not pyannote-rs?
 
 [pyannote-rs](https://github.com/thewh1teagle/pyannote-rs) is another Rust diarization crate, but it uses a simpler pipeline instead of the full pyannote algorithm:
 
-| | speakrs | pyannote-rs |
-|---|---------|-------------|
-| Segmentation | Powerset decode → 3-speaker activations | Raw argmax on logits (binary speech/non-speech) |
-| Aggregation | Hamming-windowed overlap-add | None (per-window only) |
-| Binarization | Hysteresis + min-duration filtering | None |
-| Embedding model | WeSpeaker ResNet34 (same as pyannote) | WeSpeaker CAM++ (only ONNX model they ship) |
-| Clustering | PLDA + VBx (Bayesian HMM) | Cosine similarity with fixed 0.5 threshold |
-| Speaker count | VBx EM estimation | Capped by max_speakers parameter |
-| pyannote parity | Bit-exact on CPU/CUDA | No, different algorithm and different embedding model |
+|                 | speakrs                                 | pyannote-rs                                           |
+| --------------- | --------------------------------------- | ----------------------------------------------------- |
+| Segmentation    | Powerset decode → 3-speaker activations | Raw argmax on logits (binary speech/non-speech)       |
+| Aggregation     | Hamming-windowed overlap-add            | None (per-window only)                                |
+| Binarization    | Hysteresis + min-duration filtering     | None                                                  |
+| Embedding model | WeSpeaker ResNet34 (same as pyannote)   | WeSpeaker CAM++ (only ONNX model they ship)           |
+| Clustering      | PLDA + VBx (Bayesian HMM)               | Cosine similarity with fixed 0.5 threshold            |
+| Speaker count   | VBx EM estimation                       | Capped by max_speakers parameter                      |
+| pyannote parity | Bit-exact on CPU/CUDA                   | No, different algorithm and different embedding model |
 
 On the VoxConverse dev set, using the 33 files where pyannote-rs produces output (186 min, collar=0ms):
 
-| | DER | Missed | False Alarm | Confusion |
-|---|-----|--------|-------------|-----------|
-| speakrs CoreML | 11.5% | 3.8% | 3.6% | 4.1% |
-| pyannote-rs | 80.2% | 34.9% | 7.4% | 37.9% |
+|                | DER   | Missed | False Alarm | Confusion |
+| -------------- | ----- | ------ | ----------- | --------- |
+| speakrs CoreML | 11.5% | 3.8%   | 3.6%        | 4.1%      |
+| pyannote-rs    | 80.2% | 34.9%  | 7.4%        | 37.9%     |
 
 pyannote-rs produces 0 segments on 183 out of 216 VoxConverse files. Its segments only close on speech to silence transitions, so continuous speech without silence gaps yields no output. The 33 files above are the subset where it produces at least 5 segments.
 
