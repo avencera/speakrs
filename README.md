@@ -11,6 +11,7 @@ On the full VoxConverse dev set (216 files), speakrs CoreML achieves **7.0% DER 
 - [Pipeline](#pipeline)
 - [macOS / iOS (CoreML)](#macos--ios-coreml)
 - [CPU & CUDA (Linux, Windows, macOS)](#cpu--cuda-linux-windows-macos)
+- [Usage](#usage)
 - [Models](#models)
 - [Modules](#modules)
 - [Why Not pyannote-rs?](#why-not-pyannote-rs)
@@ -73,45 +74,11 @@ CoreML may differ slightly from CPU due to GPU floating-point non-determinism. S
 
 ### Choosing a mode
 
-The accuracy gap between `coreml` and `coreml-fast` depends on the type of audio. On meeting recordings with orderly turn-taking (AMI), CoreML Fast matches CoreML within 0.2% DER — the 2x speed boost comes at essentially no accuracy cost. On broadcast content with frequent speaker changes (VoxConverse), the gap widens to ~0.8%. On earnings calls with many Q&A participants, expect ~1% difference.
+The accuracy gap between `coreml` and `coreml-fast` depends on the type of audio. On meeting recordings with orderly turn-taking (AMI), CoreML Fast matches CoreML within 0.2% DER. The 2x speed boost comes at essentially no accuracy cost. On broadcast content with frequent speaker changes (VoxConverse), the gap widens to ~0.8%. On earnings calls with many Q&A participants, expect ~1% difference.
 
-The gap comes entirely from speaker confusion at boundaries — the coarser 2-second step loses some temporal resolution. Missed speech and false alarm rates are identical across both modes.
+`coreml-fast` never misses speech or hallucinates extra speech. The only extra errors are misattributing speech to the wrong speaker near turn boundaries, because the 2s step gives fewer data points to pinpoint where one speaker stops and another starts.
 
 See [benchmarks/](benchmarks/) for full results across all datasets.
-
-### Library Usage
-
-```rust
-use speakrs::models::Mode;
-use speakrs::pipeline::OwnedDiarizationPipeline;
-
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut pipeline = OwnedDiarizationPipeline::from_pretrained(Mode::CoreMl)?;
-
-    let audio: Vec<f32> = load_your_mono_16khz_audio_here();
-    let result = pipeline.run(&audio)?;
-
-    print!("{}", result.rttm("my-audio"));
-    Ok(())
-}
-
-fn load_your_mono_16khz_audio_here() -> Vec<f32> {
-    unimplemented!()
-}
-```
-
-### CLI Usage
-
-```bash
-# CoreML (fastest)
-cargo run --release -p xtask --features coreml --bin diarize -- --mode coreml-fast audio.wav
-
-# CoreML (best accuracy)
-cargo run --release -p xtask --features coreml --bin diarize -- --mode coreml audio.wav
-
-# Compare with pyannote
-just compare audio.wav
-```
 
 ## CPU & CUDA (Linux, Windows, macOS)
 
@@ -128,23 +95,19 @@ Additional Cargo features are available for `directml` (Windows) and `tensorrt` 
 
 ### Benchmarks
 
-<!-- TODO: add CPU benchmark numbers -->
-<!-- TODO: add CUDA benchmark numbers -->
+Coming soon.
 
-Benchmarks coming soon.
+## Usage
 
-### Accuracy (DER)
-
-CPU and CUDA modes match or exceed pyannote community-1 accuracy. Temporal smoothing during reconstruction slightly improves DER on some datasets. See [benchmarks/](benchmarks/) for dataset-level results.
-
-### Library Usage
+### Library
 
 ```rust
 use speakrs::models::Mode;
 use speakrs::pipeline::OwnedDiarizationPipeline;
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut pipeline = OwnedDiarizationPipeline::from_pretrained(Mode::Cpu)?;
+    // Mode::CoreMl, Mode::CoreMlFast, Mode::Cpu, or Mode::Cuda
+    let mut pipeline = OwnedDiarizationPipeline::from_pretrained(Mode::CoreMl)?;
 
     let audio: Vec<f32> = load_your_mono_16khz_audio_here();
     let result = pipeline.run(&audio)?;
@@ -158,14 +121,23 @@ fn load_your_mono_16khz_audio_here() -> Vec<f32> {
 }
 ```
 
-### CLI Usage
+### CLI
 
 ```bash
-# CPU reference
+# CoreML (best accuracy, requires coreml feature)
+cargo run --release -p xtask --features coreml --bin diarize -- --mode coreml audio.wav
+
+# CoreML Fast (fastest on Apple Silicon)
+cargo run --release -p xtask --features coreml --bin diarize -- --mode coreml-fast audio.wav
+
+# CPU
 cargo run --release -p xtask --bin diarize -- --mode cpu audio.wav
 
 # CUDA (NVIDIA GPU)
 cargo run --release -p xtask --features cuda --bin diarize -- --mode cuda audio.wav
+
+# Compare with pyannote
+just compare audio.wav
 ```
 
 The result also gives you access to intermediate data:
