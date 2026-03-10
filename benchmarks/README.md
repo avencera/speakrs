@@ -71,5 +71,3 @@ cargo xtask benchmark der --max-files 39 --max-minutes 60 --impl pyannote --impl
 # list available implementations
 cargo xtask benchmark der --impl list
 ```
-
-Raw timestamped results from dev runs are in `_benchmarks/` (gitignored)
