@@ -1,7 +1,7 @@
 use std::fs;
 use std::process::Command;
 
-use color_eyre::eyre::{bail, Result};
+use color_eyre::eyre::{Result, bail};
 use serde_json::Value;
 
 use crate::cmd::{project_root, run_cmd};
@@ -57,13 +57,13 @@ set -euo pipefail
 
 if ! command -v cargo &>/dev/null; then
     echo "=== Installing build dependencies ==="
-    apt-get update && apt-get install -y build-essential pkg-config libssl-dev git cmake curl libopenblas-dev unzip libclang-dev ffmpeg libavutil-dev libavcodec-dev libavformat-dev libswresample-dev libpython3.12-dev libcudnn9-cuda-12
+    apt-get update && apt-get install -y build-essential pkg-config libssl-dev git cmake curl libopenblas-dev unzip libclang-dev ffmpeg libavutil-dev libavcodec-dev libavformat-dev libswresample-dev libpython3.12-dev libcudnn9-cuda-12 tmux
 
     echo "=== Installing Rust ==="
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-elif ! command -v unzip &>/dev/null || ! dpkg -s libclang-dev &>/dev/null 2>&1 || ! dpkg -s libcudnn9-cuda-12 &>/dev/null 2>&1; then
+elif ! command -v tmux &>/dev/null || ! command -v unzip &>/dev/null || ! dpkg -s libclang-dev &>/dev/null 2>&1 || ! dpkg -s libcudnn9-cuda-12 &>/dev/null 2>&1; then
     echo "=== Installing missing dependencies ==="
-    apt-get update && apt-get install -y unzip libclang-dev ffmpeg libavutil-dev libavcodec-dev libavformat-dev libswresample-dev libpython3.12-dev libcudnn9-cuda-12
+    apt-get update && apt-get install -y tmux unzip libclang-dev ffmpeg libavutil-dev libavcodec-dev libavformat-dev libswresample-dev libpython3.12-dev libcudnn9-cuda-12
 fi
 source $HOME/.cargo/env
 
@@ -530,37 +530,162 @@ fn rsync_source(instance_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn benchmark(args: &[String]) -> Result<()> {
-    let instance_id = pick_or_read_instance()?;
+fn prepare_benchmark(instance_id: &str, args: &[String]) -> Result<String> {
+    rsync_source(instance_id)?;
+    sync_datasets(instance_id, args)?;
+    ensure_remote_models(instance_id)?;
 
-    rsync_source(&instance_id)?;
-
-    // sync local datasets to remote if present
-    sync_datasets(&instance_id, args)?;
-
-    // ensure models are present
-    ensure_remote_models(&instance_id)?;
-
-    // incremental build on remote — only recompiles changed crates
     println!("Building on remote (incremental)...");
-    let mut build_cmd = ssh_cmd(&instance_id)?;
-    build_cmd.arg("source $HOME/.cargo/env && cd /workspace/speakrs && cargo build --release -p xtask --features cuda");
+    let mut build_cmd = ssh_cmd(instance_id)?;
+    build_cmd.arg(
+        "source $HOME/.cargo/env && cd /workspace/speakrs && cargo build --release -p xtask --features cuda",
+    );
     run_cmd(&mut build_cmd)?;
 
     let remote_cmd = if args.is_empty() {
         "cd /workspace/speakrs && source $HOME/.cargo/env && ./target/release/xtask benchmark run fixtures/sample.wav --rust-mode cuda".to_string()
     } else {
+        let quoted_args: Vec<String> = args
+            .iter()
+            .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
+            .collect();
         format!(
             "cd /workspace/speakrs && source $HOME/.cargo/env && ./target/release/xtask benchmark {}",
-            args.join(" ")
+            quoted_args.join(" ")
         )
     };
 
-    println!("Running benchmark on remote GPU...");
+    Ok(remote_cmd)
+}
+
+pub fn benchmark(args: &[String], detach: bool, force: bool) -> Result<()> {
+    let instance_id = pick_or_read_instance()?;
+    let remote_cmd = prepare_benchmark(&instance_id, args)?;
+
+    if detach {
+        // check for an already-running tmux session
+        let mut check = ssh_cmd(&instance_id)?;
+        check.arg("tmux has-session -t benchmark 2>/dev/null");
+        if check.output()?.status.success() && !force {
+            bail!(
+                "A benchmark is already running. Use --force to replace it, or check with:\n  \
+                 cargo xtask gpu benchmark --detach --force"
+            );
+        }
+
+        println!("Launching benchmark in detached tmux session...");
+        // escape single quotes for embedding inside single-quoted tmux command
+        let escaped_cmd = remote_cmd.replace('\'', "'\\''");
+        let tmux_cmd = format!(
+            concat!(
+                "tmux kill-session -t benchmark 2>/dev/null; ",
+                "mkdir -p /workspace/speakrs/_benchmarks && ",
+                "tmux new-session -d -s benchmark ",
+                "'{escaped_cmd} 2>&1 | tee /workspace/speakrs/_benchmarks/latest.log; ",
+                "echo \"=== BENCHMARK COMPLETE ===\"'",
+            ),
+            escaped_cmd = escaped_cmd,
+        );
+        let mut cmd = ssh_cmd(&instance_id)?;
+        cmd.arg(&tmux_cmd);
+        run_cmd(&mut cmd)?;
+
+        println!("Benchmark running in background. You can now disconnect.");
+        println!("  cargo xtask gpu status         — check progress");
+        println!("  cargo xtask gpu attach         — reconnect to live session");
+        println!("  cargo xtask gpu pull-results   — download results when done");
+    } else {
+        println!("Running benchmark on remote GPU...");
+        let mut cmd = ssh_cmd(&instance_id)?;
+        cmd.arg(&remote_cmd);
+        run_cmd(&mut cmd)?;
+    }
+
+    Ok(())
+}
+
+pub fn status() -> Result<()> {
+    let instance_id = pick_or_read_instance()?;
+
+    let script = concat!(
+        "if tmux has-session -t benchmark 2>/dev/null; then ",
+        "echo 'STATUS: RUNNING'; echo '---'; ",
+        "tmux capture-pane -t benchmark -p | tail -30; ",
+        "else ",
+        "echo 'STATUS: NOT RUNNING'; ",
+        "if [ -f /workspace/speakrs/_benchmarks/latest.log ]; then ",
+        "echo '--- last output ---'; ",
+        "tail -20 /workspace/speakrs/_benchmarks/latest.log; fi; fi",
+    );
+
     let mut cmd = ssh_cmd(&instance_id)?;
-    cmd.arg(&remote_cmd);
+    cmd.arg(script);
     run_cmd(&mut cmd)?;
 
+    Ok(())
+}
+
+pub fn attach() -> Result<()> {
+    let instance_id = pick_or_read_instance()?;
+
+    // verify session exists before handing off to exec
+    let mut check = ssh_cmd(&instance_id)?;
+    check.arg("tmux has-session -t benchmark 2>/dev/null");
+    if !check.output()?.status.success() {
+        bail!("No benchmark session running. Use `cargo xtask gpu status` to check");
+    }
+
+    let args = get_ssh_args(&instance_id)?;
+    let mut cmd = Command::new("ssh");
+    cmd.args([
+        "-t",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+    ]);
+    cmd.args(&args);
+    cmd.arg("tmux attach -t benchmark");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = cmd.exec();
+        bail!("Failed to exec ssh: {err}");
+    }
+
+    #[cfg(not(unix))]
+    {
+        run_cmd(&mut cmd)?;
+        Ok(())
+    }
+}
+
+pub fn pull_results() -> Result<()> {
+    let instance_id = pick_or_read_instance()?;
+    let ssh_args = get_ssh_args(&instance_id)?;
+    let port = ssh_port(&ssh_args);
+    let user_host = ssh_user_host(&ssh_args);
+
+    let root = project_root();
+    let local_dir = root.join("_benchmarks");
+    fs::create_dir_all(&local_dir)?;
+
+    let ssh_opts = format!(
+        "ssh -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p {port}"
+    );
+    let src = format!("{user_host}:/workspace/speakrs/_benchmarks/");
+    let dest = format!("{}/", local_dir.display());
+
+    println!("Pulling benchmark results from remote...");
+    run_cmd(
+        Command::new("rsync")
+            .args(["-az", "--info=progress2", "-e"])
+            .arg(&ssh_opts)
+            .args([&src, &dest]),
+    )?;
+
+    println!("Results saved to _benchmarks/");
     Ok(())
 }
 
