@@ -224,31 +224,32 @@ pub fn run(mode: &str, wav_path: &str, iterations: usize, log_every: usize) -> R
     Ok(())
 }
 
-fn build_embedding_session(model_path: &Path) -> Result<Session> {
-    use color_eyre::eyre::eyre;
+fn ort_err(e: impl std::fmt::Display) -> color_eyre::eyre::Report {
+    color_eyre::eyre::eyre!("{e}")
+}
 
+fn build_embedding_session(model_path: &Path) -> Result<Session> {
     if std::env::var_os("SPEAKRS_PROFILE_ORT_DEFAULTS").is_some() {
-        return Ok(Session::builder()
-            .map_err(|e| eyre!("{e}"))?
+        return Session::builder()
+            .map_err(ort_err)?
             .commit_from_file(model_path)
-            .map_err(|e| eyre!("{e}"))?);
+            .map_err(ort_err);
     }
 
     let mut builder = Session::builder()
-        .map_err(|e| eyre!("{e}"))?
+        .map_err(ort_err)?
         .with_independent_thread_pool()
-        .map_err(|e| eyre!("{e}"))?
+        .map_err(ort_err)?
         .with_intra_threads(1)
-        .map_err(|e| eyre!("{e}"))?
+        .map_err(ort_err)?
         .with_inter_threads(1)
-        .map_err(|e| eyre!("{e}"))?
+        .map_err(ort_err)?
         .with_memory_pattern(false)
-        .map_err(|e| eyre!("{e}"))?
+        .map_err(ort_err)?
         .with_execution_providers([ep::CPU::default().with_arena_allocator(false).build()])
-        .map_err(|e| eyre!("{e}"))?;
-    Ok(builder
-        .commit_from_file(model_path)
-        .map_err(|e| eyre!("{e}"))?)
+        .map_err(ort_err)?;
+
+    builder.commit_from_file(model_path).map_err(ort_err)
 }
 
 fn run_one_embedding(
