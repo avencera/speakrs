@@ -24,7 +24,7 @@ All benchmarks run on Apple M4 Pro, macOS 26.3, collar=0ms.
 | pyannote community-1 (MPS) | 7.2% | 2.3% | 2.3% | 2.6% | 2998.8s | 24x |
 | **speakrs CoreML** | **7.0%** | 2.3% | 2.3% | 2.4% | 1009.1s | 72x |
 | speakrs CoreML Fast | 7.8% | 2.3% | 2.3% | 3.3% | 524.0s | 139x |
-| FluidAudio | 22.3% | 5.3% | 1.6% | 15.5% | 500.9s | 146x |
+| FluidAudio | 22.3% | 5.3% | 1.6% | 15.5% | 500.9s | **146x** |
 
 ### VoxConverse Test (232 files, 2612.2 min)
 
@@ -33,7 +33,7 @@ All benchmarks run on Apple M4 Pro, macOS 26.3, collar=0ms.
 | **pyannote community-1 (MPS)** | **11.1%** | 3.4% | 4.1% | 3.7% | 6705.3s | 23x |
 | **speakrs CoreML** | **11.1%** | 3.4% | 4.1% | 3.7% | 2133.5s | 73x |
 | speakrs CoreML Fast | 11.9% | 3.3% | 4.1% | 4.5% | 1093.2s | 143x |
-| FluidAudio | 32.6% | 5.4% | 3.4% | 23.8% | 1044.2s | 150x |
+| FluidAudio | 32.6% | 5.4% | 3.4% | 23.8% | 1044.2s | **150x** |
 
 ### AMI IHM (3 files, 47 min)
 
@@ -42,7 +42,7 @@ All benchmarks run on Apple M4 Pro, macOS 26.3, collar=0ms.
 | **pyannote community-1 (MPS)** | **16.0%** | 8.6% | 4.2% | 3.2% | 145.1s | 20x |
 | **speakrs CoreML** | **16.0%** | 8.6% | 4.2% | 3.2% | 46.2s | 61x |
 | speakrs CoreML Fast | 16.2% | 8.6% | 4.3% | 3.3% | 23.1s | 123x |
-| FluidAudio | 40.1% | 14.3% | 3.1% | 22.6% | 19.3s | 147x |
+| FluidAudio | 40.1% | 14.3% | 3.1% | 22.6% | 19.3s | **147x** |
 
 ### Other implementations
 
