@@ -5,7 +5,7 @@
 #     "torch>=2.6",
 # ]
 # ///
-"""Run pyannote community-1 diarization on a WAV file and print RTTM."""
+"""Run pyannote community-1 diarization on WAV files and print RTTM."""
 
 import argparse
 import os
@@ -17,7 +17,7 @@ import torch
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("wav_path")
+    parser.add_argument("wav_files", nargs="+")
     parser.add_argument(
         "--device",
         choices=("auto", "cpu", "mps", "cuda"),
@@ -85,9 +85,34 @@ def configure_torch(device: torch.device) -> None:
         torch.backends.cudnn.allow_tf32 = False
 
 
+def diarize_file(pipeline: Any, wav_path: str, file_id: str) -> str:
+    with torch.inference_mode():
+        result: Any = pipeline({"audio": wav_path})
+
+    # handle both old Annotation and new DiarizeOutput APIs
+    annotation = result
+    if hasattr(result, "speaker_diarization"):
+        annotation = result.speaker_diarization
+    elif not hasattr(result, "itertracks"):
+        for attr in ("annotation", "diarization", "output"):
+            if hasattr(result, attr):
+                annotation = getattr(result, attr)
+                break
+
+    lines = []
+    for seg, _, speaker in annotation.itertracks(yield_label=True):
+        lines.append(
+            f"SPEAKER {file_id} 1 {seg.start:.6f} {seg.duration:.6f} "
+            f"<NA> <NA> {speaker} <NA> <NA>"
+        )
+    output = "\n".join(lines)
+    if output:
+        output += "\n"
+    return output
+
+
 def main() -> None:
     args = parse_args()
-    wav_path = args.wav_path
     token = os.environ.get("HF_TOKEN")
     if not token:
         # try cached token
@@ -118,34 +143,16 @@ def main() -> None:
     if hasattr(pipeline, "embedding_batch_size"):
         pipeline.embedding_batch_size = args.embedding_batch_size
 
-    with torch.inference_mode():
-        result: Any = pipeline({"audio": wav_path})
-
-    # handle both old Annotation and new DiarizeOutput APIs
-    annotation = result
-    if hasattr(result, "speaker_diarization"):
-        annotation = result.speaker_diarization
-    elif not hasattr(result, "itertracks"):
-        for attr in ("annotation", "diarization", "output"):
-            if hasattr(result, attr):
-                annotation = getattr(result, attr)
-                break
-
-    lines = []
-    for seg, _, speaker in annotation.itertracks(yield_label=True):
-        lines.append(
-            f"SPEAKER file1 1 {seg.start:.6f} {seg.duration:.6f} "
-            f"<NA> <NA> {speaker} <NA> <NA>"
-        )
-    output = "\n".join(lines)
-    if output:
-        output += "\n"
+    all_output = ""
+    for wav_path in args.wav_files:
+        file_id = os.path.splitext(os.path.basename(wav_path))[0]
+        all_output += diarize_file(pipeline, wav_path, file_id)
 
     if args.output:
         with open(args.output, "w", encoding="utf-8") as handle:
-            handle.write(output)
+            handle.write(all_output)
     else:
-        sys.stdout.write(output)
+        sys.stdout.write(all_output)
 
 
 if __name__ == "__main__":
