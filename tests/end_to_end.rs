@@ -1,17 +1,21 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 use ndarray::{Array2, Array3};
 use ndarray_npy::ReadNpyExt;
 use speakrs::clustering::plda::PldaTransform;
-use speakrs::inference::ExecutionMode;
 use speakrs::inference::embedding::EmbeddingModel;
 use speakrs::inference::segmentation::SegmentationModel;
+use speakrs::pipeline::{FRAME_STEP_SECONDS, SEGMENTATION_STEP_SECONDS, diarize};
+
+#[cfg(feature = "coreml")]
+use speakrs::inference::ExecutionMode;
+#[cfg(feature = "coreml")]
 use speakrs::metrics::{compute_der, parse_rttm};
-use speakrs::pipeline::{
-    FAST_SEGMENTATION_STEP_SECONDS, FRAME_STEP_SECONDS, SEGMENTATION_STEP_SECONDS, diarize,
-};
+#[cfg(feature = "coreml")]
+use speakrs::pipeline::FAST_SEGMENTATION_STEP_SECONDS;
+#[cfg(feature = "coreml")]
+use std::time::{Duration, Instant};
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -105,7 +109,7 @@ fn pipeline_runs_on_main_fixture_audio() {
     assert!(result.rttm.contains("SPEAKER fixture 1"));
 }
 
-/// VoxConverse files for DER testing, sorted by duration (shortest first)
+#[cfg(feature = "coreml")]
 const VOXCONVERSE_TEST_FILES: &[&str] = &[
     "hqyok", "tfvyr", "qrzjk", "qpylu", "szsyz", "gwtwd", "fxgvy", "whmpa", "rtvuw", "usbgm",
     "bkwns", "abjxc", "syiwe", "qppll", "cobal", "oenox", "bwzyf", "jiqvr", "jyirt", "hiyis",
@@ -113,6 +117,7 @@ const VOXCONVERSE_TEST_FILES: &[&str] = &[
     "jsmbi", "qydmg", "akthc", "exymw", "kbkon", "wmori", "ysgbf", "atgpi", "qjgpl",
 ];
 
+#[cfg(feature = "coreml")]
 fn voxconverse_der(mode: ExecutionMode, step: f64) -> (Vec<(String, f64)>, Duration) {
     let models_dir = fixture_path("models");
     let mut seg_model = SegmentationModel::with_mode(

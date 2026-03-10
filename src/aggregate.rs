@@ -203,7 +203,7 @@ mod tests {
         }
 
         let result = overlap_add(&windows, step, 0);
-        let total = (2 - 1) * step + frames_per_window;
+        let total = step + frames_per_window;
         assert_eq!(result.shape(), &[total, num_speakers]);
 
         let h = hamming_window(frames_per_window);
