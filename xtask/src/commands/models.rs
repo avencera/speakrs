@@ -34,41 +34,32 @@ pub fn compare_coreml() -> Result<()> {
 pub fn deploy() -> Result<()> {
     let root = project_root();
 
-    // create repo (ignore error if it already exists)
-    let _ = Command::new("hf")
-        .args([
-            "repo",
-            "create",
-            "avencera/speakrs-models",
-            "--type",
-            "model",
-        ])
-        .current_dir(&root)
-        .status();
+    let includes = [
+        "plda_*.npy",
+        "wespeaker-voxceleb-resnet34.min_num_samples.txt",
+        "segmentation-3.0.onnx",
+        "segmentation-3.0-b32.onnx",
+        "wespeaker-voxceleb-resnet34.onnx",
+        "wespeaker-voxceleb-resnet34.onnx.data",
+        "wespeaker-fbank.onnx",
+        "wespeaker-fbank-b32.onnx",
+        "wespeaker-voxceleb-resnet34-tail.onnx",
+        "wespeaker-voxceleb-resnet34-tail-b3.onnx",
+        "wespeaker-voxceleb-resnet34-tail-b32.onnx",
+        "segmentation-3.0.mlmodelc/**",
+        "segmentation-3.0-b32.mlmodelc/**",
+        "wespeaker-fbank.mlmodelc/**",
+        "wespeaker-fbank-b32.mlmodelc/**",
+        "wespeaker-voxceleb-resnet34-tail*.mlmodelc/**",
+        "wespeaker-voxceleb-resnet34-fused*.mlmodelc/**",
+    ];
 
-    run_cmd(
-        Command::new("hf")
-            .args(["upload", "avencera/speakrs-models", "fixtures/models", "."])
-            .args([
-                "--include",
-                "plda_*.npy",
-                "wespeaker-voxceleb-resnet34.min_num_samples.txt",
-                "segmentation-3.0.onnx",
-                "segmentation-3.0-b32.onnx",
-                "wespeaker-voxceleb-resnet34.onnx",
-                "wespeaker-voxceleb-resnet34.onnx.data",
-                "wespeaker-fbank.onnx",
-                "wespeaker-fbank-b32.onnx",
-                "wespeaker-voxceleb-resnet34-tail.onnx",
-                "wespeaker-voxceleb-resnet34-tail-b3.onnx",
-                "wespeaker-voxceleb-resnet34-tail-b32.onnx",
-                "segmentation-3.0.mlmodelc/**",
-                "segmentation-3.0-b32.mlmodelc/**",
-                "wespeaker-fbank.mlmodelc/**",
-                "wespeaker-fbank-b32.mlmodelc/**",
-                "wespeaker-voxceleb-resnet34-tail*.mlmodelc/**",
-                "wespeaker-voxceleb-resnet34-fused*.mlmodelc/**",
-            ])
-            .current_dir(&root),
-    )
+    let mut cmd = Command::new("hf");
+    cmd.args(["upload", "avencera/speakrs-models", "fixtures/models", "."]);
+    for pattern in includes {
+        cmd.args(["--include", pattern]);
+    }
+    cmd.current_dir(&root);
+
+    run_cmd(&mut cmd)
 }

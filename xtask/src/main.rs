@@ -165,6 +165,14 @@ enum GpuCmd {
         /// Provision a new GPU instance instead of picking an existing one
         #[arg(long)]
         new: bool,
+
+        /// Use raw CUDA image and build everything from scratch on the remote
+        #[arg(long)]
+        bare: bool,
+
+        /// Minimum GPU TFLOPS when provisioning a new instance
+        #[arg(long, default_value = "10")]
+        min_tflops: f64,
     },
     /// Run benchmarks on the remote GPU instance
     Benchmark {
@@ -231,7 +239,11 @@ fn main() -> Result<()> {
             ),
         },
         Command::Gpu { cmd } => match cmd {
-            GpuCmd::Setup { new } => commands::gpu::setup(new),
+            GpuCmd::Setup {
+                new,
+                bare,
+                min_tflops,
+            } => commands::gpu::setup(new, bare, min_tflops),
             GpuCmd::Benchmark { args } => commands::gpu::benchmark(&args),
             GpuCmd::Ssh => commands::gpu::ssh(),
             GpuCmd::Destroy => commands::gpu::destroy(),

@@ -3,6 +3,9 @@
 # dependencies = [
 #     "pyannote.audio>=3.3",
 #     "torch>=2.6",
+#     "torchaudio>=2.6",
+#     "soundfile>=0.12",
+#     "tqdm>=4.66",
 # ]
 # ///
 """Run pyannote community-1 diarization on WAV files and print RTTM."""
@@ -10,6 +13,7 @@
 import argparse
 import os
 import sys
+import time
 from typing import Any
 
 import torch
@@ -144,9 +148,24 @@ def main() -> None:
         pipeline.embedding_batch_size = args.embedding_batch_size
 
     all_output = ""
-    for wav_path in args.wav_files:
+    multiple = len(args.wav_files) > 1
+
+    if multiple:
+        from tqdm import tqdm
+
+        pbar = tqdm(
+            args.wav_files, file=sys.stderr, bar_format="{l_bar}{bar:20}{r_bar}"
+        )
+    else:
+        pbar = args.wav_files
+
+    for wav_path in pbar:
         file_id = os.path.splitext(os.path.basename(wav_path))[0]
+        t0 = time.monotonic()
         all_output += diarize_file(pipeline, wav_path, file_id)
+        elapsed = time.monotonic() - t0
+        if multiple:
+            pbar.set_postfix_str(f"{file_id}: {elapsed:.1f}s")
 
     if args.output:
         with open(args.output, "w", encoding="utf-8") as handle:
