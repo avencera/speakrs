@@ -2,9 +2,9 @@
 
 Speaker diarization in Rust. Put audio in, get RTTM segments out. Runs **48–79x realtime** on Apple Silicon, matching pyannote accuracy at the high end and trading some accuracy for speed at the low end.
 
-`speakrs` implements the full pyannote community-1 pipeline in Rust: segmentation, powerset decode, aggregation, binarization, embedding, PLDA, and VBx clustering — plus temporal smoothing during reconstruction. There is no Python dependency. Inference runs on ONNX Runtime or native CoreML, and all post-processing stays in Rust.
+`speakrs` implements the full pyannote community-1 pipeline in Rust: segmentation, powerset decode, aggregation, binarization, embedding, PLDA, and VBx clustering, plus temporal smoothing during reconstruction. There is no Python dependency. Inference runs on ONNX Runtime or native CoreML, and all post-processing stays in Rust.
 
-On the full VoxConverse dev set (216 files), speakrs CoreML achieves **7.0% DER vs pyannote's 7.2%** — slightly better accuracy at 3x the speed on Apple Silicon. On the test set (232 files) both match at 11.1% DER. See [benchmarks/](benchmarks/) for full results.
+On the full VoxConverse dev set (216 files), speakrs CoreML achieves **7.0% DER vs pyannote's 7.2%**, slightly better accuracy at 3x the speed on Apple Silicon. On the test set (232 files) both match at 11.1% DER. See [benchmarks/](benchmarks/) for full results.
 
 ## Table of Contents
 
@@ -140,8 +140,8 @@ Works on any platform with ONNX Runtime. No special Cargo features needed for CP
 
 | Mode | Backend | Step | Precision | Use case |
 |------|---------|------|-----------|----------|
-| `cpu` | ORT CPU | 1s | FP32 | Reference, bit-exact with pyannote community-1 (CPU) |
-| `cuda` | ORT CUDA | 1s | FP32 | NVIDIA GPU, bit-exact with pyannote community-1 (CPU) |
+| `cpu` | ORT CPU | 1s | FP32 | Reference |
+| `cuda` | ORT CUDA | 1s | FP32 | NVIDIA GPU |
 
 Additional Cargo features are available for `directml` (Windows) and `tensorrt` (NVIDIA TensorRT).
 
@@ -154,7 +154,7 @@ Benchmarks coming soon.
 
 ### Accuracy (DER)
 
-CPU and CUDA modes produce bit-exact output matching pyannote community-1 (CPU). With temporal smoothing enabled by default, DER matches or slightly improves on pyannote. See [benchmarks/](benchmarks/) for dataset-level results.
+CPU and CUDA modes match or exceed pyannote community-1 accuracy. Temporal smoothing during reconstruction slightly improves DER on some datasets. See [benchmarks/](benchmarks/) for dataset-level results.
 
 ### Library Usage
 

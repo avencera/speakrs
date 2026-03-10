@@ -651,7 +651,7 @@ impl EmbeddingModel {
         has
     }
 
-    #[cfg(feature = "coreml")]
+    #[cfg(all(test, feature = "coreml"))]
     pub(crate) fn select_chunk_mask<'a>(
         &self,
         mask: &'a [f32],
