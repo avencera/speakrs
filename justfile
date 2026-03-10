@@ -1,13 +1,13 @@
 fmt:
-    cargo fmt
+    cargo fmt --all
     uv run --group dev ruff format scripts fixtures
 
 clippy:
-    cargo clippy -- -D warnings
+    cargo clippy --workspace -- -D warnings
     uv run --group dev ty check --python .venv --exclude 'scripts/pyannote_rs_bench/target' scripts fixtures
 
 test *args:
-    cargo test {{args}}
+    cargo test --workspace {{args}}
 
 check: fmt clippy test
 
