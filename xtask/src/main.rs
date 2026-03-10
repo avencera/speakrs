@@ -121,6 +121,9 @@ enum BenchmarkCmd {
         /// Description of what this benchmark run is testing
         #[arg(long, short = 'd')]
         description: Option<String>,
+        /// Implementations to run (omit for all, use "list" to show available)
+        #[arg(long = "impl", value_name = "NAME")]
+        impls: Vec<String>,
     },
 }
 
@@ -183,7 +186,14 @@ fn main() -> Result<()> {
                 max_files,
                 max_minutes,
                 description,
-            } => commands::benchmark::der(&dataset, max_files, max_minutes, description.as_deref()),
+                impls,
+            } => commands::benchmark::der(
+                &dataset,
+                max_files,
+                max_minutes,
+                description.as_deref(),
+                &impls,
+            ),
         },
         Command::Gpu { cmd } => match cmd {
             GpuCmd::Setup => commands::gpu::setup(),
