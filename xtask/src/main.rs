@@ -114,10 +114,10 @@ enum BenchmarkCmd {
         /// Dataset to evaluate (use "all" for all datasets, "list" to show available)
         #[arg(long, default_value = "voxconverse-dev")]
         dataset: String,
-        #[arg(long, default_value_t = 10)]
-        max_files: u32,
-        #[arg(long, default_value_t = 30)]
-        max_minutes: u32,
+        #[arg(long)]
+        max_files: Option<u32>,
+        #[arg(long)]
+        max_minutes: Option<u32>,
         /// Description of what this benchmark run is testing
         #[arg(long, short = 'd')]
         description: Option<String>,
@@ -189,8 +189,8 @@ fn main() -> Result<()> {
                 impls,
             } => commands::benchmark::der(
                 &dataset,
-                max_files,
-                max_minutes,
+                max_files.unwrap_or(u32::MAX),
+                max_minutes.unwrap_or(u32::MAX),
                 description.as_deref(),
                 &impls,
             ),
