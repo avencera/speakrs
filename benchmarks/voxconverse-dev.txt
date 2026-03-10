@@ -2,9 +2,8 @@ VoxConverse Dev DER (39 files, 53.0 min, collar=0ms)
 
 Implementation             DER%    Missed%   FalseAlarm%   Confusion%     Time
 ──────────────────────────────────────────────────────────────────────────────
-pyannote MPS               6.4%       2.4%          2.0%         2.1%   574.4s
-speakrs CoreML             6.5%       2.4%          2.0%         2.2%    70.6s
+pyannote MPS               6.4%       2.4%          2.0%         2.1%   128.4s
+speakrs CoreML             6.4%       2.4%          2.0%         2.0%    66.8s
 speakrs CoreML Fast        9.0%       2.3%          2.0%         4.7%    40.2s
-SpeakRs                    6.4%       2.4%          2.0%         2.0%    66.8s
 FluidAudio                16.1%       5.3%          1.8%         8.9%    29.3s
 pyannote-rs               92.4%      84.1%          1.0%         7.3%    16.9s

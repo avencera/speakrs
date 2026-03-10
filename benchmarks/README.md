@@ -9,9 +9,8 @@ All benchmarks run on Apple M4 Pro, macOS 26.3, collar=0ms
 | Name | Description |
 |------|-------------|
 | pyannote MPS | pyannote.audio on Apple GPU (MPS) — reference |
-| speakrs CoreML | speakrs with native CoreML, 1s step, FP32 |
+| speakrs CoreML | speakrs with native CoreML, 1s step, FP32, temporal smoothing |
 | speakrs CoreML Fast | speakrs with native CoreML, 2s step, FP32 |
-| SpeakRs | speakrs CoreML + temporal smoothing (default mode) |
 | FluidAudio | [FluidAudio](https://github.com/FluidInference/FluidAudio) Swift implementation |
 | pyannote-rs | [pyannote-rs](https://github.com/thewh1teagle/pyannote-rs) Rust implementation |
 
