@@ -88,6 +88,12 @@ pub(crate) struct CoreMlModel {
     input_dict: Retained<NSMutableDictionary<NSString, AnyObject>>,
 }
 
+// SAFETY: CoreMlModel is only used from one thread at a time (&mut self).
+// MLModel.prediction is thread-safe per Apple docs, and the other fields
+// (NSString, NSMutableDictionary, RcBlock) are only accessed during predict
+// calls which require &mut self, preventing concurrent access
+unsafe impl Send for CoreMlModel {}
+
 impl CoreMlModel {
     /// Load a compiled .mlmodelc bundle
     pub fn load(

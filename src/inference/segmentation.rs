@@ -1,3 +1,4 @@
+use crossbeam_channel::Sender;
 use ndarray::Array2;
 use ort::session::Session;
 use ort::value::TensorRef;
@@ -7,6 +8,14 @@ use crate::inference::coreml::{CachedInputShape, CoreMlModel, GpuPrecision, core
 use crate::inference::{ExecutionMode, with_execution_mode};
 #[cfg(feature = "coreml")]
 use objc2_core_ml::MLComputeUnits;
+
+#[derive(Debug, thiserror::Error)]
+pub enum SegmentationError {
+    #[error(transparent)]
+    Ort(#[from] ort::Error),
+    #[error("receiver disconnected")]
+    Disconnected(#[from] crossbeam_channel::SendError<Array2<f32>>),
+}
 
 const PRIMARY_BATCH_SIZE: usize = 32;
 
@@ -29,6 +38,12 @@ pub struct SegmentationModel {
     step_samples: usize,
     sample_rate: usize,
 }
+
+// SAFETY: SegmentationModel is only used from one thread at a time via &mut self.
+// The non-Send fields (CoreMlModel, CachedInputShape) contain Objective-C objects
+// that are safe to move between threads when not accessed concurrently
+#[cfg(feature = "coreml")]
+unsafe impl Send for SegmentationModel {}
 
 impl SegmentationModel {
     /// Load a segmentation-3.0 ONNX model
@@ -110,6 +125,10 @@ impl SegmentationModel {
         self.step_samples as f64 / self.sample_rate as f64
     }
 
+    pub fn mode(&self) -> ExecutionMode {
+        self.mode
+    }
+
     pub fn reset_session(&mut self) -> Result<(), ort::Error> {
         self.session = Self::build_session(&self.model_path, self.mode)?;
         self.primary_batched_session = batched_model_path(&self.model_path, PRIMARY_BATCH_SIZE)
@@ -123,6 +142,66 @@ impl SegmentationModel {
                 Self::load_native_coreml_batched(&self.model_path, self.mode);
         }
         Ok(())
+    }
+
+    /// Run segmentation on audio, streaming raw logits through a channel
+    ///
+    /// Same logic as `run()`, but sends each decoded window through `tx` as it's produced
+    /// instead of collecting into a Vec. Returns total window count
+    pub fn run_streaming(
+        &mut self,
+        audio: &[f32],
+        tx: Sender<Array2<f32>>,
+    ) -> Result<usize, SegmentationError> {
+        let mut offsets = Vec::new();
+        let mut offset = 0;
+
+        while offset + self.window_samples <= audio.len() {
+            offsets.push(offset);
+            offset += self.step_samples;
+        }
+
+        let padded = if offset < audio.len() && audio.len() > self.window_samples {
+            let mut p = vec![0.0f32; self.window_samples];
+            let remaining = audio.len() - offset;
+            p[..remaining].copy_from_slice(&audio[offset..]);
+            Some(p)
+        } else {
+            None
+        };
+
+        let total_windows = offsets.len() + padded.is_some() as usize;
+        let win_samples = self.window_samples;
+        let window_at = |i: usize| -> &[f32] {
+            if i < offsets.len() {
+                &audio[offsets[i]..offsets[i] + win_samples]
+            } else {
+                padded.as_deref().unwrap()
+            }
+        };
+
+        let mut next_idx = 0;
+        while next_idx < total_windows {
+            let remaining = total_windows - next_idx;
+
+            if remaining >= PRIMARY_BATCH_SIZE && self.primary_batched_session.is_some() {
+                let batch: Vec<&[f32]> = (next_idx..next_idx + PRIMARY_BATCH_SIZE)
+                    .map(&window_at)
+                    .collect();
+
+                for r in self.run_batch(&batch)? {
+                    tx.send(r)?;
+                }
+                next_idx += PRIMARY_BATCH_SIZE;
+                continue;
+            }
+
+            let result = self.run_window(window_at(next_idx))?;
+            tx.send(result)?;
+            next_idx += 1;
+        }
+
+        Ok(total_windows)
     }
 
     /// Run segmentation on audio, returning raw logits per window
