@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Instant;
+
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 
 use color_eyre::eyre::{Result, bail};
 
@@ -567,18 +569,24 @@ pub fn der(
     println!("=== Building binaries ===");
     let build_features = der_build_features(impls);
     cargo_build_xtask(&build_features)?;
-    if let Err(e) = run_cmd(
-        Command::new("cargo")
-            .args(["build", "--release"])
-            .current_dir(root.join("scripts/pyannote_rs_bench")),
-    ) {
+
+    let needs_pyannote_rs = impls.is_empty() || impls.iter().any(|i| i == "pyannote-rs");
+    if needs_pyannote_rs
+        && let Err(e) = run_cmd(
+            Command::new("cargo")
+                .args(["build", "--release"])
+                .current_dir(root.join("scripts/pyannote_rs_bench")),
+        )
+    {
         eprintln!("warning: pyannote-rs bench build failed (skipping): {e}");
     }
 
     let models_dir = root.join("fixtures/models");
     let seg_model = models_dir.join("segmentation-3.0.onnx");
     let emb_model = models_dir.join("wespeaker_en_voxceleb_CAM++.onnx");
-    ensure_pyannote_rs_emb_model(&emb_model)?;
+    if needs_pyannote_rs {
+        ensure_pyannote_rs_emb_model(&emb_model)?;
+    }
 
     // SAFETY: single-threaded CLI, no other threads reading env vars
     unsafe { std::env::set_var("SPEAKRS_MODELS_DIR", &models_dir) };
@@ -872,10 +880,19 @@ impl DerImplResult {
     }
 }
 
+fn make_progress_bar(file_count: u64) -> ProgressBar {
+    let pb = ProgressBar::with_draw_target(
+        Some(file_count),
+        ProgressDrawTarget::term_like_with_hz(Box::new(console::Term::stderr()), 20),
+    );
+    pb.set_style(ProgressStyle::with_template("  {pos}/{len} ETA {eta}  {msg}").unwrap());
+    pb.tick();
+    pb
+}
+
 fn run_batch_cmd(cmd: &mut Command) -> Result<(f64, HashMap<String, String>)> {
     let (elapsed, stdout) = capture_benchmark_cmd(cmd)?;
     let per_file = split_rttm_by_file_id(&stdout);
-    println!("  batch: {:.1}s", elapsed);
     Ok((elapsed, per_file))
 }
 
@@ -897,7 +914,12 @@ fn run_pyannote_batch(
     device: &str,
     wav_paths: &[&Path],
 ) -> Result<(f64, HashMap<String, String>)> {
-    let mut cmd = Command::new("uv");
+    let uv = std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".local/bin/uv"))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| "uv".into());
+    let mut cmd = Command::new(uv);
     cmd.args(["run", "scripts/diarize_pyannote.py", "--device", device])
         .current_dir(root);
     for p in wav_paths {
@@ -920,15 +942,18 @@ fn run_per_file(
 ) -> Result<(f64, HashMap<String, String>)> {
     let mut total_time = 0.0;
     let mut per_file = HashMap::new();
+    let pb = make_progress_bar(files.len() as u64);
 
     for (wav_path, _) in files {
         let (elapsed, rttm) = runner(wav_path)?;
         total_time += elapsed;
         let stem = wav_path.file_stem().unwrap().to_string_lossy().to_string();
         per_file.insert(stem.clone(), rttm);
-        println!("  {stem}: {elapsed:.1}s");
+        pb.println(format!("  {stem}: {elapsed:.1}s"));
+        pb.inc(1);
     }
 
+    pb.finish_with_message(format!("done ({total_time:.1}s)"));
     Ok((total_time, per_file))
 }
 
@@ -1112,23 +1137,17 @@ fn save_der_results(
 
 fn capture_benchmark_cmd(cmd: &mut Command) -> Result<(f64, String)> {
     let start = Instant::now();
-    let output = cmd.output()?;
+    let output = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .output()?;
     let elapsed = start.elapsed().as_secs_f64();
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if stderr.is_empty() {
-            bail!(
-                "{} failed with {}",
-                cmd.get_program().to_string_lossy(),
-                output.status
-            );
-        }
         bail!(
-            "{} failed with {}: {}",
+            "{} failed with {}",
             cmd.get_program().to_string_lossy(),
-            output.status,
-            stderr
+            output.status
         );
     }
 
@@ -1148,9 +1167,14 @@ fn der_build_features(impls: &[String]) -> Vec<String> {
     };
 
     let mut features = Vec::new();
+
+    #[cfg(target_os = "macos")]
     let needs_coreml = active_impls
         .iter()
         .any(|t| matches!(t, ImplType::Speakrs(m) if m.starts_with("coreml")));
+    #[cfg(not(target_os = "macos"))]
+    let needs_coreml = false;
+
     let needs_cuda = active_impls
         .iter()
         .any(|t| matches!(t, ImplType::Speakrs("cuda")));
@@ -1176,7 +1200,14 @@ fn der_skip_reason(
     match impl_type {
         ImplType::Pyannote(_) => (!root.join("scripts/diarize_pyannote.py").exists())
             .then(|| "scripts/diarize_pyannote.py not found".to_string()),
-        ImplType::Speakrs(_) => None,
+        ImplType::Speakrs(mode) => {
+            #[cfg(not(target_os = "macos"))]
+            if mode.starts_with("coreml") {
+                return Some("CoreML not available on this platform".to_string());
+            }
+            let _ = mode;
+            None
+        }
         ImplType::FluidAudioBench => (!fluidaudio_bench_dir.join("Package.swift").exists())
             .then(|| "scripts/fluidaudio-bench/Package.swift not found".to_string()),
         ImplType::PyannoteRs => {
