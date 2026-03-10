@@ -5,6 +5,7 @@ use std::process::Command;
 use color_eyre::eyre::{Result, bail};
 
 use crate::cmd::run_cmd;
+use crate::convert::convert_to_16k_mono;
 
 /// RAII temp directory that cleans up on drop
 pub struct TempDir(PathBuf);
@@ -69,26 +70,14 @@ pub fn prepare_audio(source: &str) -> Result<(PathBuf, TempDir)> {
                     .arg("-o")
                     .arg(&input),
             )?;
-            convert_to_wav(&input, &wav)?;
+            convert_to_16k_mono(&input, &wav)?;
         }
     } else {
         if !Path::new(source).is_file() {
             bail!("Input does not exist: {source}");
         }
-        convert_to_wav(Path::new(source), &wav)?;
+        convert_to_16k_mono(Path::new(source), &wav)?;
     }
 
     Ok((wav, tmp))
-}
-
-fn convert_to_wav(input: &Path, output: &Path) -> Result<()> {
-    run_cmd(
-        Command::new("ffmpeg")
-            .args(["-y", "-i"])
-            .arg(input)
-            .args(["-ar", "16000", "-ac", "1"])
-            .arg(output)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null()),
-    )
 }

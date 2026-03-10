@@ -46,7 +46,7 @@ pub fn tee_cmd(cmd: &mut Command, path: &Path) -> Result<()> {
 /// Run a command, capture stdout, return (elapsed, stdout_text)
 ///
 /// Returns empty stdout on non-zero exit or timeout
-pub fn capture_cmd(cmd: &mut Command, timeout_secs: u64) -> Result<(std::time::Duration, String)> {
+pub fn capture_cmd(cmd: &mut Command) -> Result<(std::time::Duration, String)> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let start = std::time::Instant::now();
     let child = cmd.spawn()?;
@@ -58,7 +58,6 @@ pub fn capture_cmd(cmd: &mut Command, timeout_secs: u64) -> Result<(std::time::D
         }
     };
     let elapsed = start.elapsed();
-    let _ = timeout_secs; // timeout handled by OS-level mechanisms if needed
 
     if !output.status.success() {
         return Ok((elapsed, String::new()));
@@ -75,6 +74,23 @@ pub fn project_root() -> PathBuf {
         .parent()
         .expect("xtask should be in a subdirectory of the project root")
         .to_path_buf()
+}
+
+/// Locate the FluidAudio checkout, checking FLUIDAUDIO_PATH env var then the default cache location
+pub fn find_fluidaudio() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("FLUIDAUDIO_PATH") {
+        let p = PathBuf::from(path);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    let home = std::env::var("HOME").ok()?;
+    let default = PathBuf::from(home).join(".cache/cmd/repos/github.com/FluidInference/FluidAudio");
+    if default.is_dir() {
+        Some(default)
+    } else {
+        None
+    }
 }
 
 /// Get WAV file duration in seconds using hound

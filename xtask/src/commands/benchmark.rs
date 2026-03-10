@@ -7,7 +7,7 @@ use color_eyre::eyre::Result;
 
 use crate::audio::prepare_audio;
 use crate::cargo::{cargo_build, features_for_mode};
-use crate::cmd::{capture_cmd, project_root, run_cmd, wav_duration_seconds};
+use crate::cmd::{capture_cmd, find_fluidaudio, project_root, run_cmd, wav_duration_seconds};
 use crate::fluidaudio;
 
 // ---------------------------------------------------------------------------
@@ -101,7 +101,6 @@ fn run_once(command: &[&str], cwd: &Path) -> Result<f64> {
         Command::new(command[0])
             .args(&command[1..])
             .current_dir(cwd),
-        600,
     )?;
     Ok(elapsed.as_secs_f64())
 }
@@ -207,7 +206,7 @@ pub fn compare(source: &str, runs: u32, warmups: u32) -> Result<()> {
         ),
     ];
 
-    let has_fluidaudio = find_fluidaudio().is_some();
+    let fluidaudio_path = find_fluidaudio();
 
     let mut results: Vec<RunResult> = Vec::new();
 
@@ -231,9 +230,7 @@ pub fn compare(source: &str, runs: u32, warmups: u32) -> Result<()> {
         println!("  {name}: {best_time:.2}s");
     }
 
-    if has_fluidaudio {
-        let fluidaudio_path = find_fluidaudio().unwrap();
-
+    if let Some(fluidaudio_path) = &fluidaudio_path {
         for _ in 0..warmups {
             run_fluidaudio_impl(&fluidaudio_path, &wav_str);
         }
@@ -312,7 +309,6 @@ fn run_capture_impl(command: &[&str], cwd: &Path) -> (f64, String) {
         Command::new(command[0])
             .args(&command[1..])
             .current_dir(cwd),
-        600,
     );
     match result {
         Ok((elapsed, stdout)) => (elapsed.as_secs_f64(), stdout),
@@ -332,7 +328,6 @@ fn run_fluidaudio_impl(fluidaudio_path: &Path, wav_path: &str) -> (f64, String) 
             .arg(wav_path)
             .args(["--mode", "offline", "--output"])
             .arg(&json_tmp),
-        600,
     );
     let elapsed = start.elapsed().as_secs_f64();
 
@@ -405,12 +400,47 @@ fn parse_rttm_intervals(rttm: &str) -> Vec<(f64, f64)> {
 // benchmark der — DER evaluation on VoxConverse dev set
 // ---------------------------------------------------------------------------
 
+const IMPL_REGISTRY: &[(&str, &str, ImplType)] = &[
+    ("pyannote", "pyannote MPS", ImplType::Pyannote("mps")),
+    ("pyannote-cpu", "pyannote CPU", ImplType::Pyannote("cpu")),
+    ("coreml", "speakrs CoreML", ImplType::Speakrs("coreml")),
+    (
+        "coreml-fast",
+        "speakrs CoreML Fast",
+        ImplType::Speakrs("coreml-fast"),
+    ),
+    ("cpu", "speakrs CPU", ImplType::Speakrs("cpu")),
+    ("fluidaudio", "FluidAudio", ImplType::FluidAudioBench),
+    ("pyannote-rs", "pyannote-rs", ImplType::PyannoteRs),
+];
+
 pub fn der(
     dataset_id: &str,
     max_files: u32,
     max_minutes: u32,
     description: Option<&str>,
+    impls: &[String],
 ) -> Result<()> {
+    if impls.len() == 1 && impls[0] == "list" {
+        println!("Available implementations:");
+        for (cli_id, display_name, _) in IMPL_REGISTRY {
+            println!("  {cli_id:<15} {display_name}");
+        }
+        return Ok(());
+    }
+
+    if !impls.is_empty() {
+        for id in impls {
+            if id != "list" && !IMPL_REGISTRY.iter().any(|(cli_id, _, _)| cli_id == id) {
+                let available: Vec<&str> = IMPL_REGISTRY.iter().map(|(id, _, _)| *id).collect();
+                color_eyre::eyre::bail!(
+                    "unknown implementation: {id}. Available: {}",
+                    available.join(", ")
+                );
+            }
+        }
+    }
+
     if dataset_id == "list" {
         println!("Available datasets:");
         for id in crate::datasets::list_dataset_ids() {
@@ -494,7 +524,7 @@ pub fn der(
         println!();
 
         let (implementations, all_results) =
-            run_der_implementations(&root, &files, &seg_model, &emb_model)?;
+            run_der_implementations(&root, &files, &seg_model, &emb_model, impls)?;
 
         save_der_results(
             &run_dir,
@@ -521,6 +551,7 @@ fn run_der_implementations(
     files: &[(PathBuf, PathBuf)],
     seg_model: &Path,
     emb_model: &Path,
+    impls: &[String],
 ) -> Result<DerResults> {
     let speakrs_binary = root.join("target/release/diarize");
     let pyannote_rs_binary =
@@ -530,19 +561,32 @@ fn run_der_implementations(
     let has_fluidaudio_bench = fluidaudio_bench_dir.join("Package.swift").exists();
     let has_pyannote_rs = pyannote_rs_binary.exists() && seg_model.exists() && emb_model.exists();
 
-    let mut implementations: Vec<(&str, ImplType)> = Vec::new();
+    let is_available = |impl_type: &ImplType| -> bool {
+        match impl_type {
+            ImplType::Pyannote(_) => root.join("scripts/diarize_pyannote.py").exists(),
+            ImplType::Speakrs(_) => true,
+            ImplType::FluidAudioBench => has_fluidaudio_bench,
+            ImplType::PyannoteRs => has_pyannote_rs,
+        }
+    };
 
-    if root.join("scripts/diarize_pyannote.py").exists() {
-        implementations.push(("pyannote MPS", ImplType::Pyannote));
-    }
-    implementations.push(("speakrs CoreML", ImplType::Speakrs("coreml")));
-    implementations.push(("speakrs CoreML Fast", ImplType::Speakrs("coreml-fast")));
-    if has_fluidaudio_bench {
-        implementations.push(("FluidAudio", ImplType::FluidAudioBench));
-    }
-    if has_pyannote_rs {
-        implementations.push(("pyannote-rs", ImplType::PyannoteRs));
-    }
+    let implementations: Vec<(&str, ImplType)> = if impls.is_empty() {
+        // default: all available implementations
+        IMPL_REGISTRY
+            .iter()
+            .filter(|(_, _, impl_type)| is_available(impl_type))
+            .map(|(_, display_name, impl_type)| (*display_name, *impl_type))
+            .collect()
+    } else {
+        // only requested implementations that are available
+        IMPL_REGISTRY
+            .iter()
+            .filter(|(cli_id, _, impl_type)| {
+                impls.iter().any(|i| i == cli_id) && is_available(impl_type)
+            })
+            .map(|(_, display_name, impl_type)| (*display_name, *impl_type))
+            .collect()
+    };
 
     let wav_paths: Vec<&Path> = files.iter().map(|(w, _)| w.as_path()).collect();
     let mut all_results: HashMap<String, DerImplResult> = HashMap::new();
@@ -563,7 +607,7 @@ fn run_der_implementations(
                     &wav_paths,
                 )?
             }
-            ImplType::PyannoteRs => run_per_file(impl_name, files, |wav| {
+            ImplType::PyannoteRs => run_per_file(files, |wav| {
                 let cmd_args = [
                     pyannote_rs_binary.to_string_lossy().to_string(),
                     wav.to_string_lossy().to_string(),
@@ -573,26 +617,7 @@ fn run_der_implementations(
                 let refs: Vec<&str> = cmd_args.iter().map(String::as_str).collect();
                 run_capture_impl(&refs, root)
             })?,
-            ImplType::Pyannote => run_per_file(impl_name, files, |wav| {
-                let tmp =
-                    std::env::temp_dir().join(format!("pyannote-{}.rttm", std::process::id()));
-                let tmp_str = tmp.to_string_lossy().to_string();
-                let wav_str = wav.to_string_lossy().to_string();
-                let cmd_args = vec![
-                    "uv",
-                    "run",
-                    "scripts/diarize_pyannote.py",
-                    "--device",
-                    "mps",
-                    "--output",
-                    &tmp_str,
-                    &wav_str,
-                ];
-                let (elapsed, _) = run_capture_impl(&cmd_args, root);
-                let rttm = fs::read_to_string(&tmp).unwrap_or_default();
-                let _ = fs::remove_file(&tmp);
-                (elapsed, rttm)
-            })?,
+            ImplType::Pyannote(device) => run_pyannote_batch(root, device, &wav_paths)?,
         };
 
         let mut total_missed = 0.0;
@@ -660,9 +685,10 @@ fn run_der_implementations(
     Ok((implementations, all_results))
 }
 
+#[derive(Clone, Copy)]
 enum ImplType {
     Speakrs(&'static str),
-    Pyannote,
+    Pyannote(&'static str),
     PyannoteRs,
     FluidAudioBench,
 }
@@ -677,6 +703,13 @@ struct DerImplResult {
     files: usize,
 }
 
+fn run_batch_cmd(cmd: &mut Command) -> Result<(f64, HashMap<String, String>)> {
+    let (elapsed, stdout) = capture_cmd(cmd)?;
+    let per_file = split_rttm_by_file_id(&stdout);
+    println!("  batch: {:.1}s", elapsed.as_secs_f64());
+    Ok((elapsed.as_secs_f64(), per_file))
+}
+
 fn run_speakrs_batch(
     binary: &Path,
     mode: &str,
@@ -687,16 +720,21 @@ fn run_speakrs_batch(
     for p in wav_paths {
         cmd.arg(p);
     }
+    run_batch_cmd(&mut cmd)
+}
 
-    let (elapsed, stdout) = capture_cmd(&mut cmd, 1200)?;
-    let per_file = split_rttm_by_file_id(&stdout);
-
-    println!(
-        "  batch: {:.1}s ({} files)",
-        elapsed.as_secs_f64(),
-        wav_paths.len()
-    );
-    Ok((elapsed.as_secs_f64(), per_file))
+fn run_pyannote_batch(
+    root: &Path,
+    device: &str,
+    wav_paths: &[&Path],
+) -> Result<(f64, HashMap<String, String>)> {
+    let mut cmd = Command::new("uv");
+    cmd.args(["run", "scripts/diarize_pyannote.py", "--device", device])
+        .current_dir(root);
+    for p in wav_paths {
+        cmd.arg(p);
+    }
+    run_batch_cmd(&mut cmd)
 }
 
 fn run_batch_binary(binary: &Path, wav_paths: &[&Path]) -> Result<(f64, HashMap<String, String>)> {
@@ -704,20 +742,10 @@ fn run_batch_binary(binary: &Path, wav_paths: &[&Path]) -> Result<(f64, HashMap<
     for p in wav_paths {
         cmd.arg(p);
     }
-
-    let (elapsed, stdout) = capture_cmd(&mut cmd, 1200)?;
-    let per_file = split_rttm_by_file_id(&stdout);
-
-    println!(
-        "  batch: {:.1}s ({} files)",
-        elapsed.as_secs_f64(),
-        wav_paths.len()
-    );
-    Ok((elapsed.as_secs_f64(), per_file))
+    run_batch_cmd(&mut cmd)
 }
 
 fn run_per_file(
-    _name: &str,
     files: &[(PathBuf, PathBuf)],
     runner: impl Fn(&Path) -> (f64, String),
 ) -> Result<(f64, HashMap<String, String>)> {
@@ -906,20 +934,4 @@ fn ensure_pyannote_rs_emb_model(path: &Path) -> Result<()> {
             .arg(path)
             .arg("https://github.com/thewh1teagle/pyannote-rs/releases/download/v0.1.0/wespeaker_en_voxceleb_CAM++.onnx"),
     )
-}
-
-fn find_fluidaudio() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("FLUIDAUDIO_PATH") {
-        let p = PathBuf::from(path);
-        if p.is_dir() {
-            return Some(p);
-        }
-    }
-    let home = std::env::var("HOME").ok()?;
-    let default = PathBuf::from(home).join(".cache/cmd/repos/github.com/FluidInference/FluidAudio");
-    if default.is_dir() {
-        Some(default)
-    } else {
-        None
-    }
 }
