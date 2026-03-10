@@ -6,7 +6,7 @@ use std::process::Command;
 use color_eyre::eyre::Result;
 
 use crate::audio::prepare_audio;
-use crate::cargo::{cargo_build, features_for_mode};
+use crate::cargo::{cargo_build_xtask, features_for_mode};
 use crate::cmd::{capture_cmd, find_fluidaudio, project_root, run_cmd, wav_duration_seconds};
 use crate::fluidaudio;
 
@@ -26,10 +26,10 @@ pub fn run(
 
     println!();
     println!("=== Building Rust binary ===");
-    cargo_build("diarize", &features)?;
+    cargo_build_xtask(&features)?;
 
     let root = project_root();
-    let binary = root.join("target/release/diarize");
+    let binary = root.join("target/release/xtask");
     let audio_seconds = wav_duration_seconds(&wav)?;
 
     println!();
@@ -39,6 +39,7 @@ pub fn run(
         "Rust",
         &[
             binary.to_str().unwrap(),
+            "diarize",
             "--mode",
             rust_mode,
             wav.to_str().unwrap(),
@@ -145,7 +146,7 @@ pub fn compare(source: &str, runs: u32, warmups: u32) -> Result<()> {
 
     println!();
     println!("=== Building binaries ===");
-    cargo_build("diarize", &["coreml".to_string()])?;
+    cargo_build_xtask(&["coreml".to_string()])?;
     run_cmd(
         Command::new("cargo")
             .args(["build", "--release"])
@@ -161,7 +162,7 @@ pub fn compare(source: &str, runs: u32, warmups: u32) -> Result<()> {
     println!();
     println!("=== Running benchmarks ===");
 
-    let speakrs_binary = root.join("target/release/diarize");
+    let speakrs_binary = root.join("target/release/xtask");
     let pyannote_rs_binary =
         root.join("scripts/pyannote_rs_bench/target/release/diarize-pyannote-rs");
 
@@ -181,6 +182,7 @@ pub fn compare(source: &str, runs: u32, warmups: u32) -> Result<()> {
             "speakrs CoreML",
             vec![
                 speakrs_binary.to_string_lossy().into(),
+                "diarize".into(),
                 "--mode".into(),
                 "coreml".into(),
                 wav_str.to_string(),
@@ -190,6 +192,7 @@ pub fn compare(source: &str, runs: u32, warmups: u32) -> Result<()> {
             "speakrs MiniCoreML",
             vec![
                 speakrs_binary.to_string_lossy().into(),
+                "diarize".into(),
                 "--mode".into(),
                 "mini-coreml".into(),
                 wav_str.to_string(),
@@ -463,7 +466,7 @@ pub fn der(
     let root = project_root();
 
     println!("=== Building binaries ===");
-    cargo_build("diarize", &["coreml".to_string()])?;
+    cargo_build_xtask(&["coreml".to_string()])?;
     if let Err(e) = run_cmd(
         Command::new("cargo")
             .args(["build", "--release"])
@@ -553,7 +556,7 @@ fn run_der_implementations(
     emb_model: &Path,
     impls: &[String],
 ) -> Result<DerResults> {
-    let speakrs_binary = root.join("target/release/diarize");
+    let speakrs_binary = root.join("target/release/xtask");
     let pyannote_rs_binary =
         root.join("scripts/pyannote_rs_bench/target/release/diarize-pyannote-rs");
 
@@ -716,7 +719,7 @@ fn run_speakrs_batch(
     wav_paths: &[&Path],
 ) -> Result<(f64, HashMap<String, String>)> {
     let mut cmd = Command::new(binary);
-    cmd.arg("--mode").arg(mode);
+    cmd.arg("diarize").arg("--mode").arg(mode);
     for p in wav_paths {
         cmd.arg(p);
     }
