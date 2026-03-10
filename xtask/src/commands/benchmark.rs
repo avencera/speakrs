@@ -480,7 +480,7 @@ pub fn der(
     // SAFETY: single-threaded CLI, no other threads reading env vars
     unsafe { std::env::set_var("SPEAKRS_MODELS_DIR", &models_dir) };
 
-    let fixtures_dir = root.join("fixtures");
+    let fixtures_dir = root.join("fixtures/datasets");
 
     for dataset in &datasets {
         println!();

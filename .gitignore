@@ -1,10 +1,7 @@
 /target
 .venv/
 fixtures/models/
-fixtures/voxconverse/
-fixtures/voxconverse-dev
-fixtures/voxconverse-test/
-fixtures/ami-ihm/
+fixtures/datasets/
 notes
 /scripts/pyannote_rs_bench/target
 __pycache__/

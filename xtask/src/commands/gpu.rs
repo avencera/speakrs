@@ -224,7 +224,7 @@ pub fn benchmark(args: &[String]) -> Result<()> {
                 "--exclude",
                 "fixtures/models",
                 "--exclude",
-                "fixtures/voxconverse",
+                "fixtures/datasets",
                 "--exclude",
                 ".git",
                 "-e",

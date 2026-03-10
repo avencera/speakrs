@@ -134,8 +134,8 @@ fn voxconverse_der(mode: ExecutionMode, step: f64) -> (Vec<(String, f64)>, Durat
     let start = Instant::now();
     let mut results = Vec::new();
     for &name in VOXCONVERSE_TEST_FILES {
-        let wav_path = fixture_path(&format!("voxconverse/wav/{name}.wav"));
-        let rttm_path = fixture_path(&format!("voxconverse/rttm/{name}.rttm"));
+        let wav_path = fixture_path(&format!("datasets/voxconverse/wav/{name}.wav"));
+        let rttm_path = fixture_path(&format!("datasets/voxconverse/rttm/{name}.rttm"));
 
         let file_start = Instant::now();
         let (samples, sr) = load_wav_samples(&wav_path);

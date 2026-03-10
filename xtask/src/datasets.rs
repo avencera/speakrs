@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use color_eyre::eyre::Result;
 
 pub trait Dataset {
-    /// Unique identifier used in --dataset flag and fixtures/ directory name
+    /// Unique identifier used in --dataset flag and fixtures/datasets/ directory name
     fn id(&self) -> &'static str;
 
     /// Human-readable name for display
