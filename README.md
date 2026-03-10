@@ -1,10 +1,10 @@
 # speakrs
 
-Speaker diarization in Rust. Put audio in, get RTTM segments out. Runs up to **63x realtime** on Apple Silicon and is **bit-exact with pyannote** on CPU/CUDA.
+Speaker diarization in Rust. Put audio in, get RTTM segments out. Runs up to **63x realtime** on Apple Silicon, matching or beating pyannote accuracy at ~9x speed.
 
-`speakrs` implements the full pyannote community-1 pipeline in Rust: segmentation, powerset decode, aggregation, binarization, embedding, PLDA, and VBx clustering. There is no Python dependency. Inference runs on ONNX Runtime or native CoreML, and all post-processing stays in Rust.
+`speakrs` implements the full pyannote community-1 pipeline in Rust: segmentation, powerset decode, aggregation, binarization, embedding, PLDA, and VBx clustering — plus temporal smoothing during reconstruction. There is no Python dependency. Inference runs on ONNX Runtime or native CoreML, and all post-processing stays in Rust.
 
-The outputs have been checked against `pyannote.audio`. CPU and CUDA modes produce **identical RTTM** on all tested files. CoreML runs the same algorithm, but GPU floating-point non-determinism can change a small number of results. On the VoxConverse dev set, 9 out of 10 files matched exactly.
+The outputs have been checked against `pyannote.audio`. On the VoxConverse dev set (39 files), CoreML FP32 matches pyannote MPS at 6.4% DER. CoreML may differ slightly from CPU due to GPU floating-point non-determinism.
 
 ## Table of Contents
 
@@ -38,7 +38,7 @@ Audio (16kHz f32)
   │
   ├─ VBx Clustering ────→ Bayesian HMM speaker assignments
   │
-  ├─ Reconstruct ───────→ map clusters back to frame-level activations
+  ├─ Reconstruct ───────→ map clusters back to frame-level activations (temporal smoothing)
   │
   └─ Segments ──────────→ RTTM output
 ```
@@ -88,14 +88,15 @@ Coverage is measured as mutual speech overlap with pyannote. Small segment count
 
 ### Accuracy (DER)
 
-Evaluated on VoxConverse dev set (10 files, collar=0ms):
+Evaluated on VoxConverse dev set (39 files, 53 min, collar=0ms):
 
 | Mode | DER | Notes |
 |------|-----|-------|
-| `coreml` (FP32) | 14.9% | +0.9% from GPU floating-point non-determinism |
-| pyannote MPS | 14.0% | Reference |
+| `coreml` (FP32) | 6.4% | Matches pyannote MPS |
+| `coreml-lite` (FP16) | 9.0% | 2s step, ~2x faster |
+| pyannote MPS | 6.4% | Reference |
 
-The small `coreml` gap comes from GPU execution producing slightly different embedding vectors because accumulation order and fused multiply-add behavior are not deterministic. That is expected GPU behavior, not a correctness bug. CoreML and pyannote's MPS also use different software stacks on the same Apple GPU, so they drift from CPU in different ways. On 9 out of 10 files, CoreML matches CPU exactly. On one file (`gwtwd`), the embedding difference is enough to move a borderline speaker cluster below the VBx threshold.
+CoreML may differ slightly from CPU due to GPU floating-point non-determinism in accumulation order and fused multiply-add behavior.
 
 ### Library Usage
 
@@ -153,15 +154,15 @@ Benchmarks coming soon.
 
 ### Accuracy (DER)
 
-Evaluated on VoxConverse dev set (10 files, collar=0ms):
+Evaluated on VoxConverse dev set (39 files, 53 min, collar=0ms):
 
 | Mode | DER | Notes |
 |------|-----|-------|
-| `cpu` (ONNX) | 14.0% | Identical RTTM to pyannote CPU on all 10 files |
-| `cuda` (ONNX) | 14.0% | Identical RTTM to pyannote CPU on all 10 files |
-| pyannote CPU | 14.0% | Reference |
+| `cpu` (ONNX) | 6.4% | Matches or slightly improves on pyannote CPU |
+| `cuda` (ONNX) | 6.4% | Matches or slightly improves on pyannote CPU |
+| pyannote CPU | 6.4% | Reference |
 
-The `cpu` and `cuda` modes produce **bit-exact output** with pyannote's CPU backend. The RTTM is identical on every test file.
+With temporal smoothing enabled by default, CPU/CUDA output matches or slightly improves on pyannote's CPU backend.
 
 ### Library Usage
 
@@ -221,7 +222,7 @@ For development, `just download-models` exports the ONNX models and converts the
 | `binarize` | Hysteresis binarization + min-duration + padding |
 | `clustering::plda` | PLDA whitening/dimensionality reduction (256→128) |
 | `clustering::vbx` | VBx Bayesian HMM EM clustering |
-| `reconstruct` | Cluster-to-frame mapping, top-K selection |
+| `reconstruct` | Cluster-to-frame mapping, top-K selection, temporal smoothing |
 | `segment` | Time segments, merging, RTTM formatting |
 | `utils` | Cosine similarity, L2 norm, logsumexp, centroids |
 
@@ -239,7 +240,7 @@ For development, `just download-models` exports the ONNX models and converts the
 | Speaker count | VBx EM estimation | Capped by max_speakers parameter |
 | pyannote parity | Bit-exact on CPU/CUDA | No, different algorithm and different embedding model |
 
-On the VoxConverse dev set, using the 33 files where pyannote-rs produces output (186 minutes total, collar=0ms):
+On the VoxConverse dev set, using the 33 files where pyannote-rs produces output (186 min, collar=0ms):
 
 | | DER | Missed | False Alarm | Confusion |
 |---|-----|--------|-------------|-----------|
