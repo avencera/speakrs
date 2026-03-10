@@ -81,7 +81,7 @@ fn load_transcript(path: &Path) -> ExampleResult<Vec<TranscriptRow>> {
     Ok(rows)
 }
 
-fn dominant_speaker<'a>(segments: &'a [Segment], start: f64, end: f64) -> Option<&'a str> {
+fn dominant_speaker(segments: &[Segment], start: f64, end: f64) -> Option<&str> {
     let mut best_speaker = None;
     let mut best_overlap = 0.0f64;
 
