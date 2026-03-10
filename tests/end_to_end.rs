@@ -8,6 +8,11 @@ use speakrs::inference::embedding::EmbeddingModel;
 use speakrs::inference::segmentation::SegmentationModel;
 use speakrs::pipeline::{FRAME_STEP_SECONDS, SEGMENTATION_STEP_SECONDS, diarize};
 
+#[cfg(feature = "online")]
+use speakrs::models::Mode;
+#[cfg(feature = "online")]
+use speakrs::pipeline::OwnedDiarizationPipeline;
+
 #[cfg(feature = "coreml")]
 use speakrs::inference::ExecutionMode;
 #[cfg(feature = "coreml")]
@@ -248,4 +253,49 @@ fn pipeline_handles_short_audio_fixture() {
             .all(|value| value.is_finite())
     );
     assert!(result.speaker_count.len() <= result.discrete_diarization.nrows());
+}
+
+#[test]
+#[cfg(feature = "online")]
+fn owned_pipeline_from_dir() {
+    let models_dir = fixture_path("models");
+    let mut pipeline = OwnedDiarizationPipeline::from_dir(&models_dir, Mode::Cpu).unwrap();
+
+    let (samples, sr) = load_wav_samples(&fixture_path("test.wav"));
+    assert_eq!(sr, 16_000);
+
+    let result = pipeline.run(&samples).unwrap();
+
+    assert!(result.discrete_diarization.nrows() > 0);
+    assert!(result.discrete_diarization.ncols() > 0);
+    assert!(
+        result
+            .discrete_diarization
+            .iter()
+            .all(|value| value.is_finite())
+    );
+    assert!(result.rttm.contains("SPEAKER file1 1"));
+}
+
+/// Requires models deployed to HF (`cargo xtask models deploy`)
+#[test]
+#[ignore]
+#[cfg(feature = "online")]
+fn online_pipeline_downloads_and_runs() {
+    let mut pipeline = OwnedDiarizationPipeline::from_pretrained(Mode::Cpu).unwrap();
+
+    let (samples, sr) = load_wav_samples(&fixture_path("test.wav"));
+    assert_eq!(sr, 16_000);
+
+    let result = pipeline.run(&samples).unwrap();
+
+    assert!(result.discrete_diarization.nrows() > 0);
+    assert!(result.discrete_diarization.ncols() > 0);
+    assert!(
+        result
+            .discrete_diarization
+            .iter()
+            .all(|value| value.is_finite())
+    );
+    assert!(result.rttm.contains("SPEAKER file1 1"));
 }
