@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
+use clap::{Parser, ValueEnum};
 use speakrs::clustering::plda::PldaTransform;
 use speakrs::inference::ExecutionMode;
 use speakrs::inference::embedding::EmbeddingModel;
@@ -12,38 +13,87 @@ use speakrs::inference::segmentation::SegmentationModel;
 use speakrs::models::ModelManager;
 use speakrs::pipeline::{FAST_SEGMENTATION_STEP_SECONDS, SEGMENTATION_STEP_SECONDS, diarize};
 
+#[derive(Parser)]
+#[command(about = "Speaker diarization CLI")]
+struct Cli {
+    #[arg(long, default_value = "cpu")]
+    mode: DiarizeMode,
+
+    /// WAV files to diarize
+    wav_files: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DiarizeMode {
+    Cpu,
+    Coreml,
+    #[value(name = "coreml-fast")]
+    CoremlFast,
+    Cuda,
+    #[value(name = "pyannote-cpu")]
+    PyannoteCpu,
+    #[value(name = "pyannote-mps")]
+    PyannoteMps,
+    #[value(name = "pyannote-cuda")]
+    PyannoteCuda,
+}
+
+impl DiarizeMode {
+    fn execution_mode(self) -> ExecutionMode {
+        match self {
+            Self::Cpu => ExecutionMode::Cpu,
+            Self::Coreml => ExecutionMode::CoreMl,
+            Self::CoremlFast => ExecutionMode::CoreMlFast,
+            Self::Cuda => ExecutionMode::Cuda,
+            Self::PyannoteCpu | Self::PyannoteMps | Self::PyannoteCuda => unreachable!(),
+        }
+    }
+
+    fn step_seconds(self) -> f64 {
+        match self {
+            Self::CoremlFast => FAST_SEGMENTATION_STEP_SECONDS,
+            _ => SEGMENTATION_STEP_SECONDS,
+        }
+    }
+
+    fn pyannote_device(self) -> Option<&'static str> {
+        match self {
+            Self::PyannoteCpu => Some("cpu"),
+            Self::PyannoteMps => Some("mps"),
+            Self::PyannoteCuda => Some("cuda"),
+            _ => None,
+        }
+    }
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
         .init();
 
-    let args: Vec<String> = std::env::args().collect();
-    let (mode, wav_paths) = parse_args(&args);
-    if wav_paths.is_empty() {
+    let cli = Cli::parse();
+
+    if cli.wav_files.is_empty() {
+        eprintln!("No WAV files specified");
         std::process::exit(1);
     }
 
-    if let CliMode::PyannoteDevice(device) = mode {
-        let output = run_pyannote_sidecar(device, wav_paths[0]).expect("pyannote sidecar failed");
+    if let Some(device) = cli.mode.pyannote_device() {
+        let wav_path = cli.wav_files[0].to_string_lossy();
+        let output = run_pyannote_sidecar(device, &wav_path).expect("pyannote sidecar failed");
         print!("{output}");
         return;
     }
 
-    let CliMode::Native(mode, mode_name) = mode else {
-        unreachable!();
-    };
+    let execution_mode = cli.mode.execution_mode();
+    let models_dir = resolve_models_dir(execution_mode);
 
-    let models_dir = resolve_models_dir(mode);
-
-    let step = match mode_name {
-        "coreml-fast" => FAST_SEGMENTATION_STEP_SECONDS,
-        _ => SEGMENTATION_STEP_SECONDS,
-    };
+    let step = cli.mode.step_seconds();
     let mut seg_model = SegmentationModel::with_mode(
         models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
         step as f32,
-        mode,
+        execution_mode,
     )
     .expect("failed to load segmentation model");
     let mut emb_model = EmbeddingModel::with_mode(
@@ -51,18 +101,18 @@ fn main() {
             .join("wespeaker-voxceleb-resnet34.onnx")
             .to_str()
             .unwrap(),
-        mode,
+        execution_mode,
     )
     .expect("failed to load embedding model");
     let plda = PldaTransform::from_dir(&models_dir).expect("failed to load PLDA parameters");
 
-    for wav_path in &wav_paths {
-        let file_id = Path::new(wav_path)
+    for wav_path in &cli.wav_files {
+        let file_id = wav_path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "file1".to_string());
 
-        let (samples, sr) = load_wav_samples(wav_path);
+        let (samples, sr) = load_wav_samples(&wav_path.to_string_lossy());
         assert_eq!(sr, 16000, "expected 16kHz WAV, got {sr}Hz");
 
         let start = Instant::now();
@@ -70,7 +120,7 @@ fn main() {
             .expect("diarization failed");
         let elapsed = start.elapsed();
 
-        if wav_paths.len() > 1 {
+        if cli.wav_files.len() > 1 {
             eprintln!("{file_id}: {:.3}s", elapsed.as_secs_f64());
         }
         print!("{}", result.rttm);
@@ -103,50 +153,8 @@ fn resolve_models_dir(mode: ExecutionMode) -> PathBuf {
     }
 }
 
-enum CliMode {
-    Native(ExecutionMode, &'static str),
-    PyannoteDevice(&'static str),
-}
-
-fn parse_args(args: &[String]) -> (CliMode, Vec<&str>) {
-    const USAGE: &str = "Usage: diarize [--mode cpu|coreml|coreml-fast|cuda|pyannote-cpu|pyannote-mps|pyannote-cuda] <wav_files...>";
-
-    fn parse_mode(mode: &str) -> Option<CliMode> {
-        match mode {
-            "cpu" => Some(CliMode::Native(ExecutionMode::Cpu, "cpu")),
-            "coreml" => Some(CliMode::Native(ExecutionMode::CoreMl, "coreml")),
-            "coreml-fast" => Some(CliMode::Native(ExecutionMode::CoreMlFast, "coreml-fast")),
-            "cuda" => Some(CliMode::Native(ExecutionMode::Cuda, "cuda")),
-            "pyannote-cpu" => Some(CliMode::PyannoteDevice("cpu")),
-            "pyannote-mps" => Some(CliMode::PyannoteDevice("mps")),
-            "pyannote-cuda" => Some(CliMode::PyannoteDevice("cuda")),
-            _ => None,
-        }
-    }
-
-    if args.len() < 2 {
-        eprintln!("{USAGE}");
-        return (CliMode::Native(ExecutionMode::Cpu, "cpu"), vec![]);
-    }
-
-    // diarize --mode <mode> file1.wav file2.wav ...
-    if args.len() >= 4 && args[1] == "--mode" {
-        let Some(parsed) = parse_mode(&args[2]) else {
-            eprintln!("Unknown mode: {}", args[2]);
-            eprintln!("{USAGE}");
-            return (CliMode::Native(ExecutionMode::Cpu, "cpu"), vec![]);
-        };
-        let paths: Vec<&str> = args[3..].iter().map(|s| s.as_str()).collect();
-        return (parsed, paths);
-    }
-
-    // diarize file1.wav file2.wav ...
-    let paths: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
-    (CliMode::Native(ExecutionMode::Cpu, "cpu"), paths)
-}
-
 fn run_pyannote_sidecar(
-    device: &'static str,
+    device: &str,
     wav_path: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync + 'static>> {
     let script_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/diarize_pyannote.py");

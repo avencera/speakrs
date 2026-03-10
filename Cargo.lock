@@ -2209,6 +2209,7 @@ version = "0.1.0"
 dependencies = [
  "approx",
  "block2",
+ "clap",
  "hf-hub",
  "kodama",
  "mimalloc",
