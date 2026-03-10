@@ -44,3 +44,7 @@ benchmark-compare source runs="1" warmups="1":
 
 benchmark-der max_files="10" max_minutes="30" *args="":
     cargo xtask benchmark der --max-files {{max_files}} --max-minutes {{max_minutes}} {{args}}
+
+# GPU
+gpu-image:
+    nsc build -f Dockerfile.gpu --platform linux/amd64 -t ghcr.io/avencera/speakrs-gpu:latest --push .
