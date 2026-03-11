@@ -4,7 +4,7 @@ mod vastai;
 use std::fmt;
 use std::fs;
 use std::io::Write;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::str::FromStr;
 
 use color_eyre::eyre::{Result, bail};
@@ -77,6 +77,7 @@ pub struct InstanceInfo {
     pub instance_id: String,
     pub ssh_host: String,
     pub ssh_port: String,
+    pub ssh_user: String,
 }
 
 fn instances_dir() -> std::path::PathBuf {
@@ -90,7 +91,9 @@ fn read_instance(name: &str) -> Result<InstanceInfo> {
 
     let lines: Vec<&str> = content.trim().lines().collect();
     if lines.len() < 4 {
-        bail!("Instance file '{name}' is malformed (expected 4 lines: backend, id, host, port)");
+        bail!(
+            "Instance file '{name}' is malformed (expected 4+ lines: backend, id, host, port, [user])"
+        );
     }
 
     Ok(InstanceInfo {
@@ -98,6 +101,7 @@ fn read_instance(name: &str) -> Result<InstanceInfo> {
         instance_id: lines[1].to_string(),
         ssh_host: lines[2].to_string(),
         ssh_port: lines[3].to_string(),
+        ssh_user: lines.get(4).unwrap_or(&"root").to_string(),
     })
 }
 
@@ -105,8 +109,8 @@ fn save_instance(name: &str, info: &InstanceInfo) -> Result<()> {
     let dir = instances_dir();
     fs::create_dir_all(&dir)?;
     let content = format!(
-        "{}\n{}\n{}\n{}\n",
-        info.backend, info.instance_id, info.ssh_host, info.ssh_port
+        "{}\n{}\n{}\n{}\n{}\n",
+        info.backend, info.instance_id, info.ssh_host, info.ssh_port, info.ssh_user
     );
     fs::write(dir.join(name), content)?;
     Ok(())
@@ -172,20 +176,27 @@ pub fn get_ssh_args(info: &InstanceInfo) -> Vec<String> {
     vec![
         "-p".to_string(),
         info.ssh_port.clone(),
-        format!("root@{}", info.ssh_host),
+        format!("{}@{}", info.ssh_user, info.ssh_host),
     ]
 }
 
+fn is_proxy(info: &InstanceInfo) -> bool {
+    info.ssh_host == "ssh.runpod.io"
+}
+
+/// SSH command — adds `-tt` (PTY) only for RunPod proxy connections
 pub fn ssh_cmd(info: &InstanceInfo) -> Command {
-    let args = get_ssh_args(info);
     let mut cmd = Command::new("ssh");
+    if is_proxy(info) {
+        cmd.arg("-tt");
+    }
     cmd.args([
         "-o",
         "StrictHostKeyChecking=no",
         "-o",
         "UserKnownHostsFile=/dev/null",
     ]);
-    cmd.args(&args);
+    cmd.args(get_ssh_args(info));
     cmd
 }
 
@@ -198,16 +209,51 @@ fn models_script_with_token() -> String {
 }
 
 pub fn run_remote_script(info: &InstanceInfo, script: &str) -> Result<()> {
-    let mut cmd = ssh_cmd(info);
-    cmd.arg("bash -s").stdin(std::process::Stdio::piped());
-
-    let mut child = cmd.spawn()?;
-    if let Some(ref mut stdin) = child.stdin {
-        stdin.write_all(script.as_bytes())?;
+    if is_proxy(info) {
+        let mut cmd = ssh_cmd(info);
+        cmd.stdin(Stdio::piped());
+        let mut child = cmd.spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(script.as_bytes())?;
+            stdin.write_all(b"\nexit\n")?;
+        }
+        let status = child.wait()?;
+        if !status.success() {
+            bail!("Remote script failed");
+        }
+    } else {
+        let mut cmd = ssh_cmd(info);
+        cmd.args(["bash", "-s"]);
+        cmd.stdin(Stdio::piped());
+        let mut child = cmd.spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(script.as_bytes())?;
+        }
+        let status = child.wait()?;
+        if !status.success() {
+            bail!("Remote script failed");
+        }
     }
-    let status = child.wait()?;
-    if !status.success() {
-        bail!("Remote command failed");
+    Ok(())
+}
+
+pub fn run_remote_cmd(info: &InstanceInfo, cmd_str: &str) -> Result<()> {
+    if is_proxy(info) {
+        let mut cmd = ssh_cmd(info);
+        cmd.stdin(Stdio::piped());
+        let mut child = cmd.spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(cmd_str.as_bytes())?;
+            stdin.write_all(b"\nexit\n")?;
+        }
+        let status = child.wait()?;
+        if !status.success() {
+            bail!("Remote command failed");
+        }
+    } else {
+        let mut cmd = ssh_cmd(info);
+        cmd.arg(cmd_str);
+        run_cmd(&mut cmd)?;
     }
     Ok(())
 }
@@ -259,9 +305,7 @@ pub fn benchmark(
     };
 
     if detach {
-        let mut check = ssh_cmd(&info);
-        check.arg("tmux has-session -t benchmark 2>/dev/null");
-        if check.output()?.status.success() && !force {
+        if run_remote_cmd(&info, "tmux has-session -t benchmark 2>/dev/null").is_ok() && !force {
             bail!(
                 "A benchmark is already running. Use --force to replace it, or check with:\n  \
                  cargo xtask gpu status <name>"
@@ -277,19 +321,15 @@ pub fn benchmark(
              '{escaped_cmd} 2>&1 | tee /workspace/speakrs/_benchmarks/latest.log; \
              echo \"=== BENCHMARK COMPLETE ===\"'",
         );
-        let mut cmd = ssh_cmd(&info);
-        cmd.arg(&tmux_cmd);
-        run_cmd(&mut cmd)?;
+        run_remote_cmd(&info, &tmux_cmd)?;
 
         println!("Benchmark running in background");
-        println!("  cargo xtask gpu status <name>        — check progress");
-        println!("  cargo xtask gpu attach <name>        — reconnect to live session");
-        println!("  cargo xtask gpu pull-results <name>  — download results when done");
+        println!("  cargo xtask gpu status <name>        -- check progress");
+        println!("  cargo xtask gpu attach <name>        -- reconnect to live session");
+        println!("  cargo xtask gpu pull-results <name>  -- download results when done");
     } else {
         println!("Running benchmark on remote GPU...");
-        let mut cmd = ssh_cmd(&info);
-        cmd.arg(&remote_cmd);
-        run_cmd(&mut cmd)?;
+        run_remote_cmd(&info, &remote_cmd)?;
     }
 
     Ok(())
@@ -309,45 +349,29 @@ pub fn status(name: Option<&str>) -> Result<()> {
         "tail -20 /workspace/speakrs/_benchmarks/latest.log; fi; fi",
     );
 
-    let mut cmd = ssh_cmd(&info);
-    cmd.arg(script);
-    run_cmd(&mut cmd)?;
+    run_remote_cmd(&info, script)?;
     Ok(())
 }
 
 pub fn attach(name: Option<&str>) -> Result<()> {
     let (_n, info) = resolve_instance(name)?;
 
-    let mut check = ssh_cmd(&info);
-    check.arg("tmux has-session -t benchmark 2>/dev/null");
-    if !check.output()?.status.success() {
+    if run_remote_cmd(&info, "tmux has-session -t benchmark 2>/dev/null").is_err() {
         bail!("No benchmark session running. Use `cargo xtask gpu status` to check");
     }
 
-    let args = get_ssh_args(&info);
-    let mut cmd = Command::new("ssh");
-    cmd.args([
-        "-t",
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-    ]);
-    cmd.args(&args);
-    cmd.arg("tmux attach -t benchmark");
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        let err = cmd.exec();
-        bail!("Failed to exec ssh: {err}");
+    // pipe tmux attach via stdin so it works through RunPod's SSH proxy
+    let mut cmd = ssh_cmd(&info);
+    cmd.stdin(std::process::Stdio::piped());
+    let mut child = cmd.spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(b"tmux attach -t benchmark\n")?;
     }
-
-    #[cfg(not(unix))]
-    {
-        run_cmd(&mut cmd)?;
-        Ok(())
+    let status = child.wait()?;
+    if !status.success() {
+        bail!("SSH session ended with {status}");
     }
+    Ok(())
 }
 
 pub fn pull_results(name: Option<&str>) -> Result<()> {
@@ -357,11 +381,15 @@ pub fn pull_results(name: Option<&str>) -> Result<()> {
     let local_dir = root.join("_benchmarks");
     fs::create_dir_all(&local_dir)?;
 
+    let pty_flag = if is_proxy(&info) { "-tt" } else { "-T" };
     let ssh_opts = format!(
-        "ssh -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p {}",
+        "ssh {pty_flag} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p {}",
         info.ssh_port
     );
-    let src = format!("root@{}:/workspace/speakrs/_benchmarks/", info.ssh_host);
+    let src = format!(
+        "{}@{}:/workspace/speakrs/_benchmarks/",
+        info.ssh_user, info.ssh_host
+    );
     let dest = format!("{}/", local_dir.display());
 
     println!("Pulling benchmark results from remote...");
@@ -378,16 +406,7 @@ pub fn pull_results(name: Option<&str>) -> Result<()> {
 
 pub fn ssh(name: Option<&str>) -> Result<()> {
     let (_n, info) = resolve_instance(name)?;
-    let args = get_ssh_args(&info);
-
-    let mut cmd = Command::new("ssh");
-    cmd.args([
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-    ]);
-    cmd.args(&args);
+    let mut cmd = ssh_cmd(&info);
 
     #[cfg(unix)]
     {
@@ -441,6 +460,42 @@ fn destroy_all() -> Result<()> {
     }
 
     println!("All {} instances destroyed", names.len());
+    Ok(())
+}
+
+pub fn start(name: Option<&str>) -> Result<()> {
+    let (n, info) = resolve_instance(name)?;
+
+    match info.backend {
+        Backend::RunPod => {
+            let updated = runpod::resume(&info)?;
+            save_instance(&n, &updated)?;
+            println!(
+                "Instance '{n}' started (ssh {}@{}:{})",
+                updated.ssh_user, updated.ssh_host, updated.ssh_port
+            );
+        }
+        Backend::VastAi => bail!("Start not supported for VastAI yet"),
+    }
+
+    Ok(())
+}
+
+pub fn import(name: &str, backend: Backend) -> Result<()> {
+    if instances_dir().join(name).exists() {
+        bail!("Instance '{name}' already exists");
+    }
+
+    let info = match backend {
+        Backend::RunPod => runpod::import()?,
+        Backend::VastAi => bail!("Import not supported for VastAI yet"),
+    };
+
+    save_instance(name, &info)?;
+    println!(
+        "Instance '{name}' imported ({backend}, id={})",
+        info.instance_id
+    );
     Ok(())
 }
 

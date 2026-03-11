@@ -7,6 +7,7 @@ use super::{
     Backend, GITHUB_REPO, IMAGE, InstanceInfo, models_script_with_token, run_remote_script,
 };
 use crate::cmd::project_root;
+use std::io::Write;
 
 const RUNPOD_API_URL: &str = "https://api.runpod.io/graphql";
 
@@ -110,6 +111,9 @@ fn wait_for_ssh(pod_id: &str) -> Result<InstanceInfo> {
             query Pod($podId: String!) {
                 pod(input: { podId: $podId }) {
                     desiredStatus
+                    machine {
+                        podHostId
+                    }
                     runtime {
                         ports {
                             ip
@@ -133,29 +137,18 @@ fn wait_for_ssh(pod_id: &str) -> Result<InstanceInfo> {
             continue;
         }
 
-        let ports = pod["runtime"]["ports"].as_array();
-        let ssh_port = ports.and_then(|ports| {
-            ports.iter().find(|p| {
-                p["privatePort"].as_u64() == Some(22) && p["isIpPublic"].as_bool() == Some(true)
-            })
-        });
-
-        if let Some(port_info) = ssh_port {
-            let host = port_info["ip"].as_str().unwrap_or("").to_string();
-            let port = port_info["publicPort"].as_u64().unwrap_or(0).to_string();
-
-            if !host.is_empty() && port != "0" {
-                println!(
-                    "Pod is running! SSH at {host}:{port} (took ~{}s)",
-                    (i + 1) * 5
-                );
-                return Ok(InstanceInfo {
-                    backend: Backend::RunPod,
-                    instance_id: pod_id.to_string(),
-                    ssh_host: host,
-                    ssh_port: port,
-                });
-            }
+        if let Some((host, port, user)) = extract_ssh_info(pod) {
+            println!(
+                "Pod is running! SSH at {user}@{host}:{port} (took ~{}s)",
+                (i + 1) * 5
+            );
+            return Ok(InstanceInfo {
+                backend: Backend::RunPod,
+                instance_id: pod_id.to_string(),
+                ssh_host: host,
+                ssh_port: port,
+                ssh_user: user,
+            });
         }
 
         if i % 6 == 0 {
@@ -164,6 +157,170 @@ fn wait_for_ssh(pod_id: &str) -> Result<InstanceInfo> {
     }
 
     bail!("Pod did not become ready within 7.5 minutes");
+}
+
+/// Extract SSH connection info from a RunPod pod object
+///
+/// Two modes:
+/// 1. Public IP: `runtime.ports` has an entry with `privatePort: 22`
+///    → (ip, publicPort, "root")
+/// 2. SSH proxy: ports is null (SECURE cloud type) — use `machine.podHostId`
+///    → ("ssh.runpod.io", "22", podHostId)
+fn extract_ssh_info(pod: &Value) -> Option<(String, String, String)> {
+    // try public IP ports first
+    if let Some(ports) = pod["runtime"]["ports"].as_array() {
+        let ssh_port = ports
+            .iter()
+            .find(|p| {
+                p["privatePort"].as_u64() == Some(22) && p["isIpPublic"].as_bool() == Some(true)
+            })
+            .or_else(|| ports.iter().find(|p| p["privatePort"].as_u64() == Some(22)));
+
+        if let Some(p) = ssh_port {
+            let host = p["ip"].as_str().unwrap_or("").to_string();
+            let port = p["publicPort"].as_u64().unwrap_or(0).to_string();
+            if !host.is_empty() && port != "0" {
+                return Some((host, port, "root".to_string()));
+            }
+        }
+    }
+
+    // fallback: SSH proxy via podHostId
+    let pod_host_id = pod["machine"]["podHostId"].as_str()?;
+    Some((
+        "ssh.runpod.io".to_string(),
+        "22".to_string(),
+        pod_host_id.to_string(),
+    ))
+}
+
+pub fn list_pods() -> Result<Value> {
+    let query = r#"
+        query Pods {
+            myself {
+                pods {
+                    id
+                    name
+                    desiredStatus
+                    machine {
+                        podHostId
+                    }
+                    runtime {
+                        ports {
+                            ip
+                            isIpPublic
+                            privatePort
+                            publicPort
+                        }
+                    }
+                }
+            }
+        }
+    "#;
+
+    let response = graphql_query(query, &serde_json::json!({}))?;
+    Ok(response)
+}
+
+pub fn import() -> Result<InstanceInfo> {
+    let response = list_pods()?;
+    let pods = response["data"]["myself"]["pods"]
+        .as_array()
+        .ok_or_else(|| color_eyre::eyre::eyre!("Could not parse pods from response"))?;
+
+    let running: Vec<&Value> = pods
+        .iter()
+        .filter(|p| p["desiredStatus"].as_str() == Some("RUNNING"))
+        .collect();
+
+    if running.is_empty() {
+        bail!("No running pods found on RunPod");
+    }
+
+    let pod = if running.len() == 1 {
+        let p = running[0];
+        let name = p["name"].as_str().unwrap_or("unnamed");
+        let id = p["id"].as_str().unwrap_or("?");
+        println!("Found one running pod: {id} | {name}");
+        p
+    } else {
+        let descriptions: Vec<String> = running
+            .iter()
+            .map(|p| {
+                let id = p["id"].as_str().unwrap_or("?");
+                let name = p["name"].as_str().unwrap_or("unnamed");
+                format!("{id} | {name}")
+            })
+            .collect();
+
+        let input = descriptions.join("\n");
+        let output = Command::new("fzf")
+            .arg("--header=Pick a pod to import")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .and_then(|mut child| {
+                if let Some(ref mut stdin) = child.stdin {
+                    stdin.write_all(input.as_bytes()).ok();
+                }
+                child.wait_with_output()
+            })?;
+
+        if !output.status.success() {
+            bail!("No pod selected");
+        }
+
+        let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let selected_id = selected.split('|').next().map(|s| s.trim()).unwrap_or("");
+
+        running
+            .iter()
+            .find(|p| p["id"].as_str() == Some(selected_id))
+            .ok_or_else(|| color_eyre::eyre::eyre!("Selected pod not found"))?
+    };
+
+    let pod_id = pod["id"]
+        .as_str()
+        .ok_or_else(|| color_eyre::eyre::eyre!("Pod missing id"))?
+        .to_string();
+
+    let (host, port, user) = extract_ssh_info(pod)
+        .ok_or_else(|| color_eyre::eyre::eyre!("Pod {pod_id} has no SSH port available"))?;
+
+    println!("SSH at {user}@{host}:{port}");
+
+    Ok(InstanceInfo {
+        backend: Backend::RunPod,
+        instance_id: pod_id,
+        ssh_host: host,
+        ssh_port: port,
+        ssh_user: user,
+    })
+}
+
+pub fn resume(info: &InstanceInfo) -> Result<InstanceInfo> {
+    println!("Resuming RunPod pod {}...", info.instance_id);
+
+    let query = r#"
+        mutation ResumePod($input: PodResumeInput!) {
+            podResume(input: $input) {
+                id
+                desiredStatus
+            }
+        }
+    "#;
+
+    let variables = serde_json::json!({
+        "input": {
+            "podId": info.instance_id,
+            "gpuCount": 1,
+        }
+    });
+
+    graphql_query(query, &variables)?;
+    println!("Resume requested, waiting for SSH...");
+    wait_for_ssh(&info.instance_id)
 }
 
 pub fn destroy(info: &InstanceInfo) -> Result<()> {
@@ -236,8 +393,15 @@ pub fn prepare_benchmark(info: &InstanceInfo, args: &[String], branch: &str) -> 
         }
     }
 
-    let clone_or_pull =
-        format!("cd /workspace/speakrs && git fetch origin && git reset --hard origin/{branch}",);
+    let clone_or_pull = format!(
+        "if [ -d /workspace/speakrs/.git ]; then \
+         cd /workspace/speakrs && git fetch origin && git reset --hard origin/{branch}; \
+         else \
+         git clone {repo} /workspace/speakrs && cd /workspace/speakrs && git checkout {branch}; \
+         fi",
+        branch = branch,
+        repo = GITHUB_REPO,
+    );
 
     let prep_script = format!(
         "set -euo pipefail\n\

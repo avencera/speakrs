@@ -1,4 +1,4 @@
-FROM nvidia/cuda:12.9.0-runtime-ubuntu24.04
+FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential pkg-config cmake \
@@ -18,3 +18,6 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 RUN mkdir -p /var/run/sshd /workspace
 
 WORKDIR /workspace
+
+# RunPod injects its own sshd via startSsh, just keep the container alive
+CMD ["sleep", "infinity"]
