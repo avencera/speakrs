@@ -44,6 +44,19 @@ pub fn speaker_count(
         .collect()
 }
 
+fn build_cluster_mapping(
+    chunk_labels: &ndarray::ArrayView1<i32>,
+    num_clusters: usize,
+) -> Vec<Vec<usize>> {
+    let mut mapping = vec![Vec::new(); num_clusters];
+    for (local_idx, &label) in chunk_labels.iter().enumerate() {
+        if label >= 0 {
+            mapping[label as usize].push(local_idx);
+        }
+    }
+    mapping
+}
+
 /// Accumulate per-cluster activation scores from chunk segmentations,
 /// padding to at least max_speakers_per_frame columns
 fn accumulate_activations(
@@ -67,13 +80,7 @@ fn accumulate_activations(
     for (chunk_idx, &start_frame) in start_frames.iter().enumerate().take(num_chunks) {
         let chunk_labels = hard_clusters.row(chunk_idx);
         let chunk_segmentations = segmentations.slice(s![chunk_idx, .., ..]);
-        let mut local_by_cluster = vec![Vec::new(); num_clusters];
-
-        for (local_idx, &label) in chunk_labels.iter().enumerate() {
-            if label >= 0 {
-                local_by_cluster[label as usize].push(local_idx);
-            }
-        }
+        let local_by_cluster = build_cluster_mapping(&chunk_labels, num_clusters);
 
         for (cluster_idx, local_indices) in local_by_cluster.iter().enumerate() {
             if local_indices.is_empty() {
@@ -146,8 +153,8 @@ pub fn make_exclusive(activations: &mut Array2<f32>) {
             .map(|(idx, _)| idx)
             .unwrap();
 
-        for (idx, value) in row.iter_mut().enumerate() {
-            if idx != argmax {
+        for (col_idx, value) in row.iter_mut().enumerate() {
+            if col_idx != argmax {
                 *value = 0.0;
             }
         }

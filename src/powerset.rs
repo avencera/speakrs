@@ -74,36 +74,36 @@ impl PowersetMapping {
     }
 }
 
-/// Generate all combinations of `k` items from `0..n` in lexicographic order
-fn combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
-    if k == 0 {
+/// Generate all combinations of `size` items from `0..total` in lexicographic order
+fn combinations(total: usize, size: usize) -> Vec<Vec<usize>> {
+    if size == 0 {
         return vec![vec![]];
     }
-    if k > n {
+    if size > total {
         return vec![];
     }
 
     let mut result = Vec::new();
-    let mut combo: Vec<usize> = (0..k).collect();
+    let mut combination: Vec<usize> = (0..size).collect();
 
     loop {
-        result.push(combo.clone());
+        result.push(combination.clone());
 
         // find rightmost element that can be incremented
-        let mut i = k;
-        while i > 0 {
-            i -= 1;
-            if combo[i] != i + n - k {
+        let mut pos = size;
+        while pos > 0 {
+            pos -= 1;
+            if combination[pos] != pos + total - size {
                 break;
             }
-            if i == 0 && combo[0] == n - k {
+            if pos == 0 && combination[0] == total - size {
                 return result;
             }
         }
 
-        combo[i] += 1;
-        for j in (i + 1)..k {
-            combo[j] = combo[j - 1] + 1;
+        combination[pos] += 1;
+        for fill_pos in (pos + 1)..size {
+            combination[fill_pos] = combination[fill_pos - 1] + 1;
         }
     }
 }

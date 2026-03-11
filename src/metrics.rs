@@ -181,76 +181,100 @@ fn optimal_mapping(cooccurrence: &[Vec<f64>], n_ref: usize, n_hyp: usize) -> Has
         .collect()
 }
 
+struct HungarianSolver {
+    dimension: usize,
+    row_potentials: Vec<f64>,
+    col_potentials: Vec<f64>,
+    col_to_row: Vec<usize>,
+    prev_col: Vec<usize>,
+}
+
+impl HungarianSolver {
+    fn new(dimension: usize) -> Self {
+        Self {
+            dimension,
+            row_potentials: vec![0.0; dimension + 1],
+            col_potentials: vec![0.0; dimension + 1],
+            col_to_row: vec![0; dimension + 1],
+            prev_col: vec![0; dimension + 1],
+        }
+    }
+
+    fn assign_row(&mut self, row: usize, cost: &[Vec<f64>]) {
+        let n = self.dimension;
+        self.col_to_row[0] = row;
+        let mut current_col = 0usize;
+        let mut shortest_paths = vec![f64::INFINITY; n + 1];
+        let mut visited = vec![false; n + 1];
+
+        loop {
+            visited[current_col] = true;
+            let assigned_row = self.col_to_row[current_col];
+            let mut min_delta = f64::INFINITY;
+            let mut next_col = 0usize;
+
+            for j in 1..=n {
+                if visited[j] {
+                    continue;
+                }
+                let reduced_cost = cost[assigned_row - 1][j - 1]
+                    - self.row_potentials[assigned_row]
+                    - self.col_potentials[j];
+                if reduced_cost < shortest_paths[j] {
+                    shortest_paths[j] = reduced_cost;
+                    self.prev_col[j] = current_col;
+                }
+                if shortest_paths[j] < min_delta {
+                    min_delta = shortest_paths[j];
+                    next_col = j;
+                }
+            }
+
+            for j in 0..=n {
+                if visited[j] {
+                    self.row_potentials[self.col_to_row[j]] += min_delta;
+                    self.col_potentials[j] -= min_delta;
+                } else {
+                    shortest_paths[j] -= min_delta;
+                }
+            }
+
+            current_col = next_col;
+            if self.col_to_row[current_col] == 0 {
+                break;
+            }
+        }
+
+        // augmenting path
+        loop {
+            let prev = self.prev_col[current_col];
+            self.col_to_row[current_col] = self.col_to_row[prev];
+            current_col = prev;
+            if current_col == 0 {
+                break;
+            }
+        }
+    }
+
+    fn into_assignment(self) -> Vec<usize> {
+        let mut result = vec![0usize; self.dimension];
+        for j in 1..=self.dimension {
+            result[self.col_to_row[j] - 1] = j - 1;
+        }
+        result
+    }
+}
+
 /// Hungarian algorithm for the linear assignment problem (O(n³))
 ///
 /// Returns a Vec where result[row] = assigned column
 fn hungarian_algorithm(cost: &[Vec<f64>]) -> Vec<usize> {
     let n = cost.len();
-    // u[i] and v[j] are potentials for rows and columns (1-indexed internally)
-    let mut u = vec![0.0; n + 1];
-    let mut v = vec![0.0; n + 1];
-    // p[j] = row assigned to column j, way[j] = previous column in shortest path
-    let mut p = vec![0usize; n + 1];
-    let mut way = vec![0usize; n + 1];
-
-    for i in 1..=n {
-        p[0] = i;
-        let mut j0 = 0usize;
-        let mut min_v = vec![f64::INFINITY; n + 1];
-        let mut used = vec![false; n + 1];
-
-        loop {
-            used[j0] = true;
-            let i0 = p[j0];
-            let mut delta = f64::INFINITY;
-            let mut j1 = 0usize;
-
-            for j in 1..=n {
-                if used[j] {
-                    continue;
-                }
-                let cur = cost[i0 - 1][j - 1] - u[i0] - v[j];
-                if cur < min_v[j] {
-                    min_v[j] = cur;
-                    way[j] = j0;
-                }
-                if min_v[j] < delta {
-                    delta = min_v[j];
-                    j1 = j;
-                }
-            }
-
-            for j in 0..=n {
-                if used[j] {
-                    u[p[j]] += delta;
-                    v[j] -= delta;
-                } else {
-                    min_v[j] -= delta;
-                }
-            }
-
-            j0 = j1;
-            if p[j0] == 0 {
-                break;
-            }
-        }
-
-        loop {
-            let j1 = way[j0];
-            p[j0] = p[j1];
-            j0 = j1;
-            if j0 == 0 {
-                break;
-            }
-        }
+    let mut solver = HungarianSolver::new(n);
+    for row in 1..=n {
+        solver.assign_row(row, cost);
     }
-
-    // p[j] = row assigned to col j (1-indexed) → convert to row→col (0-indexed)
-    let mut result = vec![0usize; n];
-    for j in 1..=n {
-        result[p[j] - 1] = j - 1;
-    }
-    result
+    solver.into_assignment()
 }
 
 /// Wrapper for f64 that implements Ord for use in BTreeSet

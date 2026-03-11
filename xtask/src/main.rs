@@ -52,7 +52,7 @@ enum Command {
     },
     /// Run speaker diarization on WAV files
     Diarize {
-        #[arg(long, default_value = "cpu")]
+        #[arg(long, default_value = "cpu", value_parser = clap::value_parser!(DiarizeMode))]
         mode: DiarizeMode,
         /// WAV files to diarize
         wav_files: Vec<PathBuf>,

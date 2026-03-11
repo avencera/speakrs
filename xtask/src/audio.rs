@@ -41,6 +41,24 @@ fn is_http_url(source: &str) -> bool {
     source.starts_with("http://") || source.starts_with("https://")
 }
 
+enum AudioSource {
+    YouTube,
+    HttpDownload,
+    LocalFile,
+}
+
+impl AudioSource {
+    fn new(source: &str) -> Self {
+        if is_youtube_url(source) {
+            Self::YouTube
+        } else if is_http_url(source) {
+            Self::HttpDownload
+        } else {
+            Self::LocalFile
+        }
+    }
+}
+
 /// Prepare audio from a URL, YouTube link, or local file path into 16kHz mono WAV
 ///
 /// Returns the path to the WAV file and a TempDir guard (drop to clean up)
@@ -50,8 +68,8 @@ pub fn prepare_audio(source: &str) -> Result<(PathBuf, TempDir)> {
 
     println!("=== Preparing audio ===");
 
-    if is_http_url(source) {
-        if is_youtube_url(source) {
+    match AudioSource::new(source) {
+        AudioSource::YouTube => {
             run_cmd(
                 Command::new("yt-dlp")
                     .args(["-x", "--audio-format", "wav"])
@@ -61,7 +79,8 @@ pub fn prepare_audio(source: &str) -> Result<(PathBuf, TempDir)> {
                     .arg(tmp.path().join("audio.%(ext)s"))
                     .arg(source),
             )?;
-        } else {
+        }
+        AudioSource::HttpDownload => {
             let input = tmp.path().join("input");
             run_cmd(
                 Command::new("curl")
@@ -72,11 +91,12 @@ pub fn prepare_audio(source: &str) -> Result<(PathBuf, TempDir)> {
             )?;
             convert_to_16k_mono(&input, &wav)?;
         }
-    } else {
-        if !Path::new(source).is_file() {
-            bail!("Input does not exist: {source}");
+        AudioSource::LocalFile => {
+            if !Path::new(source).is_file() {
+                bail!("Input does not exist: {source}");
+            }
+            convert_to_16k_mono(Path::new(source), &wav)?;
         }
-        convert_to_16k_mono(Path::new(source), &wav)?;
     }
 
     Ok((wav, tmp))

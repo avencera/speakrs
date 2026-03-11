@@ -93,45 +93,45 @@ pub fn aggregate_at(
     let mut mask =
         (options.missing != 0.0).then(|| Array2::<f32>::zeros((total_frames, num_speakers)));
 
-    for (i, start_frame) in start_frames.iter().copied().enumerate().take(num_windows) {
-        for j in 0..frames_per_window {
-            let out_frame = start_frame + j;
-            let w = weights[j];
+    for (window_idx, start_frame) in start_frames.iter().copied().enumerate().take(num_windows) {
+        for frame_offset in 0..frames_per_window {
+            let out_frame = start_frame + frame_offset;
+            let weight = weights[frame_offset];
 
-            let window_slice = windows.slice(s![i, j, ..]);
-            for s in 0..num_speakers {
-                let value = window_slice[s];
+            let window_slice = windows.slice(s![window_idx, frame_offset, ..]);
+            for speaker_idx in 0..num_speakers {
+                let value = window_slice[speaker_idx];
                 if value.is_nan() {
                     continue;
                 }
 
-                numerator[[out_frame, s]] += w * value;
+                numerator[[out_frame, speaker_idx]] += weight * value;
                 if let Some(denominator) = denominator.as_mut() {
-                    denominator[[out_frame, s]] += w;
+                    denominator[[out_frame, speaker_idx]] += weight;
                 }
                 if let Some(mask) = mask.as_mut() {
-                    mask[[out_frame, s]] = 1.0;
+                    mask[[out_frame, speaker_idx]] = 1.0;
                 }
             }
         }
     }
 
     if let Some(denominator) = denominator.as_ref() {
-        for frame in 0..total_frames {
-            for s in 0..num_speakers {
-                let weight = denominator[[frame, s]];
+        for frame_idx in 0..total_frames {
+            for speaker_idx in 0..num_speakers {
+                let weight = denominator[[frame_idx, speaker_idx]];
                 if weight > 0.0 {
-                    numerator[[frame, s]] /= weight;
+                    numerator[[frame_idx, speaker_idx]] /= weight;
                 }
             }
         }
     }
 
     if let Some(mask) = mask.as_ref() {
-        for frame in 0..total_frames {
-            for s in 0..num_speakers {
-                if mask[[frame, s]] == 0.0 {
-                    numerator[[frame, s]] = options.missing;
+        for frame_idx in 0..total_frames {
+            for speaker_idx in 0..num_speakers {
+                if mask[[frame_idx, speaker_idx]] == 0.0 {
+                    numerator[[frame_idx, speaker_idx]] = options.missing;
                 }
             }
         }
