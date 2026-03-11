@@ -12,8 +12,6 @@ default = ["online"]
 online = ["dep:hf-hub", "hf-hub/ureq", "hf-hub/native-tls"]
 coreml = ["dep:objc2", "dep:objc2-core-ml", "dep:objc2-foundation", "dep:block2"]
 cuda = ["ort/cuda"]
-directml = ["ort/directml"]
-tensorrt = ["ort/tensorrt"]
 
 [dependencies]
 hf-hub = { version = "0.5", optional = true, default-features = false }

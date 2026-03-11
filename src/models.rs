@@ -109,14 +109,6 @@ fn required_files(mode: Mode) -> Vec<&'static str> {
                 "wespeaker-voxceleb-resnet34-tail-b32.mlmodelc",
             ));
             files.extend(mlmodelc_files("wespeaker-voxceleb-resnet34-tail.mlmodelc"));
-            // fused CoreML models (fbank+tail in one model, preferred fast path)
-            files.extend(mlmodelc_files("wespeaker-voxceleb-resnet34-fused.mlmodelc"));
-            files.extend(mlmodelc_files(
-                "wespeaker-voxceleb-resnet34-fused-b3.mlmodelc",
-            ));
-            files.extend(mlmodelc_files(
-                "wespeaker-voxceleb-resnet34-fused-b32.mlmodelc",
-            ));
         }
     }
 
