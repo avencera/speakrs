@@ -5,11 +5,12 @@ use std::str::FromStr;
 use std::time::Instant;
 
 use color_eyre::eyre::{Result, bail, ensure};
-use speakrs::clustering::plda::PldaTransform;
 use speakrs::inference::ExecutionMode;
 use speakrs::inference::embedding::EmbeddingModel;
 use speakrs::inference::segmentation::SegmentationModel;
-use speakrs::pipeline::{FAST_SEGMENTATION_STEP_SECONDS, SEGMENTATION_STEP_SECONDS, diarize};
+use speakrs::pipeline::{
+    DiarizationPipeline, FAST_SEGMENTATION_STEP_SECONDS, SEGMENTATION_STEP_SECONDS,
+};
 
 use crate::wav;
 
@@ -126,7 +127,8 @@ pub fn run(mode: DiarizeMode, wav_files: Vec<PathBuf>) -> Result<()> {
                     .unwrap(),
                 execution_mode,
             )?;
-            let plda = PldaTransform::from_dir(&models_dir)?;
+            let mut pipeline =
+                DiarizationPipeline::new(&mut seg_model, &mut emb_model, &models_dir)?;
 
             let total = wav_files.len();
             let mut cumulative = 0.0f64;
@@ -141,7 +143,7 @@ pub fn run(mode: DiarizeMode, wav_files: Vec<PathBuf>) -> Result<()> {
                 ensure!(sr == 16000, "expected 16kHz WAV, got {sr}Hz");
 
                 let start = Instant::now();
-                let result = diarize(&mut seg_model, &mut emb_model, &plda, &samples, &file_id)?;
+                let result = pipeline.run_with_file_id(&samples, &file_id)?;
                 let elapsed = start.elapsed().as_secs_f64();
                 cumulative += elapsed;
 
