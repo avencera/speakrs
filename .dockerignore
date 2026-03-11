@@ -1,0 +1,6 @@
+target/
+_benchmarks/
+.git/
+fixtures/models/
+*.mlpackage
+*.mlmodelc
