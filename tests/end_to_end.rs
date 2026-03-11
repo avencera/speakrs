@@ -3,15 +3,14 @@ use std::path::{Path, PathBuf};
 
 use ndarray::{Array2, Array3};
 use ndarray_npy::ReadNpyExt;
-use speakrs::clustering::plda::PldaTransform;
 use speakrs::inference::embedding::EmbeddingModel;
 use speakrs::inference::segmentation::SegmentationModel;
-use speakrs::pipeline::{FRAME_STEP_SECONDS, SEGMENTATION_STEP_SECONDS, diarize};
+use speakrs::pipeline::{
+    DiarizationPipeline, FRAME_STEP_SECONDS, OwnedDiarizationPipeline, SEGMENTATION_STEP_SECONDS,
+};
 
 #[cfg(feature = "online")]
 use speakrs::models::Mode;
-#[cfg(feature = "online")]
-use speakrs::pipeline::OwnedDiarizationPipeline;
 
 #[cfg(feature = "coreml")]
 use speakrs::inference::ExecutionMode;
@@ -92,12 +91,12 @@ fn pipeline_runs_on_main_fixture_audio() {
             .unwrap(),
     )
     .unwrap();
-    let plda = PldaTransform::from_dir(&models_dir).unwrap();
-
     let (samples, sr) = load_wav_samples(&fixture_path("test.wav"));
     assert_eq!(sr, 16_000);
 
-    let result = diarize(&mut seg_model, &mut emb_model, &plda, &samples, "fixture").unwrap();
+    let mut pipeline =
+        DiarizationPipeline::new(&mut seg_model, &mut emb_model, &models_dir).unwrap();
+    let result = pipeline.run_with_file_id(&samples, "fixture").unwrap();
 
     assert!(result.discrete_diarization.nrows() > 0);
     assert!(result.discrete_diarization.ncols() > 0);
@@ -139,10 +138,10 @@ fn voxconverse_der(mode: ExecutionMode, step: f64) -> (Vec<(String, f64)>, Durat
         mode,
     )
     .unwrap();
-    let plda = PldaTransform::from_dir(&models_dir).unwrap();
-
     let start = Instant::now();
     let mut results = Vec::new();
+    let mut pipeline =
+        DiarizationPipeline::new(&mut seg_model, &mut emb_model, &models_dir).unwrap();
     for &name in VOXCONVERSE_TEST_FILES {
         let wav_path = fixture_path(&format!("datasets/voxconverse/wav/{name}.wav"));
         let rttm_path = fixture_path(&format!("datasets/voxconverse/rttm/{name}.rttm"));
@@ -151,7 +150,7 @@ fn voxconverse_der(mode: ExecutionMode, step: f64) -> (Vec<(String, f64)>, Durat
         let (samples, sr) = load_wav_samples(&wav_path);
         assert_eq!(sr, 16_000);
 
-        let result = diarize(&mut seg_model, &mut emb_model, &plda, &samples, name).unwrap();
+        let result = pipeline.run_with_file_id(&samples, name).unwrap();
 
         let reference_rttm = fs::read_to_string(&rttm_path).unwrap();
         let reference = parse_rttm(&reference_rttm);
@@ -239,12 +238,12 @@ fn pipeline_handles_short_audio_fixture() {
             .unwrap(),
     )
     .unwrap();
-    let plda = PldaTransform::from_dir(&models_dir).unwrap();
-
     let (samples, sr) = load_wav_samples(&fixture_path("test_short.wav"));
     assert_eq!(sr, 16_000);
 
-    let result = diarize(&mut seg_model, &mut emb_model, &plda, &samples, "short").unwrap();
+    let mut pipeline =
+        DiarizationPipeline::new(&mut seg_model, &mut emb_model, &models_dir).unwrap();
+    let result = pipeline.run_with_file_id(&samples, "short").unwrap();
 
     assert!(
         result
@@ -256,7 +255,6 @@ fn pipeline_handles_short_audio_fixture() {
 }
 
 #[test]
-#[cfg(feature = "online")]
 fn owned_pipeline_from_dir() {
     let models_dir = fixture_path("models");
     let mut pipeline = OwnedDiarizationPipeline::from_dir(&models_dir, Mode::Cpu).unwrap();

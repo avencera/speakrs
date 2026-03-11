@@ -34,8 +34,8 @@ fn main() -> ExampleResult<()> {
     let result = pipeline.run(&audio)?;
 
     let mut exclusive = result.discrete_diarization.clone();
-    make_exclusive(&mut exclusive);
-    let segments = to_segments(&exclusive, FRAME_STEP_SECONDS, FRAME_DURATION_SECONDS);
+    make_exclusive(&mut exclusive.0);
+    let segments = to_segments(&exclusive.0, FRAME_STEP_SECONDS, FRAME_DURATION_SECONDS);
     let transcript = load_transcript(transcript_path)?;
 
     println!("start\tend\tspeaker\ttext");

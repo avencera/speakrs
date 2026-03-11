@@ -1,3 +1,4 @@
+use std::ops::Deref;
 use std::path::Path;
 
 use ndarray::{Array2, Array3, ArrayView2, s};
@@ -12,7 +13,7 @@ use crate::inference::embedding::{
 };
 use crate::inference::segmentation::SegmentationModel;
 use crate::powerset::PowersetMapping;
-use crate::reconstruct::{reconstruct, reconstruct_smoothed, speaker_count};
+use crate::reconstruct::Reconstructor;
 use crate::segment::{merge_segments, to_rttm, to_segments};
 use crate::utils::cosine_similarity;
 
@@ -133,6 +134,102 @@ impl ConcurrentEmbeddingResult {
 
         (segmentations, embeddings)
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct DecodedSegmentations(pub Array3<f32>);
+
+impl Deref for DecodedSegmentations {
+    type Target = Array3<f32>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ChunkEmbeddings(pub Array3<f32>);
+
+impl Deref for ChunkEmbeddings {
+    type Target = Array3<f32>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SpeakerCountTrack(pub Vec<usize>);
+
+impl Deref for SpeakerCountTrack {
+    type Target = Vec<usize>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ChunkSpeakerClusters(pub Array2<i32>);
+
+impl Deref for ChunkSpeakerClusters {
+    type Target = Array2<i32>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DiscreteDiarization(pub Array2<f32>);
+
+impl Deref for DiscreteDiarization {
+    type Target = Array2<f32>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FrameActivations(pub(crate) Array2<f32>);
+
+impl Deref for FrameActivations {
+    type Target = Array2<f32>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+struct RawSegmentationWindows(Vec<Array2<f32>>);
+
+struct TrainingEmbeddings(Array2<f32>);
+
+struct ChunkLayout {
+    step_seconds: f64,
+    step_samples: usize,
+    window_samples: usize,
+    start_frames: Vec<usize>,
+    output_frames: usize,
+}
+
+struct InferenceArtifacts {
+    layout: ChunkLayout,
+    segmentations: DecodedSegmentations,
+    embeddings: ChunkEmbeddings,
+}
+
+#[derive(Clone, Copy)]
+enum InferencePath {
+    Sequential,
+    Concurrent,
+}
+
+#[derive(Clone, Copy)]
+enum EmbeddingPath {
+    Masked,
+    Split,
 }
 
 struct ConcurrentEmbeddingRunner<'a> {
@@ -353,25 +450,25 @@ fn select_speaker_weights(
 
 #[derive(Debug, Clone)]
 pub struct DiarizationResult {
-    pub segmentations: Array3<f32>,
-    pub embeddings: Array3<f32>,
-    pub speaker_count: Vec<usize>,
-    pub hard_clusters: Array2<i32>,
-    pub discrete_diarization: Array2<f32>,
+    pub segmentations: DecodedSegmentations,
+    pub embeddings: ChunkEmbeddings,
+    pub speaker_count: SpeakerCountTrack,
+    pub hard_clusters: ChunkSpeakerClusters,
+    pub discrete_diarization: DiscreteDiarization,
     pub rttm: String,
 }
 
 /// Owned pipeline that manages its own model lifetimes
-#[cfg(feature = "online")]
 pub struct OwnedDiarizationPipeline {
     seg_model: SegmentationModel,
     emb_model: EmbeddingModel,
     plda: PldaTransform,
+    powerset: PowersetMapping,
 }
 
-#[cfg(feature = "online")]
 impl OwnedDiarizationPipeline {
     /// Download models from HuggingFace and build the pipeline
+    #[cfg(feature = "online")]
     pub fn from_pretrained(mode: crate::models::Mode) -> Result<Self, PipelineError> {
         let manager = crate::models::ModelManager::new()?;
         let models_dir = manager.ensure(mode)?;
@@ -406,17 +503,29 @@ impl OwnedDiarizationPipeline {
             seg_model,
             emb_model,
             plda,
+            powerset: PowersetMapping::new(3, 2),
         })
     }
 
     pub fn run(&mut self, audio: &[f32]) -> Result<DiarizationResult, PipelineError> {
-        diarize(
-            &mut self.seg_model,
-            &mut self.emb_model,
-            &self.plda,
-            audio,
-            "file1",
-        )
+        self.run_with_file_id(audio, "file1")
+    }
+
+    pub fn run_with_file_id(
+        &mut self,
+        audio: &[f32],
+        file_id: &str,
+    ) -> Result<DiarizationResult, PipelineError> {
+        self.run_with_config(audio, file_id, &PipelineConfig::default())
+    }
+
+    pub fn run_with_config(
+        &mut self,
+        audio: &[f32],
+        file_id: &str,
+        config: &PipelineConfig,
+    ) -> Result<DiarizationResult, PipelineError> {
+        self.runner().run(audio, file_id, config)
     }
 
     /// Build the pipeline from a local models directory
@@ -451,6 +560,7 @@ impl OwnedDiarizationPipeline {
             seg_model,
             emb_model,
             plda,
+            powerset: PowersetMapping::new(3, 2),
         })
     }
 
@@ -463,6 +573,7 @@ pub struct DiarizationPipeline<'a> {
     seg_model: &'a mut SegmentationModel,
     emb_model: &'a mut EmbeddingModel,
     plda: PldaTransform,
+    powerset: PowersetMapping,
 }
 
 impl<'a> DiarizationPipeline<'a> {
@@ -475,6 +586,7 @@ impl<'a> DiarizationPipeline<'a> {
             seg_model,
             emb_model,
             plda: PldaTransform::from_dir(models_dir)?,
+            powerset: PowersetMapping::new(3, 2),
         })
     }
 
@@ -483,7 +595,24 @@ impl<'a> DiarizationPipeline<'a> {
     }
 
     pub fn run(&mut self, audio: &[f32]) -> Result<DiarizationResult, PipelineError> {
-        diarize(self.seg_model, self.emb_model, &self.plda, audio, "file1")
+        self.run_with_file_id(audio, "file1")
+    }
+
+    pub fn run_with_file_id(
+        &mut self,
+        audio: &[f32],
+        file_id: &str,
+    ) -> Result<DiarizationResult, PipelineError> {
+        self.run_with_config(audio, file_id, &PipelineConfig::default())
+    }
+
+    pub fn run_with_config(
+        &mut self,
+        audio: &[f32],
+        file_id: &str,
+        config: &PipelineConfig,
+    ) -> Result<DiarizationResult, PipelineError> {
+        self.runner().run(audio, file_id, config)
     }
 
     pub fn segmentation_step(&self) -> f64 {
@@ -502,387 +631,539 @@ impl DiarizationResult {
     }
 }
 
-pub fn diarize(
-    seg_model: &mut SegmentationModel,
-    emb_model: &mut EmbeddingModel,
-    plda: &PldaTransform,
-    audio: &[f32],
-    file_id: &str,
-) -> Result<DiarizationResult, PipelineError> {
-    diarize_with_config(
-        seg_model,
-        emb_model,
-        plda,
-        audio,
-        file_id,
-        &PipelineConfig::default(),
-    )
+impl OwnedDiarizationPipeline {
+    fn runner(&mut self) -> PipelineRunner<'_> {
+        PipelineRunner {
+            seg_model: &mut self.seg_model,
+            emb_model: &mut self.emb_model,
+            plda: &self.plda,
+            powerset: &self.powerset,
+        }
+    }
 }
 
-pub fn diarize_with_config(
-    seg_model: &mut SegmentationModel,
-    emb_model: &mut EmbeddingModel,
-    plda: &PldaTransform,
-    audio: &[f32],
-    file_id: &str,
-    config: &PipelineConfig,
-) -> Result<DiarizationResult, PipelineError> {
-    // concurrent path for CoreML — seg and emb overlap via channel
-    if matches!(
-        seg_model.mode(),
-        ExecutionMode::CoreMl | ExecutionMode::CoreMlFast
-    ) {
-        return diarize_with_config_concurrent(seg_model, emb_model, plda, audio, file_id, config);
+impl<'a> DiarizationPipeline<'a> {
+    fn runner(&mut self) -> PipelineRunner<'_> {
+        PipelineRunner {
+            seg_model: self.seg_model,
+            emb_model: self.emb_model,
+            plda: &self.plda,
+            powerset: &self.powerset,
+        }
+    }
+}
+
+struct PipelineRunner<'a> {
+    seg_model: &'a mut SegmentationModel,
+    emb_model: &'a mut EmbeddingModel,
+    plda: &'a PldaTransform,
+    powerset: &'a PowersetMapping,
+}
+
+impl<'a> PipelineRunner<'a> {
+    fn run(
+        &mut self,
+        audio: &[f32],
+        file_id: &str,
+        config: &PipelineConfig,
+    ) -> Result<DiarizationResult, PipelineError> {
+        let inference_artifacts = self.run_inference(audio)?;
+        self.run_post_inference(inference_artifacts, file_id, config)
     }
 
-    diarize_with_config_sequential(seg_model, emb_model, plda, audio, file_id, config)
-}
-
-fn diarize_with_config_sequential(
-    seg_model: &mut SegmentationModel,
-    emb_model: &mut EmbeddingModel,
-    plda: &PldaTransform,
-    audio: &[f32],
-    file_id: &str,
-    config: &PipelineConfig,
-) -> Result<DiarizationResult, PipelineError> {
-    let powerset = PowersetMapping::new(3, 2);
-    let raw_windows = seg_model.run(audio)?;
-    tracing::info!(windows = raw_windows.len(), "Segmentation complete");
-    if raw_windows.is_empty() {
-        return Ok(DiarizationResult {
-            segmentations: Array3::zeros((0, 0, 0)),
-            embeddings: Array3::zeros((0, 0, 0)),
-            speaker_count: Vec::new(),
-            hard_clusters: Array2::zeros((0, 0)),
-            discrete_diarization: Array2::zeros((0, 0)),
-            rttm: String::new(),
-        });
-    }
-
-    let step_seconds = seg_model.step_seconds();
-    let segmentations = decode_windows(raw_windows, &powerset);
-    let embeddings = extract_embeddings(seg_model, emb_model, audio, &segmentations)?;
-    tracing::info!(
-        chunks = segmentations.shape()[0],
-        speakers = segmentations.shape()[2],
-        "Embeddings complete"
-    );
-
-    diarize_from_intermediates(
-        &segmentations,
-        &embeddings,
-        step_seconds,
-        file_id,
-        plda,
-        config,
-    )
-}
-
-/// Concurrent seg+emb pipeline: segmentation runs on a spawned thread while
-/// embedding consumes decoded chunks on the main thread via mpsc channel
-fn diarize_with_config_concurrent(
-    seg_model: &mut SegmentationModel,
-    emb_model: &mut EmbeddingModel,
-    plda: &PldaTransform,
-    audio: &[f32],
-    file_id: &str,
-    config: &PipelineConfig,
-) -> Result<DiarizationResult, PipelineError> {
-    let powerset = PowersetMapping::new(3, 2);
-    let step_seconds = seg_model.step_seconds();
-    let step_samples = seg_model.step_samples();
-    let window_samples = seg_model.window_samples();
-    let num_speakers = 3usize;
-
-    let uses_split_path =
-        emb_model.prefers_chunk_embedding_path() && emb_model.split_primary_batch_size() > 0;
-
-    let batch_size = if uses_split_path {
-        emb_model.split_primary_batch_size()
-    } else {
-        emb_model.primary_batch_size()
-    };
-    let min_num_samples = emb_model.min_num_samples();
-    let concurrent_embedding_runner = ConcurrentEmbeddingRunner {
-        powerset: &powerset,
-        audio,
-        step_samples,
-        window_samples,
-        num_speakers,
-    };
-
-    let (tx, rx) = crossbeam_channel::bounded::<Array2<f32>>(64);
-
-    let (seg_result, emb_result) = std::thread::scope(|s| {
-        let seg_handle = s.spawn(|| seg_model.run_streaming(audio, tx));
-
-        let emb_result = if uses_split_path {
-            concurrent_embedding_runner.run_split(rx, emb_model, batch_size, min_num_samples)
+    fn inference_path(&self) -> InferencePath {
+        if matches!(
+            self.seg_model.mode(),
+            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast
+        ) {
+            InferencePath::Concurrent
         } else {
-            concurrent_embedding_runner.run_masked(rx, emb_model, batch_size)
+            InferencePath::Sequential
+        }
+    }
+
+    fn embedding_path(&self) -> EmbeddingPath {
+        if self.emb_model.prefers_chunk_embedding_path()
+            && self.emb_model.split_primary_batch_size() > 0
+        {
+            EmbeddingPath::Split
+        } else {
+            EmbeddingPath::Masked
+        }
+    }
+
+    fn run_inference(&mut self, audio: &[f32]) -> Result<InferenceArtifacts, PipelineError> {
+        match self.inference_path() {
+            InferencePath::Sequential => self.run_sequential_inference(audio),
+            InferencePath::Concurrent => self.run_concurrent_inference(audio),
+        }
+    }
+
+    fn run_sequential_inference(
+        &mut self,
+        audio: &[f32],
+    ) -> Result<InferenceArtifacts, PipelineError> {
+        let raw_windows = RawSegmentationWindows(self.seg_model.run(audio)?);
+        tracing::info!(windows = raw_windows.0.len(), "Segmentation complete");
+
+        let segmentations = raw_windows.decode(self.powerset);
+        let layout = ChunkLayout::new(
+            self.seg_model.step_seconds(),
+            self.seg_model.step_samples(),
+            self.seg_model.window_samples(),
+            segmentations.nchunks(),
+        );
+        let embeddings = segmentations.extract_embeddings(
+            audio,
+            self.emb_model,
+            &layout,
+            self.embedding_path(),
+        )?;
+
+        tracing::info!(
+            chunks = segmentations.nchunks(),
+            speakers = segmentations.num_speakers(),
+            "Embeddings complete"
+        );
+
+        Ok(InferenceArtifacts {
+            layout,
+            segmentations,
+            embeddings,
+        })
+    }
+
+    fn run_concurrent_inference(
+        &mut self,
+        audio: &[f32],
+    ) -> Result<InferenceArtifacts, PipelineError> {
+        let layout = ChunkLayout::without_frame_extent(
+            self.seg_model.step_seconds(),
+            self.seg_model.step_samples(),
+            self.seg_model.window_samples(),
+        );
+        let concurrent_embedding_runner = ConcurrentEmbeddingRunner {
+            powerset: self.powerset,
+            audio,
+            step_samples: layout.step_samples,
+            window_samples: layout.window_samples,
+            num_speakers: 3,
+        };
+        let embedding_path = self.embedding_path();
+        let batch_size = match embedding_path {
+            EmbeddingPath::Split => self.emb_model.split_primary_batch_size(),
+            EmbeddingPath::Masked => self.emb_model.primary_batch_size(),
+        };
+        let min_num_samples = self.emb_model.min_num_samples();
+        let (tx, rx) = crossbeam_channel::bounded::<Array2<f32>>(64);
+
+        let (segmentation_result, embedding_result) = std::thread::scope(|scope| {
+            let segmentation_handle = scope.spawn(|| self.seg_model.run_streaming(audio, tx));
+
+            let embedding_result = match embedding_path {
+                EmbeddingPath::Split => concurrent_embedding_runner.run_split(
+                    rx,
+                    self.emb_model,
+                    batch_size,
+                    min_num_samples,
+                ),
+                EmbeddingPath::Masked => {
+                    concurrent_embedding_runner.run_masked(rx, self.emb_model, batch_size)
+                }
+            };
+
+            let segmentation_result = segmentation_handle.join().unwrap();
+            (segmentation_result, embedding_result)
+        });
+
+        segmentation_result?;
+
+        let concurrent_result = embedding_result?;
+        if concurrent_result.is_empty() {
+            return Ok(InferenceArtifacts {
+                layout: layout.with_num_chunks(0),
+                segmentations: DecodedSegmentations(Array3::zeros((0, 0, 0))),
+                embeddings: ChunkEmbeddings(Array3::zeros((0, 0, 0))),
+            });
+        }
+
+        let num_chunks = concurrent_result.decoded_windows.len();
+        let (segmentations, embeddings) = concurrent_result.into_arrays();
+        let layout = layout.with_num_chunks(num_chunks);
+        tracing::info!(
+            chunks = segmentations.shape()[0],
+            speakers = segmentations.shape()[2],
+            "Concurrent seg+emb complete"
+        );
+
+        Ok(InferenceArtifacts {
+            layout,
+            segmentations: DecodedSegmentations(segmentations),
+            embeddings: ChunkEmbeddings(embeddings),
+        })
+    }
+
+    fn run_post_inference(
+        &mut self,
+        inference_artifacts: InferenceArtifacts,
+        file_id: &str,
+        config: &PipelineConfig,
+    ) -> Result<DiarizationResult, PipelineError> {
+        let InferenceArtifacts {
+            layout,
+            segmentations,
+            embeddings,
+        } = inference_artifacts;
+        let speaker_count = segmentations.speaker_count(&layout);
+
+        if speaker_count
+            .iter()
+            .all(|speaker_count| *speaker_count == 0)
+        {
+            return Ok(DiarizationResult {
+                segmentations,
+                embeddings,
+                speaker_count,
+                hard_clusters: ChunkSpeakerClusters(Array2::zeros((0, 0))),
+                discrete_diarization: DiscreteDiarization(Array2::zeros((0, 0))),
+                rttm: String::new(),
+            });
+        }
+
+        let training_embeddings = embeddings.training_set(&segmentations);
+        let hard_clusters =
+            training_embeddings.cluster(&segmentations, &embeddings, self.plda, config);
+        tracing::info!(
+            rows = hard_clusters.nrows(),
+            cols = hard_clusters.ncols(),
+            "Clustering complete"
+        );
+
+        let reconstructor =
+            Reconstructor::with_clusters(&segmentations, &hard_clusters, &layout.start_frames, 0);
+        let discrete_diarization = match config.reconstruct_method {
+            ReconstructMethod::Smoothed { epsilon } => {
+                reconstructor.reconstruct_smoothed(&speaker_count, epsilon)
+            }
+            ReconstructMethod::Standard => reconstructor.reconstruct(&speaker_count),
         };
 
-        let seg_result = seg_handle.join().unwrap();
-        (seg_result, emb_result)
-    });
+        let segments = discrete_diarization.to_segments(FRAME_STEP_SECONDS, FRAME_DURATION_SECONDS);
+        let segments = merge_segments(&segments, config.merge_gap);
+        let rttm = to_rttm(&segments, file_id);
 
-    seg_result?;
-
-    let result = emb_result?;
-    if result.is_empty() {
-        return Ok(DiarizationResult {
-            segmentations: Array3::zeros((0, 0, 0)),
-            embeddings: Array3::zeros((0, 0, 0)),
-            speaker_count: Vec::new(),
-            hard_clusters: Array2::zeros((0, 0)),
-            discrete_diarization: Array2::zeros((0, 0)),
-            rttm: String::new(),
-        });
+        Ok(DiarizationResult {
+            segmentations,
+            embeddings,
+            speaker_count,
+            hard_clusters,
+            discrete_diarization,
+            rttm,
+        })
     }
-
-    let (segmentations, embeddings) = result.into_arrays();
-    tracing::info!(
-        chunks = segmentations.shape()[0],
-        speakers = num_speakers,
-        "Concurrent seg+emb complete"
-    );
-
-    diarize_from_intermediates(
-        &segmentations,
-        &embeddings,
-        step_seconds,
-        file_id,
-        plda,
-        config,
-    )
 }
 
-/// Run post-inference pipeline from cached segmentations + embeddings.
-///
-/// Takes precomputed segmentations and embeddings; runs binarize → filter →
-/// AHC → PLDA → VBx → reconstruct → RTTM. Used for grid search
-/// where inference is cached and only post-inference params vary
-pub fn diarize_from_intermediates(
-    segmentations: &Array3<f32>,
-    embeddings: &Array3<f32>,
-    step_seconds: f64,
-    file_id: &str,
-    plda: &PldaTransform,
-    config: &PipelineConfig,
-) -> Result<DiarizationResult, PipelineError> {
-    let start_frames = chunk_start_frames(segmentations.shape()[0], step_seconds);
-    let output_frames = total_output_frames(segmentations.shape()[0], step_seconds);
-    let speaker_count = speaker_count(segmentations, &start_frames, 0, output_frames);
-
-    if speaker_count.iter().all(|count| *count == 0) {
-        return Ok(DiarizationResult {
-            segmentations: segmentations.clone(),
-            embeddings: embeddings.clone(),
-            speaker_count,
-            hard_clusters: Array2::zeros((0, 0)),
-            discrete_diarization: Array2::zeros((0, 0)),
-            rttm: String::new(),
-        });
+impl ChunkLayout {
+    fn new(
+        step_seconds: f64,
+        step_samples: usize,
+        window_samples: usize,
+        num_chunks: usize,
+    ) -> Self {
+        Self {
+            step_seconds,
+            step_samples,
+            window_samples,
+            start_frames: chunk_start_frames(num_chunks, step_seconds),
+            output_frames: total_output_frames(num_chunks, step_seconds),
+        }
     }
 
-    let (train_embeddings, _train_chunk_idx, _train_speaker_idx) =
-        filter_embeddings(segmentations, embeddings);
+    fn without_frame_extent(step_seconds: f64, step_samples: usize, window_samples: usize) -> Self {
+        Self::new(step_seconds, step_samples, window_samples, 0)
+    }
 
-    let hard_clusters = if train_embeddings.nrows() < 2 {
-        let mut clusters =
-            Array2::<i32>::zeros((segmentations.shape()[0], segmentations.shape()[2]));
-        mark_inactive_speakers(segmentations, &mut clusters);
-        clusters
-    } else {
-        let ahc_labels = cluster_ahc(&train_embeddings.view(), config.ahc);
-        tracing::debug!(
-            rows = train_embeddings.nrows(),
-            cols = train_embeddings.ncols(),
-            "train_embeddings shape"
-        );
-        {
-            let unique: std::collections::BTreeSet<_> = ahc_labels.iter().copied().collect();
-            tracing::debug!(num_clusters = unique.len(), "AHC pre-clustering");
-            for &k in &unique {
-                let count = ahc_labels.iter().filter(|&&v| v == k).count();
-                tracing::debug!(cluster = k, count, "AHC cluster size");
+    fn with_num_chunks(mut self, num_chunks: usize) -> Self {
+        self.start_frames = chunk_start_frames(num_chunks, self.step_seconds);
+        self.output_frames = total_output_frames(num_chunks, self.step_seconds);
+        self
+    }
+
+    fn chunk_audio<'a>(&self, audio: &'a [f32], chunk_idx: usize) -> &'a [f32] {
+        chunk_audio_raw(audio, self.step_samples, self.window_samples, chunk_idx)
+    }
+}
+
+impl RawSegmentationWindows {
+    fn decode(self, powerset: &PowersetMapping) -> DecodedSegmentations {
+        let num_windows = self.0.len();
+        if num_windows == 0 {
+            return DecodedSegmentations(Array3::zeros((0, 0, 0)));
+        }
+
+        let mut windows = self.0.into_iter();
+        let first = powerset.hard_decode(&windows.next().unwrap());
+        let mut stacked = Array3::<f32>::zeros((num_windows, first.nrows(), first.ncols()));
+        stacked.slice_mut(s![0, .., ..]).assign(&first);
+
+        for (window_idx, window) in windows.enumerate() {
+            let decoded = powerset.hard_decode(&window);
+            stacked
+                .slice_mut(s![window_idx + 1, .., ..])
+                .assign(&decoded);
+        }
+
+        DecodedSegmentations(stacked)
+    }
+}
+
+impl DecodedSegmentations {
+    fn nchunks(&self) -> usize {
+        self.0.shape()[0]
+    }
+
+    fn num_speakers(&self) -> usize {
+        if self.0.ndim() < 3 {
+            return 0;
+        }
+        self.0.shape()[2]
+    }
+
+    fn speaker_count(&self, layout: &ChunkLayout) -> SpeakerCountTrack {
+        let reconstructor = Reconstructor::new(self, &layout.start_frames, 0);
+        reconstructor.speaker_count(layout.output_frames)
+    }
+
+    fn extract_embeddings(
+        &self,
+        audio: &[f32],
+        emb_model: &mut EmbeddingModel,
+        layout: &ChunkLayout,
+        embedding_path: EmbeddingPath,
+    ) -> Result<ChunkEmbeddings, PipelineError> {
+        let num_chunks = self.0.shape()[0];
+        let num_speakers = self.0.shape()[2];
+        let mut embeddings = Array3::<f32>::from_elem((num_chunks, num_speakers, 256), f32::NAN);
+
+        match embedding_path {
+            EmbeddingPath::Split => {
+                self.extract_split_embeddings(audio, emb_model, layout, &mut embeddings)?
+            }
+            EmbeddingPath::Masked => {
+                if emb_model.prefers_chunk_embedding_path() {
+                    for chunk_idx in 0..num_chunks {
+                        let chunk_audio = layout.chunk_audio(audio, chunk_idx);
+                        let chunk_segmentations = self.0.slice(s![chunk_idx, .., ..]);
+                        let clean_masks = clean_masks(&chunk_segmentations);
+                        let chunk_embeddings = emb_model.embed_chunk_speakers(
+                            chunk_audio,
+                            chunk_segmentations,
+                            &clean_masks,
+                        )?;
+                        embeddings
+                            .slice_mut(s![chunk_idx, .., ..])
+                            .assign(&chunk_embeddings);
+                    }
+                } else {
+                    self.extract_masked_embeddings(audio, emb_model, layout, &mut embeddings)?;
+                }
             }
         }
 
-        let plda_features = plda.transform(&train_embeddings.view(), 128);
-        let phi = plda.phi();
-
-        let (gamma, pi): (Array2<f32>, ndarray::Array1<f32>) = cluster_vbx(
-            &ahc_labels,
-            &plda_features.view(),
-            &phi.slice(s![..128]),
-            &config.vbx,
-        );
-
-        tracing::debug!(?pi, "VBx speaker priors");
-
-        let mut kept_speakers: Vec<usize> = pi
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, weight)| {
-                (*weight > config.speaker_keep_threshold as f32).then_some(idx)
-            })
-            .collect();
-        if kept_speakers.is_empty() && !pi.is_empty() {
-            let best = pi
-                .iter()
-                .enumerate()
-                .max_by(|lhs, rhs| lhs.1.partial_cmp(rhs.1).unwrap())
-                .map(|(idx, _)| idx)
-                .unwrap();
-            kept_speakers.push(best);
-        }
-
-        tracing::debug!(?kept_speakers, "VBx kept speakers");
-
-        let centroids = weighted_centroids(&train_embeddings, &gamma, &kept_speakers);
-        for i in 0..centroids.nrows() {
-            let norm: f32 = centroids.row(i).dot(&centroids.row(i)).sqrt();
-            tracing::debug!(cluster = i, norm, "centroid");
-        }
-
-        let mut clusters = assign_embeddings(segmentations, embeddings, &centroids);
-
-        mark_inactive_speakers(segmentations, &mut clusters);
-        tracing::debug!(
-            rows = clusters.nrows(),
-            cols = clusters.ncols(),
-            "hard_clusters shape"
-        );
-
-        clusters
-    };
-
-    tracing::info!(
-        rows = hard_clusters.nrows(),
-        cols = hard_clusters.ncols(),
-        "Clustering complete"
-    );
-
-    let discrete_diarization = match config.reconstruct_method {
-        ReconstructMethod::Smoothed { epsilon } => reconstruct_smoothed(
-            segmentations,
-            &hard_clusters,
-            &speaker_count,
-            &start_frames,
-            0,
-            epsilon,
-        ),
-        ReconstructMethod::Standard => reconstruct(
-            segmentations,
-            &hard_clusters,
-            &speaker_count,
-            &start_frames,
-            0,
-        ),
-    };
-
-    let segments = to_segments(
-        &discrete_diarization,
-        FRAME_STEP_SECONDS,
-        FRAME_DURATION_SECONDS,
-    );
-    let segments = merge_segments(&segments, config.merge_gap);
-    let rttm = to_rttm(&segments, file_id);
-
-    Ok(DiarizationResult {
-        segmentations: segmentations.clone(),
-        embeddings: embeddings.clone(),
-        speaker_count,
-        hard_clusters,
-        discrete_diarization,
-        rttm,
-    })
-}
-
-fn decode_windows(raw_windows: Vec<Array2<f32>>, powerset: &PowersetMapping) -> Array3<f32> {
-    let num_windows = raw_windows.len();
-    let mut windows = raw_windows.into_iter();
-    let first = powerset.hard_decode(&windows.next().unwrap());
-    let mut stacked = Array3::<f32>::zeros((num_windows, first.nrows(), first.ncols()));
-    stacked.slice_mut(s![0, .., ..]).assign(&first);
-
-    for (window_idx, window) in windows.enumerate() {
-        let decoded = powerset.hard_decode(&window);
-        stacked
-            .slice_mut(s![window_idx + 1, .., ..])
-            .assign(&decoded);
+        Ok(ChunkEmbeddings(embeddings))
     }
-    stacked
+
+    fn extract_masked_embeddings(
+        &self,
+        audio: &[f32],
+        emb_model: &mut EmbeddingModel,
+        layout: &ChunkLayout,
+        embeddings: &mut Array3<f32>,
+    ) -> Result<(), PipelineError> {
+        let mut pending = Vec::with_capacity(emb_model.primary_batch_size());
+
+        for chunk_idx in 0..self.0.shape()[0] {
+            let chunk_audio = layout.chunk_audio(audio, chunk_idx);
+            let chunk_segmentations = self.0.slice(s![chunk_idx, .., ..]);
+            let clean_masks = clean_masks(&chunk_segmentations);
+
+            for speaker_idx in 0..self.0.shape()[2] {
+                let mask = chunk_segmentations.column(speaker_idx);
+                let activity: f32 = mask.iter().sum();
+                if activity < MIN_SPEAKER_ACTIVITY {
+                    continue;
+                }
+
+                pending.push(PendingEmbedding {
+                    chunk_idx,
+                    speaker_idx,
+                    audio: chunk_audio,
+                    mask: mask.to_vec(),
+                    clean_mask: clean_masks.column(speaker_idx).to_vec(),
+                });
+                if pending.len() == emb_model.primary_batch_size() {
+                    flush_embedding_batch(emb_model, &pending, embeddings)?;
+                    pending.clear();
+                }
+            }
+        }
+
+        while !pending.is_empty() {
+            let batch_len = emb_model.best_batch_len(pending.len());
+            flush_embedding_batch(emb_model, &pending[..batch_len], embeddings)?;
+            pending.drain(..batch_len);
+        }
+
+        Ok(())
+    }
+
+    fn extract_split_embeddings(
+        &self,
+        audio: &[f32],
+        emb_model: &mut EmbeddingModel,
+        layout: &ChunkLayout,
+        embeddings: &mut Array3<f32>,
+    ) -> Result<(), PipelineError> {
+        let batch_size = emb_model.split_primary_batch_size();
+        let num_speakers = self.0.shape()[2];
+        let min_num_samples = emb_model.min_num_samples();
+
+        let mut pending: Vec<PendingSplitEmbedding> = Vec::with_capacity(batch_size);
+        let mut fbanks: Vec<Array2<f32>> = Vec::new();
+        let mut tail_batches = 0usize;
+        let mut active_items = 0usize;
+
+        for chunk_idx in 0..self.0.shape()[0] {
+            let chunk_audio = layout.chunk_audio(audio, chunk_idx);
+            let fbank = emb_model.compute_chunk_fbank(chunk_audio)?;
+            fbanks.push(fbank);
+            let mut current_fbank_idx = fbanks.len() - 1;
+
+            let chunk_segmentations = self.0.slice(s![chunk_idx, .., ..]);
+            let clean_masks = clean_masks(&chunk_segmentations);
+
+            for speaker_idx in 0..num_speakers {
+                let Some(weights) = select_speaker_weights(
+                    &chunk_segmentations,
+                    &clean_masks,
+                    speaker_idx,
+                    chunk_audio.len(),
+                    min_num_samples,
+                ) else {
+                    continue;
+                };
+                active_items += 1;
+                pending.push(PendingSplitEmbedding {
+                    chunk_idx,
+                    speaker_idx,
+                    fbank_idx: current_fbank_idx,
+                    weights,
+                });
+                if pending.len() == batch_size {
+                    flush_split_embedding_batch(emb_model, &pending, &fbanks, embeddings)?;
+                    tail_batches += 1;
+                    pending.clear();
+
+                    if speaker_idx + 1 < num_speakers {
+                        let kept_fbank = fbanks.swap_remove(current_fbank_idx);
+                        fbanks.clear();
+                        fbanks.push(kept_fbank);
+                        current_fbank_idx = 0;
+                    } else {
+                        fbanks.clear();
+                    }
+                }
+            }
+        }
+
+        if !pending.is_empty() {
+            flush_split_embedding_batch(emb_model, &pending, &fbanks, embeddings)?;
+            tail_batches += 1;
+        }
+
+        tracing::info!(
+            batches = tail_batches,
+            active_items,
+            total_items = self.0.shape()[0] * num_speakers,
+            "Split embeddings complete (fbank+tail streaming)"
+        );
+
+        Ok(())
+    }
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
+fn decode_windows(raw_windows: Vec<Array2<f32>>, powerset: &PowersetMapping) -> Array3<f32> {
+    RawSegmentationWindows(raw_windows).decode(powerset).0
+}
+
+#[cfg(test)]
 fn extract_embeddings(
     seg_model: &SegmentationModel,
     emb_model: &mut EmbeddingModel,
     audio: &[f32],
     segmentations: &Array3<f32>,
 ) -> Result<Array3<f32>, PipelineError> {
-    let num_chunks = segmentations.shape()[0];
-    let num_speakers = segmentations.shape()[2];
-    let mut embeddings = Array3::<f32>::from_elem((num_chunks, num_speakers, 256), f32::NAN);
+    let decoded_segmentations = DecodedSegmentations(segmentations.clone());
+    let layout = ChunkLayout::new(
+        seg_model.step_seconds(),
+        seg_model.step_samples(),
+        seg_model.window_samples(),
+        decoded_segmentations.nchunks(),
+    );
+    decoded_segmentations
+        .extract_embeddings(
+            audio,
+            emb_model,
+            &layout,
+            if emb_model.prefers_chunk_embedding_path() && emb_model.split_primary_batch_size() > 0
+            {
+                EmbeddingPath::Split
+            } else {
+                EmbeddingPath::Masked
+            },
+        )
+        .map(|chunk_embeddings| chunk_embeddings.0)
+}
 
-    if emb_model.prefers_chunk_embedding_path() {
-        if emb_model.split_primary_batch_size() > 0 {
-            extract_split_embeddings(seg_model, emb_model, audio, segmentations, &mut embeddings)?;
-        } else {
-            for chunk_idx in 0..num_chunks {
-                let chunk_audio = chunk_audio(audio, seg_model, chunk_idx);
-                let chunk_segmentations = segmentations.slice(s![chunk_idx, .., ..]);
-                let clean_masks = clean_masks(&chunk_segmentations);
-                let chunk_embeddings = emb_model.embed_chunk_speakers(
-                    chunk_audio,
-                    chunk_segmentations,
-                    &clean_masks,
-                )?;
-                embeddings
-                    .slice_mut(s![chunk_idx, .., ..])
-                    .assign(&chunk_embeddings);
+#[cfg(test)]
+fn filter_embeddings(
+    segmentations: &Array3<f32>,
+    embeddings: &Array3<f32>,
+) -> (Array2<f32>, Vec<usize>, Vec<usize>) {
+    let num_frames = segmentations.shape()[1] as f32;
+    let mut filtered = Vec::new();
+    let mut chunk_indices = Vec::new();
+    let mut speaker_indices = Vec::new();
+
+    for chunk_idx in 0..segmentations.shape()[0] {
+        let single_active: Vec<bool> = segmentations
+            .slice(s![chunk_idx, .., ..])
+            .rows()
+            .into_iter()
+            .map(|row| (row.iter().copied().sum::<f32>() - 1.0).abs() < 1e-6)
+            .collect();
+        for speaker_idx in 0..segmentations.shape()[2] {
+            let clean_frames = segmentations
+                .slice(s![chunk_idx, .., speaker_idx])
+                .iter()
+                .zip(single_active.iter())
+                .filter_map(|(value, is_single_active)| is_single_active.then_some(*value))
+                .sum::<f32>();
+            let embedding = embeddings.slice(s![chunk_idx, speaker_idx, ..]);
+            let valid_embedding = embedding.iter().all(|value| value.is_finite());
+            if valid_embedding && clean_frames >= 0.2 * num_frames {
+                filtered.extend(embedding.iter());
+                chunk_indices.push(chunk_idx);
+                speaker_indices.push(speaker_idx);
             }
         }
-        return Ok(embeddings);
     }
 
-    let mut pending = Vec::with_capacity(emb_model.primary_batch_size());
-
-    for chunk_idx in 0..num_chunks {
-        let chunk_audio = chunk_audio(audio, seg_model, chunk_idx);
-        let chunk_segmentations = segmentations.slice(s![chunk_idx, .., ..]);
-        let clean_masks = clean_masks(&chunk_segmentations);
-
-        for speaker_idx in 0..num_speakers {
-            let mask = chunk_segmentations.column(speaker_idx);
-            let activity: f32 = mask.iter().sum();
-            if activity < MIN_SPEAKER_ACTIVITY {
-                continue;
-            }
-
-            pending.push(PendingEmbedding {
-                chunk_idx,
-                speaker_idx,
-                audio: chunk_audio,
-                mask: mask.to_vec(),
-                clean_mask: clean_masks.column(speaker_idx).to_vec(),
-            });
-            if pending.len() == emb_model.primary_batch_size() {
-                flush_embedding_batch(emb_model, &pending, &mut embeddings)?;
-                pending.clear();
-            }
-        }
-    }
-
-    while !pending.is_empty() {
-        let batch_len = emb_model.best_batch_len(pending.len());
-        flush_embedding_batch(emb_model, &pending[..batch_len], &mut embeddings)?;
-        pending.drain(..batch_len);
-    }
-
-    Ok(embeddings)
+    let filtered_embeddings =
+        Array2::from_shape_vec((chunk_indices.len(), embeddings.shape()[2]), filtered).unwrap();
+    (filtered_embeddings, chunk_indices, speaker_indices)
 }
 
 fn flush_embedding_batch(
@@ -905,91 +1186,6 @@ fn flush_embedding_batch(
             .slice_mut(s![item.chunk_idx, item.speaker_idx, ..])
             .assign(&batch_embeddings.row(batch_idx));
     }
-
-    Ok(())
-}
-
-fn extract_split_embeddings(
-    seg_model: &SegmentationModel,
-    emb_model: &mut EmbeddingModel,
-    audio: &[f32],
-    segmentations: &Array3<f32>,
-    embeddings: &mut Array3<f32>,
-) -> Result<(), PipelineError> {
-    let batch_size = emb_model.split_primary_batch_size();
-    let num_chunks = segmentations.shape()[0];
-    let num_speakers = segmentations.shape()[2];
-    let min_num_samples = emb_model.min_num_samples();
-
-    let mut pending: Vec<PendingSplitEmbedding> = Vec::with_capacity(batch_size);
-    let mut fbanks: Vec<Array2<f32>> = Vec::new();
-    let mut tail_batches = 0usize;
-    let mut active_items = 0usize;
-
-    // stream: compute fbank per chunk, immediately enqueue speaker tail items
-    for chunk_idx in 0..num_chunks {
-        let chunk_audio = chunk_audio(audio, seg_model, chunk_idx);
-        let fbank = emb_model.compute_chunk_fbank(chunk_audio)?;
-        fbanks.push(fbank);
-        let mut cur_fbank_idx = fbanks.len() - 1;
-
-        let chunk_segmentations = segmentations.slice(s![chunk_idx, .., ..]);
-        let clean = clean_masks(&chunk_segmentations);
-
-        for speaker_idx in 0..num_speakers {
-            let mask_col = chunk_segmentations.column(speaker_idx);
-            let activity: f32 = mask_col.iter().sum();
-            if activity < MIN_SPEAKER_ACTIVITY {
-                continue;
-            }
-
-            let clean_col = clean.column(speaker_idx);
-            let use_clean = should_use_clean_mask(
-                &clean_col,
-                mask_col.len(),
-                chunk_audio.len(),
-                min_num_samples,
-            );
-            let weights: Vec<f32> = if use_clean {
-                clean_col.iter().copied().collect()
-            } else {
-                mask_col.iter().copied().collect()
-            };
-            active_items += 1;
-            pending.push(PendingSplitEmbedding {
-                chunk_idx,
-                speaker_idx,
-                fbank_idx: cur_fbank_idx,
-                weights,
-            });
-            if pending.len() == batch_size {
-                flush_split_embedding_batch(emb_model, &pending, &fbanks, embeddings)?;
-                tail_batches += 1;
-                pending.clear();
-
-                // keep current chunk's fbank if more speakers remain
-                if speaker_idx + 1 < num_speakers {
-                    let kept = fbanks.swap_remove(cur_fbank_idx);
-                    fbanks.clear();
-                    fbanks.push(kept);
-                    cur_fbank_idx = 0;
-                } else {
-                    fbanks.clear();
-                }
-            }
-        }
-    }
-
-    if !pending.is_empty() {
-        flush_split_embedding_batch(emb_model, &pending, &fbanks, embeddings)?;
-        tail_batches += 1;
-    }
-    tracing::info!(
-        batches = tail_batches,
-        active_items,
-        total_items = num_chunks * num_speakers,
-        "Split embeddings complete (fbank+tail streaming)"
-    );
 
     Ok(())
 }
@@ -1018,42 +1214,132 @@ fn flush_split_embedding_batch(
     Ok(())
 }
 
-fn filter_embeddings(
-    segmentations: &Array3<f32>,
-    embeddings: &Array3<f32>,
-) -> (Array2<f32>, Vec<usize>, Vec<usize>) {
-    let num_frames = segmentations.shape()[1] as f32;
-    let mut filtered = Vec::new();
-    let mut chunk_idx = Vec::new();
-    let mut speaker_idx = Vec::new();
+impl ChunkEmbeddings {
+    fn training_set(&self, segmentations: &DecodedSegmentations) -> TrainingEmbeddings {
+        let num_frames = segmentations.0.shape()[1] as f32;
+        let mut filtered = Vec::new();
+        let mut chunk_indices = Vec::new();
 
-    for chunk in 0..segmentations.shape()[0] {
-        let single_active: Vec<bool> = segmentations
-            .slice(s![chunk, .., ..])
-            .rows()
-            .into_iter()
-            .map(|row| (row.iter().copied().sum::<f32>() - 1.0).abs() < 1e-6)
-            .collect();
-        for speaker in 0..segmentations.shape()[2] {
-            let clean_frames = segmentations
-                .slice(s![chunk, .., speaker])
-                .iter()
-                .zip(single_active.iter())
-                .filter_map(|(value, single)| single.then_some(*value))
-                .sum::<f32>();
-            let embedding = embeddings.slice(s![chunk, speaker, ..]);
-            let valid = embedding.iter().all(|value| value.is_finite());
-            if valid && clean_frames >= 0.2 * num_frames {
-                filtered.extend(embedding.iter());
-                chunk_idx.push(chunk);
-                speaker_idx.push(speaker);
+        for chunk_idx in 0..segmentations.0.shape()[0] {
+            let single_active: Vec<bool> = segmentations
+                .0
+                .slice(s![chunk_idx, .., ..])
+                .rows()
+                .into_iter()
+                .map(|row| (row.iter().copied().sum::<f32>() - 1.0).abs() < 1e-6)
+                .collect();
+            for speaker_idx in 0..segmentations.0.shape()[2] {
+                let clean_frames = segmentations
+                    .0
+                    .slice(s![chunk_idx, .., speaker_idx])
+                    .iter()
+                    .zip(single_active.iter())
+                    .filter_map(|(value, is_single_active)| is_single_active.then_some(*value))
+                    .sum::<f32>();
+                let embedding = self.0.slice(s![chunk_idx, speaker_idx, ..]);
+                let valid_embedding = embedding.iter().all(|value| value.is_finite());
+                if valid_embedding && clean_frames >= 0.2 * num_frames {
+                    filtered.extend(embedding.iter());
+                    chunk_indices.push(chunk_idx);
+                }
             }
         }
-    }
 
-    let filtered_embeddings =
-        Array2::from_shape_vec((chunk_idx.len(), embeddings.shape()[2]), filtered).unwrap();
-    (filtered_embeddings, chunk_idx, speaker_idx)
+        let row_count = chunk_indices.len();
+        let filtered_embeddings =
+            Array2::from_shape_vec((row_count, self.0.shape()[2]), filtered).unwrap();
+        TrainingEmbeddings(filtered_embeddings)
+    }
+}
+
+impl TrainingEmbeddings {
+    fn cluster(
+        &self,
+        segmentations: &DecodedSegmentations,
+        embeddings: &ChunkEmbeddings,
+        plda: &PldaTransform,
+        config: &PipelineConfig,
+    ) -> ChunkSpeakerClusters {
+        if self.0.nrows() < 2 {
+            let mut clusters =
+                Array2::<i32>::zeros((segmentations.0.shape()[0], segmentations.0.shape()[2]));
+            mark_inactive_speakers(&segmentations.0, &mut clusters);
+            return ChunkSpeakerClusters(clusters);
+        }
+
+        let ahc_labels = cluster_ahc(&self.0.view(), config.ahc);
+        tracing::debug!(
+            rows = self.0.nrows(),
+            cols = self.0.ncols(),
+            "train_embeddings shape"
+        );
+        {
+            let unique: std::collections::BTreeSet<_> = ahc_labels.iter().copied().collect();
+            tracing::debug!(num_clusters = unique.len(), "AHC pre-clustering");
+            for &cluster in &unique {
+                let count = ahc_labels.iter().filter(|&&value| value == cluster).count();
+                tracing::debug!(cluster, count, "AHC cluster size");
+            }
+        }
+
+        let plda_features = plda.transform(&self.0.view(), 128);
+        let phi = plda.phi();
+        let (gamma, pi): (Array2<f32>, ndarray::Array1<f32>) = cluster_vbx(
+            &ahc_labels,
+            &plda_features.view(),
+            &phi.slice(s![..128]),
+            &config.vbx,
+        );
+
+        tracing::debug!(?pi, "VBx speaker priors");
+
+        let mut kept_speakers: Vec<usize> = pi
+            .iter()
+            .enumerate()
+            .filter_map(|(speaker_idx, weight)| {
+                (*weight > config.speaker_keep_threshold as f32).then_some(speaker_idx)
+            })
+            .collect();
+        if kept_speakers.is_empty() && !pi.is_empty() {
+            let best_speaker = pi
+                .iter()
+                .enumerate()
+                .max_by(|left, right| left.1.partial_cmp(right.1).unwrap())
+                .map(|(speaker_idx, _)| speaker_idx)
+                .unwrap();
+            kept_speakers.push(best_speaker);
+        }
+
+        tracing::debug!(?kept_speakers, "VBx kept speakers");
+        let centroids = weighted_centroids(&self.0, &gamma, &kept_speakers);
+        for cluster_idx in 0..centroids.nrows() {
+            let norm: f32 = centroids
+                .row(cluster_idx)
+                .dot(&centroids.row(cluster_idx))
+                .sqrt();
+            tracing::debug!(cluster = cluster_idx, norm, "centroid");
+        }
+
+        let mut clusters = assign_chunk_embeddings(segmentations, embeddings, &centroids);
+        mark_inactive_speakers(&segmentations.0, &mut clusters);
+        tracing::debug!(
+            rows = clusters.nrows(),
+            cols = clusters.ncols(),
+            "hard_clusters shape"
+        );
+
+        ChunkSpeakerClusters(clusters)
+    }
+}
+
+impl DiscreteDiarization {
+    pub fn to_segments(
+        &self,
+        frame_step_seconds: f64,
+        frame_duration_seconds: f64,
+    ) -> Vec<crate::segment::Segment> {
+        to_segments(&self.0, frame_step_seconds, frame_duration_seconds)
+    }
 }
 
 fn weighted_centroids(
@@ -1074,13 +1360,13 @@ fn weighted_centroids(
     centroids
 }
 
-fn assign_embeddings(
-    segmentations: &Array3<f32>,
-    embeddings: &Array3<f32>,
+fn assign_chunk_embeddings(
+    segmentations: &DecodedSegmentations,
+    embeddings: &ChunkEmbeddings,
     centroids: &Array2<f32>,
 ) -> Array2<i32> {
-    let num_chunks = embeddings.shape()[0];
-    let num_speakers = embeddings.shape()[1];
+    let num_chunks = embeddings.0.shape()[0];
+    let num_speakers = embeddings.0.shape()[1];
     let num_clusters = centroids.nrows();
     let mut labels = Array2::<i32>::from_elem((num_chunks, num_speakers), -2);
 
@@ -1089,13 +1375,13 @@ fn assign_embeddings(
         let mut active_local = Vec::new();
         let mut scores = Array2::<f32>::from_elem((num_speakers, num_clusters), f32::NEG_INFINITY);
         for speaker_idx in 0..num_speakers {
-            let is_active = segmentations.slice(s![chunk_idx, .., speaker_idx]).sum() > 0.0;
+            let is_active = segmentations.0.slice(s![chunk_idx, .., speaker_idx]).sum() > 0.0;
             if !is_active {
                 continue;
             }
 
             active_local.push(speaker_idx);
-            let embedding = embeddings.slice(s![chunk_idx, speaker_idx, ..]);
+            let embedding = embeddings.0.slice(s![chunk_idx, speaker_idx, ..]);
             if embedding.iter().any(|value| !value.is_finite()) {
                 continue;
             }
@@ -1137,6 +1423,19 @@ fn assign_embeddings(
     }
 
     labels
+}
+
+#[cfg(test)]
+fn assign_embeddings(
+    segmentations: &Array3<f32>,
+    embeddings: &Array3<f32>,
+    centroids: &Array2<f32>,
+) -> Array2<i32> {
+    assign_chunk_embeddings(
+        &DecodedSegmentations(segmentations.clone()),
+        &ChunkEmbeddings(embeddings.clone()),
+        centroids,
+    )
 }
 
 fn best_assignment(
@@ -1245,6 +1544,8 @@ fn clean_masks(segmentations: &ArrayView2<f32>) -> Array2<f32> {
     clean
 }
 
+#[cfg(test)]
+#[allow(dead_code)]
 fn chunk_audio<'a>(audio: &'a [f32], seg_model: &SegmentationModel, chunk_idx: usize) -> &'a [f32] {
     chunk_audio_raw(
         audio,
