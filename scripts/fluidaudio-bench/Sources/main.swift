@@ -44,8 +44,11 @@ enum Bench {
             let avg = cumulative / Double(i + 1)
             let remaining = Double(totalFiles - i - 1) * avg
             let eta = formatEta(remaining)
+            let timeFmt = DateFormatter()
+            timeFmt.dateFormat = "HH:mm:ss"
+            let now = timeFmt.string(from: Date())
             FileHandle.standardError.write(
-                Data("  [\(i + 1)/\(totalFiles)] \(stem): \(String(format: "%.1f", elapsed))s (ETA \(eta))\n".utf8))
+                Data("  [\(i + 1)/\(totalFiles)] \(stem): \(String(format: "%.1f", elapsed))s (ETA \(eta)) [\(now)]\n".utf8))
 
             // RTTM output to stdout
             for seg in result.segments {
