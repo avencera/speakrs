@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Instant;
-
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use std::time::{Duration, Instant};
 
 use color_eyre::eyre::{Result, bail};
+use wait_timeout::ChildExt;
 
 use crate::audio::prepare_audio;
 use crate::cargo::{cargo_build_xtask, features_for_mode};
@@ -105,6 +105,7 @@ fn run_once(command: &[&str], cwd: &Path) -> Result<f64> {
         Command::new(command[0])
             .args(&command[1..])
             .current_dir(cwd),
+        Duration::from_secs(30 * 60),
     )?;
     Ok(elapsed)
 }
@@ -219,7 +220,10 @@ pub fn compare(source: &str, runs: u32, warmups: u32) -> Result<()> {
     for (name, cmd_args) in &implementations {
         let cmd_refs: Vec<&str> = cmd_args.iter().map(String::as_str).collect();
 
-        match run_compare_impl(name, warmups, runs, || run_capture_impl(&cmd_refs, &root)) {
+        let compare_timeout = Duration::from_secs(30 * 60);
+        match run_compare_impl(name, warmups, runs, || {
+            run_capture_impl(&cmd_refs, &root, compare_timeout)
+        }) {
             Ok(result) => {
                 println!(
                     "  {name}: mean {:.2}s, min {:.2}s",
@@ -239,7 +243,7 @@ pub fn compare(source: &str, runs: u32, warmups: u32) -> Result<()> {
 
     if let Some(fluidaudio_path) = &fluidaudio_path {
         match run_compare_impl("FluidAudio", warmups, runs, || {
-            run_fluidaudio_impl(fluidaudio_path, &wav_str)
+            run_fluidaudio_impl(fluidaudio_path, &wav_str, Duration::from_secs(30 * 60))
         }) {
             Ok(result) => {
                 println!(
@@ -272,7 +276,7 @@ pub fn compare(source: &str, runs: u32, warmups: u32) -> Result<()> {
         ];
         let cmd_refs: Vec<&str> = cmd_args.iter().map(String::as_str).collect();
         match run_compare_impl("pyannote-rs", warmups, runs, || {
-            run_capture_impl(&cmd_refs, &root)
+            run_capture_impl(&cmd_refs, &root, Duration::from_secs(30 * 60))
         }) {
             Ok(result) => {
                 println!(
@@ -413,15 +417,20 @@ fn summarize_compare_runs(name: &str, measurements: &[f64], rttm: String) -> Run
     RunResult::new(name, mean_seconds, min_seconds, rttm)
 }
 
-fn run_capture_impl(command: &[&str], cwd: &Path) -> Result<(f64, String)> {
+fn run_capture_impl(command: &[&str], cwd: &Path, timeout: Duration) -> Result<(f64, String)> {
     capture_benchmark_cmd(
         Command::new(command[0])
             .args(&command[1..])
             .current_dir(cwd),
+        timeout,
     )
 }
 
-fn run_fluidaudio_impl(fluidaudio_path: &Path, wav_path: &str) -> Result<(f64, String)> {
+fn run_fluidaudio_impl(
+    fluidaudio_path: &Path,
+    wav_path: &str,
+    timeout: Duration,
+) -> Result<(f64, String)> {
     let json_tmp = std::env::temp_dir().join(format!("fa-{}.json", std::process::id()));
 
     let (elapsed, _) = capture_benchmark_cmd(
@@ -432,6 +441,7 @@ fn run_fluidaudio_impl(fluidaudio_path: &Path, wav_path: &str) -> Result<(f64, S
             .arg(wav_path)
             .args(["--mode", "offline", "--output"])
             .arg(&json_tmp),
+        timeout,
     )?;
 
     if !json_tmp.exists() {
@@ -524,6 +534,7 @@ pub fn der(
     max_minutes: u32,
     description: Option<&str>,
     impls: &[String],
+    no_preflight: bool,
 ) -> Result<()> {
     if impls.len() == 1 && impls[0] == "list" {
         println!("Available implementations:");
@@ -593,6 +604,23 @@ pub fn der(
 
     let fixtures_dir = root.join("fixtures/datasets");
 
+    // pre-flight: run all implementations on the shortest file from the first dataset
+    let preflight_failures: HashMap<String, String> = if no_preflight {
+        HashMap::new()
+    } else {
+        // ensure first dataset is available for preflight
+        let first_dataset = &datasets[0];
+        first_dataset.ensure(&fixtures_dir)?;
+        let first_dir = first_dataset.dataset_dir(&fixtures_dir);
+        let preflight_files = discover_files(&first_dir, 1, f64::MAX)?;
+        if preflight_files.is_empty() {
+            eprintln!("warning: no files for preflight, skipping");
+            HashMap::new()
+        } else {
+            preflight_check(&root, &preflight_files[0], &seg_model, &emb_model, impls)?
+        }
+    };
+
     for dataset in &datasets {
         println!();
         println!("========== {} ==========", dataset.display_name());
@@ -634,8 +662,15 @@ pub fn der(
         println!("Run ID: {run_id}");
         println!();
 
-        let (implementations, all_results) =
-            run_der_implementations(&root, &files, &seg_model, &emb_model, impls)?;
+        let (implementations, all_results) = run_der_implementations(
+            &root,
+            &files,
+            &seg_model,
+            &emb_model,
+            impls,
+            total_audio_seconds,
+            &preflight_failures,
+        )?;
 
         save_der_results(
             &run_dir,
@@ -665,6 +700,8 @@ fn run_der_implementations(
     seg_model: &Path,
     emb_model: &Path,
     impls: &[String],
+    total_audio_seconds: f64,
+    preflight_failures: &HashMap<String, String>,
 ) -> Result<DerResults> {
     let speakrs_binary = root.join("target/release/xtask");
     let pyannote_rs_binary =
@@ -687,8 +724,26 @@ fn run_der_implementations(
     let wav_paths: Vec<&Path> = files.iter().map(|(w, _)| w.as_path()).collect();
     let mut all_results: HashMap<String, DerImplResult> = HashMap::new();
 
+    // 5x realtime timeout with a 2 minute minimum
+    let batch_timeout = Duration::from_secs_f64((total_audio_seconds * 5.0).max(120.0));
+    let per_file_timeout = |wav: &Path| {
+        let dur = wav_duration_seconds(wav).unwrap_or(60.0);
+        Duration::from_secs_f64((dur * 5.0).max(120.0))
+    };
+
     for (impl_name, impl_type) in &implementations {
         println!("Running {impl_name}...");
+
+        // skip if preflight failed for this implementation
+        if let Some(reason) = preflight_failures.get(*impl_name) {
+            println!("  → skipped (preflight failed): {reason}");
+            println!();
+            all_results.insert(
+                impl_name.to_string(),
+                DerImplResult::failed(format!("preflight failed: {reason}")),
+            );
+            continue;
+        }
 
         if let Some(reason) = der_skip_reason(
             root,
@@ -705,7 +760,9 @@ fn run_der_implementations(
         }
 
         let benchmark_result = match impl_type {
-            ImplType::Speakrs(mode) => run_speakrs_batch(&speakrs_binary, mode, &wav_paths),
+            ImplType::Speakrs(mode) => {
+                run_speakrs_batch(&speakrs_binary, mode, &wav_paths, batch_timeout)
+            }
             ImplType::FluidAudioBench => {
                 if let Err(err) = run_cmd(
                     Command::new("swift")
@@ -717,6 +774,7 @@ fn run_der_implementations(
                     run_batch_binary(
                         &fluidaudio_bench_dir.join(".build/release/fluidaudio-bench"),
                         &wav_paths,
+                        batch_timeout,
                     )
                 }
             }
@@ -728,9 +786,11 @@ fn run_der_implementations(
                     emb_model.to_string_lossy().to_string(),
                 ];
                 let refs: Vec<&str> = cmd_args.iter().map(String::as_str).collect();
-                run_capture_impl(&refs, root)
+                run_capture_impl(&refs, root, per_file_timeout(wav))
             }),
-            ImplType::Pyannote(device) => run_pyannote_batch(root, device, &wav_paths),
+            ImplType::Pyannote(device) => {
+                run_pyannote_batch(root, device, &wav_paths, batch_timeout)
+            }
         };
 
         let (total_time, per_file_rttm) = match benchmark_result {
@@ -880,60 +940,102 @@ impl DerImplResult {
     }
 }
 
-fn make_progress_bar(file_count: u64) -> ProgressBar {
-    let pb = ProgressBar::with_draw_target(
-        Some(file_count),
-        ProgressDrawTarget::term_like_with_hz(Box::new(console::Term::stderr()), 20),
-    );
-    pb.set_style(ProgressStyle::with_template("  {pos}/{len} ETA {eta}  {msg}").unwrap());
-    pb.tick();
-    pb
-}
+const MAX_RETRIES: u32 = 3;
 
-fn run_batch_cmd(cmd: &mut Command) -> Result<(f64, HashMap<String, String>)> {
-    let (elapsed, stdout) = capture_benchmark_cmd(cmd)?;
-    let per_file = split_rttm_by_file_id(&stdout);
-    Ok((elapsed, per_file))
+fn run_batch_cmd(
+    cmd_builder: impl Fn() -> Command,
+    timeout: Duration,
+) -> Result<(f64, HashMap<String, String>)> {
+    for attempt in 0..=MAX_RETRIES {
+        let mut cmd = cmd_builder();
+        match capture_benchmark_cmd(&mut cmd, timeout) {
+            Ok((elapsed, stdout)) => return Ok((elapsed, split_rttm_by_file_id(&stdout))),
+            Err(err) => {
+                // don't retry timeouts — only crashes
+                let is_timeout = err
+                    .downcast_ref::<BenchmarkError>()
+                    .is_some_and(|e| e.is_timeout());
+                if is_timeout || attempt >= MAX_RETRIES {
+                    return Err(err);
+                }
+                eprintln!(
+                    "  attempt {}/{} failed: {err}, retrying...",
+                    attempt + 1,
+                    MAX_RETRIES + 1
+                );
+            }
+        }
+    }
+    unreachable!()
 }
 
 fn run_speakrs_batch(
     binary: &Path,
     mode: &str,
     wav_paths: &[&Path],
+    timeout: Duration,
 ) -> Result<(f64, HashMap<String, String>)> {
-    let mut cmd = Command::new(binary);
-    cmd.arg("diarize").arg("--mode").arg(mode);
-    for p in wav_paths {
-        cmd.arg(p);
-    }
-    run_batch_cmd(&mut cmd)
+    let binary = binary.to_path_buf();
+    let mode = mode.to_string();
+    let wav_paths: Vec<PathBuf> = wav_paths.iter().map(|p| p.to_path_buf()).collect();
+    run_batch_cmd(
+        move || {
+            let mut cmd = Command::new(&binary);
+            cmd.arg("diarize").arg("--mode").arg(&mode);
+            for p in &wav_paths {
+                cmd.arg(p);
+            }
+            cmd
+        },
+        timeout,
+    )
 }
 
 fn run_pyannote_batch(
     root: &Path,
     device: &str,
     wav_paths: &[&Path],
+    timeout: Duration,
 ) -> Result<(f64, HashMap<String, String>)> {
     let uv = std::env::var("HOME")
         .ok()
         .map(|h| std::path::PathBuf::from(h).join(".local/bin/uv"))
         .filter(|p| p.exists())
         .unwrap_or_else(|| "uv".into());
-    let mut cmd = Command::new(uv);
-    cmd.args(["run", "scripts/diarize_pyannote.py", "--device", device])
-        .current_dir(root);
-    for p in wav_paths {
-        cmd.arg(p);
-    }
-    run_batch_cmd(&mut cmd)
+    let root = root.to_path_buf();
+    let device = device.to_string();
+    let wav_paths: Vec<PathBuf> = wav_paths.iter().map(|p| p.to_path_buf()).collect();
+    run_batch_cmd(
+        move || {
+            let mut cmd = Command::new(&uv);
+            cmd.args(["run", "scripts/diarize_pyannote.py", "--device", &device])
+                .current_dir(&root);
+            for p in &wav_paths {
+                cmd.arg(p);
+            }
+            cmd
+        },
+        timeout,
+    )
 }
 
-fn run_batch_binary(binary: &Path, wav_paths: &[&Path]) -> Result<(f64, HashMap<String, String>)> {
-    let mut cmd = Command::new(binary);
-    for p in wav_paths {
-        cmd.arg(p);
-    }
-    run_batch_cmd(&mut cmd)
+fn run_batch_binary(
+    binary: &Path,
+    wav_paths: &[&Path],
+    timeout: Duration,
+) -> Result<(f64, HashMap<String, String>)> {
+    let binary = binary.to_path_buf();
+    let wav_paths: Vec<PathBuf> = wav_paths.iter().map(|p| p.to_path_buf()).collect();
+    run_batch_cmd(
+        move || {
+            let mut cmd = Command::new(&binary);
+            for p in &wav_paths {
+                cmd.arg(p);
+            }
+            cmd
+        },
+        timeout,
+    )
 }
 
 fn run_per_file(
@@ -942,18 +1044,20 @@ fn run_per_file(
 ) -> Result<(f64, HashMap<String, String>)> {
     let mut total_time = 0.0;
     let mut per_file = HashMap::new();
-    let pb = make_progress_bar(files.len() as u64);
+    let total = files.len();
 
-    for (wav_path, _) in files {
+    for (i, (wav_path, _)) in files.iter().enumerate() {
         let (elapsed, rttm) = runner(wav_path)?;
         total_time += elapsed;
         let stem = wav_path.file_stem().unwrap().to_string_lossy().to_string();
         per_file.insert(stem.clone(), rttm);
-        pb.println(format!("  {stem}: {elapsed:.1}s"));
-        pb.inc(1);
+
+        let avg = total_time / (i + 1) as f64;
+        let remaining = (total - i - 1) as f64 * avg;
+        let eta = format_eta(remaining);
+        eprintln!("  [{}/{}] {stem}: {elapsed:.1}s (ETA {eta})", i + 1, total);
     }
 
-    pb.finish_with_message(format!("done ({total_time:.1}s)"));
     Ok((total_time, per_file))
 }
 
@@ -1135,24 +1239,87 @@ fn save_der_results(
     Ok(())
 }
 
-fn capture_benchmark_cmd(cmd: &mut Command) -> Result<(f64, String)> {
-    let start = Instant::now();
-    let output = cmd
+/// Possible failure modes for `capture_benchmark_cmd`
+enum BenchmarkError {
+    /// Process exceeded its time budget
+    Timeout { program: String, timeout: Duration },
+    /// Process exited with non-zero / signal
+    ProcessFailed {
+        program: String,
+        status: std::process::ExitStatus,
+    },
+    /// Other I/O error
+    Other(color_eyre::eyre::Report),
+}
+
+impl BenchmarkError {
+    fn is_timeout(&self) -> bool {
+        matches!(self, Self::Timeout { .. })
+    }
+}
+
+impl std::fmt::Display for BenchmarkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Timeout { program, timeout } => {
+                write!(f, "{program} timed out after {}s", timeout.as_secs())
+            }
+            Self::ProcessFailed { program, status } => {
+                write!(f, "{program} failed with {status}")
+            }
+            Self::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+fn capture_benchmark_cmd(cmd: &mut Command, timeout: Duration) -> Result<(f64, String)> {
+    let program = cmd.get_program().to_string_lossy().to_string();
+
+    let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
-        .output()?;
-    let elapsed = start.elapsed().as_secs_f64();
+        .spawn()
+        .map_err(|e| BenchmarkError::Other(e.into()))?;
 
-    if !output.status.success() {
-        bail!(
-            "{} failed with {}",
-            cmd.get_program().to_string_lossy(),
-            output.status
-        );
+    // drain stdout in a background thread to prevent pipe buffer deadlock
+    let stdout_handle = child.stdout.take().unwrap();
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let mut r = stdout_handle;
+        r.read_to_end(&mut buf).ok();
+        buf
+    });
+
+    let start = Instant::now();
+    match child
+        .wait_timeout(timeout)
+        .map_err(|e| BenchmarkError::Other(e.into()))?
+    {
+        Some(status) => {
+            let elapsed = start.elapsed().as_secs_f64();
+            if !status.success() {
+                return Err(BenchmarkError::ProcessFailed { program, status }.into());
+            }
+            let stdout_bytes = reader.join().unwrap_or_default();
+            Ok((elapsed, String::from_utf8_lossy(&stdout_bytes).to_string()))
+        }
+        None => {
+            // timed out — kill and reap
+            let _ = child.kill();
+            let _ = child.wait();
+            drop(reader);
+            Err(BenchmarkError::Timeout { program, timeout }.into())
+        }
     }
-
-    Ok((elapsed, String::from_utf8_lossy(&output.stdout).to_string()))
 }
+
+impl std::fmt::Debug for BenchmarkError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+
+impl std::error::Error for BenchmarkError {}
 
 /// Derive cargo features needed for the selected DER implementations
 fn der_build_features(impls: &[String]) -> Vec<String> {
@@ -1187,6 +1354,136 @@ fn der_build_features(impls: &[String]) -> Vec<String> {
     }
 
     features
+}
+
+const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Run each selected implementation on a single short file as a smoke test
+fn preflight_check(
+    root: &Path,
+    file: &(PathBuf, PathBuf),
+    seg_model: &Path,
+    emb_model: &Path,
+    impls: &[String],
+) -> Result<HashMap<String, String>> {
+    let (wav_path, _rttm_path) = file;
+    let stem = wav_path.file_stem().unwrap().to_string_lossy().to_string();
+    let dur = wav_duration_seconds(wav_path).unwrap_or(0.0);
+    println!();
+    println!("=== Pre-flight check ({stem}, {dur:.0}s) ===");
+
+    let speakrs_binary = root.join("target/release/xtask");
+    let pyannote_rs_binary =
+        root.join("scripts/pyannote_rs_bench/target/release/diarize-pyannote-rs");
+    let fluidaudio_bench_dir = root.join("scripts/fluidaudio-bench");
+
+    let implementations: Vec<(&str, &str, ImplType)> = if impls.is_empty() {
+        IMPL_REGISTRY
+            .iter()
+            .map(|(cli_id, display_name, impl_type)| (*cli_id, *display_name, *impl_type))
+            .collect()
+    } else {
+        IMPL_REGISTRY
+            .iter()
+            .filter(|(cli_id, _, _)| impls.iter().any(|i| i == cli_id))
+            .map(|(cli_id, display_name, impl_type)| (*cli_id, *display_name, *impl_type))
+            .collect()
+    };
+
+    let wav_paths: Vec<&Path> = vec![wav_path.as_path()];
+    let mut failures: HashMap<String, String> = HashMap::new();
+
+    for (_cli_id, display_name, impl_type) in &implementations {
+        if let Some(reason) = der_skip_reason(
+            root,
+            impl_type,
+            &fluidaudio_bench_dir,
+            &pyannote_rs_binary,
+            seg_model,
+            emb_model,
+        ) {
+            println!("  {display_name:<22} skipped ({reason})");
+            continue;
+        }
+
+        let result = match impl_type {
+            ImplType::Speakrs(mode) => {
+                run_speakrs_batch(&speakrs_binary, mode, &wav_paths, PREFLIGHT_TIMEOUT)
+            }
+            ImplType::FluidAudioBench => {
+                if let Err(err) = run_cmd(
+                    Command::new("swift")
+                        .args(["build", "-c", "release", "--package-path"])
+                        .arg(&fluidaudio_bench_dir),
+                ) {
+                    Err(err)
+                } else {
+                    run_batch_binary(
+                        &fluidaudio_bench_dir.join(".build/release/fluidaudio-bench"),
+                        &wav_paths,
+                        PREFLIGHT_TIMEOUT,
+                    )
+                }
+            }
+            ImplType::PyannoteRs => {
+                let cmd_args = [
+                    pyannote_rs_binary.to_string_lossy().to_string(),
+                    wav_path.to_string_lossy().to_string(),
+                    seg_model.to_string_lossy().to_string(),
+                    emb_model.to_string_lossy().to_string(),
+                ];
+                let refs: Vec<&str> = cmd_args.iter().map(String::as_str).collect();
+                run_capture_impl(&refs, root, PREFLIGHT_TIMEOUT).map(|(elapsed, rttm)| {
+                    let mut map = HashMap::new();
+                    map.insert(stem.clone(), rttm);
+                    (elapsed, map)
+                })
+            }
+            ImplType::Pyannote(device) => {
+                run_pyannote_batch(root, device, &wav_paths, PREFLIGHT_TIMEOUT)
+            }
+        };
+
+        match result {
+            Ok((elapsed, rttm_map)) => {
+                let has_output = rttm_map.values().any(|v| !v.trim().is_empty());
+                if has_output {
+                    println!("  {display_name:<22} ok ({elapsed:.1}s)");
+                } else {
+                    let reason = "empty RTTM output".to_string();
+                    println!("  {display_name:<22} FAILED: {reason}");
+                    failures.insert(display_name.to_string(), reason);
+                }
+            }
+            Err(err) => {
+                let reason = format!("{err}");
+                println!("  {display_name:<22} FAILED: {reason}");
+                failures.insert(display_name.to_string(), reason);
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        let names: Vec<&str> = failures.keys().map(String::as_str).collect();
+        println!();
+        println!(
+            "Skipping failed implementations for remaining datasets: {}",
+            names.join(", ")
+        );
+    }
+
+    println!();
+    Ok(failures)
+}
+
+fn format_eta(seconds: f64) -> String {
+    if seconds < 60.0 {
+        format!("{seconds:.0}s")
+    } else {
+        let mins = (seconds / 60.0).floor() as u64;
+        let secs = (seconds % 60.0).round() as u64;
+        format!("{mins}m {secs:02}s")
+    }
 }
 
 fn der_skip_reason(

@@ -156,6 +156,9 @@ enum BenchmarkCmd {
         /// Implementations to run (omit for all, use "list" to show available)
         #[arg(long = "impl", value_name = "NAME")]
         impls: Vec<String>,
+        /// Skip the pre-flight smoke test
+        #[arg(long)]
+        no_preflight: bool,
     },
 }
 
@@ -276,12 +279,14 @@ fn main() -> Result<()> {
                 max_minutes,
                 description,
                 impls,
+                no_preflight,
             } => commands::benchmark::der(
                 &dataset,
                 max_files.unwrap_or(u32::MAX),
                 max_minutes.unwrap_or(u32::MAX),
                 description.as_deref(),
                 &impls,
+                no_preflight,
             ),
         },
         Command::Gpu { cmd } => match cmd {
