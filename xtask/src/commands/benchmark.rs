@@ -848,10 +848,11 @@ fn run_der_implementations(
             (None, None, None, None)
         };
 
+        let rtfx = total_audio_seconds / total_time;
         if let Some(d) = der_pct {
-            println!("  → DER: {d:.1}%, Time: {total_time:.1}s");
+            println!("  → DER: {d:.1}%, Time: {total_time:.1}s, RTFx: {rtfx:.1}x");
         } else {
-            println!("  → N/A, Time: {total_time:.1}s");
+            println!("  → N/A, Time: {total_time:.1}s, RTFx: {rtfx:.1}x");
         }
         println!();
 
@@ -1131,8 +1132,6 @@ fn save_der_results(
         .iter()
         .map(|(w, _)| w.file_stem().unwrap().to_string_lossy().to_string())
         .collect::<Vec<_>>();
-    let pyannote_segmentation_batch_size = pyannote_segmentation_batch_size();
-    let pyannote_embedding_batch_size = pyannote_embedding_batch_size();
     let mut json_results = serde_json::Map::new();
     for (name, _) in implementations {
         if let Some(r) = results.get(*name) {
@@ -1153,8 +1152,9 @@ fn save_der_results(
             "max_minutes": max_minutes,
         },
         "pyannote_batch_sizes": {
-            "segmentation": pyannote_segmentation_batch_size,
-            "embedding": pyannote_embedding_batch_size,
+            "mps": 16,
+            "cuda": 32,
+            "note": "device-dependent defaults, override via PYANNOTE_*_BATCH_SIZE env vars",
         },
         "file_list": file_list,
         "results": json_results,
@@ -1176,19 +1176,18 @@ fn save_der_results(
     lines.push(format!(
         "Selection: shortest-first by duration, capped at max_files={max_files}, max_minutes={max_minutes}"
     ));
-    lines.push(format!(
-        "pyannote batch sizes: segmentation={pyannote_segmentation_batch_size}, embedding={pyannote_embedding_batch_size}"
-    ));
+    lines.push("pyannote batch sizes: MPS=16, CUDA=32 (device-dependent defaults)".to_string());
     lines.push(format!("Files: {}", file_list.join(", ")));
     if let Some(desc) = description {
         lines.push(format!("Description: {desc}"));
     }
     lines.push(String::new());
 
+    let total_audio_seconds = total_audio_minutes * 60.0;
     let name_w = 22;
     let header = format!(
-        "{:<name_w$} {:>8} {:>10} {:>13} {:>12} {:>8}  {}",
-        "Implementation", "DER%", "Missed%", "FalseAlarm%", "Confusion%", "Time", "Status"
+        "{:<name_w$} {:>8} {:>10} {:>13} {:>12} {:>8} {:>7}  {}",
+        "Implementation", "DER%", "Missed%", "FalseAlarm%", "Confusion%", "Time", "RTFx", "Status"
     );
     lines.push(header.clone());
     lines.push("─".repeat(header.len()));
@@ -1213,6 +1212,10 @@ fn save_der_results(
                 .time
                 .map(|time| format!("{time:.1}s"))
                 .unwrap_or_else(|| "—".to_string());
+            let rtfx_str = r
+                .time
+                .map(|time| format!("{:.1}x", total_audio_seconds / time))
+                .unwrap_or_else(|| "—".to_string());
             let status_str = match r.status {
                 DerImplStatus::Completed => "ok".to_string(),
                 DerImplStatus::Skipped => format!(
@@ -1225,8 +1228,8 @@ fn save_der_results(
                 ),
             };
             lines.push(format!(
-                "{:<name_w$} {:>8} {:>10} {:>13} {:>12} {:>8}  {}",
-                impl_name, der_str, miss_str, fa_str, conf_str, time_str, status_str
+                "{:<name_w$} {:>8} {:>10} {:>13} {:>12} {:>8} {:>7}  {}",
+                impl_name, der_str, miss_str, fa_str, conf_str, time_str, rtfx_str, status_str
             ));
         }
     }
@@ -1558,20 +1561,6 @@ fn select_pairs_for_benchmark(
     }
 
     selected
-}
-
-fn pyannote_segmentation_batch_size() -> usize {
-    std::env::var("PYANNOTE_SEGMENTATION_BATCH_SIZE")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(16)
-}
-
-fn pyannote_embedding_batch_size() -> usize {
-    std::env::var("PYANNOTE_EMBEDDING_BATCH_SIZE")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(16)
 }
 
 // ---------------------------------------------------------------------------
