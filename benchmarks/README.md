@@ -64,6 +64,21 @@ All benchmarks run on Apple M4 Pro, macOS 26.3, collar=0ms.
 - [AMI IHM](ami-ihm.txt)
 - [Earnings-21](earnings-21.txt)
 
+## Batch Sizes
+
+pyannote batch sizes affect throughput differently per device:
+
+- **MPS** (Apple GPU): batch size 16 (default) -- batch 32 is slower
+- **CUDA** (NVIDIA GPU): batch size 32
+
+Override via environment variables:
+
+```bash
+PYANNOTE_SEGMENTATION_BATCH_SIZE=32 PYANNOTE_EMBEDDING_BATCH_SIZE=32 cargo xtask benchmark der ...
+```
+
+All results above use batch size 16 (MPS).
+
 ## Reproduce
 
 Requires models (`just export-models`) and datasets (auto-downloaded on first run).
