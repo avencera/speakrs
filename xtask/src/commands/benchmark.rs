@@ -1056,8 +1056,9 @@ fn run_per_file(
         let avg = total_time / (i + 1) as f64;
         let remaining = (total - i - 1) as f64 * avg;
         let eta = format_eta(remaining);
+        let total_elapsed = format_eta(total_time);
         eprintln!(
-            "  [{}/{}] {stem}: {elapsed:.1}s (ETA {eta}) [{}]",
+            "  [{}/{}] {stem}: {elapsed:.1}s (elapsed {total_elapsed}, ETA {eta}) [{}]",
             i + 1,
             total,
             now_stamp()
@@ -1128,6 +1129,15 @@ fn save_der_results(
     max_files: u32,
     max_minutes: u32,
 ) -> Result<()> {
+    let seg_batch: u32 = std::env::var("PYANNOTE_SEGMENTATION_BATCH_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(32);
+    let emb_batch: u32 = std::env::var("PYANNOTE_EMBEDDING_BATCH_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(32);
+
     let file_list = files
         .iter()
         .map(|(w, _)| w.file_stem().unwrap().to_string_lossy().to_string())
@@ -1152,9 +1162,9 @@ fn save_der_results(
             "max_minutes": max_minutes,
         },
         "pyannote_batch_sizes": {
-            "mps": 16,
-            "cuda": 32,
             "note": "device-dependent defaults, override via PYANNOTE_*_BATCH_SIZE env vars",
+            "segmentation": seg_batch,
+            "embedding": emb_batch,
         },
         "file_list": file_list,
         "results": json_results,
@@ -1176,7 +1186,9 @@ fn save_der_results(
     lines.push(format!(
         "Selection: shortest-first by duration, capped at max_files={max_files}, max_minutes={max_minutes}"
     ));
-    lines.push("pyannote batch sizes: MPS=16, CUDA=32 (device-dependent defaults)".to_string());
+    lines.push(format!(
+        "pyannote batch sizes: seg={seg_batch}, emb={emb_batch}"
+    ));
     lines.push(format!("Files: {}", file_list.join(", ")));
     if let Some(desc) = description {
         lines.push(format!("Description: {desc}"));
