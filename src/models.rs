@@ -2,15 +2,9 @@ use std::path::PathBuf;
 
 use hf_hub::api::sync::{Api, ApiBuilder, ApiRepo};
 
-const HF_REPO: &str = "avencera/speakrs-models";
+use crate::inference::ExecutionMode;
 
-#[derive(Debug, Clone, Copy)]
-pub enum Mode {
-    Cpu,
-    CoreMl,
-    CoreMlFast,
-    Cuda,
-}
+const HF_REPO: &str = "avencera/speakrs-models";
 
 pub struct ModelManager {
     repo: ApiRepo,
@@ -35,7 +29,7 @@ impl ModelManager {
     }
 
     /// Ensure all files for a mode are downloaded, return base models dir
-    pub fn ensure(&self, mode: Mode) -> Result<PathBuf, hf_hub::api::sync::ApiError> {
+    pub fn ensure(&self, mode: ExecutionMode) -> Result<PathBuf, hf_hub::api::sync::ApiError> {
         let files = required_files(mode);
         for f in &files {
             self.repo.get(f)?;
@@ -77,14 +71,14 @@ fn mlmodelc_files(name: &str) -> Vec<&'static str> {
         .collect()
 }
 
-fn required_files(mode: Mode) -> Vec<&'static str> {
+fn required_files(mode: ExecutionMode) -> Vec<&'static str> {
     let mut files: Vec<&str> = PLDA_FILES.to_vec();
 
     match mode {
-        Mode::Cpu | Mode::Cuda => {
+        ExecutionMode::Cpu | ExecutionMode::Cuda => {
             files.extend_from_slice(ONNX_FILES);
         }
-        Mode::CoreMl | Mode::CoreMlFast => {
+        ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => {
             // CoreML modes still need the ONNX segmentation model for the constructor
             files.push("segmentation-3.0.onnx");
             files.push("wespeaker-voxceleb-resnet34.onnx");

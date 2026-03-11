@@ -9,10 +9,6 @@ use speakrs::pipeline::{
     DiarizationPipeline, FRAME_STEP_SECONDS, OwnedDiarizationPipeline, SEGMENTATION_STEP_SECONDS,
 };
 
-#[cfg(feature = "online")]
-use speakrs::models::Mode;
-
-#[cfg(feature = "coreml")]
 use speakrs::inference::ExecutionMode;
 #[cfg(feature = "coreml")]
 use speakrs::metrics::{compute_der, parse_rttm};
@@ -257,7 +253,7 @@ fn pipeline_handles_short_audio_fixture() {
 #[test]
 fn owned_pipeline_from_dir() {
     let models_dir = fixture_path("models");
-    let mut pipeline = OwnedDiarizationPipeline::from_dir(&models_dir, Mode::Cpu).unwrap();
+    let mut pipeline = OwnedDiarizationPipeline::from_dir(&models_dir, ExecutionMode::Cpu).unwrap();
 
     let (samples, sr) = load_wav_samples(&fixture_path("test.wav"));
     assert_eq!(sr, 16_000);
@@ -280,7 +276,7 @@ fn owned_pipeline_from_dir() {
 #[ignore]
 #[cfg(feature = "online")]
 fn online_pipeline_downloads_and_runs() {
-    let mut pipeline = OwnedDiarizationPipeline::from_pretrained(Mode::Cpu).unwrap();
+    let mut pipeline = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::Cpu).unwrap();
 
     let (samples, sr) = load_wav_samples(&fixture_path("test.wav"));
     assert_eq!(sr, 16_000);

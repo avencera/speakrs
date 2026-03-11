@@ -100,12 +100,12 @@ Coming soon.
 ### Library
 
 ```rust
-use speakrs::models::Mode;
+use speakrs::inference::ExecutionMode;
 use speakrs::pipeline::OwnedDiarizationPipeline;
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Mode::CoreMl, Mode::CoreMlFast, Mode::Cpu, or Mode::Cuda
-    let mut pipeline = OwnedDiarizationPipeline::from_pretrained(Mode::CoreMl)?;
+    // ExecutionMode::CoreMl, CoreMlFast, Cpu, or Cuda
+    let mut pipeline = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::CoreMl)?;
 
     let audio: Vec<f32> = load_your_mono_16khz_audio_here();
     let result = pipeline.run(&audio)?;
