@@ -10,12 +10,12 @@ use crate::compare_rttm::compare_rttm_files;
 use crate::fluidaudio;
 
 pub fn run(source: &str, python_device: &str, rust_mode: &str) -> Result<()> {
-    let (wav, tmp) = prepare_audio(source)?;
+    let (wav, temp_dir) = prepare_audio(source)?.into_parts();
     let features = features_for_mode(rust_mode);
     let wav_str = wav.to_string_lossy();
 
-    let rust_rttm = tmp.path().join("rust.rttm");
-    let python_rttm = tmp.path().join("python.rttm");
+    let rust_rttm = temp_dir.path().join("rust.rttm");
+    let python_rttm = temp_dir.path().join("python.rttm");
 
     println!();
     println!("=== speakrs (Rust) ===");
@@ -53,14 +53,14 @@ pub fn rttm(a: &Path, b: &Path) -> Result<()> {
 }
 
 pub fn accuracy(source: &str, rust_mode: &str) -> Result<()> {
-    let (wav, tmp) = prepare_audio(source)?;
+    let (wav, temp_dir) = prepare_audio(source)?.into_parts();
     let features = features_for_mode(rust_mode);
     let wav_str = wav.to_string_lossy();
 
-    let rust_rttm = tmp.path().join("rust.rttm");
-    let python_cpu_rttm = tmp.path().join("python_cpu.rttm");
-    let fluidaudio_json = tmp.path().join("fluidaudio.json");
-    let fluidaudio_rttm = tmp.path().join("fluidaudio.rttm");
+    let rust_rttm = temp_dir.path().join("rust.rttm");
+    let python_cpu_rttm = temp_dir.path().join("python_cpu.rttm");
+    let fluidaudio_json = temp_dir.path().join("fluidaudio.json");
+    let fluidaudio_rttm = temp_dir.path().join("fluidaudio.rttm");
 
     println!();
     println!("=== speakrs (Rust) ===");

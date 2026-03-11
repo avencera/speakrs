@@ -25,7 +25,8 @@ pub fn run(
     warmups: u32,
     rust_mode: &str,
 ) -> Result<()> {
-    let (wav, _tmp) = prepare_audio(source)?;
+    let prepared_audio = prepare_audio(source)?;
+    let wav = prepared_audio.wav_path();
     let features = features_for_mode(rust_mode);
 
     println!();
@@ -34,7 +35,7 @@ pub fn run(
 
     let root = project_root();
     let binary = root.join("target/release/xtask");
-    let audio_seconds = wav_duration_seconds(&wav)?;
+    let audio_seconds = wav_duration_seconds(wav)?;
 
     println!();
     println!("=== Benchmark ===");
@@ -257,7 +258,8 @@ impl<'a> CompareRecorder<'a> {
 }
 
 pub fn compare(source: &str, runs: u32, warmups: u32) -> Result<()> {
-    let (wav, _tmp) = prepare_audio(source)?;
+    let prepared_audio = prepare_audio(source)?;
+    let wav = prepared_audio.wav_path();
     let wav_str = wav.to_string_lossy();
     let root = project_root();
 
@@ -270,7 +272,7 @@ pub fn compare(source: &str, runs: u32, warmups: u32) -> Result<()> {
             .current_dir(root.join("scripts/pyannote_rs_bench")),
     );
 
-    let audio_seconds = wav_duration_seconds(&wav)?;
+    let audio_seconds = wav_duration_seconds(wav)?;
     let models_dir = root.join("fixtures/models");
     let seg_model = models_dir.join("segmentation-3.0.onnx");
     let emb_model = models_dir.join("wespeaker_en_voxceleb_CAM++.onnx");
@@ -728,18 +730,19 @@ pub fn der(
             &preflight_failures,
         )?;
 
-        save_der_results(
-            &run_dir,
-            dataset.display_name(),
-            &implementations,
-            &all_results,
-            &files,
+        DerResultsWriter {
+            run_dir: &run_dir,
+            dataset_name: dataset.display_name(),
+            implementations: &implementations,
+            results: &all_results,
+            files: &files,
             total_audio_minutes,
-            0.0,
+            collar: 0.0,
             description,
             max_files,
             max_minutes,
-        )?;
+        }
+        .write()?;
     }
 
     Ok(())
@@ -1208,147 +1211,192 @@ fn discover_files(
     Ok(select_pairs_for_benchmark(pairs, max_files, max_minutes))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn save_der_results(
-    run_dir: &Path,
-    dataset_name: &str,
-    implementations: &[(&str, ImplType)],
-    results: &HashMap<String, DerImplResult>,
-    files: &[(PathBuf, PathBuf)],
+struct DerResultsWriter<'a> {
+    run_dir: &'a Path,
+    dataset_name: &'a str,
+    implementations: &'a [(&'static str, ImplType)],
+    results: &'a HashMap<String, DerImplResult>,
+    files: &'a [(PathBuf, PathBuf)],
     total_audio_minutes: f64,
     collar: f64,
-    description: Option<&str>,
+    description: Option<&'a str>,
     max_files: u32,
     max_minutes: u32,
-) -> Result<()> {
-    let seg_batch: u32 = std::env::var("PYANNOTE_SEGMENTATION_BATCH_SIZE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(32);
-    let emb_batch: u32 = std::env::var("PYANNOTE_EMBEDDING_BATCH_SIZE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(32);
+}
 
-    let file_list = files
-        .iter()
-        .map(|(w, _)| w.file_stem().unwrap().to_string_lossy().to_string())
-        .collect::<Vec<_>>();
-    let mut json_results = serde_json::Map::new();
-    for (name, _) in implementations {
-        if let Some(r) = results.get(*name) {
-            json_results.insert(name.to_string(), serde_json::to_value(r)?);
+impl<'a> DerResultsWriter<'a> {
+    fn write(&self) -> Result<()> {
+        let json_payload = self.json_payload()?;
+        fs::write(
+            self.run_dir.join("results.json"),
+            serde_json::to_string_pretty(&json_payload)? + "\n",
+        )?;
+
+        let summary_lines = self.summary_lines();
+        fs::write(
+            self.run_dir.join("results.txt"),
+            summary_lines.join("\n") + "\n",
+        )?;
+
+        println!("\nResults saved to {}/", self.run_dir.display());
+        for line in &summary_lines {
+            println!("{line}");
         }
+
+        Ok(())
     }
 
-    let mut data = serde_json::json!({
-        "dataset": dataset_name,
-        "run_id": run_dir.file_name().unwrap().to_string_lossy(),
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-        "files": files.len(),
-        "total_audio_minutes": (total_audio_minutes * 10.0).round() / 10.0,
-        "collar": collar,
-        "selection_policy": "shortest_first_by_duration",
-        "selection_limits": {
-            "max_files": max_files,
-            "max_minutes": max_minutes,
-        },
-        "pyannote_batch_sizes": {
-            "note": "device-dependent defaults, override via PYANNOTE_*_BATCH_SIZE env vars",
-            "segmentation": seg_batch,
-            "embedding": emb_batch,
-        },
-        "file_list": file_list,
-        "results": json_results,
-    });
+    fn json_payload(&self) -> Result<serde_json::Value> {
+        let (seg_batch_size, emb_batch_size) = self.pyannote_batch_sizes();
+        let file_list = self.file_list();
+        let mut json_results = serde_json::Map::new();
 
-    if let Some(desc) = description {
-        data["description"] = serde_json::Value::String(desc.to_string());
-    }
-
-    let json_path = run_dir.join("results.json");
-    fs::write(&json_path, serde_json::to_string_pretty(&data)? + "\n")?;
-
-    // text summary
-    let mut lines = Vec::new();
-    lines.push(format!(
-        "{dataset_name} DER ({} files, {total_audio_minutes:.1} min, collar={collar:.0}ms)",
-        files.len()
-    ));
-    lines.push(format!(
-        "Selection: shortest-first by duration, capped at max_files={max_files}, max_minutes={max_minutes}"
-    ));
-    lines.push(format!(
-        "pyannote batch sizes: seg={seg_batch}, emb={emb_batch}"
-    ));
-    lines.push(format!("Files: {}", file_list.join(", ")));
-    if let Some(desc) = description {
-        lines.push(format!("Description: {desc}"));
-    }
-    lines.push(String::new());
-
-    let total_audio_seconds = total_audio_minutes * 60.0;
-    let name_w = 22;
-    let header = format!(
-        "{:<name_w$} {:>8} {:>10} {:>13} {:>12} {:>8} {:>7}  {}",
-        "Implementation", "DER%", "Missed%", "FalseAlarm%", "Confusion%", "Time", "RTFx", "Status"
-    );
-    lines.push(header.clone());
-    lines.push("─".repeat(header.len()));
-
-    for (impl_name, _) in implementations {
-        if let Some(r) = results.get(*impl_name) {
-            let (der_str, miss_str, fa_str, conf_str) = match r.der {
-                Some(d) => (
-                    format!("{d:.1}%"),
-                    format!("{:.1}%", r.missed.unwrap_or(0.0)),
-                    format!("{:.1}%", r.false_alarm.unwrap_or(0.0)),
-                    format!("{:.1}%", r.confusion.unwrap_or(0.0)),
-                ),
-                None => (
-                    "N/A".to_string(),
-                    "—".to_string(),
-                    "—".to_string(),
-                    "—".to_string(),
-                ),
-            };
-            let time_str = r
-                .time
-                .map(|time| format!("{time:.1}s"))
-                .unwrap_or_else(|| "—".to_string());
-            let rtfx_str = r
-                .time
-                .map(|time| format!("{:.1}x", total_audio_seconds / time))
-                .unwrap_or_else(|| "—".to_string());
-            let status_str = match r.status {
-                DerImplStatus::Completed => "ok".to_string(),
-                DerImplStatus::Skipped => format!(
-                    "skipped ({})",
-                    r.reason.as_deref().unwrap_or("no reason recorded")
-                ),
-                DerImplStatus::Failed => format!(
-                    "failed ({})",
-                    r.reason.as_deref().unwrap_or("no reason recorded")
-                ),
-            };
-            lines.push(format!(
-                "{:<name_w$} {:>8} {:>10} {:>13} {:>12} {:>8} {:>7}  {}",
-                impl_name, der_str, miss_str, fa_str, conf_str, time_str, rtfx_str, status_str
-            ));
+        for (implementation_name, _) in self.implementations {
+            if let Some(result) = self.results.get(*implementation_name) {
+                json_results.insert(
+                    implementation_name.to_string(),
+                    serde_json::to_value(result)?,
+                );
+            }
         }
+
+        let mut payload = serde_json::json!({
+            "dataset": self.dataset_name,
+            "run_id": self.run_dir.file_name().unwrap().to_string_lossy(),
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "files": self.files.len(),
+            "total_audio_minutes": (self.total_audio_minutes * 10.0).round() / 10.0,
+            "collar": self.collar,
+            "selection_policy": "shortest_first_by_duration",
+            "selection_limits": {
+                "max_files": self.max_files,
+                "max_minutes": self.max_minutes,
+            },
+            "pyannote_batch_sizes": {
+                "note": "device-dependent defaults, override via PYANNOTE_*_BATCH_SIZE env vars",
+                "segmentation": seg_batch_size,
+                "embedding": emb_batch_size,
+            },
+            "file_list": file_list,
+            "results": json_results,
+        });
+
+        if let Some(description) = self.description {
+            payload["description"] = serde_json::Value::String(description.to_string());
+        }
+
+        Ok(payload)
     }
 
-    let txt_path = run_dir.join("results.txt");
-    fs::write(&txt_path, lines.join("\n") + "\n")?;
+    fn summary_lines(&self) -> Vec<String> {
+        let (seg_batch_size, emb_batch_size) = self.pyannote_batch_sizes();
+        let file_list = self.file_list();
+        let total_audio_seconds = self.total_audio_minutes * 60.0;
+        let name_width = 22;
+        let header = format!(
+            "{:<name_width$} {:>8} {:>10} {:>13} {:>12} {:>8} {:>7}  {}",
+            "Implementation",
+            "DER%",
+            "Missed%",
+            "FalseAlarm%",
+            "Confusion%",
+            "Time",
+            "RTFx",
+            "Status"
+        );
 
-    println!("\nResults saved to {}/", run_dir.display());
+        let mut lines = vec![
+            format!(
+                "{} DER ({} files, {:.1} min, collar={:.0}ms)",
+                self.dataset_name,
+                self.files.len(),
+                self.total_audio_minutes,
+                self.collar
+            ),
+            format!(
+                "Selection: shortest-first by duration, capped at max_files={}, max_minutes={}",
+                self.max_files, self.max_minutes
+            ),
+            format!("pyannote batch sizes: seg={seg_batch_size}, emb={emb_batch_size}"),
+            format!("Files: {}", file_list.join(", ")),
+        ];
+        if let Some(description) = self.description {
+            lines.push(format!("Description: {description}"));
+        }
+        lines.push(String::new());
+        lines.push(header.clone());
+        lines.push("─".repeat(header.len()));
 
-    // also print the summary to stdout
-    for line in &lines {
-        println!("{line}");
+        for (implementation_name, _) in self.implementations {
+            if let Some(result) = self.results.get(*implementation_name) {
+                let (der_str, missed_str, false_alarm_str, confusion_str) = match result.der {
+                    Some(der) => (
+                        format!("{der:.1}%"),
+                        format!("{:.1}%", result.missed.unwrap_or(0.0)),
+                        format!("{:.1}%", result.false_alarm.unwrap_or(0.0)),
+                        format!("{:.1}%", result.confusion.unwrap_or(0.0)),
+                    ),
+                    None => (
+                        "N/A".to_string(),
+                        "—".to_string(),
+                        "—".to_string(),
+                        "—".to_string(),
+                    ),
+                };
+                let time_str = result
+                    .time
+                    .map(|time| format!("{time:.1}s"))
+                    .unwrap_or_else(|| "—".to_string());
+                let rtfx_str = result
+                    .time
+                    .map(|time| format!("{:.1}x", total_audio_seconds / time))
+                    .unwrap_or_else(|| "—".to_string());
+                let status_str = match result.status {
+                    DerImplStatus::Completed => "ok".to_string(),
+                    DerImplStatus::Skipped => format!(
+                        "skipped ({})",
+                        result.reason.as_deref().unwrap_or("no reason recorded")
+                    ),
+                    DerImplStatus::Failed => format!(
+                        "failed ({})",
+                        result.reason.as_deref().unwrap_or("no reason recorded")
+                    ),
+                };
+                lines.push(format!(
+                    "{:<name_width$} {:>8} {:>10} {:>13} {:>12} {:>8} {:>7}  {}",
+                    implementation_name,
+                    der_str,
+                    missed_str,
+                    false_alarm_str,
+                    confusion_str,
+                    time_str,
+                    rtfx_str,
+                    status_str
+                ));
+            }
+        }
+
+        lines
     }
 
-    Ok(())
+    fn file_list(&self) -> Vec<String> {
+        self.files
+            .iter()
+            .map(|(wav_path, _)| wav_path.file_stem().unwrap().to_string_lossy().to_string())
+            .collect()
+    }
+
+    fn pyannote_batch_sizes(&self) -> (u32, u32) {
+        let segmentation_batch_size = std::env::var("PYANNOTE_SEGMENTATION_BATCH_SIZE")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(32);
+        let embedding_batch_size = std::env::var("PYANNOTE_EMBEDDING_BATCH_SIZE")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(32);
+        (segmentation_batch_size, embedding_batch_size)
+    }
 }
 
 /// Possible failure modes for `capture_benchmark_cmd`
