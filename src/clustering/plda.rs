@@ -26,29 +26,30 @@ impl PldaTransform {
         let mean2 = read_array1_f64(models_dir.join("plda_mean2.npy"))?;
         let lda = read_array2_f64(models_dir.join("plda_lda.npy"))?;
         let mu = read_array1_f64(models_dir.join("plda_mu.npy"))?;
-        let tr = read_array2_f64(models_dir.join("plda_tr.npy"))?;
+        let raw_transform = read_array2_f64(models_dir.join("plda_tr.npy"))?;
         let psi = read_array1_f64(models_dir.join("plda_psi.npy"))?;
 
-        let w = tr.t().dot(&tr).inv()?;
+        let precision_matrix = raw_transform.t().dot(&raw_transform).inv()?;
 
-        let mut tr_over_psi = tr.t().to_owned();
+        let mut tr_over_psi = raw_transform.t().to_owned();
         for (mut column, &psi_value) in tr_over_psi.columns_mut().into_iter().zip(psi.iter()) {
             if psi_value == 0.0 {
                 return Err(PldaError::InvalidPsi);
             }
             column /= psi_value;
         }
-        let b = tr_over_psi.dot(&tr).inv()?;
+        let between_class_covariance = tr_over_psi.dot(&raw_transform).inv()?;
 
-        let (eigenvalues, (eigenvectors, _)) = (b, w).eigh(UPLO::Lower)?;
+        let (eigenvalues, (eigenvectors, _)) =
+            (between_class_covariance, precision_matrix).eigh(UPLO::Lower)?;
 
         let dim = lda.ncols();
         let mut phi = Array1::<f64>::zeros(dim);
         let mut transform = Array2::<f64>::zeros((dim, dim));
-        for idx in 0..dim {
-            let src = eigenvalues.len() - 1 - idx;
-            phi[idx] = eigenvalues[src];
-            transform.row_mut(idx).assign(&eigenvectors.column(src));
+        for dim_idx in 0..dim {
+            let src = eigenvalues.len() - 1 - dim_idx;
+            phi[dim_idx] = eigenvalues[src];
+            transform.row_mut(dim_idx).assign(&eigenvectors.column(src));
         }
 
         Ok(Self {

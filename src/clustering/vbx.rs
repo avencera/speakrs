@@ -48,19 +48,19 @@ pub fn vbx(
     let mut pi = Array1::from_elem(n_speakers, 1.0 / n_speakers as f64);
 
     // precompute per-frame constant: G = -0.5 * (sum(X^2, axis=1) + D*ln(2*pi))
-    let g: Array1<f64> = features_f64
+    let frame_constants: Array1<f64> = features_f64
         .rows()
         .into_iter()
         .map(|row| -0.5 * (row.dot(&row) + dim as f64 * (2.0 * std::f64::consts::PI).ln()))
         .collect();
 
     // V = sqrt(Phi)
-    let v = phi_f64.mapv(f64::sqrt);
+    let phi_sqrt = phi_f64.mapv(f64::sqrt);
 
     // rho = X * V (element-wise broadcast)
     let mut rho = features_f64;
     for mut row in rho.rows_mut() {
-        row *= &v;
+        row *= &phi_sqrt;
     }
 
     let mut prev_elbo = f64::NEG_INFINITY;
@@ -75,50 +75,59 @@ pub fn vbx(
         let mut inv_l = Array2::zeros((n_speakers, dim));
         let mut alpha = Array2::zeros((n_speakers, dim));
 
-        for k in 0..n_speakers {
-            for d in 0..dim {
-                inv_l[[k, d]] = 1.0 / (1.0 + fa_over_fb * n_k[k] * phi_f64[d]);
+        for speaker_idx in 0..n_speakers {
+            for dim_idx in 0..dim {
+                inv_l[[speaker_idx, dim_idx]] =
+                    1.0 / (1.0 + fa_over_fb * n_k[speaker_idx] * phi_f64[dim_idx]);
             }
 
-            // gamma.T @ rho for speaker k
+            // gamma.T @ rho for this speaker
             let mut f_k = Array1::<f64>::zeros(dim);
-            for t in 0..n_samples {
-                f_k.scaled_add(gamma[[t, k]], &rho.row(t));
+            for sample_idx in 0..n_samples {
+                f_k.scaled_add(gamma[[sample_idx, speaker_idx]], &rho.row(sample_idx));
             }
 
-            for d in 0..dim {
-                alpha[[k, d]] = fa_over_fb * inv_l[[k, d]] * f_k[d];
+            for dim_idx in 0..dim {
+                alpha[[speaker_idx, dim_idx]] =
+                    fa_over_fb * inv_l[[speaker_idx, dim_idx]] * f_k[dim_idx];
             }
         }
 
         // E-step
         // log_p_[t,k] = Fa * (rho[t] . alpha[k] - 0.5 * (invL[k] + alpha[k]^2) . Phi + G[t])
         let mut log_p = Array2::<f64>::zeros((n_samples, n_speakers));
-        for t in 0..n_samples {
-            for k in 0..n_speakers {
-                let rho_dot_alpha: f64 = rho.row(t).dot(&alpha.row(k));
+        for sample_idx in 0..n_samples {
+            for speaker_idx in 0..n_speakers {
+                let rho_dot_alpha: f64 = rho.row(sample_idx).dot(&alpha.row(speaker_idx));
                 let penalty: f64 = (0..dim)
-                    .map(|d| (inv_l[[k, d]] + alpha[[k, d]] * alpha[[k, d]]) * phi_f64[d])
+                    .map(|dim_idx| {
+                        (inv_l[[speaker_idx, dim_idx]]
+                            + alpha[[speaker_idx, dim_idx]] * alpha[[speaker_idx, dim_idx]])
+                            * phi_f64[dim_idx]
+                    })
                     .sum();
-                log_p[[t, k]] = fa * (rho_dot_alpha - 0.5 * penalty + g[t]);
+                log_p[[sample_idx, speaker_idx]] =
+                    fa * (rho_dot_alpha - 0.5 * penalty + frame_constants[sample_idx]);
             }
         }
 
         // GMM-style update with pi priors
         let lpi: Array1<f64> = pi.mapv(|p| (p + 1e-8).ln());
 
-        // log_p_x[t] = logsumexp(log_p[t] + lpi)
+        // log_p_x[sample_idx] = logsumexp(log_p[sample_idx] + lpi)
         let mut log_p_x = Array1::<f64>::zeros(n_samples);
-        for t in 0..n_samples {
-            scratch.assign(&log_p.row(t));
+        for sample_idx in 0..n_samples {
+            scratch.assign(&log_p.row(sample_idx));
             scratch += &lpi;
-            log_p_x[t] = logsumexp_f64(&scratch.view());
+            log_p_x[sample_idx] = logsumexp_f64(&scratch.view());
         }
 
-        // gamma[t,k] = exp(log_p[t,k] + lpi[k] - log_p_x[t])
-        for t in 0..n_samples {
-            for k in 0..n_speakers {
-                gamma[[t, k]] = (log_p[[t, k]] + lpi[k] - log_p_x[t]).exp();
+        // gamma[sample_idx,speaker_idx] = exp(log_p[sample_idx,speaker_idx] + lpi[speaker_idx] - log_p_x[sample_idx])
+        for sample_idx in 0..n_samples {
+            for speaker_idx in 0..n_speakers {
+                gamma[[sample_idx, speaker_idx]] =
+                    (log_p[[sample_idx, speaker_idx]] + lpi[speaker_idx] - log_p_x[sample_idx])
+                        .exp();
             }
         }
 

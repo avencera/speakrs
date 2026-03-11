@@ -1,11 +1,11 @@
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
-pub fn l2_normalize(v: &ArrayView1<f32>) -> Array1<f32> {
-    let norm = v.dot(v).sqrt();
+pub fn l2_normalize(vector: &ArrayView1<f32>) -> Array1<f32> {
+    let norm = vector.dot(vector).sqrt();
     if norm == 0.0 {
-        return Array1::zeros(v.len());
+        return Array1::zeros(vector.len());
     }
-    v / norm
+    vector / norm
 }
 
 pub fn l2_normalize_rows(embeddings: &ArrayView2<f32>) -> Array2<f32> {
@@ -30,29 +30,29 @@ pub fn l2_normalize_rows_f64(embeddings: &ArrayView2<f64>) -> Array2<f64> {
     normalized
 }
 
-pub fn cosine_similarity(a: &ArrayView1<f32>, b: &ArrayView1<f32>) -> f32 {
-    let a_norm = l2_normalize(a);
-    let b_norm = l2_normalize(b);
-    a_norm.dot(&b_norm)
+pub fn cosine_similarity(lhs: &ArrayView1<f32>, rhs: &ArrayView1<f32>) -> f32 {
+    let lhs_norm = l2_normalize(lhs);
+    let rhs_norm = l2_normalize(rhs);
+    lhs_norm.dot(&rhs_norm)
 }
 
-pub fn logsumexp(a: &ArrayView1<f32>) -> f32 {
-    let max = a.fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
+pub fn logsumexp(values: &ArrayView1<f32>) -> f32 {
+    let max = values.fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
     if max.is_infinite() {
         return max;
     }
 
-    let sum_exp = a.mapv(|x| (x - max).exp()).sum();
+    let sum_exp = values.mapv(|x| (x - max).exp()).sum();
     max + sum_exp.ln()
 }
 
-pub fn logsumexp_f64(a: &ArrayView1<f64>) -> f64 {
-    let max = a.fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
+pub fn logsumexp_f64(values: &ArrayView1<f64>) -> f64 {
+    let max = values.fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
     if max.is_infinite() {
         return max;
     }
 
-    let sum_exp = a.mapv(|x| (x - max).exp()).sum();
+    let sum_exp = values.mapv(|x| (x - max).exp()).sum();
     max + sum_exp.ln()
 }
 
