@@ -15,34 +15,25 @@ fn runpod_api_key() -> Result<String> {
         .map_err(|_| color_eyre::eyre::eyre!("RUNPOD_API_KEY not set. Add it to .envrc"))
 }
 
-fn graphql_query(query: &str, variables: &Value) -> Result<Value> {
+/// Send a GraphQL request, returning the raw JSON (caller checks errors)
+fn graphql_request(query: &str, variables: &Value) -> Result<Value> {
     let api_key = runpod_api_key()?;
     let body = serde_json::json!({
         "query": query,
         "variables": variables,
     });
 
-    let output = Command::new("curl")
-        .args([
-            "-s",
-            "-X",
-            "POST",
-            RUNPOD_API_URL,
-            "-H",
-            "Content-Type: application/json",
-            "-H",
-            &format!("Authorization: Bearer {api_key}"),
-            "-d",
-            &body.to_string(),
-        ])
-        .output()?;
+    let response: Value = ureq::post(RUNPOD_API_URL)
+        .header("Authorization", &format!("Bearer {api_key}"))
+        .send_json(&body)?
+        .body_mut()
+        .read_json()?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("GraphQL request failed: {stderr}");
-    }
+    Ok(response)
+}
 
-    let response: Value = serde_json::from_slice(&output.stdout)?;
+fn graphql_query(query: &str, variables: &Value) -> Result<Value> {
+    let response = graphql_request(query, variables)?;
 
     if let Some(errors) = response.get("errors") {
         bail!("GraphQL errors: {errors}");
@@ -51,9 +42,7 @@ fn graphql_query(query: &str, variables: &Value) -> Result<Value> {
     Ok(response)
 }
 
-pub fn provision(gpu_type: &str) -> Result<InstanceInfo> {
-    println!("Provisioning RunPod instance with {gpu_type}...");
-
+pub fn provision(name: &str, gpu_types: &[&str]) -> Result<InstanceInfo> {
     let query = r#"
         mutation CreatePod($input: PodFindAndDeployOnDemandInput!) {
             podFindAndDeployOnDemand(input: $input) {
@@ -62,28 +51,55 @@ pub fn provision(gpu_type: &str) -> Result<InstanceInfo> {
         }
     "#;
 
-    let variables = serde_json::json!({
-        "input": {
-            "name": "speakrs-bench",
-            "imageName": IMAGE,
-            "gpuTypeId": gpu_type,
-            "cloudType": "SECURE",
-            "volumeInGb": 40,
-            "containerDiskInGb": 20,
-            "ports": "22/tcp",
-            "startSsh": true,
-            "dockerArgs": "",
+    for (i, gpu_type) in gpu_types.iter().enumerate() {
+        println!("Trying {gpu_type}...");
+
+        let variables = serde_json::json!({
+            "input": {
+                "name": format!("speakrs-bench-{name}"),
+                "imageName": IMAGE,
+                "gpuTypeId": gpu_type,
+                "cloudType": "SECURE",
+                "gpuCount": 1,
+                "volumeInGb": 40,
+                "containerDiskInGb": 20,
+                "volumeMountPath": "/workspace",
+                "ports": "22/tcp",
+                "startSsh": true,
+            }
+        });
+
+        let response = graphql_request(query, &variables)?;
+
+        // check for supply constraint error — try next GPU
+        if let Some(errors) = response.get("errors") {
+            let err_str = errors.to_string();
+            if err_str.contains("SUPPLY_CONSTRAINT") || err_str.contains("no available") {
+                println!(
+                    "  {gpu_type} unavailable, {}",
+                    if i + 1 < gpu_types.len() {
+                        "trying next..."
+                    } else {
+                        "no more fallbacks"
+                    }
+                );
+                continue;
+            }
+            bail!("GraphQL errors: {errors}");
         }
-    });
 
-    let response = graphql_query(query, &variables)?;
-    let pod_id = response["data"]["podFindAndDeployOnDemand"]["id"]
-        .as_str()
-        .ok_or_else(|| color_eyre::eyre::eyre!("Could not parse pod ID from response: {response}"))?
-        .to_string();
+        let pod_id = response["data"]["podFindAndDeployOnDemand"]["id"]
+            .as_str()
+            .ok_or_else(|| {
+                color_eyre::eyre::eyre!("Could not parse pod ID from response: {response}")
+            })?
+            .to_string();
 
-    println!("Pod {pod_id} created, waiting for SSH...");
-    wait_for_ssh(&pod_id)
+        println!("Pod {pod_id} created with {gpu_type}, waiting for SSH...");
+        return wait_for_ssh(&pod_id);
+    }
+
+    bail!("All GPU types exhausted — none available on RunPod")
 }
 
 fn wait_for_ssh(pod_id: &str) -> Result<InstanceInfo> {

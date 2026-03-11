@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::Result;
 use commands::diarize::DiarizeMode;
-use commands::gpu::Backend;
+use commands::gpu::{Backend, RUNPOD_GPU_FALLBACKS};
 
 #[derive(Parser)]
 #[command(name = "xtask", about = "Development tasks for speakrs")]
@@ -171,9 +171,9 @@ enum GpuCmd {
         /// Backend provider
         #[arg(long, default_value = "runpod")]
         backend: Backend,
-        /// GPU type (RunPod GPU type ID)
-        #[arg(long, default_value = "NVIDIA GeForce RTX 4090")]
-        gpu_type: String,
+        /// GPU type (RunPod GPU type ID). Falls back through preferred list if omitted
+        #[arg(long)]
+        gpu_type: Option<String>,
         /// Minimum TFLOPS for GPU search (vast.ai only)
         #[arg(long, default_value_t = 10.0)]
         min_tflops: f64,
@@ -295,7 +295,13 @@ fn main() -> Result<()> {
                 backend,
                 gpu_type,
                 min_tflops,
-            } => commands::gpu::create(&name, backend, &gpu_type, min_tflops),
+            } => {
+                let gpu_types: Vec<&str> = match &gpu_type {
+                    Some(t) => vec![t.as_str()],
+                    None => RUNPOD_GPU_FALLBACKS.to_vec(),
+                };
+                commands::gpu::create(&name, backend, &gpu_types, min_tflops)
+            }
             GpuCmd::Setup { name, branch } => commands::gpu::setup(name.as_deref(), &branch),
             GpuCmd::Benchmark {
                 name,
