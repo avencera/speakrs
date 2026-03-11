@@ -36,12 +36,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--segmentation-batch-size",
         type=int,
-        default=int(os.environ.get("PYANNOTE_SEGMENTATION_BATCH_SIZE", "16")),
+        default=None,
     )
     parser.add_argument(
         "--embedding-batch-size",
         type=int,
-        default=int(os.environ.get("PYANNOTE_EMBEDDING_BATCH_SIZE", "16")),
+        default=None,
     )
     return parser.parse_args()
 
@@ -71,7 +71,7 @@ def resolve_device(name: str) -> torch.device:
 
 def configure_torch(device: torch.device) -> None:
     if hasattr(torch, "set_float32_matmul_precision"):
-        precision = "highest" if device.type == "cuda" else "high"
+        precision = "high"
         torch.set_float32_matmul_precision(precision)
 
     if device.type == "cpu":
@@ -85,7 +85,7 @@ def configure_torch(device: torch.device) -> None:
         return
 
     if device.type == "cuda":
-        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
 
@@ -146,15 +146,25 @@ def main() -> None:
 
     device = resolve_device(args.device)
     configure_torch(device)
+
+    # CUDA works better with batch 32, MPS with 16
+    default_batch = 32 if device.type == "cuda" else 16
+    seg_batch = args.segmentation_batch_size or int(
+        os.environ.get("PYANNOTE_SEGMENTATION_BATCH_SIZE", str(default_batch))
+    )
+    emb_batch = args.embedding_batch_size or int(
+        os.environ.get("PYANNOTE_EMBEDDING_BATCH_SIZE", str(default_batch))
+    )
+
     pipeline = Pipeline.from_pretrained(
         "pyannote/speaker-diarization-community-1", token=token
     )
     assert pipeline is not None
     pipeline.to(device)
     if hasattr(pipeline, "segmentation_batch_size"):
-        pipeline.segmentation_batch_size = args.segmentation_batch_size
+        pipeline.segmentation_batch_size = seg_batch
     if hasattr(pipeline, "embedding_batch_size"):
-        pipeline.embedding_batch_size = args.embedding_batch_size
+        pipeline.embedding_batch_size = emb_batch
 
     all_output = ""
     total = len(args.wav_files)
