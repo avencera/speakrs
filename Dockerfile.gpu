@@ -2,7 +2,7 @@ FROM nvidia/cuda:12.9.0-devel-ubuntu24.04
 
 RUN apt-get update && apt-get install -y \
     build-essential pkg-config libssl-dev git cmake curl libopenblas-dev unzip libclang-dev \
-    libcudnn9-cuda-12 ffmpeg libavutil-dev libavcodec-dev libavformat-dev libswresample-dev libpython3.12-dev \
+    libcudnn9-cuda-12 ffmpeg libavutil-dev libavcodec-dev libavformat-dev libswresample-dev libpython3.12-dev tmux openssh-server \
     && rm -rf /var/lib/apt/lists/*
 
 # Rust

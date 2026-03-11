@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::Result;
 use commands::diarize::DiarizeMode;
+use commands::gpu::Backend;
 
 #[derive(Parser)]
 #[command(name = "xtask", about = "Development tasks for speakrs")]
@@ -44,7 +45,7 @@ enum Command {
         #[command(subcommand)]
         cmd: BenchmarkCmd,
     },
-    /// Remote GPU benchmarking on Vast.ai
+    /// Remote GPU benchmarking (RunPod, Vast.ai)
     Gpu {
         #[command(subcommand)]
         cmd: GpuCmd,
@@ -160,42 +161,75 @@ enum BenchmarkCmd {
 
 #[derive(Subcommand)]
 enum GpuCmd {
-    /// Pick an existing instance (or provision a new one with --new), install deps, and build
-    Setup {
-        /// Provision a new GPU instance instead of picking an existing one
-        #[arg(long)]
-        new: bool,
-
-        /// Use raw CUDA image and build everything from scratch on the remote
-        #[arg(long)]
-        bare: bool,
-
-        /// Minimum GPU TFLOPS when provisioning a new instance
-        #[arg(long, default_value = "10")]
+    /// Provision a new GPU instance
+    Create {
+        /// Instance name
+        name: String,
+        /// Backend provider
+        #[arg(long, default_value = "runpod")]
+        backend: Backend,
+        /// GPU type (RunPod GPU type ID)
+        #[arg(long, default_value = "NVIDIA GeForce RTX 4090")]
+        gpu_type: String,
+        /// Minimum TFLOPS for GPU search (vast.ai only)
+        #[arg(long, default_value_t = 10.0)]
         min_tflops: f64,
     },
-    /// Run benchmarks on the remote GPU instance
+    /// Git clone/pull + download models + build on a running instance
+    Setup {
+        /// Instance name (omit for fzf picker)
+        name: Option<String>,
+        /// Git branch to checkout
+        #[arg(long, default_value = "master")]
+        branch: String,
+    },
+    /// Run benchmarks on a GPU instance
     Benchmark {
+        /// Instance name (omit for fzf picker)
+        name: Option<String>,
         /// Run in a detached tmux session (returns immediately)
         #[arg(long)]
         detach: bool,
         /// Replace a running detached benchmark (requires --detach)
         #[arg(long)]
         force: bool,
+        /// Git branch to checkout on remote before benchmarking
+        #[arg(long, default_value = "master")]
+        branch: String,
         /// Arguments passed to `cargo xtask benchmark` on the remote
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
     },
     /// Check if a detached benchmark is still running and show recent output
-    Status,
+    Status {
+        /// Instance name (omit for fzf picker)
+        name: Option<String>,
+    },
     /// Reconnect to a running detached benchmark session
-    Attach,
+    Attach {
+        /// Instance name (omit for fzf picker)
+        name: Option<String>,
+    },
     /// Download benchmark results from the remote instance
-    PullResults,
+    PullResults {
+        /// Instance name (omit for fzf picker)
+        name: Option<String>,
+    },
     /// Open an interactive SSH session to the GPU instance
-    Ssh,
-    /// Tear down the GPU instance
-    Destroy,
+    Ssh {
+        /// Instance name (omit for fzf picker)
+        name: Option<String>,
+    },
+    /// Tear down GPU instance(s)
+    Destroy {
+        /// Instance name (omit for fzf picker)
+        name: Option<String>,
+        /// Destroy all instances
+        #[arg(long)]
+        all: bool,
+    },
+    /// List all GPU instances
+    List,
 }
 
 fn main() -> Result<()> {
@@ -251,21 +285,26 @@ fn main() -> Result<()> {
             ),
         },
         Command::Gpu { cmd } => match cmd {
-            GpuCmd::Setup {
-                new,
-                bare,
+            GpuCmd::Create {
+                name,
+                backend,
+                gpu_type,
                 min_tflops,
-            } => commands::gpu::setup(new, bare, min_tflops),
+            } => commands::gpu::create(&name, backend, &gpu_type, min_tflops),
+            GpuCmd::Setup { name, branch } => commands::gpu::setup(name.as_deref(), &branch),
             GpuCmd::Benchmark {
+                name,
                 detach,
                 args,
                 force,
-            } => commands::gpu::benchmark(&args, detach, force),
-            GpuCmd::Status => commands::gpu::status(),
-            GpuCmd::Attach => commands::gpu::attach(),
-            GpuCmd::PullResults => commands::gpu::pull_results(),
-            GpuCmd::Ssh => commands::gpu::ssh(),
-            GpuCmd::Destroy => commands::gpu::destroy(),
+                branch,
+            } => commands::gpu::benchmark(name.as_deref(), &args, detach, force, &branch),
+            GpuCmd::Status { name } => commands::gpu::status(name.as_deref()),
+            GpuCmd::Attach { name } => commands::gpu::attach(name.as_deref()),
+            GpuCmd::PullResults { name } => commands::gpu::pull_results(name.as_deref()),
+            GpuCmd::Ssh { name } => commands::gpu::ssh(name.as_deref()),
+            GpuCmd::Destroy { name, all } => commands::gpu::destroy(name.as_deref(), all),
+            GpuCmd::List => commands::gpu::list(),
         },
         Command::Diarize { mode, wav_files } => commands::diarize::run(mode, wav_files),
         Command::ProfileOrtEmbedding {
