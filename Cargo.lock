@@ -3176,6 +3176,7 @@ dependencies = [
  "serde",
  "serde_json",
  "speakrs",
+ "tempfile",
  "tracing-subscriber",
  "ureq",
  "wait-timeout",

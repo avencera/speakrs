@@ -1,44 +1,25 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use color_eyre::eyre::{Result, bail};
+use tempfile::TempDir;
 
 use crate::cmd::run_cmd;
 use crate::convert::convert_to_16k_mono;
 
-/// RAII temp directory that cleans up on drop
-pub struct TempDir(PathBuf);
-
-impl TempDir {
-    pub fn new() -> Result<Self> {
-        let path = std::env::temp_dir().join(format!("xtask-{}", std::process::id()));
-        fs::create_dir_all(&path)?;
-        Ok(Self(path))
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.0
-    }
+pub struct PreparedAudio {
+    wav_path: PathBuf,
+    temp_dir: TempDir,
 }
 
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+impl PreparedAudio {
+    pub fn wav_path(&self) -> &Path {
+        &self.wav_path
     }
-}
 
-fn is_youtube_url(source: &str) -> bool {
-    source.starts_with("http://www.youtube.com")
-        || source.starts_with("https://www.youtube.com")
-        || source.starts_with("http://youtube.com")
-        || source.starts_with("https://youtube.com")
-        || source.starts_with("http://youtu.be")
-        || source.starts_with("https://youtu.be")
-}
-
-fn is_http_url(source: &str) -> bool {
-    source.starts_with("http://") || source.starts_with("https://")
+    pub fn into_parts(self) -> (PathBuf, TempDir) {
+        (self.wav_path, self.temp_dir)
+    }
 }
 
 enum AudioSource {
@@ -61,10 +42,10 @@ impl AudioSource {
 
 /// Prepare audio from a URL, YouTube link, or local file path into 16kHz mono WAV
 ///
-/// Returns the path to the WAV file and a TempDir guard (drop to clean up)
-pub fn prepare_audio(source: &str) -> Result<(PathBuf, TempDir)> {
-    let tmp = TempDir::new()?;
-    let wav = tmp.path().join("audio.wav");
+/// Returns the converted WAV path plus the temp dir guard that keeps it alive
+pub fn prepare_audio(source: &str) -> Result<PreparedAudio> {
+    let temp_dir = TempDir::new()?;
+    let wav_path = temp_dir.path().join("audio.wav");
 
     println!("=== Preparing audio ===");
 
@@ -76,12 +57,12 @@ pub fn prepare_audio(source: &str) -> Result<(PathBuf, TempDir)> {
                     .arg("--postprocessor-args")
                     .arg("ffmpeg:-ar 16000 -ac 1")
                     .arg("-o")
-                    .arg(tmp.path().join("audio.%(ext)s"))
+                    .arg(temp_dir.path().join("audio.%(ext)s"))
                     .arg(source),
             )?;
         }
         AudioSource::HttpDownload => {
-            let input = tmp.path().join("input");
+            let input = temp_dir.path().join("input");
             run_cmd(
                 Command::new("curl")
                     .args(["--fail", "--location", "--silent", "--show-error"])
@@ -89,15 +70,28 @@ pub fn prepare_audio(source: &str) -> Result<(PathBuf, TempDir)> {
                     .arg("-o")
                     .arg(&input),
             )?;
-            convert_to_16k_mono(&input, &wav)?;
+            convert_to_16k_mono(&input, &wav_path)?;
         }
         AudioSource::LocalFile => {
             if !Path::new(source).is_file() {
                 bail!("Input does not exist: {source}");
             }
-            convert_to_16k_mono(Path::new(source), &wav)?;
+            convert_to_16k_mono(Path::new(source), &wav_path)?;
         }
     }
 
-    Ok((wav, tmp))
+    Ok(PreparedAudio { wav_path, temp_dir })
+}
+
+fn is_youtube_url(source: &str) -> bool {
+    source.starts_with("http://www.youtube.com")
+        || source.starts_with("https://www.youtube.com")
+        || source.starts_with("http://youtube.com")
+        || source.starts_with("https://youtube.com")
+        || source.starts_with("http://youtu.be")
+        || source.starts_with("https://youtu.be")
+}
+
+fn is_http_url(source: &str) -> bool {
+    source.starts_with("http://") || source.starts_with("https://")
 }
