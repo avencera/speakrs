@@ -5,7 +5,7 @@
 #     "torch>=2.6",
 #     "torchaudio>=2.6",
 #     "soundfile>=0.12",
-#     "tqdm>=4.66",
+#
 # ]
 # ///
 """Run pyannote community-1 diarization on WAV files and print RTTM."""
@@ -115,6 +115,14 @@ def diarize_file(pipeline: Any, wav_path: str, file_id: str) -> str:
     return output
 
 
+def _format_eta(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    mins = int(seconds // 60)
+    secs = int(round(seconds % 60))
+    return f"{mins}m {secs:02d}s"
+
+
 def main() -> None:
     args = parse_args()
     token = os.environ.get("HF_TOKEN")
@@ -148,24 +156,24 @@ def main() -> None:
         pipeline.embedding_batch_size = args.embedding_batch_size
 
     all_output = ""
-    multiple = len(args.wav_files) > 1
+    total = len(args.wav_files)
+    cumulative = 0.0
 
-    if multiple:
-        from tqdm import tqdm
-
-        pbar = tqdm(
-            args.wav_files, file=sys.stderr, bar_format="{l_bar}{bar:20}{r_bar}"
-        )
-    else:
-        pbar = args.wav_files
-
-    for wav_path in pbar:
+    for i, wav_path in enumerate(args.wav_files):
         file_id = os.path.splitext(os.path.basename(wav_path))[0]
         t0 = time.monotonic()
         all_output += diarize_file(pipeline, wav_path, file_id)
         elapsed = time.monotonic() - t0
-        if multiple:
-            pbar.set_postfix_str(f"{file_id}: {elapsed:.1f}s")
+        cumulative += elapsed
+
+        if total > 1:
+            avg = cumulative / (i + 1)
+            remaining = (total - i - 1) * avg
+            eta = _format_eta(remaining)
+            print(
+                f"  [{i + 1}/{total}] {file_id}: {elapsed:.1f}s (ETA {eta})",
+                file=sys.stderr,
+            )
 
     if args.output:
         with open(args.output, "w", encoding="utf-8") as handle:

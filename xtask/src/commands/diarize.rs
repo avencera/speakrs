@@ -4,7 +4,6 @@ use std::time::Instant;
 
 use clap::ValueEnum;
 use color_eyre::eyre::{Result, bail, ensure};
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use speakrs::clustering::plda::PldaTransform;
 use speakrs::inference::ExecutionMode;
 use speakrs::inference::embedding::EmbeddingModel;
@@ -89,14 +88,10 @@ pub fn run(mode: DiarizeMode, wav_files: Vec<PathBuf>) -> Result<()> {
     )?;
     let plda = PldaTransform::from_dir(&models_dir)?;
 
-    let pb = ProgressBar::with_draw_target(
-        Some(wav_files.len() as u64),
-        ProgressDrawTarget::term_like_with_hz(Box::new(console::Term::stderr()), 20),
-    );
-    pb.set_style(ProgressStyle::with_template("  {pos}/{len} ETA {eta}  {msg}").unwrap());
-    pb.tick();
+    let total = wav_files.len();
+    let mut cumulative = 0.0f64;
 
-    for wav_path in &wav_files {
+    for (i, wav_path) in wav_files.iter().enumerate() {
         let file_id = wav_path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
@@ -107,14 +102,19 @@ pub fn run(mode: DiarizeMode, wav_files: Vec<PathBuf>) -> Result<()> {
 
         let start = Instant::now();
         let result = diarize(&mut seg_model, &mut emb_model, &plda, &samples, &file_id)?;
-        let elapsed = start.elapsed();
+        let elapsed = start.elapsed().as_secs_f64();
+        cumulative += elapsed;
 
-        pb.println(format!("{file_id}: {:.3}s", elapsed.as_secs_f64()));
-        pb.inc(1);
+        let avg = cumulative / (i + 1) as f64;
+        let remaining = (total - i - 1) as f64 * avg;
+        let eta = format_eta(remaining);
+        eprintln!(
+            "  [{}/{}] {file_id}: {elapsed:.1}s (ETA {eta})",
+            i + 1,
+            total
+        );
         print!("{}", result.rttm);
     }
-
-    pb.finish_and_clear();
     Ok(())
 }
 
@@ -149,4 +149,14 @@ fn run_pyannote_sidecar(device: &str, wav_path: &str) -> Result<String> {
     }
 
     Ok(String::from_utf8(output.stdout)?)
+}
+
+fn format_eta(seconds: f64) -> String {
+    if seconds < 60.0 {
+        format!("{seconds:.0}s")
+    } else {
+        let mins = (seconds / 60.0).floor() as u64;
+        let secs = (seconds % 60.0).round() as u64;
+        format!("{mins}m {secs:02}s")
+    }
 }
