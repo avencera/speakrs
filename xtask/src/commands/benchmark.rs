@@ -1055,7 +1055,12 @@ fn run_per_file(
         let avg = total_time / (i + 1) as f64;
         let remaining = (total - i - 1) as f64 * avg;
         let eta = format_eta(remaining);
-        eprintln!("  [{}/{}] {stem}: {elapsed:.1}s (ETA {eta})", i + 1, total);
+        eprintln!(
+            "  [{}/{}] {stem}: {elapsed:.1}s (ETA {eta}) [{}]",
+            i + 1,
+            total,
+            now_stamp()
+        );
     }
 
     Ok((total_time, per_file))
@@ -1484,6 +1489,10 @@ fn format_eta(seconds: f64) -> String {
         let secs = (seconds % 60.0).round() as u64;
         format!("{mins}m {secs:02}s")
     }
+}
+
+fn now_stamp() -> String {
+    chrono::Local::now().format("%H:%M:%S").to_string()
 }
 
 fn der_skip_reason(

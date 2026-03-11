@@ -108,8 +108,9 @@ pub fn run(mode: DiarizeMode, wav_files: Vec<PathBuf>) -> Result<()> {
         let avg = cumulative / (i + 1) as f64;
         let remaining = (total - i - 1) as f64 * avg;
         let eta = format_eta(remaining);
+        let now = chrono::Local::now().format("%H:%M:%S");
         eprintln!(
-            "  [{}/{}] {file_id}: {elapsed:.1}s (ETA {eta})",
+            "  [{}/{}] {file_id}: {elapsed:.1}s (ETA {eta}) [{now}]",
             i + 1,
             total
         );

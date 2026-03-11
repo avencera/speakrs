@@ -14,6 +14,7 @@ import argparse
 import os
 import sys
 import time
+from datetime import datetime
 from typing import Any
 
 import torch
@@ -171,7 +172,7 @@ def main() -> None:
             remaining = (total - i - 1) * avg
             eta = _format_eta(remaining)
             print(
-                f"  [{i + 1}/{total}] {file_id}: {elapsed:.1f}s (ETA {eta})",
+                f"  [{i + 1}/{total}] {file_id}: {elapsed:.1f}s (ETA {eta}) [{datetime.now():%H:%M:%S}]",
                 file=sys.stderr,
             )
 
