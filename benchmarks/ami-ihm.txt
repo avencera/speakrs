@@ -3,6 +3,6 @@ AMI IHM DER (34 files, 1123.8 min, collar=0ms)
 Implementation             DER%    Missed%   FalseAlarm%   Confusion%     Time
 ──────────────────────────────────────────────────────────────────────────────
 pyannote MPS              17.0%       8.1%          4.3%         4.5%  3326.2s
-speakrs CoreML            16.9%       8.1%          4.3%         4.5%  1086.3s
-speakrs CoreML Fast       17.0%       8.2%          4.3%         4.6%   540.0s
-FluidAudio                59.4%      16.7%          3.1%        39.6%   464.5s
+speakrs CoreML            16.9%       8.1%          4.3%         4.5%   855.4s
+speakrs CoreML Fast       17.0%       8.2%          4.3%         4.6%   425.0s
+FluidAudio                59.4%      16.7%          3.1%        39.6%   464.2s
