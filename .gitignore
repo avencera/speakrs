@@ -7,4 +7,4 @@ notes
 __pycache__/
 /scripts/fluidaudio-bench/.build
 _benchmarks/
-.vastai-instance
+.gpu-instances/
