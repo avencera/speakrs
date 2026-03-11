@@ -586,6 +586,7 @@ const IMPL_REGISTRY: &[(&str, &str, ImplType)] = &[
     ("pyannote-rs", "pyannote-rs", ImplType::PyannoteRs),
 ];
 
+#[allow(clippy::too_many_arguments)]
 pub fn der(
     dataset_id: &str,
     max_files: u32,
@@ -593,7 +594,16 @@ pub fn der(
     description: Option<&str>,
     impls: &[String],
     no_preflight: bool,
+    seg_batch_size: Option<u32>,
+    emb_batch_size: Option<u32>,
 ) -> Result<()> {
+    if let Some(seg) = seg_batch_size {
+        unsafe { std::env::set_var("PYANNOTE_SEGMENTATION_BATCH_SIZE", seg.to_string()) };
+    }
+    if let Some(emb) = emb_batch_size {
+        unsafe { std::env::set_var("PYANNOTE_EMBEDDING_BATCH_SIZE", emb.to_string()) };
+    }
+
     if impls.len() == 1 && impls[0] == "list" {
         println!("Available implementations:");
         for (cli_id, display_name, _) in IMPL_REGISTRY {

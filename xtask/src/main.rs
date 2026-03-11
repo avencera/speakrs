@@ -159,6 +159,12 @@ enum BenchmarkCmd {
         /// Skip the pre-flight smoke test
         #[arg(long)]
         no_preflight: bool,
+        /// Segmentation batch size (sets PYANNOTE_SEGMENTATION_BATCH_SIZE)
+        #[arg(long)]
+        seg_batch_size: Option<u32>,
+        /// Embedding batch size (sets PYANNOTE_EMBEDDING_BATCH_SIZE)
+        #[arg(long)]
+        emb_batch_size: Option<u32>,
     },
 }
 
@@ -231,6 +237,19 @@ enum GpuCmd {
         #[arg(long)]
         all: bool,
     },
+    /// Resume a stopped GPU instance
+    Start {
+        /// Instance name (omit for fzf picker)
+        name: Option<String>,
+    },
+    /// Import an existing running pod as a local instance
+    Import {
+        /// Local instance name
+        name: String,
+        /// Backend provider
+        #[arg(long, default_value = "runpod")]
+        backend: Backend,
+    },
     /// List all GPU instances
     List,
 }
@@ -280,6 +299,8 @@ fn main() -> Result<()> {
                 description,
                 impls,
                 no_preflight,
+                seg_batch_size,
+                emb_batch_size,
             } => commands::benchmark::der(
                 &dataset,
                 max_files.unwrap_or(u32::MAX),
@@ -287,6 +308,8 @@ fn main() -> Result<()> {
                 description.as_deref(),
                 &impls,
                 no_preflight,
+                seg_batch_size,
+                emb_batch_size,
             ),
         },
         Command::Gpu { cmd } => match cmd {
@@ -315,6 +338,8 @@ fn main() -> Result<()> {
             GpuCmd::PullResults { name } => commands::gpu::pull_results(name.as_deref()),
             GpuCmd::Ssh { name } => commands::gpu::ssh(name.as_deref()),
             GpuCmd::Destroy { name, all } => commands::gpu::destroy(name.as_deref(), all),
+            GpuCmd::Start { name } => commands::gpu::start(name.as_deref()),
+            GpuCmd::Import { name, backend } => commands::gpu::import(&name, backend),
             GpuCmd::List => commands::gpu::list(),
         },
         Command::Diarize { mode, wav_files } => commands::diarize::run(mode, wav_files),

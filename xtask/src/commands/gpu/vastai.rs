@@ -150,6 +150,7 @@ pub fn provision(min_tflops: f64) -> Result<InstanceInfo> {
         instance_id,
         ssh_host: host,
         ssh_port: port,
+        ssh_user: "root".to_string(),
     })
 }
 
