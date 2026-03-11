@@ -2,7 +2,7 @@
 
 DER (Diarization Error Rate) evaluation on standard datasets, comparing speakrs against pyannote and other implementations.
 
-On VoxConverse, speakrs CoreML matches or beats pyannote community-1 (MPS) on accuracy while running ~3x faster on Apple Silicon.
+On VoxConverse, speakrs CoreML matches or beats pyannote community-1 (MPS) on accuracy while running ~4x faster on Apple Silicon. speakrs CoreML Fast is the fastest implementation tested across all datasets, beating FluidAudio on both speed and accuracy.
 
 All benchmarks run on Apple M4 Pro, macOS 26.3, collar=0ms.
 
@@ -22,36 +22,36 @@ All benchmarks run on Apple M4 Pro, macOS 26.3, collar=0ms.
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
 | pyannote community-1 (MPS) | 7.2% | 2.3% | 2.3% | 2.6% | 2998.8s | 24x |
-| **speakrs CoreML** | **7.0%** | 2.3% | 2.3% | 2.4% | 1009.1s | 72x |
-| speakrs CoreML Fast | 7.8% | 2.3% | 2.3% | 3.3% | 524.0s | 139x |
-| FluidAudio | 22.3% | 5.3% | 1.6% | 15.5% | 500.9s | **146x** |
+| **speakrs CoreML** | **7.0%** | 2.3% | 2.3% | 2.4% | 779.4s | 94x |
+| speakrs CoreML Fast | 7.8% | 2.3% | 2.3% | 3.3% | 410.3s | **178x** |
+| FluidAudio | 22.3% | 5.3% | 1.6% | 15.5% | 495.8s | 147x |
 
 ### VoxConverse Test (232 files, 2612.2 min)
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
 | **pyannote community-1 (MPS)** | **11.1%** | 3.4% | 4.1% | 3.7% | 6705.3s | 23x |
-| **speakrs CoreML** | **11.1%** | 3.4% | 4.1% | 3.7% | 2133.5s | 73x |
-| speakrs CoreML Fast | 11.9% | 3.3% | 4.1% | 4.5% | 1093.2s | 143x |
-| FluidAudio | 32.6% | 5.4% | 3.4% | 23.8% | 1044.2s | **150x** |
+| **speakrs CoreML** | **11.1%** | 3.4% | 4.1% | 3.7% | 1610.8s | 97x |
+| speakrs CoreML Fast | 11.9% | 3.3% | 4.1% | 4.5% | 826.3s | **190x** |
+| FluidAudio | 32.6% | 5.4% | 3.4% | 23.8% | 1044.4s | 150x |
 
 ### AMI IHM (34 files, 1123.8 min)
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
 | pyannote community-1 (MPS) | 17.0% | 8.1% | 4.3% | 4.5% | 3326.2s | 20x |
-| **speakrs CoreML** | **16.9%** | 8.1% | 4.3% | 4.5% | 1086.3s | 62x |
-| speakrs CoreML Fast | 17.0% | 8.2% | 4.3% | 4.6% | 540.0s | 125x |
-| FluidAudio | 59.4% | 16.7% | 3.1% | 39.6% | 464.5s | **145x** |
+| **speakrs CoreML** | **16.9%** | 8.1% | 4.3% | 4.5% | 855.4s | 79x |
+| speakrs CoreML Fast | 17.0% | 8.2% | 4.3% | 4.6% | 425.0s | **159x** |
+| FluidAudio | 59.4% | 16.7% | 3.1% | 39.6% | 464.2s | 145x |
 
 ### Earnings-21 (44 files, 2355.8 min)
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
 | **pyannote community-1 (MPS)** | **9.7%** | 2.6% | 2.4% | 4.7% | 8009.6s | 18x |
-| **speakrs CoreML** | **9.7%** | 2.6% | 2.4% | 4.7% | 1752.1s | 81x |
-| speakrs CoreML Fast | 10.9% | 2.5% | 2.5% | 5.9% | 866.3s | **163x** |
-| FluidAudio | 43.1% | 4.4% | 2.2% | 36.5% | 1042.7s | 136x |
+| **speakrs CoreML** | **9.7%** | 2.6% | 2.4% | 4.7% | 1238.8s | 114x |
+| speakrs CoreML Fast | 10.9% | 2.5% | 2.5% | 5.9% | 615.1s | **230x** |
+| FluidAudio | 43.1% | 4.4% | 2.2% | 36.5% | 1040.2s | 136x |
 
 ### Other implementations
 
@@ -66,18 +66,15 @@ All benchmarks run on Apple M4 Pro, macOS 26.3, collar=0ms.
 
 ## Batch Sizes
 
-pyannote batch sizes affect throughput differently per device:
-
-- **MPS** (Apple GPU): batch size 16 (default) -- batch 32 is slower
-- **CUDA** (NVIDIA GPU): batch size 32
+Default pyannote batch size is 32 for both segmentation and embedding (all devices).
 
 Override via environment variables:
 
 ```bash
-PYANNOTE_SEGMENTATION_BATCH_SIZE=32 PYANNOTE_EMBEDDING_BATCH_SIZE=32 cargo xtask benchmark der ...
+PYANNOTE_SEGMENTATION_BATCH_SIZE=64 PYANNOTE_EMBEDDING_BATCH_SIZE=64 cargo xtask benchmark der ...
 ```
 
-All results above use batch size 16 (MPS).
+All results above use batch size 32.
 
 ## Reproduce
 

@@ -3,6 +3,6 @@ Earnings-21 DER (44 files, 2355.8 min, collar=0ms)
 Implementation             DER%    Missed%   FalseAlarm%   Confusion%     Time
 ──────────────────────────────────────────────────────────────────────────────
 pyannote MPS               9.7%       2.6%          2.4%         4.7%  8009.6s
-speakrs CoreML             9.7%       2.6%          2.4%         4.7%  1752.1s
-speakrs CoreML Fast       10.9%       2.5%          2.5%         5.9%   866.3s
-FluidAudio                43.1%       4.4%          2.2%        36.5%  1042.7s
+speakrs CoreML             9.7%       2.6%          2.4%         4.7%  1238.8s
+speakrs CoreML Fast       10.9%       2.5%          2.5%         5.9%   615.1s
+FluidAudio                43.1%       4.4%          2.2%        36.5%  1040.2s
