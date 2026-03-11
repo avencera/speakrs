@@ -91,8 +91,6 @@ Works on any platform with ONNX Runtime. No special Cargo features needed for CP
 | `cpu`  | ORT CPU  | 1s   | FP32      | Reference  |
 | `cuda` | ORT CUDA | 1s   | FP32      | NVIDIA GPU |
 
-Additional Cargo features are available for `directml` (Windows) and `tensorrt` (NVIDIA TensorRT).
-
 ### Benchmarks
 
 Coming soon.

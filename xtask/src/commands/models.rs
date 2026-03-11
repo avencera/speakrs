@@ -51,7 +51,6 @@ pub fn deploy() -> Result<()> {
         "wespeaker-fbank.mlmodelc/**",
         "wespeaker-fbank-b32.mlmodelc/**",
         "wespeaker-voxceleb-resnet34-tail*.mlmodelc/**",
-        "wespeaker-voxceleb-resnet34-fused*.mlmodelc/**",
     ];
 
     let mut cmd = Command::new("hf");

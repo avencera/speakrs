@@ -25,12 +25,6 @@ pub(crate) struct SplitTailInput<'a> {
     pub weights: &'a [f32],
 }
 
-#[cfg(feature = "coreml")]
-pub(crate) struct FusedEmbeddingInput<'a> {
-    pub audio: &'a [f32],
-    pub weights: &'a [f32],
-}
-
 pub struct EmbeddingModel {
     model_path: String,
     mode: ExecutionMode,
@@ -52,19 +46,9 @@ pub struct EmbeddingModel {
     #[cfg(feature = "coreml")]
     native_fbank_batched_session: Option<CoreMlModel>,
     #[cfg(feature = "coreml")]
-    native_fused_session: Option<CoreMlModel>,
-    #[cfg(feature = "coreml")]
-    native_fused_batched_session: Option<CoreMlModel>,
-    #[cfg(feature = "coreml")]
-    native_fused_primary_batched_session: Option<CoreMlModel>,
-    #[cfg(feature = "coreml")]
     cached_tail_fbank_shape: CachedInputShape,
     #[cfg(feature = "coreml")]
     cached_tail_weights_shape: CachedInputShape,
-    #[cfg(feature = "coreml")]
-    cached_fused_waveform_shape: CachedInputShape,
-    #[cfg(feature = "coreml")]
-    cached_fused_weights_shape: CachedInputShape,
     #[cfg(feature = "coreml")]
     cached_fbank_single_shape: CachedInputShape,
     #[cfg(feature = "coreml")]
@@ -164,36 +148,12 @@ impl EmbeddingModel {
                 PRIMARY_BATCH_SIZE,
             ),
             #[cfg(feature = "coreml")]
-            native_fused_session: Self::load_native_fused(model_path, mode, 1),
-            #[cfg(feature = "coreml")]
-            native_fused_batched_session: Self::load_native_fused(
-                model_path,
-                mode,
-                CHUNK_SPEAKER_BATCH_SIZE,
-            ),
-            #[cfg(feature = "coreml")]
-            native_fused_primary_batched_session: Self::load_native_fused(
-                model_path,
-                mode,
-                PRIMARY_BATCH_SIZE,
-            ),
-            #[cfg(feature = "coreml")]
             cached_tail_fbank_shape: CachedInputShape::new(
                 "fbank",
                 &[PRIMARY_BATCH_SIZE, FBANK_FRAMES, FBANK_FEATURES],
             ),
             #[cfg(feature = "coreml")]
             cached_tail_weights_shape: CachedInputShape::new("weights", &[PRIMARY_BATCH_SIZE, 589]),
-            #[cfg(feature = "coreml")]
-            cached_fused_waveform_shape: CachedInputShape::new(
-                "waveform",
-                &[PRIMARY_BATCH_SIZE, 1, 160_000],
-            ),
-            #[cfg(feature = "coreml")]
-            cached_fused_weights_shape: CachedInputShape::new(
-                "weights",
-                &[PRIMARY_BATCH_SIZE, 589],
-            ),
             #[cfg(feature = "coreml")]
             cached_fbank_single_shape: CachedInputShape::new("waveform", &[1, 1, 160_000]),
             #[cfg(feature = "coreml")]
@@ -336,11 +296,6 @@ impl EmbeddingModel {
             self.native_fbank_session = Self::load_native_fbank(&self.model_path, self.mode, 1);
             self.native_fbank_batched_session =
                 Self::load_native_fbank(&self.model_path, self.mode, PRIMARY_BATCH_SIZE);
-            self.native_fused_session = Self::load_native_fused(&self.model_path, self.mode, 1);
-            self.native_fused_batched_session =
-                Self::load_native_fused(&self.model_path, self.mode, CHUNK_SPEAKER_BATCH_SIZE);
-            self.native_fused_primary_batched_session =
-                Self::load_native_fused(&self.model_path, self.mode, PRIMARY_BATCH_SIZE);
         }
         Ok(())
     }
@@ -348,8 +303,7 @@ impl EmbeddingModel {
     pub fn prefers_chunk_embedding_path(&self) -> bool {
         let ort_split = self.split_fbank_session.is_some() && self.split_tail_session.is_some();
         #[cfg(feature = "coreml")]
-        let ort_split =
-            ort_split || self.native_tail_session.is_some() || self.native_fused_session.is_some();
+        let ort_split = ort_split || self.native_tail_session.is_some();
         ort_split
     }
 
@@ -358,9 +312,7 @@ impl EmbeddingModel {
             return PRIMARY_BATCH_SIZE;
         }
         #[cfg(feature = "coreml")]
-        if self.native_tail_primary_batched_session.is_some()
-            || self.native_fused_primary_batched_session.is_some()
-        {
+        if self.native_tail_primary_batched_session.is_some() {
             return PRIMARY_BATCH_SIZE;
         }
         0
@@ -422,28 +374,6 @@ impl EmbeddingModel {
                     mask.as_slice().unwrap(),
                     Some(clean_mask.as_slice().unwrap()),
                 )?;
-                embeddings.row_mut(speaker_idx).assign(&embedding);
-            }
-            return Ok(embeddings);
-        }
-
-        // fused path: waveform + weights → embedding (no separate fbank)
-        #[cfg(feature = "coreml")]
-        if self.native_fused_session.is_some() {
-            let has_batched_fused = self.native_fused_batched_session.is_some();
-            if speaker_count == CHUNK_SPEAKER_BATCH_SIZE && has_batched_fused {
-                return self.embed_fused_batch(audio, &segmentations, clean_masks);
-            }
-            for speaker_idx in 0..speaker_count {
-                let mask = segmentations.column(speaker_idx).to_owned();
-                let clean_mask = clean_masks.column(speaker_idx).to_owned();
-                let used_mask = select_mask(
-                    mask.as_slice().unwrap(),
-                    Some(clean_mask.as_slice().unwrap()),
-                    audio.len(),
-                    self.min_num_samples,
-                );
-                let embedding = self.embed_fused_single(audio, used_mask)?;
                 embeddings.row_mut(speaker_idx).assign(&embedding);
             }
             return Ok(embeddings);
@@ -727,55 +657,6 @@ impl EmbeddingModel {
         Ok(batch.slice(s![0..inputs.len(), ..]).to_owned())
     }
 
-    #[cfg(feature = "coreml")]
-    pub(crate) fn has_fused_primary_batch(&self) -> bool {
-        self.native_fused_primary_batched_session.is_some()
-    }
-
-    #[cfg(feature = "coreml")]
-    pub(crate) fn embed_fused_batch_inputs(
-        &mut self,
-        inputs: &[FusedEmbeddingInput<'_>],
-    ) -> Result<Array2<f32>, ort::Error> {
-        let native = self.native_fused_primary_batched_session.as_mut().unwrap();
-        debug_assert!(inputs.len() <= PRIMARY_BATCH_SIZE);
-
-        for (batch_idx, input) in inputs.iter().enumerate() {
-            let copy_len = input.audio.len().min(self.window_samples);
-            self.primary_batch_waveform_buffer
-                .slice_mut(s![batch_idx, 0, ..copy_len])
-                .assign(&ndarray::ArrayView1::from(&input.audio[..copy_len]));
-            // zero waveform tail if audio is shorter than window
-            if copy_len < self.window_samples {
-                self.primary_batch_waveform_buffer
-                    .slice_mut(s![batch_idx, 0, copy_len..])
-                    .fill(0.0);
-            }
-            Self::prepare_weights(
-                batch_idx,
-                input.weights,
-                self.mask_frames,
-                &mut self.primary_batch_weights_buffer.view_mut(),
-            );
-        }
-        if inputs.len() < PRIMARY_BATCH_SIZE {
-            self.primary_batch_weights_buffer
-                .slice_mut(s![inputs.len().., ..])
-                .fill(0.0);
-        }
-
-        let waveform_data = self.primary_batch_waveform_buffer.as_slice().unwrap();
-        let weights_data = self.primary_batch_weights_buffer.as_slice().unwrap();
-        let (data, _) = native
-            .predict_cached(&[
-                (&self.cached_fused_waveform_shape, waveform_data),
-                (&self.cached_fused_weights_shape, weights_data),
-            ])
-            .map_err(|e| ort::Error::new(e.to_string()))?;
-        let batch = Array2::from_shape_vec((PRIMARY_BATCH_SIZE, 256), data).unwrap();
-        Ok(batch.slice(s![0..inputs.len(), ..]).to_owned())
-    }
-
     fn embed_tail_single(
         &mut self,
         fbank: &Array2<f32>,
@@ -935,92 +816,6 @@ impl EmbeddingModel {
     }
 
     #[cfg(feature = "coreml")]
-    fn embed_fused_single(
-        &mut self,
-        audio: &[f32],
-        weights: &[f32],
-    ) -> Result<Array1<f32>, ort::Error> {
-        let native = self.native_fused_session.as_mut().unwrap();
-        let copy_len = audio.len().min(self.window_samples);
-        self.split_waveform_buffer
-            .slice_mut(s![0, 0, ..copy_len])
-            .assign(&ndarray::ArrayView1::from(&audio[..copy_len]));
-        if copy_len < self.window_samples {
-            self.split_waveform_buffer
-                .slice_mut(s![0, 0, copy_len..])
-                .fill(0.0);
-        }
-        Self::prepare_weights(
-            0,
-            weights,
-            self.mask_frames,
-            &mut self.split_weights_batch_buffer.view_mut(),
-        );
-
-        let waveform_data = self.split_waveform_buffer.as_slice().unwrap();
-        let weight_slice = self.split_weights_batch_buffer.slice(s![0..1, ..]);
-        let weights_data = weight_slice.as_slice().unwrap();
-        let (data, _) = native
-            .predict(&[
-                ("waveform", &[1, 1, self.window_samples], waveform_data),
-                ("weights", &[1, self.mask_frames], weights_data),
-            ])
-            .map_err(|e| ort::Error::new(e.to_string()))?;
-        Ok(Array1::from_vec(data))
-    }
-
-    #[cfg(feature = "coreml")]
-    fn embed_fused_batch(
-        &mut self,
-        audio: &[f32],
-        segmentations: &ArrayView2<'_, f32>,
-        clean_masks: &Array2<f32>,
-    ) -> Result<Array2<f32>, ort::Error> {
-        let native = self.native_fused_batched_session.as_mut().unwrap();
-        let batch = CHUNK_SPEAKER_BATCH_SIZE;
-
-        let copy_len = audio.len().min(self.window_samples);
-        for speaker_idx in 0..batch {
-            self.split_fbank_batch_buffer
-                .slice_mut(s![speaker_idx, 0, ..copy_len])
-                .assign(&ndarray::ArrayView1::from(&audio[..copy_len]));
-            if copy_len < self.window_samples {
-                self.split_fbank_batch_buffer
-                    .slice_mut(s![speaker_idx, 0, copy_len..])
-                    .fill(0.0);
-            }
-        }
-
-        for speaker_idx in 0..segmentations.ncols() {
-            let mask = segmentations.column(speaker_idx).to_owned();
-            let clean_mask = clean_masks.column(speaker_idx).to_owned();
-            let used_mask = select_mask(
-                mask.as_slice().unwrap(),
-                Some(clean_mask.as_slice().unwrap()),
-                audio.len(),
-                self.min_num_samples,
-            );
-            Self::prepare_weights(
-                speaker_idx,
-                used_mask,
-                self.mask_frames,
-                &mut self.split_weights_batch_buffer.view_mut(),
-            );
-        }
-
-        let waveform_slice = self.split_fbank_batch_buffer.slice(s![0..batch, .., ..]);
-        let waveform_data = waveform_slice.as_slice().unwrap();
-        let weights_data = self.split_weights_batch_buffer.as_slice().unwrap();
-        let (data, _) = native
-            .predict(&[
-                ("waveform", &[batch, 1, self.window_samples], waveform_data),
-                ("weights", &[batch, self.mask_frames], weights_data),
-            ])
-            .map_err(|e| ort::Error::new(e.to_string()))?;
-        Ok(Array2::from_shape_vec((segmentations.ncols(), 256), data).unwrap())
-    }
-
-    #[cfg(feature = "coreml")]
     fn load_native_tail(
         model_path: &str,
         mode: ExecutionMode,
@@ -1085,41 +880,6 @@ impl EmbeddingModel {
             }
         }
     }
-
-    #[cfg(feature = "coreml")]
-    fn load_native_fused(
-        model_path: &str,
-        mode: ExecutionMode,
-        batch_size: usize,
-    ) -> Option<CoreMlModel> {
-        let fused_onnx = fused_model_path(model_path, batch_size);
-        let onnx_str = fused_onnx.to_str().unwrap();
-
-        match mode {
-            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => {
-                // FP32 fused: fbank DFT matmul is accurate on CPU+GPU
-                let coreml_path = coreml_model_path(onnx_str);
-                if !coreml_path.exists() {
-                    return None;
-                }
-                match CoreMlModel::load(
-                    &coreml_path,
-                    CoreMlModel::default_compute_units(),
-                    "output",
-                    GpuPrecision::Low,
-                ) {
-                    Ok(model) => Some(model),
-                    Err(e) => {
-                        eprintln!(
-                            "warning: failed to load native CoreML fused (batch={batch_size}): {e}"
-                        );
-                        None
-                    }
-                }
-            }
-            _ => None,
-        }
-    }
 }
 
 fn batched_model_path(model_path: &str, batch_size: usize) -> Option<std::path::PathBuf> {
@@ -1146,18 +906,6 @@ fn split_tail_model_path(model_path: &str, batch_size: usize) -> std::path::Path
     } else {
         path.with_file_name(format!(
             "wespeaker-voxceleb-resnet34-tail-b{batch_size}.onnx"
-        ))
-    }
-}
-
-#[cfg(feature = "coreml")]
-fn fused_model_path(model_path: &str, batch_size: usize) -> std::path::PathBuf {
-    let path = Path::new(model_path);
-    if batch_size == 1 {
-        path.with_file_name("wespeaker-voxceleb-resnet34-fused.onnx")
-    } else {
-        path.with_file_name(format!(
-            "wespeaker-voxceleb-resnet34-fused-b{batch_size}.onnx"
         ))
     }
 }

@@ -7,8 +7,6 @@ use crate::clustering::ahc::{AhcConfig, cluster as cluster_ahc};
 use crate::clustering::plda::PldaTransform;
 use crate::clustering::vbx::{VbxConfig, cluster_vbx};
 use crate::inference::ExecutionMode;
-#[cfg(feature = "coreml")]
-use crate::inference::embedding::FusedEmbeddingInput;
 use crate::inference::embedding::{
     EmbeddingModel, MaskedEmbeddingInput, SplitTailInput, should_use_clean_mask,
 };
@@ -105,14 +103,6 @@ struct PendingSplitEmbedding {
     weights: Vec<f32>,
 }
 
-#[cfg(feature = "coreml")]
-struct PendingFusedEmbedding<'a> {
-    chunk_idx: usize,
-    speaker_idx: usize,
-    audio: &'a [f32],
-    weights: Vec<f32>,
-}
-
 struct ConcurrentEmbeddingResult {
     decoded_windows: Vec<Array2<f32>>,
     embeddings: Vec<SpeakerEmbedding>,
@@ -170,83 +160,6 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
         );
         let clean_masks = clean_masks(&segmentation_view);
         (segmentation_view, chunk_audio, clean_masks)
-    }
-
-    #[cfg(feature = "coreml")]
-    fn run_fused(
-        &self,
-        receiver: crossbeam_channel::Receiver<Array2<f32>>,
-        embedding_model: &mut EmbeddingModel,
-        batch_size: usize,
-        min_num_samples: usize,
-    ) -> Result<ConcurrentEmbeddingResult, PipelineError> {
-        let mut decoded_windows: Vec<Array2<f32>> = Vec::new();
-        let mut embeddings: Vec<SpeakerEmbedding> = Vec::new();
-        let mut pending: Vec<PendingFusedEmbedding<'_>> = Vec::with_capacity(batch_size);
-        let mut chunk_idx = 0usize;
-
-        for raw_window in receiver {
-            let (segmentation_view, chunk_audio, clean_masks) =
-                self.decode_chunk(&raw_window, &mut decoded_windows, chunk_idx);
-
-            for speaker_idx in 0..self.num_speakers {
-                let Some(weights) = select_speaker_weights(
-                    &segmentation_view,
-                    &clean_masks,
-                    speaker_idx,
-                    chunk_audio.len(),
-                    min_num_samples,
-                ) else {
-                    continue;
-                };
-                pending.push(PendingFusedEmbedding {
-                    chunk_idx,
-                    speaker_idx,
-                    audio: chunk_audio,
-                    weights,
-                });
-                if pending.len() == batch_size {
-                    self.flush_fused_pending(embedding_model, &pending, &mut embeddings)?;
-                    pending.clear();
-                }
-            }
-            chunk_idx += 1;
-        }
-
-        if !pending.is_empty() {
-            self.flush_fused_pending(embedding_model, &pending, &mut embeddings)?;
-        }
-
-        Ok(ConcurrentEmbeddingResult {
-            decoded_windows,
-            embeddings,
-            num_speakers: self.num_speakers,
-        })
-    }
-
-    #[cfg(feature = "coreml")]
-    fn flush_fused_pending(
-        &self,
-        embedding_model: &mut EmbeddingModel,
-        pending: &[PendingFusedEmbedding<'_>],
-        embeddings: &mut Vec<SpeakerEmbedding>,
-    ) -> Result<(), PipelineError> {
-        let batch_inputs: Vec<_> = pending
-            .iter()
-            .map(|item| FusedEmbeddingInput {
-                audio: item.audio,
-                weights: &item.weights,
-            })
-            .collect();
-        let batch_embeddings = embedding_model.embed_fused_batch_inputs(&batch_inputs)?;
-        for (batch_idx, item) in pending.iter().enumerate() {
-            embeddings.push(SpeakerEmbedding {
-                chunk_idx: item.chunk_idx,
-                speaker_idx: item.speaker_idx,
-                embedding: batch_embeddings.row(batch_idx).to_vec(),
-            });
-        }
-        Ok(())
     }
 
     fn run_split(
@@ -685,11 +598,6 @@ fn diarize_with_config_concurrent(
     let uses_split_path =
         emb_model.prefers_chunk_embedding_path() && emb_model.split_primary_batch_size() > 0;
 
-    #[cfg(feature = "coreml")]
-    let uses_fused_path = uses_split_path && emb_model.has_fused_primary_batch();
-    #[cfg(not(feature = "coreml"))]
-    let uses_fused_path = false;
-
     let batch_size = if uses_split_path {
         emb_model.split_primary_batch_size()
     } else {
@@ -709,17 +617,7 @@ fn diarize_with_config_concurrent(
     let (seg_result, emb_result) = std::thread::scope(|s| {
         let seg_handle = s.spawn(|| seg_model.run_streaming(audio, tx));
 
-        let emb_result = if uses_fused_path {
-            #[cfg(feature = "coreml")]
-            {
-                concurrent_embedding_runner.run_fused(rx, emb_model, batch_size, min_num_samples)
-            }
-            #[cfg(not(feature = "coreml"))]
-            {
-                let _ = rx;
-                unreachable!()
-            }
-        } else if uses_split_path {
+        let emb_result = if uses_split_path {
             concurrent_embedding_runner.run_split(rx, emb_model, batch_size, min_num_samples)
         } else {
             concurrent_embedding_runner.run_masked(rx, emb_model, batch_size)
@@ -1018,12 +916,6 @@ fn extract_split_embeddings(
     segmentations: &Array3<f32>,
     embeddings: &mut Array3<f32>,
 ) -> Result<(), PipelineError> {
-    // fused path: waveform+weights → embedding in one CoreML call, no separate fbank
-    #[cfg(feature = "coreml")]
-    if emb_model.has_fused_primary_batch() {
-        return extract_fused_embeddings(seg_model, emb_model, audio, segmentations, embeddings);
-    }
-
     let batch_size = emb_model.split_primary_batch_size();
     let num_chunks = segmentations.shape()[0];
     let num_speakers = segmentations.shape()[2];
@@ -1116,101 +1008,6 @@ fn flush_split_embedding_batch(
         })
         .collect();
     let batch_embeddings = emb_model.embed_tail_batch_inputs(&batch_inputs)?;
-
-    for (batch_idx, item) in pending.iter().enumerate() {
-        embeddings
-            .slice_mut(s![item.chunk_idx, item.speaker_idx, ..])
-            .assign(&batch_embeddings.row(batch_idx));
-    }
-
-    Ok(())
-}
-
-#[cfg(feature = "coreml")]
-fn extract_fused_embeddings(
-    seg_model: &SegmentationModel,
-    emb_model: &mut EmbeddingModel,
-    audio: &[f32],
-    segmentations: &Array3<f32>,
-    embeddings: &mut Array3<f32>,
-) -> Result<(), PipelineError> {
-    let batch_size = emb_model.split_primary_batch_size();
-    let num_chunks = segmentations.shape()[0];
-    let num_speakers = segmentations.shape()[2];
-
-    let mut pending: Vec<PendingFusedEmbedding<'_>> = Vec::with_capacity(batch_size);
-    let mut fused_batches = 0usize;
-    let mut active_items = 0usize;
-
-    let min_num_samples = emb_model.min_num_samples();
-
-    for chunk_idx in 0..num_chunks {
-        let chunk_audio = chunk_audio(audio, seg_model, chunk_idx);
-        let chunk_segmentations = segmentations.slice(s![chunk_idx, .., ..]);
-        let clean = clean_masks(&chunk_segmentations);
-
-        for speaker_idx in 0..num_speakers {
-            let mask_col = chunk_segmentations.column(speaker_idx);
-            let activity: f32 = mask_col.iter().sum();
-            if activity < MIN_SPEAKER_ACTIVITY {
-                continue;
-            }
-
-            let clean_col = clean.column(speaker_idx);
-            let use_clean = should_use_clean_mask(
-                &clean_col,
-                mask_col.len(),
-                chunk_audio.len(),
-                min_num_samples,
-            );
-            let weights: Vec<f32> = if use_clean {
-                clean_col.iter().copied().collect()
-            } else {
-                mask_col.iter().copied().collect()
-            };
-            active_items += 1;
-            pending.push(PendingFusedEmbedding {
-                chunk_idx,
-                speaker_idx,
-                audio: chunk_audio,
-                weights,
-            });
-            if pending.len() == batch_size {
-                flush_fused_embedding_batch(emb_model, &pending, embeddings)?;
-                fused_batches += 1;
-                pending.clear();
-            }
-        }
-    }
-
-    if !pending.is_empty() {
-        flush_fused_embedding_batch(emb_model, &pending, embeddings)?;
-        fused_batches += 1;
-    }
-    tracing::info!(
-        batches = fused_batches,
-        active_items,
-        total_items = num_chunks * num_speakers,
-        "Fused embeddings complete"
-    );
-
-    Ok(())
-}
-
-#[cfg(feature = "coreml")]
-fn flush_fused_embedding_batch(
-    emb_model: &mut EmbeddingModel,
-    pending: &[PendingFusedEmbedding<'_>],
-    embeddings: &mut Array3<f32>,
-) -> Result<(), PipelineError> {
-    let batch_inputs: Vec<_> = pending
-        .iter()
-        .map(|item| FusedEmbeddingInput {
-            audio: item.audio,
-            weights: &item.weights,
-        })
-        .collect();
-    let batch_embeddings = emb_model.embed_fused_batch_inputs(&batch_inputs)?;
 
     for (batch_idx, item) in pending.iter().enumerate() {
         embeddings
