@@ -14,6 +14,19 @@ use crate::cmd::{project_root, run_cmd};
 pub const IMAGE: &str = "ghcr.io/avencera/speakrs-gpu:latest";
 pub const GITHUB_REPO: &str = "https://github.com/avencera/speakrs.git";
 
+pub const RUNPOD_GPU_FALLBACKS: &[&str] = &[
+    // ≥70 TFLOPS, sorted by price
+    "NVIDIA GeForce RTX 4090",        // 83 TFLOPS, $0.59/hr
+    "NVIDIA RTX 6000 Ada Generation", // 91 TFLOPS, $0.77/hr
+    "NVIDIA L40S",                    // 91 TFLOPS, $0.86/hr
+    "NVIDIA GeForce RTX 5090",        // 105 TFLOPS, $0.89/hr
+    "NVIDIA L40",                     // 90 TFLOPS, $0.99/hr
+    // <70 TFLOPS fallbacks
+    "NVIDIA RTX A6000",        // 39 TFLOPS, $0.49/hr
+    "NVIDIA A40",              // 37 TFLOPS, $0.40/hr
+    "NVIDIA GeForce RTX 3090", // 36 TFLOPS, $0.46/hr
+];
+
 pub const MODELS_SCRIPT: &str = r#"
 export PATH="$HOME/.local/bin:$PATH"
 MODELS_DIR=/workspace/speakrs/fixtures/models
@@ -201,13 +214,13 @@ pub fn run_remote_script(info: &InstanceInfo, script: &str) -> Result<()> {
 
 // --- public API ---
 
-pub fn create(name: &str, backend: Backend, gpu_type: &str, min_tflops: f64) -> Result<()> {
+pub fn create(name: &str, backend: Backend, gpu_types: &[&str], min_tflops: f64) -> Result<()> {
     if instances_dir().join(name).exists() {
         bail!("Instance '{name}' already exists. Destroy it first or pick a different name");
     }
 
     let info = match backend {
-        Backend::RunPod => runpod::provision(gpu_type)?,
+        Backend::RunPod => runpod::provision(name, gpu_types)?,
         Backend::VastAi => vastai::provision(min_tflops)?,
     };
 
