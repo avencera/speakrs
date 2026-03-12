@@ -1,23 +1,98 @@
-FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
+# =============================================================================
+# Stage 1: Builder — compile speakrs-bm and download models
+# =============================================================================
+FROM nvidia/cuda:12.8.1-devel-ubuntu24.04 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential pkg-config cmake \
-    ca-certificates curl ffmpeg git openssh-server python3 python3-venv \
-    tar tmux unzip \
+    ca-certificates curl git \
     libssl-dev libclang-dev libopenblas-dev \
     libcudnn9-dev-cuda-12 \
-    libavutil-dev libavcodec-dev libavformat-dev libswresample-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# uv and Rust are required because xtask builds inside the container
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-RUN mkdir -p /var/run/sshd /workspace
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /build
+
+# --- Dependency cache layer ---
+# Copy only manifests so deps are cached across code changes
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p xtask
+COPY xtask/Cargo.toml xtask/
+
+# Create minimal compilable stubs so cargo can resolve and build deps
+RUN mkdir -p src && echo "" > src/lib.rs && \
+    mkdir -p xtask/src && echo "" > xtask/src/lib.rs && \
+    echo "fn main() {}" > xtask/src/main.rs && \
+    mkdir -p xtask/src/bin && echo "fn main() {}" > xtask/src/bin/speakrs_bm.rs
+
+# Build dependencies only (speakrs lib will fail but all C/C++ deps get compiled)
+RUN cargo build --release -p speakrs --features cuda 2>&1 || true
+RUN cargo build --release -p xtask --features cuda 2>&1 || true
+
+# Remove dummy source and stale fingerprints (keep compiled deps in target/)
+RUN rm -rf src xtask/src && \
+    find target/release/.fingerprint -name 'speakrs-*' -exec rm -rf {} + 2>/dev/null; \
+    find target/release/.fingerprint -name 'xtask-*' -exec rm -rf {} + 2>/dev/null; \
+    rm -f target/release/deps/libspeakrs* target/release/deps/xtask* \
+          target/release/xtask target/release/speakrs-bm
+
+# --- Build layer ---
+COPY . .
+RUN cargo build --release -p xtask --features cuda --bin speakrs-bm
+
+# Collect ORT shared libraries into a known location
+RUN mkdir -p /opt/ort-libs && \
+    find target/release/build/ -path '*/ort-sys-*/out/onnxruntime/lib/*.so*' \
+        -exec cp -P {} /opt/ort-libs/ \;
+
+# Download models
+ARG HF_TOKEN=""
+RUN if [ -n "$HF_TOKEN" ]; then export HF_TOKEN="$HF_TOKEN"; fi && \
+    uv tool run --from huggingface-hub huggingface-cli download avencera/speakrs-models \
+        --local-dir /opt/models \
+        --include "segmentation-3.0.onnx" \
+        --include "wespeaker-voxceleb-resnet34.onnx" \
+        --include "wespeaker-voxceleb-resnet34.onnx.data" \
+        --include "plda_*.npy" \
+        --include "wespeaker-voxceleb-resnet34.min_num_samples.txt"
+
+# =============================================================================
+# Stage 2: Runtime — minimal image with binary + models
+# =============================================================================
+FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-venv \
+    ca-certificates curl git unzip \
+    openssh-server tmux \
+    libcudnn9-cuda-12 \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv (for pyannote sidecar)
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+# speakrs-bm binary
+COPY --from=builder /build/target/release/speakrs-bm /usr/local/bin/
+
+# ORT shared libraries
+COPY --from=builder /opt/ort-libs/ /usr/local/lib/
+RUN ldconfig
+
+# Models
+COPY --from=builder /opt/models/ /workspace/models/
+
+# Pyannote script
+COPY scripts/diarize_pyannote.py /workspace/scripts/
+
+# SSH setup for RunPod
+RUN mkdir -p /var/run/sshd /root/.ssh /workspace && \
+    echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
+    ssh-keygen -A
 
 WORKDIR /workspace
 
-# RunPod injects its own sshd via startSsh, just keep the container alive
-CMD ["sleep", "infinity"]
+CMD ["/usr/sbin/sshd", "-D"]

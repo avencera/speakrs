@@ -3,7 +3,7 @@ use std::process::Command;
 use color_eyre::eyre::{Result, bail};
 use serde_json::Value;
 
-use super::{Backend, InstanceInfo, models_script_with_token, run_remote_script, ssh_cmd};
+use super::{Backend, InstanceInfo, run_remote_script};
 use crate::cmd::{project_root, run_cmd};
 
 const SETUP_SCRIPT: &str = r#"
@@ -252,86 +252,4 @@ fn rsync_source(info: &InstanceInfo) -> Result<()> {
             .arg(&ssh_opts)
             .args([&src, &dest]),
     )
-}
-
-fn sync_datasets(info: &InstanceInfo, args: &[String]) -> Result<()> {
-    let datasets: Vec<&str> = args
-        .windows(2)
-        .filter_map(|w| {
-            if w[0] == "--dataset" {
-                Some(w[1].as_str())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    if datasets.is_empty() {
-        return Ok(());
-    }
-
-    let root = project_root();
-    let ssh_opts = format!(
-        "ssh -T -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p {}",
-        info.ssh_port
-    );
-
-    for dataset_id in datasets {
-        let local_dir = root.join("fixtures/datasets").join(dataset_id);
-        if !local_dir.is_dir() {
-            continue;
-        }
-        println!("Syncing dataset {dataset_id} to remote...");
-        let src = format!("{}/", local_dir.display());
-        let dest = format!(
-            "root@{}:/workspace/speakrs/fixtures/datasets/{dataset_id}/",
-            info.ssh_host
-        );
-        run_cmd(
-            Command::new("rsync")
-                .args([
-                    "-az",
-                    "--info=progress2",
-                    "--compress-level=1",
-                    "--rsync-path",
-                    "mkdir -p /workspace/speakrs/fixtures/datasets && rsync",
-                    "-e",
-                ])
-                .arg(&ssh_opts)
-                .args([&src, &dest]),
-        )?;
-    }
-
-    Ok(())
-}
-
-pub fn prepare_benchmark(info: &InstanceInfo, args: &[String]) -> Result<String> {
-    rsync_source(info)?;
-    sync_datasets(info, args)?;
-
-    // ensure models
-    println!("Ensuring models are present on remote...");
-    let models_script = format!("set -euo pipefail\n{}", models_script_with_token());
-    run_remote_script(info, &models_script)?;
-
-    // incremental build
-    println!("Building on remote (incremental)...");
-    let mut build_cmd = ssh_cmd(info);
-    build_cmd.arg("source $HOME/.cargo/env && cd /workspace/speakrs && cargo build --release -p xtask --features cuda");
-    run_cmd(&mut build_cmd)?;
-
-    let remote_cmd = if args.is_empty() {
-        "cd /workspace/speakrs && source $HOME/.cargo/env && ./target/release/xtask benchmark run fixtures/sample.wav --rust-mode cuda".to_string()
-    } else {
-        let quoted_args: Vec<String> = args
-            .iter()
-            .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
-            .collect();
-        format!(
-            "cd /workspace/speakrs && source $HOME/.cargo/env && ./target/release/xtask benchmark {}",
-            quoted_args.join(" ")
-        )
-    };
-
-    Ok(remote_cmd)
 }

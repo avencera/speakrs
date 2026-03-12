@@ -3,10 +3,7 @@ use std::process::Command;
 use color_eyre::eyre::{Result, bail};
 use serde_json::Value;
 
-use super::{
-    Backend, GITHUB_REPO, IMAGE, InstanceInfo, models_script_with_token, run_remote_script,
-};
-use crate::cmd::project_root;
+use super::{Backend, GITHUB_REPO, IMAGE, InstanceInfo, run_remote_script};
 use std::io::Write;
 
 const RUNPOD_API_URL: &str = "https://api.runpod.io/graphql";
@@ -67,6 +64,7 @@ pub fn provision(name: &str, gpu_types: &[&str]) -> Result<InstanceInfo> {
                 "volumeMountPath": "/workspace",
                 "ports": "22/tcp",
                 "startSsh": true,
+                "minCudaVersion": "12.8",
             }
         });
 
@@ -339,6 +337,8 @@ pub fn destroy(info: &InstanceInfo) -> Result<()> {
 
 pub fn setup(info: &InstanceInfo, branch: &str) -> Result<()> {
     println!("Running setup on remote (RunPod)...");
+    println!("Binary and models are baked into the image.");
+    println!("Setup only clones the repo for the pyannote script (if not present).");
 
     let clone_or_pull = format!(
         "if [ -d /workspace/speakrs/.git ]; then \
@@ -352,84 +352,16 @@ pub fn setup(info: &InstanceInfo, branch: &str) -> Result<()> {
 
     let script = format!(
         "set -euo pipefail\n\
+         echo '=== Verifying baked binary ==='\n\
+         which speakrs-bm && speakrs-bm --help | head -1 || echo 'warning: speakrs-bm not found in PATH'\n\
+         echo '=== Verifying baked models ==='\n\
+         ls /workspace/models/segmentation-3.0.onnx /workspace/models/wespeaker-voxceleb-resnet34.onnx 2>/dev/null \
+           && echo 'Models present' || echo 'warning: models not found at /workspace/models/'\n\
+         echo '=== Cloning repo (for pyannote script) ==='\n\
          {clone_or_pull}\n\
-         {models}\n\
-         echo '=== Building ==='\n\
-         cd /workspace/speakrs\n\
-         source $HOME/.cargo/env 2>/dev/null || true\n\
-         cargo build --release -p xtask --features cuda\n\
          echo '=== Setup complete ==='\n",
         clone_or_pull = clone_or_pull,
-        models = models_script_with_token(),
     );
 
     run_remote_script(info, &script)
-}
-
-pub fn prepare_benchmark(info: &InstanceInfo, args: &[String], branch: &str) -> Result<String> {
-    let local_head = Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(project_root())
-        .output()?;
-    let remote_head = Command::new("git")
-        .args(["rev-parse", &format!("origin/{branch}")])
-        .current_dir(project_root())
-        .output()?;
-
-    if local_head.status.success() && remote_head.status.success() {
-        let local = String::from_utf8_lossy(&local_head.stdout)
-            .trim()
-            .to_string();
-        let remote = String::from_utf8_lossy(&remote_head.stdout)
-            .trim()
-            .to_string();
-        if local != remote {
-            println!(
-                "WARNING: local HEAD ({}) differs from origin/{branch} ({})",
-                &local[..8],
-                &remote[..8]
-            );
-            println!("  Push your changes before benchmarking: git push");
-        }
-    }
-
-    let clone_or_pull = format!(
-        "if [ -d /workspace/speakrs/.git ]; then \
-         cd /workspace/speakrs && git fetch origin && git reset --hard origin/{branch}; \
-         else \
-         git clone {repo} /workspace/speakrs && cd /workspace/speakrs && git checkout {branch}; \
-         fi",
-        branch = branch,
-        repo = GITHUB_REPO,
-    );
-
-    let prep_script = format!(
-        "set -euo pipefail\n\
-         source $HOME/.cargo/env 2>/dev/null || true\n\
-         {clone_or_pull}\n\
-         {models}\n\
-         echo '=== Building ==='\n\
-         cd /workspace/speakrs\n\
-         cargo build --release -p xtask --features cuda\n",
-        clone_or_pull = clone_or_pull,
-        models = models_script_with_token(),
-    );
-
-    println!("Preparing remote (git pull + build)...");
-    run_remote_script(info, &prep_script)?;
-
-    let remote_cmd = if args.is_empty() {
-        "cd /workspace/speakrs && source $HOME/.cargo/env && ./target/release/xtask benchmark run fixtures/sample.wav --rust-mode cuda".to_string()
-    } else {
-        let quoted_args: Vec<String> = args
-            .iter()
-            .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
-            .collect();
-        format!(
-            "cd /workspace/speakrs && source $HOME/.cargo/env && ./target/release/xtask benchmark {}",
-            quoted_args.join(" ")
-        )
-    };
-
-    Ok(remote_cmd)
 }

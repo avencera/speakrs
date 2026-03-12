@@ -4,6 +4,14 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[[bin]]
+name = "speakrs-bm"
+path = "src/bin/speakrs_bm.rs"
+
 [features]
 coreml = ["speakrs/coreml"]
 cuda = ["speakrs/cuda"]

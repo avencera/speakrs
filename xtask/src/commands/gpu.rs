@@ -9,7 +9,9 @@ use std::str::FromStr;
 
 use color_eyre::eyre::{Result, bail};
 
-use crate::cmd::{project_root, run_cmd};
+use crate::cmd::project_root;
+#[cfg(not(unix))]
+use crate::cmd::run_cmd;
 
 pub const IMAGE: &str = "ghcr.io/avencera/speakrs-gpu:latest";
 pub const GITHUB_REPO: &str = "https://github.com/avencera/speakrs.git";
@@ -26,23 +28,6 @@ pub const RUNPOD_GPU_FALLBACKS: &[&str] = &[
     "NVIDIA A40",              // 37 TFLOPS, $0.40/hr
     "NVIDIA GeForce RTX 3090", // 36 TFLOPS, $0.46/hr
 ];
-
-pub const MODELS_SCRIPT: &str = r#"
-export PATH="$HOME/.local/bin:$PATH"
-MODELS_DIR=/workspace/speakrs/fixtures/models
-if [ -f "$MODELS_DIR/segmentation-3.0.onnx" ] && [ -f "$MODELS_DIR/wespeaker-voxceleb-resnet34.onnx" ]; then
-    echo "=== Models already present ==="
-else
-    echo "=== Downloading models ==="
-    mkdir -p "$MODELS_DIR"
-    uv tool run --from huggingface-hub hf download avencera/speakrs-models --local-dir "$MODELS_DIR" \
-        --include "segmentation-3.0.onnx" \
-        --include "wespeaker-voxceleb-resnet34.onnx" \
-        --include "wespeaker-voxceleb-resnet34.onnx.data" \
-        --include "plda_*.npy" \
-        --include "wespeaker-voxceleb-resnet34.min_num_samples.txt"
-fi
-"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
@@ -200,14 +185,6 @@ pub fn ssh_cmd(info: &InstanceInfo) -> Command {
     cmd
 }
 
-fn models_script_with_token() -> String {
-    if let Ok(token) = std::env::var("HF_TOKEN") {
-        format!("export HF_TOKEN={token}\n{MODELS_SCRIPT}")
-    } else {
-        MODELS_SCRIPT.to_string()
-    }
-}
-
 pub fn run_remote_script(info: &InstanceInfo, script: &str) -> Result<()> {
     if is_proxy(info) {
         let mut cmd = ssh_cmd(info);
@@ -233,27 +210,6 @@ pub fn run_remote_script(info: &InstanceInfo, script: &str) -> Result<()> {
         if !status.success() {
             bail!("Remote script failed");
         }
-    }
-    Ok(())
-}
-
-pub fn run_remote_cmd(info: &InstanceInfo, cmd_str: &str) -> Result<()> {
-    if is_proxy(info) {
-        let mut cmd = ssh_cmd(info);
-        cmd.stdin(Stdio::piped());
-        let mut child = cmd.spawn()?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(cmd_str.as_bytes())?;
-            stdin.write_all(b"\nexit\n")?;
-        }
-        let status = child.wait()?;
-        if !status.success() {
-            bail!("Remote command failed");
-        }
-    } else {
-        let mut cmd = ssh_cmd(info);
-        cmd.arg(cmd_str);
-        run_cmd(&mut cmd)?;
     }
     Ok(())
 }
@@ -287,120 +243,6 @@ pub fn setup(name: Option<&str>, branch: &str) -> Result<()> {
     }
 
     println!("Instance '{n}' setup complete");
-    Ok(())
-}
-
-pub fn benchmark(
-    name: Option<&str>,
-    args: &[String],
-    detach: bool,
-    force: bool,
-    branch: &str,
-) -> Result<()> {
-    let (_n, info) = resolve_instance(name)?;
-
-    let remote_cmd = match info.backend {
-        Backend::RunPod => runpod::prepare_benchmark(&info, args, branch)?,
-        Backend::VastAi => vastai::prepare_benchmark(&info, args)?,
-    };
-
-    if detach {
-        if run_remote_cmd(&info, "tmux has-session -t benchmark 2>/dev/null").is_ok() && !force {
-            bail!(
-                "A benchmark is already running. Use --force to replace it, or check with:\n  \
-                 cargo xtask gpu status <name>"
-            );
-        }
-
-        println!("Launching benchmark in detached tmux session...");
-        let escaped_cmd = remote_cmd.replace('\'', "'\\''");
-        let tmux_cmd = format!(
-            "tmux kill-session -t benchmark 2>/dev/null; \
-             mkdir -p /workspace/speakrs/_benchmarks && \
-             tmux new-session -d -s benchmark \
-             '{escaped_cmd} 2>&1 | tee /workspace/speakrs/_benchmarks/latest.log; \
-             echo \"=== BENCHMARK COMPLETE ===\"'",
-        );
-        run_remote_cmd(&info, &tmux_cmd)?;
-
-        println!("Benchmark running in background");
-        println!("  cargo xtask gpu status <name>        -- check progress");
-        println!("  cargo xtask gpu attach <name>        -- reconnect to live session");
-        println!("  cargo xtask gpu pull-results <name>  -- download results when done");
-    } else {
-        println!("Running benchmark on remote GPU...");
-        run_remote_cmd(&info, &remote_cmd)?;
-    }
-
-    Ok(())
-}
-
-pub fn status(name: Option<&str>) -> Result<()> {
-    let (_n, info) = resolve_instance(name)?;
-
-    let script = concat!(
-        "if tmux has-session -t benchmark 2>/dev/null; then ",
-        "echo 'STATUS: RUNNING'; echo '---'; ",
-        "tmux capture-pane -t benchmark -p | tail -30; ",
-        "else ",
-        "echo 'STATUS: NOT RUNNING'; ",
-        "if [ -f /workspace/speakrs/_benchmarks/latest.log ]; then ",
-        "echo '--- last output ---'; ",
-        "tail -20 /workspace/speakrs/_benchmarks/latest.log; fi; fi",
-    );
-
-    run_remote_cmd(&info, script)?;
-    Ok(())
-}
-
-pub fn attach(name: Option<&str>) -> Result<()> {
-    let (_n, info) = resolve_instance(name)?;
-
-    if run_remote_cmd(&info, "tmux has-session -t benchmark 2>/dev/null").is_err() {
-        bail!("No benchmark session running. Use `cargo xtask gpu status` to check");
-    }
-
-    // pipe tmux attach via stdin so it works through RunPod's SSH proxy
-    let mut cmd = ssh_cmd(&info);
-    cmd.stdin(std::process::Stdio::piped());
-    let mut child = cmd.spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(b"tmux attach -t benchmark\n")?;
-    }
-    let status = child.wait()?;
-    if !status.success() {
-        bail!("SSH session ended with {status}");
-    }
-    Ok(())
-}
-
-pub fn pull_results(name: Option<&str>) -> Result<()> {
-    let (_n, info) = resolve_instance(name)?;
-
-    let root = project_root();
-    let local_dir = root.join("_benchmarks");
-    fs::create_dir_all(&local_dir)?;
-
-    let pty_flag = if is_proxy(&info) { "-tt" } else { "-T" };
-    let ssh_opts = format!(
-        "ssh {pty_flag} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p {}",
-        info.ssh_port
-    );
-    let src = format!(
-        "{}@{}:/workspace/speakrs/_benchmarks/",
-        info.ssh_user, info.ssh_host
-    );
-    let dest = format!("{}/", local_dir.display());
-
-    println!("Pulling benchmark results from remote...");
-    run_cmd(
-        Command::new("rsync")
-            .args(["-az", "--info=progress2", "-e"])
-            .arg(&ssh_opts)
-            .args([&src, &dest]),
-    )?;
-
-    println!("Results saved to _benchmarks/");
     Ok(())
 }
 

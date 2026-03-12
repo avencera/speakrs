@@ -144,25 +144,25 @@ impl RunResult {
     }
 }
 
-struct SingleRunOutput {
-    elapsed_seconds: f64,
-    rttm: String,
+pub struct SingleRunOutput {
+    pub elapsed_seconds: f64,
+    pub rttm: String,
 }
 
-struct BatchRunOutput {
-    total_seconds: f64,
-    per_file_rttm: HashMap<String, String>,
+pub struct BatchRunOutput {
+    pub total_seconds: f64,
+    pub per_file_rttm: HashMap<String, String>,
 }
 
 #[derive(Clone)]
-struct CommandSpec {
-    program: OsString,
-    args: Vec<OsString>,
-    current_dir: Option<PathBuf>,
+pub struct CommandSpec {
+    pub program: OsString,
+    pub args: Vec<OsString>,
+    pub current_dir: Option<PathBuf>,
 }
 
 impl CommandSpec {
-    fn new(program: impl Into<OsString>) -> Self {
+    pub fn new(program: impl Into<OsString>) -> Self {
         Self {
             program: program.into(),
             args: Vec::new(),
@@ -170,7 +170,7 @@ impl CommandSpec {
         }
     }
 
-    fn from_argv(argv: &[String]) -> Self {
+    pub fn from_argv(argv: &[String]) -> Self {
         debug_assert!(!argv.is_empty());
         let mut command_spec = Self::new(argv[0].clone());
         for arg in &argv[1..] {
@@ -179,17 +179,17 @@ impl CommandSpec {
         command_spec
     }
 
-    fn arg(mut self, arg: impl Into<OsString>) -> Self {
+    pub fn arg(mut self, arg: impl Into<OsString>) -> Self {
         self.args.push(arg.into());
         self
     }
 
-    fn current_dir(mut self, current_dir: impl Into<PathBuf>) -> Self {
+    pub fn current_dir(mut self, current_dir: impl Into<PathBuf>) -> Self {
         self.current_dir = Some(current_dir.into());
         self
     }
 
-    fn build_command(&self) -> Command {
+    pub fn build_command(&self) -> Command {
         let mut command = Command::new(&self.program);
         command.args(&self.args);
         if let Some(current_dir) = &self.current_dir {
@@ -901,7 +901,7 @@ fn run_der_implementations(
 }
 
 #[derive(Clone, Copy)]
-enum ImplType {
+pub enum ImplType {
     Speakrs(&'static str),
     Pyannote(&'static str),
     PyannoteRs,
@@ -910,26 +910,26 @@ enum ImplType {
 
 #[derive(Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-enum DerImplStatus {
+pub enum DerImplStatus {
     Completed,
     Skipped,
     Failed,
 }
 
 #[derive(serde::Serialize)]
-struct DerImplResult {
-    status: DerImplStatus,
-    reason: Option<String>,
-    der: Option<f64>,
-    missed: Option<f64>,
-    false_alarm: Option<f64>,
-    confusion: Option<f64>,
-    time: Option<f64>,
-    files: usize,
+pub struct DerImplResult {
+    pub status: DerImplStatus,
+    pub reason: Option<String>,
+    pub der: Option<f64>,
+    pub missed: Option<f64>,
+    pub false_alarm: Option<f64>,
+    pub confusion: Option<f64>,
+    pub time: Option<f64>,
+    pub files: usize,
 }
 
 impl DerImplResult {
-    fn completed(
+    pub fn completed(
         der: Option<f64>,
         missed: Option<f64>,
         false_alarm: Option<f64>,
@@ -949,7 +949,7 @@ impl DerImplResult {
         }
     }
 
-    fn skipped(reason: String) -> Self {
+    pub fn skipped(reason: String) -> Self {
         Self {
             status: DerImplStatus::Skipped,
             reason: Some(reason),
@@ -962,7 +962,7 @@ impl DerImplResult {
         }
     }
 
-    fn failed(reason: String) -> Self {
+    pub fn failed(reason: String) -> Self {
         Self {
             status: DerImplStatus::Failed,
             reason: Some(reason),
@@ -976,16 +976,16 @@ impl DerImplResult {
     }
 }
 
-struct DerAccumulation {
-    missed: f64,
-    false_alarm: f64,
-    confusion: f64,
-    total_ref: f64,
-    file_count: usize,
+pub struct DerAccumulation {
+    pub missed: f64,
+    pub false_alarm: f64,
+    pub confusion: f64,
+    pub total_ref: f64,
+    pub file_count: usize,
 }
 
 impl DerAccumulation {
-    fn compute(
+    pub fn compute(
         files: &[(PathBuf, PathBuf)],
         per_file_rttm: &HashMap<String, String>,
     ) -> Result<Self> {
@@ -1026,7 +1026,7 @@ impl DerAccumulation {
         Ok(acc)
     }
 
-    fn der_percentages(&self) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
+    pub fn der_percentages(&self) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
         if self.total_ref > 0.0 {
             (
                 Some((self.missed + self.false_alarm + self.confusion) / self.total_ref * 100.0),
@@ -1040,12 +1040,12 @@ impl DerAccumulation {
     }
 }
 
-struct BatchCommandRunner {
+pub struct BatchCommandRunner {
     command_spec: CommandSpec,
 }
 
 impl BatchCommandRunner {
-    fn speakrs(binary: &Path, mode: &str, wav_paths: &[&Path]) -> Self {
+    pub fn speakrs(binary: &Path, mode: &str, wav_paths: &[&Path]) -> Self {
         let mut command_spec = CommandSpec::new(binary.as_os_str().to_os_string())
             .arg("diarize")
             .arg("--mode")
@@ -1056,7 +1056,7 @@ impl BatchCommandRunner {
         Self { command_spec }
     }
 
-    fn pyannote(root: &Path, device: &str, wav_paths: &[&Path]) -> Self {
+    pub fn pyannote(root: &Path, device: &str, wav_paths: &[&Path]) -> Self {
         let uv_path = std::env::var("HOME")
             .ok()
             .map(|home| PathBuf::from(home).join(".local/bin/uv"))
@@ -1075,7 +1075,7 @@ impl BatchCommandRunner {
         Self { command_spec }
     }
 
-    fn binary(binary: &Path, wav_paths: &[&Path]) -> Self {
+    pub fn binary(binary: &Path, wav_paths: &[&Path]) -> Self {
         let mut command_spec = CommandSpec::new(binary.as_os_str().to_os_string());
         for wav_path in wav_paths {
             command_spec = command_spec.arg(wav_path.as_os_str().to_os_string());
@@ -1083,7 +1083,7 @@ impl BatchCommandRunner {
         Self { command_spec }
     }
 
-    fn run_with_retries(&self, timeout: Duration) -> Result<BatchRunOutput> {
+    pub fn run_with_retries(&self, timeout: Duration) -> Result<BatchRunOutput> {
         for attempt in 0..=MAX_RETRIES {
             let mut benchmark_command = self.command_spec.build_command();
             match capture_benchmark_cmd(&mut benchmark_command, timeout) {
@@ -1171,9 +1171,9 @@ impl PyannoteRsFileRunner {
     }
 }
 
-const MAX_RETRIES: u32 = 3;
+pub const MAX_RETRIES: u32 = 3;
 
-fn split_rttm_by_file_id(stdout: &str) -> HashMap<String, String> {
+pub fn split_rttm_by_file_id(stdout: &str) -> HashMap<String, String> {
     let mut per_file: HashMap<String, Vec<&str>> = HashMap::new();
     for line in stdout.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
@@ -1187,7 +1187,7 @@ fn split_rttm_by_file_id(stdout: &str) -> HashMap<String, String> {
         .collect()
 }
 
-fn discover_files(
+pub fn discover_files(
     dataset_dir: &Path,
     max_files: u32,
     max_minutes: f64,
@@ -1221,21 +1221,21 @@ fn discover_files(
     Ok(select_pairs_for_benchmark(pairs, max_files, max_minutes))
 }
 
-struct DerResultsWriter<'a> {
-    run_dir: &'a Path,
-    dataset_name: &'a str,
-    implementations: &'a [(&'static str, ImplType)],
-    results: &'a HashMap<String, DerImplResult>,
-    files: &'a [(PathBuf, PathBuf)],
-    total_audio_minutes: f64,
-    collar: f64,
-    description: Option<&'a str>,
-    max_files: u32,
-    max_minutes: u32,
+pub struct DerResultsWriter<'a> {
+    pub run_dir: &'a Path,
+    pub dataset_name: &'a str,
+    pub implementations: &'a [(&'static str, ImplType)],
+    pub results: &'a HashMap<String, DerImplResult>,
+    pub files: &'a [(PathBuf, PathBuf)],
+    pub total_audio_minutes: f64,
+    pub collar: f64,
+    pub description: Option<&'a str>,
+    pub max_files: u32,
+    pub max_minutes: u32,
 }
 
 impl<'a> DerResultsWriter<'a> {
-    fn write(&self) -> Result<()> {
+    pub fn write(&self) -> Result<()> {
         let json_payload = self.json_payload()?;
         fs::write(
             self.run_dir.join("results.json"),
@@ -1410,7 +1410,7 @@ impl<'a> DerResultsWriter<'a> {
 }
 
 /// Possible failure modes for `capture_benchmark_cmd`
-enum BenchmarkError {
+pub enum BenchmarkError {
     /// Process exceeded its time budget
     Timeout { program: String, timeout: Duration },
     /// Process exited with non-zero / signal
@@ -1423,7 +1423,7 @@ enum BenchmarkError {
 }
 
 impl BenchmarkError {
-    fn is_timeout(&self) -> bool {
+    pub fn is_timeout(&self) -> bool {
         matches!(self, Self::Timeout { .. })
     }
 }
@@ -1442,7 +1442,7 @@ impl std::fmt::Display for BenchmarkError {
     }
 }
 
-fn capture_benchmark_cmd(cmd: &mut Command, timeout: Duration) -> Result<SingleRunOutput> {
+pub fn capture_benchmark_cmd(cmd: &mut Command, timeout: Duration) -> Result<SingleRunOutput> {
     let program = cmd.get_program().to_string_lossy().to_string();
 
     let mut child = cmd
@@ -1529,7 +1529,7 @@ fn der_build_features(impls: &[String]) -> Vec<String> {
     features
 }
 
-const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(180);
+pub const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Run each selected implementation on a single short file as a smoke test
 fn preflight_check(
@@ -1647,7 +1647,7 @@ fn preflight_check(
     Ok(failures)
 }
 
-fn format_eta(seconds: f64) -> String {
+pub fn format_eta(seconds: f64) -> String {
     if seconds < 60.0 {
         format!("{seconds:.0}s")
     } else {
@@ -1657,7 +1657,7 @@ fn format_eta(seconds: f64) -> String {
     }
 }
 
-fn now_stamp() -> String {
+pub fn now_stamp() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
 }
 
@@ -1702,7 +1702,7 @@ fn der_skip_reason(
     }
 }
 
-fn select_pairs_for_benchmark(
+pub fn select_pairs_for_benchmark(
     mut pairs: Vec<(PathBuf, PathBuf, f64)>,
     max_files: u32,
     max_minutes: f64,

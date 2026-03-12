@@ -1,20 +1,10 @@
-mod audio;
-mod cargo;
-mod cmd;
-mod commands;
-mod compare_rttm;
-mod convert;
-mod datasets;
-mod fluidaudio;
-mod python;
-mod wav;
-
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::Result;
-use commands::diarize::DiarizeMode;
-use commands::gpu::{Backend, RUNPOD_GPU_FALLBACKS};
+use xtask::commands;
+use xtask::commands::diarize::DiarizeMode;
+use xtask::commands::gpu::{Backend, RUNPOD_GPU_FALLBACKS};
 
 #[derive(Parser)]
 #[command(name = "xtask", about = "Development tasks for speakrs")]
@@ -192,38 +182,6 @@ enum GpuCmd {
         #[arg(long, default_value = "master")]
         branch: String,
     },
-    /// Run benchmarks on a GPU instance
-    Benchmark {
-        /// Instance name (omit for fzf picker)
-        name: Option<String>,
-        /// Run in a detached tmux session (returns immediately)
-        #[arg(long)]
-        detach: bool,
-        /// Replace a running detached benchmark (requires --detach)
-        #[arg(long)]
-        force: bool,
-        /// Git branch to checkout on remote before benchmarking
-        #[arg(long, default_value = "master")]
-        branch: String,
-        /// Arguments passed to `cargo xtask benchmark` on the remote
-        #[arg(trailing_var_arg = true)]
-        args: Vec<String>,
-    },
-    /// Check if a detached benchmark is still running and show recent output
-    Status {
-        /// Instance name (omit for fzf picker)
-        name: Option<String>,
-    },
-    /// Reconnect to a running detached benchmark session
-    Attach {
-        /// Instance name (omit for fzf picker)
-        name: Option<String>,
-    },
-    /// Download benchmark results from the remote instance
-    PullResults {
-        /// Instance name (omit for fzf picker)
-        name: Option<String>,
-    },
     /// Open an interactive SSH session to the GPU instance
     Ssh {
         /// Instance name (omit for fzf picker)
@@ -326,16 +284,6 @@ fn main() -> Result<()> {
                 commands::gpu::create(&name, backend, &gpu_types, min_tflops)
             }
             GpuCmd::Setup { name, branch } => commands::gpu::setup(name.as_deref(), &branch),
-            GpuCmd::Benchmark {
-                name,
-                detach,
-                args,
-                force,
-                branch,
-            } => commands::gpu::benchmark(name.as_deref(), &args, detach, force, &branch),
-            GpuCmd::Status { name } => commands::gpu::status(name.as_deref()),
-            GpuCmd::Attach { name } => commands::gpu::attach(name.as_deref()),
-            GpuCmd::PullResults { name } => commands::gpu::pull_results(name.as_deref()),
             GpuCmd::Ssh { name } => commands::gpu::ssh(name.as_deref()),
             GpuCmd::Destroy { name, all } => commands::gpu::destroy(name.as_deref(), all),
             GpuCmd::Start { name } => commands::gpu::start(name.as_deref()),
