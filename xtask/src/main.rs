@@ -144,7 +144,7 @@ enum BenchmarkCmd {
         #[arg(long, short = 'd')]
         description: Option<String>,
         /// Implementations to run (omit for all, use "list" to show available)
-        #[arg(long = "impl", value_name = "NAME")]
+        #[arg(long, value_delimiter = ',', value_name = "IMPL")]
         impls: Vec<String>,
         /// Skip the pre-flight smoke test
         #[arg(long)]

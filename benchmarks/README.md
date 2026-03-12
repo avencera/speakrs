@@ -82,17 +82,17 @@ Requires models (`just export-models`) and datasets (auto-downloaded on first ru
 
 ```bash
 # full VoxConverse dev set
-cargo xtask benchmark der --dataset voxconverse-dev --impl pyannote --impl coreml --impl coreml-fast --impl fluidaudio
+cargo xtask benchmark der --dataset voxconverse-dev --impls pmps,scm,scmf,fa
 
 # full VoxConverse test set
-cargo xtask benchmark der --dataset voxconverse-test --impl pyannote --impl coreml --impl coreml-fast --impl fluidaudio
+cargo xtask benchmark der --dataset voxconverse-test --impls pmps,scm,scmf,fa
 
 # AMI IHM
-cargo xtask benchmark der --dataset ami-ihm --impl pyannote --impl coreml --impl coreml-fast --impl fluidaudio
+cargo xtask benchmark der --dataset ami-ihm --impls pmps,scm,scmf,fa
 
 # specific implementations only
-cargo xtask benchmark der --dataset voxconverse-dev --impl pyannote --impl coreml
+cargo xtask benchmark der --dataset voxconverse-dev --impls pmps,scm
 
 # list available implementations
-cargo xtask benchmark der --impl list
+cargo xtask benchmark der --impls list
 ```
