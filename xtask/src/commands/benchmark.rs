@@ -570,21 +570,48 @@ fn parse_rttm_intervals(rttm: &str) -> Vec<(f64, f64)> {
 // benchmark der — DER evaluation on VoxConverse dev set
 // ---------------------------------------------------------------------------
 
-const IMPL_REGISTRY: &[(&str, &str, ImplType)] = &[
-    ("pyannote", "pyannote MPS", ImplType::Pyannote("mps")),
-    ("pyannote-cpu", "pyannote CPU", ImplType::Pyannote("cpu")),
-    ("pyannote-cuda", "pyannote CUDA", ImplType::Pyannote("cuda")),
-    ("coreml", "speakrs CoreML", ImplType::Speakrs("coreml")),
+const IMPL_REGISTRY: &[(&str, &str, &str, ImplType)] = &[
+    (
+        "pyannote",
+        "pmps",
+        "pyannote MPS",
+        ImplType::Pyannote("mps"),
+    ),
+    (
+        "pyannote-cpu",
+        "pcpu",
+        "pyannote CPU",
+        ImplType::Pyannote("cpu"),
+    ),
+    (
+        "pyannote-cuda",
+        "pg",
+        "pyannote CUDA",
+        ImplType::Pyannote("cuda"),
+    ),
+    (
+        "coreml",
+        "scm",
+        "speakrs CoreML",
+        ImplType::Speakrs("coreml"),
+    ),
     (
         "coreml-fast",
+        "scmf",
         "speakrs CoreML Fast",
         ImplType::Speakrs("coreml-fast"),
     ),
-    ("cuda", "speakrs CUDA", ImplType::Speakrs("cuda")),
-    ("cpu", "speakrs CPU", ImplType::Speakrs("cpu")),
-    ("fluidaudio", "FluidAudio", ImplType::FluidAudioBench),
-    ("pyannote-rs", "pyannote-rs", ImplType::PyannoteRs),
+    ("cuda", "sg", "speakrs CUDA", ImplType::Speakrs("cuda")),
+    ("cpu", "scpu", "speakrs CPU", ImplType::Speakrs("cpu")),
+    ("fluidaudio", "fa", "FluidAudio", ImplType::FluidAudioBench),
+    ("pyannote-rs", "prs", "pyannote-rs", ImplType::PyannoteRs),
 ];
+
+fn resolve_impl(name: &str) -> Option<usize> {
+    IMPL_REGISTRY
+        .iter()
+        .position(|(cli_id, alias, _, _)| *cli_id == name || *alias == name)
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn der(
@@ -606,16 +633,19 @@ pub fn der(
 
     if impls.len() == 1 && impls[0] == "list" {
         println!("Available implementations:");
-        for (cli_id, display_name, _) in IMPL_REGISTRY {
-            println!("  {cli_id:<15} {display_name}");
+        for (cli_id, alias, display_name, _) in IMPL_REGISTRY {
+            println!("  {alias:<4} {cli_id:<15} {display_name}");
         }
         return Ok(());
     }
 
     if !impls.is_empty() {
         for id in impls {
-            if id != "list" && !IMPL_REGISTRY.iter().any(|(cli_id, _, _)| cli_id == id) {
-                let available: Vec<&str> = IMPL_REGISTRY.iter().map(|(id, _, _)| *id).collect();
+            if id != "list" && resolve_impl(id).is_none() {
+                let available: Vec<String> = IMPL_REGISTRY
+                    .iter()
+                    .map(|(id, alias, _, _)| format!("{id} ({alias})"))
+                    .collect();
                 color_eyre::eyre::bail!(
                     "unknown implementation: {id}. Available: {}",
                     available.join(", ")
@@ -780,13 +810,13 @@ fn run_der_implementations(
     let implementations: Vec<(&str, ImplType)> = if impls.is_empty() {
         IMPL_REGISTRY
             .iter()
-            .map(|(_, display_name, impl_type)| (*display_name, *impl_type))
+            .map(|(_, _, display_name, impl_type)| (*display_name, *impl_type))
             .collect()
     } else {
         IMPL_REGISTRY
             .iter()
-            .filter(|(cli_id, _, _)| impls.iter().any(|i| i == cli_id))
-            .map(|(_, display_name, impl_type)| (*display_name, *impl_type))
+            .filter(|(cli_id, alias, _, _)| impls.iter().any(|i| i == cli_id || i == alias))
+            .map(|(_, _, display_name, impl_type)| (*display_name, *impl_type))
             .collect()
     };
 
@@ -1497,12 +1527,12 @@ impl std::error::Error for BenchmarkError {}
 /// Derive cargo features needed for the selected DER implementations
 fn der_build_features(impls: &[String]) -> Vec<String> {
     let active_impls: Vec<&ImplType> = if impls.is_empty() {
-        IMPL_REGISTRY.iter().map(|(_, _, t)| t).collect()
+        IMPL_REGISTRY.iter().map(|(_, _, _, t)| t).collect()
     } else {
         IMPL_REGISTRY
             .iter()
-            .filter(|(cli_id, _, _)| impls.iter().any(|i| i == cli_id))
-            .map(|(_, _, t)| t)
+            .filter(|(cli_id, alias, _, _)| impls.iter().any(|i| i == cli_id || i == alias))
+            .map(|(_, _, _, t)| t)
             .collect()
     };
 
@@ -1553,13 +1583,13 @@ fn preflight_check(
     let implementations: Vec<(&str, &str, ImplType)> = if impls.is_empty() {
         IMPL_REGISTRY
             .iter()
-            .map(|(cli_id, display_name, impl_type)| (*cli_id, *display_name, *impl_type))
+            .map(|(cli_id, _, display_name, impl_type)| (*cli_id, *display_name, *impl_type))
             .collect()
     } else {
         IMPL_REGISTRY
             .iter()
-            .filter(|(cli_id, _, _)| impls.iter().any(|i| i == cli_id))
-            .map(|(cli_id, display_name, impl_type)| (*cli_id, *display_name, *impl_type))
+            .filter(|(cli_id, alias, _, _)| impls.iter().any(|i| i == cli_id || i == alias))
+            .map(|(cli_id, _, display_name, impl_type)| (*cli_id, *display_name, *impl_type))
             .collect()
     };
 

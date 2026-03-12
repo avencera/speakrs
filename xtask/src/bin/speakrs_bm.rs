@@ -20,10 +20,21 @@ use xtask::wav;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const BM_IMPLS: &[(&str, &str, ImplType)] = &[
-    ("speakrs", "speakrs CUDA", ImplType::Speakrs("cuda")),
-    ("pyannote", "pyannote CUDA", ImplType::Pyannote("cuda")),
+const BM_IMPLS: &[(&str, &str, &str, ImplType)] = &[
+    ("speakrs", "sg", "speakrs CUDA", ImplType::Speakrs("cuda")),
+    (
+        "pyannote",
+        "pg",
+        "pyannote CUDA",
+        ImplType::Pyannote("cuda"),
+    ),
 ];
+
+fn resolve_bm_impl(name: &str) -> Option<usize> {
+    BM_IMPLS
+        .iter()
+        .position(|(cli_id, alias, _, _)| *cli_id == name || *alias == name)
+}
 
 #[derive(Parser)]
 #[command(name = "speakrs-bm", about = "GPU benchmark runner for speakrs")]
@@ -32,8 +43,8 @@ struct Cli {
     #[arg(long, default_value = "voxconverse-dev")]
     dataset: String,
 
-    /// Implementations to run (speakrs, pyannote)
-    #[arg(long = "impl", value_name = "NAME")]
+    /// Implementations to run (use "list" to show available)
+    #[arg(long, value_delimiter = ',', value_name = "IMPL")]
     impls: Vec<String>,
 
     #[arg(long)]
@@ -78,16 +89,19 @@ fn main() -> Result<()> {
 
     if cli.impls.len() == 1 && cli.impls[0] == "list" {
         println!("Available implementations:");
-        for (cli_id, display_name, _) in BM_IMPLS {
-            println!("  {cli_id:<15} {display_name}");
+        for (cli_id, alias, display_name, _) in BM_IMPLS {
+            println!("  {alias:<4} {cli_id:<15} {display_name}");
         }
         return Ok(());
     }
 
     if !cli.impls.is_empty() {
         for id in &cli.impls {
-            if !BM_IMPLS.iter().any(|(cli_id, _, _)| cli_id == id) {
-                let available: Vec<&str> = BM_IMPLS.iter().map(|(id, _, _)| *id).collect();
+            if resolve_bm_impl(id).is_none() {
+                let available: Vec<String> = BM_IMPLS
+                    .iter()
+                    .map(|(id, alias, _, _)| format!("{id} ({alias})"))
+                    .collect();
                 color_eyre::eyre::bail!(
                     "unknown implementation: {id}. Available: {}",
                     available.join(", ")
@@ -125,13 +139,13 @@ fn main() -> Result<()> {
     let implementations: Vec<(&str, ImplType)> = if cli.impls.is_empty() {
         BM_IMPLS
             .iter()
-            .map(|(_, display_name, impl_type)| (*display_name, *impl_type))
+            .map(|(_, _, display_name, impl_type)| (*display_name, *impl_type))
             .collect()
     } else {
         BM_IMPLS
             .iter()
-            .filter(|(cli_id, _, _)| cli.impls.iter().any(|i| i == cli_id))
-            .map(|(_, display_name, impl_type)| (*display_name, *impl_type))
+            .filter(|(cli_id, alias, _, _)| cli.impls.iter().any(|i| i == cli_id || i == alias))
+            .map(|(_, _, display_name, impl_type)| (*display_name, *impl_type))
             .collect()
     };
 
