@@ -1,7 +1,11 @@
+# syntax=docker/dockerfile:1.7
+
 # =============================================================================
-# Stage 1: Builder — compile speakrs-bm and download models
+# Base builder image with the CUDA toolchain and Rust installed
 # =============================================================================
-FROM nvidia/cuda:12.8.1-devel-ubuntu24.04 AS builder
+FROM nvidia/cuda:12.8.1-devel-ubuntu24.04 AS base
+
+ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential pkg-config cmake \
@@ -11,49 +15,60 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-ENV PATH="/root/.cargo/bin:${PATH}"
+
+ENV CARGO_HOME="/root/.cargo" \
+    PATH="/root/.cargo/bin:${PATH}" \
+    RUSTUP_HOME="/root/.rustup"
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /build
 
-# --- Dependency cache layer ---
-# Copy only manifests so deps are cached across code changes
+# =============================================================================
+# Dependency warmup for the speakrs-bm build graph
+# =============================================================================
+FROM base AS deps
+
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir -p xtask
-COPY xtask/Cargo.toml xtask/
+COPY xtask/Cargo.toml xtask/Cargo.toml
 
-# Create minimal compilable stubs so cargo can resolve and build deps
-RUN mkdir -p src && echo "" > src/lib.rs && \
-    mkdir -p xtask/src && echo "" > xtask/src/lib.rs && \
-    echo "fn main() {}" > xtask/src/main.rs && \
-    mkdir -p xtask/src/bin && echo "fn main() {}" > xtask/src/bin/speakrs_bm.rs
+RUN mkdir -p src xtask/src xtask/src/bin && \
+    printf '\n' > src/lib.rs && \
+    printf '\n' > xtask/src/lib.rs && \
+    printf 'fn main() {}\n' > xtask/src/main.rs && \
+    printf 'fn main() {}\n' > xtask/src/bin/speakrs_bm.rs
 
-# Build dependencies only (speakrs lib will fail but all C/C++ deps get compiled)
-RUN cargo build --release -p speakrs --features cuda 2>&1 || true
-RUN cargo build --release -p xtask --features cuda 2>&1 || true
+RUN --mount=type=cache,target=/root/.cargo/registry,id=speakrs-gpu-cargo-registry \
+    --mount=type=cache,target=/root/.cargo/git,id=speakrs-gpu-cargo-git \
+    --mount=type=cache,target=/build/target,id=speakrs-gpu-target \
+    cargo build --release -p xtask --features cuda --bin speakrs-bm
 
-# Remove dummy source and all artifacts for our crates (keep compiled deps in target/)
-RUN rm -rf src xtask/src && \
-    find target/release/.fingerprint -name 'speakrs-*' -exec rm -rf {} + 2>/dev/null; \
-    find target/release/.fingerprint -name 'xtask-*' -exec rm -rf {} + 2>/dev/null; \
-    rm -f target/release/deps/libspeakrs* target/release/deps/speakrs* \
-          target/release/deps/libxtask* target/release/deps/xtask* \
-          target/release/xtask target/release/speakrs-bm; \
-    rm -rf target/release/incremental/speakrs* target/release/incremental/xtask*
+# =============================================================================
+# Build the real speakrs-bm binary while reusing warmed Cargo caches
+# =============================================================================
+FROM deps AS builder
 
-# --- Build layer ---
-COPY . .
-RUN cargo build --release -p xtask --features cuda --bin speakrs-bm
+COPY src/ ./src/
+COPY xtask/ ./xtask/
 
-# Collect ORT shared libraries into a known location
-RUN mkdir -p /opt/ort-libs && \
+RUN --mount=type=cache,target=/root/.cargo/registry,id=speakrs-gpu-cargo-registry \
+    --mount=type=cache,target=/root/.cargo/git,id=speakrs-gpu-cargo-git \
+    --mount=type=cache,target=/build/target,id=speakrs-gpu-target \
+    cargo build --release -p xtask --features cuda --bin speakrs-bm && \
+    mkdir -p /opt/bin /opt/ort-libs && \
+    cp -P target/release/speakrs-bm /opt/bin/ && \
     find target/release/build/ -path '*/ort-sys-*/out/onnxruntime/lib/*.so*' \
         -exec cp -P {} /opt/ort-libs/ \;
 
-# Download models
+# =============================================================================
+# Model download stays in a separate cacheable stage from Rust source changes
+# =============================================================================
+FROM base AS models
+
 ARG HF_TOKEN=""
-RUN if [ -n "$HF_TOKEN" ]; then export HF_TOKEN="$HF_TOKEN"; fi && \
+
+RUN --mount=type=cache,target=/root/.cache/uv,id=speakrs-gpu-uv-cache \
+    if [ -n "$HF_TOKEN" ]; then export HF_TOKEN="$HF_TOKEN"; fi && \
     uv tool run --from huggingface-hub hf download avencera/speakrs-models \
         --local-dir /opt/models \
         --include "segmentation-3.0.onnx" \
@@ -63,9 +78,11 @@ RUN if [ -n "$HF_TOKEN" ]; then export HF_TOKEN="$HF_TOKEN"; fi && \
         --include "wespeaker-voxceleb-resnet34.min_num_samples.txt"
 
 # =============================================================================
-# Stage 2: Runtime — minimal image with binary + models
+# Runtime image with the benchmark binary, ORT shared libs, and models
 # =============================================================================
 FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
@@ -74,23 +91,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcudnn9-cuda-12 \
     && rm -rf /var/lib/apt/lists/*
 
-# uv (for pyannote sidecar)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# speakrs-bm binary
-COPY --from=builder /build/target/release/speakrs-bm /usr/local/bin/
-
-# ORT shared libraries
+COPY --from=builder /opt/bin/speakrs-bm /usr/local/bin/
 COPY --from=builder /opt/ort-libs/ /usr/local/lib/
-RUN ldconfig
-
-# Models
-COPY --from=builder /opt/models/ /workspace/models/
-
-# Pyannote script
+COPY --from=models /opt/models/ /workspace/models/
 COPY scripts/diarize_pyannote.py /workspace/scripts/
 
-# SSH setup for RunPod
+RUN ldconfig
+
 RUN mkdir -p /var/run/sshd /root/.ssh /workspace && \
     echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
     ssh-keygen -A
