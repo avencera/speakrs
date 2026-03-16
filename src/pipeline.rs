@@ -289,6 +289,9 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
                 ) else {
                     continue;
                 };
+                if !has_enough_non_overlap(&segmentation_view, speaker_idx) {
+                    continue;
+                }
                 pending.push(PendingSplitEmbedding {
                     chunk_idx,
                     speaker_idx,
@@ -371,6 +374,10 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
                     continue;
                 }
 
+                if !has_enough_non_overlap(&segmentation_view, speaker_idx) {
+                    continue;
+                }
+
                 pending.push(PendingEmbedding {
                     chunk_idx,
                     speaker_idx,
@@ -446,6 +453,41 @@ fn select_speaker_weights(
     } else {
         Some(mask_col.iter().copied().collect())
     }
+}
+
+/// Minimum fraction of active frames that must be non-overlapping for a speaker embedding
+/// to be useful. Embeddings from highly overlapping regions are contaminated
+const MIN_NON_OVERLAP_RATIO: f32 = 0.2;
+
+/// Check if a speaker has enough non-overlapping active frames for a clean embedding.
+/// Overlap frames (where multiple speakers are active) contaminate embeddings
+fn has_enough_non_overlap(segmentation: &ArrayView2<f32>, speaker_idx: usize) -> bool {
+    let mask = segmentation.column(speaker_idx);
+    let mut active_frames = 0u32;
+    let mut non_overlap_frames = 0u32;
+
+    for frame_idx in 0..mask.len() {
+        if mask[frame_idx] <= 0.0 {
+            continue;
+        }
+        active_frames += 1;
+
+        let mut other_active = false;
+        for other_idx in 0..segmentation.ncols() {
+            if other_idx != speaker_idx && segmentation[[frame_idx, other_idx]] > 0.0 {
+                other_active = true;
+                break;
+            }
+        }
+        if !other_active {
+            non_overlap_frames += 1;
+        }
+    }
+
+    if active_frames == 0 {
+        return false;
+    }
+    (non_overlap_frames as f32 / active_frames as f32) >= MIN_NON_OVERLAP_RATIO
 }
 
 #[derive(Debug, Clone)]
