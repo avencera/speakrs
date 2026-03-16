@@ -78,6 +78,25 @@ RUN --mount=type=cache,target=/root/.cache/uv,id=speakrs-gpu-uv-cache \
         --include "wespeaker-voxceleb-resnet34.min_num_samples.txt"
 
 # =============================================================================
+# Download the default benchmark dataset (VoxConverse Dev)
+# =============================================================================
+FROM ubuntu:24.04 AS datasets
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates git unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /opt/datasets/voxconverse-dev/rttm && \
+    curl --fail -L -o /tmp/dev.zip \
+      https://www.robots.ox.ac.uk/~vgg/data/voxconverse/data/voxconverse_dev_wav.zip && \
+    unzip -q /tmp/dev.zip -d /opt/datasets/voxconverse-dev && \
+    mv /opt/datasets/voxconverse-dev/audio /opt/datasets/voxconverse-dev/wav && \
+    rm /tmp/dev.zip && \
+    git clone --depth 1 https://github.com/joonson/voxconverse /tmp/voxconverse-clone && \
+    cp /tmp/voxconverse-clone/dev/*.rttm /opt/datasets/voxconverse-dev/rttm/ && \
+    rm -rf /tmp/voxconverse-clone
+
+# =============================================================================
 # Runtime image with the benchmark binary, ORT shared libs, and models
 # =============================================================================
 FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
@@ -89,21 +108,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl git unzip \
     openssh-server tmux \
     libcudnn9-cuda-12 \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -L https://github.com/peak/s5cmd/releases/download/v2.3.0/s5cmd_2.3.0_linux_amd64.deb -o /tmp/s5cmd.deb \
+    && dpkg -i /tmp/s5cmd.deb \
+    && rm /tmp/s5cmd.deb
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 COPY --from=builder /opt/bin/speakrs-bm /usr/local/bin/
 COPY --from=builder /opt/ort-libs/ /usr/local/lib/
-COPY --from=models /opt/models/ /workspace/models/
-COPY scripts/diarize_pyannote.py /workspace/scripts/
+COPY --from=models /opt/models/ /opt/models/
+COPY --from=datasets /opt/datasets/ /opt/datasets/
+COPY scripts/diarize_pyannote.py /opt/scripts/
 
-RUN ldconfig
+RUN ldconfig && \
+    ln -s /usr/local/bin/speakrs-bm /usr/local/bin/sbm
 
 RUN mkdir -p /var/run/sshd /root/.ssh /workspace && \
     echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
     ssh-keygen -A
 
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 WORKDIR /workspace
 
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["/usr/sbin/sshd", "-D"]

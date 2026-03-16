@@ -8,3 +8,5 @@ __pycache__/
 
 fixtures/models/
 fixtures/datasets/
+
+.envrc

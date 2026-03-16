@@ -670,7 +670,7 @@ pub fn der(
         return Ok(());
     }
 
-    let datasets: Vec<Box<dyn crate::datasets::Dataset>> = if dataset_id == "all" {
+    let datasets: Vec<crate::datasets::Dataset> = if dataset_id == "all" {
         crate::datasets::all_datasets()
     } else {
         vec![crate::datasets::find_dataset(dataset_id).ok_or_else(|| {
@@ -728,7 +728,7 @@ pub fn der(
 
     for dataset in &datasets {
         println!();
-        println!("========== {} ==========", dataset.display_name());
+        println!("========== {} ==========", dataset.display_name);
 
         dataset.ensure(&fixtures_dir)?;
         let dataset_dir = dataset.dataset_dir(&fixtures_dir);
@@ -750,7 +750,7 @@ pub fn der(
 
         let run_id = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
         let run_dir = if datasets.len() > 1 {
-            root.join("_benchmarks").join(&run_id).join(dataset.id())
+            root.join("_benchmarks").join(&run_id).join(&dataset.id)
         } else {
             root.join("_benchmarks").join(&run_id)
         };
@@ -779,7 +779,7 @@ pub fn der(
 
         DerResultsWriter {
             run_dir: &run_dir,
-            dataset_name: dataset.display_name(),
+            dataset_name: &dataset.display_name,
             implementations: &implementations,
             results: &all_results,
             files: &files,
