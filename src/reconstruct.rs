@@ -1,5 +1,6 @@
-use ndarray::{Array2, s};
+use ndarray::{Array1, Array2, s};
 
+use crate::aggregate::hamming_window;
 use crate::pipeline::{
     ChunkSpeakerClusters, DecodedSegmentations, DiscreteDiarization, FrameActivations,
     SpeakerCountTrack,
@@ -10,6 +11,8 @@ pub struct Reconstructor<'a> {
     hard_clusters: Option<&'a ChunkSpeakerClusters>,
     start_frames: &'a [usize],
     warmup_frames: usize,
+    /// Per-frame weights for overlap-add (None = uniform weighting)
+    frame_weights: Option<Array1<f32>>,
 }
 
 impl<'a> Reconstructor<'a> {
@@ -23,6 +26,7 @@ impl<'a> Reconstructor<'a> {
             hard_clusters: None,
             start_frames,
             warmup_frames,
+            frame_weights: None,
         }
     }
 
@@ -37,7 +41,26 @@ impl<'a> Reconstructor<'a> {
             hard_clusters: Some(hard_clusters),
             start_frames,
             warmup_frames,
+            frame_weights: None,
         }
+    }
+
+    /// Enable Hamming-weighted overlap-add. For step=2, uses squared Hamming
+    /// to more aggressively suppress noisy edge frames
+    pub fn with_hamming_weights(mut self, step_frames: usize) -> Self {
+        let num_frames = self.segmentations.shape()[1];
+        if num_frames == 0 {
+            return self;
+        }
+
+        let mut weights = hamming_window(num_frames);
+        // for step=2 (large step), square the weights to suppress edges more aggressively
+        let is_large_step = step_frames > num_frames / 4;
+        if is_large_step {
+            weights.mapv_inplace(|w| w * w);
+        }
+        self.frame_weights = Some(weights);
+        self
     }
 
     pub fn speaker_count(&self, output_frames: usize) -> SpeakerCountTrack {
@@ -58,12 +81,13 @@ impl<'a> Reconstructor<'a> {
                     continue;
                 }
 
-                numerator[out_frame] += self
+                let w = self.frame_weight(frame_idx);
+                numerator[out_frame] += w * self
                     .segmentations
                     .slice(s![chunk_idx, frame_idx, ..])
                     .iter()
                     .sum::<f32>();
-                denominator[out_frame] += 1.0;
+                denominator[out_frame] += w;
             }
         }
 
@@ -117,7 +141,7 @@ impl<'a> Reconstructor<'a> {
                     for &local_idx in local_indices {
                         score = score.max(chunk_segmentations[[frame_idx, local_idx]]);
                     }
-                    activations[[out_frame, cluster_idx]] += score;
+                    activations[[out_frame, cluster_idx]] += self.frame_weight(frame_idx) * score;
                 }
             }
         }
@@ -132,6 +156,10 @@ impl<'a> Reconstructor<'a> {
         }
 
         FrameActivations(activations)
+    }
+
+    fn frame_weight(&self, frame_idx: usize) -> f32 {
+        self.frame_weights.as_ref().map_or(1.0, |w| w[frame_idx])
     }
 
     pub fn reconstruct(&self, speaker_count: &SpeakerCountTrack) -> DiscreteDiarization {

@@ -124,7 +124,7 @@ impl<'a> Aggregate<'a> {
     }
 }
 
-fn hamming_window(len: usize) -> Array1<f32> {
+pub(crate) fn hamming_window(len: usize) -> Array1<f32> {
     if len <= 1 {
         return Array1::ones(len);
     }

@@ -868,7 +868,8 @@ impl<'a> PipelineRunner<'a> {
         );
 
         let reconstructor =
-            Reconstructor::with_clusters(&segmentations, &hard_clusters, &layout.start_frames, 0);
+            Reconstructor::with_clusters(&segmentations, &hard_clusters, &layout.start_frames, 0)
+                .with_hamming_weights(layout.step_frames());
         let discrete_diarization = match config.reconstruct_method {
             ReconstructMethod::Smoothed { epsilon } => {
                 reconstructor.reconstruct_smoothed(&speaker_count, epsilon)
@@ -917,6 +918,15 @@ impl ChunkLayout {
         self
     }
 
+    /// Step size in frames (derived from start_frames spacing, or from step_seconds)
+    fn step_frames(&self) -> usize {
+        if self.start_frames.len() >= 2 {
+            self.start_frames[1] - self.start_frames[0]
+        } else {
+            closest_frame(self.step_seconds)
+        }
+    }
+
     fn chunk_audio<'a>(&self, audio: &'a [f32], chunk_idx: usize) -> &'a [f32] {
         chunk_audio_raw(audio, self.step_samples, self.window_samples, chunk_idx)
     }
@@ -958,7 +968,8 @@ impl DecodedSegmentations {
     }
 
     fn speaker_count(&self, layout: &ChunkLayout) -> SpeakerCountTrack {
-        let reconstructor = Reconstructor::new(self, &layout.start_frames, 0);
+        let reconstructor = Reconstructor::new(self, &layout.start_frames, 0)
+            .with_hamming_weights(layout.step_frames());
         reconstructor.speaker_count(layout.output_frames)
     }
 
