@@ -4,6 +4,8 @@ Speaker diarization in Rust. Runs **79–230x realtime** on Apple Silicon, match
 
 `speakrs` implements the full pyannote `community-1` pipeline in Rust: segmentation, powerset decode, aggregation, binarization, embedding, PLDA, and VBx clustering, plus temporal smoothing during reconstruction. There is no Python dependency. Inference runs on ONNX Runtime or native CoreML, and all post-processing stays in Rust.
 
+> **Work in progress.** The API, benchmarks, and documentation are still changing. Expect breaking changes.
+
 On the full VoxConverse dev set (216 files), speakrs CoreML achieves **7.0% DER vs pyannote's 7.2%**, slightly better accuracy at 4x the speed on Apple Silicon. On the test set (232 files) both match at 11.1% DER. speakrs CoreML Fast is the fastest implementation tested across all datasets, beating FluidAudio on both speed and accuracy. See [benchmarks/](benchmarks/) for full results.
 
 ## Table of Contents

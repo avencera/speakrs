@@ -6,6 +6,13 @@ exclude = ["scripts/"]
 name = "speakrs"
 version = "0.1.0"
 edition = "2024"
+description = "Speaker diarization in Rust"
+license = "Apache-2.0"
+repository = "https://github.com/praveenperera/speakrs"
+readme = "README.md"
+authors = ["Praveen Perera"]
+keywords = ["speaker", "diarization", "audio", "pyannote", "onnx"]
+categories = ["multimedia::audio", "science"]
 
 [features]
 default = ["online"]
