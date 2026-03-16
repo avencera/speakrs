@@ -23,6 +23,12 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 const BM_IMPLS: &[(&str, &str, &str, ImplType)] = &[
     ("speakrs", "sg", "speakrs CUDA", ImplType::Speakrs("cuda")),
     (
+        "speakrs-hybrid",
+        "sgh",
+        "speakrs CUDA Hybrid",
+        ImplType::Speakrs("cuda-hybrid"),
+    ),
+    (
         "pyannote",
         "pg",
         "pyannote CUDA",
@@ -202,7 +208,7 @@ fn main() -> Result<()> {
             println!("Running {impl_name}...");
 
             let benchmark_result = match impl_type {
-                ImplType::Speakrs(_) => run_speakrs_cuda(&models_dir, &files),
+                ImplType::Speakrs(mode) => run_speakrs_gpu(&models_dir, &files, mode),
                 ImplType::Pyannote(device) => {
                     BatchCommandRunner::pyannote(&root, device, &wav_paths)
                         .run_with_retries(batch_timeout)
@@ -279,19 +285,27 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Run speakrs CUDA in-process: load models once, diarize all files
-fn run_speakrs_cuda(models_dir: &Path, files: &[(PathBuf, PathBuf)]) -> Result<BatchRunOutput> {
+/// Run speakrs GPU in-process: load models once, diarize all files
+fn run_speakrs_gpu(
+    models_dir: &Path,
+    files: &[(PathBuf, PathBuf)],
+    mode: &str,
+) -> Result<BatchRunOutput> {
+    let execution_mode = match mode {
+        "cuda-hybrid" => ExecutionMode::CudaHybrid,
+        _ => ExecutionMode::Cuda,
+    };
     let mut seg_model = SegmentationModel::with_mode(
         models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
         SEGMENTATION_STEP_SECONDS as f32,
-        ExecutionMode::Cuda,
+        execution_mode,
     )?;
     let mut emb_model = EmbeddingModel::with_mode(
         models_dir
             .join("wespeaker-voxceleb-resnet34.onnx")
             .to_str()
             .unwrap(),
-        ExecutionMode::Cuda,
+        execution_mode,
     )?;
     let mut pipeline = DiarizationPipeline::new(&mut seg_model, &mut emb_model, models_dir)?;
 

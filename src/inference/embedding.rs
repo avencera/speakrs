@@ -71,6 +71,12 @@ pub struct EmbeddingModel {
     min_num_samples: usize,
 }
 
+// SAFETY: EmbeddingModel is only used from one thread at a time via &mut self.
+// The non-Send fields (CoreMlModel, CachedInputShape) contain Objective-C objects
+// that are safe to move between threads when not accessed concurrently
+#[cfg(feature = "coreml")]
+unsafe impl Send for EmbeddingModel {}
+
 impl EmbeddingModel {
     /// Load the WeSpeaker embedding model
     pub fn new(model_path: &str) -> Result<Self, ort::Error> {
@@ -221,6 +227,15 @@ impl EmbeddingModel {
 
     fn build_batched_session(model_path: &str, mode: ExecutionMode) -> Result<Session, ort::Error> {
         Self::build_session(model_path, Self::single_execution_mode(mode))
+    }
+
+    /// Create a new instance with the same configuration (for multi-worker embedding)
+    pub fn duplicate(&self) -> Result<Self, ort::Error> {
+        Self::with_mode(&self.model_path, self.mode)
+    }
+
+    pub fn mode(&self) -> ExecutionMode {
+        self.mode
     }
 
     pub fn sample_rate(&self) -> usize {

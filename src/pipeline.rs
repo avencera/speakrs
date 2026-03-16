@@ -122,6 +122,14 @@ struct PendingSplitEmbedding {
     weights: Vec<f32>,
 }
 
+/// Owned work item for multi-worker embedding. Carries fbank + weights across thread boundaries
+struct OwnedSplitWorkItem {
+    chunk_idx: usize,
+    speaker_idx: usize,
+    fbank: Array2<f32>,
+    weights: Vec<f32>,
+}
+
 struct ConcurrentEmbeddingResult {
     decoded_windows: Vec<Array2<f32>>,
     embeddings: Vec<SpeakerEmbedding>,
@@ -244,7 +252,7 @@ enum InferencePath {
     Concurrent,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum EmbeddingPath {
     Masked,
     Split,
@@ -391,7 +399,6 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
                 if activity < MIN_SPEAKER_ACTIVITY {
                     continue;
                 }
-
                 if !has_enough_non_overlap(&segmentation_view, speaker_idx) {
                     continue;
                 }
@@ -507,7 +514,6 @@ fn has_enough_non_overlap(segmentation: &ArrayView2<f32>, speaker_idx: usize) ->
     }
     (non_overlap_frames as f32 / active_frames as f32) >= MIN_NON_OVERLAP_RATIO
 }
-
 #[derive(Debug, Clone)]
 pub struct DiarizationResult {
     pub segmentations: DecodedSegmentations,
@@ -726,7 +732,7 @@ impl<'a> PipelineRunner<'a> {
     fn inference_path(&self) -> InferencePath {
         if matches!(
             self.seg_model.mode(),
-            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast
+            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast | ExecutionMode::CudaHybrid
         ) {
             InferencePath::Concurrent
         } else {
@@ -744,10 +750,25 @@ impl<'a> PipelineRunner<'a> {
         }
     }
 
+    fn num_embedding_workers(&self) -> usize {
+        match self.seg_model.mode() {
+            // NE has 16 cores — 2 workers pipeline requests and overlap scheduling latency
+            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => 2,
+            _ => 1,
+        }
+    }
+
     fn run_inference(&mut self, audio: &[f32]) -> Result<InferenceArtifacts, PipelineError> {
         match self.inference_path() {
             InferencePath::Sequential => self.run_sequential_inference(audio),
-            InferencePath::Concurrent => self.run_concurrent_inference(audio),
+            InferencePath::Concurrent => {
+                let num_workers = self.num_embedding_workers();
+                if num_workers > 1 && self.embedding_path() == EmbeddingPath::Split {
+                    self.run_concurrent_inference_multi_worker(audio, num_workers)
+                } else {
+                    self.run_concurrent_inference(audio)
+                }
+            }
         }
     }
 
@@ -846,6 +867,168 @@ impl<'a> PipelineRunner<'a> {
             chunks = segmentations.shape()[0],
             speakers = segmentations.shape()[2],
             "Concurrent seg+emb complete"
+        );
+
+        Ok(InferenceArtifacts {
+            layout,
+            segmentations: DecodedSegmentations(segmentations),
+            embeddings: ChunkEmbeddings(embeddings),
+        })
+    }
+
+    /// Multi-worker variant: decode stage in main thread, N embedding workers on NE
+    fn run_concurrent_inference_multi_worker(
+        &mut self,
+        audio: &[f32],
+        num_workers: usize,
+    ) -> Result<InferenceArtifacts, PipelineError> {
+        let layout = ChunkLayout::without_frame_extent(
+            self.seg_model.step_seconds(),
+            self.seg_model.step_samples(),
+            self.seg_model.window_samples(),
+        );
+        let batch_size = self.emb_model.split_primary_batch_size();
+        let min_num_samples = self.emb_model.min_num_samples();
+        let num_speakers = 3usize;
+
+        let mut worker_models: Vec<EmbeddingModel> = Vec::with_capacity(num_workers);
+        for _ in 0..num_workers {
+            worker_models.push(self.emb_model.duplicate()?);
+        }
+        tracing::info!(workers = num_workers, batch_size, "Multi-worker embedding");
+
+        let (seg_tx, seg_rx) = crossbeam_channel::bounded::<Array2<f32>>(64);
+        let (work_tx, work_rx) =
+            crossbeam_channel::bounded::<Vec<OwnedSplitWorkItem>>(num_workers * 2);
+        let (result_tx, result_rx) = crossbeam_channel::unbounded::<Vec<SpeakerEmbedding>>();
+
+        let (segmentation_result, decode_result) = std::thread::scope(|scope| {
+            // segmentation producer
+            let seg_handle = scope.spawn(|| self.seg_model.run_streaming(audio, seg_tx));
+
+            // embedding workers — each owns a model and pulls batches from the work channel
+            for model in &mut worker_models {
+                let rx = work_rx.clone();
+                let tx = result_tx.clone();
+                scope.spawn(move || -> Result<(), PipelineError> {
+                    for batch in rx {
+                        let inputs: Vec<SplitTailInput<'_>> = batch
+                            .iter()
+                            .map(|item| SplitTailInput {
+                                fbank: &item.fbank,
+                                weights: &item.weights,
+                            })
+                            .collect();
+                        let batch_embeddings = model.embed_tail_batch_inputs(&inputs)?;
+                        let results: Vec<SpeakerEmbedding> = batch
+                            .iter()
+                            .enumerate()
+                            .map(|(i, item)| SpeakerEmbedding {
+                                chunk_idx: item.chunk_idx,
+                                speaker_idx: item.speaker_idx,
+                                embedding: batch_embeddings.row(i).to_vec(),
+                            })
+                            .collect();
+                        tx.send(results).ok();
+                    }
+                    Ok(())
+                });
+            }
+            // drop sender so workers see channel close after decode finishes
+            drop(result_tx);
+
+            // decode stage: receives raw windows, decodes, computes fbanks, dispatches work
+            let decode_result: Result<(Vec<Array2<f32>>, Vec<SpeakerEmbedding>), PipelineError> =
+                (|| {
+                    let powerset = self.powerset;
+                    let step_samples = layout.step_samples;
+                    let window_samples = layout.window_samples;
+                    let mut decoded_windows: Vec<Array2<f32>> = Vec::new();
+                    let mut pending: Vec<OwnedSplitWorkItem> = Vec::with_capacity(batch_size);
+                    let mut chunk_idx = 0usize;
+
+                    for raw_window in seg_rx {
+                        let decoded = powerset.hard_decode(&raw_window);
+                        decoded_windows.push(decoded);
+                        let segmentation_view = decoded_windows.last().unwrap().view();
+                        let chunk_audio =
+                            chunk_audio_raw(audio, step_samples, window_samples, chunk_idx);
+                        let clean_masks = clean_masks(&segmentation_view);
+
+                        let fbank = self.emb_model.compute_chunk_fbank(chunk_audio)?;
+
+                        for speaker_idx in 0..num_speakers {
+                            let Some(weights) = select_speaker_weights(
+                                &segmentation_view,
+                                &clean_masks,
+                                speaker_idx,
+                                chunk_audio.len(),
+                                min_num_samples,
+                            ) else {
+                                continue;
+                            };
+                            if !has_enough_non_overlap(&segmentation_view, speaker_idx) {
+                                continue;
+                            }
+
+                            pending.push(OwnedSplitWorkItem {
+                                chunk_idx,
+                                speaker_idx,
+                                fbank: fbank.clone(),
+                                weights,
+                            });
+
+                            if pending.len() == batch_size {
+                                work_tx.send(std::mem::take(&mut pending)).ok();
+                                pending = Vec::with_capacity(batch_size);
+                            }
+                        }
+                        chunk_idx += 1;
+                    }
+
+                    if !pending.is_empty() {
+                        work_tx.send(pending).ok();
+                    }
+                    drop(work_tx);
+
+                    // collect results from all workers
+                    let mut all_embeddings: Vec<SpeakerEmbedding> = Vec::new();
+                    for batch_results in result_rx {
+                        all_embeddings.extend(batch_results);
+                    }
+
+                    Ok((decoded_windows, all_embeddings))
+                })();
+
+            let segmentation_result = seg_handle.join().unwrap();
+            (segmentation_result, decode_result)
+        });
+
+        segmentation_result?;
+
+        let (decoded_windows, embeddings) = decode_result?;
+        if decoded_windows.is_empty() {
+            return Ok(InferenceArtifacts {
+                layout: layout.with_num_chunks(0),
+                segmentations: DecodedSegmentations(Array3::zeros((0, 0, 0))),
+                embeddings: ChunkEmbeddings(Array3::zeros((0, 0, 0))),
+            });
+        }
+
+        let concurrent_result = ConcurrentEmbeddingResult {
+            decoded_windows,
+            embeddings,
+            num_speakers,
+        };
+        let num_chunks = concurrent_result.decoded_windows.len();
+        let (segmentations, embeddings) = concurrent_result.into_arrays();
+        let layout = layout.with_num_chunks(num_chunks);
+
+        tracing::info!(
+            chunks = segmentations.shape()[0],
+            speakers = segmentations.shape()[2],
+            workers = num_workers,
+            "Multi-worker seg+emb complete"
         );
 
         Ok(InferenceArtifacts {

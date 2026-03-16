@@ -75,7 +75,7 @@ fn required_files(mode: ExecutionMode) -> Vec<&'static str> {
     let mut files: Vec<&str> = PLDA_FILES.to_vec();
 
     match mode {
-        ExecutionMode::Cpu | ExecutionMode::Cuda => {
+        ExecutionMode::Cpu | ExecutionMode::Cuda | ExecutionMode::CudaHybrid => {
             files.extend_from_slice(ONNX_FILES);
         }
         ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => {
