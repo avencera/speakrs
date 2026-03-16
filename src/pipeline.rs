@@ -3,7 +3,7 @@ use std::path::Path;
 
 use ndarray::{Array2, Array3, ArrayView2, s};
 
-use crate::binarize::BinarizeConfig;
+use crate::binarize::{BinarizeConfig, binarize};
 use crate::clustering::ahc::{AhcConfig, cluster as cluster_ahc};
 use crate::clustering::plda::PldaTransform;
 use crate::clustering::vbx::{VbxConfig, cluster_vbx};
@@ -69,6 +69,24 @@ impl Default for PipelineConfig {
             merge_gap: 0.0,
             speaker_keep_threshold: 1e-7,
             reconstruct_method: ReconstructMethod::Smoothed { epsilon: 0.1 },
+        }
+    }
+}
+
+impl PipelineConfig {
+    /// Mode-specific defaults. CoreMLFast uses min-duration filtering to remove
+    /// single-frame speaker flickers caused by the larger step size
+    pub fn for_mode(mode: ExecutionMode) -> Self {
+        match mode {
+            ExecutionMode::CoreMlFast => Self {
+                binarize: BinarizeConfig {
+                    min_duration_on: 3,
+                    min_duration_off: 3,
+                    ..BinarizeConfig::default()
+                },
+                ..Self::default()
+            },
+            _ => Self::default(),
         }
     }
 }
@@ -506,6 +524,7 @@ pub struct OwnedDiarizationPipeline {
     emb_model: EmbeddingModel,
     plda: PldaTransform,
     powerset: PowersetMapping,
+    mode: ExecutionMode,
 }
 
 impl OwnedDiarizationPipeline {
@@ -539,6 +558,7 @@ impl OwnedDiarizationPipeline {
             emb_model,
             plda,
             powerset: PowersetMapping::new(3, 2),
+            mode,
         })
     }
 
@@ -551,7 +571,7 @@ impl OwnedDiarizationPipeline {
         audio: &[f32],
         file_id: &str,
     ) -> Result<DiarizationResult, PipelineError> {
-        self.run_with_config(audio, file_id, &PipelineConfig::default())
+        self.run_with_config(audio, file_id, &PipelineConfig::for_mode(self.mode))
     }
 
     pub fn run_with_config(
@@ -589,6 +609,7 @@ impl OwnedDiarizationPipeline {
             emb_model,
             plda,
             powerset: PowersetMapping::new(3, 2),
+            mode,
         })
     }
 
@@ -602,6 +623,7 @@ pub struct DiarizationPipeline<'a> {
     emb_model: &'a mut EmbeddingModel,
     plda: PldaTransform,
     powerset: PowersetMapping,
+    mode: ExecutionMode,
 }
 
 impl<'a> DiarizationPipeline<'a> {
@@ -610,11 +632,13 @@ impl<'a> DiarizationPipeline<'a> {
         emb_model: &'a mut EmbeddingModel,
         models_dir: &Path,
     ) -> Result<Self, PipelineError> {
+        let mode = seg_model.mode();
         Ok(Self {
             seg_model,
             emb_model,
             plda: PldaTransform::from_dir(models_dir)?,
             powerset: PowersetMapping::new(3, 2),
+            mode,
         })
     }
 
@@ -631,7 +655,7 @@ impl<'a> DiarizationPipeline<'a> {
         audio: &[f32],
         file_id: &str,
     ) -> Result<DiarizationResult, PipelineError> {
-        self.run_with_config(audio, file_id, &PipelineConfig::default())
+        self.run_with_config(audio, file_id, &PipelineConfig::for_mode(self.mode))
     }
 
     pub fn run_with_config(
@@ -875,6 +899,15 @@ impl<'a> PipelineRunner<'a> {
                 reconstructor.reconstruct_smoothed(&speaker_count, epsilon)
             }
             ReconstructMethod::Standard => reconstructor.reconstruct(&speaker_count),
+        };
+
+        // apply min-duration filtering to remove single-frame speaker flickers
+        let has_duration_filter =
+            config.binarize.min_duration_on > 0 || config.binarize.min_duration_off > 0;
+        let discrete_diarization = if has_duration_filter {
+            DiscreteDiarization(binarize(&discrete_diarization, &config.binarize))
+        } else {
+            discrete_diarization
         };
 
         let segments = discrete_diarization.to_segments(FRAME_STEP_SECONDS, FRAME_DURATION_SECONDS);
