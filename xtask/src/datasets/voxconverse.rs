@@ -5,47 +5,21 @@ use std::process::Command;
 use color_eyre::eyre::Result;
 
 use crate::cmd::run_cmd;
-use crate::datasets::Dataset;
 
-pub struct VoxConverseDev;
-pub struct VoxConverseTest;
-
-impl Dataset for VoxConverseDev {
-    fn id(&self) -> &'static str {
-        "voxconverse-dev"
+pub fn ensure_dev(dir: &Path, base_dir: &Path) -> Result<()> {
+    // migrate from old fixtures/voxconverse/ location
+    let old_dir = base_dir.join("voxconverse");
+    if old_dir.is_dir() && !dir.exists() {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&old_dir, dir)?;
+        #[cfg(not(unix))]
+        fs::rename(&old_dir, dir)?;
     }
-
-    fn display_name(&self) -> &'static str {
-        "VoxConverse Dev"
-    }
-
-    fn ensure(&self, base_dir: &Path) -> Result<()> {
-        let dir = self.dataset_dir(base_dir);
-        // migrate from old fixtures/voxconverse/ location
-        let old_dir = base_dir.join("voxconverse");
-        if old_dir.is_dir() && !dir.exists() {
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(&old_dir, &dir)?;
-            #[cfg(not(unix))]
-            fs::rename(&old_dir, &dir)?;
-        }
-        ensure_split(&dir, "voxconverse_dev_wav.zip", "dev")
-    }
+    ensure_split(dir, "voxconverse_dev_wav.zip", "dev")
 }
 
-impl Dataset for VoxConverseTest {
-    fn id(&self) -> &'static str {
-        "voxconverse-test"
-    }
-
-    fn display_name(&self) -> &'static str {
-        "VoxConverse Test"
-    }
-
-    fn ensure(&self, base_dir: &Path) -> Result<()> {
-        let dir = self.dataset_dir(base_dir);
-        ensure_split(&dir, "voxconverse_test_wav.zip", "test")
-    }
+pub fn ensure_test(dir: &Path) -> Result<()> {
+    ensure_split(dir, "voxconverse_test_wav.zip", "test")
 }
 
 fn ensure_split(dir: &Path, zip_name: &str, rttm_subdir: &str) -> Result<()> {
@@ -70,7 +44,6 @@ fn ensure_split(dir: &Path, zip_name: &str, rttm_subdir: &str) -> Result<()> {
                 .arg("-d")
                 .arg(dir),
         )?;
-        // the zip extracts to audio/ — rename to wav/
         let audio_dir = dir.join("audio");
         if audio_dir.is_dir() && !wav_dir.is_dir() {
             fs::rename(&audio_dir, &wav_dir)?;

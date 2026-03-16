@@ -398,7 +398,10 @@ pub fn sync() -> Result<()> {
 
         if !ids.contains(&info.instance_id) {
             fs::remove_file(instances_dir().join(name))?;
-            println!("Removed '{name}' ({}, id={})", info.backend, info.instance_id);
+            println!(
+                "Removed '{name}' ({}, id={})",
+                info.backend, info.instance_id
+            );
             removed += 1;
         }
     }

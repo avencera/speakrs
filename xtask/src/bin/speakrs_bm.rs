@@ -125,7 +125,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let datasets_list: Vec<Box<dyn datasets::Dataset>> = if cli.dataset == "all" {
+    let datasets_list: Vec<datasets::Dataset> = if cli.dataset == "all" {
         datasets::all_datasets()
     } else {
         vec![datasets::find_dataset(&cli.dataset).ok_or_else(|| {
@@ -160,7 +160,7 @@ fn main() -> Result<()> {
 
     for dataset in &datasets_list {
         println!();
-        println!("========== {} ==========", dataset.display_name());
+        println!("========== {} ==========", dataset.display_name);
 
         dataset.ensure(&datasets_dir)?;
         let dataset_dir = dataset.dataset_dir(&datasets_dir);
@@ -183,7 +183,7 @@ fn main() -> Result<()> {
         let run_id = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
         let results_base = resolve_results_dir();
         let run_dir = if datasets_list.len() > 1 {
-            results_base.join(&run_id).join(dataset.id())
+            results_base.join(&run_id).join(&dataset.id)
         } else {
             results_base.join(&run_id)
         };
@@ -269,7 +269,7 @@ fn main() -> Result<()> {
 
         DerResultsWriter {
             run_dir: &run_dir,
-            dataset_name: dataset.display_name(),
+            dataset_name: &dataset.display_name,
             implementations: &implementations,
             results: &all_results,
             files: &files,

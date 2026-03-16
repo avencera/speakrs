@@ -351,7 +351,38 @@ pub fn destroy(info: &InstanceInfo) -> Result<()> {
 pub fn setup(info: &InstanceInfo, branch: &str) -> Result<()> {
     println!("Running setup on remote (RunPod)...");
     println!("Binary and models are baked into the image.");
-    println!("Setup only clones the repo for the pyannote script (if not present).");
+    println!("Setup provisions S3 creds and clones the repo.");
+
+    // collect env vars to provision on the remote
+    let env_vars = [
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_ENDPOINT_URL",
+        "HF_TOKEN",
+    ];
+
+    let mut env_lines = Vec::new();
+    for var in &env_vars {
+        if let Ok(val) = std::env::var(var) {
+            env_lines.push(format!("export {var}=\"{val}\""));
+        }
+    }
+
+    let write_env = if env_lines.is_empty() {
+        String::from("echo 'No S3/HF env vars found locally, skipping /root/.env'")
+    } else {
+        let env_content = env_lines.join("\n");
+        format!(
+            "cat > /root/.env << 'ENVEOF'\n{env_content}\nENVEOF\n\
+             chmod 600 /root/.env\n\
+             echo 'Wrote /root/.env with {} var(s)'",
+            env_lines.len()
+        )
+    };
+
+    // ensure interactive SSH sessions also get the env vars
+    let bashrc_source = "grep -q 'source /root/.env' /root/.bashrc 2>/dev/null || \
+         echo '[ -f /root/.env ] && source /root/.env' >> /root/.bashrc";
 
     let clone_or_pull = format!(
         "if [ -d /workspace/speakrs/.git ]; then \
@@ -365,6 +396,9 @@ pub fn setup(info: &InstanceInfo, branch: &str) -> Result<()> {
 
     let script = format!(
         "set -euo pipefail\n\
+         echo '=== Provisioning env vars ==='\n\
+         {write_env}\n\
+         {bashrc_source}\n\
          echo '=== Verifying baked binary ==='\n\
          which speakrs-bm && speakrs-bm --help | head -1 || echo 'warning: speakrs-bm not found in PATH'\n\
          echo '=== Verifying baked models ==='\n\
@@ -373,7 +407,6 @@ pub fn setup(info: &InstanceInfo, branch: &str) -> Result<()> {
          echo '=== Cloning repo (for pyannote script) ==='\n\
          {clone_or_pull}\n\
          echo '=== Setup complete ==='\n",
-        clone_or_pull = clone_or_pull,
     );
 
     run_remote_script(info, &script)
