@@ -338,8 +338,9 @@ impl SegmentationModel {
 
     #[cfg(feature = "coreml")]
     fn compute_units_for_mode(_mode: ExecutionMode) -> MLComputeUnits {
-        // segmentation is LSTM-based, always best on CPU+GPU regardless of mode
-        CoreMlModel::default_compute_units()
+        // LSTM-based segmentation runs poorly on ANE (sequential hidden state dependencies),
+        // so restrict to CPU only — this frees the NE for the embedding ResNet tail
+        MLComputeUnits::CPUOnly
     }
 
     #[cfg(feature = "coreml")]

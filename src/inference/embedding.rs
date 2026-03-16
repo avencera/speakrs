@@ -8,6 +8,8 @@ use ort::value::TensorRef;
 #[cfg(feature = "coreml")]
 use crate::inference::coreml::{CachedInputShape, CoreMlModel, GpuPrecision, coreml_model_path};
 use crate::inference::{ExecutionMode, with_execution_mode};
+#[cfg(feature = "coreml")]
+use objc2_core_ml::MLComputeUnits;
 
 const PRIMARY_BATCH_SIZE: usize = 32;
 const CHUNK_SPEAKER_BATCH_SIZE: usize = 3;
@@ -824,7 +826,8 @@ impl EmbeddingModel {
         let (resolve_path, compute_units) = match mode {
             ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => (
                 coreml_model_path as fn(&str) -> std::path::PathBuf,
-                CoreMlModel::default_compute_units(),
+                // target NE for ResNet tail — segmentation uses CPUOnly, so NE is free
+                MLComputeUnits::CPUAndNeuralEngine,
             ),
             _ => return None,
         };
