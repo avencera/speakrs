@@ -1,3 +1,7 @@
+.DS_Store
+.cargo/
+.envrc
+.python-version
 target/
 _benchmarks/
 .git/
@@ -6,11 +10,14 @@ _benchmarks/
 .gpu-instances/
 .claude/
 
-fixtures/models/
-fixtures/datasets/
+fixtures/
 *.mlpackage
 *.mlmodelc
 
+CONTRIBUTING.md
+README.md
+pyproject.toml
+uv.lock
 notes/
 adr/
 benchmarks/
