@@ -602,6 +602,12 @@ const IMPL_REGISTRY: &[(&str, &str, &str, ImplType)] = &[
         ImplType::Speakrs("coreml-fast"),
     ),
     ("cuda", "sg", "speakrs CUDA", ImplType::Speakrs("cuda")),
+    (
+        "cuda-hybrid",
+        "sgh",
+        "speakrs CUDA Hybrid",
+        ImplType::Speakrs("cuda-hybrid"),
+    ),
     ("cpu", "scpu", "speakrs CPU", ImplType::Speakrs("cpu")),
     ("fluidaudio", "fa", "FluidAudio", ImplType::FluidAudioBench),
     ("pyannote-rs", "prs", "pyannote-rs", ImplType::PyannoteRs),
@@ -1547,7 +1553,7 @@ fn der_build_features(impls: &[String]) -> Vec<String> {
 
     let needs_cuda = active_impls
         .iter()
-        .any(|t| matches!(t, ImplType::Speakrs("cuda")));
+        .any(|t| matches!(t, ImplType::Speakrs("cuda" | "cuda-hybrid")));
 
     if needs_coreml {
         features.push("coreml".to_string());
