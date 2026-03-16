@@ -610,6 +610,7 @@ const IMPL_REGISTRY: &[(&str, &str, &str, ImplType)] = &[
     ),
     ("cpu", "scpu", "speakrs CPU", ImplType::Speakrs("cpu")),
     ("fluidaudio", "fa", "FluidAudio", ImplType::FluidAudioBench),
+    ("speakerkit", "sk", "SpeakerKit", ImplType::SpeakerKitBench),
     ("pyannote-rs", "prs", "pyannote-rs", ImplType::PyannoteRs),
 ];
 
@@ -813,6 +814,7 @@ fn run_der_implementations(
         root.join("scripts/pyannote_rs_bench/target/release/diarize-pyannote-rs");
 
     let fluidaudio_bench_dir = root.join("scripts/fluidaudio-bench");
+    let speakerkit_bench_dir = root.join("scripts/speakerkit-bench");
     let implementations: Vec<(&str, ImplType)> = if impls.is_empty() {
         IMPL_REGISTRY
             .iter()
@@ -850,6 +852,7 @@ fn run_der_implementations(
             root,
             impl_type,
             &fluidaudio_bench_dir,
+            &speakerkit_bench_dir,
             &pyannote_rs_binary,
             seg_model,
             emb_model,
@@ -875,6 +878,21 @@ fn run_der_implementations(
                 } else {
                     BatchCommandRunner::binary(
                         &fluidaudio_bench_dir.join(".build/release/fluidaudio-bench"),
+                        &wav_paths,
+                    )
+                    .run_with_retries(batch_timeout)
+                }
+            }
+            ImplType::SpeakerKitBench => {
+                if let Err(err) = run_cmd(
+                    Command::new("swift")
+                        .args(["build", "-c", "release", "--package-path"])
+                        .arg(&speakerkit_bench_dir),
+                ) {
+                    Err(err)
+                } else {
+                    BatchCommandRunner::binary(
+                        &speakerkit_bench_dir.join(".build/release/speakerkit-bench"),
                         &wav_paths,
                     )
                     .run_with_retries(batch_timeout)
@@ -942,6 +960,7 @@ pub enum ImplType {
     Pyannote(&'static str),
     PyannoteRs,
     FluidAudioBench,
+    SpeakerKitBench,
 }
 
 #[derive(Clone, Copy, serde::Serialize)]
@@ -1585,6 +1604,7 @@ fn preflight_check(
     let pyannote_rs_binary =
         root.join("scripts/pyannote_rs_bench/target/release/diarize-pyannote-rs");
     let fluidaudio_bench_dir = root.join("scripts/fluidaudio-bench");
+    let speakerkit_bench_dir = root.join("scripts/speakerkit-bench");
 
     let implementations: Vec<(&str, &str, ImplType)> = if impls.is_empty() {
         IMPL_REGISTRY
@@ -1607,6 +1627,7 @@ fn preflight_check(
             root,
             impl_type,
             &fluidaudio_bench_dir,
+            &speakerkit_bench_dir,
             &pyannote_rs_binary,
             seg_model,
             emb_model,
@@ -1630,6 +1651,21 @@ fn preflight_check(
                 } else {
                     BatchCommandRunner::binary(
                         &fluidaudio_bench_dir.join(".build/release/fluidaudio-bench"),
+                        &wav_paths,
+                    )
+                    .run_with_retries(PREFLIGHT_TIMEOUT)
+                }
+            }
+            ImplType::SpeakerKitBench => {
+                if let Err(err) = run_cmd(
+                    Command::new("swift")
+                        .args(["build", "-c", "release", "--package-path"])
+                        .arg(&speakerkit_bench_dir),
+                ) {
+                    Err(err)
+                } else {
+                    BatchCommandRunner::binary(
+                        &speakerkit_bench_dir.join(".build/release/speakerkit-bench"),
                         &wav_paths,
                     )
                     .run_with_retries(PREFLIGHT_TIMEOUT)
@@ -1701,6 +1737,7 @@ fn der_skip_reason(
     root: &Path,
     impl_type: &ImplType,
     fluidaudio_bench_dir: &Path,
+    speakerkit_bench_dir: &Path,
     pyannote_rs_binary: &Path,
     seg_model: &Path,
     emb_model: &Path,
@@ -1718,6 +1755,8 @@ fn der_skip_reason(
         }
         ImplType::FluidAudioBench => (!fluidaudio_bench_dir.join("Package.swift").exists())
             .then(|| "scripts/fluidaudio-bench/Package.swift not found".to_string()),
+        ImplType::SpeakerKitBench => (!speakerkit_bench_dir.join("Package.swift").exists())
+            .then(|| "scripts/speakerkit-bench/Package.swift not found".to_string()),
         ImplType::PyannoteRs => {
             if !pyannote_rs_binary.exists() {
                 Some("pyannote-rs bench binary not found".to_string())
