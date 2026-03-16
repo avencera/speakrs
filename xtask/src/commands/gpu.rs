@@ -341,6 +341,77 @@ pub fn import(name: &str, backend: Backend) -> Result<()> {
     Ok(())
 }
 
+pub fn sync() -> Result<()> {
+    let names = list_instances()?;
+    if names.is_empty() {
+        println!("No instances");
+        return Ok(());
+    }
+
+    let mut has_runpod = false;
+    let mut has_vastai = false;
+    let mut instances: Vec<(String, InstanceInfo)> = Vec::new();
+
+    for name in &names {
+        let info = read_instance(name)?;
+        match info.backend {
+            Backend::RunPod => has_runpod = true,
+            Backend::VastAi => has_vastai = true,
+        }
+        instances.push((name.clone(), info));
+    }
+
+    let runpod_ids = if has_runpod {
+        match runpod::get_pod_ids() {
+            Ok(ids) => Some(ids),
+            Err(e) => {
+                eprintln!("Warning: failed to query RunPod, skipping RunPod instances: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let vastai_ids = if has_vastai {
+        match vastai::get_instance_ids() {
+            Ok(ids) => Some(ids),
+            Err(e) => {
+                eprintln!("Warning: failed to query vast.ai, skipping vast.ai instances: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut removed = 0;
+    for (name, info) in &instances {
+        let active_ids = match info.backend {
+            Backend::RunPod => &runpod_ids,
+            Backend::VastAi => &vastai_ids,
+        };
+
+        let Some(ids) = active_ids else {
+            continue;
+        };
+
+        if !ids.contains(&info.instance_id) {
+            fs::remove_file(instances_dir().join(name))?;
+            println!("Removed '{name}' ({}, id={})", info.backend, info.instance_id);
+            removed += 1;
+        }
+    }
+
+    if removed == 0 {
+        println!("All instances are still active");
+    } else {
+        println!("Removed {removed} stale instance(s)");
+    }
+
+    Ok(())
+}
+
 pub fn list() -> Result<()> {
     let names = list_instances()?;
     if names.is_empty() {
