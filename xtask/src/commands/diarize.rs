@@ -26,6 +26,7 @@ pub enum SpeakrsMode {
     Coreml,
     CoremlFast,
     Cuda,
+    CudaHybrid,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -42,6 +43,7 @@ impl SpeakrsMode {
             Self::Coreml => ExecutionMode::CoreMl,
             Self::CoremlFast => ExecutionMode::CoreMlFast,
             Self::Cuda => ExecutionMode::Cuda,
+            Self::CudaHybrid => ExecutionMode::CudaHybrid,
         }
     }
 
@@ -72,11 +74,12 @@ impl FromStr for DiarizeMode {
             "coreml" => Ok(Self::Speakrs(SpeakrsMode::Coreml)),
             "coreml-fast" => Ok(Self::Speakrs(SpeakrsMode::CoremlFast)),
             "cuda" => Ok(Self::Speakrs(SpeakrsMode::Cuda)),
+            "cuda-hybrid" => Ok(Self::Speakrs(SpeakrsMode::CudaHybrid)),
             "pyannote-cpu" => Ok(Self::Pyannote(PyannoteDevice::Cpu)),
             "pyannote-mps" => Ok(Self::Pyannote(PyannoteDevice::Mps)),
             "pyannote-cuda" => Ok(Self::Pyannote(PyannoteDevice::Cuda)),
             _ => Err(format!(
-                "unknown mode '{s}', expected one of: cpu, coreml, coreml-fast, cuda, pyannote-cpu, pyannote-mps, pyannote-cuda"
+                "unknown mode '{s}', expected one of: cpu, coreml, coreml-fast, cuda, cuda-hybrid, pyannote-cpu, pyannote-mps, pyannote-cuda"
             )),
         }
     }
@@ -89,6 +92,7 @@ impl fmt::Display for DiarizeMode {
             Self::Speakrs(SpeakrsMode::Coreml) => write!(f, "coreml"),
             Self::Speakrs(SpeakrsMode::CoremlFast) => write!(f, "coreml-fast"),
             Self::Speakrs(SpeakrsMode::Cuda) => write!(f, "cuda"),
+            Self::Speakrs(SpeakrsMode::CudaHybrid) => write!(f, "cuda-hybrid"),
             Self::Pyannote(PyannoteDevice::Cpu) => write!(f, "pyannote-cpu"),
             Self::Pyannote(PyannoteDevice::Mps) => write!(f, "pyannote-mps"),
             Self::Pyannote(PyannoteDevice::Cuda) => write!(f, "pyannote-cuda"),

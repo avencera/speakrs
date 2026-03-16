@@ -12,7 +12,8 @@ pub enum ExecutionMode {
     Cpu,
     CoreMl,     // FP32 native CoreML, CPU+GPU, 1s step
     CoreMlFast, // FP32 native CoreML, CPU+GPU, 2s step
-    Cuda,
+    Cuda,       // NVIDIA GPU, sequential seg then emb
+    CudaHybrid, // NVIDIA GPU, concurrent seg+emb via crossbeam channel
 }
 
 /// Map execution mode to ORT execution providers
@@ -26,7 +27,7 @@ pub fn with_execution_mode(
     match mode {
         ExecutionMode::Cpu | ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => Ok(builder
             .with_execution_providers([ep::CPU::default().with_arena_allocator(false).build()])?),
-        ExecutionMode::Cuda => {
+        ExecutionMode::Cuda | ExecutionMode::CudaHybrid => {
             #[cfg(feature = "cuda")]
             {
                 Ok(builder.with_execution_providers([ep::CUDA::default()
