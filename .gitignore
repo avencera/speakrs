@@ -1,10 +1,10 @@
-/target
+/_*
+target
+.build
 .venv/
+__pycache__/
+
+.gpu-instances/
+
 fixtures/models/
 fixtures/datasets/
-notes
-/scripts/pyannote_rs_bench/target
-__pycache__/
-/scripts/fluidaudio-bench/.build
-_benchmarks/
-.gpu-instances/
