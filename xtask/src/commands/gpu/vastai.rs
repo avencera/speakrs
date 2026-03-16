@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::process::Command;
 
 use color_eyre::eyre::{Result, bail};
@@ -176,6 +177,30 @@ fn wait_for_running(instance_id: &str) -> Result<()> {
     }
 
     bail!("Instance did not start within 5 minutes");
+}
+
+pub fn get_instance_ids() -> Result<HashSet<String>> {
+    let output = Command::new("vastai")
+        .args(["show", "instances", "--raw"])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Failed to list vast.ai instances: {stderr}");
+    }
+
+    let instances: Value = serde_json::from_slice(&output.stdout)?;
+    let empty = vec![];
+    let instances = instances.as_array().unwrap_or(&empty);
+    Ok(instances
+        .iter()
+        .filter_map(|i| {
+            i["id"]
+                .as_u64()
+                .map(|id| id.to_string())
+                .or_else(|| i["id"].as_str().map(String::from))
+        })
+        .collect())
 }
 
 pub fn destroy(info: &InstanceInfo) -> Result<()> {

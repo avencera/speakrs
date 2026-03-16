@@ -188,6 +188,7 @@ enum GpuCmd {
         name: Option<String>,
     },
     /// Tear down GPU instance(s)
+    #[command(alias = "rm")]
     Destroy {
         /// Instance name (omit for fzf picker)
         name: Option<String>,
@@ -209,7 +210,10 @@ enum GpuCmd {
         backend: Backend,
     },
     /// List all GPU instances
+    #[command(alias = "ls")]
     List,
+    /// Remove local instances that no longer exist on their backend
+    Sync,
 }
 
 fn main() -> Result<()> {
@@ -289,6 +293,7 @@ fn main() -> Result<()> {
             GpuCmd::Start { name } => commands::gpu::start(name.as_deref()),
             GpuCmd::Import { name, backend } => commands::gpu::import(&name, backend),
             GpuCmd::List => commands::gpu::list(),
+            GpuCmd::Sync => commands::gpu::sync(),
         },
         Command::Diarize { mode, wav_files } => commands::diarize::run(mode, wav_files),
         Command::ProfileOrtEmbedding {

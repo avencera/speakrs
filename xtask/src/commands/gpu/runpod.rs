@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::process::Command;
 
 use color_eyre::eyre::{Result, bail};
@@ -218,6 +219,18 @@ pub fn list_pods() -> Result<Value> {
 
     let response = graphql_query(query, &serde_json::json!({}))?;
     Ok(response)
+}
+
+pub fn get_pod_ids() -> Result<HashSet<String>> {
+    let response = list_pods()?;
+    let empty = vec![];
+    let pods = response["data"]["myself"]["pods"]
+        .as_array()
+        .unwrap_or(&empty);
+    Ok(pods
+        .iter()
+        .filter_map(|p| p["id"].as_str().map(String::from))
+        .collect())
 }
 
 pub fn import() -> Result<InstanceInfo> {
