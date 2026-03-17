@@ -15,7 +15,7 @@ path = "src/bin/speakrs_bm.rs"
 
 [features]
 coreml = ["speakrs/coreml"]
-cuda = ["speakrs/cuda"]
+cuda = ["speakrs/cuda", "ort/load-dynamic"]
 
 [dependencies]
 chrono = "0.4.44"

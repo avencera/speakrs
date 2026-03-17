@@ -166,6 +166,16 @@ fn main() -> Result<()> {
     // SAFETY: single-threaded CLI
     unsafe { std::env::set_var("SPEAKRS_MODELS_DIR", &models_dir) };
 
+    if !cli.no_preflight {
+        preflight(
+            &datasets_list,
+            &datasets_dir,
+            &implementations,
+            &models_dir,
+            &root,
+        )?;
+    }
+
     for dataset in &datasets_list {
         println!();
         println!("========== {} ==========", dataset.display_name);
@@ -382,4 +392,52 @@ fn resolve_results_dir() -> PathBuf {
     std::env::var("SPEAKRS_RESULTS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/workspace/_benchmarks"))
+}
+
+fn preflight(
+    datasets: &[datasets::Dataset],
+    datasets_dir: &Path,
+    implementations: &[(&str, ImplType)],
+    models_dir: &Path,
+    root: &Path,
+) -> Result<()> {
+    let first_dataset = &datasets[0];
+    first_dataset.ensure(datasets_dir)?;
+    let first_dir = first_dataset.dataset_dir(datasets_dir);
+    let preflight_files = discover_files(&first_dir, 1, f64::MAX)?;
+
+    if preflight_files.is_empty() {
+        eprintln!("warning: no files for preflight, skipping");
+        return Ok(());
+    }
+
+    let (wav_path, _) = &preflight_files[0];
+    let stem = wav_path.file_stem().unwrap().to_string_lossy();
+    let dur = wav_duration_seconds(wav_path).unwrap_or(0.0);
+    println!();
+    println!("=== Pre-flight check ({stem}, {dur:.0}s) ===");
+
+    for (impl_name, impl_type) in implementations {
+        let result = match impl_type {
+            ImplType::Speakrs(mode) => run_speakrs_gpu(models_dir, &preflight_files, mode),
+            ImplType::Pyannote(device) => {
+                BatchCommandRunner::pyannote(root, device, &[wav_path.as_path()])
+                    .run_with_retries(Duration::from_secs(180))
+            }
+            _ => continue,
+        };
+
+        let output = result
+            .map_err(|err| color_eyre::eyre::eyre!("preflight failed for {impl_name}: {err}"))?;
+
+        ensure!(
+            output.per_file_rttm.values().any(|v| !v.trim().is_empty()),
+            "preflight failed for {impl_name}: empty RTTM output"
+        );
+
+        println!("  {impl_name:<22} ok ({:.1}s)", output.total_seconds);
+    }
+
+    println!();
+    Ok(())
 }
