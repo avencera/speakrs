@@ -117,7 +117,7 @@ pub fn provision(min_tflops: f64) -> Result<InstanceInfo> {
             "instance",
             &offer_id.to_string(),
             "--image",
-            super::IMAGE,
+            &super::image(),
             "--disk",
             "40",
             "--ssh",
