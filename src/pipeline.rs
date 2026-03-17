@@ -78,7 +78,7 @@ impl PipelineConfig {
     /// single-frame speaker flickers caused by the larger step size
     pub fn for_mode(mode: ExecutionMode) -> Self {
         match mode {
-            ExecutionMode::CoreMlFast => Self {
+            ExecutionMode::CoreMlFast | ExecutionMode::CudaFast => Self {
                 binarize: BinarizeConfig {
                     min_duration_on: 3,
                     min_duration_off: 3,
@@ -493,7 +493,7 @@ impl OwnedDiarizationPipeline {
         let models_dir = manager.ensure(mode)?;
 
         let step = match mode {
-            ExecutionMode::CoreMlFast => FAST_SEGMENTATION_STEP_SECONDS,
+            ExecutionMode::CoreMlFast | ExecutionMode::CudaFast => FAST_SEGMENTATION_STEP_SECONDS,
             _ => SEGMENTATION_STEP_SECONDS,
         };
 
@@ -544,7 +544,7 @@ impl OwnedDiarizationPipeline {
     /// Build the pipeline from a local models directory
     pub fn from_dir(models_dir: &Path, mode: ExecutionMode) -> Result<Self, PipelineError> {
         let step = match mode {
-            ExecutionMode::CoreMlFast => FAST_SEGMENTATION_STEP_SECONDS,
+            ExecutionMode::CoreMlFast | ExecutionMode::CudaFast => FAST_SEGMENTATION_STEP_SECONDS,
             _ => SEGMENTATION_STEP_SECONDS,
         };
 
@@ -684,7 +684,11 @@ impl<'a> PipelineRunner<'a> {
     fn inference_path(&self) -> InferencePath {
         if matches!(
             self.seg_model.mode(),
-            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast | ExecutionMode::CudaHybrid
+            ExecutionMode::CoreMl
+                | ExecutionMode::CoreMlFast
+                | ExecutionMode::Cuda
+                | ExecutionMode::CudaHybrid
+                | ExecutionMode::CudaFast
         ) {
             InferencePath::Concurrent
         } else {

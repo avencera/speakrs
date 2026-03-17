@@ -86,9 +86,10 @@ impl EmbeddingModel {
         let split_tail_path = split_tail_model_path(model_path, 1);
         let split_tail_batched_path = split_tail_model_path(model_path, CHUNK_SPEAKER_BATCH_SIZE);
         let split_primary_tail_batched_path = split_tail_model_path(model_path, PRIMARY_BATCH_SIZE);
-        let use_split_backend = (mode == ExecutionMode::CoreMl
-            || mode == ExecutionMode::CoreMlFast)
-            && split_fbank_path.exists()
+        let use_split_backend = matches!(
+            mode,
+            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast | ExecutionMode::CudaHybrid
+        ) && split_fbank_path.exists()
             && split_tail_path.exists();
 
         Ok(Self {
@@ -211,8 +212,11 @@ impl EmbeddingModel {
 
     fn single_execution_mode(mode: ExecutionMode) -> ExecutionMode {
         match mode {
-            // keep single embeddings on the CPU path; native CoreML handles the tail
-            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => ExecutionMode::Cpu,
+            // keep single embeddings on the CPU path; native CoreML handles the tail,
+            // CudaHybrid uses split-tail (CPU fbank + CUDA tail) to avoid memory bloat
+            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast | ExecutionMode::CudaHybrid => {
+                ExecutionMode::Cpu
+            }
             _ => mode,
         }
     }
@@ -258,9 +262,10 @@ impl EmbeddingModel {
             split_tail_model_path(&self.model_path, CHUNK_SPEAKER_BATCH_SIZE);
         let split_primary_tail_batched_path =
             split_tail_model_path(&self.model_path, PRIMARY_BATCH_SIZE);
-        let use_split_backend = (self.mode == ExecutionMode::CoreMl
-            || self.mode == ExecutionMode::CoreMlFast)
-            && split_fbank_path.exists()
+        let use_split_backend = matches!(
+            self.mode,
+            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast | ExecutionMode::CudaHybrid
+        ) && split_fbank_path.exists()
             && split_tail_path.exists();
         let split_fbank_batched_path = split_fbank_batched_model_path(&self.model_path);
         self.split_fbank_session = use_split_backend

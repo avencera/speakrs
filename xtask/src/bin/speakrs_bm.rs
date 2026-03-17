@@ -8,7 +8,9 @@ use color_eyre::eyre::{Result, ensure};
 use speakrs::inference::ExecutionMode;
 use speakrs::inference::embedding::EmbeddingModel;
 use speakrs::inference::segmentation::SegmentationModel;
-use speakrs::pipeline::{DiarizationPipeline, SEGMENTATION_STEP_SECONDS};
+use speakrs::pipeline::{
+    DiarizationPipeline, FAST_SEGMENTATION_STEP_SECONDS, SEGMENTATION_STEP_SECONDS,
+};
 use xtask::cmd::wav_duration_seconds;
 use xtask::commands::benchmark::{
     BatchCommandRunner, BatchRunOutput, DerAccumulation, DerImplResult, DerResultsWriter, ImplType,
@@ -27,6 +29,12 @@ const BM_IMPLS: &[(&str, &str, &str, ImplType)] = &[
         "sgh",
         "speakrs CUDA Hybrid",
         ImplType::Speakrs("cuda-hybrid"),
+    ),
+    (
+        "speakrs-fast",
+        "sgf",
+        "speakrs CUDA Fast",
+        ImplType::Speakrs("cuda-fast"),
     ),
     (
         "pyannote",
@@ -293,11 +301,16 @@ fn run_speakrs_gpu(
 ) -> Result<BatchRunOutput> {
     let execution_mode = match mode {
         "cuda-hybrid" => ExecutionMode::CudaHybrid,
+        "cuda-fast" => ExecutionMode::CudaFast,
         _ => ExecutionMode::Cuda,
+    };
+    let step = match execution_mode {
+        ExecutionMode::CudaFast => FAST_SEGMENTATION_STEP_SECONDS,
+        _ => SEGMENTATION_STEP_SECONDS,
     };
     let mut seg_model = SegmentationModel::with_mode(
         models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
-        SEGMENTATION_STEP_SECONDS as f32,
+        step as f32,
         execution_mode,
     )?;
     let mut emb_model = EmbeddingModel::with_mode(
