@@ -36,7 +36,9 @@ enum Bench {
 
             let fileStart = Date()
             let audioArray = try AudioProcessor.loadAudioAsFloatArray(fromPath: path)
-            let result = try await speakerKit.diarize(audioArray: audioArray)
+            // match whisperkit-cli diarize defaults (useExclusiveReconciliation=false)
+            let options = PyannoteDiarizationOptions(useExclusiveReconciliation: false)
+            let result = try await speakerKit.diarize(audioArray: audioArray, options: options)
             let elapsed = Date().timeIntervalSince(fileStart)
             cumulative += elapsed
 
