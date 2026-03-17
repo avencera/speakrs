@@ -27,6 +27,7 @@ pub enum SpeakrsMode {
     CoremlFast,
     Cuda,
     CudaHybrid,
+    CudaFast,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -44,12 +45,13 @@ impl SpeakrsMode {
             Self::CoremlFast => ExecutionMode::CoreMlFast,
             Self::Cuda => ExecutionMode::Cuda,
             Self::CudaHybrid => ExecutionMode::CudaHybrid,
+            Self::CudaFast => ExecutionMode::CudaFast,
         }
     }
 
     fn step_seconds(self) -> f64 {
         match self {
-            Self::CoremlFast => FAST_SEGMENTATION_STEP_SECONDS,
+            Self::CoremlFast | Self::CudaFast => FAST_SEGMENTATION_STEP_SECONDS,
             _ => SEGMENTATION_STEP_SECONDS,
         }
     }
@@ -75,11 +77,12 @@ impl FromStr for DiarizeMode {
             "coreml-fast" => Ok(Self::Speakrs(SpeakrsMode::CoremlFast)),
             "cuda" => Ok(Self::Speakrs(SpeakrsMode::Cuda)),
             "cuda-hybrid" => Ok(Self::Speakrs(SpeakrsMode::CudaHybrid)),
+            "cuda-fast" => Ok(Self::Speakrs(SpeakrsMode::CudaFast)),
             "pyannote-cpu" => Ok(Self::Pyannote(PyannoteDevice::Cpu)),
             "pyannote-mps" => Ok(Self::Pyannote(PyannoteDevice::Mps)),
             "pyannote-cuda" => Ok(Self::Pyannote(PyannoteDevice::Cuda)),
             _ => Err(format!(
-                "unknown mode '{s}', expected one of: cpu, coreml, coreml-fast, cuda, cuda-hybrid, pyannote-cpu, pyannote-mps, pyannote-cuda"
+                "unknown mode '{s}', expected one of: cpu, coreml, coreml-fast, cuda, cuda-hybrid, cuda-fast, pyannote-cpu, pyannote-mps, pyannote-cuda"
             )),
         }
     }
@@ -93,6 +96,7 @@ impl fmt::Display for DiarizeMode {
             Self::Speakrs(SpeakrsMode::CoremlFast) => write!(f, "coreml-fast"),
             Self::Speakrs(SpeakrsMode::Cuda) => write!(f, "cuda"),
             Self::Speakrs(SpeakrsMode::CudaHybrid) => write!(f, "cuda-hybrid"),
+            Self::Speakrs(SpeakrsMode::CudaFast) => write!(f, "cuda-fast"),
             Self::Pyannote(PyannoteDevice::Cpu) => write!(f, "pyannote-cpu"),
             Self::Pyannote(PyannoteDevice::Mps) => write!(f, "pyannote-mps"),
             Self::Pyannote(PyannoteDevice::Cuda) => write!(f, "pyannote-cuda"),
