@@ -8,7 +8,7 @@ use crate::cmd::run_cmd;
 use crate::convert::{convert_to_16k_mono, textgrid_to_rttm};
 
 /// AliMeeting eval set -- Mandarin meetings with high overlap
-/// Audio + TextGrid from OpenSLR
+/// Far-field audio + TextGrid from OpenSLR
 pub fn ensure(dir: &Path) -> Result<()> {
     let wav_dir = dir.join("wav");
     let rttm_dir = dir.join("rttm");
@@ -43,37 +43,47 @@ pub fn ensure(dir: &Path) -> Result<()> {
     fs::create_dir_all(&wav_dir)?;
     fs::create_dir_all(&rttm_dir)?;
 
-    let near_dir = raw_dir.join("Eval_Ali/Eval_Ali_near/audio_and_target");
-    if near_dir.is_dir() {
-        let mut entries: Vec<_> = fs::read_dir(&near_dir)?
+    // structure: Eval_Ali/Eval_Ali_far/audio_dir/*.wav
+    //            Eval_Ali/Eval_Ali_far/textgrid_dir/*.TextGrid
+    let far_audio = raw_dir.join("Eval_Ali/Eval_Ali_far/audio_dir");
+    let far_tg = raw_dir.join("Eval_Ali/Eval_Ali_far/textgrid_dir");
+
+    if far_tg.is_dir() {
+        let mut entries: Vec<_> = fs::read_dir(&far_tg)?
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_dir())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("textgrid"))
+            })
             .collect();
         entries.sort_by_key(|e| e.file_name());
 
         for entry in &entries {
-            let session_dir = entry.path();
-            let session_id = entry.file_name().to_string_lossy().to_string();
+            let path = entry.path();
+            let session_id = path.file_stem().unwrap().to_string_lossy().to_string();
+            textgrid_to_rttm(
+                &path,
+                &rttm_dir.join(format!("{session_id}.rttm")),
+                &session_id,
+            )?;
+        }
+    }
 
-            let textgrid_path = session_dir.join(format!("{session_id}.TextGrid"));
-            if textgrid_path.exists() {
-                textgrid_to_rttm(
-                    &textgrid_path,
-                    &rttm_dir.join(format!("{session_id}.rttm")),
-                    &session_id,
-                )?;
-            }
+    if far_audio.is_dir() {
+        let mut entries: Vec<_> = fs::read_dir(&far_audio)?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file())
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
 
-            let audio_path = session_dir.join(format!("{session_id}_near.wav"));
-            let audio_path = if audio_path.exists() {
-                audio_path
-            } else {
-                find_wav(&session_dir).unwrap_or(audio_path)
-            };
-
-            if audio_path.exists() {
-                convert_to_16k_mono(&audio_path, &wav_dir.join(format!("{session_id}.wav")))?;
-            }
+        for entry in &entries {
+            let path = entry.path();
+            let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+            // wav filenames have a mic suffix (e.g. R8001_M8004_MS801.wav)
+            // textgrid filenames don't (R8001_M8004.TextGrid)
+            // use the wav stem as-is for the output filename
+            convert_to_16k_mono(&path, &wav_dir.join(format!("{stem}.wav")))?;
         }
     }
 
@@ -81,15 +91,4 @@ pub fn ensure(dir: &Path) -> Result<()> {
     println!("AliMeeting setup complete");
 
     Ok(())
-}
-
-fn find_wav(dir: &Path) -> Option<std::path::PathBuf> {
-    fs::read_dir(dir).ok()?.flatten().find_map(|e| {
-        let p = e.path();
-        if p.extension().is_some_and(|e| e == "wav") {
-            Some(p)
-        } else {
-            None
-        }
-    })
 }
