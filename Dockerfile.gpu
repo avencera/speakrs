@@ -24,6 +24,7 @@ RUN mkdir -p src xtask/src xtask/src/bin && \
 RUN --mount=type=cache,target=/root/.cargo/registry,id=speakrs-gpu-cargo-registry \
     --mount=type=cache,target=/root/.cargo/git,id=speakrs-gpu-cargo-git \
     --mount=type=cache,target=/build/target,id=speakrs-gpu-target \
+    --mount=type=cache,target=/root/.cache/ort.pyke.io,id=speakrs-gpu-ort-cache \
     cargo build --release -p xtask --features cuda --bin speakrs-bm
 
 # =============================================================================
@@ -34,14 +35,18 @@ FROM deps AS builder
 COPY src/ ./src/
 COPY xtask/ ./xtask/
 
+# ort-sys downloads prebuilt ORT binaries to ~/.cache/ort.pyke.io/dfbin/,
+# not into target/release/build/. Mount that cache and copy provider .so files
+# needed by the CUDA execution provider at runtime.
 RUN --mount=type=cache,target=/root/.cargo/registry,id=speakrs-gpu-cargo-registry \
     --mount=type=cache,target=/root/.cargo/git,id=speakrs-gpu-cargo-git \
     --mount=type=cache,target=/build/target,id=speakrs-gpu-target \
+    --mount=type=cache,target=/root/.cache/ort.pyke.io,id=speakrs-gpu-ort-cache \
     cargo build --release -p xtask --features cuda --bin speakrs-bm && \
     mkdir -p /opt/bin /opt/ort-libs && \
     cp -P target/release/speakrs-bm /opt/bin/ && \
-    find target/release/build/ -path '*/ort-sys-*/out/onnxruntime/lib/*.so*' \
-    -exec cp -P {} /opt/ort-libs/ \;
+    find /root/.cache/ort.pyke.io -name '*.so*' \
+        -exec cp -P {} /opt/ort-libs/ \;
 
 # =============================================================================
 # Pre-built images for models and datasets (avoids rebuilding on remote CI)
