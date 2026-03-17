@@ -8,6 +8,19 @@
 FROM ghcr.io/avencera/speakrs-gpu-base:latest AS base
 
 # =============================================================================
+# Download Microsoft's official ORT GPU shared lib (avoids pyke.io AVX-512 MLAS)
+# =============================================================================
+FROM base AS ort-download
+
+ARG ORT_VERSION=1.24.2
+RUN curl -fSL -o /tmp/ort.tgz \
+        "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-gpu-${ORT_VERSION}.tgz" && \
+    mkdir -p /opt/ort-libs && \
+    tar xzf /tmp/ort.tgz --strip-components=2 -C /opt/ort-libs \
+        --wildcards "*/lib/*.so*" && \
+    rm /tmp/ort.tgz
+
+# =============================================================================
 # Dependency warmup for the speakrs-bm build graph
 # =============================================================================
 FROM base AS deps
@@ -24,7 +37,6 @@ RUN mkdir -p src xtask/src xtask/src/bin && \
 RUN --mount=type=cache,target=/root/.cargo/registry,id=speakrs-gpu-cargo-registry \
     --mount=type=cache,target=/root/.cargo/git,id=speakrs-gpu-cargo-git \
     --mount=type=cache,target=/build/target,id=speakrs-gpu-target \
-    --mount=type=cache,target=/root/.cache/ort.pyke.io,id=speakrs-gpu-ort-cache \
     cargo build --release -p xtask --features cuda --bin speakrs-bm
 
 # =============================================================================
@@ -35,18 +47,14 @@ FROM deps AS builder
 COPY src/ ./src/
 COPY xtask/ ./xtask/
 
-# ort-sys downloads prebuilt ORT binaries to ~/.cache/ort.pyke.io/dfbin/,
-# not into target/release/build/. Mount that cache and copy provider .so files
-# needed by the CUDA execution provider at runtime.
+# With load-dynamic, ort-sys skips downloading/linking ORT at compile time.
+# The binary loads libonnxruntime.so at runtime from the library path.
 RUN --mount=type=cache,target=/root/.cargo/registry,id=speakrs-gpu-cargo-registry \
     --mount=type=cache,target=/root/.cargo/git,id=speakrs-gpu-cargo-git \
     --mount=type=cache,target=/build/target,id=speakrs-gpu-target \
-    --mount=type=cache,target=/root/.cache/ort.pyke.io,id=speakrs-gpu-ort-cache \
     cargo build --release -p xtask --features cuda --bin speakrs-bm && \
-    mkdir -p /opt/bin /opt/ort-libs && \
-    cp -P target/release/speakrs-bm /opt/bin/ && \
-    find /root/.cache/ort.pyke.io -name '*.so*' \
-        -exec cp -P {} /opt/ort-libs/ \;
+    mkdir -p /opt/bin && \
+    cp -P target/release/speakrs-bm /opt/bin/
 
 # =============================================================================
 # Pre-built images for models and datasets (avoids rebuilding on remote CI)
@@ -64,7 +72,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry,id=speakrs-gpu-cargo-registr
 FROM ghcr.io/avencera/speakrs-gpu-runtime:latest
 
 COPY --from=builder /opt/bin/speakrs-bm /usr/local/bin/
-COPY --from=builder /opt/ort-libs/ /usr/local/lib/
+COPY --from=ort-download /opt/ort-libs/ /usr/local/lib/
 COPY --from=ghcr.io/avencera/speakrs-models:latest /opt/models/ /opt/models/
 COPY --from=ghcr.io/avencera/speakrs-datasets:latest /opt/datasets/ /opt/datasets/
 COPY scripts/diarize_pyannote.py /opt/scripts/
