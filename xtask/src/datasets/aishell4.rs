@@ -5,10 +5,10 @@ use std::process::Command;
 use color_eyre::eyre::Result;
 
 use crate::cmd::run_cmd;
-use crate::convert::{convert_to_16k_mono, textgrid_to_rttm};
+use crate::convert::convert_to_16k_mono;
 
 /// AISHELL-4 test set -- Mandarin conference meetings
-/// Audio + TextGrid from OpenSLR
+/// Audio (FLAC) + RTTM from OpenSLR
 pub fn ensure(dir: &Path) -> Result<()> {
     let wav_dir = dir.join("wav");
     let rttm_dir = dir.join("rttm");
@@ -43,73 +43,38 @@ pub fn ensure(dir: &Path) -> Result<()> {
     fs::create_dir_all(&wav_dir)?;
     fs::create_dir_all(&rttm_dir)?;
 
-    let test_dir = raw_dir.join("test");
-    if test_dir.is_dir() {
-        convert_sessions(&test_dir, &wav_dir, &rttm_dir)?;
+    // structure: test/wav/*.flac + test/TextGrid/*.rttm (+ *.TextGrid)
+    let src_wav_dir = raw_dir.join("test/wav");
+    let src_tg_dir = raw_dir.join("test/TextGrid");
+
+    // copy pre-existing RTTM files
+    if src_tg_dir.is_dir() {
+        for entry in fs::read_dir(&src_tg_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "rttm") {
+                fs::copy(&path, rttm_dir.join(entry.file_name()))?;
+            }
+        }
+    }
+
+    // convert FLAC to 16kHz mono WAV
+    if src_wav_dir.is_dir() {
+        let mut entries: Vec<_> = fs::read_dir(&src_wav_dir)?
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file())
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
+
+        for entry in &entries {
+            let path = entry.path();
+            let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+            convert_to_16k_mono(&path, &wav_dir.join(format!("{stem}.wav")))?;
+        }
     }
 
     let _ = fs::remove_dir_all(&raw_dir);
     println!("AISHELL-4 setup complete");
 
     Ok(())
-}
-
-fn convert_sessions(test_dir: &Path, wav_dir: &Path, rttm_dir: &Path) -> Result<()> {
-    let mut entries: Vec<_> = fs::read_dir(test_dir)?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
-        .collect();
-    entries.sort_by_key(|e| e.file_name());
-
-    for entry in &entries {
-        let session_dir = entry.path();
-        let session_id = entry.file_name().to_string_lossy().to_string();
-
-        let textgrid = find_file_with_ext(&session_dir, "TextGrid");
-        let source_wav = find_file_with_ext(&session_dir, "wav")
-            .or_else(|| find_file_with_ext(&session_dir, "flac"));
-
-        if let Some(tg) = textgrid {
-            textgrid_to_rttm(
-                &tg,
-                &rttm_dir.join(format!("{session_id}.rttm")),
-                &session_id,
-            )?;
-        }
-        if let Some(audio) = source_wav {
-            convert_to_16k_mono(&audio, &wav_dir.join(format!("{session_id}.wav")))?;
-        }
-    }
-
-    Ok(())
-}
-
-fn find_file_with_ext(dir: &Path, ext: &str) -> Option<std::path::PathBuf> {
-    if let Ok(entries) = fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file()
-                && path
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case(ext))
-            {
-                return Some(path);
-            }
-            if path.is_dir()
-                && let Ok(sub_entries) = fs::read_dir(&path)
-            {
-                for sub in sub_entries.flatten() {
-                    let sub_path = sub.path();
-                    if sub_path.is_file()
-                        && sub_path
-                            .extension()
-                            .is_some_and(|e| e.eq_ignore_ascii_case(ext))
-                    {
-                        return Some(sub_path);
-                    }
-                }
-            }
-        }
-    }
-    None
 }

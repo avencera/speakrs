@@ -43,7 +43,7 @@ pub fn ensure(dir: &Path) -> Result<()> {
     fs::create_dir_all(&wav_dir)?;
     fs::create_dir_all(&rttm_dir)?;
 
-    let near_dir = raw_dir.join("Eval_Ali_near/audio_and_target");
+    let near_dir = raw_dir.join("Eval_Ali/Eval_Ali_near/audio_and_target");
     if near_dir.is_dir() {
         let mut entries: Vec<_> = fs::read_dir(&near_dir)?
             .filter_map(|e| e.ok())
