@@ -40,6 +40,11 @@ enum Command {
         #[command(subcommand)]
         cmd: GpuCmd,
     },
+    /// Download and manage benchmark datasets
+    Dataset {
+        #[command(subcommand)]
+        cmd: DatasetCmd,
+    },
     /// Run speaker diarization on WAV files
     Diarize {
         #[arg(long, default_value = "cpu", value_parser = clap::value_parser!(DiarizeMode))]
@@ -216,6 +221,22 @@ enum GpuCmd {
     Sync,
 }
 
+#[derive(Subcommand)]
+enum DatasetCmd {
+    /// Download one or all datasets (use "list" as id to show available)
+    Ensure {
+        /// Dataset id, or "all"
+        #[arg(default_value = "all")]
+        id: String,
+    },
+    /// Upload local datasets to Tigris S3
+    Upload {
+        /// Dataset id, or "all"
+        #[arg(default_value = "all")]
+        id: String,
+    },
+}
+
 fn main() -> Result<()> {
     color_eyre::install()?;
     let cli = Cli::parse();
@@ -295,6 +316,66 @@ fn main() -> Result<()> {
             GpuCmd::List => commands::gpu::list(),
             GpuCmd::Sync => commands::gpu::sync(),
         },
+        Command::Dataset { cmd } => {
+            use xtask::cmd::project_root;
+            use xtask::datasets::{self, S5cmd};
+
+            let base_dir = project_root().join("fixtures/datasets");
+
+            match cmd {
+                DatasetCmd::Ensure { id } => {
+                    if id == "list" {
+                        for ds_id in datasets::list_dataset_ids() {
+                            println!("  {ds_id}");
+                        }
+                        return Ok(());
+                    }
+
+                    let targets = if id == "all" {
+                        datasets::all_datasets()
+                    } else {
+                        vec![
+                            datasets::find_dataset(&id)
+                                .ok_or_else(|| color_eyre::eyre::eyre!("unknown dataset: {id}"))?,
+                        ]
+                    };
+
+                    for ds in &targets {
+                        println!("--- {} ---", ds.display_name);
+                        ds.ensure(&base_dir)?;
+                    }
+                    Ok(())
+                }
+                DatasetCmd::Upload { id } => {
+                    if !S5cmd::available() {
+                        color_eyre::eyre::bail!("s5cmd not available or AWS_ACCESS_KEY_ID not set");
+                    }
+
+                    let targets = if id == "all" {
+                        datasets::all_datasets()
+                            .into_iter()
+                            .filter(|d| d.id != "voxconverse-dev")
+                            .collect()
+                    } else {
+                        vec![
+                            datasets::find_dataset(&id)
+                                .ok_or_else(|| color_eyre::eyre::eyre!("unknown dataset: {id}"))?,
+                        ]
+                    };
+
+                    for ds in &targets {
+                        let ds_dir = ds.dataset_dir(&base_dir);
+                        if !ds_dir.join("wav").is_dir() || !ds_dir.join("rttm").is_dir() {
+                            println!("Skipping {} (not downloaded yet)", ds.id);
+                            continue;
+                        }
+                        println!("Uploading {}...", ds.id);
+                        S5cmd::upload(&ds.id, &ds_dir)?;
+                    }
+                    Ok(())
+                }
+            }
+        }
         Command::Diarize { mode, wav_files } => commands::diarize::run(mode, wav_files),
         Command::ProfileOrtEmbedding {
             mode,
