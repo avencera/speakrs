@@ -130,19 +130,19 @@ fn list_instances() -> Result<Vec<String>> {
 }
 
 fn resolve_instance(name: Option<&str>) -> Result<(String, InstanceInfo)> {
-    if let Some(n) = name {
-        let info = read_instance(n)?;
-        return Ok((n.to_string(), info));
+    if let Some(instance_name) = name {
+        let info = read_instance(instance_name)?;
+        return Ok((instance_name.to_string(), info));
     }
 
     let names = list_instances()?;
     match names.len() {
         0 => bail!("No instances found. Run `cargo xtask gpu create <name>` first"),
         1 => {
-            let n = &names[0];
-            let info = read_instance(n)?;
-            println!("Auto-selected instance '{n}'");
-            Ok((n.clone(), info))
+            let instance_name = &names[0];
+            let info = read_instance(instance_name)?;
+            println!("Auto-selected instance '{instance_name}'");
+            Ok((instance_name.clone(), info))
         }
         _ => {
             let input = names.join("\n");
@@ -163,68 +163,129 @@ fn resolve_instance(name: Option<&str>) -> Result<(String, InstanceInfo)> {
                 bail!("No instance selected");
             }
 
-            let n = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let info = read_instance(&n)?;
-            Ok((n, info))
+            let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let info = read_instance(&selected)?;
+            Ok((selected, info))
         }
     }
 }
 
-pub fn get_ssh_args(info: &InstanceInfo) -> Vec<String> {
-    vec![
-        "-p".to_string(),
-        info.ssh_port.clone(),
-        format!("{}@{}", info.ssh_user, info.ssh_host),
-    ]
-}
-
-fn is_proxy(info: &InstanceInfo) -> bool {
-    info.ssh_host == "ssh.runpod.io"
-}
-
-/// SSH command — adds `-tt` (PTY) only for RunPod proxy connections
-pub fn ssh_cmd(info: &InstanceInfo) -> Command {
-    let mut cmd = Command::new("ssh");
-    if is_proxy(info) {
-        cmd.arg("-tt");
+impl InstanceInfo {
+    pub fn ssh_args(&self) -> Vec<String> {
+        vec![
+            "-p".to_string(),
+            self.ssh_port.clone(),
+            format!("{}@{}", self.ssh_user, self.ssh_host),
+        ]
     }
-    cmd.args([
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-    ]);
-    cmd.args(get_ssh_args(info));
-    cmd
-}
 
-pub fn run_remote_script(info: &InstanceInfo, script: &str) -> Result<()> {
-    if is_proxy(info) {
-        let mut cmd = ssh_cmd(info);
-        cmd.stdin(Stdio::piped());
-        let mut child = cmd.spawn()?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(script.as_bytes())?;
-            stdin.write_all(b"\nexit\n")?;
-        }
-        let status = child.wait()?;
-        if !status.success() {
-            bail!("Remote script failed");
-        }
-    } else {
-        let mut cmd = ssh_cmd(info);
-        cmd.args(["bash", "-s"]);
-        cmd.stdin(Stdio::piped());
-        let mut child = cmd.spawn()?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(script.as_bytes())?;
-        }
-        let status = child.wait()?;
-        if !status.success() {
-            bail!("Remote script failed");
-        }
+    fn is_proxy(&self) -> bool {
+        self.ssh_host == "ssh.runpod.io"
     }
-    Ok(())
+
+    /// SSH command, adds `-tt` (PTY) only for RunPod proxy connections
+    pub fn ssh_cmd(&self) -> Command {
+        let mut cmd = Command::new("ssh");
+        if self.is_proxy() {
+            cmd.arg("-tt");
+        }
+        cmd.args([
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+        ]);
+        cmd.args(self.ssh_args());
+        cmd
+    }
+
+    pub fn run_remote_script(&self, script: &str) -> Result<()> {
+        if self.is_proxy() {
+            let mut cmd = self.ssh_cmd();
+            cmd.stdin(Stdio::piped());
+            let mut child = cmd.spawn()?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(script.as_bytes())?;
+                stdin.write_all(b"\nexit\n")?;
+            }
+            let status = child.wait()?;
+            if !status.success() {
+                bail!("Remote script failed");
+            }
+        } else {
+            let mut cmd = self.ssh_cmd();
+            cmd.args(["bash", "-s"]);
+            cmd.stdin(Stdio::piped());
+            let mut child = cmd.spawn()?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(script.as_bytes())?;
+            }
+            let status = child.wait()?;
+            if !status.success() {
+                bail!("Remote script failed");
+            }
+        }
+        Ok(())
+    }
+
+    /// Copy local terminal info to the remote so tmux works with non-standard terminals (e.g. Ghostty)
+    pub fn provision_terminfo(&self) -> Result<()> {
+        let term = std::env::var("TERM").unwrap_or_default();
+        if term.is_empty() || term == "xterm-256color" || term == "xterm" {
+            return Ok(());
+        }
+
+        let output = Command::new("infocmp")
+            .args(["-x", &term])
+            .output()
+            .ok()
+            .filter(|o| o.status.success());
+
+        let Some(output) = output else {
+            return Ok(());
+        };
+
+        let terminfo = String::from_utf8_lossy(&output.stdout);
+        if terminfo.is_empty() {
+            return Ok(());
+        }
+
+        let script = format!("cat << 'TERMINFO_EOF' | tic -x -\n{terminfo}\nTERMINFO_EOF");
+        self.run_remote_script(&script)?;
+        println!("Installed {term} terminfo on remote");
+
+        Ok(())
+    }
+
+    /// Write local env vars to `/root/.env` on the remote and ensure `.bashrc` sources it
+    pub fn provision_env_vars(&self) -> Result<()> {
+        let mut lines = Vec::new();
+        for var in ENV_VARS {
+            if let Ok(val) = std::env::var(var) {
+                lines.push(format!("export {var}=\"{val}\""));
+            }
+        }
+
+        if lines.is_empty() {
+            println!("No S3/HF env vars found locally, skipping");
+            return Ok(());
+        }
+
+        let count = lines.len();
+        let env_content = lines.join("\n");
+
+        // content built in Rust, heredoc is just the SSH transport
+        let script = format!(
+            "cat > /root/.env << 'SPEAKRS_EOF'\n{env_content}\nSPEAKRS_EOF\n\
+             chmod 600 /root/.env\n\
+             grep -q 'source /root/.env' /root/.bashrc 2>/dev/null || \
+             echo '[ -f /root/.env ] && source /root/.env' >> /root/.bashrc",
+        );
+        self.run_remote_script(&script)?;
+
+        println!("Wrote /root/.env with {count} var(s)");
+        Ok(())
+    }
 }
 
 // --- setup marker ---
@@ -258,36 +319,6 @@ const ENV_VARS: &[&str] = &[
     "HF_TOKEN",
 ];
 
-/// Write local env vars to `/root/.env` on the remote and ensure `.bashrc` sources it
-pub fn provision_env_vars(info: &InstanceInfo) -> Result<()> {
-    let mut lines = Vec::new();
-    for var in ENV_VARS {
-        if let Ok(val) = std::env::var(var) {
-            lines.push(format!("export {var}=\"{val}\""));
-        }
-    }
-
-    if lines.is_empty() {
-        println!("No S3/HF env vars found locally, skipping");
-        return Ok(());
-    }
-
-    let count = lines.len();
-    let env_content = lines.join("\n");
-
-    // content built in Rust, heredoc is just the SSH transport
-    let script = format!(
-        "cat > /root/.env << 'SPEAKRS_EOF'\n{env_content}\nSPEAKRS_EOF\n\
-         chmod 600 /root/.env\n\
-         grep -q 'source /root/.env' /root/.bashrc 2>/dev/null || \
-         echo '[ -f /root/.env ] && source /root/.env' >> /root/.bashrc",
-    );
-    run_remote_script(info, &script)?;
-
-    println!("Wrote /root/.env with {count} var(s)");
-    Ok(())
-}
-
 // --- public API ---
 
 pub fn create(name: &str, backend: Backend, gpu_types: &[&str], min_tflops: f64) -> Result<()> {
@@ -309,25 +340,26 @@ pub fn create(name: &str, backend: Backend, gpu_types: &[&str], min_tflops: f64)
 }
 
 pub fn setup(name: Option<&str>, branch: &str) -> Result<()> {
-    let (n, info) = resolve_instance(name)?;
-    runpod::wait_for_container_ready(&info)?;
+    let (instance_name, info) = resolve_instance(name)?;
+    // TODO: re-enable wait_for_container_ready after image rebuild with new entrypoint
 
     match info.backend {
         Backend::RunPod => runpod::setup(&info, branch)?,
         Backend::VastAi => vastai::setup(&info)?,
     }
 
-    mark_setup_done(&n);
-    println!("Instance '{n}' setup complete");
+    mark_setup_done(&instance_name);
+    println!("Instance '{instance_name}' setup complete");
     Ok(())
 }
 
 pub fn ssh(name: Option<&str>) -> Result<()> {
-    let (n, info) = resolve_instance(name)?;
-    runpod::wait_for_container_ready(&info)?;
+    let (instance_name, info) = resolve_instance(name)?;
+    // TODO: re-enable wait_for_container_ready after image rebuild with new entrypoint
 
-    if is_setup_done(&n) {
-        provision_env_vars(&info)?;
+    if is_setup_done(&instance_name) {
+        info.provision_env_vars()?;
+        info.provision_terminfo()?;
     } else {
         println!("First SSH, running setup...");
         let branch = current_branch()?;
@@ -335,10 +367,10 @@ pub fn ssh(name: Option<&str>) -> Result<()> {
             Backend::RunPod => runpod::setup(&info, &branch)?,
             Backend::VastAi => vastai::setup(&info)?,
         }
-        mark_setup_done(&n);
+        mark_setup_done(&instance_name);
     }
 
-    let mut cmd = ssh_cmd(&info);
+    let mut cmd = info.ssh_cmd();
 
     #[cfg(unix)]
     {
@@ -359,16 +391,16 @@ pub fn destroy(name: Option<&str>, all: bool) -> Result<()> {
         return destroy_all();
     }
 
-    let (n, info) = resolve_instance(name)?;
+    let (instance_name, info) = resolve_instance(name)?;
 
     match info.backend {
         Backend::RunPod => runpod::destroy(&info)?,
         Backend::VastAi => vastai::destroy(&info)?,
     }
 
-    fs::remove_file(instances_dir().join(&n))?;
-    let _ = fs::remove_file(setup_done_path(&n));
-    println!("Instance '{n}' destroyed and removed");
+    fs::remove_file(instances_dir().join(&instance_name))?;
+    let _ = fs::remove_file(setup_done_path(&instance_name));
+    println!("Instance '{instance_name}' destroyed and removed");
     Ok(())
 }
 
@@ -398,14 +430,14 @@ fn destroy_all() -> Result<()> {
 }
 
 pub fn start(name: Option<&str>) -> Result<()> {
-    let (n, info) = resolve_instance(name)?;
+    let (instance_name, info) = resolve_instance(name)?;
 
     match info.backend {
         Backend::RunPod => {
             let updated = runpod::resume(&info)?;
-            save_instance(&n, &updated)?;
+            save_instance(&instance_name, &updated)?;
             println!(
-                "Instance '{n}' started (ssh {}@{}:{})",
+                "Instance '{instance_name}' started (ssh {}@{}:{})",
                 updated.ssh_user, updated.ssh_host, updated.ssh_port
             );
         }
@@ -527,5 +559,48 @@ pub fn list() -> Result<()> {
             Err(e) => println!("{name:20} ERROR: {e}"),
         }
     }
+    Ok(())
+}
+
+pub fn download_benchmarks(name: Option<&str>) -> Result<()> {
+    let (instance_name, info) = resolve_instance(name)?;
+
+    let local_dir = project_root()
+        .join("_benchmarks")
+        .join(format!("{instance_name}-{}", info.instance_id));
+    fs::create_dir_all(&local_dir)?;
+
+    let (host, port) = runpod::direct_ssh_info(&info.instance_id)?;
+
+    println!(
+        "Downloading benchmarks from '{instance_name}' ({host}:{port}) to {}",
+        local_dir.display()
+    );
+
+    let remote = format!("root@{host}:/workspace/_benchmarks/.");
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let key_path = format!("{home}/.ssh/id_ed25519");
+
+    let status = Command::new("scp")
+        .args([
+            "-r",
+            "-i",
+            &key_path,
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-P",
+            &port,
+            &remote,
+        ])
+        .arg(&local_dir)
+        .status()?;
+
+    if !status.success() {
+        bail!("scp failed");
+    }
+
+    println!("Done");
     Ok(())
 }

@@ -4,7 +4,7 @@ use std::process::Command;
 use color_eyre::eyre::{Result, bail};
 use serde_json::Value;
 
-use super::{Backend, InstanceInfo, run_remote_script};
+use super::{Backend, InstanceInfo};
 use crate::cmd::{project_root, run_cmd};
 
 const SETUP_SCRIPT: &str = r#"
@@ -220,7 +220,7 @@ pub fn setup(info: &InstanceInfo) -> Result<()> {
         SETUP_SCRIPT.to_string()
     };
 
-    run_remote_script(info, &script)
+    info.run_remote_script(&script)
 }
 
 fn rsync_source(info: &InstanceInfo) -> Result<()> {

@@ -2,12 +2,84 @@ use std::collections::HashSet;
 use std::process::{Command, Stdio};
 
 use color_eyre::eyre::{Result, bail};
-use serde_json::Value;
+use serde::Deserialize;
 
-use super::{Backend, GITHUB_REPO, InstanceInfo, image, run_remote_script};
+use super::{Backend, GITHUB_REPO, InstanceInfo, image};
 use std::io::Write;
 
 const RUNPOD_API_URL: &str = "https://api.runpod.io/graphql";
+
+// ---------------------------------------------------------------------------
+// GraphQL response types
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct GqlResponse<T> {
+    data: Option<T>,
+    errors: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Port {
+    ip: Option<String>,
+    is_ip_public: Option<bool>,
+    private_port: Option<u16>,
+    public_port: Option<u16>,
+}
+
+#[derive(Deserialize)]
+struct Runtime {
+    ports: Option<Vec<Port>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Machine {
+    pod_host_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Pod {
+    id: Option<String>,
+    name: Option<String>,
+    desired_status: Option<String>,
+    machine: Option<Machine>,
+    runtime: Option<Runtime>,
+}
+
+// query wrappers, one per distinct shape
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreatePodData {
+    pod_find_and_deploy_on_demand: CreatedPod,
+}
+
+#[derive(Deserialize)]
+struct CreatedPod {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct PodQueryData {
+    pod: Pod,
+}
+
+#[derive(Deserialize)]
+struct PodsQueryData {
+    myself: Myself,
+}
+
+#[derive(Deserialize)]
+struct Myself {
+    pods: Vec<Pod>,
+}
+
+// ---------------------------------------------------------------------------
+// HTTP helpers
+// ---------------------------------------------------------------------------
 
 fn runpod_api_key() -> Result<String> {
     std::env::var("RUNPOD_API_KEY")
@@ -15,14 +87,17 @@ fn runpod_api_key() -> Result<String> {
 }
 
 /// Send a GraphQL request, returning the raw JSON (caller checks errors)
-fn graphql_request(query: &str, variables: &Value) -> Result<Value> {
+fn graphql_request(
+    query: &str,
+    variables: &serde_json::Value,
+) -> Result<GqlResponse<serde_json::Value>> {
     let api_key = runpod_api_key()?;
     let body = serde_json::json!({
         "query": query,
         "variables": variables,
     });
 
-    let response: Value = ureq::post(RUNPOD_API_URL)
+    let response: GqlResponse<serde_json::Value> = ureq::post(RUNPOD_API_URL)
         .header("Authorization", &format!("Bearer {api_key}"))
         .send_json(&body)?
         .body_mut()
@@ -31,15 +106,82 @@ fn graphql_request(query: &str, variables: &Value) -> Result<Value> {
     Ok(response)
 }
 
-fn graphql_query(query: &str, variables: &Value) -> Result<Value> {
+fn graphql_query<T: serde::de::DeserializeOwned>(
+    query: &str,
+    variables: &serde_json::Value,
+) -> Result<T> {
     let response = graphql_request(query, variables)?;
 
-    if let Some(errors) = response.get("errors") {
+    if let Some(errors) = response.errors {
         bail!("GraphQL errors: {errors}");
     }
 
-    Ok(response)
+    let data = response
+        .data
+        .ok_or_else(|| color_eyre::eyre::eyre!("No data in GraphQL response"))?;
+
+    Ok(serde_json::from_value(data)?)
 }
+
+// ---------------------------------------------------------------------------
+// SSH info extraction
+// ---------------------------------------------------------------------------
+
+impl Pod {
+    /// Extract SSH connection from a pod's port list
+    ///
+    /// Two modes:
+    /// 1. Public IP: `runtime.ports` has an entry with `privatePort: 22`
+    ///    → (ip, publicPort, "root")
+    /// 2. SSH proxy: ports is null (SECURE cloud type), use `machine.podHostId`
+    ///    → ("ssh.runpod.io", "22", podHostId)
+    fn ssh_info(&self) -> Option<(String, String, String)> {
+        if let Some(runtime) = &self.runtime
+            && let Some(ports) = &runtime.ports
+        {
+            let ssh_port = ports
+                .iter()
+                .find(|p| p.private_port == Some(22) && p.is_ip_public == Some(true))
+                .or_else(|| ports.iter().find(|p| p.private_port == Some(22)));
+
+            if let Some(entry) = ssh_port {
+                let host = entry.ip.clone().unwrap_or_default();
+                let port = entry.public_port.unwrap_or(0).to_string();
+                if !host.is_empty() && port != "0" {
+                    return Some((host, port, "root".to_string()));
+                }
+            }
+        }
+
+        let pod_host_id = self.machine.as_ref()?.pod_host_id.as_ref()?;
+        Some((
+            "ssh.runpod.io".to_string(),
+            "22".to_string(),
+            pod_host_id.clone(),
+        ))
+    }
+
+    fn direct_ssh(&self) -> Option<(String, String)> {
+        let ports = self.runtime.as_ref()?.ports.as_ref()?;
+        let ssh_port = ports
+            .iter()
+            .find(|p| p.private_port == Some(22) && p.is_ip_public == Some(true))
+            .or_else(|| ports.iter().find(|p| p.private_port == Some(22)));
+
+        let entry = ssh_port?;
+        let host = entry.ip.clone().unwrap_or_default();
+        let port = entry.public_port.unwrap_or(0).to_string();
+        if !host.is_empty() && port != "0" {
+            Some((host, port))
+        } else {
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Provision / wait
+// ---------------------------------------------------------------------------
 
 pub fn provision(name: &str, gpu_types: &[&str]) -> Result<InstanceInfo> {
     let query = r#"
@@ -60,8 +202,8 @@ pub fn provision(name: &str, gpu_types: &[&str]) -> Result<InstanceInfo> {
                 "gpuTypeId": gpu_type,
                 "cloudType": "SECURE",
                 "gpuCount": 1,
-                "volumeInGb": 100,
-                "containerDiskInGb": 50,
+                "volumeInGb": 50,
+                "containerDiskInGb": 100,
                 "volumeMountPath": "/workspace",
                 "ports": "22/tcp",
                 "startSsh": true,
@@ -71,8 +213,8 @@ pub fn provision(name: &str, gpu_types: &[&str]) -> Result<InstanceInfo> {
 
         let response = graphql_request(query, &variables)?;
 
-        // check for supply constraint error — try next GPU
-        if let Some(errors) = response.get("errors") {
+        // check for supply constraint error, try next GPU
+        if let Some(errors) = response.errors {
             let err_str = errors.to_string();
             if err_str.contains("SUPPLY_CONSTRAINT") || err_str.contains("no available") {
                 println!(
@@ -88,48 +230,47 @@ pub fn provision(name: &str, gpu_types: &[&str]) -> Result<InstanceInfo> {
             bail!("GraphQL errors: {errors}");
         }
 
-        let pod_id = response["data"]["podFindAndDeployOnDemand"]["id"]
-            .as_str()
-            .ok_or_else(|| {
-                color_eyre::eyre::eyre!("Could not parse pod ID from response: {response}")
-            })?
-            .to_string();
+        let data: CreatePodData = serde_json::from_value(
+            response
+                .data
+                .ok_or_else(|| color_eyre::eyre::eyre!("No data in create response"))?,
+        )?;
 
+        let pod_id = data.pod_find_and_deploy_on_demand.id;
         println!("Pod {pod_id} created with {gpu_type}, waiting for SSH...");
         let info = wait_for_ssh(&pod_id)?;
-        wait_for_container_ready(&info)?;
+        // TODO: re-enable wait_for_container_ready after image rebuild with new entrypoint
         return Ok(info);
     }
 
-    bail!("All GPU types exhausted — none available on RunPod")
+    bail!("All GPU types exhausted, none available on RunPod")
 }
 
 fn wait_for_ssh(pod_id: &str) -> Result<InstanceInfo> {
-    for i in 0..90 {
-        std::thread::sleep(std::time::Duration::from_secs(5));
-
-        let query = r#"
-            query Pod($podId: String!) {
-                pod(input: { podId: $podId }) {
-                    desiredStatus
-                    machine {
-                        podHostId
-                    }
-                    runtime {
-                        ports {
-                            ip
-                            isIpPublic
-                            privatePort
-                            publicPort
-                        }
+    let query = r#"
+        query Pod($podId: String!) {
+            pod(input: { podId: $podId }) {
+                desiredStatus
+                machine {
+                    podHostId
+                }
+                runtime {
+                    ports {
+                        ip
+                        isIpPublic
+                        privatePort
+                        publicPort
                     }
                 }
             }
-        "#;
+        }
+    "#;
 
-        let response = graphql_query(query, &serde_json::json!({ "podId": pod_id }))?;
-        let pod = &response["data"]["pod"];
-        let status = pod["desiredStatus"].as_str().unwrap_or("");
+    for i in 0..90 {
+        std::thread::sleep(std::time::Duration::from_secs(5));
+
+        let data: PodQueryData = graphql_query(query, &serde_json::json!({ "podId": pod_id }))?;
+        let status = data.pod.desired_status.as_deref().unwrap_or("");
 
         if status != "RUNNING" {
             if i % 6 == 0 {
@@ -138,7 +279,7 @@ fn wait_for_ssh(pod_id: &str) -> Result<InstanceInfo> {
             continue;
         }
 
-        if let Some((host, port, user)) = extract_ssh_info(pod) {
+        if let Some((host, port, user)) = data.pod.ssh_info() {
             println!(
                 "Pod is running! SSH at {user}@{host}:{port} (took ~{}s)",
                 (i + 1) * 5
@@ -164,10 +305,11 @@ fn wait_for_ssh(pod_id: &str) -> Result<InstanceInfo> {
 ///
 /// RunPod's SSH proxy returns exit code 0 even when the container isn't
 /// running ("container not found"), so we check stdout instead
+#[allow(dead_code)]
 pub fn wait_for_container_ready(info: &super::InstanceInfo) -> Result<()> {
     println!("Waiting for container to be ready...");
     for i in 0..60 {
-        let mut cmd = super::ssh_cmd(info);
+        let mut cmd = info.ssh_cmd();
         cmd.args(["cat", "/tmp/.container-ready"]);
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -197,42 +339,11 @@ pub fn wait_for_container_ready(info: &super::InstanceInfo) -> Result<()> {
     bail!("Container did not become ready within 5 minutes");
 }
 
-/// Extract SSH connection info from a RunPod pod object
-///
-/// Two modes:
-/// 1. Public IP: `runtime.ports` has an entry with `privatePort: 22`
-///    → (ip, publicPort, "root")
-/// 2. SSH proxy: ports is null (SECURE cloud type) — use `machine.podHostId`
-///    → ("ssh.runpod.io", "22", podHostId)
-fn extract_ssh_info(pod: &Value) -> Option<(String, String, String)> {
-    // try public IP ports first
-    if let Some(ports) = pod["runtime"]["ports"].as_array() {
-        let ssh_port = ports
-            .iter()
-            .find(|p| {
-                p["privatePort"].as_u64() == Some(22) && p["isIpPublic"].as_bool() == Some(true)
-            })
-            .or_else(|| ports.iter().find(|p| p["privatePort"].as_u64() == Some(22)));
+// ---------------------------------------------------------------------------
+// Pod queries
+// ---------------------------------------------------------------------------
 
-        if let Some(p) = ssh_port {
-            let host = p["ip"].as_str().unwrap_or("").to_string();
-            let port = p["publicPort"].as_u64().unwrap_or(0).to_string();
-            if !host.is_empty() && port != "0" {
-                return Some((host, port, "root".to_string()));
-            }
-        }
-    }
-
-    // fallback: SSH proxy via podHostId
-    let pod_host_id = pod["machine"]["podHostId"].as_str()?;
-    Some((
-        "ssh.runpod.io".to_string(),
-        "22".to_string(),
-        pod_host_id.to_string(),
-    ))
-}
-
-pub fn list_pods() -> Result<Value> {
+fn query_pods() -> Result<Vec<Pod>> {
     let query = r#"
         query Pods {
             myself {
@@ -256,31 +367,45 @@ pub fn list_pods() -> Result<Value> {
         }
     "#;
 
-    let response = graphql_query(query, &serde_json::json!({}))?;
-    Ok(response)
+    let data: PodsQueryData = graphql_query(query, &serde_json::json!({}))?;
+    Ok(data.myself.pods)
 }
 
 pub fn get_pod_ids() -> Result<HashSet<String>> {
-    let response = list_pods()?;
-    let empty = vec![];
-    let pods = response["data"]["myself"]["pods"]
-        .as_array()
-        .unwrap_or(&empty);
-    Ok(pods
-        .iter()
-        .filter_map(|p| p["id"].as_str().map(String::from))
-        .collect())
+    let pods = query_pods()?;
+    Ok(pods.iter().filter_map(|p| p.id.clone()).collect())
+}
+
+/// Get the direct (non-proxy) SSH connection for a running pod
+pub fn direct_ssh_info(instance_id: &str) -> Result<(String, String)> {
+    let query = r#"
+        query Pod($podId: String!) {
+            pod(input: { podId: $podId }) {
+                runtime {
+                    ports {
+                        ip
+                        isIpPublic
+                        privatePort
+                        publicPort
+                    }
+                }
+            }
+        }
+    "#;
+
+    let data: PodQueryData = graphql_query(query, &serde_json::json!({ "podId": instance_id }))?;
+
+    data.pod
+        .direct_ssh()
+        .ok_or_else(|| color_eyre::eyre::eyre!("No direct SSH port found for pod {instance_id}"))
 }
 
 pub fn import() -> Result<InstanceInfo> {
-    let response = list_pods()?;
-    let pods = response["data"]["myself"]["pods"]
-        .as_array()
-        .ok_or_else(|| color_eyre::eyre::eyre!("Could not parse pods from response"))?;
+    let pods = query_pods()?;
 
-    let running: Vec<&Value> = pods
+    let running: Vec<&Pod> = pods
         .iter()
-        .filter(|p| p["desiredStatus"].as_str() == Some("RUNNING"))
+        .filter(|p| p.desired_status.as_deref() == Some("RUNNING"))
         .collect();
 
     if running.is_empty() {
@@ -288,17 +413,17 @@ pub fn import() -> Result<InstanceInfo> {
     }
 
     let pod = if running.len() == 1 {
-        let p = running[0];
-        let name = p["name"].as_str().unwrap_or("unnamed");
-        let id = p["id"].as_str().unwrap_or("?");
+        let only = running[0];
+        let name = only.name.as_deref().unwrap_or("unnamed");
+        let id = only.id.as_deref().unwrap_or("?");
         println!("Found one running pod: {id} | {name}");
-        p
+        only
     } else {
         let descriptions: Vec<String> = running
             .iter()
             .map(|p| {
-                let id = p["id"].as_str().unwrap_or("?");
-                let name = p["name"].as_str().unwrap_or("unnamed");
+                let id = p.id.as_deref().unwrap_or("?");
+                let name = p.name.as_deref().unwrap_or("unnamed");
                 format!("{id} | {name}")
             })
             .collect();
@@ -326,16 +451,18 @@ pub fn import() -> Result<InstanceInfo> {
 
         running
             .iter()
-            .find(|p| p["id"].as_str() == Some(selected_id))
+            .find(|p| p.id.as_deref() == Some(selected_id))
             .ok_or_else(|| color_eyre::eyre::eyre!("Selected pod not found"))?
     };
 
-    let pod_id = pod["id"]
-        .as_str()
+    let pod_id = pod
+        .id
+        .as_ref()
         .ok_or_else(|| color_eyre::eyre::eyre!("Pod missing id"))?
-        .to_string();
+        .clone();
 
-    let (host, port, user) = extract_ssh_info(pod)
+    let (host, port, user) = pod
+        .ssh_info()
         .ok_or_else(|| color_eyre::eyre::eyre!("Pod {pod_id} has no SSH port available"))?;
 
     println!("SSH at {user}@{host}:{port}");
@@ -348,6 +475,10 @@ pub fn import() -> Result<InstanceInfo> {
         ssh_user: user,
     })
 }
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
 
 pub fn resume(info: &InstanceInfo) -> Result<InstanceInfo> {
     println!("Resuming RunPod pod {}...", info.instance_id);
@@ -368,10 +499,10 @@ pub fn resume(info: &InstanceInfo) -> Result<InstanceInfo> {
         }
     });
 
-    graphql_query(query, &variables)?;
+    graphql_query::<serde_json::Value>(query, &variables)?;
     println!("Resume requested, waiting for SSH...");
     let new_info = wait_for_ssh(&info.instance_id)?;
-    wait_for_container_ready(&new_info)?;
+    // TODO: re-enable wait_for_container_ready after image rebuild with new entrypoint
     Ok(new_info)
 }
 
@@ -384,17 +515,44 @@ pub fn destroy(info: &InstanceInfo) -> Result<()> {
         }
     "#;
 
-    graphql_query(query, &serde_json::json!({ "podId": info.instance_id }))?;
+    graphql_query::<serde_json::Value>(query, &serde_json::json!({ "podId": info.instance_id }))?;
     println!("Pod terminated");
+    Ok(())
+}
+
+fn provision_ssh_key(info: &InstanceInfo) -> Result<()> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let pub_key_path = format!("{home}/.ssh/id_ed25519.pub");
+
+    let pub_key = match std::fs::read_to_string(&pub_key_path) {
+        Ok(key) => key.trim().to_string(),
+        Err(_) => {
+            println!("No SSH public key found at {pub_key_path}, skipping");
+            return Ok(());
+        }
+    };
+
+    let script = format!(
+        "mkdir -p /root/.ssh && \
+         chmod 700 /root/.ssh && \
+         grep -qF '{pub_key}' /root/.ssh/authorized_keys 2>/dev/null || \
+         echo '{pub_key}' >> /root/.ssh/authorized_keys && \
+         chmod 600 /root/.ssh/authorized_keys",
+    );
+
+    info.run_remote_script(&script)?;
+    println!("SSH key provisioned for direct access");
     Ok(())
 }
 
 pub fn setup(info: &InstanceInfo, branch: &str) -> Result<()> {
     println!("Running setup on remote (RunPod)...");
     println!("Binary and models are baked into the image.");
-    println!("Setup provisions S3 creds and clones the repo.");
+    println!("Setup provisions S3 creds, SSH key, and clones the repo.");
 
-    super::provision_env_vars(info)?;
+    info.provision_env_vars()?;
+    info.provision_terminfo()?;
+    provision_ssh_key(info)?;
 
     let clone_or_pull = format!(
         "if [ -d /workspace/speakrs/.git ]; then \
@@ -418,5 +576,5 @@ pub fn setup(info: &InstanceInfo, branch: &str) -> Result<()> {
          echo '=== Setup complete ==='\n",
     );
 
-    run_remote_script(info, &script)
+    info.run_remote_script(&script)
 }

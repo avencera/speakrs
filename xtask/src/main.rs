@@ -220,6 +220,12 @@ enum GpuCmd {
     List,
     /// Remove local instances that no longer exist on their backend
     Sync,
+    /// Download benchmark results from a GPU instance
+    #[command(aliases = ["dl", "dl-benchmarks", "download"])]
+    DownloadBenchmarks {
+        /// Instance name (omit for fzf picker)
+        name: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -316,6 +322,9 @@ fn main() -> Result<()> {
             GpuCmd::Import { name, backend } => commands::gpu::import(&name, backend),
             GpuCmd::List => commands::gpu::list(),
             GpuCmd::Sync => commands::gpu::sync(),
+            GpuCmd::DownloadBenchmarks { name } => {
+                commands::gpu::download_benchmarks(name.as_deref())
+            }
         },
         Command::Dataset { cmd } => {
             use xtask::cmd::project_root;
