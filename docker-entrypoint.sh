@@ -28,4 +28,9 @@ if [ -f /opt/scripts/diarize_pyannote.py ] && [ ! -f /workspace/scripts/diarize_
     cp /opt/scripts/diarize_pyannote.py /workspace/scripts/
 fi
 
+# ORT CUDA provider looks for shared libs in CWD (/workspace/)
+for lib in libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so; do
+    [ -f /usr/local/lib/$lib ] && ln -sf /usr/local/lib/$lib /workspace/$lib
+done
+
 exec "$@"

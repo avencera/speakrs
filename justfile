@@ -47,4 +47,23 @@ benchmark-der max_files="10" max_minutes="30" *args="":
 
 # GPU
 gpu-image:
-    nsc build -f Dockerfile.gpu --platform linux/amd64 -t ghcr.io/avencera/speakrs-gpu:latest --push .
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TAG=$(git rev-parse --short HEAD)
+    IMAGE="ghcr.io/avencera/speakrs-gpu:${TAG}"
+    nsc build -f Dockerfile.gpu --platform linux/amd64 -t "$IMAGE" --push .
+    mkdir -p _local
+    echo "$TAG" > _local/gpu-image-tag
+    echo "Built and pushed: $IMAGE"
+
+gpu-base-image:
+    nsc build -f docker/base.Dockerfile --platform linux/amd64 -t ghcr.io/avencera/speakrs-gpu-base:latest --push .
+
+gpu-runtime-image:
+    nsc build -f docker/runtime.Dockerfile --platform linux/amd64 -t ghcr.io/avencera/speakrs-gpu-runtime:latest --push .
+
+gpu-models-image:
+    nsc build -f docker/models.Dockerfile --platform linux/amd64 -t ghcr.io/avencera/speakrs-models:latest --push .
+
+gpu-datasets-image:
+    nsc build -f docker/datasets.Dockerfile --platform linux/amd64 -t ghcr.io/avencera/speakrs-datasets:latest --push .

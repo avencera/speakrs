@@ -1,28 +1,11 @@
 # syntax=docker/dockerfile:1.7
 
 # =============================================================================
-# Base builder image with the CUDA toolchain and Rust installed
+# Pre-built base builder image (CUDA + Rust + dev packages)
+#
+# Rebuild with: just gpu-base-image
 # =============================================================================
-FROM nvidia/cuda:12.8.1-devel-ubuntu24.04 AS base
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential pkg-config cmake \
-    ca-certificates curl git python3 \
-    libssl-dev libclang-dev libopenblas-dev \
-    libcudnn9-dev-cuda-12 \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-
-ENV CARGO_HOME="/root/.cargo" \
-    PATH="/root/.cargo/bin:${PATH}" \
-    RUSTUP_HOME="/root/.rustup"
-
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-
-WORKDIR /build
+FROM ghcr.io/avencera/speakrs-gpu-base:latest AS base
 
 # =============================================================================
 # Dependency warmup for the speakrs-bm build graph
@@ -58,71 +41,27 @@ RUN --mount=type=cache,target=/root/.cargo/registry,id=speakrs-gpu-cargo-registr
     mkdir -p /opt/bin /opt/ort-libs && \
     cp -P target/release/speakrs-bm /opt/bin/ && \
     find target/release/build/ -path '*/ort-sys-*/out/onnxruntime/lib/*.so*' \
-        -exec cp -P {} /opt/ort-libs/ \;
+    -exec cp -P {} /opt/ort-libs/ \;
 
 # =============================================================================
-# Model download stays in a separate cacheable stage from Rust source changes
+# Pre-built images for models and datasets (avoids rebuilding on remote CI)
+#
+# Rebuild with:
+#   just gpu-models-image
+#   just gpu-datasets-image
 # =============================================================================
-FROM base AS models
-
-ARG HF_TOKEN=""
-
-RUN --mount=type=cache,target=/root/.cache/uv,id=speakrs-gpu-uv-cache \
-    if [ -n "$HF_TOKEN" ]; then export HF_TOKEN="$HF_TOKEN"; fi && \
-    uv tool run --from huggingface-hub hf download avencera/speakrs-models \
-        --local-dir /opt/models \
-        --include "segmentation-3.0.onnx" \
-        --include "wespeaker-voxceleb-resnet34.onnx" \
-        --include "wespeaker-voxceleb-resnet34.onnx.data" \
-        --include "plda_*.npy" \
-        --include "wespeaker-voxceleb-resnet34.min_num_samples.txt"
-
-# =============================================================================
-# Download the default benchmark dataset (VoxConverse Dev)
-# =============================================================================
-FROM ubuntu:24.04 AS datasets
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl ca-certificates git unzip \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN mkdir -p /opt/datasets/voxconverse-dev/rttm && \
-    curl --fail -L -o /tmp/dev.zip \
-      https://www.robots.ox.ac.uk/~vgg/data/voxconverse/data/voxconverse_dev_wav.zip && \
-    unzip -q /tmp/dev.zip -d /opt/datasets/voxconverse-dev && \
-    mv /opt/datasets/voxconverse-dev/audio /opt/datasets/voxconverse-dev/wav && \
-    rm /tmp/dev.zip && \
-    git clone --depth 1 https://github.com/joonson/voxconverse /tmp/voxconverse-clone && \
-    cp /tmp/voxconverse-clone/dev/*.rttm /opt/datasets/voxconverse-dev/rttm/ && \
-    rm -rf /tmp/voxconverse-clone
 
 # =============================================================================
 # Runtime image with the benchmark binary, ORT shared libs, and models
+#
+# Pre-built runtime base: just gpu-runtime-image
 # =============================================================================
-FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
-
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    ca-certificates curl xz-utils git unzip \
-    openssh-server tmux \
-    libcudnn9-cuda-12 \
-    && rm -rf /var/lib/apt/lists/* \
-    && curl -L https://github.com/peak/s5cmd/releases/download/v2.3.0/s5cmd_2.3.0_linux_amd64.deb -o /tmp/s5cmd.deb \
-    && dpkg -i /tmp/s5cmd.deb \
-    && rm /tmp/s5cmd.deb
-
-# FFmpeg 7 shared libs for torchcodec (pyannote.audio >=4.0)
-RUN curl -L https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-linux64-lgpl-shared-7.1.tar.xz \
-    | tar xJ --strip-components=1 -C /usr/local
-
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+FROM ghcr.io/avencera/speakrs-gpu-runtime:latest
 
 COPY --from=builder /opt/bin/speakrs-bm /usr/local/bin/
 COPY --from=builder /opt/ort-libs/ /usr/local/lib/
-COPY --from=models /opt/models/ /opt/models/
-COPY --from=datasets /opt/datasets/ /opt/datasets/
+COPY --from=ghcr.io/avencera/speakrs-models:latest /opt/models/ /opt/models/
+COPY --from=ghcr.io/avencera/speakrs-datasets:latest /opt/datasets/ /opt/datasets/
 COPY scripts/diarize_pyannote.py /opt/scripts/
 
 RUN ldconfig && \
