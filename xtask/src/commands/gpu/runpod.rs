@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use color_eyre::eyre::{Result, bail};
 use serde_json::Value;
@@ -96,7 +96,9 @@ pub fn provision(name: &str, gpu_types: &[&str]) -> Result<InstanceInfo> {
             .to_string();
 
         println!("Pod {pod_id} created with {gpu_type}, waiting for SSH...");
-        return wait_for_ssh(&pod_id);
+        let info = wait_for_ssh(&pod_id)?;
+        wait_for_container_ready(&info)?;
+        return Ok(info);
     }
 
     bail!("All GPU types exhausted — none available on RunPod")
@@ -156,6 +158,43 @@ fn wait_for_ssh(pod_id: &str) -> Result<InstanceInfo> {
     }
 
     bail!("Pod did not become ready within 7.5 minutes");
+}
+
+/// Wait until the entrypoint has finished (marker file exists)
+///
+/// RunPod's SSH proxy returns exit code 0 even when the container isn't
+/// running ("container not found"), so we check stdout instead
+pub fn wait_for_container_ready(info: &super::InstanceInfo) -> Result<()> {
+    println!("Waiting for container to be ready...");
+    for i in 0..60 {
+        let mut cmd = super::ssh_cmd(info);
+        cmd.args(["cat", "/tmp/.container-ready"]);
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        if let Ok(output) = cmd.output() {
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            );
+
+            if !combined.contains("container not found")
+                && !combined.contains("No such file")
+                && output.status.success()
+            {
+                println!("Container ready (took ~{}s)", (i + 1) * 5);
+                return Ok(());
+            }
+        }
+
+        if i % 6 == 0 {
+            println!("  entrypoint still running, waiting...");
+        }
+        std::thread::sleep(std::time::Duration::from_secs(5));
+    }
+
+    bail!("Container did not become ready within 5 minutes");
 }
 
 /// Extract SSH connection info from a RunPod pod object
@@ -331,7 +370,9 @@ pub fn resume(info: &InstanceInfo) -> Result<InstanceInfo> {
 
     graphql_query(query, &variables)?;
     println!("Resume requested, waiting for SSH...");
-    wait_for_ssh(&info.instance_id)
+    let new_info = wait_for_ssh(&info.instance_id)?;
+    wait_for_container_ready(&new_info)?;
+    Ok(new_info)
 }
 
 pub fn destroy(info: &InstanceInfo) -> Result<()> {

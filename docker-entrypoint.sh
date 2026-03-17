@@ -33,4 +33,6 @@ for lib in libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so; 
     [ -f /usr/local/lib/$lib ] && ln -sf /usr/local/lib/$lib /workspace/$lib
 done
 
+touch /tmp/.container-ready
+
 exec "$@"
