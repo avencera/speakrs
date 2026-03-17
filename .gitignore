@@ -10,3 +10,5 @@ fixtures/models/
 fixtures/datasets/
 
 .envrc
+/scripts/speakerkit-bench/Packages
+scripts/speakerkit-bench/Package.resolved

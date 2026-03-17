@@ -1,11 +1,6 @@
 #!/bin/bash
 set -e
 
-# source S3 credentials written by `cargo xtask gpu setup`
-if [ -f /root/.env ]; then
-    source /root/.env
-fi
-
 # RunPod mounts a volume at /workspace, hiding anything baked into the image
 # at that path. This entrypoint seeds baked assets from /opt/ into the volume
 # on first boot (idempotent -- skips if already present)

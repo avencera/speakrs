@@ -11,6 +11,10 @@ test *args:
 
 check: fmt clippy test
 
+# passthrough to cargo xtask
+x *args:
+    cargo xtask {{args}}
+
 # Models
 deploy-models:
     cargo xtask models deploy
@@ -35,17 +39,17 @@ compare source python_device="cpu" rust_mode="cpu":
 compare-apple-accuracy source rust_mode="pyannote-mps":
     cargo xtask compare accuracy {{source}} --rust-mode {{rust_mode}}
 
-# Benchmark
-benchmark source python_device="auto" runs="1" warmups="1" rust_mode="cpu":
-    cargo xtask benchmark run {{source}} --python-device {{python_device}} --runs {{runs}} --warmups {{warmups}} --rust-mode {{rust_mode}}
+# Benchmark (local)
+bench-run source python_device="auto" runs="1" warmups="1" rust_mode="cpu":
+    cargo xtask bench run {{source}} --python-device {{python_device}} --runs {{runs}} --warmups {{warmups}} --rust-mode {{rust_mode}}
 
-benchmark-compare source runs="1" warmups="1":
-    cargo xtask benchmark compare {{source}} --runs {{runs}} --warmups {{warmups}}
+bench-compare source runs="1" warmups="1":
+    cargo xtask bench compare {{source}} --runs {{runs}} --warmups {{warmups}}
 
-benchmark-der max_files="10" max_minutes="30" *args="":
-    cargo xtask benchmark der --max-files {{max_files}} --max-minutes {{max_minutes}} {{args}}
+bench-der max_files="10" max_minutes="30" *args="":
+    cargo xtask bench der --max-files {{max_files}} --max-minutes {{max_minutes}} {{args}}
 
-# GPU
+# GPU image
 gpu-image:
     #!/usr/bin/env bash
     set -euo pipefail

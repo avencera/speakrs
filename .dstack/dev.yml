@@ -1,0 +1,24 @@
+type: dev-environment
+name: gpu-dev
+
+image: ${{ env.SPEAKRS_GPU_IMAGE }}
+ide: vscode
+
+env:
+  - HF_TOKEN
+  - AWS_ACCESS_KEY_ID
+  - AWS_SECRET_ACCESS_KEY
+  - AWS_ENDPOINT_URL
+  - AWS_REGION
+
+init:
+  - echo "GPU dev environment ready"
+
+resources:
+  gpu:
+    name: [RTX4090, RTX6000Ada, L40S, RTX5090, L40, RTXA6000, A40, RTX3090]
+    count: 1
+
+inactivity_duration: 2h
+max_duration: 12h
+spot_policy: on-demand

@@ -123,6 +123,7 @@ pub fn list_dataset_ids() -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 const S3_BUCKET: &str = "s3://speakrs/datasets";
+const S3_BENCHMARKS: &str = "s3://speakrs/benchmarks";
 const TIGRIS_ENDPOINT: &str = "https://t3.storage.dev";
 
 pub struct S5cmd;
@@ -167,6 +168,46 @@ impl S5cmd {
                 .args(["--exclude", "*__MACOSX*", "--exclude", "*.DS_Store"])
                 .arg(format!("{}/*", local_dir.display()))
                 .arg(&s3_path),
+        )
+    }
+
+    /// Upload a benchmark run directory to S3
+    pub fn upload_benchmarks(run_id: &str, run_dir: &Path) -> Result<()> {
+        let s3_path = format!("{S3_BENCHMARKS}/{run_id}/");
+        run_cmd(
+            Self::base_cmd()
+                .args(["sync", "--concurrency", "20", "--part-size", "25"])
+                .arg(format!("{}/*", run_dir.display()))
+                .arg(&s3_path),
+        )
+    }
+
+    /// Verify that an S3 upload contains the expected number of files
+    pub fn verify_upload(run_id: &str, expected_count: usize) -> Result<bool> {
+        let s3_path = format!("{S3_BENCHMARKS}/{run_id}/");
+        let output = Self::base_cmd()
+            .args(["ls", &s3_path])
+            .output()
+            .map_err(|e| color_eyre::eyre::eyre!("s5cmd ls failed: {e}"))?;
+
+        if !output.status.success() {
+            return Ok(false);
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let remote_count = stdout.lines().filter(|l| !l.trim().is_empty()).count();
+        Ok(remote_count >= expected_count)
+    }
+
+    /// Download benchmark results from S3
+    pub fn download_benchmarks(run_id: &str, local_dir: &Path) -> Result<()> {
+        let s3_path = format!("{S3_BENCHMARKS}/{run_id}/*");
+        fs::create_dir_all(local_dir)?;
+        run_cmd(
+            Self::base_cmd()
+                .args(["cp", "--concurrency", "20", "--part-size", "25"])
+                .arg(&s3_path)
+                .arg(local_dir),
         )
     }
 
