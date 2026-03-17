@@ -310,6 +310,7 @@ pub fn create(name: &str, backend: Backend, gpu_types: &[&str], min_tflops: f64)
 
 pub fn setup(name: Option<&str>, branch: &str) -> Result<()> {
     let (n, info) = resolve_instance(name)?;
+    runpod::wait_for_container_ready(&info)?;
 
     match info.backend {
         Backend::RunPod => runpod::setup(&info, branch)?,
@@ -323,6 +324,7 @@ pub fn setup(name: Option<&str>, branch: &str) -> Result<()> {
 
 pub fn ssh(name: Option<&str>) -> Result<()> {
     let (n, info) = resolve_instance(name)?;
+    runpod::wait_for_container_ready(&info)?;
 
     if is_setup_done(&n) {
         provision_env_vars(&info)?;
