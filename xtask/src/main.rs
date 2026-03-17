@@ -4,7 +4,6 @@ use clap::{Parser, Subcommand};
 use color_eyre::eyre::Result;
 use xtask::commands;
 use xtask::commands::diarize::DiarizeMode;
-use xtask::commands::gpu::{Backend, RUNPOD_GPU_FALLBACKS};
 
 #[derive(Parser)]
 #[command(name = "xtask", about = "Development tasks for speakrs")]
@@ -30,15 +29,15 @@ enum Command {
         #[command(subcommand)]
         cmd: CompareCmd,
     },
-    /// Benchmark diarization implementations
-    Benchmark {
+    /// Local benchmarks (DER evaluation, single-file, multi-tool)
+    Bench {
         #[command(subcommand)]
-        cmd: BenchmarkCmd,
+        cmd: BenchCmd,
     },
-    /// Remote GPU benchmarking (RunPod, Vast.ai)
-    Gpu {
+    /// Remote GPU benchmarks via dstack
+    Dstack {
         #[command(subcommand)]
-        cmd: GpuCmd,
+        cmd: DstackCmd,
     },
     /// Download and manage benchmark datasets
     Dataset {
@@ -115,7 +114,7 @@ enum CompareCmd {
 }
 
 #[derive(Subcommand)]
-enum BenchmarkCmd {
+enum BenchCmd {
     /// Benchmark speakrs vs pyannote on the same audio
     Run {
         source: String,
@@ -164,67 +163,45 @@ enum BenchmarkCmd {
 }
 
 #[derive(Subcommand)]
-enum GpuCmd {
-    /// Provision a new GPU instance
-    #[command(alias = "new")]
-    Create {
-        /// Instance name
+enum DstackCmd {
+    /// Run a GPU benchmark
+    Bench {
+        /// Run name (used for S3 path and dstack logs/attach/stop)
         name: String,
-        /// Backend provider
-        #[arg(long, default_value = "runpod")]
-        backend: Backend,
-        /// GPU type (RunPod GPU type ID). Falls back through preferred list if omitted
+        #[arg(long, default_value = "voxconverse-dev")]
+        dataset: String,
+        #[arg(long, value_delimiter = ',')]
+        impls: Vec<String>,
         #[arg(long)]
-        gpu_type: Option<String>,
-        /// Minimum TFLOPS for GPU search (vast.ai only)
-        #[arg(long, default_value_t = 10.0)]
-        min_tflops: f64,
-    },
-    /// Git clone/pull + download models + build on a running instance
-    Setup {
-        /// Instance name (omit for fzf picker)
-        name: Option<String>,
-        /// Git branch to checkout
-        #[arg(long, default_value = "master")]
-        branch: String,
-    },
-    /// Open an interactive SSH session to the GPU instance
-    Ssh {
-        /// Instance name (omit for fzf picker)
-        name: Option<String>,
-    },
-    /// Tear down GPU instance(s)
-    #[command(alias = "rm")]
-    Destroy {
-        /// Instance name (omit for fzf picker)
-        name: Option<String>,
-        /// Destroy all instances
+        max_files: Option<u32>,
         #[arg(long)]
-        all: bool,
+        max_minutes: Option<u32>,
+        /// Reuse existing fleet pod instead of provisioning a new one
+        #[arg(long, short = 'R')]
+        reuse: bool,
+        /// Submit and exit immediately (default: attach to logs)
+        #[arg(long, short = 'd')]
+        detach: bool,
     },
-    /// Resume a stopped GPU instance
-    Start {
-        /// Instance name (omit for fzf picker)
-        name: Option<String>,
-    },
-    /// Import an existing running pod as a local instance
-    Import {
-        /// Local instance name
-        name: String,
-        /// Backend provider
-        #[arg(long, default_value = "runpod")]
-        backend: Backend,
-    },
-    /// List all GPU instances
-    #[command(alias = "ls")]
-    List,
-    /// Remove local instances that no longer exist on their backend
-    Sync,
-    /// Download benchmark results from a GPU instance
-    #[command(aliases = ["dl", "dl-benchmarks", "download"])]
-    DownloadBenchmarks {
-        /// Instance name (omit for fzf picker)
-        name: Option<String>,
+    /// Start a reusable GPU fleet (30min idle timeout)
+    Fleet,
+    /// Reattach to a running task (logs + port forwarding, Ctrl+C safe)
+    Attach { name: String },
+    /// Stream logs from a running task (Ctrl+C safe)
+    Logs { name: String },
+    /// Show status of all dstack runs
+    Ps,
+    /// Stop a dstack run or fleet
+    #[command(alias = "kill")]
+    Stop { name: String },
+    /// Start interactive GPU dev environment
+    Dev,
+    /// Download benchmark results from S3
+    Download { name: String },
+    /// Delete a path from the S3 bucket (with confirmation)
+    Delete {
+        /// S3 path to delete (e.g. "benchmarks/my-run" or "benchmarks/my-run/20260318-1430")
+        path: String,
     },
 }
 
@@ -269,20 +246,20 @@ fn main() -> Result<()> {
                 commands::compare::accuracy(&source, &rust_mode)
             }
         },
-        Command::Benchmark { cmd } => match cmd {
-            BenchmarkCmd::Run {
+        Command::Bench { cmd } => match cmd {
+            BenchCmd::Run {
                 source,
                 python_device,
                 runs,
                 warmups,
                 rust_mode,
             } => commands::benchmark::run(&source, &python_device, runs, warmups, &rust_mode),
-            BenchmarkCmd::Compare {
+            BenchCmd::Compare {
                 source,
                 runs,
                 warmups,
             } => commands::benchmark::compare(&source, runs, warmups),
-            BenchmarkCmd::Der {
+            BenchCmd::Der {
                 dataset,
                 max_files,
                 max_minutes,
@@ -302,29 +279,32 @@ fn main() -> Result<()> {
                 emb_batch_size,
             ),
         },
-        Command::Gpu { cmd } => match cmd {
-            GpuCmd::Create {
+        Command::Dstack { cmd } => match cmd {
+            DstackCmd::Bench {
                 name,
-                backend,
-                gpu_type,
-                min_tflops,
-            } => {
-                let gpu_types: Vec<&str> = match &gpu_type {
-                    Some(t) => vec![t.as_str()],
-                    None => RUNPOD_GPU_FALLBACKS.to_vec(),
-                };
-                commands::gpu::create(&name, backend, &gpu_types, min_tflops)
-            }
-            GpuCmd::Setup { name, branch } => commands::gpu::setup(name.as_deref(), &branch),
-            GpuCmd::Ssh { name } => commands::gpu::ssh(name.as_deref()),
-            GpuCmd::Destroy { name, all } => commands::gpu::destroy(name.as_deref(), all),
-            GpuCmd::Start { name } => commands::gpu::start(name.as_deref()),
-            GpuCmd::Import { name, backend } => commands::gpu::import(&name, backend),
-            GpuCmd::List => commands::gpu::list(),
-            GpuCmd::Sync => commands::gpu::sync(),
-            GpuCmd::DownloadBenchmarks { name } => {
-                commands::gpu::download_benchmarks(name.as_deref())
-            }
+                dataset,
+                impls,
+                max_files,
+                max_minutes,
+                reuse,
+                detach,
+            } => commands::dstack::bench(
+                &name,
+                &dataset,
+                &impls,
+                max_files,
+                max_minutes,
+                reuse,
+                detach,
+            ),
+            DstackCmd::Fleet => commands::dstack::fleet(),
+            DstackCmd::Attach { name } => commands::dstack::attach(&name),
+            DstackCmd::Logs { name } => commands::dstack::logs(&name),
+            DstackCmd::Ps => commands::dstack::ps(),
+            DstackCmd::Stop { name } => commands::dstack::stop(&name),
+            DstackCmd::Dev => commands::dstack::dev(),
+            DstackCmd::Download { name } => commands::dstack::download(&name),
+            DstackCmd::Delete { path } => commands::dstack::delete(&path),
         },
         Command::Dataset { cmd } => {
             use xtask::cmd::project_root;

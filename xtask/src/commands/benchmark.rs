@@ -821,18 +821,13 @@ fn run_der_implementations(
 
     let fluidaudio_bench_dir = root.join("scripts/fluidaudio-bench");
     let speakerkit_bench_dir = root.join("scripts/speakerkit-bench");
-    let implementations: Vec<(&str, ImplType)> = if impls.is_empty() {
-        IMPL_REGISTRY
-            .iter()
-            .map(|(_, _, display_name, impl_type)| (*display_name, *impl_type))
-            .collect()
-    } else {
-        IMPL_REGISTRY
-            .iter()
-            .filter(|(cli_id, alias, _, _)| impls.iter().any(|i| i == cli_id || i == alias))
-            .map(|(_, _, display_name, impl_type)| (*display_name, *impl_type))
-            .collect()
-    };
+    let implementations: Vec<(&str, ImplType)> = IMPL_REGISTRY
+        .iter()
+        .filter(|(cli_id, alias, _, _)| {
+            impls.is_empty() || impls.iter().any(|i| i == cli_id || i == alias)
+        })
+        .map(|(_, _, display_name, impl_type)| (*display_name, *impl_type))
+        .collect();
 
     let wav_paths: Vec<&Path> = files.iter().map(|(w, _)| w.as_path()).collect();
     let mut all_results: HashMap<String, DerImplResult> = HashMap::new();
@@ -1822,6 +1817,271 @@ fn ensure_pyannote_rs_emb_model(path: &Path) -> Result<()> {
             .arg(path)
             .arg("https://github.com/thewh1teagle/pyannote-rs/releases/download/v0.1.0/wespeaker_en_voxceleb_CAM++.onnx"),
     )
+}
+
+// ---------------------------------------------------------------------------
+// GPU benchmark job (used by speakrs-bm)
+// ---------------------------------------------------------------------------
+
+/// Progress update emitted per-file during a benchmark run
+pub struct ProgressUpdate {
+    pub impl_name: String,
+    pub file_index: u32,
+    pub total_files: u32,
+    pub file_id: String,
+    pub elapsed_secs: f64,
+}
+
+/// Configuration for a single-dataset benchmark job
+pub struct BenchmarkJobConfig {
+    pub models_dir: PathBuf,
+    pub datasets_dir: PathBuf,
+    pub root: PathBuf,
+    pub results_dir: PathBuf,
+    pub dataset: crate::datasets::Dataset,
+    pub implementations: Vec<(&'static str, ImplType)>,
+    pub max_files: u32,
+    pub max_minutes: u32,
+    pub description: Option<String>,
+    /// When running multiple datasets, nest run_dir under dataset id
+    pub multi_dataset: bool,
+}
+
+/// Result of a completed benchmark job
+pub struct BenchmarkJobResult {
+    pub run_id: String,
+    pub run_dir: PathBuf,
+    pub total_audio_minutes: f64,
+    pub results: HashMap<String, DerImplResult>,
+}
+
+/// Run a benchmark job for a single dataset, returning results
+///
+/// Core GPU benchmark runner used by `speakrs-bm`
+/// The optional `progress_cb` is called per-file for live progress reporting.
+#[cfg(feature = "cuda")]
+pub fn run_benchmark_job(
+    config: &BenchmarkJobConfig,
+    progress_cb: Option<&(dyn Fn(&ProgressUpdate) + Send + Sync)>,
+) -> Result<BenchmarkJobResult> {
+    use crate::cmd::wav_duration_seconds;
+
+    println!();
+    println!("========== {} ==========", config.dataset.display_name);
+
+    config.dataset.ensure(&config.datasets_dir)?;
+    let dataset_dir = config.dataset.dataset_dir(&config.datasets_dir);
+
+    let files = discover_files(&dataset_dir, config.max_files, config.max_minutes as f64)?;
+    if files.is_empty() {
+        bail!(
+            "No paired wav+rttm files found in {}",
+            dataset_dir.display()
+        );
+    }
+
+    let total_audio_seconds: f64 = files
+        .iter()
+        .map(|(wav, _)| wav_duration_seconds(wav).unwrap_or(0.0))
+        .sum();
+    let total_audio_minutes = total_audio_seconds / 60.0;
+
+    let run_id = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let run_dir = if config.multi_dataset {
+        config.results_dir.join(&run_id).join(&config.dataset.id)
+    } else {
+        config.results_dir.join(&run_id)
+    };
+    fs::create_dir_all(&run_dir)?;
+
+    if let Some(ref desc) = config.description {
+        fs::write(run_dir.join("README.md"), format!("{desc}\n"))?;
+    }
+
+    println!(
+        "Found {} files, {total_audio_minutes:.1} min total audio",
+        files.len()
+    );
+    println!("Run ID: {run_id}");
+    println!();
+
+    let batch_timeout = Duration::from_secs_f64((total_audio_seconds * 5.0).max(120.0));
+    let wav_paths: Vec<&Path> = files.iter().map(|(w, _)| w.as_path()).collect();
+    let mut all_results: HashMap<String, DerImplResult> = HashMap::new();
+
+    for (impl_name, impl_type) in &config.implementations {
+        println!("Running {impl_name}...");
+
+        let benchmark_result = match impl_type {
+            ImplType::Speakrs(mode) => {
+                run_speakrs_gpu(&config.models_dir, &files, mode, progress_cb)
+            }
+            ImplType::Pyannote(device) => {
+                BatchCommandRunner::pyannote(&config.root, device, &wav_paths)
+                    .run_with_retries(batch_timeout)
+            }
+            _ => {
+                println!("  → skipped: not a GPU implementation");
+                println!();
+                all_results.insert(
+                    impl_name.to_string(),
+                    DerImplResult::skipped("not a GPU implementation".to_string()),
+                );
+                continue;
+            }
+        };
+
+        let benchmark_output = match benchmark_result {
+            Ok(result) => result,
+            Err(err) => {
+                println!("  → failed: {err}");
+                println!();
+                all_results.insert(
+                    impl_name.to_string(),
+                    DerImplResult::failed(err.to_string()),
+                );
+                continue;
+            }
+        };
+
+        let acc = DerAccumulation::compute(&files, &benchmark_output.per_file_rttm)?;
+        let (der_pct, miss_pct, fa_pct, conf_pct) = acc.der_percentages();
+
+        let rtfx = total_audio_seconds / benchmark_output.total_seconds;
+        if let Some(d) = der_pct {
+            println!(
+                "  → DER: {d:.1}%, Time: {:.1}s, RTFx: {rtfx:.1}x",
+                benchmark_output.total_seconds
+            );
+        } else {
+            println!(
+                "  → N/A, Time: {:.1}s, RTFx: {rtfx:.1}x",
+                benchmark_output.total_seconds
+            );
+        }
+        println!();
+
+        all_results.insert(
+            impl_name.to_string(),
+            DerImplResult::completed(
+                der_pct,
+                miss_pct,
+                fa_pct,
+                conf_pct,
+                benchmark_output.total_seconds,
+                acc.file_count,
+            ),
+        );
+    }
+
+    DerResultsWriter {
+        run_dir: &run_dir,
+        dataset_name: &config.dataset.display_name,
+        implementations: &config.implementations,
+        results: &all_results,
+        files: &files,
+        total_audio_minutes,
+        collar: 0.0,
+        description: config.description.as_deref(),
+        max_files: config.max_files,
+        max_minutes: config.max_minutes,
+    }
+    .write()?;
+
+    Ok(BenchmarkJobResult {
+        run_id,
+        run_dir,
+        total_audio_minutes,
+        results: all_results,
+    })
+}
+
+/// Run speakrs GPU in-process: load models once, diarize all files
+#[cfg(feature = "cuda")]
+pub fn run_speakrs_gpu(
+    models_dir: &Path,
+    files: &[(PathBuf, PathBuf)],
+    mode: &str,
+    progress_cb: Option<&(dyn Fn(&ProgressUpdate) + Send + Sync)>,
+) -> Result<BatchRunOutput> {
+    use speakrs::inference::ExecutionMode;
+    use speakrs::inference::embedding::EmbeddingModel;
+    use speakrs::inference::segmentation::SegmentationModel;
+    use speakrs::pipeline::{
+        DiarizationPipeline, FAST_SEGMENTATION_STEP_SECONDS, SEGMENTATION_STEP_SECONDS,
+    };
+
+    use crate::wav;
+
+    let execution_mode = match mode {
+        "cuda-hybrid" => ExecutionMode::CudaHybrid,
+        "cuda-fast" => ExecutionMode::CudaFast,
+        _ => ExecutionMode::Cuda,
+    };
+    let step = match execution_mode {
+        ExecutionMode::CudaFast => FAST_SEGMENTATION_STEP_SECONDS,
+        _ => SEGMENTATION_STEP_SECONDS,
+    };
+    let mut seg_model = SegmentationModel::with_mode(
+        models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
+        step as f32,
+        execution_mode,
+    )?;
+    let mut emb_model = EmbeddingModel::with_mode(
+        models_dir
+            .join("wespeaker-voxceleb-resnet34.onnx")
+            .to_str()
+            .unwrap(),
+        execution_mode,
+    )?;
+    let mut pipeline = DiarizationPipeline::new(&mut seg_model, &mut emb_model, models_dir)?;
+
+    let mut per_file_rttm = HashMap::new();
+    let total_files = files.len();
+    let start = Instant::now();
+
+    for (i, (wav_path, _)) in files.iter().enumerate() {
+        let file_id = wav_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file1".to_string());
+
+        let (samples, sr) = wav::load_wav_samples(&wav_path.to_string_lossy())?;
+        color_eyre::eyre::ensure!(sr == 16000, "expected 16kHz WAV, got {sr}Hz");
+
+        let file_start = Instant::now();
+        let result = pipeline.run_with_file_id(&samples, &file_id)?;
+        let file_elapsed = file_start.elapsed().as_secs_f64();
+
+        per_file_rttm.insert(file_id.clone(), result.rttm);
+
+        let cumulative = start.elapsed().as_secs_f64();
+        let avg = cumulative / (i + 1) as f64;
+        let remaining = (total_files - i - 1) as f64 * avg;
+        let eta = format_eta(remaining);
+        let total_elapsed = format_eta(cumulative);
+        eprintln!(
+            "  [{}/{}] {file_id}: {file_elapsed:.1}s (elapsed {total_elapsed}, ETA {eta}) [{}]",
+            i + 1,
+            total_files,
+            now_stamp()
+        );
+
+        if let Some(cb) = progress_cb {
+            cb(&ProgressUpdate {
+                impl_name: format!("speakrs {mode}"),
+                file_index: i as u32,
+                total_files: total_files as u32,
+                file_id,
+                elapsed_secs: file_elapsed,
+            });
+        }
+    }
+
+    Ok(BatchRunOutput {
+        total_seconds: start.elapsed().as_secs_f64(),
+        per_file_rttm,
+    })
 }
 
 #[cfg(test)]

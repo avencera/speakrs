@@ -32,3 +32,4 @@ tempfile = "3"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 ureq = { version = "3.2", features = ["json"] }
 wait-timeout = "0.2"
+xshell = "0.2"

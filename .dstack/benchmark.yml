@@ -1,0 +1,33 @@
+type: task
+name: benchmark
+
+image: ${{ env.SPEAKRS_GPU_IMAGE }}
+
+env:
+  - DATASET
+  - IMPLS
+  - MAX_FILES
+  - MAX_MINUTES
+  - RUN_NAME
+  - HF_TOKEN
+  - AWS_ACCESS_KEY_ID
+  - AWS_SECRET_ACCESS_KEY
+  - AWS_ENDPOINT_URL
+  - AWS_REGION
+
+commands:
+  - export SPEAKRS_RESULTS_DIR=/workspace/_benchmarks/$RUN_NAME
+  - mkdir -p $SPEAKRS_RESULTS_DIR
+  - speakrs-bm --dataset $DATASET
+      ${IMPLS:+--impls $IMPLS}
+      ${MAX_FILES:+--max-files $MAX_FILES}
+      ${MAX_MINUTES:+--max-minutes $MAX_MINUTES}
+  - s5cmd --endpoint-url $AWS_ENDPOINT_URL
+      cp $SPEAKRS_RESULTS_DIR/* s3://speakrs/benchmarks/$RUN_NAME/
+
+resources:
+  gpu:
+    name: [RTX4090, RTX6000Ada, L40S, RTX5090, L40, RTXA6000, A40, RTX3090]
+    count: 1
+
+spot_policy: on-demand
