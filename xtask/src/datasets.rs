@@ -111,7 +111,24 @@ pub fn all_datasets() -> Vec<Dataset> {
 }
 
 pub fn find_dataset(id: &str) -> Option<Dataset> {
+    let id = resolve_alias(id);
     all_datasets().into_iter().find(|d| d.id == id)
+}
+
+fn resolve_alias(id: &str) -> &str {
+    match id {
+        "vd" | "vox-dev" => "voxconverse-dev",
+        "vt" | "vox-test" => "voxconverse-test",
+        "ai" | "ami-i" => "ami-ihm",
+        "as" | "ami-s" => "ami-sdm",
+        "a4" | "aishell" => "aishell4",
+        "e21" | "earnings" => "earnings21",
+        "ali" | "alimeet" => "alimeeting",
+        "ava" => "ava-avd",
+        "ch" => "callhome",
+        "msw" => "msdwild",
+        other => other,
+    }
 }
 
 pub fn list_dataset_ids() -> Vec<String> {
@@ -145,6 +162,17 @@ impl S5cmd {
                 .args(["cp", "--concurrency", "20", "--part-size", "25"])
                 .arg(&s3_path)
                 .arg(local_dir),
+        )
+    }
+
+    /// Upload a local dataset directory to Tigris S3
+    pub fn upload(dataset_id: &str, local_dir: &Path) -> Result<()> {
+        let s3_path = format!("{S3_BUCKET}/{dataset_id}/");
+        run_cmd(
+            Command::new("s5cmd")
+                .args(["sync", "--concurrency", "20", "--part-size", "25"])
+                .arg(format!("{}/*", local_dir.display()))
+                .arg(&s3_path),
         )
     }
 
