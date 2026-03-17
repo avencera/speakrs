@@ -123,6 +123,7 @@ pub fn list_dataset_ids() -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 const S3_BUCKET: &str = "s3://speakrs/datasets";
+const TIGRIS_ENDPOINT: &str = "https://t3.storage.dev";
 
 pub struct S5cmd;
 
@@ -136,12 +137,21 @@ impl S5cmd {
             && std::env::var("AWS_ACCESS_KEY_ID").is_ok()
     }
 
+    fn base_cmd() -> Command {
+        let mut cmd = Command::new("s5cmd");
+        let endpoint = std::env::var("S3_ENDPOINT_URL")
+            .or_else(|_| std::env::var("AWS_ENDPOINT_URL"))
+            .unwrap_or_else(|_| TIGRIS_ENDPOINT.to_string());
+        cmd.arg("--endpoint-url").arg(endpoint);
+        cmd
+    }
+
     /// Copy a dataset from Tigris S3 to a local directory
     pub fn sync(dataset_id: &str, local_dir: &Path) -> Result<()> {
         let s3_path = format!("{S3_BUCKET}/{dataset_id}/*");
         fs::create_dir_all(local_dir)?;
         run_cmd(
-            Command::new("s5cmd")
+            Self::base_cmd()
                 .args(["cp", "--concurrency", "20", "--part-size", "25"])
                 .arg(&s3_path)
                 .arg(local_dir),
@@ -152,7 +162,7 @@ impl S5cmd {
     pub fn upload(dataset_id: &str, local_dir: &Path) -> Result<()> {
         let s3_path = format!("{S3_BUCKET}/{dataset_id}/");
         run_cmd(
-            Command::new("s5cmd")
+            Self::base_cmd()
                 .args(["sync", "--concurrency", "20", "--part-size", "25"])
                 .args(["--exclude", "*__MACOSX*", "--exclude", "*.DS_Store"])
                 .arg(format!("{}/*", local_dir.display()))

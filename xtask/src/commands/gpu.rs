@@ -316,6 +316,7 @@ const ENV_VARS: &[&str] = &[
     "AWS_SECRET_ACCESS_KEY",
     "AWS_ENDPOINT_URL",
     "AWS_REGION",
+    "S3_ENDPOINT_URL",
     "HF_TOKEN",
 ];
 
