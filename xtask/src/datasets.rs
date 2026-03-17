@@ -11,7 +11,6 @@ use std::process::Command;
 use color_eyre::eyre::Result;
 
 use crate::cmd::run_cmd;
-use crate::convert::convert_to_16k_mono;
 
 #[derive(Clone)]
 pub struct Dataset {
@@ -87,24 +86,10 @@ pub fn all_datasets() -> Vec<Dataset> {
             },
         ),
         Dataset::new(
-            "callhome",
-            "CALLHOME",
-            Source::Hf {
-                repo: "argmaxinc/callhome".into(),
-            },
-        ),
-        Dataset::new(
             "icsi",
             "ICSI",
             Source::Hf {
                 repo: "argmaxinc/icsi-meetings".into(),
-            },
-        ),
-        Dataset::new(
-            "msdwild",
-            "MSDWILD",
-            Source::Hf {
-                repo: "argmaxinc/msdwild".into(),
             },
         ),
     ]
@@ -125,8 +110,6 @@ fn resolve_alias(id: &str) -> &str {
         "e21" | "earnings" => "earnings21",
         "ali" | "alimeet" => "alimeeting",
         "ava" => "ava-avd",
-        "ch" => "callhome",
-        "msw" => "msdwild",
         other => other,
     }
 }
@@ -220,7 +203,11 @@ fn ensure_hf(display_name: &str, repo: &str, dir: &Path) -> Result<()> {
     let wav_dir = dir.join("wav");
     let rttm_dir = dir.join("rttm");
     if wav_dir.is_dir() && rttm_dir.is_dir() {
-        return Ok(());
+        let has_wavs = fs::read_dir(&wav_dir).is_ok_and(|mut d| d.next().is_some());
+        let has_rttms = fs::read_dir(&rttm_dir).is_ok_and(|mut d| d.next().is_some());
+        if has_wavs && has_rttms {
+            return Ok(());
+        }
     }
 
     println!("=== Downloading {display_name} from HuggingFace ===");
@@ -229,44 +216,22 @@ fn ensure_hf(display_name: &str, repo: &str, dir: &Path) -> Result<()> {
     let _ = fs::remove_dir_all(&tmp_dir);
     hf_download(repo, &tmp_dir)?;
 
-    fs::create_dir_all(&wav_dir)?;
-    fs::create_dir_all(&rttm_dir)?;
+    // HF datasets use parquet format with embedded audio
+    let parquet_dir = tmp_dir.join("data");
+    let extract_script = crate::cmd::project_root().join("scripts/extract_hf_dataset.py");
 
-    for path in walk_files_with_ext(&tmp_dir, "rttm") {
-        let name = path.file_name().unwrap().to_string_lossy().to_string();
-        fs::copy(&path, rttm_dir.join(&name))?;
-    }
-
-    for path in walk_files_with_ext(&tmp_dir, "wav") {
-        let stem = path.file_stem().unwrap().to_string_lossy().to_string();
-        convert_to_16k_mono(&path, &wav_dir.join(format!("{stem}.wav")))?;
-    }
+    println!("Extracting parquet to wav + rttm...");
+    run_cmd(
+        Command::new("uv")
+            .args(["run", "--script"])
+            .arg(&extract_script)
+            .arg(&parquet_dir)
+            .arg(&wav_dir)
+            .arg(&rttm_dir)
+            .args(["--split", "test"]),
+    )?;
 
     let _ = fs::remove_dir_all(&tmp_dir);
     println!("{display_name} setup complete");
     Ok(())
-}
-
-fn walk_files_with_ext(dir: &Path, ext: &str) -> Vec<PathBuf> {
-    let mut results = Vec::new();
-    walk_recursive(dir, ext, &mut results);
-    results.sort();
-    results
-}
-
-fn walk_recursive(dir: &Path, ext: &str, results: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            walk_recursive(&path, ext, results);
-        } else if path
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case(ext))
-        {
-            results.push(path);
-        }
-    }
 }
