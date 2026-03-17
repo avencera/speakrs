@@ -154,6 +154,7 @@ impl S5cmd {
         run_cmd(
             Command::new("s5cmd")
                 .args(["sync", "--concurrency", "20", "--part-size", "25"])
+                .args(["--exclude", "*__MACOSX*", "--exclude", "*.DS_Store"])
                 .arg(format!("{}/*", local_dir.display()))
                 .arg(&s3_path),
         )

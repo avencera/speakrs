@@ -4,6 +4,7 @@ mod vastai;
 use std::fmt;
 use std::fs;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::str::FromStr;
 
@@ -111,6 +112,7 @@ fn list_instances() -> Result<Vec<String>> {
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
         .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| !n.ends_with(".setup-done"))
         .collect();
     names.sort();
     Ok(names)
@@ -214,6 +216,67 @@ pub fn run_remote_script(info: &InstanceInfo, script: &str) -> Result<()> {
     Ok(())
 }
 
+// --- setup marker ---
+
+fn setup_done_path(name: &str) -> PathBuf {
+    instances_dir().join(format!("{name}.setup-done"))
+}
+
+fn mark_setup_done(name: &str) {
+    let _ = fs::write(setup_done_path(name), "");
+}
+
+fn is_setup_done(name: &str) -> bool {
+    setup_done_path(name).exists()
+}
+
+fn current_branch() -> Result<String> {
+    let head = fs::read_to_string(project_root().join(".git/HEAD"))?;
+    Ok(head
+        .strip_prefix("ref: refs/heads/")
+        .unwrap_or(head.trim())
+        .trim()
+        .to_string())
+}
+
+const ENV_VARS: &[&str] = &[
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_ENDPOINT_URL",
+    "AWS_REGION",
+    "HF_TOKEN",
+];
+
+/// Write local env vars to `/root/.env` on the remote and ensure `.bashrc` sources it
+pub fn provision_env_vars(info: &InstanceInfo) -> Result<()> {
+    let mut lines = Vec::new();
+    for var in ENV_VARS {
+        if let Ok(val) = std::env::var(var) {
+            lines.push(format!("export {var}=\"{val}\""));
+        }
+    }
+
+    if lines.is_empty() {
+        println!("No S3/HF env vars found locally, skipping");
+        return Ok(());
+    }
+
+    let count = lines.len();
+    let env_content = lines.join("\n");
+
+    // content built in Rust, heredoc is just the SSH transport
+    let script = format!(
+        "cat > /root/.env << 'SPEAKRS_EOF'\n{env_content}\nSPEAKRS_EOF\n\
+         chmod 600 /root/.env\n\
+         grep -q 'source /root/.env' /root/.bashrc 2>/dev/null || \
+         echo '[ -f /root/.env ] && source /root/.env' >> /root/.bashrc",
+    );
+    run_remote_script(info, &script)?;
+
+    println!("Wrote /root/.env with {count} var(s)");
+    Ok(())
+}
+
 // --- public API ---
 
 pub fn create(name: &str, backend: Backend, gpu_types: &[&str], min_tflops: f64) -> Result<()> {
@@ -242,12 +305,26 @@ pub fn setup(name: Option<&str>, branch: &str) -> Result<()> {
         Backend::VastAi => vastai::setup(&info)?,
     }
 
+    mark_setup_done(&n);
     println!("Instance '{n}' setup complete");
     Ok(())
 }
 
 pub fn ssh(name: Option<&str>) -> Result<()> {
-    let (_n, info) = resolve_instance(name)?;
+    let (n, info) = resolve_instance(name)?;
+
+    if is_setup_done(&n) {
+        provision_env_vars(&info)?;
+    } else {
+        println!("First SSH, running setup...");
+        let branch = current_branch()?;
+        match info.backend {
+            Backend::RunPod => runpod::setup(&info, &branch)?,
+            Backend::VastAi => vastai::setup(&info)?,
+        }
+        mark_setup_done(&n);
+    }
+
     let mut cmd = ssh_cmd(&info);
 
     #[cfg(unix)]
@@ -277,6 +354,7 @@ pub fn destroy(name: Option<&str>, all: bool) -> Result<()> {
     }
 
     fs::remove_file(instances_dir().join(&n))?;
+    let _ = fs::remove_file(setup_done_path(&n));
     println!("Instance '{n}' destroyed and removed");
     Ok(())
 }
@@ -299,6 +377,7 @@ fn destroy_all() -> Result<()> {
             Backend::VastAi => vastai::destroy(&info)?,
         }
         fs::remove_file(instances_dir().join(name))?;
+        let _ = fs::remove_file(setup_done_path(name));
     }
 
     println!("All {} instances destroyed", names.len());
@@ -398,6 +477,7 @@ pub fn sync() -> Result<()> {
 
         if !ids.contains(&info.instance_id) {
             fs::remove_file(instances_dir().join(name))?;
+            let _ = fs::remove_file(setup_done_path(name));
             println!(
                 "Removed '{name}' ({}, id={})",
                 info.backend, info.instance_id

@@ -105,13 +105,17 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
-    ca-certificates curl git unzip \
+    ca-certificates curl xz-utils git unzip \
     openssh-server tmux \
     libcudnn9-cuda-12 \
     && rm -rf /var/lib/apt/lists/* \
     && curl -L https://github.com/peak/s5cmd/releases/download/v2.3.0/s5cmd_2.3.0_linux_amd64.deb -o /tmp/s5cmd.deb \
     && dpkg -i /tmp/s5cmd.deb \
     && rm /tmp/s5cmd.deb
+
+# FFmpeg 7 shared libs for torchcodec (pyannote.audio >=4.0)
+RUN curl -L https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-linux64-lgpl-shared-7.1.tar.xz \
+    | tar xJ --strip-components=1 -C /usr/local
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
