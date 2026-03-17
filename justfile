@@ -4,7 +4,7 @@ fmt:
 
 clippy:
     cargo clippy --all --all-targets --all-features --workspace -- -D warnings
-    uv run --group dev ty check --python .venv --exclude 'scripts/pyannote_rs_bench/target' scripts fixtures
+    uv run --group dev ty check --python .venv --exclude 'scripts/pyannote_rs_bench/target' --exclude 'scripts/extract_hf_dataset.py' scripts fixtures
 
 test *args:
     cargo test --workspace {{args}}
