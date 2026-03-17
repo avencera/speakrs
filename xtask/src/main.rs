@@ -166,6 +166,7 @@ enum BenchmarkCmd {
 #[derive(Subcommand)]
 enum GpuCmd {
     /// Provision a new GPU instance
+    #[command(alias = "new")]
     Create {
         /// Instance name
         name: String,

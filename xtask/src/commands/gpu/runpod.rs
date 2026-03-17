@@ -4,7 +4,7 @@ use std::process::Command;
 use color_eyre::eyre::{Result, bail};
 use serde_json::Value;
 
-use super::{Backend, GITHUB_REPO, IMAGE, InstanceInfo, run_remote_script};
+use super::{Backend, GITHUB_REPO, InstanceInfo, image, run_remote_script};
 use std::io::Write;
 
 const RUNPOD_API_URL: &str = "https://api.runpod.io/graphql";
@@ -56,12 +56,12 @@ pub fn provision(name: &str, gpu_types: &[&str]) -> Result<InstanceInfo> {
         let variables = serde_json::json!({
             "input": {
                 "name": format!("speakrs-bench-{name}"),
-                "imageName": IMAGE,
+                "imageName": image(),
                 "gpuTypeId": gpu_type,
                 "cloudType": "SECURE",
                 "gpuCount": 1,
-                "volumeInGb": 40,
-                "containerDiskInGb": 20,
+                "volumeInGb": 100,
+                "containerDiskInGb": 50,
                 "volumeMountPath": "/workspace",
                 "ports": "22/tcp",
                 "startSsh": true,

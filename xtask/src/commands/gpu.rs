@@ -14,7 +14,18 @@ use crate::cmd::project_root;
 #[cfg(not(unix))]
 use crate::cmd::run_cmd;
 
-pub const IMAGE: &str = "ghcr.io/avencera/speakrs-gpu:latest";
+const IMAGE_BASE: &str = "ghcr.io/avencera/speakrs-gpu";
+const LOCAL_DIR: &str = "_local";
+const IMAGE_TAG_FILE: &str = "gpu-image-tag";
+const INSTANCES_DIR: &str = "gpu-instances";
+
+pub fn image() -> String {
+    let tag_file = project_root().join(LOCAL_DIR).join(IMAGE_TAG_FILE);
+    let tag = fs::read_to_string(tag_file)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "latest".to_string());
+    format!("{IMAGE_BASE}:{tag}")
+}
 pub const GITHUB_REPO: &str = "https://github.com/avencera/speakrs.git";
 
 pub const RUNPOD_GPU_FALLBACKS: &[&str] = &[
@@ -67,7 +78,7 @@ pub struct InstanceInfo {
 }
 
 fn instances_dir() -> std::path::PathBuf {
-    project_root().join(".gpu-instances")
+    project_root().join(LOCAL_DIR).join(INSTANCES_DIR)
 }
 
 fn read_instance(name: &str) -> Result<InstanceInfo> {
