@@ -5,22 +5,8 @@ use xshell::{Shell, cmd};
 
 use crate::cmd::project_root;
 
-const IMAGE_BASE: &str = "ghcr.io/avencera/speakrs-gpu";
-
-fn gpu_image() -> String {
-    let tag_file = project_root().join("_local").join("gpu-image-tag");
-    let tag = std::fs::read_to_string(tag_file)
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| "latest".to_string());
-    format!("{IMAGE_BASE}:{tag}")
-}
-
 fn require_env(name: &str) -> Result<String> {
     std::env::var(name).map_err(|_| color_eyre::eyre::eyre!("{name} must be set"))
-}
-
-fn set_gpu_image_env(sh: &Shell) {
-    sh.set_var("SPEAKRS_GPU_IMAGE", gpu_image());
 }
 
 pub fn bench(
@@ -37,20 +23,13 @@ pub fn bench(
 
     let sh = Shell::new()?;
     sh.change_dir(project_root());
-    set_gpu_image_env(&sh);
 
     sh.set_var("RUN_NAME", name);
     sh.set_var("DATASET", dataset);
 
-    if !impls.is_empty() {
-        sh.set_var("IMPLS", impls.join(","));
-    }
-    if let Some(n) = max_files {
-        sh.set_var("MAX_FILES", n.to_string());
-    }
-    if let Some(n) = max_minutes {
-        sh.set_var("MAX_MINUTES", n.to_string());
-    }
+    sh.set_var("IMPLS", if impls.is_empty() { String::new() } else { impls.join(",") });
+    sh.set_var("MAX_FILES", max_files.map(|n| n.to_string()).unwrap_or_default());
+    sh.set_var("MAX_MINUTES", max_minutes.map(|n| n.to_string()).unwrap_or_default());
 
     if reuse {
         // ensure fleet exists before submitting
@@ -117,7 +96,6 @@ pub fn stop(name: &str) -> Result<()> {
 pub fn dev() -> Result<()> {
     let sh = Shell::new()?;
     sh.change_dir(project_root());
-    set_gpu_image_env(&sh);
     cmd!(sh, "dstack apply -f .dstack/dev.yml -y").run()?;
     Ok(())
 }
