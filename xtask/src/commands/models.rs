@@ -46,18 +46,11 @@ pub fn deploy() -> Result<()> {
         "wespeaker-voxceleb-resnet34-tail.onnx",
         "wespeaker-voxceleb-resnet34-tail-b3.onnx",
         "wespeaker-voxceleb-resnet34-tail-b32.onnx",
-        "wespeaker-resnet-frames.onnx",
-        "wespeaker-resnet-frames-b32.onnx",
-        "wespeaker-pool-classify.onnx",
-        "wespeaker-pool-classify-b3.onnx",
-        "wespeaker-pool-classify-b32.onnx",
         "segmentation-3.0.mlmodelc/**",
         "segmentation-3.0-b32.mlmodelc/**",
         "wespeaker-fbank.mlmodelc/**",
         "wespeaker-fbank-b32.mlmodelc/**",
         "wespeaker-voxceleb-resnet34-tail*.mlmodelc/**",
-        "wespeaker-resnet-frames*.mlmodelc/**",
-        "wespeaker-pool-classify*.mlmodelc/**",
     ];
 
     let mut cmd = Command::new("hf");
