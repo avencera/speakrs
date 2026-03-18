@@ -11,8 +11,10 @@ use crate::inference::{ExecutionMode, with_execution_mode};
 
 const PRIMARY_BATCH_SIZE: usize = 32;
 const CHUNK_SPEAKER_BATCH_SIZE: usize = 3;
+const NUM_SPEAKERS: usize = 3;
 const FBANK_FRAMES: usize = 998;
 const FBANK_FEATURES: usize = 80;
+const MASK_FRAMES: usize = 589;
 
 pub struct MaskedEmbeddingInput<'a> {
     pub audio: &'a [f32],
@@ -46,6 +48,10 @@ pub struct EmbeddingModel {
     #[cfg(feature = "coreml")]
     native_fbank_batched_session: Option<CoreMlModel>,
     #[cfg(feature = "coreml")]
+    native_multi_mask_session: Option<CoreMlModel>,
+    multi_mask_session: Option<Session>,
+    multi_mask_batched_session: Option<Session>,
+    #[cfg(feature = "coreml")]
     cached_tail_fbank_shape: CachedInputShape,
     #[cfg(feature = "coreml")]
     cached_tail_weights_shape: CachedInputShape,
@@ -53,6 +59,12 @@ pub struct EmbeddingModel {
     cached_fbank_single_shape: CachedInputShape,
     #[cfg(feature = "coreml")]
     cached_fbank_batch_shape: CachedInputShape,
+    #[cfg(feature = "coreml")]
+    cached_multi_mask_fbank_shape: CachedInputShape,
+    #[cfg(feature = "coreml")]
+    cached_multi_mask_masks_shape: CachedInputShape,
+    multi_mask_fbank_buffer: Array3<f32>,
+    multi_mask_masks_buffer: Array2<f32>,
     waveform_buffer: Array3<f32>,
     weights_buffer: Array2<f32>,
     primary_batch_waveform_buffer: Array3<f32>,
@@ -147,12 +159,25 @@ impl EmbeddingModel {
                 PRIMARY_BATCH_SIZE,
             ),
             #[cfg(feature = "coreml")]
+            native_multi_mask_session: Self::load_native_multi_mask(model_path, mode),
+            multi_mask_session: multi_mask_model_path(model_path, 1)
+                .filter(|p| p.exists())
+                .map(|p| Self::build_session(p.to_str().unwrap(), mode))
+                .transpose()?,
+            multi_mask_batched_session: multi_mask_model_path(model_path, PRIMARY_BATCH_SIZE)
+                .filter(|p| p.exists())
+                .map(|p| Self::build_session(p.to_str().unwrap(), mode))
+                .transpose()?,
+            #[cfg(feature = "coreml")]
             cached_tail_fbank_shape: CachedInputShape::new(
                 "fbank",
                 &[PRIMARY_BATCH_SIZE, FBANK_FRAMES, FBANK_FEATURES],
             ),
             #[cfg(feature = "coreml")]
-            cached_tail_weights_shape: CachedInputShape::new("weights", &[PRIMARY_BATCH_SIZE, 589]),
+            cached_tail_weights_shape: CachedInputShape::new(
+                "weights",
+                &[PRIMARY_BATCH_SIZE, MASK_FRAMES],
+            ),
             #[cfg(feature = "coreml")]
             cached_fbank_single_shape: CachedInputShape::new("waveform", &[1, 1, 160_000]),
             #[cfg(feature = "coreml")]
@@ -160,6 +185,25 @@ impl EmbeddingModel {
                 "waveform",
                 &[PRIMARY_BATCH_SIZE, 1, 160_000],
             ),
+            #[cfg(feature = "coreml")]
+            cached_multi_mask_fbank_shape: CachedInputShape::new(
+                "fbank",
+                &[PRIMARY_BATCH_SIZE, FBANK_FRAMES, FBANK_FEATURES],
+            ),
+            #[cfg(feature = "coreml")]
+            cached_multi_mask_masks_shape: CachedInputShape::new(
+                "masks",
+                &[PRIMARY_BATCH_SIZE * NUM_SPEAKERS, MASK_FRAMES],
+            ),
+            multi_mask_fbank_buffer: Array3::zeros((
+                PRIMARY_BATCH_SIZE,
+                FBANK_FRAMES,
+                FBANK_FEATURES,
+            )),
+            multi_mask_masks_buffer: Array2::zeros((
+                PRIMARY_BATCH_SIZE * NUM_SPEAKERS,
+                MASK_FRAMES,
+            )),
             waveform_buffer: Array3::zeros((1, 1, 160_000)),
             weights_buffer: Array2::zeros((1, 589)),
             primary_batch_waveform_buffer: Array3::zeros((PRIMARY_BATCH_SIZE, 1, 160_000)),
@@ -295,7 +339,18 @@ impl EmbeddingModel {
             self.native_fbank_session = Self::load_native_fbank(&self.model_path, self.mode, 1);
             self.native_fbank_batched_session =
                 Self::load_native_fbank(&self.model_path, self.mode, PRIMARY_BATCH_SIZE);
+            self.native_multi_mask_session =
+                Self::load_native_multi_mask(&self.model_path, self.mode);
         }
+        self.multi_mask_session = multi_mask_model_path(&self.model_path, 1)
+            .filter(|p| p.exists())
+            .map(|p| Self::build_session(p.to_str().unwrap(), self.mode))
+            .transpose()?;
+        self.multi_mask_batched_session =
+            multi_mask_model_path(&self.model_path, PRIMARY_BATCH_SIZE)
+                .filter(|p| p.exists())
+                .map(|p| Self::build_session(p.to_str().unwrap(), self.mode))
+                .transpose()?;
         Ok(())
     }
 
@@ -580,6 +635,125 @@ impl EmbeddingModel {
         has
     }
 
+    pub fn prefers_multi_mask_path(&self) -> bool {
+        let has = self.multi_mask_session.is_some();
+        #[cfg(feature = "coreml")]
+        let has = has || self.native_multi_mask_session.is_some();
+        has
+    }
+
+    pub fn multi_mask_batch_size(&self) -> usize {
+        let has_batched = self.multi_mask_batched_session.is_some();
+        #[cfg(feature = "coreml")]
+        let has_batched = has_batched || self.native_multi_mask_session.is_some();
+        if has_batched {
+            PRIMARY_BATCH_SIZE
+        } else if self.multi_mask_session.is_some() {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Run multi-mask inference: B fbanks + B*3 masks -> B*3 embeddings (sliced to actual count)
+    pub(crate) fn embed_multi_mask_batch(
+        &mut self,
+        fbanks: &[&Array2<f32>],
+        masks: &[&[f32]],
+    ) -> Result<Array2<f32>, ort::Error> {
+        let num_fbanks = fbanks.len();
+        let num_masks = masks.len();
+        debug_assert_eq!(num_masks, num_fbanks * NUM_SPEAKERS);
+        debug_assert!(num_fbanks <= PRIMARY_BATCH_SIZE);
+
+        let fbank_row_stride = FBANK_FRAMES * FBANK_FEATURES;
+        for (idx, fbank) in fbanks.iter().enumerate() {
+            self.multi_mask_fbank_buffer
+                .slice_mut(s![idx, ..fbank.nrows(), ..fbank.ncols()])
+                .assign(fbank);
+        }
+
+        for (idx, mask) in masks.iter().enumerate() {
+            Self::prepare_weights(
+                idx,
+                mask,
+                self.mask_frames,
+                &mut self.multi_mask_masks_buffer.view_mut(),
+            );
+        }
+        // zero unused fbank rows
+        if num_fbanks < PRIMARY_BATCH_SIZE {
+            let start = num_fbanks * fbank_row_stride;
+            let buf = self.multi_mask_fbank_buffer.as_slice_mut().unwrap();
+            buf[start..].fill(0.0);
+        }
+        // zero unused mask rows
+        if num_masks < PRIMARY_BATCH_SIZE * NUM_SPEAKERS {
+            self.multi_mask_masks_buffer
+                .slice_mut(s![num_masks.., ..])
+                .fill(0.0);
+        }
+
+        let full_mask_batch = PRIMARY_BATCH_SIZE * NUM_SPEAKERS;
+
+        #[cfg(feature = "coreml")]
+        if let Some(ref mut native) = self.native_multi_mask_session {
+            let fbank_data = self.multi_mask_fbank_buffer.as_slice().unwrap();
+            let masks_data = self.multi_mask_masks_buffer.as_slice().unwrap();
+            let (data, _) = native
+                .predict_cached(&[
+                    (&self.cached_multi_mask_fbank_shape, fbank_data),
+                    (&self.cached_multi_mask_masks_shape, masks_data),
+                ])
+                .map_err(|e| ort::Error::new(e.to_string()))?;
+            let batch = Array2::from_shape_vec((full_mask_batch, 256), data).unwrap();
+            return Ok(batch.slice(s![0..num_masks, ..]).to_owned());
+        }
+
+        let use_batched =
+            num_fbanks == PRIMARY_BATCH_SIZE && self.multi_mask_batched_session.is_some();
+
+        if use_batched {
+            let fbank_tensor = TensorRef::from_array_view(self.multi_mask_fbank_buffer.view())?;
+            let masks_tensor = TensorRef::from_array_view(self.multi_mask_masks_buffer.view())?;
+            let outputs = self
+                .multi_mask_batched_session
+                .as_mut()
+                .unwrap()
+                .run(ort::inputs!["fbank" => fbank_tensor, "masks" => masks_tensor])?;
+            let (_shape, data) = outputs[0].try_extract_tensor::<f32>()?;
+            let batch = Array2::from_shape_vec((full_mask_batch, 256), data.to_vec()).unwrap();
+            Ok(batch.slice(s![0..num_masks, ..]).to_owned())
+        } else {
+            let mut all_embeddings = Array2::<f32>::zeros((num_masks, 256));
+            for fbank_idx in 0..num_fbanks {
+                let fbank_slice =
+                    self.multi_mask_fbank_buffer
+                        .slice(s![fbank_idx..fbank_idx + 1, .., ..]);
+                let mask_start = fbank_idx * NUM_SPEAKERS;
+                let mask_end = mask_start + NUM_SPEAKERS;
+                let masks_slice = self
+                    .multi_mask_masks_buffer
+                    .slice(s![mask_start..mask_end, ..]);
+                let fbank_tensor = TensorRef::from_array_view(fbank_slice.view())?;
+                let masks_tensor = TensorRef::from_array_view(masks_slice.view())?;
+                let outputs = self
+                    .multi_mask_session
+                    .as_mut()
+                    .unwrap()
+                    .run(ort::inputs!["fbank" => fbank_tensor, "masks" => masks_tensor])?;
+                let (_shape, data) = outputs[0].try_extract_tensor::<f32>()?;
+                for (local_idx, row_idx) in (mask_start..mask_end).enumerate() {
+                    let start = local_idx * 256;
+                    all_embeddings
+                        .row_mut(row_idx)
+                        .assign(&ndarray::ArrayView1::from(&data[start..start + 256]));
+                }
+            }
+            Ok(all_embeddings)
+        }
+    }
+
     #[cfg(all(test, feature = "coreml"))]
     pub(crate) fn select_chunk_mask<'a>(
         &self,
@@ -861,7 +1035,7 @@ impl EmbeddingModel {
         } else {
             split_fbank_batched_model_path(model_path)
         };
-        // fbank DFT matmul needs FP32 for accuracy — always use FP32 CPU+GPU
+        // fbank DFT matmul needs FP32 for accuracy -- always use FP32 CPU+GPU
         let coreml_path = coreml_model_path(fbank_onnx.to_str().unwrap());
         if !coreml_path.exists() {
             return None;
@@ -875,6 +1049,31 @@ impl EmbeddingModel {
             Ok(model) => Some(model),
             Err(e) => {
                 eprintln!("warning: failed to load native CoreML fbank (batch={batch_size}): {e}");
+                None
+            }
+        }
+    }
+
+    #[cfg(feature = "coreml")]
+    fn load_native_multi_mask(model_path: &str, mode: ExecutionMode) -> Option<CoreMlModel> {
+        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
+            return None;
+        }
+        // use the b32 compiled model (supports both b1 and b32 via EnumeratedShapes)
+        let onnx_path = Path::new(model_path).with_file_name("wespeaker-multimask-tail-b32.onnx");
+        let coreml_path = coreml_model_path(onnx_path.to_str().unwrap());
+        if !coreml_path.exists() {
+            return None;
+        }
+        match CoreMlModel::load(
+            &coreml_path,
+            CoreMlModel::default_compute_units(),
+            "output",
+            GpuPrecision::Low,
+        ) {
+            Ok(model) => Some(model),
+            Err(e) => {
+                eprintln!("warning: failed to load native CoreML multi-mask: {e}");
                 None
             }
         }
@@ -906,6 +1105,15 @@ fn split_tail_model_path(model_path: &str, batch_size: usize) -> std::path::Path
         path.with_file_name(format!(
             "wespeaker-voxceleb-resnet34-tail-b{batch_size}.onnx"
         ))
+    }
+}
+
+fn multi_mask_model_path(model_path: &str, batch_size: usize) -> Option<std::path::PathBuf> {
+    let path = Path::new(model_path);
+    if batch_size == 1 {
+        Some(path.with_file_name("wespeaker-multimask-tail.onnx"))
+    } else {
+        Some(path.with_file_name(format!("wespeaker-multimask-tail-b{batch_size}.onnx")))
     }
 }
 

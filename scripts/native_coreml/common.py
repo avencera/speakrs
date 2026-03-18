@@ -31,6 +31,10 @@ FUSED_STEM = "wespeaker-voxceleb-resnet34-fused"
 FUSED_B3_STEM = "wespeaker-voxceleb-resnet34-fused-b3"
 FUSED_B32_STEM = "wespeaker-voxceleb-resnet34-fused-b32"
 FUSED_BATCH_SIZES = (1, 3, 32)
+NUM_SPEAKERS = 3
+MULTI_MASK_STEM = "wespeaker-multimask-tail"
+MULTI_MASK_B32_STEM = "wespeaker-multimask-tail-b32"
+MULTI_MASK_BATCH_SIZES = (1, 32)
 PACKAGES_DIRNAME = "coreml-packages"
 
 
@@ -247,6 +251,76 @@ def build_fused_wrapper(pipeline: Any) -> FusedEmbeddingWrapper:
     wrapper = FusedEmbeddingWrapper(fbank, tail)
     wrapper.eval()
     return wrapper
+
+
+class MultiMaskTailWrapper(nn.Module):
+    """Single model: fbanks [B, 998, 80] + masks [B*3, 589] -> embeddings [B*3, 256]
+
+    ResNet runs once per fbank, frames are expanded via repeat_interleave to
+    match the B*3 masks, then pool+classify runs on all B*3 pairs. Keeps
+    everything GPU-internal -- no intermediate data extraction between models.
+    """
+
+    def __init__(self, model: Any) -> None:
+        super().__init__()
+        self.resnet = model.resnet
+        self.num_speakers = NUM_SPEAKERS
+        with torch.no_grad():
+            dummy_fbank = torch.zeros(1, FBANK_FRAMES, FBANK_FEATURES)
+            frames = self.resnet.forward_frames(dummy_fbank)
+        self.target_frames = frames.size(-1)
+
+    def pool(self, sequences: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+        weights = weights.unsqueeze(1)
+        weights = F.interpolate(weights, size=self.target_frames, mode="nearest")
+
+        weight_sum = weights.sum(dim=2)
+        safe_sum = torch.where(
+            weight_sum > 0.0, weight_sum, torch.ones_like(weight_sum)
+        )
+        mean = torch.sum(sequences * weights, dim=2) / safe_sum
+        dx2 = torch.square(sequences - mean.unsqueeze(2))
+        weight_sq_sum = torch.square(weights).sum(dim=2)
+        denom = safe_sum - weight_sq_sum / safe_sum + 1e-8
+        var = torch.sum(dx2 * weights, dim=2) / denom
+        std = torch.sqrt(torch.clamp_min(var, 1e-10))
+
+        stats = torch.cat([mean, std], dim=-1)
+        zero_stats = torch.cat(
+            [torch.zeros_like(mean), torch.full_like(std, 1e-5)], dim=-1
+        )
+        zero_mask = (weight_sum <= 0.0).repeat(1, stats.size(1))
+        return torch.where(zero_mask, zero_stats, stats)
+
+    def forward(self, fbank: torch.Tensor, masks: torch.Tensor) -> Any:
+        # fbank: [B, 998, 80], masks: [B*3, 589]
+        frames = self.resnet.forward_frames(fbank)  # [B, C_raw, C2, T]
+        B = frames.size(0)
+        C = frames.size(1) * frames.size(2)
+        T = frames.size(3)
+        frames = frames.reshape(B, C, T)  # [B, 2560, 125]
+
+        # repeat each fbank's frames NUM_SPEAKERS times along the batch dim
+        frames = torch.repeat_interleave(frames, self.num_speakers, dim=0)  # [B*3, 2560, 125]
+
+        stats = self.pool(frames, masks)  # [B*3, 5120]
+        embed_a = self.resnet.seg_1(stats)
+        if self.resnet.two_emb_layer:
+            out = F.relu(embed_a)
+            out = self.resnet.seg_bn_1(out)
+            return self.resnet.seg_2(out)
+
+        return embed_a
+
+
+def build_multi_mask_wrapper(pipeline: Any) -> MultiMaskTailWrapper:
+    wrapper = MultiMaskTailWrapper(pipeline._embedding.model_)
+    wrapper.eval()
+    return wrapper
+
+
+def multi_mask_package_path(output_dir: Path) -> Path:
+    return coreml_packages_dir(output_dir) / f"{MULTI_MASK_STEM}.mlpackage"
 
 
 def save_model_artifacts(
