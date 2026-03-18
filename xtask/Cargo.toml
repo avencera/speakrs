@@ -12,6 +12,7 @@ path = "src/main.rs"
 [[bin]]
 name = "speakrs-bm"
 path = "src/bin/speakrs_bm.rs"
+required-features = ["cuda"]
 
 [features]
 coreml = ["speakrs/coreml"]

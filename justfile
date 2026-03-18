@@ -58,7 +58,8 @@ gpu-image:
     nsc build -f Dockerfile.gpu --platform linux/amd64 -t "$IMAGE" --push .
     mkdir -p _local
     echo "$TAG" > _local/gpu-image-tag
-    echo "Built and pushed: $IMAGE"
+    sed -i '' "s|ghcr.io/avencera/speakrs-gpu:[a-zA-Z0-9._-]*|ghcr.io/avencera/speakrs-gpu:${TAG}|g" .dstack/*.yml
+    echo "Built and pushed: $IMAGE (updated .dstack/*.yml)"
 
 gpu-base-image:
     nsc build -f docker/base.Dockerfile --platform linux/amd64 -t ghcr.io/avencera/speakrs-gpu-base:latest --push .
