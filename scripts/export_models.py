@@ -181,85 +181,16 @@ def export_embedding(pipeline: Any, models_dir: str) -> None:
 
             return embed_a
 
-    class ResNetFramesWrapper(nn.Module):
-        """ResNet backbone only: fbank -> frame-level features (expensive CNN)"""
-
-        def __init__(self, model: Any) -> None:
-            super().__init__()
-            self.resnet = model.resnet
-
-        def forward(self, fbank: torch.Tensor) -> torch.Tensor:
-            frames = self.resnet.forward_frames(fbank)
-            return frames.reshape(
-                frames.size(0), frames.size(1) * frames.size(2), frames.size(3)
-            )
-
-    class PoolClassifyWrapper(nn.Module):
-        """Pooling + classification head: resnet_frames + weights -> embedding"""
-
-        def __init__(self, model: Any) -> None:
-            super().__init__()
-            self.resnet = model.resnet
-
-        def pool(self, sequences: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-            weights = weights.unsqueeze(1)
-            num_frames = sequences.size(-1)
-            if weights.size(-1) != num_frames:
-                weights = F.interpolate(weights, size=num_frames, mode="nearest")
-
-            weight_sum = weights.sum(dim=2)
-            safe_sum = torch.where(
-                weight_sum > 0.0, weight_sum, torch.ones_like(weight_sum)
-            )
-            mean = torch.sum(sequences * weights, dim=2) / safe_sum
-            dx2 = torch.square(sequences - mean.unsqueeze(2))
-            weight_sq_sum = torch.square(weights).sum(dim=2)
-            denom = safe_sum - weight_sq_sum / safe_sum + 1e-8
-            var = torch.sum(dx2 * weights, dim=2) / denom
-            std = torch.sqrt(torch.clamp_min(var, 1e-10))
-
-            stats = torch.cat([mean, std], dim=-1)
-            zero_stats = torch.cat(
-                [torch.zeros_like(mean), torch.full_like(std, 1e-5)], dim=-1
-            )
-            zero_mask = (weight_sum <= 0.0).repeat(1, stats.size(1))
-            return torch.where(zero_mask, zero_stats, stats)
-
-        def forward(self, frames: torch.Tensor, weights: torch.Tensor) -> Any:
-            stats = self.pool(frames, weights)
-            embed_a = self.resnet.seg_1(stats)
-            if self.resnet.two_emb_layer:
-                out = F.relu(embed_a)
-                out = self.resnet.seg_bn_1(out)
-                return self.resnet.seg_2(out)
-
-            return embed_a
-
     emb_model = pipeline._embedding.model_
     emb_model.eval()
     fbank_wrapper = FbankWrapper(emb_model)
     fbank_wrapper.eval()
     tail_wrapper = EmbeddingTailWrapper(emb_model)
     tail_wrapper.eval()
-    resnet_frames_wrapper = ResNetFramesWrapper(emb_model)
-    resnet_frames_wrapper.eval()
-    pool_classify_wrapper = PoolClassifyWrapper(emb_model)
-    pool_classify_wrapper.eval()
 
     dummy_waveform = torch.randn(1, 1, 160000)
     dummy_weights = torch.ones(1, 589)
     dummy_fbank = fbank_wrapper(dummy_waveform)
-
-    # discover intermediate resnet frames shape and verify parity
-    with torch.no_grad():
-        dummy_resnet_frames = resnet_frames_wrapper(dummy_fbank)
-        print(f"  resnet frames shape: {list(dummy_resnet_frames.shape)}")
-
-        tail_output = tail_wrapper(dummy_fbank, dummy_weights)
-        split_output = pool_classify_wrapper(dummy_resnet_frames, dummy_weights)
-        max_diff = (tail_output - split_output).abs().max().item()
-        assert max_diff < 1e-6, f"parity check failed: max diff = {max_diff}"
-        print(f"  parity check passed (max diff = {max_diff:.2e})")
 
     with torch.no_grad():
         torch.onnx.export(
@@ -324,44 +255,6 @@ def export_embedding(pipeline: Any, models_dir: str) -> None:
         dummy_fbank.repeat(32, 1, 1),
         dummy_weights.repeat(32, 1),
     )
-
-    # export resnet-frames models (CNN backbone only)
-    export_resnet_frames_model(
-        resnet_frames_wrapper,
-        models_dir,
-        "wespeaker-resnet-frames.onnx",
-        dummy_fbank,
-    )
-    export_resnet_frames_model(
-        resnet_frames_wrapper,
-        models_dir,
-        "wespeaker-resnet-frames-b32.onnx",
-        dummy_fbank.repeat(32, 1, 1),
-    )
-
-    # export pool-classify models (pooling + classification head)
-    export_pool_classify_model(
-        pool_classify_wrapper,
-        models_dir,
-        "wespeaker-pool-classify.onnx",
-        dummy_resnet_frames,
-        dummy_weights,
-    )
-    export_pool_classify_model(
-        pool_classify_wrapper,
-        models_dir,
-        "wespeaker-pool-classify-b3.onnx",
-        dummy_resnet_frames.repeat(3, 1, 1),
-        dummy_weights.repeat(3, 1),
-    )
-    export_pool_classify_model(
-        pool_classify_wrapper,
-        models_dir,
-        "wespeaker-pool-classify-b32.onnx",
-        dummy_resnet_frames.repeat(32, 1, 1),
-        dummy_weights.repeat(32, 1),
-    )
-
     with open(
         os.path.join(models_dir, "wespeaker-voxceleb-resnet34.min_num_samples.txt"), "w"
     ) as f:
@@ -422,53 +315,6 @@ def export_embedding_tail_model(
             (dummy_fbank, dummy_weights),
             output_path,
             input_names=["fbank", "weights"],
-            output_names=["output"],
-            opset_version=18,
-            dynamo=True,
-            external_data=False,
-        )
-
-    sz = os.path.getsize(output_path) / 1e6
-    print(f"  {filename} ({sz:.1f} MB)")
-
-
-def export_resnet_frames_model(
-    wrapper: nn.Module,
-    models_dir: str,
-    filename: str,
-    dummy_fbank: torch.Tensor,
-) -> None:
-    output_path = os.path.join(models_dir, filename)
-    with torch.no_grad():
-        torch.onnx.export(
-            wrapper,
-            (dummy_fbank,),
-            output_path,
-            input_names=["fbank"],
-            output_names=["frames"],
-            opset_version=18,
-            dynamo=True,
-            external_data=False,
-        )
-
-    sz = os.path.getsize(output_path) / 1e6
-    print(f"  {filename} ({sz:.1f} MB)")
-
-
-def export_pool_classify_model(
-    wrapper: nn.Module,
-    models_dir: str,
-    filename: str,
-    dummy_frames: torch.Tensor,
-    dummy_weights: torch.Tensor,
-) -> None:
-    output_path = os.path.join(models_dir, filename)
-    with torch.no_grad():
-        torch.onnx.export(
-            wrapper,
-            (dummy_frames, dummy_weights),
-            output_path,
-            input_names=["frames", "weights"],
             output_names=["output"],
             opset_version=18,
             dynamo=True,

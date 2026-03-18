@@ -31,14 +31,6 @@ FUSED_STEM = "wespeaker-voxceleb-resnet34-fused"
 FUSED_B3_STEM = "wespeaker-voxceleb-resnet34-fused-b3"
 FUSED_B32_STEM = "wespeaker-voxceleb-resnet34-fused-b32"
 FUSED_BATCH_SIZES = (1, 3, 32)
-RESNET_FRAMES_STEM = "wespeaker-resnet-frames"
-RESNET_FRAMES_BATCH_SIZES = (1, 32)
-POOL_CLASSIFY_STEM = "wespeaker-pool-classify"
-POOL_CLASSIFY_B3_STEM = "wespeaker-pool-classify-b3"
-POOL_CLASSIFY_B32_STEM = "wespeaker-pool-classify-b32"
-POOL_CLASSIFY_BATCH_SIZES = (1, 3, 32)
-RESNET_CHANNELS = 2560
-RESNET_TIME_FRAMES = 125
 PACKAGES_DIRNAME = "coreml-packages"
 
 
@@ -255,84 +247,6 @@ def build_fused_wrapper(pipeline: Any) -> FusedEmbeddingWrapper:
     wrapper = FusedEmbeddingWrapper(fbank, tail)
     wrapper.eval()
     return wrapper
-
-
-class ResNetFramesWrapper(nn.Module):
-    """ResNet backbone only: fbank -> frame-level features"""
-
-    def __init__(self, model: Any) -> None:
-        super().__init__()
-        self.resnet = model.resnet
-
-    def forward(self, fbank: torch.Tensor) -> torch.Tensor:
-        frames = self.resnet.forward_frames(fbank)
-        return frames.reshape(
-            frames.size(0), frames.size(1) * frames.size(2), frames.size(3)
-        )
-
-
-class PoolClassifyWrapper(nn.Module):
-    """Pooling + classification head: resnet_frames + weights -> embedding"""
-
-    def __init__(self, model: Any) -> None:
-        super().__init__()
-        self.resnet = model.resnet
-        with torch.no_grad():
-            dummy_fbank = torch.zeros(1, FBANK_FRAMES, FBANK_FEATURES)
-            frames = self.resnet.forward_frames(dummy_fbank)
-        self.target_frames = frames.size(-1)
-
-    def pool(self, sequences: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
-        weights = weights.unsqueeze(1)
-        weights = F.interpolate(weights, size=self.target_frames, mode="nearest")
-
-        weight_sum = weights.sum(dim=2)
-        safe_sum = torch.where(
-            weight_sum > 0.0, weight_sum, torch.ones_like(weight_sum)
-        )
-        mean = torch.sum(sequences * weights, dim=2) / safe_sum
-        dx2 = torch.square(sequences - mean.unsqueeze(2))
-        weight_sq_sum = torch.square(weights).sum(dim=2)
-        denom = safe_sum - weight_sq_sum / safe_sum + 1e-8
-        var = torch.sum(dx2 * weights, dim=2) / denom
-        std = torch.sqrt(torch.clamp_min(var, 1e-10))
-
-        stats = torch.cat([mean, std], dim=-1)
-        zero_stats = torch.cat(
-            [torch.zeros_like(mean), torch.full_like(std, 1e-5)], dim=-1
-        )
-        zero_mask = (weight_sum <= 0.0).repeat(1, stats.size(1))
-        return torch.where(zero_mask, zero_stats, stats)
-
-    def forward(self, frames: torch.Tensor, weights: torch.Tensor) -> Any:
-        stats = self.pool(frames, weights)
-        embed_a = self.resnet.seg_1(stats)
-        if self.resnet.two_emb_layer:
-            out = F.relu(embed_a)
-            out = self.resnet.seg_bn_1(out)
-            return self.resnet.seg_2(out)
-
-        return embed_a
-
-
-def build_resnet_frames_wrapper(pipeline: Any) -> ResNetFramesWrapper:
-    wrapper = ResNetFramesWrapper(pipeline._embedding.model_)
-    wrapper.eval()
-    return wrapper
-
-
-def build_pool_classify_wrapper(pipeline: Any) -> PoolClassifyWrapper:
-    wrapper = PoolClassifyWrapper(pipeline._embedding.model_)
-    wrapper.eval()
-    return wrapper
-
-
-def resnet_frames_package_path(output_dir: Path) -> Path:
-    return coreml_packages_dir(output_dir) / f"{RESNET_FRAMES_STEM}.mlpackage"
-
-
-def pool_classify_package_path(output_dir: Path) -> Path:
-    return coreml_packages_dir(output_dir) / f"{POOL_CLASSIFY_STEM}.mlpackage"
 
 
 def save_model_artifacts(

@@ -19,14 +19,6 @@ from common import (
     FUSED_B3_STEM,
     FUSED_BATCH_SIZES,
     FUSED_STEM,
-    POOL_CLASSIFY_B32_STEM,
-    POOL_CLASSIFY_B3_STEM,
-    POOL_CLASSIFY_BATCH_SIZES,
-    POOL_CLASSIFY_STEM,
-    RESNET_CHANNELS,
-    RESNET_FRAMES_BATCH_SIZES,
-    RESNET_FRAMES_STEM,
-    RESNET_TIME_FRAMES,
     SEGMENTATION_BATCHED_STEM,
     SEGMENTATION_BATCH_SIZES,
     SEGMENTATION_FRAMES,
@@ -38,15 +30,11 @@ from common import (
     TAIL_STEM,
     build_fbank_wrapper,
     build_fused_wrapper,
-    build_pool_classify_wrapper,
-    build_resnet_frames_wrapper,
     build_tail_wrapper,
     fbank_package_path,
     fused_package_path,
     load_pipeline,
     patch_sincnet_encoder_for_tracing,
-    pool_classify_package_path,
-    resnet_frames_package_path,
     save_model_artifacts,
     segmentation_package_path,
     tail_package_path,
@@ -409,102 +397,6 @@ def export_fused_embedding(pipeline: Any, output_dir: Path) -> None:
     )
 
 
-def export_resnet_frames(pipeline: Any, output_dir: Path) -> None:
-    resnet_frames_wrapper = build_resnet_frames_wrapper(pipeline)
-    dummy_fbank = torch.zeros(32, FBANK_FRAMES, FBANK_FEATURES)
-
-    with torch.inference_mode():
-        traced = torch.jit.trace(resnet_frames_wrapper, dummy_fbank)
-
-    compiled_paths = [
-        output_dir / f"{RESNET_FRAMES_STEM}.mlmodelc",
-        output_dir / f"{RESNET_FRAMES_STEM}-b32.mlmodelc",
-    ]
-
-    mlmodel = ct.convert(
-        traced,
-        convert_to="mlprogram",
-        inputs=[
-            ct.TensorType(
-                name="fbank",
-                shape=ct.EnumeratedShapes(
-                    shapes=[
-                        (bs, FBANK_FRAMES, FBANK_FEATURES)
-                        for bs in RESNET_FRAMES_BATCH_SIZES
-                    ],
-                    default=(32, FBANK_FRAMES, FBANK_FEATURES),
-                ),
-                dtype=np.float32,
-            )
-        ],
-        outputs=[ct.TensorType(name="output", dtype=np.float32)],
-        compute_units=ct.ComputeUnit.CPU_AND_GPU,
-        minimum_deployment_target=deployment_target(),
-        compute_precision=ct.precision.FLOAT32,
-    )
-
-    print("Saving resnet-frames CoreML artifacts (FP32)...")
-    save_model_artifacts(
-        mlmodel,
-        resnet_frames_package_path(output_dir),
-        compiled_paths,
-    )
-
-
-def export_pool_classify(pipeline: Any, output_dir: Path) -> None:
-    pool_classify_wrapper = build_pool_classify_wrapper(pipeline)
-    dummy_frames = torch.zeros(32, RESNET_CHANNELS, RESNET_TIME_FRAMES)
-    dummy_weights = torch.ones(32, SEGMENTATION_FRAMES)
-
-    with torch.inference_mode():
-        traced = torch.jit.trace(pool_classify_wrapper, (dummy_frames, dummy_weights))
-
-    compiled_paths = [
-        output_dir / f"{POOL_CLASSIFY_STEM}.mlmodelc",
-        output_dir / f"{POOL_CLASSIFY_B3_STEM}.mlmodelc",
-        output_dir / f"{POOL_CLASSIFY_B32_STEM}.mlmodelc",
-    ]
-
-    mlmodel = ct.convert(
-        traced,
-        convert_to="mlprogram",
-        inputs=[
-            ct.TensorType(
-                name="frames",
-                shape=ct.EnumeratedShapes(
-                    shapes=[
-                        (bs, RESNET_CHANNELS, RESNET_TIME_FRAMES)
-                        for bs in POOL_CLASSIFY_BATCH_SIZES
-                    ],
-                    default=(32, RESNET_CHANNELS, RESNET_TIME_FRAMES),
-                ),
-                dtype=np.float32,
-            ),
-            ct.TensorType(
-                name="weights",
-                shape=ct.EnumeratedShapes(
-                    shapes=[
-                        (bs, SEGMENTATION_FRAMES) for bs in POOL_CLASSIFY_BATCH_SIZES
-                    ],
-                    default=(32, SEGMENTATION_FRAMES),
-                ),
-                dtype=np.float32,
-            ),
-        ],
-        outputs=[ct.TensorType(name="output", dtype=np.float32)],
-        compute_units=ct.ComputeUnit.CPU_AND_GPU,
-        minimum_deployment_target=deployment_target(),
-        compute_precision=ct.precision.FLOAT32,
-    )
-
-    print("Saving pool-classify CoreML artifacts (FP32)...")
-    save_model_artifacts(
-        mlmodel,
-        pool_classify_package_path(output_dir),
-        compiled_paths,
-    )
-
-
 def main() -> None:
     args = parse_args()
     pipeline = load_pipeline()
@@ -512,8 +404,6 @@ def main() -> None:
     export_tail(pipeline, args.output_dir)
     export_fbank(args.output_dir)
     export_fused_embedding(pipeline, args.output_dir)
-    export_resnet_frames(pipeline, args.output_dir)
-    export_pool_classify(pipeline, args.output_dir)
     print("CoreML conversion complete")
 
 
