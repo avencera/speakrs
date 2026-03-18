@@ -98,9 +98,11 @@ impl EmbeddingModel {
         let split_tail_path = split_tail_model_path(model_path, 1);
         let split_tail_batched_path = split_tail_model_path(model_path, CHUNK_SPEAKER_BATCH_SIZE);
         let split_primary_tail_batched_path = split_tail_model_path(model_path, PRIMARY_BATCH_SIZE);
-        let use_split_backend = matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast)
+        let has_multi_mask = multi_mask_model_path(model_path, 1).is_some_and(|p| p.exists());
+        let use_split_backend = (matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast)
             && split_fbank_path.exists()
-            && split_tail_path.exists();
+            && split_tail_path.exists())
+            || (has_multi_mask && split_fbank_path.exists());
 
         Ok(Self {
             model_path: model_path.to_owned(),
@@ -301,10 +303,12 @@ impl EmbeddingModel {
             split_tail_model_path(&self.model_path, CHUNK_SPEAKER_BATCH_SIZE);
         let split_primary_tail_batched_path =
             split_tail_model_path(&self.model_path, PRIMARY_BATCH_SIZE);
+        let has_multi_mask = multi_mask_model_path(&self.model_path, 1).is_some_and(|p| p.exists());
         let use_split_backend =
-            matches!(self.mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast)
+            (matches!(self.mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast)
                 && split_fbank_path.exists()
-                && split_tail_path.exists();
+                && split_tail_path.exists())
+                || (has_multi_mask && split_fbank_path.exists());
         let split_fbank_batched_path = split_fbank_batched_model_path(&self.model_path);
         self.split_fbank_session = use_split_backend
             .then(|| {

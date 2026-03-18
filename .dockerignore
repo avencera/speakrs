@@ -11,6 +11,8 @@ _benchmarks/
 .claude/
 
 fixtures/
+!fixtures/models/wespeaker-multimask-tail.onnx
+!fixtures/models/wespeaker-multimask-tail-b32.onnx
 *.mlpackage
 *.mlmodelc
 

@@ -301,7 +301,9 @@ class MultiMaskTailWrapper(nn.Module):
         frames = frames.reshape(B, C, T)  # [B, 2560, 125]
 
         # repeat each fbank's frames NUM_SPEAKERS times along the batch dim
-        frames = torch.repeat_interleave(frames, self.num_speakers, dim=0)  # [B*3, 2560, 125]
+        frames = torch.repeat_interleave(
+            frames, self.num_speakers, dim=0
+        )  # [B*3, 2560, 125]
 
         stats = self.pool(frames, masks)  # [B*3, 5120]
         embed_a = self.resnet.seg_1(stats)
