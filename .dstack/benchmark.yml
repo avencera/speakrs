@@ -1,9 +1,12 @@
 type: task
 name: benchmark
 
-image: ${{ env.SPEAKRS_GPU_IMAGE }}
+image: ghcr.io/avencera/speakrs-gpu:4393fe5
 
 env:
+  - NVIDIA_VISIBLE_DEVICES=all
+  - LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64
+  - RUST_BACKTRACE=1
   - DATASET
   - IMPLS
   - MAX_FILES
@@ -16,13 +19,20 @@ env:
   - AWS_REGION
 
 commands:
-  - export SPEAKRS_RESULTS_DIR=/workspace/_benchmarks/$RUN_NAME
-  - mkdir -p $SPEAKRS_RESULTS_DIR
-  - speakrs-bm --dataset $DATASET
-      ${IMPLS:+--impls $IMPLS}
-      ${MAX_FILES:+--max-files $MAX_FILES}
+  - |
+    # seed baked assets from /opt into /workspace (mirrors docker-entrypoint.sh)
+    mkdir -p /workspace/models && cp -rn /opt/models/* /workspace/models/ 2>/dev/null || true
+    mkdir -p /workspace/datasets && cp -rn /opt/datasets/* /workspace/datasets/ 2>/dev/null || true
+    for lib in libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so; do
+      [ -f /usr/local/lib/$lib ] && ln -sf /usr/local/lib/$lib /workspace/$lib || true
+    done
+    export SPEAKRS_RESULTS_DIR=/workspace/_benchmarks/$RUN_NAME
+    mkdir -p $SPEAKRS_RESULTS_DIR
+    speakrs-bm --dataset $DATASET \
+      ${IMPLS:+--impls $IMPLS} \
+      ${MAX_FILES:+--max-files $MAX_FILES} \
       ${MAX_MINUTES:+--max-minutes $MAX_MINUTES}
-  - s5cmd --endpoint-url $AWS_ENDPOINT_URL
+    s5cmd --endpoint-url $AWS_ENDPOINT_URL \
       cp $SPEAKRS_RESULTS_DIR/* s3://speakrs/benchmarks/$RUN_NAME/
 
 resources:

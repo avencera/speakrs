@@ -21,38 +21,41 @@ RUN curl -fSL -o /tmp/ort.tgz \
     rm /tmp/ort.tgz
 
 # =============================================================================
-# Dependency warmup for the speakrs-bm build graph
+# cargo-chef: compute dependency recipe from lock file
+# =============================================================================
+FROM base AS planner
+
+RUN cargo install cargo-chef --locked
+COPY Cargo.toml Cargo.lock ./
+COPY xtask/Cargo.toml xtask/Cargo.toml
+COPY src/ ./src/
+COPY xtask/ ./xtask/
+RUN cargo chef prepare --recipe-path recipe.json
+
+# =============================================================================
+# cargo-chef: cook dependencies (cached layer, only re-runs when deps change)
 # =============================================================================
 FROM base AS deps
 
-COPY Cargo.toml Cargo.lock ./
-COPY xtask/Cargo.toml xtask/Cargo.toml
-
-RUN mkdir -p src xtask/src xtask/src/bin && \
-    printf '\n' > src/lib.rs && \
-    printf '\n' > xtask/src/lib.rs && \
-    printf 'fn main() {}\n' > xtask/src/main.rs && \
-    printf 'fn main() {}\n' > xtask/src/bin/speakrs_bm.rs
-
+RUN cargo install cargo-chef --locked
+COPY --from=planner /build/recipe.json recipe.json
 RUN --mount=type=cache,target=/root/.cargo/registry,id=speakrs-gpu-cargo-registry \
     --mount=type=cache,target=/root/.cargo/git,id=speakrs-gpu-cargo-git \
-    --mount=type=cache,target=/build/target,id=speakrs-gpu-target \
-    cargo build --release -p xtask --features cuda --bin speakrs-bm
+    cargo chef cook --release --recipe-path recipe.json --features cuda -p xtask
 
 # =============================================================================
-# Build the real speakrs-bm binary while reusing warmed Cargo caches
+# Build the real speakrs-bm binary (deps are cached, only project code compiles)
 # =============================================================================
 FROM deps AS builder
 
+COPY Cargo.toml Cargo.lock ./
+COPY xtask/Cargo.toml xtask/Cargo.toml
 COPY src/ ./src/
 COPY xtask/ ./xtask/
 
 # With load-dynamic, ort-sys skips downloading/linking ORT at compile time.
 # The binary loads libonnxruntime.so at runtime from the library path.
-RUN --mount=type=cache,target=/root/.cargo/registry,id=speakrs-gpu-cargo-registry \
-    --mount=type=cache,target=/root/.cargo/git,id=speakrs-gpu-cargo-git \
-    --mount=type=cache,target=/build/target,id=speakrs-gpu-target \
-    cargo build --release -p xtask --features cuda --bin speakrs-bm && \
+RUN cargo build --release -p xtask --features cuda --bin speakrs-bm && \
     mkdir -p /opt/bin && \
     cp -P target/release/speakrs-bm /opt/bin/
 
