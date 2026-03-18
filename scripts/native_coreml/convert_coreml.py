@@ -19,6 +19,10 @@ from common import (
     FUSED_B3_STEM,
     FUSED_BATCH_SIZES,
     FUSED_STEM,
+    MULTI_MASK_B32_STEM,
+    MULTI_MASK_BATCH_SIZES,
+    MULTI_MASK_STEM,
+    NUM_SPEAKERS,
     SEGMENTATION_BATCHED_STEM,
     SEGMENTATION_BATCH_SIZES,
     SEGMENTATION_FRAMES,
@@ -30,10 +34,12 @@ from common import (
     TAIL_STEM,
     build_fbank_wrapper,
     build_fused_wrapper,
+    build_multi_mask_wrapper,
     build_tail_wrapper,
     fbank_package_path,
     fused_package_path,
     load_pipeline,
+    multi_mask_package_path,
     patch_sincnet_encoder_for_tracing,
     save_model_artifacts,
     segmentation_package_path,
@@ -397,6 +403,61 @@ def export_fused_embedding(pipeline: Any, output_dir: Path) -> None:
     )
 
 
+def export_multi_mask_tail(pipeline: Any, output_dir: Path) -> None:
+    multi_mask_wrapper = build_multi_mask_wrapper(pipeline)
+    dummy_fbank = torch.zeros(32, FBANK_FRAMES, FBANK_FEATURES)
+    dummy_masks = torch.ones(32 * NUM_SPEAKERS, SEGMENTATION_FRAMES)
+
+    with torch.inference_mode():
+        traced = torch.jit.trace(multi_mask_wrapper, (dummy_fbank, dummy_masks))
+
+    compiled_paths = [
+        output_dir / f"{MULTI_MASK_STEM}.mlmodelc",
+        output_dir / f"{MULTI_MASK_B32_STEM}.mlmodelc",
+    ]
+
+    # fbank and masks dimensions are decoupled: fbank batch = B, masks batch = B*3
+    mlmodel = ct.convert(
+        traced,
+        convert_to="mlprogram",
+        inputs=[
+            ct.TensorType(
+                name="fbank",
+                shape=ct.EnumeratedShapes(
+                    shapes=[
+                        (bs, FBANK_FRAMES, FBANK_FEATURES)
+                        for bs in MULTI_MASK_BATCH_SIZES
+                    ],
+                    default=(32, FBANK_FRAMES, FBANK_FEATURES),
+                ),
+                dtype=np.float32,
+            ),
+            ct.TensorType(
+                name="masks",
+                shape=ct.EnumeratedShapes(
+                    shapes=[
+                        (bs * NUM_SPEAKERS, SEGMENTATION_FRAMES)
+                        for bs in MULTI_MASK_BATCH_SIZES
+                    ],
+                    default=(32 * NUM_SPEAKERS, SEGMENTATION_FRAMES),
+                ),
+                dtype=np.float32,
+            ),
+        ],
+        outputs=[ct.TensorType(name="output", dtype=np.float32)],
+        compute_units=ct.ComputeUnit.CPU_AND_GPU,
+        minimum_deployment_target=deployment_target(),
+        compute_precision=ct.precision.FLOAT32,
+    )
+
+    print("Saving multi-mask tail CoreML artifacts (FP32)...")
+    save_model_artifacts(
+        mlmodel,
+        multi_mask_package_path(output_dir),
+        compiled_paths,
+    )
+
+
 def main() -> None:
     args = parse_args()
     pipeline = load_pipeline()
@@ -404,6 +465,7 @@ def main() -> None:
     export_tail(pipeline, args.output_dir)
     export_fbank(args.output_dir)
     export_fused_embedding(pipeline, args.output_dir)
+    export_multi_mask_tail(pipeline, args.output_dir)
     print("CoreML conversion complete")
 
 

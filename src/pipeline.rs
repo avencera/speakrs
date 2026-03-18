@@ -248,6 +248,7 @@ enum InferencePath {
 enum EmbeddingPath {
     Masked,
     Split,
+    MultiMask,
 }
 
 struct ConcurrentEmbeddingRunner<'a> {
@@ -340,6 +341,104 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
             embeddings,
             num_speakers: self.num_speakers,
         })
+    }
+
+    fn run_multi_mask(
+        &self,
+        receiver: crossbeam_channel::Receiver<Array2<f32>>,
+        embedding_model: &mut EmbeddingModel,
+        batch_size: usize,
+        min_num_samples: usize,
+    ) -> Result<ConcurrentEmbeddingResult, PipelineError> {
+        let mut decoded_windows: Vec<Array2<f32>> = Vec::new();
+        let mut embeddings: Vec<SpeakerEmbedding> = Vec::new();
+        let mut fbank_buffer: Vec<Array2<f32>> = Vec::with_capacity(batch_size);
+        let mut masks_buffer: Vec<Vec<f32>> = Vec::with_capacity(batch_size * self.num_speakers);
+        let mut chunk_indices: Vec<usize> = Vec::with_capacity(batch_size);
+        let mut chunk_idx = 0usize;
+
+        for raw_window in receiver {
+            let (segmentation_view, chunk_audio, clean_masks) =
+                self.decode_chunk(&raw_window, &mut decoded_windows, chunk_idx);
+            let fbank = embedding_model.compute_chunk_fbank(chunk_audio)?;
+            fbank_buffer.push(fbank);
+            chunk_indices.push(chunk_idx);
+
+            // collect per-speaker masks for this chunk
+            for speaker_idx in 0..self.num_speakers {
+                let Some(weights) = select_speaker_weights(
+                    &segmentation_view,
+                    &clean_masks,
+                    speaker_idx,
+                    chunk_audio.len(),
+                    min_num_samples,
+                ) else {
+                    masks_buffer.push(vec![0.0; 589]);
+                    continue;
+                };
+                masks_buffer.push(weights);
+            }
+
+            if fbank_buffer.len() == batch_size {
+                self.flush_multi_mask(
+                    embedding_model,
+                    &fbank_buffer,
+                    &masks_buffer,
+                    &chunk_indices,
+                    &mut embeddings,
+                )?;
+                fbank_buffer.clear();
+                masks_buffer.clear();
+                chunk_indices.clear();
+            }
+            chunk_idx += 1;
+        }
+
+        if !fbank_buffer.is_empty() {
+            self.flush_multi_mask(
+                embedding_model,
+                &fbank_buffer,
+                &masks_buffer,
+                &chunk_indices,
+                &mut embeddings,
+            )?;
+        }
+
+        Ok(ConcurrentEmbeddingResult {
+            decoded_windows,
+            embeddings,
+            num_speakers: self.num_speakers,
+        })
+    }
+
+    fn flush_multi_mask(
+        &self,
+        embedding_model: &mut EmbeddingModel,
+        fbanks: &[Array2<f32>],
+        masks: &[Vec<f32>],
+        chunk_indices: &[usize],
+        embeddings: &mut Vec<SpeakerEmbedding>,
+    ) -> Result<(), PipelineError> {
+        let fbank_refs: Vec<_> = fbanks.iter().collect();
+        let mask_refs: Vec<_> = masks.iter().map(|m| m.as_slice()).collect();
+        let batch_embeddings = embedding_model.embed_multi_mask_batch(&fbank_refs, &mask_refs)?;
+
+        for (fbank_idx, &chunk_idx) in chunk_indices.iter().enumerate() {
+            for speaker_idx in 0..self.num_speakers {
+                let mask_idx = fbank_idx * self.num_speakers + speaker_idx;
+                // skip inactive speakers (all-zero masks)
+                let is_active = masks[mask_idx].iter().any(|&v| v > 0.0);
+                if !is_active {
+                    continue;
+                }
+                embeddings.push(SpeakerEmbedding {
+                    chunk_idx,
+                    speaker_idx,
+                    embedding: batch_embeddings.row(mask_idx).to_vec(),
+                });
+            }
+        }
+        Ok(())
     }
 
     fn flush_split_pending(
@@ -696,7 +795,9 @@ impl<'a> PipelineRunner<'a> {
     }
 
     fn embedding_path(&self) -> EmbeddingPath {
-        if self.emb_model.prefers_chunk_embedding_path()
+        if self.emb_model.prefers_multi_mask_path() && self.emb_model.multi_mask_batch_size() > 0 {
+            EmbeddingPath::MultiMask
+        } else if self.emb_model.prefers_chunk_embedding_path()
             && self.emb_model.split_primary_batch_size() > 0
         {
             EmbeddingPath::Split
@@ -764,6 +865,7 @@ impl<'a> PipelineRunner<'a> {
         };
         let embedding_path = self.embedding_path();
         let batch_size = match embedding_path {
+            EmbeddingPath::MultiMask => self.emb_model.multi_mask_batch_size(),
             EmbeddingPath::Split => self.emb_model.split_primary_batch_size(),
             EmbeddingPath::Masked => self.emb_model.primary_batch_size(),
         };
@@ -774,6 +876,12 @@ impl<'a> PipelineRunner<'a> {
             let segmentation_handle = scope.spawn(|| self.seg_model.run_streaming(audio, tx));
 
             let embedding_result = match embedding_path {
+                EmbeddingPath::MultiMask => concurrent_embedding_runner.run_multi_mask(
+                    rx,
+                    self.emb_model,
+                    batch_size,
+                    min_num_samples,
+                ),
                 EmbeddingPath::Split => concurrent_embedding_runner.run_split(
                     rx,
                     self.emb_model,
@@ -968,6 +1076,9 @@ impl DecodedSegmentations {
         let mut embeddings = Array3::<f32>::from_elem((num_chunks, num_speakers, 256), f32::NAN);
 
         match embedding_path {
+            EmbeddingPath::MultiMask => {
+                self.extract_multi_mask_embeddings(audio, emb_model, layout, &mut embeddings)?
+            }
             EmbeddingPath::Split => {
                 self.extract_split_embeddings(audio, emb_model, layout, &mut embeddings)?
             }
@@ -1112,6 +1223,83 @@ impl DecodedSegmentations {
 
         Ok(())
     }
+
+    fn extract_multi_mask_embeddings(
+        &self,
+        audio: &[f32],
+        emb_model: &mut EmbeddingModel,
+        layout: &ChunkLayout,
+        embeddings: &mut Array3<f32>,
+    ) -> Result<(), PipelineError> {
+        let batch_size = emb_model.multi_mask_batch_size();
+        let num_speakers = self.0.shape()[2];
+        let num_chunks = self.0.shape()[0];
+        let min_num_samples = emb_model.min_num_samples();
+
+        let mut fbank_buffer: Vec<Array2<f32>> = Vec::with_capacity(batch_size);
+        let mut masks_buffer: Vec<Vec<f32>> = Vec::with_capacity(batch_size * num_speakers);
+        let mut chunk_indices: Vec<usize> = Vec::with_capacity(batch_size);
+        let mut batches = 0usize;
+
+        for chunk_idx in 0..num_chunks {
+            let chunk_audio = layout.chunk_audio(audio, chunk_idx);
+            let fbank = emb_model.compute_chunk_fbank(chunk_audio)?;
+            fbank_buffer.push(fbank);
+            chunk_indices.push(chunk_idx);
+
+            let chunk_segmentations = self.0.slice(s![chunk_idx, .., ..]);
+            let clean_masks_arr = clean_masks(&chunk_segmentations);
+
+            for speaker_idx in 0..num_speakers {
+                let Some(weights) = select_speaker_weights(
+                    &chunk_segmentations,
+                    &clean_masks_arr,
+                    speaker_idx,
+                    chunk_audio.len(),
+                    min_num_samples,
+                ) else {
+                    masks_buffer.push(vec![0.0; 589]);
+                    continue;
+                };
+                masks_buffer.push(weights);
+            }
+
+            if fbank_buffer.len() == batch_size {
+                flush_multi_mask_batch(
+                    emb_model,
+                    &fbank_buffer,
+                    &masks_buffer,
+                    &chunk_indices,
+                    num_speakers,
+                    embeddings,
+                )?;
+                batches += 1;
+                fbank_buffer.clear();
+                masks_buffer.clear();
+                chunk_indices.clear();
+            }
+        }
+
+        if !fbank_buffer.is_empty() {
+            flush_multi_mask_batch(
+                emb_model,
+                &fbank_buffer,
+                &masks_buffer,
+                &chunk_indices,
+                num_speakers,
+                embeddings,
+            )?;
+            batches += 1;
+        }
+
+        tracing::info!(
+            batches,
+            total_chunks = num_chunks,
+            "Multi-mask embeddings complete"
+        );
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1134,18 +1322,17 @@ fn extract_embeddings(
         seg_model.window_samples(),
         decoded_segmentations.nchunks(),
     );
+    let embedding_path = if emb_model.prefers_multi_mask_path()
+        && emb_model.multi_mask_batch_size() > 0
+    {
+        EmbeddingPath::MultiMask
+    } else if emb_model.prefers_chunk_embedding_path() && emb_model.split_primary_batch_size() > 0 {
+        EmbeddingPath::Split
+    } else {
+        EmbeddingPath::Masked
+    };
     decoded_segmentations
-        .extract_embeddings(
-            audio,
-            emb_model,
-            &layout,
-            if emb_model.prefers_chunk_embedding_path() && emb_model.split_primary_batch_size() > 0
-            {
-                EmbeddingPath::Split
-            } else {
-                EmbeddingPath::Masked
-            },
-        )
+        .extract_embeddings(audio, emb_model, &layout, embedding_path)
         .map(|chunk_embeddings| chunk_embeddings.0)
 }
 
@@ -1231,6 +1418,34 @@ fn flush_split_embedding_batch(
         embeddings
             .slice_mut(s![item.chunk_idx, item.speaker_idx, ..])
             .assign(&batch_embeddings.row(batch_idx));
+    }
+
+    Ok(())
+}
+
+fn flush_multi_mask_batch(
+    emb_model: &mut EmbeddingModel,
+    fbanks: &[Array2<f32>],
+    masks: &[Vec<f32>],
+    chunk_indices: &[usize],
+    num_speakers: usize,
+    embeddings: &mut Array3<f32>,
+) -> Result<(), PipelineError> {
+    let fbank_refs: Vec<_> = fbanks.iter().collect();
+    let mask_refs: Vec<_> = masks.iter().map(|m| m.as_slice()).collect();
+    let batch_embeddings = emb_model.embed_multi_mask_batch(&fbank_refs, &mask_refs)?;
+
+    for (fbank_idx, &chunk_idx) in chunk_indices.iter().enumerate() {
+        for speaker_idx in 0..num_speakers {
+            let mask_idx = fbank_idx * num_speakers + speaker_idx;
+            let is_active = masks[mask_idx].iter().any(|&v| v > 0.0);
+            if !is_active {
+                continue;
+            }
+            embeddings
+                .slice_mut(s![chunk_idx, speaker_idx, ..])
+                .assign(&batch_embeddings.row(mask_idx));
+        }
     }
 
     Ok(())

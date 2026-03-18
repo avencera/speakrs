@@ -181,16 +181,76 @@ def export_embedding(pipeline: Any, models_dir: str) -> None:
 
             return embed_a
 
+    NUM_SPEAKERS = 3
+
+    class MultiMaskTailWrapper(nn.Module):
+        """fbanks [B, 998, 80] + masks [B*3, 589] -> embeddings [B*3, 256]"""
+
+        def __init__(self, model: Any) -> None:
+            super().__init__()
+            self.resnet = model.resnet
+            self.num_speakers = NUM_SPEAKERS
+
+        def pool(self, sequences: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+            weights = weights.unsqueeze(1)
+            num_frames = sequences.size(-1)
+            if weights.size(-1) != num_frames:
+                weights = F.interpolate(weights, size=num_frames, mode="nearest")
+
+            weight_sum = weights.sum(dim=2)
+            safe_sum = torch.where(
+                weight_sum > 0.0, weight_sum, torch.ones_like(weight_sum)
+            )
+            mean = torch.sum(sequences * weights, dim=2) / safe_sum
+            dx2 = torch.square(sequences - mean.unsqueeze(2))
+            weight_sq_sum = torch.square(weights).sum(dim=2)
+            denom = safe_sum - weight_sq_sum / safe_sum + 1e-8
+            var = torch.sum(dx2 * weights, dim=2) / denom
+            std = torch.sqrt(torch.clamp_min(var, 1e-10))
+
+            stats = torch.cat([mean, std], dim=-1)
+            zero_stats = torch.cat(
+                [torch.zeros_like(mean), torch.full_like(std, 1e-5)], dim=-1
+            )
+            zero_mask = (weight_sum <= 0.0).repeat(1, stats.size(1))
+            return torch.where(zero_mask, zero_stats, stats)
+
+        def forward(self, fbank: torch.Tensor, masks: torch.Tensor) -> Any:
+            frames = self.resnet.forward_frames(fbank)
+            B = frames.size(0)
+            C = frames.size(1) * frames.size(2)
+            T = frames.size(3)
+            frames = frames.reshape(B, C, T)
+            frames = torch.repeat_interleave(frames, self.num_speakers, dim=0)
+            stats = self.pool(frames, masks)
+            embed_a = self.resnet.seg_1(stats)
+            if self.resnet.two_emb_layer:
+                out = F.relu(embed_a)
+                out = self.resnet.seg_bn_1(out)
+                return self.resnet.seg_2(out)
+            return embed_a
+
     emb_model = pipeline._embedding.model_
     emb_model.eval()
     fbank_wrapper = FbankWrapper(emb_model)
     fbank_wrapper.eval()
     tail_wrapper = EmbeddingTailWrapper(emb_model)
     tail_wrapper.eval()
+    multi_mask_wrapper = MultiMaskTailWrapper(emb_model)
+    multi_mask_wrapper.eval()
 
     dummy_waveform = torch.randn(1, 1, 160000)
     dummy_weights = torch.ones(1, 589)
     dummy_fbank = fbank_wrapper(dummy_waveform)
+
+    # verify multi-mask parity with existing tail wrapper
+    with torch.no_grad():
+        tail_output = tail_wrapper(dummy_fbank, dummy_weights)
+        multi_masks = dummy_weights.repeat(NUM_SPEAKERS, 1)
+        multi_output = multi_mask_wrapper(dummy_fbank, multi_masks)
+        max_diff = (tail_output - multi_output[0:1]).abs().max().item()
+        assert max_diff < 1e-6, f"multi-mask parity check failed: max diff = {max_diff}"
+        print(f"  multi-mask parity check passed (max diff = {max_diff:.2e})")
 
     with torch.no_grad():
         torch.onnx.export(
@@ -255,6 +315,23 @@ def export_embedding(pipeline: Any, models_dir: str) -> None:
         dummy_fbank.repeat(32, 1, 1),
         dummy_weights.repeat(32, 1),
     )
+
+    # export multi-mask models
+    export_multi_mask_model(
+        multi_mask_wrapper,
+        models_dir,
+        "wespeaker-multimask-tail.onnx",
+        dummy_fbank,
+        dummy_weights.repeat(NUM_SPEAKERS, 1),
+    )
+    export_multi_mask_model(
+        multi_mask_wrapper,
+        models_dir,
+        "wespeaker-multimask-tail-b32.onnx",
+        dummy_fbank.repeat(32, 1, 1),
+        dummy_weights.repeat(32 * NUM_SPEAKERS, 1),
+    )
+
     with open(
         os.path.join(models_dir, "wespeaker-voxceleb-resnet34.min_num_samples.txt"), "w"
     ) as f:
@@ -315,6 +392,30 @@ def export_embedding_tail_model(
             (dummy_fbank, dummy_weights),
             output_path,
             input_names=["fbank", "weights"],
+            output_names=["output"],
+            opset_version=18,
+            dynamo=True,
+            external_data=False,
+        )
+
+    sz = os.path.getsize(output_path) / 1e6
+    print(f"  {filename} ({sz:.1f} MB)")
+
+
+def export_multi_mask_model(
+    wrapper: nn.Module,
+    models_dir: str,
+    filename: str,
+    dummy_fbank: torch.Tensor,
+    dummy_masks: torch.Tensor,
+) -> None:
+    output_path = os.path.join(models_dir, filename)
+    with torch.no_grad():
+        torch.onnx.export(
+            wrapper,
+            (dummy_fbank, dummy_masks),
+            output_path,
+            input_names=["fbank", "masks"],
             output_names=["output"],
             opset_version=18,
             dynamo=True,
