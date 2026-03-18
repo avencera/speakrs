@@ -13,6 +13,8 @@ const PRIMARY_BATCH_SIZE: usize = 32;
 const CHUNK_SPEAKER_BATCH_SIZE: usize = 3;
 const FBANK_FRAMES: usize = 998;
 const FBANK_FEATURES: usize = 80;
+const RESNET_CHANNELS: usize = 2560;
+const RESNET_FRAMES: usize = 125;
 
 pub struct MaskedEmbeddingInput<'a> {
     pub audio: &'a [f32],
@@ -22,6 +24,11 @@ pub struct MaskedEmbeddingInput<'a> {
 
 pub(crate) struct SplitTailInput<'a> {
     pub fbank: &'a Array2<f32>,
+    pub weights: &'a [f32],
+}
+
+pub(crate) struct PoolClassifyInput<'a> {
+    pub resnet_frames: &'a Array2<f32>,
     pub weights: &'a [f32],
 }
 
@@ -46,6 +53,14 @@ pub struct EmbeddingModel {
     #[cfg(feature = "coreml")]
     native_fbank_batched_session: Option<CoreMlModel>,
     #[cfg(feature = "coreml")]
+    native_resnet_frames_session: Option<CoreMlModel>,
+    #[cfg(feature = "coreml")]
+    native_pool_classify_session: Option<CoreMlModel>,
+    #[cfg(feature = "coreml")]
+    native_pool_classify_batched_session: Option<CoreMlModel>,
+    #[cfg(feature = "coreml")]
+    native_pool_classify_primary_batched_session: Option<CoreMlModel>,
+    #[cfg(feature = "coreml")]
     cached_tail_fbank_shape: CachedInputShape,
     #[cfg(feature = "coreml")]
     cached_tail_weights_shape: CachedInputShape,
@@ -53,6 +68,14 @@ pub struct EmbeddingModel {
     cached_fbank_single_shape: CachedInputShape,
     #[cfg(feature = "coreml")]
     cached_fbank_batch_shape: CachedInputShape,
+    #[cfg(feature = "coreml")]
+    cached_resnet_frames_fbank_shape: CachedInputShape,
+    #[cfg(feature = "coreml")]
+    cached_resnet_frames_fbank_batch_shape: CachedInputShape,
+    #[cfg(feature = "coreml")]
+    cached_pool_classify_frames_shape: CachedInputShape,
+    #[cfg(feature = "coreml")]
+    cached_pool_classify_weights_shape: CachedInputShape,
     waveform_buffer: Array3<f32>,
     weights_buffer: Array2<f32>,
     primary_batch_waveform_buffer: Array3<f32>,
@@ -63,6 +86,15 @@ pub struct EmbeddingModel {
     split_weights_batch_buffer: Array2<f32>,
     split_primary_feature_batch_buffer: Array3<f32>,
     split_primary_weights_batch_buffer: Array2<f32>,
+    resnet_frames_session: Option<Session>,
+    resnet_frames_batched_session: Option<Session>,
+    pool_classify_session: Option<Session>,
+    pool_classify_batched_session: Option<Session>,
+    pool_classify_primary_batched_session: Option<Session>,
+    resnet_frames_fbank_buffer: Array3<f32>,
+    resnet_frames_fbank_batch_buffer: Array3<f32>,
+    pool_classify_primary_frames_batch_buffer: Array3<f32>,
+    pool_classify_primary_weights_batch_buffer: Array2<f32>,
     sample_rate: usize,
     window_samples: usize,
     mask_frames: usize,
@@ -147,6 +179,22 @@ impl EmbeddingModel {
                 PRIMARY_BATCH_SIZE,
             ),
             #[cfg(feature = "coreml")]
+            native_resnet_frames_session: Self::load_native_resnet_frames(model_path, mode, 1),
+            #[cfg(feature = "coreml")]
+            native_pool_classify_session: Self::load_native_pool_classify(model_path, mode, 1),
+            #[cfg(feature = "coreml")]
+            native_pool_classify_batched_session: Self::load_native_pool_classify(
+                model_path,
+                mode,
+                CHUNK_SPEAKER_BATCH_SIZE,
+            ),
+            #[cfg(feature = "coreml")]
+            native_pool_classify_primary_batched_session: Self::load_native_pool_classify(
+                model_path,
+                mode,
+                PRIMARY_BATCH_SIZE,
+            ),
+            #[cfg(feature = "coreml")]
             cached_tail_fbank_shape: CachedInputShape::new(
                 "fbank",
                 &[PRIMARY_BATCH_SIZE, FBANK_FRAMES, FBANK_FEATURES],
@@ -159,6 +207,26 @@ impl EmbeddingModel {
             cached_fbank_batch_shape: CachedInputShape::new(
                 "waveform",
                 &[PRIMARY_BATCH_SIZE, 1, 160_000],
+            ),
+            #[cfg(feature = "coreml")]
+            cached_resnet_frames_fbank_shape: CachedInputShape::new(
+                "fbank",
+                &[1, FBANK_FRAMES, FBANK_FEATURES],
+            ),
+            #[cfg(feature = "coreml")]
+            cached_resnet_frames_fbank_batch_shape: CachedInputShape::new(
+                "fbank",
+                &[PRIMARY_BATCH_SIZE, FBANK_FRAMES, FBANK_FEATURES],
+            ),
+            #[cfg(feature = "coreml")]
+            cached_pool_classify_frames_shape: CachedInputShape::new(
+                "frames",
+                &[PRIMARY_BATCH_SIZE, RESNET_CHANNELS, RESNET_FRAMES],
+            ),
+            #[cfg(feature = "coreml")]
+            cached_pool_classify_weights_shape: CachedInputShape::new(
+                "weights",
+                &[PRIMARY_BATCH_SIZE, 589],
             ),
             waveform_buffer: Array3::zeros((1, 1, 160_000)),
             weights_buffer: Array2::zeros((1, 589)),
@@ -178,6 +246,43 @@ impl EmbeddingModel {
                 FBANK_FEATURES,
             )),
             split_primary_weights_batch_buffer: Array2::zeros((PRIMARY_BATCH_SIZE, 589)),
+            resnet_frames_session: load_optional_session(
+                &resnet_frames_model_path(model_path, 1),
+                mode,
+                Self::build_session,
+            )?,
+            resnet_frames_batched_session: load_optional_session(
+                &resnet_frames_model_path(model_path, PRIMARY_BATCH_SIZE),
+                mode,
+                Self::build_session,
+            )?,
+            pool_classify_session: load_optional_session(
+                &pool_classify_model_path(model_path, 1),
+                mode,
+                Self::build_session,
+            )?,
+            pool_classify_batched_session: load_optional_session(
+                &pool_classify_model_path(model_path, CHUNK_SPEAKER_BATCH_SIZE),
+                mode,
+                Self::build_session,
+            )?,
+            pool_classify_primary_batched_session: load_optional_session(
+                &pool_classify_model_path(model_path, PRIMARY_BATCH_SIZE),
+                mode,
+                Self::build_session,
+            )?,
+            resnet_frames_fbank_buffer: Array3::zeros((1, FBANK_FRAMES, FBANK_FEATURES)),
+            resnet_frames_fbank_batch_buffer: Array3::zeros((
+                PRIMARY_BATCH_SIZE,
+                FBANK_FRAMES,
+                FBANK_FEATURES,
+            )),
+            pool_classify_primary_frames_batch_buffer: Array3::zeros((
+                PRIMARY_BATCH_SIZE,
+                RESNET_CHANNELS,
+                RESNET_FRAMES,
+            )),
+            pool_classify_primary_weights_batch_buffer: Array2::zeros((PRIMARY_BATCH_SIZE, 589)),
             sample_rate: 16_000,
             window_samples: 160_000,
             mask_frames: 589,
@@ -295,7 +400,43 @@ impl EmbeddingModel {
             self.native_fbank_session = Self::load_native_fbank(&self.model_path, self.mode, 1);
             self.native_fbank_batched_session =
                 Self::load_native_fbank(&self.model_path, self.mode, PRIMARY_BATCH_SIZE);
+            self.native_resnet_frames_session =
+                Self::load_native_resnet_frames(&self.model_path, self.mode, 1);
+            self.native_pool_classify_session =
+                Self::load_native_pool_classify(&self.model_path, self.mode, 1);
+            self.native_pool_classify_batched_session = Self::load_native_pool_classify(
+                &self.model_path,
+                self.mode,
+                CHUNK_SPEAKER_BATCH_SIZE,
+            );
+            self.native_pool_classify_primary_batched_session =
+                Self::load_native_pool_classify(&self.model_path, self.mode, PRIMARY_BATCH_SIZE);
         }
+        self.resnet_frames_session = load_optional_session(
+            &resnet_frames_model_path(&self.model_path, 1),
+            self.mode,
+            Self::build_session,
+        )?;
+        self.resnet_frames_batched_session = load_optional_session(
+            &resnet_frames_model_path(&self.model_path, PRIMARY_BATCH_SIZE),
+            self.mode,
+            Self::build_session,
+        )?;
+        self.pool_classify_session = load_optional_session(
+            &pool_classify_model_path(&self.model_path, 1),
+            self.mode,
+            Self::build_session,
+        )?;
+        self.pool_classify_batched_session = load_optional_session(
+            &pool_classify_model_path(&self.model_path, CHUNK_SPEAKER_BATCH_SIZE),
+            self.mode,
+            Self::build_session,
+        )?;
+        self.pool_classify_primary_batched_session = load_optional_session(
+            &pool_classify_model_path(&self.model_path, PRIMARY_BATCH_SIZE),
+            self.mode,
+            Self::build_session,
+        )?;
         Ok(())
     }
 
@@ -306,7 +447,27 @@ impl EmbeddingModel {
         ort_split
     }
 
+    pub fn prefers_three_way_split(&self) -> bool {
+        let has_resnet_frames = self.resnet_frames_session.is_some();
+        #[cfg(feature = "coreml")]
+        let has_resnet_frames = has_resnet_frames || self.native_resnet_frames_session.is_some();
+
+        let has_pool_classify = self.pool_classify_session.is_some();
+        #[cfg(feature = "coreml")]
+        let has_pool_classify =
+            has_pool_classify || self.native_pool_classify_primary_batched_session.is_some();
+
+        self.prefers_chunk_embedding_path() && has_resnet_frames && has_pool_classify
+    }
+
     pub(crate) fn split_primary_batch_size(&self) -> usize {
+        if self.pool_classify_primary_batched_session.is_some() {
+            return PRIMARY_BATCH_SIZE;
+        }
+        #[cfg(feature = "coreml")]
+        if self.native_pool_classify_primary_batched_session.is_some() {
+            return PRIMARY_BATCH_SIZE;
+        }
         if self.split_primary_tail_batched_session.is_some() {
             return PRIMARY_BATCH_SIZE;
         }
@@ -571,6 +732,189 @@ impl EmbeddingModel {
         }
 
         Ok(results)
+    }
+
+    /// Run ResNet CNN backbone once on fbank features, producing frame-level embeddings
+    pub fn compute_resnet_frames(
+        &mut self,
+        fbank: &Array2<f32>,
+    ) -> Result<Array2<f32>, ort::Error> {
+        self.resnet_frames_fbank_buffer
+            .slice_mut(s![0, ..fbank.nrows(), ..fbank.ncols()])
+            .assign(fbank);
+
+        #[cfg(feature = "coreml")]
+        if let Some(ref mut native) = self.native_resnet_frames_session {
+            let input_data = self.resnet_frames_fbank_buffer.as_slice().unwrap();
+            let (data, out_shape) = native
+                .predict_cached(&[(&self.cached_resnet_frames_fbank_shape, input_data)])
+                .map_err(|e| ort::Error::new(e.to_string()))?;
+            let channels = out_shape[1];
+            let frames = out_shape[2];
+            return Ok(Array2::from_shape_vec((channels, frames), data).unwrap());
+        }
+
+        let fbank_tensor = TensorRef::from_array_view(self.resnet_frames_fbank_buffer.view())?;
+        let outputs = self
+            .resnet_frames_session
+            .as_mut()
+            .unwrap()
+            .run(ort::inputs!["fbank" => fbank_tensor])?;
+        let (shape, data) = outputs[0].try_extract_tensor::<f32>()?;
+        let channels = shape[1] as usize;
+        let frames = shape[2] as usize;
+        Ok(Array2::from_shape_vec((channels, frames), data.to_vec()).unwrap())
+    }
+
+    /// Batch ResNet CNN over multiple fbanks, processing in groups of PRIMARY_BATCH_SIZE
+    pub fn compute_resnet_frames_batch(
+        &mut self,
+        fbanks: &[&Array2<f32>],
+    ) -> Result<Vec<Array2<f32>>, ort::Error> {
+        let mut results = Vec::with_capacity(fbanks.len());
+        for batch_start in (0..fbanks.len()).step_by(PRIMARY_BATCH_SIZE) {
+            let batch_end = (batch_start + PRIMARY_BATCH_SIZE).min(fbanks.len());
+            let batch = &fbanks[batch_start..batch_end];
+
+            if batch.len() < PRIMARY_BATCH_SIZE {
+                for fbank in batch {
+                    results.push(self.compute_resnet_frames(fbank)?);
+                }
+                continue;
+            }
+
+            for (idx, fbank) in batch.iter().enumerate() {
+                self.resnet_frames_fbank_batch_buffer
+                    .slice_mut(s![idx, ..fbank.nrows(), ..fbank.ncols()])
+                    .assign(*fbank);
+            }
+
+            #[cfg(feature = "coreml")]
+            if let Some(ref mut native) = self.native_resnet_frames_session {
+                let input_data = self.resnet_frames_fbank_batch_buffer.as_slice().unwrap();
+                let (data, out_shape) = native
+                    .predict_cached(&[(&self.cached_resnet_frames_fbank_batch_shape, input_data)])
+                    .map_err(|e| ort::Error::new(e.to_string()))?;
+                let channels = out_shape[1];
+                let frames = out_shape[2];
+                let stride = channels * frames;
+                for idx in 0..PRIMARY_BATCH_SIZE {
+                    let start = idx * stride;
+                    results.push(
+                        Array2::from_shape_vec(
+                            (channels, frames),
+                            data[start..start + stride].to_vec(),
+                        )
+                        .unwrap(),
+                    );
+                }
+                continue;
+            }
+
+            if let Some(ref mut session) = self.resnet_frames_batched_session {
+                let fbank_tensor =
+                    TensorRef::from_array_view(self.resnet_frames_fbank_batch_buffer.view())?;
+                let outputs = session.run(ort::inputs!["fbank" => fbank_tensor])?;
+                let (shape, data) = outputs[0].try_extract_tensor::<f32>()?;
+                let channels = shape[1] as usize;
+                let frames = shape[2] as usize;
+                let flat = data.to_vec();
+                let stride = channels * frames;
+                for idx in 0..PRIMARY_BATCH_SIZE {
+                    let start = idx * stride;
+                    results.push(
+                        Array2::from_shape_vec(
+                            (channels, frames),
+                            flat[start..start + stride].to_vec(),
+                        )
+                        .unwrap(),
+                    );
+                }
+                continue;
+            }
+
+            // no batch session available, fall back to individual calls
+            for fbank in batch {
+                results.push(self.compute_resnet_frames(fbank)?);
+            }
+        }
+        Ok(results)
+    }
+
+    /// Batch pool+classify on pre-computed resnet frames for multiple speakers
+    pub(crate) fn embed_pool_classify_batch(
+        &mut self,
+        inputs: &[PoolClassifyInput<'_>],
+    ) -> Result<Array2<f32>, ort::Error> {
+        debug_assert!(inputs.len() <= PRIMARY_BATCH_SIZE);
+
+        let row_stride = RESNET_CHANNELS * RESNET_FRAMES;
+        for (batch_idx, input) in inputs.iter().enumerate() {
+            // reuse previous copy if consecutive items share the same resnet frames
+            if batch_idx > 0
+                && std::ptr::eq(input.resnet_frames, inputs[batch_idx - 1].resnet_frames)
+            {
+                let buf = self
+                    .pool_classify_primary_frames_batch_buffer
+                    .as_slice_mut()
+                    .unwrap();
+                let prev_start = (batch_idx - 1) * row_stride;
+                buf.copy_within(prev_start..prev_start + row_stride, batch_idx * row_stride);
+            } else {
+                self.pool_classify_primary_frames_batch_buffer
+                    .slice_mut(s![
+                        batch_idx,
+                        ..input.resnet_frames.nrows(),
+                        ..input.resnet_frames.ncols()
+                    ])
+                    .assign(input.resnet_frames);
+            }
+
+            Self::prepare_weights(
+                batch_idx,
+                input.weights,
+                self.mask_frames,
+                &mut self.pool_classify_primary_weights_batch_buffer.view_mut(),
+            );
+        }
+        if inputs.len() < PRIMARY_BATCH_SIZE {
+            self.pool_classify_primary_weights_batch_buffer
+                .slice_mut(s![inputs.len().., ..])
+                .fill(0.0);
+        }
+
+        #[cfg(feature = "coreml")]
+        if let Some(ref mut native) = self.native_pool_classify_primary_batched_session {
+            let frames_data = self
+                .pool_classify_primary_frames_batch_buffer
+                .as_slice()
+                .unwrap();
+            let weights_data = self
+                .pool_classify_primary_weights_batch_buffer
+                .as_slice()
+                .unwrap();
+            let (data, _) = native
+                .predict_cached(&[
+                    (&self.cached_pool_classify_frames_shape, frames_data),
+                    (&self.cached_pool_classify_weights_shape, weights_data),
+                ])
+                .map_err(|e| ort::Error::new(e.to_string()))?;
+            let batch = Array2::from_shape_vec((PRIMARY_BATCH_SIZE, 256), data).unwrap();
+            return Ok(batch.slice(s![0..inputs.len(), ..]).to_owned());
+        }
+
+        let frames_tensor =
+            TensorRef::from_array_view(self.pool_classify_primary_frames_batch_buffer.view())?;
+        let weights_tensor =
+            TensorRef::from_array_view(self.pool_classify_primary_weights_batch_buffer.view())?;
+        let outputs = self
+            .pool_classify_primary_batched_session
+            .as_mut()
+            .unwrap()
+            .run(ort::inputs!["frames" => frames_tensor, "weights" => weights_tensor])?;
+        let (_shape, data) = outputs[0].try_extract_tensor::<f32>()?;
+        let batch = Array2::from_shape_vec((PRIMARY_BATCH_SIZE, 256), data.to_vec()).unwrap();
+        Ok(batch.slice(s![0..inputs.len(), ..]).to_owned())
     }
 
     pub fn has_batched_fbank(&self) -> bool {
@@ -879,6 +1223,66 @@ impl EmbeddingModel {
             }
         }
     }
+
+    #[cfg(feature = "coreml")]
+    fn load_native_resnet_frames(
+        model_path: &str,
+        mode: ExecutionMode,
+        batch_size: usize,
+    ) -> Option<CoreMlModel> {
+        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
+            return None;
+        }
+        let onnx_path = resnet_frames_model_path(model_path, batch_size);
+        let coreml_path = coreml_model_path(onnx_path.to_str().unwrap());
+        if !coreml_path.exists() {
+            return None;
+        }
+        match CoreMlModel::load(
+            &coreml_path,
+            CoreMlModel::default_compute_units(),
+            "output",
+            GpuPrecision::Low,
+        ) {
+            Ok(model) => Some(model),
+            Err(e) => {
+                eprintln!(
+                    "warning: failed to load native CoreML resnet-frames (batch={batch_size}): {e}"
+                );
+                None
+            }
+        }
+    }
+
+    #[cfg(feature = "coreml")]
+    fn load_native_pool_classify(
+        model_path: &str,
+        mode: ExecutionMode,
+        batch_size: usize,
+    ) -> Option<CoreMlModel> {
+        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
+            return None;
+        }
+        let onnx_path = pool_classify_model_path(model_path, batch_size);
+        let coreml_path = coreml_model_path(onnx_path.to_str().unwrap());
+        if !coreml_path.exists() {
+            return None;
+        }
+        match CoreMlModel::load(
+            &coreml_path,
+            CoreMlModel::default_compute_units(),
+            "output",
+            GpuPrecision::Low,
+        ) {
+            Ok(model) => Some(model),
+            Err(e) => {
+                eprintln!(
+                    "warning: failed to load native CoreML pool-classify (batch={batch_size}): {e}"
+                );
+                None
+            }
+        }
+    }
 }
 
 fn batched_model_path(model_path: &str, batch_size: usize) -> Option<std::path::PathBuf> {
@@ -906,6 +1310,36 @@ fn split_tail_model_path(model_path: &str, batch_size: usize) -> std::path::Path
         path.with_file_name(format!(
             "wespeaker-voxceleb-resnet34-tail-b{batch_size}.onnx"
         ))
+    }
+}
+
+fn resnet_frames_model_path(model_path: &str, batch_size: usize) -> std::path::PathBuf {
+    let path = Path::new(model_path);
+    if batch_size == 1 {
+        path.with_file_name("wespeaker-resnet-frames.onnx")
+    } else {
+        path.with_file_name(format!("wespeaker-resnet-frames-b{batch_size}.onnx"))
+    }
+}
+
+fn pool_classify_model_path(model_path: &str, batch_size: usize) -> std::path::PathBuf {
+    let path = Path::new(model_path);
+    if batch_size == 1 {
+        path.with_file_name("wespeaker-pool-classify.onnx")
+    } else {
+        path.with_file_name(format!("wespeaker-pool-classify-b{batch_size}.onnx"))
+    }
+}
+
+fn load_optional_session(
+    path: &Path,
+    mode: ExecutionMode,
+    build: fn(&str, ExecutionMode) -> Result<Session, ort::Error>,
+) -> Result<Option<Session>, ort::Error> {
+    if path.exists() {
+        Ok(Some(build(path.to_str().unwrap(), mode)?))
+    } else {
+        Ok(None)
     }
 }
 
