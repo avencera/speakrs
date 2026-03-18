@@ -9,7 +9,7 @@ use crate::clustering::plda::PldaTransform;
 use crate::clustering::vbx::{VbxConfig, cluster_vbx};
 use crate::inference::ExecutionMode;
 use crate::inference::embedding::{
-    EmbeddingModel, MaskedEmbeddingInput, PoolClassifyInput, SplitTailInput, should_use_clean_mask,
+    EmbeddingModel, MaskedEmbeddingInput, SplitTailInput, should_use_clean_mask,
 };
 use crate::inference::segmentation::SegmentationModel;
 use crate::powerset::PowersetMapping;
@@ -119,13 +119,6 @@ struct PendingSplitEmbedding {
     chunk_idx: usize,
     speaker_idx: usize,
     fbank_idx: usize,
-    weights: Vec<f32>,
-}
-
-struct PendingPoolClassify {
-    chunk_idx: usize,
-    speaker_idx: usize,
-    frames_idx: usize,
     weights: Vec<f32>,
 }
 
@@ -255,7 +248,6 @@ enum InferencePath {
 enum EmbeddingPath {
     Masked,
     Split,
-    ThreeWaySplit,
 }
 
 struct ConcurrentEmbeddingRunner<'a> {
@@ -365,170 +357,6 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
             })
             .collect();
         let batch_embeddings = embedding_model.embed_tail_batch_inputs(&batch_inputs)?;
-        for (batch_idx, item) in pending.iter().enumerate() {
-            embeddings.push(SpeakerEmbedding {
-                chunk_idx: item.chunk_idx,
-                speaker_idx: item.speaker_idx,
-                embedding: batch_embeddings.row(batch_idx).to_vec(),
-            });
-        }
-        Ok(())
-    }
-
-    fn run_three_way_split(
-        &self,
-        receiver: crossbeam_channel::Receiver<Array2<f32>>,
-        embedding_model: &mut EmbeddingModel,
-        batch_size: usize,
-        min_num_samples: usize,
-    ) -> Result<ConcurrentEmbeddingResult, PipelineError> {
-        const RESNET_BATCH: usize = 32;
-
-        let mut decoded_windows: Vec<Array2<f32>> = Vec::new();
-        let mut embeddings: Vec<SpeakerEmbedding> = Vec::new();
-        let mut pending: Vec<PendingPoolClassify> = Vec::with_capacity(batch_size);
-        let mut resnet_frames_cache: Vec<Array2<f32>> = Vec::new();
-        // per-chunk metadata buffered until we have RESNET_BATCH fbanks
-        let mut fbank_buffer: Vec<Array2<f32>> = Vec::with_capacity(RESNET_BATCH);
-        let mut buf_chunk_indices: Vec<usize> = Vec::with_capacity(RESNET_BATCH);
-        let mut buf_decoded_indices: Vec<usize> = Vec::with_capacity(RESNET_BATCH);
-        let mut buf_audio_lens: Vec<usize> = Vec::with_capacity(RESNET_BATCH);
-        let mut chunk_idx = 0usize;
-
-        for raw_window in receiver {
-            decoded_windows.push(self.powerset.hard_decode(&raw_window));
-            let decoded_idx = decoded_windows.len() - 1;
-            let chunk_audio = chunk_audio_raw(
-                self.audio,
-                self.step_samples,
-                self.window_samples,
-                chunk_idx,
-            );
-
-            let fbank = embedding_model.compute_chunk_fbank(chunk_audio)?;
-            fbank_buffer.push(fbank);
-            buf_chunk_indices.push(chunk_idx);
-            buf_decoded_indices.push(decoded_idx);
-            buf_audio_lens.push(chunk_audio.len());
-
-            if fbank_buffer.len() == RESNET_BATCH {
-                let fbank_refs: Vec<&Array2<f32>> = fbank_buffer.iter().collect();
-                let frames_batch = embedding_model.compute_resnet_frames_batch(&fbank_refs)?;
-                let base_idx = resnet_frames_cache.len();
-                resnet_frames_cache.extend(frames_batch);
-
-                for buf_pos in 0..fbank_buffer.len() {
-                    let seg_view = decoded_windows[buf_decoded_indices[buf_pos]].view();
-                    let clean = clean_masks(&seg_view);
-                    for speaker_idx in 0..self.num_speakers {
-                        let Some(weights) = select_speaker_weights(
-                            &seg_view,
-                            &clean,
-                            speaker_idx,
-                            buf_audio_lens[buf_pos],
-                            min_num_samples,
-                        ) else {
-                            continue;
-                        };
-                        pending.push(PendingPoolClassify {
-                            chunk_idx: buf_chunk_indices[buf_pos],
-                            speaker_idx,
-                            frames_idx: base_idx + buf_pos,
-                            weights,
-                        });
-                        if pending.len() == batch_size {
-                            self.flush_pool_classify_pending(
-                                embedding_model,
-                                &pending,
-                                &resnet_frames_cache,
-                                &mut embeddings,
-                            )?;
-                            pending.clear();
-                        }
-                    }
-                }
-                // all frames from this buffer have been referenced, safe to clear
-                if pending.is_empty() {
-                    resnet_frames_cache.clear();
-                }
-                fbank_buffer.clear();
-                buf_chunk_indices.clear();
-                buf_decoded_indices.clear();
-                buf_audio_lens.clear();
-            }
-            chunk_idx += 1;
-        }
-
-        // flush remaining buffered chunks (< RESNET_BATCH)
-        if !fbank_buffer.is_empty() {
-            let fbank_refs: Vec<&Array2<f32>> = fbank_buffer.iter().collect();
-            let frames_batch = embedding_model.compute_resnet_frames_batch(&fbank_refs)?;
-            let base_idx = resnet_frames_cache.len();
-            resnet_frames_cache.extend(frames_batch);
-
-            for buf_pos in 0..fbank_buffer.len() {
-                let seg_view = decoded_windows[buf_decoded_indices[buf_pos]].view();
-                let clean = clean_masks(&seg_view);
-                for speaker_idx in 0..self.num_speakers {
-                    let Some(weights) = select_speaker_weights(
-                        &seg_view,
-                        &clean,
-                        speaker_idx,
-                        buf_audio_lens[buf_pos],
-                        min_num_samples,
-                    ) else {
-                        continue;
-                    };
-                    pending.push(PendingPoolClassify {
-                        chunk_idx: buf_chunk_indices[buf_pos],
-                        speaker_idx,
-                        frames_idx: base_idx + buf_pos,
-                        weights,
-                    });
-                    if pending.len() == batch_size {
-                        self.flush_pool_classify_pending(
-                            embedding_model,
-                            &pending,
-                            &resnet_frames_cache,
-                            &mut embeddings,
-                        )?;
-                        pending.clear();
-                    }
-                }
-            }
-        }
-
-        if !pending.is_empty() {
-            self.flush_pool_classify_pending(
-                embedding_model,
-                &pending,
-                &resnet_frames_cache,
-                &mut embeddings,
-            )?;
-        }
-
-        Ok(ConcurrentEmbeddingResult {
-            decoded_windows,
-            embeddings,
-            num_speakers: self.num_speakers,
-        })
-    }
-
-    fn flush_pool_classify_pending(
-        &self,
-        embedding_model: &mut EmbeddingModel,
-        pending: &[PendingPoolClassify],
-        resnet_frames_cache: &[Array2<f32>],
-        embeddings: &mut Vec<SpeakerEmbedding>,
-    ) -> Result<(), PipelineError> {
-        let batch_inputs: Vec<_> = pending
-            .iter()
-            .map(|item| PoolClassifyInput {
-                resnet_frames: &resnet_frames_cache[item.frames_idx],
-                weights: &item.weights,
-            })
-            .collect();
-        let batch_embeddings = embedding_model.embed_pool_classify_batch(&batch_inputs)?;
         for (batch_idx, item) in pending.iter().enumerate() {
             embeddings.push(SpeakerEmbedding {
                 chunk_idx: item.chunk_idx,
@@ -868,10 +696,7 @@ impl<'a> PipelineRunner<'a> {
     }
 
     fn embedding_path(&self) -> EmbeddingPath {
-        if self.emb_model.prefers_three_way_split() && self.emb_model.split_primary_batch_size() > 0
-        {
-            EmbeddingPath::ThreeWaySplit
-        } else if self.emb_model.prefers_chunk_embedding_path()
+        if self.emb_model.prefers_chunk_embedding_path()
             && self.emb_model.split_primary_batch_size() > 0
         {
             EmbeddingPath::Split
@@ -939,9 +764,7 @@ impl<'a> PipelineRunner<'a> {
         };
         let embedding_path = self.embedding_path();
         let batch_size = match embedding_path {
-            EmbeddingPath::ThreeWaySplit | EmbeddingPath::Split => {
-                self.emb_model.split_primary_batch_size()
-            }
+            EmbeddingPath::Split => self.emb_model.split_primary_batch_size(),
             EmbeddingPath::Masked => self.emb_model.primary_batch_size(),
         };
         let min_num_samples = self.emb_model.min_num_samples();
@@ -950,20 +773,17 @@ impl<'a> PipelineRunner<'a> {
         let (segmentation_result, embedding_result) = std::thread::scope(|scope| {
             let segmentation_handle = scope.spawn(|| self.seg_model.run_streaming(audio, tx));
 
-            let embedding_result =
-                match embedding_path {
-                    EmbeddingPath::ThreeWaySplit => concurrent_embedding_runner
-                        .run_three_way_split(rx, self.emb_model, batch_size, min_num_samples),
-                    EmbeddingPath::Split => concurrent_embedding_runner.run_split(
-                        rx,
-                        self.emb_model,
-                        batch_size,
-                        min_num_samples,
-                    ),
-                    EmbeddingPath::Masked => {
-                        concurrent_embedding_runner.run_masked(rx, self.emb_model, batch_size)
-                    }
-                };
+            let embedding_result = match embedding_path {
+                EmbeddingPath::Split => concurrent_embedding_runner.run_split(
+                    rx,
+                    self.emb_model,
+                    batch_size,
+                    min_num_samples,
+                ),
+                EmbeddingPath::Masked => {
+                    concurrent_embedding_runner.run_masked(rx, self.emb_model, batch_size)
+                }
+            };
 
             let segmentation_result = segmentation_handle.join().unwrap();
             (segmentation_result, embedding_result)
@@ -1148,9 +968,6 @@ impl DecodedSegmentations {
         let mut embeddings = Array3::<f32>::from_elem((num_chunks, num_speakers, 256), f32::NAN);
 
         match embedding_path {
-            EmbeddingPath::ThreeWaySplit => {
-                self.extract_three_way_split_embeddings(audio, emb_model, layout, &mut embeddings)?
-            }
             EmbeddingPath::Split => {
                 self.extract_split_embeddings(audio, emb_model, layout, &mut embeddings)?
             }
@@ -1295,103 +1112,6 @@ impl DecodedSegmentations {
 
         Ok(())
     }
-
-    fn extract_three_way_split_embeddings(
-        &self,
-        audio: &[f32],
-        emb_model: &mut EmbeddingModel,
-        layout: &ChunkLayout,
-        embeddings: &mut Array3<f32>,
-    ) -> Result<(), PipelineError> {
-        const RESNET_BATCH: usize = 32;
-        let batch_size = emb_model.split_primary_batch_size();
-        let num_chunks = self.0.shape()[0];
-        let num_speakers = self.0.shape()[2];
-        let min_num_samples = emb_model.min_num_samples();
-
-        let mut pending: Vec<PendingPoolClassify> = Vec::with_capacity(batch_size);
-        let mut resnet_frames_cache: Vec<Array2<f32>> = Vec::new();
-        let mut pool_batches = 0usize;
-        let mut active_items = 0usize;
-        let mut fbank_buffer: Vec<Array2<f32>> = Vec::with_capacity(RESNET_BATCH);
-        let mut buf_chunk_indices: Vec<usize> = Vec::with_capacity(RESNET_BATCH);
-        let mut buf_audio_lens: Vec<usize> = Vec::with_capacity(RESNET_BATCH);
-
-        for chunk_idx in 0..num_chunks {
-            let chunk_audio = layout.chunk_audio(audio, chunk_idx);
-            let fbank = emb_model.compute_chunk_fbank(chunk_audio)?;
-            fbank_buffer.push(fbank);
-            buf_chunk_indices.push(chunk_idx);
-            buf_audio_lens.push(chunk_audio.len());
-
-            let buffer_full = fbank_buffer.len() == RESNET_BATCH;
-            let last_chunk = chunk_idx + 1 == num_chunks;
-            if !buffer_full && !last_chunk {
-                continue;
-            }
-
-            // batch resnet-frames for all buffered fbanks
-            let fbank_refs: Vec<&Array2<f32>> = fbank_buffer.iter().collect();
-            let frames_batch = emb_model.compute_resnet_frames_batch(&fbank_refs)?;
-            let base_idx = resnet_frames_cache.len();
-            resnet_frames_cache.extend(frames_batch);
-
-            for buf_pos in 0..fbank_buffer.len() {
-                let ci = buf_chunk_indices[buf_pos];
-                let chunk_segmentations = self.0.slice(s![ci, .., ..]);
-                let clean = clean_masks(&chunk_segmentations);
-
-                for speaker_idx in 0..num_speakers {
-                    let Some(weights) = select_speaker_weights(
-                        &chunk_segmentations,
-                        &clean,
-                        speaker_idx,
-                        buf_audio_lens[buf_pos],
-                        min_num_samples,
-                    ) else {
-                        continue;
-                    };
-                    active_items += 1;
-                    pending.push(PendingPoolClassify {
-                        chunk_idx: ci,
-                        speaker_idx,
-                        frames_idx: base_idx + buf_pos,
-                        weights,
-                    });
-                    if pending.len() == batch_size {
-                        flush_pool_classify_batch(
-                            emb_model,
-                            &pending,
-                            &resnet_frames_cache,
-                            embeddings,
-                        )?;
-                        pool_batches += 1;
-                        pending.clear();
-                    }
-                }
-            }
-            if pending.is_empty() {
-                resnet_frames_cache.clear();
-            }
-            fbank_buffer.clear();
-            buf_chunk_indices.clear();
-            buf_audio_lens.clear();
-        }
-
-        if !pending.is_empty() {
-            flush_pool_classify_batch(emb_model, &pending, &resnet_frames_cache, embeddings)?;
-            pool_batches += 1;
-        }
-
-        tracing::info!(
-            batches = pool_batches,
-            active_items,
-            total_items = num_chunks * num_speakers,
-            "Three-way split embeddings complete (batched resnet+pool)"
-        );
-
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -1419,10 +1139,7 @@ fn extract_embeddings(
             audio,
             emb_model,
             &layout,
-            if emb_model.prefers_three_way_split() && emb_model.split_primary_batch_size() > 0 {
-                EmbeddingPath::ThreeWaySplit
-            } else if emb_model.prefers_chunk_embedding_path()
-                && emb_model.split_primary_batch_size() > 0
+            if emb_model.prefers_chunk_embedding_path() && emb_model.split_primary_batch_size() > 0
             {
                 EmbeddingPath::Split
             } else {
@@ -1509,30 +1226,6 @@ fn flush_split_embedding_batch(
         })
         .collect();
     let batch_embeddings = emb_model.embed_tail_batch_inputs(&batch_inputs)?;
-
-    for (batch_idx, item) in pending.iter().enumerate() {
-        embeddings
-            .slice_mut(s![item.chunk_idx, item.speaker_idx, ..])
-            .assign(&batch_embeddings.row(batch_idx));
-    }
-
-    Ok(())
-}
-
-fn flush_pool_classify_batch(
-    emb_model: &mut EmbeddingModel,
-    pending: &[PendingPoolClassify],
-    resnet_frames_cache: &[Array2<f32>],
-    embeddings: &mut Array3<f32>,
-) -> Result<(), PipelineError> {
-    let batch_inputs: Vec<_> = pending
-        .iter()
-        .map(|item| PoolClassifyInput {
-            resnet_frames: &resnet_frames_cache[item.frames_idx],
-            weights: &item.weights,
-        })
-        .collect();
-    let batch_embeddings = emb_model.embed_pool_classify_batch(&batch_inputs)?;
 
     for (batch_idx, item) in pending.iter().enumerate() {
         embeddings
