@@ -603,12 +603,6 @@ const IMPL_REGISTRY: &[(&str, &str, &str, ImplType)] = &[
     ),
     ("cuda", "sg", "speakrs CUDA", ImplType::Speakrs("cuda")),
     (
-        "cuda-hybrid",
-        "sgh",
-        "speakrs CUDA Hybrid",
-        ImplType::Speakrs("cuda-hybrid"),
-    ),
-    (
         "cuda-fast",
         "sgf",
         "speakrs CUDA Fast",
@@ -1573,7 +1567,7 @@ fn der_build_features(impls: &[String]) -> Vec<String> {
 
     let needs_cuda = active_impls
         .iter()
-        .any(|t| matches!(t, ImplType::Speakrs("cuda" | "cuda-hybrid" | "cuda-fast")));
+        .any(|t| matches!(t, ImplType::Speakrs("cuda" | "cuda-fast")));
 
     if needs_coreml {
         features.push("coreml".to_string());
@@ -2014,7 +2008,6 @@ pub fn run_speakrs_gpu(
     use crate::wav;
 
     let execution_mode = match mode {
-        "cuda-hybrid" => ExecutionMode::CudaHybrid,
         "cuda-fast" => ExecutionMode::CudaFast,
         _ => ExecutionMode::Cuda,
     };

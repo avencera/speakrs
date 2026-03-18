@@ -27,9 +27,22 @@ pub fn bench(
     sh.set_var("RUN_NAME", name);
     sh.set_var("DATASET", dataset);
 
-    sh.set_var("IMPLS", if impls.is_empty() { String::new() } else { impls.join(",") });
-    sh.set_var("MAX_FILES", max_files.map(|n| n.to_string()).unwrap_or_default());
-    sh.set_var("MAX_MINUTES", max_minutes.map(|n| n.to_string()).unwrap_or_default());
+    sh.set_var(
+        "IMPLS",
+        if impls.is_empty() {
+            String::new()
+        } else {
+            impls.join(",")
+        },
+    );
+    sh.set_var(
+        "MAX_FILES",
+        max_files.map(|n| n.to_string()).unwrap_or_default(),
+    );
+    sh.set_var(
+        "MAX_MINUTES",
+        max_minutes.map(|n| n.to_string()).unwrap_or_default(),
+    );
 
     if reuse {
         // ensure fleet exists before submitting
@@ -109,11 +122,7 @@ pub fn download(name: &str) -> Result<()> {
     std::fs::create_dir_all(&local_dir)?;
 
     let src = format!("s3://speakrs/benchmarks/{name}/*");
-    cmd!(
-        sh,
-        "s5cmd --endpoint-url {endpoint} cp {src} {local_dir}/"
-    )
-    .run()?;
+    cmd!(sh, "s5cmd --endpoint-url {endpoint} cp {src} {local_dir}/").run()?;
     Ok(())
 }
 

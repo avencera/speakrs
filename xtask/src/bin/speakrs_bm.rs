@@ -10,16 +10,8 @@ use xtask::commands::benchmark::{
 };
 use xtask::datasets;
 
-
-
 const BM_IMPLS: &[(&str, &str, &str, ImplType)] = &[
     ("speakrs", "sg", "speakrs CUDA", ImplType::Speakrs("cuda")),
-    (
-        "speakrs-hybrid",
-        "sgh",
-        "speakrs CUDA Hybrid",
-        ImplType::Speakrs("cuda-hybrid"),
-    ),
     (
         "speakrs-fast",
         "sgf",
