@@ -1,10 +1,12 @@
 type: dev-environment
 name: gpu-dev
 
-image: ${{ env.SPEAKRS_GPU_IMAGE }}
+image: ghcr.io/avencera/speakrs-gpu:4393fe5
 ide: vscode
 
 env:
+  - NVIDIA_VISIBLE_DEVICES=all
+  - LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64
   - HF_TOKEN
   - AWS_ACCESS_KEY_ID
   - AWS_SECRET_ACCESS_KEY

@@ -108,10 +108,10 @@ pub fn download(name: &str) -> Result<()> {
     let local_dir = format!("_benchmarks/{name}");
     std::fs::create_dir_all(&local_dir)?;
 
-    let src = format!("s3://speakrs/benchmarks/{name}/");
+    let src = format!("s3://speakrs/benchmarks/{name}/*");
     cmd!(
         sh,
-        "s5cmd --endpoint-url {endpoint} sync {src} {local_dir}/"
+        "s5cmd --endpoint-url {endpoint} cp {src} {local_dir}/"
     )
     .run()?;
     Ok(())

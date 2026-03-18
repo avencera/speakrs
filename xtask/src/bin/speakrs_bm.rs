@@ -10,8 +10,7 @@ use xtask::commands::benchmark::{
 };
 use xtask::datasets;
 
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 
 const BM_IMPLS: &[(&str, &str, &str, ImplType)] = &[
     ("speakrs", "sg", "speakrs CUDA", ImplType::Speakrs("cuda")),
