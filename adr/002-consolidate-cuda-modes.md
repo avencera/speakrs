@@ -41,8 +41,9 @@ Strictly dominated — same DER, 1.5x slower.
 ### Rename CudaHybrid → Cuda
 This is now the default CUDA mode: fused model on GPU, concurrent pipeline, 1s step.
 
-### Add CudaHybrid (true split-tail)
-New mode for benchmarking: CPU fbank extraction + CUDA ResNet tail, concurrent pipeline, 1s step. If benchmarks show this is faster than fused concurrent, it becomes the default.
+### ~~Add CudaHybrid (true split-tail)~~ — Removed
+
+Added as a benchmark experiment: CPU fbank extraction + CUDA ResNet tail, concurrent pipeline, 1s step. Benchmarks showed it was ~8x slower per-file than fused CUDA on short runs (10 min test: 161.8s vs 19.6s). The CPU fbank extraction is a bottleneck that negates any benefit from offloading the tail. Mode removed entirely in favor of fused Cuda.
 
 ### Add CudaFast
 Fused model on GPU, concurrent pipeline, 2s step. Same relationship as CoreMlFast to CoreMl — trades temporal resolution for ~2x speed.
@@ -52,7 +53,6 @@ Fused model on GPU, concurrent pipeline, 2s step. Same relationship as CoreMlFas
 | Mode | Embedding | Pipeline | Step | Use Case |
 |------|-----------|----------|------|----------|
 | Cuda | Fused GPU | Concurrent | 1s | Default CUDA — best accuracy |
-| CudaHybrid | CPU fbank + CUDA tail | Concurrent | 1s | Testing split-tail on CUDA hardware |
 | CudaFast | Fused GPU | Concurrent | 2s | Speed-optimized, acceptable DER |
 
 All three share the same CUDA EP config: tf32=false, Exhaustive conv search, max workspace, SameAsRequested arena strategy.

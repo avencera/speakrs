@@ -9,7 +9,7 @@ use crate::cmd::{project_root, run_cmd, tee_cmd};
 pub fn features_for_mode(mode: &str) -> Vec<String> {
     match mode {
         "coreml" | "coreml-fast" => vec!["coreml".to_string()],
-        "cuda" | "cuda-hybrid" | "cuda-fast" => vec!["cuda".to_string()],
+        "cuda" | "cuda-fast" => vec!["cuda".to_string()],
         _ => vec![],
     }
 }

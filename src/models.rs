@@ -78,15 +78,6 @@ fn required_files(mode: ExecutionMode) -> Vec<&'static str> {
         ExecutionMode::Cpu | ExecutionMode::Cuda | ExecutionMode::CudaFast => {
             files.extend_from_slice(ONNX_FILES);
         }
-        ExecutionMode::CudaHybrid => {
-            files.extend_from_slice(ONNX_FILES);
-            // split models for CPU fbank + CUDA tail
-            files.push("wespeaker-fbank.onnx");
-            files.push("wespeaker-fbank-b32.onnx");
-            files.push("wespeaker-voxceleb-resnet34-tail.onnx");
-            files.push("wespeaker-voxceleb-resnet34-tail-b3.onnx");
-            files.push("wespeaker-voxceleb-resnet34-tail-b32.onnx");
-        }
         ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => {
             // CoreML modes still need the ONNX segmentation model for the constructor
             files.push("segmentation-3.0.onnx");

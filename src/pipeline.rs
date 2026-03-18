@@ -687,7 +687,6 @@ impl<'a> PipelineRunner<'a> {
             ExecutionMode::CoreMl
                 | ExecutionMode::CoreMlFast
                 | ExecutionMode::Cuda
-                | ExecutionMode::CudaHybrid
                 | ExecutionMode::CudaFast
         ) {
             InferencePath::Concurrent
