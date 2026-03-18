@@ -18,7 +18,7 @@ init:
 
 resources:
   gpu:
-    name: [RTX4090, RTX6000Ada, L40S, RTX5090, L40, RTXA6000, A40, RTX3090]
+    name: [RTX4090, RTX5090, RTX6000Ada, L40S]
     count: 1
 
 inactivity_duration: 2h
