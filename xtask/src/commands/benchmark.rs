@@ -1374,7 +1374,7 @@ impl<'a> DerResultsWriter<'a> {
                 self.collar
             ),
             format!(
-                "Selection: shortest-first by duration, capped at max_files={}, max_minutes={}",
+                "Selection: greedy by duration, executed in input order, capped at max_files={}, max_minutes={}",
                 self.max_files, self.max_minutes
             ),
             format!("pyannote batch sizes: seg={seg_batch_size}, emb={emb_batch_size}"),
@@ -1773,27 +1773,34 @@ fn der_skip_reason(
 }
 
 pub fn select_pairs_for_benchmark(
-    mut pairs: Vec<(PathBuf, PathBuf, f64)>,
+    pairs: Vec<(PathBuf, PathBuf, f64)>,
     max_files: u32,
     max_minutes: f64,
 ) -> Vec<(PathBuf, PathBuf)> {
-    pairs.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap());
+    // sort by duration for greedy budget packing
+    let mut indexed: Vec<_> = pairs.into_iter().enumerate().collect();
+    indexed.sort_by(|a, b| a.1.2.partial_cmp(&b.1.2).unwrap());
 
-    let mut selected = Vec::new();
+    let mut selected: Vec<(usize, PathBuf, PathBuf)> = Vec::new();
     let mut total_minutes = 0.0;
 
-    for (wav, rttm, dur) in pairs {
+    for (orig_idx, (wav, rttm, dur)) in indexed {
         if selected.len() >= max_files as usize {
             break;
         }
         if total_minutes + dur / 60.0 > max_minutes && !selected.is_empty() {
             break;
         }
-        selected.push((wav, rttm));
+        selected.push((orig_idx, wav, rttm));
         total_minutes += dur / 60.0;
     }
 
+    // restore input order for execution (better ETA accuracy)
+    selected.sort_by_key(|(idx, _, _)| *idx);
     selected
+        .into_iter()
+        .map(|(_, wav, rttm)| (wav, rttm))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -2097,28 +2104,48 @@ mod tests {
     }
 
     #[test]
-    fn select_pairs_for_benchmark_prefers_shortest_files() {
+    fn select_pairs_for_benchmark_greedy_selection_in_input_order() {
         let pairs = vec![
+            (
+                PathBuf::from("medium.wav"),
+                PathBuf::from("medium.rttm"),
+                60.0,
+            ),
             (PathBuf::from("long.wav"), PathBuf::from("long.rttm"), 180.0),
             (
                 PathBuf::from("short.wav"),
                 PathBuf::from("short.rttm"),
                 30.0,
             ),
-            (
-                PathBuf::from("medium.wav"),
-                PathBuf::from("medium.rttm"),
-                60.0,
-            ),
         ];
 
         let selected = select_pairs_for_benchmark(pairs, 2, 2.0);
-        let names = selected
+        let names: Vec<_> = selected
             .iter()
             .map(|(wav, _)| wav.file_stem().unwrap().to_string_lossy().to_string())
-            .collect::<Vec<_>>();
+            .collect();
 
-        assert_eq!(names, vec!["short".to_string(), "medium".to_string()]);
+        // greedy selection picks short + medium (fit in 2 min), skips long
+        // returned in input order: medium (idx 0) before short (idx 2)
+        assert_eq!(names, vec!["medium", "short"]);
+    }
+
+    #[test]
+    fn select_pairs_for_benchmark_preserves_input_order() {
+        let pairs = vec![
+            (PathBuf::from("c.wav"), PathBuf::from("c.rttm"), 120.0),
+            (PathBuf::from("a.wav"), PathBuf::from("a.rttm"), 30.0),
+            (PathBuf::from("b.wav"), PathBuf::from("b.rttm"), 60.0),
+        ];
+
+        let selected = select_pairs_for_benchmark(pairs, u32::MAX, f64::MAX);
+        let names: Vec<_> = selected
+            .iter()
+            .map(|(wav, _)| wav.file_stem().unwrap().to_string_lossy().to_string())
+            .collect();
+
+        // all files selected, returned in input order not duration order
+        assert_eq!(names, vec!["c", "a", "b"]);
     }
 
     #[test]
