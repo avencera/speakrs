@@ -314,16 +314,13 @@ impl SegmentationModel {
         let batch = shape[0] as usize;
         let frames = shape[1] as usize;
         let classes = shape[2] as usize;
-        let stride = frames * classes;
+        let flat = data.to_vec();
 
         Ok((0..batch)
             .map(|batch_idx| {
-                let start = batch_idx * stride;
-                let mut arr = Array2::<f32>::zeros((frames, classes));
-                arr.as_slice_mut()
-                    .unwrap()
-                    .copy_from_slice(&data[start..start + stride]);
-                arr
+                let start = batch_idx * frames * classes;
+                let end = start + frames * classes;
+                Array2::from_shape_vec((frames, classes), flat[start..end].to_vec()).unwrap()
             })
             .collect())
     }
