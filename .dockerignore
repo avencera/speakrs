@@ -13,8 +13,8 @@ _benchmarks/
 fixtures/
 !fixtures/models/wespeaker-fbank.onnx
 !fixtures/models/wespeaker-fbank-b32.onnx
-!fixtures/models/wespeaker-multimask-tail.onnx
-!fixtures/models/wespeaker-multimask-tail-b32.onnx
+!fixtures/models/wespeaker-voxceleb-resnet34-tail*.onnx
+!fixtures/models/wespeaker-multimask-tail*.onnx
 *.mlpackage
 *.mlmodelc
 
