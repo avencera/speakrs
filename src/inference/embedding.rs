@@ -640,6 +640,11 @@ impl EmbeddingModel {
     }
 
     pub fn prefers_multi_mask_path(&self) -> bool {
+        // only prefer multi-mask on CoreML where fbank is already CPU-split;
+        // on CUDA the fused model runs the full pipeline on GPU in one call
+        if !matches!(self.mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
+            return false;
+        }
         let has = self.multi_mask_session.is_some();
         #[cfg(feature = "coreml")]
         let has = has || self.native_multi_mask_session.is_some();
