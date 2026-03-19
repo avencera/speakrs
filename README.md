@@ -134,7 +134,7 @@ cargo run --release -p xtask --features coreml --bin diarize -- --mode coreml-fa
 cargo run --release -p xtask --bin diarize -- --mode cpu audio.wav
 
 # CUDA (NVIDIA GPU)
-cargo run --release -p xtask --features cuda --bin diarize -- --mode cuda audio.wav
+cargo run --release -p xtask --features cuda,load-dynamic --bin diarize -- --mode cuda audio.wav
 
 # Compare with pyannote
 just compare audio.wav

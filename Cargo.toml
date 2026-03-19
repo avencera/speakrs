@@ -18,7 +18,8 @@ categories = ["multimedia::audio", "science"]
 default = ["online"]
 online = ["dep:hf-hub", "hf-hub/ureq", "hf-hub/native-tls"]
 coreml = ["dep:objc2", "dep:objc2-core-ml", "dep:objc2-foundation", "dep:block2"]
-cuda = ["ort/cuda", "ort/load-dynamic"]
+cuda = ["ort/cuda"]
+load-dynamic = ["ort/load-dynamic"]
 
 [dependencies]
 hf-hub = { version = "0.5", optional = true, default-features = false }

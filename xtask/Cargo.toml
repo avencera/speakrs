@@ -16,7 +16,8 @@ required-features = ["cuda"]
 
 [features]
 coreml = ["speakrs/coreml"]
-cuda = ["speakrs/cuda", "ort/load-dynamic"]
+cuda = ["speakrs/cuda"]
+load-dynamic = ["speakrs/load-dynamic", "ort/load-dynamic"]
 
 [dependencies]
 chrono = "0.4.44"
