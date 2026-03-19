@@ -493,7 +493,13 @@ impl EmbeddingModel {
             .unwrap()
             .run(ort::inputs!["waveform" => waveform_tensor, "weights" => weights_tensor])?;
         let (_shape, data) = outputs[0].try_extract_tensor::<f32>()?;
-        Ok(Array2::from_shape_vec((inputs.len(), 256), data.to_vec()).unwrap())
+        let n = inputs.len();
+        let mut result = Array2::<f32>::zeros((n, 256));
+        result
+            .as_slice_mut()
+            .unwrap()
+            .copy_from_slice(&data[..n * 256]);
+        Ok(result)
     }
 
     fn embed_single(&mut self, audio: &[f32], weights: &[f32]) -> Result<Array1<f32>, ort::Error> {
