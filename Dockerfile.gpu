@@ -77,6 +77,8 @@ FROM ghcr.io/avencera/speakrs-gpu-runtime:latest
 COPY --from=builder /opt/bin/speakrs-bm /usr/local/bin/
 COPY --from=ort-download /opt/ort-libs/ /usr/local/lib/
 COPY --from=ghcr.io/avencera/speakrs-models:latest /opt/models/ /opt/models/
+COPY fixtures/models/wespeaker-fbank.onnx /opt/models/
+COPY fixtures/models/wespeaker-fbank-b32.onnx /opt/models/
 COPY fixtures/models/wespeaker-multimask-tail.onnx /opt/models/
 COPY fixtures/models/wespeaker-multimask-tail-b32.onnx /opt/models/
 COPY --from=ghcr.io/avencera/speakrs-datasets:latest /opt/datasets/ /opt/datasets/
