@@ -1,6 +1,6 @@
 type: fleet
-name: gpu-pool
-nodes: 0..1
+name: runpod-global
+nodes: 0..8
 idle_duration: 30m
 resources:
   gpu:
