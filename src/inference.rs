@@ -36,6 +36,7 @@ pub fn with_execution_mode(
                     .with_conv_algorithm_search(ep::cuda::ConvAlgorithmSearch::Exhaustive)
                     .with_conv_max_workspace(true)
                     .with_arena_extend_strategy(ep::ArenaExtendStrategy::SameAsRequested)
+                    .with_prefer_nhwc(true)
                     .build()
                     .error_on_failure()])?)
             }
