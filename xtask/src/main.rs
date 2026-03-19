@@ -183,6 +183,24 @@ enum DstackCmd {
         #[arg(long, short = 'd')]
         detach: bool,
     },
+    /// Run GPU benchmarks in parallel (one dataset per GPU)
+    #[command(alias = "bp")]
+    BenchParallel {
+        /// Run name prefix (tasks named {name}-{dataset})
+        name: String,
+        /// Datasets to run (comma-separated, or "all")
+        #[arg(long, value_delimiter = ',', default_value = "all")]
+        dataset: Vec<String>,
+        #[arg(long, value_delimiter = ',')]
+        impls: Vec<String>,
+        #[arg(long)]
+        max_files: Option<u32>,
+        #[arg(long)]
+        max_minutes: Option<u32>,
+        /// Reuse existing fleet pod instead of provisioning a new one
+        #[arg(long, short = 'R')]
+        reuse: bool,
+    },
     /// Start a reusable GPU fleet (30min idle timeout)
     Fleet,
     /// Reattach to a running task (logs + port forwarding, Ctrl+C safe)
@@ -296,6 +314,21 @@ fn main() -> Result<()> {
                 max_minutes,
                 reuse,
                 detach,
+            ),
+            DstackCmd::BenchParallel {
+                name,
+                dataset,
+                impls,
+                max_files,
+                max_minutes,
+                reuse,
+            } => commands::dstack::bench_parallel(
+                &name,
+                &dataset,
+                &impls,
+                max_files,
+                max_minutes,
+                reuse,
             ),
             DstackCmd::Fleet => commands::dstack::fleet(),
             DstackCmd::Attach { name } => commands::dstack::attach(&name),

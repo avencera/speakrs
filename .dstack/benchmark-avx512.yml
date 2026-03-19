@@ -1,5 +1,5 @@
 type: task
-name: benchmark
+name: bench-avx512
 
 image: ghcr.io/avencera/speakrs-gpu:24e0a4e
 
@@ -45,7 +45,7 @@ commands:
 
 resources:
   gpu:
-    name: [RTX4090, RTX5090, RTX6000Ada, L40S]
+    name: [L40S]
     count: 1
 
 spot_policy: on-demand
