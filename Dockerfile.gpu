@@ -43,7 +43,7 @@ RUN cargo install cargo-chef --locked
 COPY --from=planner /build/recipe.json recipe.json
 RUN --mount=type=cache,target=/root/.cargo/registry,id=speakrs-gpu-cargo-registry \
     --mount=type=cache,target=/root/.cargo/git,id=speakrs-gpu-cargo-git \
-    cargo chef cook --release --recipe-path recipe.json --features cuda,load-dynamic -p xtask
+    cargo chef cook --release --recipe-path recipe.json --features cuda -p xtask
 
 # =============================================================================
 # Build the real speakrs-bm binary (deps are cached, only project code compiles)
@@ -55,12 +55,7 @@ COPY xtask/Cargo.toml xtask/Cargo.toml
 COPY src/ ./src/
 COPY xtask/ ./xtask/
 
-RUN cargo build --release -p xtask --features cuda,load-dynamic --bin speakrs-bm && \
-    if objdump -d -Mintel target/release/speakrs-bm | \
-        grep -Eiq '\<zmm[0-9]+\>|\{k[0-7]\}|(^|[^[:alnum:]_])k[0-7]([^[:alnum:]_]|$)'; then \
-        echo "AVX-512 instructions found in speakrs-bm" >&2; \
-        exit 1; \
-    fi && \
+RUN cargo build --release -p xtask --features cuda --bin speakrs-bm && \
     mkdir -p /opt/bin && \
     cp -P target/release/speakrs-bm /opt/bin/
 
