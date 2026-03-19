@@ -783,7 +783,10 @@ impl<'a> PipelineRunner<'a> {
     fn inference_path(&self) -> InferencePath {
         if matches!(
             self.seg_model.mode(),
-            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast
+            ExecutionMode::CoreMl
+                | ExecutionMode::CoreMlFast
+                | ExecutionMode::Cuda
+                | ExecutionMode::CudaFast
         ) {
             InferencePath::Concurrent
         } else {
