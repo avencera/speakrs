@@ -7,6 +7,8 @@
 # =============================================================================
 FROM ghcr.io/avencera/speakrs-gpu-base:latest AS base
 
+ENV OPENBLAS_TARGET=HASWELL
+
 # =============================================================================
 # Download Microsoft's official ORT GPU shared lib (avoids pyke.io AVX-512 MLAS)
 # =============================================================================
@@ -56,6 +58,11 @@ COPY xtask/ ./xtask/
 # With load-dynamic, ort-sys skips downloading/linking ORT at compile time.
 # The binary loads libonnxruntime.so at runtime from the library path.
 RUN cargo build --release -p xtask --features cuda --bin speakrs-bm && \
+    if objdump -d -Mintel target/release/speakrs-bm | \
+        grep -Eiq '\<zmm[0-9]+\>|\{k[0-7]\}|(^|[^[:alnum:]_])k[0-7]([^[:alnum:]_]|$)'; then \
+        echo "AVX-512 instructions found in speakrs-bm" >&2; \
+        exit 1; \
+    fi && \
     mkdir -p /opt/bin && \
     cp -P target/release/speakrs-bm /opt/bin/
 
