@@ -1,7 +1,7 @@
 type: task
 name: bench-avx512
 
-image: ghcr.io/avencera/speakrs-gpu:24e0a4e
+image: ghcr.io/avencera/speakrs-gpu:1b088f6
 
 env:
   - NVIDIA_VISIBLE_DEVICES=all
@@ -20,12 +20,7 @@ env:
 
 commands:
   - |
-    # require AVX-512 (static ORT links MLAS kernels that need it)
-    if ! grep -q avx512 /proc/cpuinfo; then
-      echo "ERROR: CPU does not support AVX-512, aborting" >&2
-      exit 1
-    fi
-    echo "AVX-512 supported: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)"
+    echo "CPU: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)"
 
     # seed baked assets from /opt into /workspace (mirrors docker-entrypoint.sh)
     mkdir -p /workspace/models && cp -rn /opt/models/* /workspace/models/ 2>/dev/null || true
@@ -45,7 +40,7 @@ commands:
 
 resources:
   gpu:
-    name: [L40S]
+    name: [RTX4090, RTX5090, RTX6000Ada, L40S]
     count: 1
 
 spot_policy: on-demand
