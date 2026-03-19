@@ -98,11 +98,12 @@ impl EmbeddingModel {
         let split_tail_path = split_tail_model_path(model_path, 1);
         let split_tail_batched_path = split_tail_model_path(model_path, CHUNK_SPEAKER_BATCH_SIZE);
         let split_primary_tail_batched_path = split_tail_model_path(model_path, PRIMARY_BATCH_SIZE);
+        let is_coreml = matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast);
         let has_multi_mask = multi_mask_model_path(model_path, 1).is_some_and(|p| p.exists());
-        let use_split_backend = (matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast)
-            && split_fbank_path.exists()
-            && split_tail_path.exists())
-            || (has_multi_mask && split_fbank_path.exists());
+        // only load split-backend on CoreML where fbank is CPU-split;
+        // on CUDA the fused model runs the full pipeline on GPU in one call
+        let use_split_backend =
+            is_coreml && split_fbank_path.exists() && (split_tail_path.exists() || has_multi_mask);
 
         Ok(Self {
             model_path: model_path.to_owned(),
@@ -162,11 +163,15 @@ impl EmbeddingModel {
             ),
             #[cfg(feature = "coreml")]
             native_multi_mask_session: Self::load_native_multi_mask(model_path, mode),
-            multi_mask_session: multi_mask_model_path(model_path, 1)
+            multi_mask_session: is_coreml
+                .then(|| multi_mask_model_path(model_path, 1))
+                .flatten()
                 .filter(|p| p.exists())
                 .map(|p| Self::build_session(p.to_str().unwrap(), mode))
                 .transpose()?,
-            multi_mask_batched_session: multi_mask_model_path(model_path, PRIMARY_BATCH_SIZE)
+            multi_mask_batched_session: is_coreml
+                .then(|| multi_mask_model_path(model_path, PRIMARY_BATCH_SIZE))
+                .flatten()
                 .filter(|p| p.exists())
                 .map(|p| Self::build_session(p.to_str().unwrap(), mode))
                 .transpose()?,
