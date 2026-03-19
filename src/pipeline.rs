@@ -872,6 +872,7 @@ impl<'a> PipelineRunner<'a> {
         let min_num_samples = self.emb_model.min_num_samples();
         let (tx, rx) = crossbeam_channel::bounded::<Array2<f32>>(64);
 
+        let inference_start = std::time::Instant::now();
         let (segmentation_result, embedding_result) = std::thread::scope(|scope| {
             let segmentation_handle = scope.spawn(|| self.seg_model.run_streaming(audio, tx));
 
@@ -896,6 +897,7 @@ impl<'a> PipelineRunner<'a> {
             let segmentation_result = segmentation_handle.join().unwrap();
             (segmentation_result, embedding_result)
         });
+        let inference_elapsed = inference_start.elapsed();
 
         segmentation_result?;
 
@@ -914,6 +916,7 @@ impl<'a> PipelineRunner<'a> {
         tracing::info!(
             chunks = segmentations.shape()[0],
             speakers = segmentations.shape()[2],
+            inference_ms = inference_elapsed.as_millis(),
             "Concurrent seg+emb complete"
         );
 
@@ -930,6 +933,7 @@ impl<'a> PipelineRunner<'a> {
         file_id: &str,
         config: &PipelineConfig,
     ) -> Result<DiarizationResult, PipelineError> {
+        let post_start = std::time::Instant::now();
         let InferenceArtifacts {
             layout,
             segmentations,
@@ -981,6 +985,11 @@ impl<'a> PipelineRunner<'a> {
         let segments = discrete_diarization.to_segments(FRAME_STEP_SECONDS, FRAME_DURATION_SECONDS);
         let segments = merge_segments(&segments, config.merge_gap);
         let rttm = to_rttm(&segments, file_id);
+
+        tracing::info!(
+            post_inference_ms = post_start.elapsed().as_millis(),
+            "Post-inference complete"
+        );
 
         Ok(DiarizationResult {
             segmentations,

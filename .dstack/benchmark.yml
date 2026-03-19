@@ -1,7 +1,7 @@
 type: task
 name: benchmark
 
-image: ghcr.io/avencera/speakrs-gpu:5470c94
+image: ghcr.io/avencera/speakrs-gpu:19a7e4c
 
 env:
   - NVIDIA_VISIBLE_DEVICES=all
