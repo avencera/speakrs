@@ -15,6 +15,70 @@ use crate::cmd::{find_fluidaudio, project_root, run_cmd, wav_duration_seconds};
 use crate::fluidaudio;
 
 // ---------------------------------------------------------------------------
+// benchmark metadata
+// ---------------------------------------------------------------------------
+
+pub struct BenchmarkMetadata {
+    pub git_sha: String,
+    pub gpu: String,
+    pub cpu: String,
+    pub region: String,
+}
+
+impl BenchmarkMetadata {
+    pub fn collect() -> Self {
+        Self {
+            git_sha: env!("GIT_SHA").to_string(),
+            gpu: detect_gpu(),
+            cpu: detect_cpu(),
+            region: std::env::var("DSTACK_REGION").unwrap_or_else(|_| "local".to_string()),
+        }
+    }
+}
+
+fn detect_gpu() -> String {
+    Command::new("nvidia-smi")
+        .args(["--query-gpu=name", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            // take the first GPU if multiple lines
+            s.lines().next().map(|l| l.trim().to_string())
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn detect_cpu() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        fs::read_to_string("/proc/cpuinfo")
+            .ok()
+            .and_then(|text| {
+                text.lines()
+                    .find(|l| l.starts_with("model name"))
+                    .and_then(|l| l.split_once(':'))
+                    .map(|(_, v)| v.trim().to_string())
+            })
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        Command::new("sysctl")
+            .args(["-n", "machdep.cpu.brand_string"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // benchmark run — speakrs vs pyannote timing
 // ---------------------------------------------------------------------------
 
@@ -708,6 +772,7 @@ pub fn der(
     unsafe { std::env::set_var("SPEAKRS_MODELS_DIR", &models_dir) };
 
     let fixtures_dir = root.join("fixtures/datasets");
+    let metadata = BenchmarkMetadata::collect();
 
     // pre-flight: run all implementations on the shortest file from the first dataset
     let preflight_failures: HashMap<String, String> = if no_preflight {
@@ -788,6 +853,7 @@ pub fn der(
             description,
             max_files,
             max_minutes,
+            metadata: &metadata,
         }
         .write()?;
     }
@@ -1282,6 +1348,7 @@ pub struct DerResultsWriter<'a> {
     pub description: Option<&'a str>,
     pub max_files: u32,
     pub max_minutes: u32,
+    pub metadata: &'a BenchmarkMetadata,
 }
 
 impl<'a> DerResultsWriter<'a> {
@@ -1320,10 +1387,15 @@ impl<'a> DerResultsWriter<'a> {
             }
         }
 
+        let m = self.metadata;
         let mut payload = serde_json::json!({
             "dataset": self.dataset_name,
             "run_id": self.run_dir.file_name().unwrap().to_string_lossy(),
             "timestamp": chrono::Utc::now().to_rfc3339(),
+            "git_sha": m.git_sha,
+            "gpu": m.gpu,
+            "cpu": m.cpu,
+            "region": m.region,
             "files": self.files.len(),
             "total_audio_minutes": (self.total_audio_minutes * 10.0).round() / 10.0,
             "collar": self.collar,
@@ -1365,6 +1437,7 @@ impl<'a> DerResultsWriter<'a> {
             "Status"
         );
 
+        let m = self.metadata;
         let mut lines = vec![
             format!(
                 "{} DER ({} files, {:.1} min, collar={:.0}ms)",
@@ -1372,6 +1445,10 @@ impl<'a> DerResultsWriter<'a> {
                 self.files.len(),
                 self.total_audio_minutes,
                 self.collar
+            ),
+            format!(
+                "Commit: {}  GPU: {}  CPU: {}  Region: {}",
+                m.git_sha, m.gpu, m.cpu, m.region
             ),
             format!(
                 "Selection: greedy by duration, executed in input order, capped at max_files={}, max_minutes={}",
@@ -1867,6 +1944,8 @@ pub fn run_benchmark_job(
 ) -> Result<BenchmarkJobResult> {
     use crate::cmd::wav_duration_seconds;
 
+    let metadata = BenchmarkMetadata::collect();
+
     println!();
     println!("========== {} ==========", config.dataset.display_name);
 
@@ -1986,6 +2065,7 @@ pub fn run_benchmark_job(
         description: config.description.as_deref(),
         max_files: config.max_files,
         max_minutes: config.max_minutes,
+        metadata: &metadata,
     }
     .write()?;
 
