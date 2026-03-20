@@ -1,7 +1,7 @@
 type: task
 name: ab-copyfix
 
-image: ghcr.io/avencera/speakrs-gpu:20dc61c
+image: ghcr.io/avencera/speakrs-gpu:1171c61
 
 env:
   - NVIDIA_VISIBLE_DEVICES=all
