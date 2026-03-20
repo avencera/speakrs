@@ -1,7 +1,7 @@
 type: task
 name: bench-5090
 
-image: ghcr.io/avencera/speakrs-gpu:f851715
+image: ghcr.io/avencera/speakrs-gpu:25c2f04
 
 env:
   - NVIDIA_VISIBLE_DEVICES=all
