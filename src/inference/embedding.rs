@@ -1221,24 +1221,33 @@ impl EmbeddingModel {
     /// Load chunk embedding models for different audio durations (30s, 60s, 120s)
     #[cfg(feature = "coreml")]
     fn load_chunk_sessions(model_path: &str, mode: ExecutionMode) -> Vec<ChunkEmbeddingSession> {
-        if !matches!(mode, ExecutionMode::CoreMlFast) {
+        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
             return Vec::new();
         }
 
-        // (num_windows, fbank_frames, num_masks)
-        let configs = [(11, 3000, 33), (26, 6000, 78), (56, 12000, 168)];
+        // (step_resnet, num_windows, fbank_frames, num_masks)
+        let configs: &[(usize, usize, usize, usize)] = match mode {
+            ExecutionMode::CoreMlFast => {
+                &[(25, 11, 3000, 33), (25, 26, 6000, 78), (25, 56, 12000, 168)]
+            }
+            _ => &[
+                (16, 16, 2920, 48),
+                (16, 40, 5992, 120),
+                (16, 86, 11880, 258),
+            ],
+        };
         let mut sessions = Vec::new();
 
-        for (num_windows, fbank_frames, num_masks) in configs {
-            let stem = format!("wespeaker-chunk-emb-w{num_windows}");
+        for &(step_resnet, num_windows, fbank_frames, num_masks) in configs {
+            let stem = format!("wespeaker-chunk-emb-s{step_resnet}-w{num_windows}");
             let w8a16_path = Path::new(model_path).with_file_name(format!("{stem}-w8a16.mlmodelc"));
             let fp32_path = Path::new(model_path).with_file_name(format!("{stem}.mlmodelc"));
 
-            // prefer W8A16 for Fast mode
-            let coreml_path = if w8a16_path.exists() {
-                w8a16_path
-            } else if fp32_path.exists() {
+            // prefer FP32 for now (W8A16 chunk causes 0.8% DER regression)
+            let coreml_path = if fp32_path.exists() {
                 fp32_path
+            } else if w8a16_path.exists() {
+                w8a16_path
             } else {
                 continue;
             };

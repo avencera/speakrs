@@ -328,18 +328,19 @@ class ChunkEmbeddingWrapper(nn.Module):
 
     # resnet output frames per 10s window (998 fbank frames -> 125 resnet frames)
     WINDOW_RESNET_FRAMES = 125
-    # 2s step = 200 fbank frames -> 25 resnet frames per step
-    STEP_RESNET_FRAMES = 25
 
-    def __init__(self, model: Any, num_windows: int) -> None:
+    def __init__(
+        self, model: Any, num_windows: int, step_resnet_frames: int = 25
+    ) -> None:
         super().__init__()
         self.resnet = model.resnet
         self.num_speakers = NUM_SPEAKERS
         self.num_windows = num_windows
+        self.step_resnet_frames = step_resnet_frames
 
         # pre-compute gather indices as buffer — avoids unfold (not in coremltools)
         # and avoids torch.arange at trace time (int cast issue with torch 2.10)
-        offsets = torch.arange(num_windows) * self.STEP_RESNET_FRAMES
+        offsets = torch.arange(num_windows) * step_resnet_frames
         # flat indices for all windows: [N * 125]
         indices = offsets.unsqueeze(1) + torch.arange(self.WINDOW_RESNET_FRAMES)
         self.register_buffer("gather_indices", indices.reshape(-1).long())
@@ -400,25 +401,35 @@ class ChunkEmbeddingWrapper(nn.Module):
         return embed_a
 
 
-# chunk sizes for ChunkEmbeddingWrapper (fbank frames, mask count)
-# ResNet downsamples by exactly 8x. For N windows at 2s step (25 resnet frames/step):
-# resnet_t = (N-1)*25 + 125, fbank_frames = resnet_t * 8
-CHUNK_FBANK_FRAMES = {
-    # 30s: 11 windows -> 33 masks, resnet_t=375, fbank=3000
-    3000: 33,
-    # 60s: 26 windows -> 78 masks, resnet_t=750, fbank=6000
-    6000: 78,
-    # 120s: 56 windows -> 168 masks, resnet_t=1500, fbank=12000
-    12000: 168,
-}
+# chunk sizes for ChunkEmbeddingWrapper
+# ResNet downsamples by exactly 8x. For N windows at step S resnet frames:
+# resnet_t = (N-1)*S + 125, fbank_frames = resnet_t * 8
+
+# CoreMlFast: 2.0s step = 25 resnet frames/step
+CHUNK_CONFIGS_FAST = [
+    # (num_windows, fbank_frames, num_masks, step_resnet_frames)
+    (11, 3000, 33, 25),  # ~30s
+    (26, 6000, 78, 25),  # ~60s
+    (56, 12000, 168, 25),  # ~120s
+]
+
+# CoreMl: 1.28s step = 16 resnet frames/step
+CHUNK_CONFIGS_DEFAULT = [
+    # (num_windows, fbank_frames, num_masks, step_resnet_frames)
+    (16, 2920, 48, 16),  # ~30s
+    (40, 5992, 120, 16),  # ~60s
+    (86, 11880, 258, 16),  # ~120s
+]
 
 CHUNK_STEM = "wespeaker-chunk-emb"
 
 
 def build_chunk_embedding_wrapper(
-    pipeline: Any, num_windows: int
+    pipeline: Any, num_windows: int, step_resnet_frames: int = 25
 ) -> ChunkEmbeddingWrapper:
-    wrapper = ChunkEmbeddingWrapper(pipeline._embedding.model_, num_windows)
+    wrapper = ChunkEmbeddingWrapper(
+        pipeline._embedding.model_, num_windows, step_resnet_frames
+    )
     wrapper.eval()
     return wrapper
 
