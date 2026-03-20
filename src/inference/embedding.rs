@@ -32,6 +32,17 @@ pub(crate) struct SplitTailInput<'a> {
     pub weights: &'a [f32],
 }
 
+/// Chunk embedding model: runs ResNet once on full-audio fbank, gathers per-window features
+#[cfg(feature = "coreml")]
+pub(crate) struct ChunkEmbeddingSession {
+    model: SharedCoreMlModel,
+    pub num_windows: usize,
+    pub fbank_frames: usize,
+    pub num_masks: usize,
+    cached_fbank_shape: CachedInputShape,
+    cached_masks_shape: CachedInputShape,
+}
+
 pub struct EmbeddingModel {
     model_path: String,
     mode: ExecutionMode,
@@ -54,6 +65,8 @@ pub struct EmbeddingModel {
     native_fbank_batched_session: Option<SharedCoreMlModel>,
     #[cfg(feature = "coreml")]
     native_multi_mask_session: Option<SharedCoreMlModel>,
+    #[cfg(feature = "coreml")]
+    native_chunk_sessions: Vec<ChunkEmbeddingSession>,
     multi_mask_session: Option<Session>,
     multi_mask_batched_session: Option<Session>,
     #[cfg(feature = "coreml")]
@@ -169,6 +182,8 @@ impl EmbeddingModel {
             ),
             #[cfg(feature = "coreml")]
             native_multi_mask_session: Self::load_native_multi_mask(model_path, mode),
+            #[cfg(feature = "coreml")]
+            native_chunk_sessions: Self::load_chunk_sessions(model_path, mode),
             multi_mask_session: is_coreml
                 .then(|| multi_mask_model_path(model_path, 1))
                 .flatten()
@@ -408,6 +423,7 @@ impl EmbeddingModel {
                 Self::load_native_fbank(&self.model_path, self.mode, PRIMARY_BATCH_SIZE);
             self.native_multi_mask_session =
                 Self::load_native_multi_mask(&self.model_path, self.mode);
+            self.native_chunk_sessions = Self::load_chunk_sessions(&self.model_path, self.mode);
         }
         self.multi_mask_session = multi_mask_model_path(&self.model_path, 1)
             .filter(|p| p.exists())
@@ -1200,6 +1216,99 @@ impl EmbeddingModel {
                 None
             }
         }
+    }
+
+    /// Load chunk embedding models for different audio durations (30s, 60s, 120s)
+    #[cfg(feature = "coreml")]
+    fn load_chunk_sessions(model_path: &str, mode: ExecutionMode) -> Vec<ChunkEmbeddingSession> {
+        if !matches!(mode, ExecutionMode::CoreMlFast) {
+            return Vec::new();
+        }
+
+        // (num_windows, fbank_frames, num_masks)
+        let configs = [(11, 3000, 33), (26, 6000, 78), (56, 12000, 168)];
+        let mut sessions = Vec::new();
+
+        for (num_windows, fbank_frames, num_masks) in configs {
+            let stem = format!("wespeaker-chunk-emb-w{num_windows}");
+            let w8a16_path = Path::new(model_path).with_file_name(format!("{stem}-w8a16.mlmodelc"));
+            let fp32_path = Path::new(model_path).with_file_name(format!("{stem}.mlmodelc"));
+
+            // prefer W8A16 for Fast mode
+            let coreml_path = if w8a16_path.exists() {
+                w8a16_path
+            } else if fp32_path.exists() {
+                fp32_path
+            } else {
+                continue;
+            };
+
+            match SharedCoreMlModel::load(
+                &coreml_path,
+                CoreMlModel::default_compute_units(),
+                "output",
+                GpuPrecision::Low,
+            ) {
+                Ok(model) => {
+                    sessions.push(ChunkEmbeddingSession {
+                        model,
+                        num_windows,
+                        fbank_frames,
+                        num_masks,
+                        cached_fbank_shape: CachedInputShape::new(
+                            "fbank",
+                            &[1, fbank_frames, FBANK_FEATURES],
+                        ),
+                        cached_masks_shape: CachedInputShape::new(
+                            "masks",
+                            &[num_masks, MASK_FRAMES],
+                        ),
+                    });
+                }
+                Err(e) => {
+                    eprintln!("warning: failed to load chunk embedding w{num_windows}: {e}");
+                }
+            }
+        }
+
+        // sort by num_windows ascending for binary search
+        sessions.sort_by_key(|s| s.num_windows);
+        if !sessions.is_empty() {
+            let sizes: Vec<_> = sessions.iter().map(|s| s.num_windows).collect();
+            tracing::info!(?sizes, "Loaded chunk embedding models");
+        }
+        sessions
+    }
+
+    /// Find the best chunk session for a given number of windows
+    #[cfg(feature = "coreml")]
+    pub(crate) fn chunk_session_for_windows(
+        &self,
+        num_windows: usize,
+    ) -> Option<&ChunkEmbeddingSession> {
+        // find the smallest chunk that fits
+        self.native_chunk_sessions
+            .iter()
+            .find(|s| s.num_windows >= num_windows)
+    }
+
+    /// Run chunk embedding: full-audio fbank + all per-window masks in one call
+    #[cfg(feature = "coreml")]
+    pub(crate) fn embed_chunk(
+        &self,
+        session: &ChunkEmbeddingSession,
+        full_fbank: &[f32],
+        masks: &[f32],
+    ) -> Result<Array2<f32>, ort::Error> {
+        let (data, _) = session
+            .model
+            .predict_cached(&[
+                (&session.cached_fbank_shape, full_fbank),
+                (&session.cached_masks_shape, masks),
+            ])
+            .map_err(|e| ort::Error::new(e.to_string()))?;
+        let num_masks = session.num_masks;
+        Ok(Array2::from_shape_vec((num_masks, 256), data).unwrap())
     }
 }
 
