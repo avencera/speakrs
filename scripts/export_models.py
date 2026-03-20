@@ -92,11 +92,22 @@ def export_segmentation(pipeline: Any, models_dir: str) -> None:
             opset_version=14,
             dynamo=False,
         )
+        torch.onnx.export(
+            seg_model,
+            (torch.randn(64, 1, 160000),),
+            os.path.join(models_dir, "segmentation-3.0-b64.onnx"),
+            input_names=["input"],
+            output_names=["output"],
+            opset_version=14,
+            dynamo=False,
+        )
 
     sz = os.path.getsize(os.path.join(models_dir, "segmentation-3.0.onnx")) / 1e6
     print(f"  segmentation-3.0.onnx ({sz:.1f} MB)")
     bsz = os.path.getsize(os.path.join(models_dir, "segmentation-3.0-b32.onnx")) / 1e6
     print(f"  segmentation-3.0-b32.onnx ({bsz:.1f} MB)")
+    b64sz = os.path.getsize(os.path.join(models_dir, "segmentation-3.0-b64.onnx")) / 1e6
+    print(f"  segmentation-3.0-b64.onnx ({b64sz:.1f} MB)")
 
 
 def export_embedding(pipeline: Any, models_dir: str) -> None:
@@ -293,6 +304,13 @@ def export_embedding(pipeline: Any, models_dir: str) -> None:
         models_dir,
         "wespeaker-voxceleb-resnet34-b32.onnx",
         batch_size=32,
+    )
+    export_embedding_model(
+        fbank_wrapper,
+        tail_wrapper,
+        models_dir,
+        "wespeaker-voxceleb-resnet34-b64.onnx",
+        batch_size=64,
     )
     export_embedding_tail_model(
         tail_wrapper,

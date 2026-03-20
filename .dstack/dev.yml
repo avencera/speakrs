@@ -1,7 +1,7 @@
 type: dev-environment
 name: gpu-dev
 
-image: ghcr.io/avencera/speakrs-gpu:25c2f04
+image: ghcr.io/avencera/speakrs-gpu:20dc61c
 ide: vscode
 
 env:

@@ -16,7 +16,9 @@ fixtures/
 !fixtures/models/wespeaker-voxceleb-resnet34-tail*.onnx
 !fixtures/models/wespeaker-multimask-tail*.onnx
 !fixtures/models/segmentation-3.0-b32.onnx
+!fixtures/models/segmentation-3.0-b64.onnx
 !fixtures/models/wespeaker-voxceleb-resnet34-b32.onnx*
+!fixtures/models/wespeaker-voxceleb-resnet34-b64.onnx*
 *.mlpackage
 *.mlmodelc
 

@@ -9,7 +9,7 @@ use ort::value::TensorRef;
 use crate::inference::coreml::{CachedInputShape, CoreMlModel, GpuPrecision, coreml_model_path};
 use crate::inference::{ExecutionMode, with_execution_mode};
 
-const PRIMARY_BATCH_SIZE: usize = 32;
+const PRIMARY_BATCH_SIZE: usize = 64;
 const CHUNK_SPEAKER_BATCH_SIZE: usize = 3;
 const NUM_SPEAKERS: usize = 3;
 const FBANK_FRAMES: usize = 998;
