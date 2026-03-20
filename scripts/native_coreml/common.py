@@ -315,6 +315,118 @@ class MultiMaskTailWrapper(nn.Module):
         return embed_a
 
 
+class ChunkEmbeddingWrapper(nn.Module):
+    """Full-audio embedding: fbank [1, T, 80] + masks [N*3, 589] -> embeddings [N*3, 256]
+
+    ResNet runs ONCE on the full audio's fbank features. Output frames are gathered
+    per-window using pre-computed indices (stride = 25 resnet frames = 2s step).
+    Pool+classify runs on all N*3 pairs. Avoids running ResNet N times for overlapping windows.
+
+    num_windows is baked in at construction time (pre-computed gather indices).
+    Export separate models per chunk size via EnumeratedShapes.
+    """
+
+    # resnet output frames per 10s window (998 fbank frames -> 125 resnet frames)
+    WINDOW_RESNET_FRAMES = 125
+    # 2s step = 200 fbank frames -> 25 resnet frames per step
+    STEP_RESNET_FRAMES = 25
+
+    def __init__(self, model: Any, num_windows: int) -> None:
+        super().__init__()
+        self.resnet = model.resnet
+        self.num_speakers = NUM_SPEAKERS
+        self.num_windows = num_windows
+
+        # pre-compute gather indices as buffer — avoids unfold (not in coremltools)
+        # and avoids torch.arange at trace time (int cast issue with torch 2.10)
+        offsets = torch.arange(num_windows) * self.STEP_RESNET_FRAMES
+        # flat indices for all windows: [N * 125]
+        indices = offsets.unsqueeze(1) + torch.arange(self.WINDOW_RESNET_FRAMES)
+        self.register_buffer("gather_indices", indices.reshape(-1).long())
+
+    def pool(self, sequences: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+        weights = weights.unsqueeze(1)
+        weights = F.interpolate(weights, size=self.WINDOW_RESNET_FRAMES, mode="nearest")
+
+        weight_sum = weights.sum(dim=2)
+        safe_sum = torch.where(
+            weight_sum > 0.0, weight_sum, torch.ones_like(weight_sum)
+        )
+        mean = torch.sum(sequences * weights, dim=2) / safe_sum
+        dx2 = torch.square(sequences - mean.unsqueeze(2))
+        weight_sq_sum = torch.square(weights).sum(dim=2)
+        denom = safe_sum - weight_sq_sum / safe_sum + 1e-8
+        var = torch.sum(dx2 * weights, dim=2) / denom
+        std = torch.sqrt(torch.clamp_min(var, 1e-10))
+
+        stats = torch.cat([mean, std], dim=-1)
+        zero_stats = torch.cat(
+            [torch.zeros_like(mean), torch.full_like(std, 1e-5)], dim=-1
+        )
+        zero_mask = (weight_sum <= 0.0).repeat(1, stats.size(1))
+        return torch.where(zero_mask, zero_stats, stats)
+
+    def forward(self, fbank: torch.Tensor, masks: torch.Tensor) -> Any:
+        # fbank: [1, T, 80] — full audio fbank features (T aligned so unfold gives N windows)
+        # masks: [N*3, 589] — per-window per-speaker masks (N = unfold window count)
+
+        # ResNet once on full audio
+        frames = self.resnet.forward_frames(fbank)  # [1, 256, 10, T_out]
+        # hardcoded: 256 channels * 10 freq bins = 2560 (avoids dynamic size() calls)
+        frames = frames.reshape(1, 2560, -1)  # [1, 2560, T_out]
+
+        # gather per-window features using pre-computed indices
+        frames_flat = frames.squeeze(0)  # [2560, T_out]
+        gathered = torch.index_select(
+            frames_flat, 1, self.gather_indices
+        )  # [2560, N*125]
+        window_features = gathered.reshape(
+            2560, self.num_windows, self.WINDOW_RESNET_FRAMES
+        )  # [2560, N, 125]
+        window_features = window_features.permute(1, 0, 2)  # [N, 2560, 125]
+
+        # expand for speakers: [N*3, 2560, 125]
+        window_features = torch.repeat_interleave(
+            window_features, self.num_speakers, dim=0
+        )
+
+        stats = self.pool(window_features, masks)  # [N*3, 5120]
+        embed_a = self.resnet.seg_1(stats)
+        if self.resnet.two_emb_layer:
+            out = F.relu(embed_a)
+            out = self.resnet.seg_bn_1(out)
+            return self.resnet.seg_2(out)
+
+        return embed_a
+
+
+# chunk sizes for ChunkEmbeddingWrapper (fbank frames, mask count)
+# ResNet downsamples by exactly 8x. For N windows at 2s step (25 resnet frames/step):
+# resnet_t = (N-1)*25 + 125, fbank_frames = resnet_t * 8
+CHUNK_FBANK_FRAMES = {
+    # 30s: 11 windows -> 33 masks, resnet_t=375, fbank=3000
+    3000: 33,
+    # 60s: 26 windows -> 78 masks, resnet_t=750, fbank=6000
+    6000: 78,
+    # 120s: 56 windows -> 168 masks, resnet_t=1500, fbank=12000
+    12000: 168,
+}
+
+CHUNK_STEM = "wespeaker-chunk-emb"
+
+
+def build_chunk_embedding_wrapper(
+    pipeline: Any, num_windows: int
+) -> ChunkEmbeddingWrapper:
+    wrapper = ChunkEmbeddingWrapper(pipeline._embedding.model_, num_windows)
+    wrapper.eval()
+    return wrapper
+
+
+def chunk_embedding_package_path(output_dir: Path) -> Path:
+    return coreml_packages_dir(output_dir) / f"{CHUNK_STEM}.mlpackage"
+
+
 def build_multi_mask_wrapper(pipeline: Any) -> MultiMaskTailWrapper:
     wrapper = MultiMaskTailWrapper(pipeline._embedding.model_)
     wrapper.eval()
