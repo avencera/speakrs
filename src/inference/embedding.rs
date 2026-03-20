@@ -7,10 +7,13 @@ use ort::session::{HasSelectedOutputs, OutputSelector, RunOptions, Session};
 use ort::value::{Tensor, TensorRef};
 
 #[cfg(feature = "coreml")]
-use crate::inference::coreml::{CachedInputShape, CoreMlModel, GpuPrecision, coreml_model_path};
+use crate::inference::coreml::{
+    CachedInputShape, CoreMlModel, GpuPrecision, SharedCoreMlModel, coreml_model_path,
+};
 use crate::inference::{ExecutionMode, with_execution_mode};
 
 const PRIMARY_BATCH_SIZE: usize = 64;
+const MULTI_MASK_BATCH_SIZE: usize = 32;
 const CHUNK_SPEAKER_BATCH_SIZE: usize = 3;
 const NUM_SPEAKERS: usize = 3;
 const FBANK_FRAMES: usize = 998;
@@ -45,11 +48,11 @@ pub struct EmbeddingModel {
     #[cfg(feature = "coreml")]
     native_tail_primary_batched_session: Option<CoreMlModel>,
     #[cfg(feature = "coreml")]
-    native_fbank_session: Option<CoreMlModel>,
+    native_fbank_session: Option<SharedCoreMlModel>,
     #[cfg(feature = "coreml")]
-    native_fbank_batched_session: Option<CoreMlModel>,
+    native_fbank_batched_session: Option<SharedCoreMlModel>,
     #[cfg(feature = "coreml")]
-    native_multi_mask_session: Option<CoreMlModel>,
+    native_multi_mask_session: Option<SharedCoreMlModel>,
     multi_mask_session: Option<Session>,
     multi_mask_batched_session: Option<Session>,
     #[cfg(feature = "coreml")]
@@ -197,20 +200,20 @@ impl EmbeddingModel {
             #[cfg(feature = "coreml")]
             cached_multi_mask_fbank_shape: CachedInputShape::new(
                 "fbank",
-                &[PRIMARY_BATCH_SIZE, FBANK_FRAMES, FBANK_FEATURES],
+                &[MULTI_MASK_BATCH_SIZE, FBANK_FRAMES, FBANK_FEATURES],
             ),
             #[cfg(feature = "coreml")]
             cached_multi_mask_masks_shape: CachedInputShape::new(
                 "masks",
-                &[PRIMARY_BATCH_SIZE * NUM_SPEAKERS, MASK_FRAMES],
+                &[MULTI_MASK_BATCH_SIZE * NUM_SPEAKERS, MASK_FRAMES],
             ),
             multi_mask_fbank_buffer: Array3::zeros((
-                PRIMARY_BATCH_SIZE,
+                MULTI_MASK_BATCH_SIZE,
                 FBANK_FRAMES,
                 FBANK_FEATURES,
             )),
             multi_mask_masks_buffer: Array2::zeros((
-                PRIMARY_BATCH_SIZE * NUM_SPEAKERS,
+                MULTI_MASK_BATCH_SIZE * NUM_SPEAKERS,
                 MASK_FRAMES,
             )),
             waveform_buffer: Array3::zeros((1, 1, 160_000)),
@@ -454,7 +457,11 @@ impl EmbeddingModel {
         &mut self,
         inputs: &[MaskedEmbeddingInput<'_>],
     ) -> Result<Array2<f32>, ort::Error> {
-        if inputs.len() == PRIMARY_BATCH_SIZE && self.primary_batched_session.is_some() {
+        if let Some(sess) = self
+            .primary_batched_session
+            .as_mut()
+            .filter(|_| inputs.len() == PRIMARY_BATCH_SIZE)
+        {
             for (batch_idx, input) in inputs.iter().enumerate() {
                 let used_mask = select_mask(
                     input.mask,
@@ -480,7 +487,6 @@ impl EmbeddingModel {
                 TensorRef::from_array_view(self.primary_batch_waveform_buffer.view())?;
             let weights_tensor =
                 TensorRef::from_array_view(self.primary_batch_weights_buffer.view())?;
-            let sess = self.primary_batched_session.as_mut().unwrap();
             let ort_inputs =
                 ort::inputs!["waveform" => waveform_tensor, "weights" => weights_tensor];
             let outputs = if let Some(opts) = &self.primary_batch_run_options {
@@ -585,7 +591,7 @@ impl EmbeddingModel {
         }
 
         #[cfg(feature = "coreml")]
-        if let Some(ref mut native) = self.native_fbank_session {
+        if let Some(ref native) = self.native_fbank_session {
             let input_data = self.split_waveform_buffer.as_slice().unwrap();
             let (data, out_shape) = native
                 .predict_cached(&[(&self.cached_fbank_single_shape, input_data)])
@@ -640,7 +646,7 @@ impl EmbeddingModel {
                 }
 
                 #[cfg(feature = "coreml")]
-                if let Some(ref mut native) = self.native_fbank_batched_session {
+                if let Some(ref native) = self.native_fbank_batched_session {
                     let input_data = self.split_fbank_batch_buffer.as_slice().unwrap();
                     let (data, out_shape) = native
                         .predict_cached(&[(&self.cached_fbank_batch_shape, input_data)])
@@ -712,7 +718,7 @@ impl EmbeddingModel {
         #[cfg(feature = "coreml")]
         let has_batched = has_batched || self.native_multi_mask_session.is_some();
         if has_batched {
-            PRIMARY_BATCH_SIZE
+            MULTI_MASK_BATCH_SIZE
         } else if self.multi_mask_session.is_some() {
             1
         } else {
@@ -729,7 +735,7 @@ impl EmbeddingModel {
         let num_fbanks = fbanks.len();
         let num_masks = masks.len();
         debug_assert_eq!(num_masks, num_fbanks * NUM_SPEAKERS);
-        debug_assert!(num_fbanks <= PRIMARY_BATCH_SIZE);
+        debug_assert!(num_fbanks <= MULTI_MASK_BATCH_SIZE);
 
         let fbank_row_stride = FBANK_FRAMES * FBANK_FEATURES;
         for (idx, fbank) in fbanks.iter().enumerate() {
@@ -747,22 +753,22 @@ impl EmbeddingModel {
             );
         }
         // zero unused fbank rows
-        if num_fbanks < PRIMARY_BATCH_SIZE {
+        if num_fbanks < MULTI_MASK_BATCH_SIZE {
             let start = num_fbanks * fbank_row_stride;
             let buf = self.multi_mask_fbank_buffer.as_slice_mut().unwrap();
             buf[start..].fill(0.0);
         }
         // zero unused mask rows
-        if num_masks < PRIMARY_BATCH_SIZE * NUM_SPEAKERS {
+        if num_masks < MULTI_MASK_BATCH_SIZE * NUM_SPEAKERS {
             self.multi_mask_masks_buffer
                 .slice_mut(s![num_masks.., ..])
                 .fill(0.0);
         }
 
-        let full_mask_batch = PRIMARY_BATCH_SIZE * NUM_SPEAKERS;
+        let full_mask_batch = MULTI_MASK_BATCH_SIZE * NUM_SPEAKERS;
 
         #[cfg(feature = "coreml")]
-        if let Some(ref mut native) = self.native_multi_mask_session {
+        if let Some(ref native) = self.native_multi_mask_session {
             let fbank_data = self.multi_mask_fbank_buffer.as_slice().unwrap();
             let masks_data = self.multi_mask_masks_buffer.as_slice().unwrap();
             let (data, _) = native
@@ -776,7 +782,7 @@ impl EmbeddingModel {
         }
 
         let use_batched =
-            num_fbanks == PRIMARY_BATCH_SIZE && self.multi_mask_batched_session.is_some();
+            num_fbanks == MULTI_MASK_BATCH_SIZE && self.multi_mask_batched_session.is_some();
 
         if use_batched {
             let fbank_tensor = TensorRef::from_array_view(self.multi_mask_fbank_buffer.view())?;
@@ -1091,7 +1097,7 @@ impl EmbeddingModel {
         model_path: &str,
         mode: ExecutionMode,
         batch_size: usize,
-    ) -> Option<CoreMlModel> {
+    ) -> Option<SharedCoreMlModel> {
         if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
             return None;
         }
@@ -1105,7 +1111,7 @@ impl EmbeddingModel {
         if !coreml_path.exists() {
             return None;
         }
-        match CoreMlModel::load(
+        match SharedCoreMlModel::load(
             &coreml_path,
             CoreMlModel::default_compute_units(),
             "output",
@@ -1120,17 +1126,18 @@ impl EmbeddingModel {
     }
 
     #[cfg(feature = "coreml")]
-    fn load_native_multi_mask(model_path: &str, mode: ExecutionMode) -> Option<CoreMlModel> {
+    fn load_native_multi_mask(model_path: &str, mode: ExecutionMode) -> Option<SharedCoreMlModel> {
         if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
             return None;
         }
         // use the b32 compiled model (supports both b1 and b32 via EnumeratedShapes)
         let onnx_path = Path::new(model_path).with_file_name("wespeaker-multimask-tail-b32.onnx");
+        // W8A16 embedding disabled pending DER validation
         let coreml_path = coreml_model_path(onnx_path.to_str().unwrap());
         if !coreml_path.exists() {
             return None;
         }
-        match CoreMlModel::load(
+        match SharedCoreMlModel::load(
             &coreml_path,
             CoreMlModel::default_compute_units(),
             "output",

@@ -285,9 +285,118 @@ fn extract_output(array: &MLMultiArray) -> Result<(Vec<f32>, Vec<usize>), CoreMl
     Ok((data.to_vec(), shape))
 }
 
+/// Thread-safe CoreML model wrapper that can be shared across threads
+///
+/// Unlike CoreMlModel which reuses a cached NSMutableDictionary (requiring &mut self),
+/// this allocates fresh input dicts per call, enabling &self predict methods.
+/// Multiple threads can call predict concurrently on the same model instance
+pub(crate) struct SharedCoreMlModel {
+    model: Retained<MLModel>,
+    output_name: String,
+    output_key: Retained<NSString>,
+}
+
+// SAFETY: MLModel.predictionFromFeatures is documented as thread-safe by Apple.
+// All per-call mutable state (NSMutableDictionary, RcBlock deallocator) is allocated
+// fresh in each predict call, preventing data races. Retained<NSString> is immutable
+unsafe impl Send for SharedCoreMlModel {}
+unsafe impl Sync for SharedCoreMlModel {}
+
+impl SharedCoreMlModel {
+    /// Load a compiled .mlmodelc bundle
+    pub fn load(
+        path: &Path,
+        compute_units: MLComputeUnits,
+        output_name: &str,
+        gpu_precision: GpuPrecision,
+    ) -> Result<Self, CoreMlError> {
+        let path_str = NSString::from_str(&path.to_string_lossy());
+        let url = NSURL::fileURLWithPath_isDirectory(&path_str, true);
+
+        let config = unsafe { MLModelConfiguration::new() };
+        unsafe { config.setComputeUnits(compute_units) };
+        let low_precision = matches!(gpu_precision, GpuPrecision::Low);
+        unsafe { config.setAllowLowPrecisionAccumulationOnGPU(low_precision) };
+
+        let model = unsafe { MLModel::modelWithContentsOfURL_configuration_error(&url, &config) }
+            .map_err(|e| CoreMlError::LoadFailed(format!("{e}")))?;
+
+        Ok(Self {
+            model,
+            output_key: NSString::from_str(output_name),
+            output_name: output_name.to_owned(),
+        })
+    }
+
+    /// Convert from an existing CoreMlModel, taking ownership of the MLModel
+    #[expect(dead_code)]
+    pub fn from_core_ml_model(model: CoreMlModel) -> Self {
+        Self {
+            model: model.model,
+            output_key: model.output_key,
+            output_name: model.output_name,
+        }
+    }
+
+    /// Run prediction with pre-cached shape/strides objects
+    ///
+    /// Thread-safe: allocates fresh input dict per call
+    pub fn predict_cached(
+        &self,
+        inputs: &[(&CachedInputShape, &[f32])],
+    ) -> Result<(Vec<f32>, Vec<usize>), CoreMlError> {
+        let deallocator = RcBlock::new(|_ptr: NonNull<c_void>| {});
+        let input_dict: Retained<NSMutableDictionary<NSString, AnyObject>> =
+            NSMutableDictionary::new();
+
+        for &(cached, data) in inputs {
+            debug_assert_eq!(data.len(), cached.total_elements);
+            let multi_array =
+                create_multi_array_cached_with_deallocator(data, cached, &deallocator)?;
+            let feature_value = unsafe { MLFeatureValue::featureValueWithMultiArray(&multi_array) };
+            let key_copy: &ProtocolObject<dyn NSCopying> = ProtocolObject::from_ref(&*cached.name);
+            let value_ref: &AnyObject =
+                unsafe { &*((&*feature_value) as *const MLFeatureValue as *const AnyObject) };
+            unsafe { input_dict.setObject_forKey(value_ref, key_copy) };
+        }
+
+        let provider = unsafe {
+            MLDictionaryFeatureProvider::initWithDictionary_error(
+                MLDictionaryFeatureProvider::alloc(),
+                &input_dict,
+            )
+        }
+        .map_err(|e| CoreMlError::PredictionFailed(format!("feature provider: {e}")))?;
+
+        let input_ref: &ProtocolObject<dyn MLFeatureProvider> =
+            ProtocolObject::from_ref(&*provider);
+        let output = unsafe { self.model.predictionFromFeatures_error(input_ref) }
+            .map_err(|e| CoreMlError::PredictionFailed(format!("{e}")))?;
+
+        let output_value = unsafe { output.featureValueForName(&self.output_key) }
+            .ok_or_else(|| CoreMlError::OutputNotFound(self.output_name.clone()))?;
+        let output_array = unsafe { output_value.multiArrayValue() }
+            .ok_or_else(|| CoreMlError::OutputNotFound(self.output_name.clone()))?;
+
+        extract_output(&output_array)
+    }
+}
+
 /// Resolve .mlmodelc path next to an .onnx file
 pub(crate) fn coreml_model_path(onnx_path: &str) -> std::path::PathBuf {
     let path = Path::new(onnx_path);
     let stem = path.file_stem().unwrap().to_str().unwrap();
     path.with_file_name(format!("{stem}.mlmodelc"))
+}
+
+/// Resolve W8A16 .mlmodelc path, falling back to FP32 if not found
+pub(crate) fn coreml_w8a16_model_path(onnx_path: &str) -> std::path::PathBuf {
+    let path = Path::new(onnx_path);
+    let stem = path.file_stem().unwrap().to_str().unwrap();
+    let w8a16_path = path.with_file_name(format!("{stem}-w8a16.mlmodelc"));
+    if w8a16_path.exists() {
+        w8a16_path
+    } else {
+        coreml_model_path(onnx_path)
+    }
 }
