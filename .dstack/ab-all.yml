@@ -1,17 +1,15 @@
 type: task
-name: benchmark
+name: ab-all
 
-image: ghcr.io/avencera/speakrs-gpu:a35b423
+image: ghcr.io/avencera/speakrs-gpu:ab-test
 
 env:
   - NVIDIA_VISIBLE_DEVICES=all
   - LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64
   - RUST_BACKTRACE=1
   - DATASET
-  - IMPLS
-  - MAX_FILES
   - MAX_MINUTES
-  - RUN_NAME
+  - MAX_FILES
   - HF_TOKEN
   - AWS_ACCESS_KEY_ID
   - AWS_SECRET_ACCESS_KEY
@@ -21,26 +19,33 @@ env:
 commands:
   - |
     echo "CPU: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)"
+    echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader,nounits | head -1)"
 
-    # seed baked assets from /opt into /workspace (mirrors docker-entrypoint.sh)
     mkdir -p /workspace/models && cp -rn /opt/models/* /workspace/models/ 2>/dev/null || true
     mkdir -p /workspace/datasets && cp -rn /opt/datasets/* /workspace/datasets/ 2>/dev/null || true
-    mkdir -p /workspace/scripts && cp -n /opt/scripts/diarize_pyannote.py /workspace/scripts/ 2>/dev/null || true
     for lib in libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so; do
       [ -f /usr/local/lib/$lib ] && ln -sf /usr/local/lib/$lib /workspace/$lib || true
     done
-    export SPEAKRS_RESULTS_DIR=/workspace/_benchmarks/$RUN_NAME
-    mkdir -p $SPEAKRS_RESULTS_DIR
-    speakrs-bm --dataset $DATASET \
-      ${IMPLS:+--impls $IMPLS} \
-      ${MAX_FILES:+--max-files $MAX_FILES} \
-      ${MAX_MINUTES:+--max-minutes $MAX_MINUTES}
+
+    RESULTS_BASE=/workspace/_benchmarks/ab-test
+    for variant in baseline copyfix nhwc; do
+      echo ""
+      echo "========== $variant =========="
+      export SPEAKRS_RESULTS_DIR=$RESULTS_BASE/$variant
+      mkdir -p $SPEAKRS_RESULTS_DIR
+      speakrs-bm-$variant --dataset $DATASET \
+        --impls sg \
+        ${MAX_FILES:+--max-files $MAX_FILES} \
+        ${MAX_MINUTES:+--max-minutes $MAX_MINUTES}
+      echo ""
+    done
+
     s5cmd --endpoint-url $AWS_ENDPOINT_URL \
-      cp $SPEAKRS_RESULTS_DIR/* s3://speakrs/benchmarks/$RUN_NAME/
+      cp $RESULTS_BASE/* s3://speakrs/benchmarks/ab-test/ --recursive
 
 resources:
   gpu:
-    name: [RTX4090, RTX5090, RTX6000Ada, L40S]
+    name: [RTX5090]
     count: 1
 
 spot_policy: on-demand

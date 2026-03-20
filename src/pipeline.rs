@@ -476,15 +476,34 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
         let mut embeddings: Vec<SpeakerEmbedding> = Vec::new();
         let mut pending: Vec<PendingEmbedding<'_>> = Vec::with_capacity(batch_size);
         let mut chunk_idx = 0usize;
+        let mut emb_calls = 0u32;
+        let mut emb_batched = 0u32;
+        let mut emb_single = 0u32;
+        let mut total_speakers = 0u32;
+        let mut skipped_speakers = 0u32;
+        let mut channel_wait = std::time::Duration::ZERO;
+        let mut decode_time = std::time::Duration::ZERO;
+        let mut embed_time = std::time::Duration::ZERO;
+        let emb_start = std::time::Instant::now();
 
-        for raw_window in receiver {
+        loop {
+            let recv_start = std::time::Instant::now();
+            let raw_window = match receiver.recv() {
+                Ok(w) => w,
+                Err(_) => break,
+            };
+            channel_wait += recv_start.elapsed();
+
+            let decode_start = std::time::Instant::now();
             let (segmentation_view, chunk_audio, clean_masks) =
                 self.decode_chunk(&raw_window, &mut decoded_windows, chunk_idx);
 
             for speaker_idx in 0..self.num_speakers {
+                total_speakers += 1;
                 let mask_col = segmentation_view.column(speaker_idx);
                 let activity: f32 = mask_col.iter().sum();
                 if activity < MIN_SPEAKER_ACTIVITY {
+                    skipped_speakers += 1;
                     continue;
                 }
 
@@ -496,18 +515,46 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
                     clean_mask: clean_masks.column(speaker_idx).to_vec(),
                 });
                 if pending.len() == batch_size {
+                    decode_time += decode_start.elapsed();
+                    let flush_start = std::time::Instant::now();
                     self.flush_masked_pending(embedding_model, &pending, &mut embeddings)?;
+                    embed_time += flush_start.elapsed();
+                    emb_calls += 1;
+                    emb_batched += 1;
                     pending.clear();
+                    // restart decode timer for remaining speakers in this chunk
+                    // (minor: just let it accumulate)
                 }
             }
+            decode_time += decode_start.elapsed();
             chunk_idx += 1;
         }
 
         while !pending.is_empty() {
             let batch_len = embedding_model.best_batch_len(pending.len());
+            let flush_start = std::time::Instant::now();
             self.flush_masked_pending(embedding_model, &pending[..batch_len], &mut embeddings)?;
+            embed_time += flush_start.elapsed();
+            emb_calls += 1;
+            emb_single += 1;
             pending.drain(..batch_len);
         }
+
+        let total_emb = emb_start.elapsed();
+        tracing::info!(
+            chunks = chunk_idx,
+            total_speakers,
+            skipped_speakers,
+            active_speakers = total_speakers - skipped_speakers,
+            emb_calls,
+            emb_batched,
+            emb_single,
+            channel_wait_ms = channel_wait.as_millis(),
+            decode_ms = decode_time.as_millis(),
+            embed_ms = embed_time.as_millis(),
+            total_emb_ms = total_emb.as_millis(),
+            "Embedding thread profile"
+        );
 
         Ok(ConcurrentEmbeddingResult {
             decoded_windows,

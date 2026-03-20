@@ -1,0 +1,9 @@
+FROM ghcr.io/avencera/speakrs-gpu:9d7b5a1 AS baseline
+FROM ghcr.io/avencera/speakrs-gpu:39e786d AS copyfix
+FROM ghcr.io/avencera/speakrs-gpu:ba3281e AS nhwc
+
+FROM ghcr.io/avencera/speakrs-gpu:9d7b5a1
+
+COPY --from=baseline /usr/local/bin/speakrs-bm /usr/local/bin/speakrs-bm-baseline
+COPY --from=copyfix /usr/local/bin/speakrs-bm /usr/local/bin/speakrs-bm-copyfix
+COPY --from=nhwc /usr/local/bin/speakrs-bm /usr/local/bin/speakrs-bm-nhwc
