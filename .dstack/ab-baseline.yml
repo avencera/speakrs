@@ -1,7 +1,7 @@
 type: task
 name: ab-baseline
 
-image: ghcr.io/avencera/speakrs-gpu:41ee2ca
+image: ghcr.io/avencera/speakrs-gpu:f851715
 
 env:
   - NVIDIA_VISIBLE_DEVICES=all

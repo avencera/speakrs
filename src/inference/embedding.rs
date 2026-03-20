@@ -400,7 +400,8 @@ impl EmbeddingModel {
         &mut self,
         inputs: &[MaskedEmbeddingInput<'_>],
     ) -> Result<Array2<f32>, ort::Error> {
-        if inputs.len() == PRIMARY_BATCH_SIZE && self.primary_batched_session.is_some() {
+        if inputs.len() <= PRIMARY_BATCH_SIZE && self.primary_batched_session.is_some() {
+            // pad partial batches with zeros to use the batched session
             return Self::embed_full_batch(
                 inputs,
                 self.window_samples,

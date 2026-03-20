@@ -185,11 +185,14 @@ impl SegmentationModel {
         let mut seg_batched = 0u32;
         let mut seg_single = 0u32;
 
+        let has_batched = self.primary_batched_session.is_some();
+        let zeros = vec![0.0f32; win_samples];
+
         let mut next_idx = 0;
         while next_idx < total_windows {
             let remaining = total_windows - next_idx;
 
-            if remaining >= PRIMARY_BATCH_SIZE && self.primary_batched_session.is_some() {
+            if remaining >= PRIMARY_BATCH_SIZE && has_batched {
                 let batch: Vec<&[f32]> = (next_idx..next_idx + PRIMARY_BATCH_SIZE)
                     .map(&window_at)
                     .collect();
@@ -202,6 +205,22 @@ impl SegmentationModel {
                     tx.send(r)?;
                 }
                 next_idx += PRIMARY_BATCH_SIZE;
+                continue;
+            }
+
+            // pad remaining windows into a full batch to avoid single-window calls
+            if remaining > 1 && has_batched {
+                let mut batch: Vec<&[f32]> = (next_idx..total_windows).map(&window_at).collect();
+                batch.resize(PRIMARY_BATCH_SIZE, &zeros[..]);
+
+                let t = std::time::Instant::now();
+                let results = self.run_batch(&batch)?;
+                seg_infer_time += t.elapsed();
+                seg_batched += 1;
+                for r in results.into_iter().take(remaining) {
+                    tx.send(r)?;
+                }
+                next_idx = total_windows;
                 continue;
             }
 
