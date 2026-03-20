@@ -900,9 +900,24 @@ impl<'a> PipelineRunner<'a> {
 
         let inference_start = std::time::Instant::now();
 
-        // 1. run segmentation
+        // 1. run segmentation (parallel workers if CoreML)
         let seg_start = std::time::Instant::now();
-        let raw_windows = self.seg_model.run(audio)?;
+        let raw_windows = {
+            // unbounded: parallel seg sends all results before rx consumes
+            let (tx, rx) = crossbeam_channel::unbounded::<Array2<f32>>();
+            #[cfg(feature = "coreml")]
+            if matches!(
+                self.seg_model.mode(),
+                ExecutionMode::CoreMl | ExecutionMode::CoreMlFast
+            ) {
+                self.seg_model.run_streaming_parallel(audio, tx, 4)?;
+            } else {
+                self.seg_model.run_streaming(audio, tx)?;
+            }
+            #[cfg(not(feature = "coreml"))]
+            self.seg_model.run_streaming(audio, tx)?;
+            rx.iter().collect::<Vec<_>>()
+        };
         let seg_ms = seg_start.elapsed().as_millis();
 
         // 2. decode all windows
