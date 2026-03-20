@@ -17,7 +17,7 @@ pub enum SegmentationError {
     Disconnected(#[from] crossbeam_channel::SendError<Array2<f32>>),
 }
 
-const PRIMARY_BATCH_SIZE: usize = 32;
+const PRIMARY_BATCH_SIZE: usize = 64;
 
 pub struct SegmentationModel {
     model_path: String,
