@@ -76,6 +76,31 @@ def _f16_compiled_paths(compiled_paths: list[Path]) -> list[Path]:
     return [p.with_name(p.stem + "-f16" + p.suffix) for p in compiled_paths]
 
 
+def _w8a16_package_path(package_path: Path) -> Path:
+    return package_path.with_name(package_path.stem + "-w8a16" + package_path.suffix)
+
+
+def _w8a16_compiled_paths(compiled_paths: list[Path]) -> list[Path]:
+    return [p.with_name(p.stem + "-w8a16" + p.suffix) for p in compiled_paths]
+
+
+def quantize_w8a16(mlmodel: ct.models.MLModel) -> ct.models.MLModel:
+    """Quantize model weights to 8-bit with 16-bit activations (W8A16)"""
+    from coremltools.optimize.coreml import (
+        OpLinearQuantizerConfig,
+        OptimizationConfig,
+        linear_quantize_weights,
+    )
+
+    config = OptimizationConfig(
+        global_config=OpLinearQuantizerConfig(
+            mode="linear_symmetric",
+            dtype="int8",
+        )
+    )
+    return linear_quantize_weights(mlmodel, config)
+
+
 def export_segmentation(pipeline: Any, output_dir: Path) -> None:
     segmentation_model = pipeline._segmentation.model
     segmentation_model.eval()
@@ -156,6 +181,15 @@ def export_segmentation(pipeline: Any, output_dir: Path) -> None:
         mlmodel_f16,
         _f16_package_path(segmentation_package_path(output_dir)),
         _f16_compiled_paths(seg_compiled_paths),
+    )
+
+    # W8A16 — quantized weights for faster CPU inference
+    mlmodel_w8a16 = quantize_w8a16(mlmodel)
+    print("Saving segmentation CoreML artifacts (W8A16)...")
+    save_model_artifacts(
+        mlmodel_w8a16,
+        _w8a16_package_path(segmentation_package_path(output_dir)),
+        _w8a16_compiled_paths(seg_compiled_paths),
     )
 
 
@@ -248,6 +282,15 @@ def export_tail(pipeline: Any, output_dir: Path) -> None:
         mlmodel_f16,
         _f16_package_path(tail_package_path(output_dir)),
         _f16_compiled_paths(tail_compiled_paths),
+    )
+
+    # W8A16 — quantized weights for faster inference
+    mlmodel_w8a16 = quantize_w8a16(mlmodel)
+    print("Saving embedding tail CoreML artifacts (W8A16)...")
+    save_model_artifacts(
+        mlmodel_w8a16,
+        _w8a16_package_path(tail_package_path(output_dir)),
+        _w8a16_compiled_paths(tail_compiled_paths),
     )
 
 
@@ -455,6 +498,15 @@ def export_multi_mask_tail(pipeline: Any, output_dir: Path) -> None:
         mlmodel,
         multi_mask_package_path(output_dir),
         compiled_paths,
+    )
+
+    # W8A16 — quantized weights for faster inference
+    mlmodel_w8a16 = quantize_w8a16(mlmodel)
+    print("Saving multi-mask tail CoreML artifacts (W8A16)...")
+    save_model_artifacts(
+        mlmodel_w8a16,
+        _w8a16_package_path(multi_mask_package_path(output_dir)),
+        _w8a16_compiled_paths(compiled_paths),
     )
 
 

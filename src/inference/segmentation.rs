@@ -4,7 +4,10 @@ use ort::session::Session;
 use ort::value::TensorRef;
 
 #[cfg(feature = "coreml")]
-use crate::inference::coreml::{CachedInputShape, CoreMlModel, GpuPrecision, coreml_model_path};
+use crate::inference::coreml::{
+    CachedInputShape, CoreMlModel, GpuPrecision, SharedCoreMlModel, coreml_model_path,
+    coreml_w8a16_model_path,
+};
 use crate::inference::{ExecutionMode, with_execution_mode};
 #[cfg(feature = "coreml")]
 use objc2_core_ml::MLComputeUnits;
@@ -19,15 +22,18 @@ pub enum SegmentationError {
 
 const PRIMARY_BATCH_SIZE: usize = 64;
 
+#[cfg(feature = "coreml")]
+type SegParallelResult = Result<Vec<Vec<(usize, Array2<f32>)>>, SegmentationError>;
+
 pub struct SegmentationModel {
     model_path: String,
     mode: ExecutionMode,
     session: Session,
     primary_batched_session: Option<Session>,
     #[cfg(feature = "coreml")]
-    native_session: Option<CoreMlModel>,
+    native_session: Option<SharedCoreMlModel>,
     #[cfg(feature = "coreml")]
-    native_batched_session: Option<CoreMlModel>,
+    native_batched_session: Option<SharedCoreMlModel>,
     #[cfg(feature = "coreml")]
     cached_single_input_shape: CachedInputShape,
     #[cfg(feature = "coreml")]
@@ -40,8 +46,9 @@ pub struct SegmentationModel {
 }
 
 // SAFETY: SegmentationModel is only used from one thread at a time via &mut self.
-// The non-Send fields (CoreMlModel, CachedInputShape) contain Objective-C objects
-// that are safe to move between threads when not accessed concurrently
+// The non-Send fields (CachedInputShape) contain Objective-C objects that are safe
+// to move between threads when not accessed concurrently.
+// SharedCoreMlModel is already Send + Sync
 #[cfg(feature = "coreml")]
 unsafe impl Send for SegmentationModel {}
 
@@ -127,6 +134,147 @@ impl SegmentationModel {
 
     pub fn mode(&self) -> ExecutionMode {
         self.mode
+    }
+
+    #[expect(dead_code)]
+    pub(crate) fn model_path(&self) -> &str {
+        &self.model_path
+    }
+
+    /// Run segmentation with N parallel workers, each loading their own CoreML model.
+    /// Workers use CPUOnly compute units to avoid GPU contention with embedding.
+    /// Results are sent through `tx` in chunk_idx order
+    #[cfg(feature = "coreml")]
+    pub fn run_streaming_parallel(
+        &mut self,
+        audio: &[f32],
+        tx: Sender<Array2<f32>>,
+        num_workers: usize,
+    ) -> Result<usize, SegmentationError> {
+        use objc2_core_ml::MLComputeUnits;
+
+        let mut offsets = Vec::new();
+        let mut offset = 0;
+        while offset + self.window_samples <= audio.len() {
+            offsets.push(offset);
+            offset += self.step_samples;
+        }
+
+        let padded = if offset < audio.len() && audio.len() > self.window_samples {
+            let mut p = vec![0.0f32; self.window_samples];
+            let remaining = audio.len() - offset;
+            p[..remaining].copy_from_slice(&audio[offset..]);
+            Some(p)
+        } else {
+            None
+        };
+
+        let total_windows = offsets.len() + padded.is_some() as usize;
+        if total_windows == 0 {
+            return Ok(0);
+        }
+
+        // load N separate CPUOnly models for parallel execution
+        let coreml_path = Self::resolve_coreml_path(&self.model_path, self.mode);
+        let coreml_path = match coreml_path {
+            Some(p) if p.exists() => p,
+            _ => return self.run_streaming(audio, tx),
+        };
+
+        let worker_models: Vec<SharedCoreMlModel> = (0..num_workers)
+            .filter_map(|_| {
+                SharedCoreMlModel::load(
+                    &coreml_path,
+                    MLComputeUnits::CPUOnly,
+                    "output",
+                    GpuPrecision::Low,
+                )
+                .ok()
+            })
+            .collect();
+
+        if worker_models.len() < 2 {
+            return self.run_streaming(audio, tx);
+        }
+
+        let seg_start = std::time::Instant::now();
+        let win_samples = self.window_samples;
+
+        // divide windows into contiguous chunks for each worker
+        let chunk_size = total_windows.div_ceil(worker_models.len());
+
+        // workers process in parallel, collect results locally, then merge in order
+        let all_results: SegParallelResult = std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+
+            for (worker_idx, model) in worker_models.iter().enumerate() {
+                let start = worker_idx * chunk_size;
+                let end = (start + chunk_size).min(total_windows);
+                if start >= total_windows {
+                    break;
+                }
+
+                let offsets = &offsets;
+                let padded = &padded;
+
+                handles.push(scope.spawn(move || {
+                    let cached_shape = CachedInputShape::new("input", &[1, 1, win_samples]);
+                    let mut buffer = ndarray::Array3::<f32>::zeros((1, 1, win_samples));
+                    let mut results = Vec::with_capacity(end - start);
+
+                    for idx in start..end {
+                        let window = if idx < offsets.len() {
+                            &audio[offsets[idx]..offsets[idx] + win_samples]
+                        } else {
+                            padded.as_deref().unwrap()
+                        };
+
+                        buffer.fill(0.0);
+                        buffer
+                            .slice_mut(ndarray::s![0, 0, ..window.len()])
+                            .assign(&ndarray::ArrayView1::from(window));
+                        let input_data = buffer.as_slice().unwrap();
+
+                        let (data, out_shape) = model
+                            .predict_cached(&[(&cached_shape, input_data)])
+                            .map_err(|e| ort::Error::new(e.to_string()))?;
+
+                        let frames = out_shape[1];
+                        let classes = out_shape[2];
+                        results.push((
+                            idx,
+                            Array2::from_shape_vec((frames, classes), data).unwrap(),
+                        ));
+                    }
+
+                    Ok::<Vec<(usize, Array2<f32>)>, SegmentationError>(results)
+                }));
+            }
+
+            let mut all = Vec::new();
+            for handle in handles {
+                all.push(handle.join().unwrap()?);
+            }
+            Ok(all)
+        });
+
+        // merge sorted results and send in global order
+        let mut merged: Vec<(usize, Array2<f32>)> = all_results?.into_iter().flatten().collect();
+        merged.sort_by_key(|(idx, _)| *idx);
+
+        for (_, result) in merged {
+            tx.send(result)?;
+        }
+
+        let total_seg = seg_start.elapsed();
+        tracing::info!(
+            windows = total_windows,
+            workers = worker_models.len(),
+            seg_total_ms = total_seg.as_millis(),
+            "Parallel segmentation complete"
+        );
+
+        Ok(total_windows)
     }
 
     pub fn reset_session(&mut self) -> Result<(), ort::Error> {
@@ -303,7 +451,7 @@ impl SegmentationModel {
 
     fn run_window(&mut self, window: &[f32]) -> Result<Array2<f32>, ort::Error> {
         #[cfg(feature = "coreml")]
-        if let Some(ref mut native) = self.native_session {
+        if let Some(ref native) = self.native_session {
             return Self::run_native_single(
                 native,
                 window,
@@ -329,7 +477,7 @@ impl SegmentationModel {
 
     fn run_batch(&mut self, windows: &[&[f32]]) -> Result<Vec<Array2<f32>>, ort::Error> {
         #[cfg(feature = "coreml")]
-        if let Some(ref mut native) = self.native_batched_session {
+        if let Some(ref native) = self.native_batched_session {
             return Self::run_native_batch(
                 native,
                 windows,
@@ -373,10 +521,8 @@ impl SegmentationModel {
     #[cfg(feature = "coreml")]
     fn resolve_coreml_path(model_path: &str, mode: ExecutionMode) -> Option<std::path::PathBuf> {
         match mode {
-            // LSTM-based segmentation runs poorly on ANE — always use FP32 CPU+GPU
-            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => {
-                Some(coreml_model_path(model_path))
-            }
+            ExecutionMode::CoreMlFast => Some(coreml_w8a16_model_path(model_path)),
+            ExecutionMode::CoreMl => Some(coreml_model_path(model_path)),
             _ => None,
         }
     }
@@ -388,7 +534,7 @@ impl SegmentationModel {
     }
 
     #[cfg(feature = "coreml")]
-    fn load_native_coreml(model_path: &str, mode: ExecutionMode) -> Option<CoreMlModel> {
+    fn load_native_coreml(model_path: &str, mode: ExecutionMode) -> Option<SharedCoreMlModel> {
         let coreml_path = Self::resolve_coreml_path(model_path, mode)?;
         if !coreml_path.exists() {
             eprintln!(
@@ -397,7 +543,7 @@ impl SegmentationModel {
             );
             return None;
         }
-        match CoreMlModel::load(
+        match SharedCoreMlModel::load(
             &coreml_path,
             Self::compute_units_for_mode(mode),
             "output",
@@ -412,18 +558,25 @@ impl SegmentationModel {
     }
 
     #[cfg(feature = "coreml")]
-    fn load_native_coreml_batched(model_path: &str, mode: ExecutionMode) -> Option<CoreMlModel> {
+    fn load_native_coreml_batched(
+        model_path: &str,
+        mode: ExecutionMode,
+    ) -> Option<SharedCoreMlModel> {
         if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
             return None;
         }
         let batched_onnx = batched_model_path(model_path, PRIMARY_BATCH_SIZE)?;
         let onnx_str = batched_onnx.to_str().unwrap();
-        // always FP32 for LSTM-based segmentation
-        let coreml_path = coreml_model_path(onnx_str);
+        let resolve = if mode == ExecutionMode::CoreMlFast {
+            coreml_w8a16_model_path
+        } else {
+            coreml_model_path
+        };
+        let coreml_path = resolve(onnx_str);
         if !coreml_path.exists() {
             return None;
         }
-        match CoreMlModel::load(
+        match SharedCoreMlModel::load(
             &coreml_path,
             Self::compute_units_for_mode(mode),
             "output",
@@ -439,7 +592,7 @@ impl SegmentationModel {
 
     #[cfg(feature = "coreml")]
     fn run_native_single(
-        native: &mut CoreMlModel,
+        native: &SharedCoreMlModel,
         window: &[f32],
         buffer: &mut ndarray::Array3<f32>,
         cached_shape: &CachedInputShape,
@@ -461,7 +614,7 @@ impl SegmentationModel {
 
     #[cfg(feature = "coreml")]
     fn run_native_batch(
-        native: &mut CoreMlModel,
+        native: &SharedCoreMlModel,
         windows: &[&[f32]],
         buffer: &mut ndarray::Array3<f32>,
         cached_shape: &CachedInputShape,

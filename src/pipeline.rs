@@ -244,7 +244,7 @@ enum InferencePath {
     Concurrent,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 enum EmbeddingPath {
     Masked,
     Split,
@@ -920,8 +920,23 @@ impl<'a> PipelineRunner<'a> {
         let (tx, rx) = crossbeam_channel::bounded::<Array2<f32>>(64);
 
         let inference_start = std::time::Instant::now();
+        let use_parallel_seg = matches!(
+            self.seg_model.mode(),
+            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast
+        );
         let (segmentation_result, embedding_result) = std::thread::scope(|scope| {
-            let segmentation_handle = scope.spawn(|| self.seg_model.run_streaming(audio, tx));
+            let segmentation_handle = if use_parallel_seg {
+                #[cfg(feature = "coreml")]
+                {
+                    scope.spawn(|| self.seg_model.run_streaming_parallel(audio, tx, 4))
+                }
+                #[cfg(not(feature = "coreml"))]
+                {
+                    scope.spawn(|| self.seg_model.run_streaming(audio, tx))
+                }
+            } else {
+                scope.spawn(|| self.seg_model.run_streaming(audio, tx))
+            };
 
             let embedding_result = match embedding_path {
                 EmbeddingPath::MultiMask => concurrent_embedding_runner.run_multi_mask(
