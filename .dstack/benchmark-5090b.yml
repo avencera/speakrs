@@ -1,5 +1,5 @@
 type: task
-name: bench-avx512
+name: bench-5090b
 
 image: ghcr.io/avencera/speakrs-gpu:9bbb0be
 
@@ -7,6 +7,7 @@ env:
   - NVIDIA_VISIBLE_DEVICES=all
   - LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64
   - RUST_BACKTRACE=1
+  - RUST_LOG=speakrs=info
   - DATASET
   - IMPLS
   - MAX_FILES
@@ -40,7 +41,7 @@ commands:
 
 resources:
   gpu:
-    name: [RTX4090, RTX5090, RTX6000Ada, L40S]
+    name: [RTX5090]
     count: 1
 
 spot_policy: on-demand

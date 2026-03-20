@@ -218,13 +218,16 @@ impl EmbeddingModel {
             primary_batch_run_options: batched_model_path(model_path, PRIMARY_BATCH_SIZE)
                 .filter(|path| path.exists())
                 .map(|_| {
-                    RunOptions::new().unwrap().with_outputs(
+                    let mut opts = RunOptions::new().unwrap().with_outputs(
                         OutputSelector::default().preallocate(
                             "output",
                             Tensor::<f32>::new(&Allocator::default(), [PRIMARY_BATCH_SIZE, 256])
                                 .unwrap(),
                         ),
-                    )
+                    );
+                    // skip device sync between batched calls for async CUDA execution
+                    let _ = opts.disable_device_sync();
+                    opts
                 }),
             primary_batch_waveform_buffer: Array3::zeros((PRIMARY_BATCH_SIZE, 1, 160_000)),
             primary_batch_weights_buffer: Array2::zeros((PRIMARY_BATCH_SIZE, 589)),
@@ -318,8 +321,8 @@ impl EmbeddingModel {
     }
 
     fn build_batched_session(model_path: &str, mode: ExecutionMode) -> Result<Session, ort::Error> {
-        // try CUDA graph capture for fixed-shape batched sessions
-        Self::build_session_with_graph(model_path, Self::single_execution_mode(mode), true)
+        // CUDA graphs don't work with fused model (has CPU-only fbank ops)
+        Self::build_session(model_path, Self::single_execution_mode(mode))
     }
 
     pub fn sample_rate(&self) -> usize {
