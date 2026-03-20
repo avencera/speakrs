@@ -1,7 +1,7 @@
 type: task
-name: benchmark
+name: ab-copyfix
 
-image: ghcr.io/avencera/speakrs-gpu:a35b423
+image: ghcr.io/avencera/speakrs-gpu:39e786d
 
 env:
   - NVIDIA_VISIBLE_DEVICES=all
@@ -21,8 +21,6 @@ env:
 commands:
   - |
     echo "CPU: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)"
-
-    # seed baked assets from /opt into /workspace (mirrors docker-entrypoint.sh)
     mkdir -p /workspace/models && cp -rn /opt/models/* /workspace/models/ 2>/dev/null || true
     mkdir -p /workspace/datasets && cp -rn /opt/datasets/* /workspace/datasets/ 2>/dev/null || true
     mkdir -p /workspace/scripts && cp -n /opt/scripts/diarize_pyannote.py /workspace/scripts/ 2>/dev/null || true
@@ -40,7 +38,7 @@ commands:
 
 resources:
   gpu:
-    name: [RTX4090, RTX5090, RTX6000Ada, L40S]
+    name: [RTX5090]
     count: 1
 
 spot_policy: on-demand

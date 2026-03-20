@@ -180,6 +180,11 @@ impl SegmentationModel {
             }
         };
 
+        let seg_start = std::time::Instant::now();
+        let mut seg_infer_time = std::time::Duration::ZERO;
+        let mut seg_batched = 0u32;
+        let mut seg_single = 0u32;
+
         let mut next_idx = 0;
         while next_idx < total_windows {
             let remaining = total_windows - next_idx;
@@ -189,17 +194,35 @@ impl SegmentationModel {
                     .map(&window_at)
                     .collect();
 
-                for r in self.run_batch(&batch)? {
+                let t = std::time::Instant::now();
+                let results = self.run_batch(&batch)?;
+                seg_infer_time += t.elapsed();
+                seg_batched += 1;
+                for r in results {
                     tx.send(r)?;
                 }
                 next_idx += PRIMARY_BATCH_SIZE;
                 continue;
             }
 
+            let t = std::time::Instant::now();
             let result = self.run_window(window_at(next_idx))?;
+            seg_infer_time += t.elapsed();
+            seg_single += 1;
             tx.send(result)?;
             next_idx += 1;
         }
+
+        let total_seg = seg_start.elapsed();
+        tracing::info!(
+            windows = total_windows,
+            seg_batched,
+            seg_single,
+            seg_infer_ms = seg_infer_time.as_millis(),
+            seg_total_ms = total_seg.as_millis(),
+            seg_overhead_ms = (total_seg - seg_infer_time).as_millis(),
+            "Segmentation thread profile"
+        );
 
         Ok(total_windows)
     }
@@ -314,16 +337,13 @@ impl SegmentationModel {
         let batch = shape[0] as usize;
         let frames = shape[1] as usize;
         let classes = shape[2] as usize;
-        let stride = frames * classes;
+        let flat = data.to_vec();
 
         Ok((0..batch)
             .map(|batch_idx| {
-                let start = batch_idx * stride;
-                let mut arr = Array2::<f32>::zeros((frames, classes));
-                arr.as_slice_mut()
-                    .unwrap()
-                    .copy_from_slice(&data[start..start + stride]);
-                arr
+                let start = batch_idx * frames * classes;
+                let end = start + frames * classes;
+                Array2::from_shape_vec((frames, classes), flat[start..end].to_vec()).unwrap()
             })
             .collect())
     }
