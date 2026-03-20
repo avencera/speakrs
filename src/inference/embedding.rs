@@ -14,6 +14,7 @@ use crate::inference::{ExecutionMode, with_execution_mode};
 
 const PRIMARY_BATCH_SIZE: usize = 64;
 const MULTI_MASK_BATCH_SIZE: usize = 32;
+const FBANK_BATCH_SIZE: usize = 32;
 const CHUNK_SPEAKER_BATCH_SIZE: usize = 3;
 const NUM_SPEAKERS: usize = 3;
 const FBANK_FRAMES: usize = 998;
@@ -195,7 +196,7 @@ impl EmbeddingModel {
             #[cfg(feature = "coreml")]
             cached_fbank_batch_shape: CachedInputShape::new(
                 "waveform",
-                &[PRIMARY_BATCH_SIZE, 1, 160_000],
+                &[FBANK_BATCH_SIZE, 1, 160_000],
             ),
             #[cfg(feature = "coreml")]
             cached_multi_mask_fbank_shape: CachedInputShape::new(
@@ -235,7 +236,7 @@ impl EmbeddingModel {
             primary_batch_waveform_buffer: Array3::zeros((PRIMARY_BATCH_SIZE, 1, 160_000)),
             primary_batch_weights_buffer: Array2::zeros((PRIMARY_BATCH_SIZE, 589)),
             split_waveform_buffer: Array3::zeros((1, 1, 160_000)),
-            split_fbank_batch_buffer: Array3::zeros((PRIMARY_BATCH_SIZE, 1, 160_000)),
+            split_fbank_batch_buffer: Array3::zeros((FBANK_BATCH_SIZE, 1, 160_000)),
             split_feature_batch_buffer: Array3::zeros((
                 CHUNK_SPEAKER_BATCH_SIZE,
                 FBANK_FRAMES,
@@ -621,18 +622,21 @@ impl EmbeddingModel {
         #[cfg(feature = "coreml")]
         let has_batched = has_batched || self.native_fbank_batched_session.is_some();
         if !has_batched {
+            tracing::debug!(
+                count = audios.len(),
+                "fbank: no batched session, falling back to per-window"
+            );
             return audios
                 .iter()
                 .map(|audio| self.compute_chunk_fbank(audio))
                 .collect();
         }
-
         let mut results = Vec::with_capacity(audios.len());
-        for batch_start in (0..audios.len()).step_by(PRIMARY_BATCH_SIZE) {
-            let batch_end = (batch_start + PRIMARY_BATCH_SIZE).min(audios.len());
+        for batch_start in (0..audios.len()).step_by(FBANK_BATCH_SIZE) {
+            let batch_end = (batch_start + FBANK_BATCH_SIZE).min(audios.len());
             let batch = &audios[batch_start..batch_end];
 
-            if batch.len() == PRIMARY_BATCH_SIZE {
+            if batch.len() == FBANK_BATCH_SIZE {
                 for (idx, audio) in batch.iter().enumerate() {
                     let copy_len = audio.len().min(self.window_samples);
                     self.split_fbank_batch_buffer
@@ -654,7 +658,7 @@ impl EmbeddingModel {
                     let frames = out_shape[1];
                     let features = out_shape[2];
                     let stride = frames * features;
-                    for idx in 0..PRIMARY_BATCH_SIZE {
+                    for idx in 0..FBANK_BATCH_SIZE {
                         let start = idx * stride;
                         results.push(
                             Array2::from_shape_vec(
@@ -688,6 +692,53 @@ impl EmbeddingModel {
                         )
                         .unwrap(),
                     );
+                }
+            } else if batch.len() > 1 {
+                // zero-pad partial batch to full batch size for batched inference
+                let actual_count = batch.len();
+                for (idx, audio) in batch.iter().enumerate() {
+                    let copy_len = audio.len().min(self.window_samples);
+                    self.split_fbank_batch_buffer
+                        .slice_mut(s![idx, 0, ..copy_len])
+                        .assign(&ndarray::ArrayView1::from(&audio[..copy_len]));
+                    if copy_len < self.window_samples {
+                        self.split_fbank_batch_buffer
+                            .slice_mut(s![idx, 0, copy_len..])
+                            .fill(0.0);
+                    }
+                }
+                // zero unused rows
+                for idx in actual_count..FBANK_BATCH_SIZE {
+                    self.split_fbank_batch_buffer
+                        .slice_mut(s![idx, 0, ..])
+                        .fill(0.0);
+                }
+
+                #[cfg(feature = "coreml")]
+                if let Some(ref native) = self.native_fbank_batched_session {
+                    let input_data = self.split_fbank_batch_buffer.as_slice().unwrap();
+                    let (data, out_shape) = native
+                        .predict_cached(&[(&self.cached_fbank_batch_shape, input_data)])
+                        .map_err(|e| ort::Error::new(e.to_string()))?;
+                    let frames = out_shape[1];
+                    let features = out_shape[2];
+                    let stride = frames * features;
+                    for idx in 0..actual_count {
+                        let start = idx * stride;
+                        results.push(
+                            Array2::from_shape_vec(
+                                (frames, features),
+                                data[start..start + stride].to_vec(),
+                            )
+                            .unwrap(),
+                        );
+                    }
+                    continue;
+                }
+
+                // ORT fallback for partial batch
+                for audio in batch {
+                    results.push(self.compute_chunk_fbank(audio)?);
                 }
             } else {
                 for audio in batch {

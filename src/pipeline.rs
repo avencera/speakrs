@@ -244,7 +244,7 @@ enum InferencePath {
     Concurrent,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum EmbeddingPath {
     Masked,
     Split,
@@ -352,7 +352,9 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
     ) -> Result<ConcurrentEmbeddingResult, PipelineError> {
         let mut decoded_windows: Vec<Array2<f32>> = Vec::new();
         let mut embeddings: Vec<SpeakerEmbedding> = Vec::new();
-        let mut fbank_buffer: Vec<Array2<f32>> = Vec::with_capacity(batch_size);
+        // buffer audio slices instead of pre-computed fbanks — fbanks are computed
+        // in a single batched call per flush, avoiding redundant per-window computation
+        let mut audio_buffer: Vec<&[f32]> = Vec::with_capacity(batch_size);
         let mut masks_buffer: Vec<Vec<f32>> = Vec::with_capacity(batch_size * self.num_speakers);
         let mut chunk_indices: Vec<usize> = Vec::with_capacity(batch_size);
         let mut chunk_idx = 0usize;
@@ -360,11 +362,9 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
         for raw_window in receiver {
             let (segmentation_view, chunk_audio, clean_masks) =
                 self.decode_chunk(&raw_window, &mut decoded_windows, chunk_idx);
-            let fbank = embedding_model.compute_chunk_fbank(chunk_audio)?;
-            fbank_buffer.push(fbank);
+            audio_buffer.push(chunk_audio);
             chunk_indices.push(chunk_idx);
 
-            // collect per-speaker masks for this chunk
             for speaker_idx in 0..self.num_speakers {
                 let Some(weights) = select_speaker_weights(
                     &segmentation_view,
@@ -379,25 +379,25 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
                 masks_buffer.push(weights);
             }
 
-            if fbank_buffer.len() == batch_size {
+            if audio_buffer.len() == batch_size {
                 self.flush_multi_mask(
                     embedding_model,
-                    &fbank_buffer,
+                    &audio_buffer,
                     &masks_buffer,
                     &chunk_indices,
                     &mut embeddings,
                 )?;
-                fbank_buffer.clear();
+                audio_buffer.clear();
                 masks_buffer.clear();
                 chunk_indices.clear();
             }
             chunk_idx += 1;
         }
 
-        if !fbank_buffer.is_empty() {
+        if !audio_buffer.is_empty() {
             self.flush_multi_mask(
                 embedding_model,
-                &fbank_buffer,
+                &audio_buffer,
                 &masks_buffer,
                 &chunk_indices,
                 &mut embeddings,
@@ -414,11 +414,12 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
     fn flush_multi_mask(
         &self,
         embedding_model: &mut EmbeddingModel,
-        fbanks: &[Array2<f32>],
+        audio_slices: &[&[f32]],
         masks: &[Vec<f32>],
         chunk_indices: &[usize],
         embeddings: &mut Vec<SpeakerEmbedding>,
     ) -> Result<(), PipelineError> {
+        let fbanks = embedding_model.compute_chunk_fbanks_batch(audio_slices)?;
         let fbank_refs: Vec<_> = fbanks.iter().collect();
         let mask_refs: Vec<_> = masks.iter().map(|m| m.as_slice()).collect();
         let batch_embeddings = embedding_model.embed_multi_mask_batch(&fbank_refs, &mask_refs)?;
@@ -426,7 +427,6 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
         for (fbank_idx, &chunk_idx) in chunk_indices.iter().enumerate() {
             for speaker_idx in 0..self.num_speakers {
                 let mask_idx = fbank_idx * self.num_speakers + speaker_idx;
-                // skip inactive speakers (all-zero masks)
                 let is_active = masks[mask_idx].iter().any(|&v| v > 0.0);
                 if !is_active {
                     continue;
@@ -842,7 +842,9 @@ impl<'a> PipelineRunner<'a> {
     }
 
     fn embedding_path(&self) -> EmbeddingPath {
-        if self.emb_model.prefers_multi_mask_path() && self.emb_model.multi_mask_batch_size() > 0 {
+        let path = if self.emb_model.prefers_multi_mask_path()
+            && self.emb_model.multi_mask_batch_size() > 0
+        {
             EmbeddingPath::MultiMask
         } else if self.emb_model.prefers_chunk_embedding_path()
             && self.emb_model.split_primary_batch_size() > 0
@@ -850,7 +852,9 @@ impl<'a> PipelineRunner<'a> {
             EmbeddingPath::Split
         } else {
             EmbeddingPath::Masked
-        }
+        };
+        tracing::debug!(?path, "Embedding path selected");
+        path
     }
 
     fn run_inference(&mut self, audio: &[f32]) -> Result<InferenceArtifacts, PipelineError> {
