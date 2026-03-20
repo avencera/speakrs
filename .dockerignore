@@ -15,6 +15,8 @@ fixtures/
 !fixtures/models/wespeaker-fbank-b32.onnx
 !fixtures/models/wespeaker-voxceleb-resnet34-tail*.onnx
 !fixtures/models/wespeaker-multimask-tail*.onnx
+!fixtures/models/segmentation-3.0-b32.onnx
+!fixtures/models/wespeaker-voxceleb-resnet34-b32.onnx*
 *.mlpackage
 *.mlmodelc
 

@@ -84,6 +84,9 @@ COPY fixtures/models/wespeaker-voxceleb-resnet34-tail-b3.onnx /opt/models/
 COPY fixtures/models/wespeaker-voxceleb-resnet34-tail-b32.onnx /opt/models/
 COPY fixtures/models/wespeaker-multimask-tail.onnx /opt/models/
 COPY fixtures/models/wespeaker-multimask-tail-b32.onnx /opt/models/
+COPY fixtures/models/segmentation-3.0-b32.onnx /opt/models/
+COPY fixtures/models/wespeaker-voxceleb-resnet34-b32.onnx /opt/models/
+COPY fixtures/models/wespeaker-voxceleb-resnet34-b32.onnx.data /opt/models/
 COPY --from=ghcr.io/avencera/speakrs-datasets:latest /opt/datasets/ /opt/datasets/
 COPY scripts/diarize_pyannote.py /opt/scripts/
 
