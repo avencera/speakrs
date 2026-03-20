@@ -2,8 +2,9 @@ use std::fs;
 use std::path::Path;
 
 use ndarray::{Array1, Array2, Array3, ArrayView2, s};
-use ort::session::Session;
-use ort::value::TensorRef;
+use ort::memory::Allocator;
+use ort::session::{HasSelectedOutputs, OutputSelector, RunOptions, Session};
+use ort::value::{Tensor, TensorRef};
 
 #[cfg(feature = "coreml")]
 use crate::inference::coreml::{CachedInputShape, CoreMlModel, GpuPrecision, coreml_model_path};
@@ -63,6 +64,7 @@ pub struct EmbeddingModel {
     cached_multi_mask_fbank_shape: CachedInputShape,
     #[cfg(feature = "coreml")]
     cached_multi_mask_masks_shape: CachedInputShape,
+    primary_batch_run_options: Option<RunOptions<HasSelectedOutputs>>,
     multi_mask_fbank_buffer: Array3<f32>,
     multi_mask_masks_buffer: Array2<f32>,
     waveform_buffer: Array3<f32>,
@@ -213,6 +215,17 @@ impl EmbeddingModel {
             )),
             waveform_buffer: Array3::zeros((1, 1, 160_000)),
             weights_buffer: Array2::zeros((1, 589)),
+            primary_batch_run_options: batched_model_path(model_path, PRIMARY_BATCH_SIZE)
+                .filter(|path| path.exists())
+                .map(|_| {
+                    RunOptions::new().unwrap().with_outputs(
+                        OutputSelector::default().preallocate(
+                            "output",
+                            Tensor::<f32>::new(&Allocator::default(), [PRIMARY_BATCH_SIZE, 256])
+                                .unwrap(),
+                        ),
+                    )
+                }),
             primary_batch_waveform_buffer: Array3::zeros((PRIMARY_BATCH_SIZE, 1, 160_000)),
             primary_batch_weights_buffer: Array2::zeros((PRIMARY_BATCH_SIZE, 589)),
             split_waveform_buffer: Array3::zeros((1, 1, 160_000)),
@@ -237,13 +250,50 @@ impl EmbeddingModel {
     }
 
     fn build_session(model_path: &str, mode: ExecutionMode) -> Result<Session, ort::Error> {
+        Self::build_session_with_graph(model_path, mode, false)
+    }
+
+    fn build_session_with_graph(
+        model_path: &str,
+        mode: ExecutionMode,
+        cuda_graph: bool,
+    ) -> Result<Session, ort::Error> {
         let builder = Session::builder()?
             .with_independent_thread_pool()?
             .with_intra_threads(1)?
             .with_inter_threads(1)?
             .with_memory_pattern(true)?;
-        let mut builder = with_execution_mode(builder, mode)?;
+        let mut builder =
+            if cuda_graph && matches!(mode, ExecutionMode::Cuda | ExecutionMode::CudaFast) {
+                Self::with_cuda_graph_mode(builder)?
+            } else {
+                with_execution_mode(builder, mode)?
+            };
         builder.commit_from_file(model_path)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn with_cuda_graph_mode(
+        builder: ort::session::builder::SessionBuilder,
+    ) -> Result<ort::session::builder::SessionBuilder, ort::Error> {
+        use ort::ep;
+        Ok(builder.with_execution_providers([ep::CUDA::default()
+            .with_device_id(0)
+            .with_tf32(false)
+            .with_conv_algorithm_search(ep::cuda::ConvAlgorithmSearch::Exhaustive)
+            .with_conv_max_workspace(true)
+            .with_arena_extend_strategy(ep::ArenaExtendStrategy::SameAsRequested)
+            .with_prefer_nhwc(true)
+            .with_cuda_graph(true)
+            .build()
+            .error_on_failure()])?)
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    fn with_cuda_graph_mode(
+        builder: ort::session::builder::SessionBuilder,
+    ) -> Result<ort::session::builder::SessionBuilder, ort::Error> {
+        with_execution_mode(builder, ExecutionMode::Cpu)
     }
 
     fn build_fbank_session(model_path: &str, mode: ExecutionMode) -> Result<Session, ort::Error> {
@@ -268,7 +318,8 @@ impl EmbeddingModel {
     }
 
     fn build_batched_session(model_path: &str, mode: ExecutionMode) -> Result<Session, ort::Error> {
-        Self::build_session(model_path, Self::single_execution_mode(mode))
+        // try CUDA graph capture for fixed-shape batched sessions
+        Self::build_session_with_graph(model_path, Self::single_execution_mode(mode), true)
     }
 
     pub fn sample_rate(&self) -> usize {
@@ -401,15 +452,47 @@ impl EmbeddingModel {
         inputs: &[MaskedEmbeddingInput<'_>],
     ) -> Result<Array2<f32>, ort::Error> {
         if inputs.len() == PRIMARY_BATCH_SIZE && self.primary_batched_session.is_some() {
-            return Self::embed_full_batch(
-                inputs,
-                self.window_samples,
-                self.mask_frames,
-                self.min_num_samples,
-                &mut self.primary_batched_session,
-                self.primary_batch_waveform_buffer.view_mut(),
-                self.primary_batch_weights_buffer.view_mut(),
-            );
+            for (batch_idx, input) in inputs.iter().enumerate() {
+                let used_mask = select_mask(
+                    input.mask,
+                    input.clean_mask,
+                    input.audio.len(),
+                    self.min_num_samples,
+                );
+                Self::prepare_waveform(
+                    batch_idx,
+                    input.audio,
+                    self.window_samples,
+                    &mut self.primary_batch_waveform_buffer.view_mut(),
+                );
+                Self::prepare_weights(
+                    batch_idx,
+                    used_mask,
+                    self.mask_frames,
+                    &mut self.primary_batch_weights_buffer.view_mut(),
+                );
+            }
+
+            let waveform_tensor =
+                TensorRef::from_array_view(self.primary_batch_waveform_buffer.view())?;
+            let weights_tensor =
+                TensorRef::from_array_view(self.primary_batch_weights_buffer.view())?;
+            let sess = self.primary_batched_session.as_mut().unwrap();
+            let ort_inputs =
+                ort::inputs!["waveform" => waveform_tensor, "weights" => weights_tensor];
+            let outputs = if let Some(opts) = &self.primary_batch_run_options {
+                sess.run_with_options(ort_inputs, opts)?
+            } else {
+                sess.run(ort_inputs)?
+            };
+            let (_shape, data) = outputs[0].try_extract_tensor::<f32>()?;
+            let n = inputs.len();
+            let mut result = Array2::<f32>::zeros((n, 256));
+            result
+                .as_slice_mut()
+                .unwrap()
+                .copy_from_slice(&data[..n * 256]);
+            return Ok(result);
         }
 
         let mut stacked = Array2::<f32>::zeros((inputs.len(), 256));
@@ -464,42 +547,6 @@ impl EmbeddingModel {
         }
 
         Ok(embeddings)
-    }
-
-    fn embed_full_batch(
-        inputs: &[MaskedEmbeddingInput<'_>],
-        window_samples: usize,
-        mask_frames: usize,
-        min_num_samples: usize,
-        session: &mut Option<Session>,
-        mut waveform_buffer: ndarray::ArrayViewMut3<f32>,
-        mut weights_buffer: ndarray::ArrayViewMut2<f32>,
-    ) -> Result<Array2<f32>, ort::Error> {
-        for (batch_idx, input) in inputs.iter().enumerate() {
-            let used_mask = select_mask(
-                input.mask,
-                input.clean_mask,
-                input.audio.len(),
-                min_num_samples,
-            );
-            Self::prepare_waveform(batch_idx, input.audio, window_samples, &mut waveform_buffer);
-            Self::prepare_weights(batch_idx, used_mask, mask_frames, &mut weights_buffer);
-        }
-
-        let waveform_tensor = TensorRef::from_array_view(waveform_buffer.view())?;
-        let weights_tensor = TensorRef::from_array_view(weights_buffer.view())?;
-        let outputs = session
-            .as_mut()
-            .unwrap()
-            .run(ort::inputs!["waveform" => waveform_tensor, "weights" => weights_tensor])?;
-        let (_shape, data) = outputs[0].try_extract_tensor::<f32>()?;
-        let n = inputs.len();
-        let mut result = Array2::<f32>::zeros((n, 256));
-        result
-            .as_slice_mut()
-            .unwrap()
-            .copy_from_slice(&data[..n * 256]);
-        Ok(result)
     }
 
     fn embed_single(&mut self, audio: &[f32], weights: &[f32]) -> Result<Array1<f32>, ort::Error> {
