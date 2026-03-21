@@ -920,8 +920,38 @@ impl<'a> PipelineRunner<'a> {
 
         let result: Result<Option<InferenceArtifacts>, PipelineError> =
             std::thread::scope(|scope| {
-                // seg thread: parallel CPUOnly workers stream windows
+                // seg thread: use 30s chunk segmenter if available, else parallel workers
                 let seg_handle = scope.spawn(|| -> Result<(), PipelineError> {
+                    #[cfg(feature = "coreml")]
+                    if audio.len() >= 480_000
+                        && let Some(chunk_seg) =
+                            SegmentationModel::load_chunk_segmenter(seg_model.model_path())
+                    {
+                        let chunk_samples = 480_000usize;
+                        // model uses 1s step internally. subsample to match our step
+                        let step_sub = (step_samples / 16_000).max(1);
+                        // stride between chunks: 30s minus 10s window = 20s
+                        let chunk_stride = chunk_samples - window_samples;
+                        let mut audio_offset = 0usize;
+
+                        while audio_offset + window_samples <= audio.len() {
+                            let chunk_end = (audio_offset + chunk_samples).min(audio.len());
+                            let windows = SegmentationModel::run_chunk_segmenter(
+                                &chunk_seg,
+                                &audio[audio_offset..chunk_end],
+                                step_sub,
+                            )
+                            .map_err(|e| PipelineError::Other(e.to_string()))?;
+
+                            for w in windows {
+                                if seg_tx.send(w).is_err() {
+                                    return Ok(());
+                                }
+                            }
+                            audio_offset += chunk_stride;
+                        }
+                        return Ok(());
+                    }
                     seg_model.run_streaming_parallel(audio, seg_tx, Self::seg_worker_count())?;
                     Ok(())
                 });

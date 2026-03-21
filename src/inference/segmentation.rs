@@ -148,6 +148,68 @@ impl SegmentationModel {
         self.native_session.as_ref()
     }
 
+    /// Load a 30s chunk segmenter model (SpeakerKit-style: internal sliding_windows)
+    #[cfg(feature = "coreml")]
+    pub fn load_chunk_segmenter(model_path: &str) -> Option<SharedCoreMlModel> {
+        let path = std::path::Path::new(model_path).with_file_name("speakerkit-segmenter.mlmodelc");
+        if !path.exists() {
+            return None;
+        }
+        SharedCoreMlModel::load(
+            &path,
+            CoreMlModel::default_compute_units(),
+            "speaker_ids",
+            GpuPrecision::Low,
+        )
+        .ok()
+    }
+
+    /// Run 30s chunk segmenter: one call → 21 raw logit windows (1s step)
+    /// `step_subsample`: take every Nth window to match desired step
+    #[cfg(feature = "coreml")]
+    pub fn run_chunk_segmenter(
+        model: &SharedCoreMlModel,
+        audio: &[f32],
+        step_subsample: usize,
+    ) -> Result<Vec<Array2<f32>>, ort::Error> {
+        let chunk_samples = 480_000usize;
+        let window_samples = 160_000usize;
+        let model_step = 16_000usize; // 1s step internal to model
+
+        let mut buffer = vec![0.0f32; chunk_samples];
+        let copy_len = audio.len().min(chunk_samples);
+        buffer[..copy_len].copy_from_slice(&audio[..copy_len]);
+
+        let shape = CachedInputShape::new("waveform", &[chunk_samples]);
+        let (data, out_shape) = model
+            .predict_cached(&[(&shape, &buffer)])
+            .map_err(|e| ort::Error::new(e.to_string()))?;
+
+        let num_windows = out_shape[0];
+        let frames = out_shape[1];
+        let classes = out_shape[2];
+        let stride = frames * classes;
+
+        // only keep windows that correspond to actual audio (not zero-padding)
+        let valid_windows = if audio.len() >= window_samples {
+            ((audio.len() - window_samples) / model_step + 1).min(num_windows)
+        } else {
+            1.min(num_windows)
+        };
+
+        let mut results = Vec::new();
+        for win_idx in 0..valid_windows {
+            if win_idx % step_subsample != 0 {
+                continue;
+            }
+            let start = win_idx * stride;
+            let window_data = &data[start..start + stride];
+            results.push(Array2::from_shape_vec((frames, classes), window_data.to_vec()).unwrap());
+        }
+
+        Ok(results)
+    }
+
     /// Run segmentation with N parallel workers, each with a fresh CoreML model.
     /// Workers use CPUOnly compute units to avoid GPU contention with embedding.
     /// Results are sent through `tx` in chunk_idx order
