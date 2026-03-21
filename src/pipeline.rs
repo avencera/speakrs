@@ -591,6 +591,15 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
     }
 }
 
+/// Number of parallel segmentation workers for CoreML
+#[cfg(feature = "coreml")]
+fn seg_worker_count() -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(4)
+        .min(8)
+}
+
 /// Select speaker weights for embedding, returning None if speaker activity is below threshold
 fn select_speaker_weights(
     seg_view: &ArrayView2<f32>,
@@ -910,7 +919,8 @@ impl<'a> PipelineRunner<'a> {
                 self.seg_model.mode(),
                 ExecutionMode::CoreMl | ExecutionMode::CoreMlFast
             ) {
-                self.seg_model.run_streaming_parallel(audio, tx, 4)?;
+                self.seg_model
+                    .run_streaming_parallel(audio, tx, seg_worker_count())?;
             } else {
                 self.seg_model.run_streaming(audio, tx)?;
             }
@@ -952,7 +962,6 @@ impl<'a> PipelineRunner<'a> {
         let fbank_ms = fbank_start.elapsed().as_millis();
 
         // 4. build per-window masks
-        let mask_start = std::time::Instant::now();
         let num_speakers = 3;
         let min_num_samples = self.emb_model.min_num_samples();
         let mut masks = vec![0.0f32; chunk_num_masks * 589];
@@ -982,8 +991,6 @@ impl<'a> PipelineRunner<'a> {
                 }
             }
         }
-
-        let mask_ms = mask_start.elapsed().as_millis();
 
         // 5. single-call chunk embedding (re-acquire session ref after mutable borrows)
         let emb_start = std::time::Instant::now();
@@ -1017,20 +1024,6 @@ impl<'a> PipelineRunner<'a> {
         }
 
         let inference_elapsed = inference_start.elapsed();
-        {
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open("/tmp/speakrs-chunk-timing.log")
-            {
-                let _ = writeln!(
-                    f,
-                    "chunks={num_chunks} seg={seg_ms}ms fbank={fbank_ms}ms masks={mask_ms}ms emb={emb_ms}ms total={}ms",
-                    inference_elapsed.as_millis()
-                );
-            }
-        }
         tracing::info!(
             chunks = num_chunks,
             windows_used = chunk_num_windows.min(num_chunks),
