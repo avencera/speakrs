@@ -914,6 +914,7 @@ impl<'a> PipelineRunner<'a> {
         // seg sends raw windows, bridge groups + decodes into chunks, emb processes
         let (seg_tx, seg_rx) = crossbeam_channel::unbounded::<Array2<f32>>();
         let (chunk_tx, chunk_rx) = crossbeam_channel::bounded::<(usize, Vec<Array2<f32>>)>(2);
+        let chunk_tx_seg = chunk_tx.clone(); // for 30s segmenter path
 
         let seg_model = &mut *self.seg_model;
         let emb_model = &mut *self.emb_model;
@@ -928,11 +929,11 @@ impl<'a> PipelineRunner<'a> {
                             SegmentationModel::load_chunk_segmenter(seg_model.model_path())
                     {
                         let chunk_samples = 480_000usize;
-                        // model uses 1s step internally. subsample to match our step
-                        let step_sub = (step_samples / 16_000).max(1);
-                        // stride between chunks: 30s minus 10s window = 20s
+                        let model_step = 16_000usize; // 1s internal step
+                        let step_sub = (step_samples / model_step).max(1);
                         let chunk_stride = chunk_samples - window_samples;
                         let mut audio_offset = 0usize;
+                        let mut global_win = 0usize;
 
                         while audio_offset + window_samples <= audio.len() {
                             let chunk_end = (audio_offset + chunk_samples).min(audio.len());
@@ -943,13 +944,17 @@ impl<'a> PipelineRunner<'a> {
                             )
                             .map_err(|e| PipelineError::Other(e.to_string()))?;
 
-                            for w in windows {
-                                if seg_tx.send(w).is_err() {
-                                    return Ok(());
-                                }
+                            // send decoded chunk directly to chunk_tx, bypassing bridge
+                            let decoded: Vec<_> =
+                                windows.iter().map(|w| powerset.hard_decode(w)).collect();
+                            if chunk_tx_seg.send((global_win, decoded)).is_err() {
+                                return Ok(());
                             }
+                            global_win += windows.len();
                             audio_offset += chunk_stride;
                         }
+                        drop(seg_tx);
+                        drop(chunk_tx_seg);
                         return Ok(());
                     }
                     seg_model.run_streaming_parallel(audio, seg_tx, Self::seg_worker_count())?;
@@ -994,6 +999,9 @@ impl<'a> PipelineRunner<'a> {
 
                     // fbank for this chunk — use 30s model if available (1 call vs 3)
                     let chunk_audio_start = global_start * step_samples;
+                    if chunk_audio_start + window_samples > audio.len() {
+                        continue;
+                    }
                     let chunk_audio_len = window_samples + (wins - 1) * step_samples;
                     let chunk_audio_end = (chunk_audio_start + chunk_audio_len).min(audio.len());
                     let chunk_audio = &audio[chunk_audio_start..chunk_audio_end];
@@ -2016,7 +2024,7 @@ fn process_chunk_group(
     let frames_per_segment = 998usize;
 
     // compute fbank for this chunk's audio range
-    let chunk_audio_start = global_win_start * step_samples;
+    let chunk_audio_start = (global_win_start * step_samples).min(audio.len().saturating_sub(1));
     let chunk_audio_len = window_samples + (wins_this_chunk - 1) * step_samples;
     let chunk_audio_end = (chunk_audio_start + chunk_audio_len).min(audio.len());
     let chunk_audio_slice = &audio[chunk_audio_start..chunk_audio_end];
