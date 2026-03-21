@@ -20,8 +20,9 @@ pub enum SegmentationError {
     Disconnected(#[from] crossbeam_channel::SendError<Array2<f32>>),
 }
 
-// seg models exported with EnumeratedShapes for batch 1-32
+// seg models exported with EnumeratedShapes for batch 1-32 and b64
 const PRIMARY_BATCH_SIZE: usize = 32;
+const LARGE_BATCH_SIZE: usize = 64;
 
 #[cfg(feature = "coreml")]
 #[expect(dead_code)]
@@ -36,6 +37,8 @@ pub struct SegmentationModel {
     native_session: Option<SharedCoreMlModel>,
     #[cfg(feature = "coreml")]
     native_batched_session: Option<SharedCoreMlModel>,
+    #[cfg(feature = "coreml")]
+    native_large_batched_session: Option<SharedCoreMlModel>,
     #[cfg(feature = "coreml")]
     cached_single_input_shape: CachedInputShape,
     #[cfg(feature = "coreml")]
@@ -83,6 +86,8 @@ impl SegmentationModel {
             native_session: Self::load_native_coreml(model_path, mode),
             #[cfg(feature = "coreml")]
             native_batched_session: Self::load_native_coreml_batched(model_path, mode),
+            #[cfg(feature = "coreml")]
+            native_large_batched_session: Self::load_native_coreml_large_batched(model_path, mode),
             #[cfg(feature = "coreml")]
             cached_single_input_shape: CachedInputShape::new("input", &[1, 1, window_samples]),
             #[cfg(feature = "coreml")]
@@ -138,7 +143,6 @@ impl SegmentationModel {
         self.mode
     }
 
-    #[expect(dead_code)]
     pub(crate) fn model_path(&self) -> &str {
         &self.model_path
     }
@@ -210,6 +214,90 @@ impl SegmentationModel {
         Ok(results)
     }
 
+    /// Load the SpeakerKit multi-output segmenter for the experiment pipeline
+    #[cfg(feature = "coreml")]
+    pub(crate) fn load_speakerkit_segmenter(model_path: &str) -> Option<SharedCoreMlModel> {
+        let path = std::path::Path::new(model_path).with_file_name("speakerkit-segmenter.mlmodelc");
+        if !path.exists() {
+            return None;
+        }
+        // SpeakerKit uses cpuOnly for segmentation
+        SharedCoreMlModel::load_multi_output(
+            &path,
+            objc2_core_ml::MLComputeUnits::CPUOnly,
+            GpuPrecision::Low,
+        )
+        .ok()
+    }
+
+    /// Diagnostic: dump raw model output values for first chunk
+    #[cfg(feature = "coreml")]
+    pub(crate) fn diagnose_speakerkit_segmenter(model_path: &str, audio: &[f32]) {
+        let chunk_samples = 480_000usize;
+        if audio.len() < chunk_samples {
+            return;
+        }
+        let model = match Self::load_speakerkit_segmenter(model_path) {
+            Some(m) => m,
+            None => return,
+        };
+
+        // use audio from 30min mark (known to have continuous speech)
+        let start = 30 * 60 * 16000usize;
+        if start + chunk_samples > audio.len() {
+            return;
+        }
+
+        let shape = CachedInputShape::new("waveform", &[chunk_samples]);
+        let mut buffer = vec![0.0f32; chunk_samples];
+        buffer.copy_from_slice(&audio[start..start + chunk_samples]);
+
+        let outputs = model
+            .predict_cached_multi(&[(&shape, &buffer)], &["speaker_probs", "speaker_activity"])
+            .unwrap();
+        let (ids_data, ids_shape) = &outputs[0];
+        let (act_data, _) = &outputs[1];
+
+        // raw value analysis for speaker_ids
+        let mut unique_vals: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        for &v in ids_data.iter() {
+            unique_vals.insert(v.to_bits());
+        }
+        let unique_f32: Vec<f32> = unique_vals
+            .iter()
+            .map(|&bits| f32::from_bits(bits))
+            .collect();
+
+        // per-window analysis: count nonzero AND print actual values for window 5
+        let frames = ids_shape[1];
+        let spks = ids_shape[2];
+        let stride = frames * spks;
+        let mut per_win_nonzero: Vec<usize> = Vec::new();
+        for w in 0..ids_shape[0] {
+            let start = w * stride;
+            let nz = ids_data[start..start + stride]
+                .iter()
+                .filter(|&&v| v != 0.0)
+                .count();
+            per_win_nonzero.push(nz);
+        }
+
+        // window 5 first 30 values (frames 0-9, all 3 speakers)
+        let w5 = 5 * stride;
+        let w5_vals: Vec<f32> = ids_data[w5..w5 + 30].to_vec();
+
+        // speaker_activity for all windows
+        let all_act: Vec<f32> = act_data.to_vec();
+
+        tracing::info!(
+            unique_values = ?unique_f32,
+            per_win_nonzero = ?per_win_nonzero,
+            w5_first30 = ?w5_vals,
+            all_activity = ?all_act,
+            "SpeakerKit segmenter diagnosis"
+        );
+    }
+
     /// Run segmentation with N parallel workers, each with a fresh CoreML model.
     /// Workers use CPUOnly compute units to avoid GPU contention with embedding.
     /// Results are sent through `tx` in chunk_idx order
@@ -241,10 +329,25 @@ impl SegmentationModel {
             return Ok(0);
         }
 
-        // share ONE model across all workers (like SpeakerKit's asyncPrediction pattern)
-        let shared_model = match &self.native_session {
-            Some(m) => m,
-            None => return self.run_streaming(audio, tx),
+        // choose model and batch size based on window count:
+        // - large files (200+ windows): batched model with parallel workers
+        // - short files: individual native calls (2.5ms each vs 120ms per batch)
+        let min_batch_windows = PRIMARY_BATCH_SIZE * 6; // ~192
+        let (shared_model, batch_size) = if total_windows >= min_batch_windows {
+            if let Some(ref m) = self.native_large_batched_session {
+                (m, LARGE_BATCH_SIZE)
+            } else if let Some(ref m) = self.native_batched_session {
+                (m, PRIMARY_BATCH_SIZE)
+            } else if let Some(ref m) = self.native_session {
+                (m, 1)
+            } else {
+                return self.run_streaming(audio, tx);
+            }
+        } else if let Some(ref m) = self.native_session {
+            // short files: individual native calls, no batching
+            (m, 1)
+        } else {
+            return self.run_streaming(audio, tx);
         };
 
         let seg_start = std::time::Instant::now();
@@ -286,31 +389,80 @@ impl SegmentationModel {
                     let padded = &padded;
 
                     rscope.spawn(move |_| {
-                        let cached_shape = CachedInputShape::new("input", &[1, 1, win_samples]);
-                        let mut buffer = ndarray::Array3::<f32>::zeros((1, 1, win_samples));
+                        if batch_size > 1 {
+                            // batched: process windows in groups of batch_size
+                            let cached_batch =
+                                CachedInputShape::new("input", &[batch_size, 1, win_samples]);
+                            let mut batch_buf = vec![0.0f32; batch_size * win_samples];
 
-                        for idx in start..end {
-                            let window = if idx < offsets.len() {
-                                &audio[offsets[idx]..offsets[idx] + win_samples]
-                            } else {
-                                padded.as_deref().unwrap()
-                            };
+                            let mut idx = start;
+                            while idx < end {
+                                let batch_end = (idx + batch_size).min(end);
+                                let actual_batch = batch_end - idx;
 
-                            buffer.fill(0.0);
-                            buffer
-                                .slice_mut(ndarray::s![0, 0, ..window.len()])
-                                .assign(&ndarray::ArrayView1::from(window));
-                            let input_data = buffer.as_slice().unwrap();
+                                batch_buf.fill(0.0);
+                                for (b, widx) in (idx..batch_end).enumerate() {
+                                    let window = if widx < offsets.len() {
+                                        &audio[offsets[widx]..offsets[widx] + win_samples]
+                                    } else {
+                                        padded.as_deref().unwrap()
+                                    };
+                                    let dst = b * win_samples;
+                                    batch_buf[dst..dst + window.len()].copy_from_slice(window);
+                                }
 
-                            let (data, out_shape) = model
-                                .predict_cached(&[(&cached_shape, input_data)])
-                                .map_err(|e| SegmentationError::Ort(ort::Error::new(e.to_string())))
-                                .unwrap();
+                                let (data, out_shape) = model
+                                    .predict_cached(&[(&cached_batch, &batch_buf)])
+                                    .map_err(|e| {
+                                        SegmentationError::Ort(ort::Error::new(e.to_string()))
+                                    })
+                                    .unwrap();
 
-                            let frames = out_shape[1];
-                            let classes = out_shape[2];
-                            let _ = worker_tx
-                                .send(Array2::from_shape_vec((frames, classes), data).unwrap());
+                                let frames = out_shape[1];
+                                let classes = out_shape[2];
+                                let stride = frames * classes;
+                                for b in 0..actual_batch {
+                                    let s = b * stride;
+                                    let _ = worker_tx.send(
+                                        Array2::from_shape_vec(
+                                            (frames, classes),
+                                            data[s..s + stride].to_vec(),
+                                        )
+                                        .unwrap(),
+                                    );
+                                }
+                                idx = batch_end;
+                            }
+                        } else {
+                            // single: one window per call
+                            let cached_shape = CachedInputShape::new("input", &[1, 1, win_samples]);
+                            let mut buffer = ndarray::Array3::<f32>::zeros((1, 1, win_samples));
+
+                            for idx in start..end {
+                                let window = if idx < offsets.len() {
+                                    &audio[offsets[idx]..offsets[idx] + win_samples]
+                                } else {
+                                    padded.as_deref().unwrap()
+                                };
+
+                                buffer.fill(0.0);
+                                buffer
+                                    .slice_mut(ndarray::s![0, 0, ..window.len()])
+                                    .assign(&ndarray::ArrayView1::from(window));
+                                let input_data = buffer.as_slice().unwrap();
+
+                                let (data, out_shape) = model
+                                    .predict_cached(&[(&cached_shape, input_data)])
+                                    .map_err(|e| {
+                                        SegmentationError::Ort(ort::Error::new(e.to_string()))
+                                    })
+                                    .unwrap();
+
+                                let frames = out_shape[1];
+                                let classes = out_shape[2];
+                                let _ = worker_tx
+                                    .send(Array2::from_shape_vec((frames, classes), data).unwrap());
+                            }
                         }
                     });
                 }
@@ -344,6 +496,8 @@ impl SegmentationModel {
             self.native_session = Self::load_native_coreml(&self.model_path, self.mode);
             self.native_batched_session =
                 Self::load_native_coreml_batched(&self.model_path, self.mode);
+            self.native_large_batched_session =
+                Self::load_native_coreml_large_batched(&self.model_path, self.mode);
         }
         Ok(())
     }
@@ -585,7 +739,6 @@ impl SegmentationModel {
 
     #[cfg(feature = "coreml")]
     fn compute_units_for_mode(_mode: ExecutionMode) -> MLComputeUnits {
-        // segmentation is LSTM-based, always best on CPU+GPU regardless of mode
         CoreMlModel::default_compute_units()
     }
 
@@ -647,6 +800,42 @@ impl SegmentationModel {
     }
 
     #[cfg(feature = "coreml")]
+    fn load_native_coreml_large_batched(
+        model_path: &str,
+        mode: ExecutionMode,
+    ) -> Option<SharedCoreMlModel> {
+        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
+            return None;
+        }
+        let batched_onnx = batched_model_path(model_path, LARGE_BATCH_SIZE)?;
+        let onnx_str = batched_onnx.to_str().unwrap();
+        let resolve = if mode == ExecutionMode::CoreMlFast {
+            coreml_w8a16_model_path
+        } else {
+            coreml_model_path
+        };
+        let coreml_path = resolve(onnx_str);
+        if !coreml_path.exists() {
+            return None;
+        }
+        match SharedCoreMlModel::load(
+            &coreml_path,
+            Self::compute_units_for_mode(mode),
+            "output",
+            GpuPrecision::Low,
+        ) {
+            Ok(model) => {
+                tracing::info!("Loaded b64 segmentation model");
+                Some(model)
+            }
+            Err(e) => {
+                eprintln!("warning: failed to load b64 segmentation: {e}");
+                None
+            }
+        }
+    }
+
+    #[cfg(feature = "coreml")]
     fn run_native_single(
         native: &SharedCoreMlModel,
         window: &[f32],
@@ -699,6 +888,92 @@ impl SegmentationModel {
             })
             .collect())
     }
+}
+
+/// Output from SpeakerKit's multi-output segmenter (one 30s chunk)
+#[cfg(feature = "coreml")]
+pub(crate) struct SpeakerKitSegOutput {
+    /// Binary speaker masks per window: 21 × [589, 3]
+    pub speaker_ids: Vec<Array2<f32>>,
+    /// Per-window speaker activity summary: [21, 3]
+    pub speaker_activity: Array2<f32>,
+    /// Per-window overlap flags: [21, 589]
+    pub overlapped_activity: Array2<f32>,
+}
+
+/// Run SpeakerKit's multi-output segmenter on a 30s chunk
+#[cfg(feature = "coreml")]
+pub(crate) fn run_speakerkit_segmenter(
+    model: &SharedCoreMlModel,
+    audio: &[f32],
+) -> Result<SpeakerKitSegOutput, SegmentationError> {
+    use crate::inference::coreml::CachedInputShape;
+
+    let chunk_samples = 480_000usize;
+    let window_samples = 160_000usize;
+    let model_step = 16_000usize;
+
+    let mut buffer = vec![0.0f32; chunk_samples];
+    let copy_len = audio.len().min(chunk_samples);
+    buffer[..copy_len].copy_from_slice(&audio[..copy_len]);
+
+    let shape = CachedInputShape::new("waveform", &[chunk_samples]);
+    let outputs = model
+        .predict_cached_multi(
+            &[(&shape, &buffer)],
+            &[
+                "speaker_probs",
+                "speaker_activity",
+                "overlapped_speaker_activity",
+            ],
+        )
+        .map_err(|e| SegmentationError::Ort(ort::Error::new(e.to_string())))?;
+
+    // use speaker_probs (continuous) instead of speaker_ids (sparse binary)
+    let (ids_data, ids_shape) = &outputs[0]; // [21, 589, 3]
+    let (act_data, act_shape) = &outputs[1]; // [21, 3]
+    let (overlap_data, overlap_shape) = &outputs[2]; // [21, 589]
+
+    let num_windows = ids_shape[0];
+    let frames = ids_shape[1];
+    let speakers = ids_shape[2];
+
+    // only keep windows that correspond to actual audio
+    let valid_windows = if audio.len() >= window_samples {
+        ((audio.len() - window_samples) / model_step + 1).min(num_windows)
+    } else {
+        1.min(num_windows)
+    };
+
+    let ids_stride = frames * speakers;
+    let speaker_ids: Vec<Array2<f32>> = (0..valid_windows)
+        .map(|w| {
+            let start = w * ids_stride;
+            Array2::from_shape_vec(
+                (frames, speakers),
+                ids_data[start..start + ids_stride].to_vec(),
+            )
+            .unwrap()
+        })
+        .collect();
+
+    let speaker_activity = Array2::from_shape_vec(
+        (valid_windows, act_shape[1]),
+        act_data[..valid_windows * act_shape[1]].to_vec(),
+    )
+    .unwrap();
+
+    let overlapped_activity = Array2::from_shape_vec(
+        (valid_windows, overlap_shape[1]),
+        overlap_data[..valid_windows * overlap_shape[1]].to_vec(),
+    )
+    .unwrap();
+
+    Ok(SpeakerKitSegOutput {
+        speaker_ids,
+        speaker_activity,
+        overlapped_activity,
+    })
 }
 
 fn batched_model_path(model_path: &str, batch_size: usize) -> Option<std::path::PathBuf> {
