@@ -294,6 +294,60 @@ fn extract_output(array: &MLMultiArray) -> Result<(Vec<f32>, Vec<usize>), CoreMl
     Ok((data, shape))
 }
 
+/// Convert f32 to IEEE 754 half-precision (FP16) bits
+fn f32_to_f16(val: f32) -> u16 {
+    let bits = val.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xff) as i32;
+    let mant = bits & 0x7fffff;
+
+    if exp == 0xff {
+        // inf/NaN
+        return sign | 0x7c00 | ((mant >> 13) as u16 & 0x3ff);
+    }
+
+    let new_exp = exp - 127 + 15;
+    if new_exp >= 31 {
+        return sign | 0x7c00; // overflow → inf
+    }
+    if new_exp <= 0 {
+        if new_exp < -10 {
+            return sign; // underflow → zero
+        }
+        let m = (mant | 0x800000) >> (1 - new_exp + 13);
+        return sign | m as u16;
+    }
+
+    sign | ((new_exp as u16) << 10) | ((mant >> 13) as u16)
+}
+
+/// Create an FP16 MLMultiArray from f32 data (converts on the fly)
+fn create_fp16_multi_array(
+    data: &[f32],
+    cached: &CachedInputShape,
+    deallocator: &RcBlock<dyn Fn(NonNull<c_void>)>,
+    fp16_buffer: &mut Vec<u16>,
+) -> Result<Retained<MLMultiArray>, CoreMlError> {
+    fp16_buffer.clear();
+    fp16_buffer.extend(data.iter().map(|&v| f32_to_f16(v)));
+
+    let ptr = NonNull::new(fp16_buffer.as_ptr() as *mut c_void)
+        .ok_or_else(|| CoreMlError::ArrayCreationFailed("null data pointer".into()))?;
+
+    #[allow(deprecated)]
+    unsafe {
+        MLMultiArray::initWithDataPointer_shape_dataType_strides_deallocator_error(
+            MLMultiArray::alloc(),
+            ptr,
+            &cached.ns_shape,
+            MLMultiArrayDataType::Float16,
+            &cached.ns_strides,
+            Some(deallocator),
+        )
+    }
+    .map_err(|e| CoreMlError::ArrayCreationFailed(format!("{e}")))
+}
+
 /// Convert IEEE 754 half-precision (FP16) bits to f32
 fn f16_to_f32(bits: u16) -> f32 {
     let sign = ((bits >> 15) & 1) as u32;
@@ -333,6 +387,9 @@ pub(crate) struct SharedCoreMlModel {
     model: Retained<MLModel>,
     output_name: String,
     output_key: Retained<NSString>,
+    /// When true, this model was loaded without a specific output — use predict_cached_multi
+    #[expect(dead_code)]
+    multi_output: bool,
 }
 
 // SAFETY: MLModel.predictionFromFeatures is documented as thread-safe by Apple.
@@ -364,6 +421,32 @@ impl SharedCoreMlModel {
             model,
             output_key: NSString::from_str(output_name),
             output_name: output_name.to_owned(),
+            multi_output: false,
+        })
+    }
+
+    /// Load a model that returns multiple outputs (use predict_cached_multi)
+    pub fn load_multi_output(
+        path: &Path,
+        compute_units: MLComputeUnits,
+        gpu_precision: GpuPrecision,
+    ) -> Result<Self, CoreMlError> {
+        let path_str = NSString::from_str(&path.to_string_lossy());
+        let url = NSURL::fileURLWithPath_isDirectory(&path_str, true);
+
+        let config = unsafe { MLModelConfiguration::new() };
+        unsafe { config.setComputeUnits(compute_units) };
+        let low_precision = matches!(gpu_precision, GpuPrecision::Low);
+        unsafe { config.setAllowLowPrecisionAccumulationOnGPU(low_precision) };
+
+        let model = unsafe { MLModel::modelWithContentsOfURL_configuration_error(&url, &config) }
+            .map_err(|e| CoreMlError::LoadFailed(format!("{e}")))?;
+
+        Ok(Self {
+            model,
+            output_key: NSString::from_str(""),
+            output_name: String::new(),
+            multi_output: true,
         })
     }
 
@@ -374,6 +457,7 @@ impl SharedCoreMlModel {
             model: model.model,
             output_key: model.output_key,
             output_name: model.output_name,
+            multi_output: false,
         }
     }
 
@@ -418,6 +502,104 @@ impl SharedCoreMlModel {
             .ok_or_else(|| CoreMlError::OutputNotFound(self.output_name.clone()))?;
 
         extract_output(&output_array)
+    }
+
+    /// Run prediction and extract multiple named outputs from a single inference call
+    pub fn predict_cached_multi(
+        &self,
+        inputs: &[(&CachedInputShape, &[f32])],
+        output_names: &[&str],
+    ) -> Result<Vec<(Vec<f32>, Vec<usize>)>, CoreMlError> {
+        let deallocator = RcBlock::new(|_ptr: NonNull<c_void>| {});
+        let input_dict: Retained<NSMutableDictionary<NSString, AnyObject>> =
+            NSMutableDictionary::new();
+
+        for &(cached, data) in inputs {
+            debug_assert_eq!(data.len(), cached.total_elements);
+            let multi_array =
+                create_multi_array_cached_with_deallocator(data, cached, &deallocator)?;
+            let feature_value = unsafe { MLFeatureValue::featureValueWithMultiArray(&multi_array) };
+            let key_copy: &ProtocolObject<dyn NSCopying> = ProtocolObject::from_ref(&*cached.name);
+            let value_ref: &AnyObject =
+                unsafe { &*((&*feature_value) as *const MLFeatureValue as *const AnyObject) };
+            unsafe { input_dict.setObject_forKey(value_ref, key_copy) };
+        }
+
+        let provider = unsafe {
+            MLDictionaryFeatureProvider::initWithDictionary_error(
+                MLDictionaryFeatureProvider::alloc(),
+                &input_dict,
+            )
+        }
+        .map_err(|e| CoreMlError::PredictionFailed(format!("feature provider: {e}")))?;
+
+        let input_ref: &ProtocolObject<dyn MLFeatureProvider> =
+            ProtocolObject::from_ref(&*provider);
+        let output = unsafe { self.model.predictionFromFeatures_error(input_ref) }
+            .map_err(|e| CoreMlError::PredictionFailed(format!("{e}")))?;
+
+        let mut results = Vec::with_capacity(output_names.len());
+        for &name in output_names {
+            let ns_name = NSString::from_str(name);
+            let output_value = unsafe { output.featureValueForName(&ns_name) }
+                .ok_or_else(|| CoreMlError::OutputNotFound(name.to_owned()))?;
+            let output_array = unsafe { output_value.multiArrayValue() }
+                .ok_or_else(|| CoreMlError::OutputNotFound(name.to_owned()))?;
+            results.push(extract_output(&output_array)?);
+        }
+
+        Ok(results)
+    }
+
+    /// Like predict_cached_multi but converts inputs to FP16 before feeding to CoreML
+    pub fn predict_cached_multi_fp16(
+        &self,
+        inputs: &[(&CachedInputShape, &[f32])],
+        output_names: &[&str],
+    ) -> Result<Vec<(Vec<f32>, Vec<usize>)>, CoreMlError> {
+        let deallocator = RcBlock::new(|_ptr: NonNull<c_void>| {});
+        let input_dict: Retained<NSMutableDictionary<NSString, AnyObject>> =
+            NSMutableDictionary::new();
+
+        // keep FP16 buffers alive until after prediction
+        let mut fp16_buffers: Vec<Vec<u16>> = Vec::with_capacity(inputs.len());
+
+        for &(cached, data) in inputs {
+            debug_assert_eq!(data.len(), cached.total_elements);
+            fp16_buffers.push(Vec::with_capacity(data.len()));
+            let buf = fp16_buffers.last_mut().unwrap();
+            let multi_array = create_fp16_multi_array(data, cached, &deallocator, buf)?;
+            let feature_value = unsafe { MLFeatureValue::featureValueWithMultiArray(&multi_array) };
+            let key_copy: &ProtocolObject<dyn NSCopying> = ProtocolObject::from_ref(&*cached.name);
+            let value_ref: &AnyObject =
+                unsafe { &*((&*feature_value) as *const MLFeatureValue as *const AnyObject) };
+            unsafe { input_dict.setObject_forKey(value_ref, key_copy) };
+        }
+
+        let provider = unsafe {
+            MLDictionaryFeatureProvider::initWithDictionary_error(
+                MLDictionaryFeatureProvider::alloc(),
+                &input_dict,
+            )
+        }
+        .map_err(|e| CoreMlError::PredictionFailed(format!("feature provider: {e}")))?;
+
+        let input_ref: &ProtocolObject<dyn MLFeatureProvider> =
+            ProtocolObject::from_ref(&*provider);
+        let output = unsafe { self.model.predictionFromFeatures_error(input_ref) }
+            .map_err(|e| CoreMlError::PredictionFailed(format!("{e}")))?;
+
+        let mut results = Vec::with_capacity(output_names.len());
+        for &name in output_names {
+            let ns_name = NSString::from_str(name);
+            let output_value = unsafe { output.featureValueForName(&ns_name) }
+                .ok_or_else(|| CoreMlError::OutputNotFound(name.to_owned()))?;
+            let output_array = unsafe { output_value.multiArrayValue() }
+                .ok_or_else(|| CoreMlError::OutputNotFound(name.to_owned()))?;
+            results.push(extract_output(&output_array)?);
+        }
+
+        Ok(results)
     }
 
     /// Async prediction via CoreML's GCD dispatch — does NOT block the calling thread.

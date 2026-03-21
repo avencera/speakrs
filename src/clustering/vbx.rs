@@ -16,7 +16,7 @@ impl Default for VbxConfig {
         Self {
             fa: 0.07,
             fb: 0.8,
-            max_iters: 20,
+            max_iters: 3,
             epsilon: 1e-4,
             init_smoothing: 7.0,
         }
