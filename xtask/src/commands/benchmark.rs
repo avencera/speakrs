@@ -687,6 +687,8 @@ fn resolve_impl(name: &str) -> Option<usize> {
 #[allow(clippy::too_many_arguments)]
 pub fn der(
     dataset_id: &str,
+    file: Option<PathBuf>,
+    rttm: Option<PathBuf>,
     max_files: u32,
     max_minutes: u32,
     description: Option<&str>,
@@ -725,7 +727,7 @@ pub fn der(
         }
     }
 
-    if dataset_id == "list" {
+    if dataset_id == "list" && file.is_none() {
         println!("Available datasets:");
         for id in crate::datasets::list_dataset_ids() {
             println!("  {id}");
@@ -734,7 +736,24 @@ pub fn der(
         return Ok(());
     }
 
-    let datasets: Vec<crate::datasets::Dataset> = if dataset_id == "all" {
+    // single-file mode: --file and --rttm provided directly
+    let single_file_mode = file.is_some();
+    if let Some(ref wav_path) = file {
+        let rttm_path = rttm
+            .as_ref()
+            .ok_or_else(|| color_eyre::eyre::eyre!("--rttm is required when using --file"))?;
+
+        if !wav_path.exists() {
+            bail!("WAV file not found: {}", wav_path.display());
+        }
+        if !rttm_path.exists() {
+            bail!("RTTM file not found: {}", rttm_path.display());
+        }
+    }
+
+    let datasets: Vec<crate::datasets::Dataset> = if single_file_mode {
+        Vec::new()
+    } else if dataset_id == "all" {
         crate::datasets::all_datasets()
     } else {
         vec![crate::datasets::find_dataset(dataset_id).ok_or_else(|| {
@@ -771,41 +790,56 @@ pub fn der(
     // SAFETY: single-threaded CLI, no other threads reading env vars
     unsafe { std::env::set_var("SPEAKRS_MODELS_DIR", &models_dir) };
 
-    let fixtures_dir = root.join("fixtures/datasets");
     let metadata = BenchmarkMetadata::collect();
 
-    // pre-flight: run all implementations on the shortest file from the first dataset
-    let preflight_failures: HashMap<String, String> = if no_preflight {
-        HashMap::new()
+    // collect all (dataset_name, files) pairs to evaluate
+    let eval_sets: Vec<(String, Vec<(PathBuf, PathBuf)>)> = if single_file_mode {
+        let wav_path = file.unwrap();
+        let rttm_path = rttm.unwrap();
+        let display_name = wav_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "single-file".to_string());
+        vec![(display_name, vec![(wav_path, rttm_path)])]
     } else {
-        // ensure first dataset is available for preflight
-        let first_dataset = &datasets[0];
-        first_dataset.ensure(&fixtures_dir)?;
-        let first_dir = first_dataset.dataset_dir(&fixtures_dir);
-        let preflight_files = discover_files(&first_dir, 1, f64::MAX)?;
-        if preflight_files.is_empty() {
-            eprintln!("warning: no files for preflight, skipping");
-            HashMap::new()
-        } else {
-            preflight_check(&root, &preflight_files[0], &seg_model, &emb_model, impls)?
+        let fixtures_dir = root.join("fixtures/datasets");
+        let mut sets = Vec::new();
+        for dataset in &datasets {
+            dataset.ensure(&fixtures_dir)?;
+            let dataset_dir = dataset.dataset_dir(&fixtures_dir);
+            let files = discover_files(&dataset_dir, max_files, max_minutes as f64)?;
+            if files.is_empty() {
+                eprintln!(
+                    "No paired wav+rttm files found in {}",
+                    dataset_dir.display()
+                );
+                continue;
+            }
+            sets.push((dataset.display_name.clone(), files));
         }
+        sets
     };
 
-    for dataset in &datasets {
+    // pre-flight: run all implementations on the shortest file from the first eval set
+    let preflight_failures: HashMap<String, String> = if no_preflight || eval_sets.is_empty() {
+        HashMap::new()
+    } else {
+        let first_file = eval_sets[0]
+            .1
+            .iter()
+            .min_by(|a, b| {
+                wav_duration_seconds(&a.0)
+                    .unwrap_or(f64::MAX)
+                    .partial_cmp(&wav_duration_seconds(&b.0).unwrap_or(f64::MAX))
+                    .unwrap()
+            })
+            .unwrap();
+        preflight_check(&root, first_file, &seg_model, &emb_model, impls)?
+    };
+
+    for (dataset_name, files) in &eval_sets {
         println!();
-        println!("========== {} ==========", dataset.display_name);
-
-        dataset.ensure(&fixtures_dir)?;
-        let dataset_dir = dataset.dataset_dir(&fixtures_dir);
-
-        let files = discover_files(&dataset_dir, max_files, max_minutes as f64)?;
-        if files.is_empty() {
-            eprintln!(
-                "No paired wav+rttm files found in {}",
-                dataset_dir.display()
-            );
-            continue;
-        }
+        println!("========== {dataset_name} ==========");
 
         let total_audio_seconds: f64 = files
             .iter()
@@ -814,8 +848,10 @@ pub fn der(
         let total_audio_minutes = total_audio_seconds / 60.0;
 
         let run_id = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-        let run_dir = if datasets.len() > 1 {
-            root.join("_benchmarks").join(&run_id).join(&dataset.id)
+        let run_dir = if eval_sets.len() > 1 {
+            root.join("_benchmarks")
+                .join(&run_id)
+                .join(dataset_name.to_lowercase().replace(' ', "-"))
         } else {
             root.join("_benchmarks").join(&run_id)
         };
@@ -834,7 +870,7 @@ pub fn der(
 
         let (implementations, all_results) = run_der_implementations(
             &root,
-            &files,
+            files,
             &seg_model,
             &emb_model,
             impls,
@@ -844,10 +880,10 @@ pub fn der(
 
         DerResultsWriter {
             run_dir: &run_dir,
-            dataset_name: &dataset.display_name,
+            dataset_name,
             implementations: &implementations,
             results: &all_results,
-            files: &files,
+            files,
             total_audio_minutes,
             collar: 0.0,
             description,
