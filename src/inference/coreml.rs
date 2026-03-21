@@ -270,19 +270,58 @@ fn create_multi_array_cached_with_deallocator(
     .map_err(|e| CoreMlError::ArrayCreationFailed(format!("{e}")))
 }
 
-/// Copy output MLMultiArray data into a Vec<f32> and return the shape
+/// Copy output MLMultiArray data into a Vec<f32> and return the shape.
+/// Handles both FP32 and FP16 output data types (FP16 is auto-converted to FP32)
 #[allow(deprecated)]
 fn extract_output(array: &MLMultiArray) -> Result<(Vec<f32>, Vec<usize>), CoreMlError> {
     let count = unsafe { array.count() } as usize;
     let ptr = unsafe { array.dataPointer() };
-    let data = unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const f32, count) };
+    let dtype = unsafe { array.dataType() };
 
     let ns_shape = unsafe { array.shape() };
     let shape: Vec<usize> = (0..ns_shape.len())
         .map(|i| ns_shape.objectAtIndex(i).as_isize() as usize)
         .collect();
 
-    Ok((data.to_vec(), shape))
+    let data = if dtype == MLMultiArrayDataType::Float16 {
+        let fp16_data = unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const u16, count) };
+        fp16_data.iter().map(|&bits| f16_to_f32(bits)).collect()
+    } else {
+        let fp32_data = unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const f32, count) };
+        fp32_data.to_vec()
+    };
+
+    Ok((data, shape))
+}
+
+/// Convert IEEE 754 half-precision (FP16) bits to f32
+fn f16_to_f32(bits: u16) -> f32 {
+    let sign = ((bits >> 15) & 1) as u32;
+    let exp = ((bits >> 10) & 0x1f) as u32;
+    let mant = (bits & 0x3ff) as u32;
+
+    if exp == 0 {
+        if mant == 0 {
+            return f32::from_bits(sign << 31);
+        }
+        // subnormal: normalize
+        let mut e: i32 = exp as i32;
+        let mut m = mant;
+        while m & 0x400 == 0 {
+            m <<= 1;
+            e -= 1;
+        }
+        m &= 0x3ff;
+        let f32_exp = ((127 - 15) + e + 1) as u32;
+        return f32::from_bits((sign << 31) | (f32_exp << 23) | (m << 13));
+    }
+
+    if exp == 0x1f {
+        return f32::from_bits((sign << 31) | (0xff_u32 << 23) | (mant << 13));
+    }
+
+    let f32_exp = exp - 15 + 127;
+    f32::from_bits((sign << 31) | (f32_exp << 23) | (mant << 13))
 }
 
 /// Thread-safe CoreML model wrapper that can be shared across threads
