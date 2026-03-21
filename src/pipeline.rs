@@ -913,8 +913,8 @@ impl<'a> PipelineRunner<'a> {
         let seg_model = &mut *self.seg_model;
         let emb_model = &mut *self.emb_model;
 
-        let result: Result<Option<InferenceArtifacts>, PipelineError> =
-            std::thread::scope(|scope| {
+        let result: Result<Option<InferenceArtifacts>, PipelineError> = std::thread::scope(
+            |scope| {
                 // seg thread: single-threaded streaming so windows arrive in order
                 let seg_handle = scope.spawn(|| -> Result<(), PipelineError> {
                     seg_model.run_streaming(audio, tx)?;
@@ -927,25 +927,35 @@ impl<'a> PipelineRunner<'a> {
                 let mut group_buffer: Vec<Array2<f32>> = Vec::with_capacity(chunk_win_capacity);
                 let mut global_win = 0usize;
                 let mut emb_ms = 0u128;
+                let mut wait_ms = 0u128;
 
-                for raw_window in &rx {
-                    let decoded = powerset.hard_decode(&raw_window);
-                    group_buffer.push(decoded);
+                loop {
+                    let wait_start = std::time::Instant::now();
+                    let raw_window = match rx.recv() {
+                        Ok(w) => w,
+                        Err(_) => break,
+                    };
+                    wait_ms += wait_start.elapsed().as_millis();
 
-                    if group_buffer.len() == chunk_win_capacity {
-                        let emb_start = std::time::Instant::now();
-                        process_chunk_group(
-                            emb_model,
-                            audio,
-                            &group_buffer,
-                            global_win,
-                            &chunk_params,
-                            &mut decoded_windows,
-                            &mut embeddings_vec,
-                        )?;
-                        emb_ms += emb_start.elapsed().as_millis();
-                        global_win += group_buffer.len();
-                        group_buffer.clear();
+                    {
+                        let decoded = powerset.hard_decode(&raw_window);
+                        group_buffer.push(decoded);
+
+                        if group_buffer.len() == chunk_win_capacity {
+                            let emb_start = std::time::Instant::now();
+                            process_chunk_group(
+                                emb_model,
+                                audio,
+                                &group_buffer,
+                                global_win,
+                                &chunk_params,
+                                &mut decoded_windows,
+                                &mut embeddings_vec,
+                            )?;
+                            emb_ms += emb_start.elapsed().as_millis();
+                            global_win += group_buffer.len();
+                            group_buffer.clear();
+                        }
                     }
                 }
 
@@ -1000,7 +1010,7 @@ impl<'a> PipelineRunner<'a> {
                     {
                         let _ = writeln!(
                             f,
-                            "audio={audio_secs:.1}s chunks={num_chunks} emb={emb_ms}ms total={}ms",
+                            "audio={audio_secs:.1}s chunks={num_chunks} wait={wait_ms}ms emb={emb_ms}ms total={}ms",
                             inference_elapsed.as_millis()
                         );
                     }
@@ -1019,7 +1029,8 @@ impl<'a> PipelineRunner<'a> {
                     segmentations: DecodedSegmentations(segmentations),
                     embeddings: ChunkEmbeddings(embeddings),
                 }))
-            });
+            },
+        );
 
         result
     }
