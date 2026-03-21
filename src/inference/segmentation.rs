@@ -172,42 +172,24 @@ impl SegmentationModel {
             return Ok(0);
         }
 
-        // load fresh CPUOnly models per file — caching causes DER regression (39.8%)
-        // because CoreML models have internal state that corrupts across different inputs
-        use objc2_core_ml::MLComputeUnits;
-        let coreml_path = Self::resolve_coreml_path(&self.model_path, self.mode);
-        let coreml_path = match coreml_path {
-            Some(p) if p.exists() => p,
-            _ => return self.run_streaming(audio, tx),
+        // share ONE model across all workers (like SpeakerKit's asyncPrediction pattern)
+        let shared_model = match &self.native_session {
+            Some(m) => m,
+            None => return self.run_streaming(audio, tx),
         };
-
-        let worker_models: Vec<SharedCoreMlModel> = (0..num_workers)
-            .filter_map(|_| {
-                SharedCoreMlModel::load(
-                    &coreml_path,
-                    MLComputeUnits::CPUOnly,
-                    "output",
-                    GpuPrecision::Low,
-                )
-                .ok()
-            })
-            .collect();
-
-        if worker_models.len() < 2 {
-            return self.run_streaming(audio, tx);
-        }
 
         let seg_start = std::time::Instant::now();
         let win_samples = self.window_samples;
 
         // divide windows into contiguous chunks for each worker
-        let chunk_size = total_windows.div_ceil(worker_models.len());
+        let chunk_size = total_windows.div_ceil(num_workers);
 
-        // workers process in parallel, collect results locally, then merge in order
+        // workers share one model, each with own buffers. Results merged in order
         let all_results: SegParallelResult = std::thread::scope(|scope| {
             let mut handles = Vec::new();
 
-            for (worker_idx, model) in worker_models.iter().take(num_workers).enumerate() {
+            for worker_idx in 0..num_workers {
+                let model = shared_model;
                 let start = worker_idx * chunk_size;
                 let end = (start + chunk_size).min(total_windows);
                 if start >= total_windows {
@@ -269,7 +251,7 @@ impl SegmentationModel {
         let total_seg = seg_start.elapsed();
         tracing::info!(
             windows = total_windows,
-            workers = worker_models.len(),
+            workers = num_workers,
             seg_total_ms = total_seg.as_millis(),
             "Parallel segmentation complete"
         );
