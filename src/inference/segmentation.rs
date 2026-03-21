@@ -182,30 +182,44 @@ impl SegmentationModel {
         let seg_start = std::time::Instant::now();
         let win_samples = self.window_samples;
 
-        // divide windows into contiguous chunks for each worker
+        // streaming parallel seg: workers compute in parallel, merger thread
+        // forwards results to pipeline tx in global order WHILE workers run
         let chunk_size = total_windows.div_ceil(num_workers);
+        let actual_workers = total_windows.div_ceil(chunk_size).min(num_workers);
 
-        // rayon persistent thread pool + crossbeam channel (no mutex, no thread creation)
-        let all_results: SegParallelResult = {
-            let (result_tx, result_rx) = crossbeam_channel::unbounded();
+        // per-worker channels: each worker sends results one at a time
+        let mut worker_txs = Vec::with_capacity(actual_workers);
+        let mut worker_rxs = Vec::with_capacity(actual_workers);
+        for _ in 0..actual_workers {
+            let (wtx, wrx) = crossbeam_channel::unbounded::<Array2<f32>>();
+            worker_txs.push(wtx);
+            worker_rxs.push(wrx);
+        }
 
-            rayon::scope(|scope| {
-                for worker_idx in 0..num_workers {
+        // use std::thread::scope so merger thread runs concurrently with rayon workers
+        std::thread::scope(|scope| {
+            // merger thread: drains per-worker channels in order, forwards to pipeline tx
+            let merge_handle = scope.spawn(move || -> Result<(), SegmentationError> {
+                for wrx in &worker_rxs {
+                    for result in wrx {
+                        tx.send(result)?;
+                    }
+                }
+                Ok(())
+            });
+
+            // rayon workers: compute in parallel on persistent thread pool
+            rayon::scope(|rscope| {
+                for (worker_idx, worker_tx) in worker_txs.into_iter().enumerate() {
                     let model = shared_model;
                     let start = worker_idx * chunk_size;
                     let end = (start + chunk_size).min(total_windows);
-                    if start >= total_windows {
-                        break;
-                    }
-
-                    let result_tx = result_tx.clone();
                     let offsets = &offsets;
                     let padded = &padded;
 
-                    scope.spawn(move |_| {
+                    rscope.spawn(move |_| {
                         let cached_shape = CachedInputShape::new("input", &[1, 1, win_samples]);
                         let mut buffer = ndarray::Array3::<f32>::zeros((1, 1, win_samples));
-                        let mut results = Vec::with_capacity(end - start);
 
                         for idx in start..end {
                             let window = if idx < offsets.len() {
@@ -227,28 +241,18 @@ impl SegmentationModel {
 
                             let frames = out_shape[1];
                             let classes = out_shape[2];
-                            results.push((
-                                idx,
-                                Array2::from_shape_vec((frames, classes), data).unwrap(),
-                            ));
+                            let _ = worker_tx
+                                .send(Array2::from_shape_vec((frames, classes), data).unwrap());
                         }
-
-                        let _ = result_tx.send(results);
                     });
                 }
             });
-            drop(result_tx);
+            // rayon scope done → all worker_txs dropped → per-worker channels close
+            // → merger drains remaining items and finishes
 
-            Ok(result_rx.iter().collect())
-        };
-
-        // merge sorted results and send in global order
-        let mut merged: Vec<(usize, Array2<f32>)> = all_results?.into_iter().flatten().collect();
-        merged.sort_by_key(|(idx, _)| *idx);
-
-        for (_, result) in merged {
-            tx.send(result)?;
-        }
+            merge_handle.join().unwrap()?;
+            Ok::<(), SegmentationError>(())
+        })?;
 
         let total_seg = seg_start.elapsed();
         tracing::info!(
