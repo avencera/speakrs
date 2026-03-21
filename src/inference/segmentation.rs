@@ -142,6 +142,11 @@ impl SegmentationModel {
         &self.model_path
     }
 
+    #[cfg(feature = "coreml")]
+    pub(crate) fn shared_seg_model(&self) -> Option<&SharedCoreMlModel> {
+        self.native_session.as_ref()
+    }
+
     /// Run segmentation with N parallel workers, each with a fresh CoreML model.
     /// Workers use CPUOnly compute units to avoid GPU contention with embedding.
     /// Results are sent through `tx` in chunk_idx order
