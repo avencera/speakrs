@@ -1039,20 +1039,19 @@ impl<'a> PipelineRunner<'a> {
         result
     }
 
-    /// Async cooperative seg+emb using tokio. Seg workers run on the tokio
-    /// blocking pool, each calling `predict_cached_async` (GCD dispatch) on the
-    /// shared CoreML model. While one worker waits for a GPU prediction result,
-    /// other workers fill CPU time with buffer prep. The emb worker processes
-    /// decoded windows on its own blocking thread, overlapping with seg
+    /// Async cooperative seg+emb using tokio. Seg tasks use `submit_prediction`
+    /// which returns a tokio oneshot Receiver, allowing true async: while one
+    /// task awaits a CoreML GCD prediction, tokio runs other tasks that do CPU
+    /// buffer prep and submit their own predictions. The emb consumer processes
+    /// decoded windows inline on the block_on thread
     #[cfg(all(feature = "coreml", feature = "tokio"))]
-    #[expect(dead_code)]
     fn try_async_chunk_embedding(
         &mut self,
         audio: &[f32],
     ) -> Result<Option<InferenceArtifacts>, PipelineError> {
         use std::sync::Arc;
 
-        use crate::inference::coreml::{CachedInputShape, SharedCoreMlModel};
+        use crate::inference::coreml::{CachedInputShapeRef, SharedCoreMlModel};
 
         let step_samples = self.seg_model.step_samples();
         let window_samples = self.seg_model.window_samples();
@@ -1135,8 +1134,14 @@ impl<'a> PipelineRunner<'a> {
             let offsets_arc: Arc<[usize]> = offsets.into();
             let padded_arc: Arc<Option<Vec<f32>>> = Arc::new(padded);
 
-            // seg workers: each runs on a blocking thread, calling predict_cached_async
-            // (GCD dispatch). While one worker waits for GPU, others do buffer prep
+            // pre-build owned CachedInputShapeRef (clones NSString/NSArray Retained handles)
+            let cached_shape_ref =
+                CachedInputShapeRef::from_shape("input", &[1, 1, window_samples]);
+
+            // seg tasks: each spawned as a true async task via tokio::spawn.
+            // submit_prediction sends work to CoreML's GCD queue and returns a
+            // oneshot Receiver, so while one task awaits its prediction result,
+            // tokio schedules other tasks to do buffer prep + submit
             let mut seg_handles = Vec::with_capacity(num_seg_tasks);
             for task_idx in 0..num_seg_tasks {
                 let start = task_idx * chunk_size;
@@ -1146,15 +1151,15 @@ impl<'a> PipelineRunner<'a> {
                 let audio_ref = audio_arc.clone();
                 let offsets_ref = offsets_arc.clone();
                 let padded_ref = padded_arc.clone();
+                let cached_shape = cached_shape_ref.clone();
 
-                seg_handles.push(tokio::task::spawn_blocking(move || {
+                seg_handles.push(tokio::spawn(async move {
                     // SAFETY: pointer is valid for the duration of block_on
                     let model = unsafe { &*seg_ref.0 };
-                    let cached_shape = CachedInputShape::new("input", &[1, 1, window_samples]);
-                    let mut buffer = vec![0.0f32; window_samples];
 
                     for idx in start..end {
-                        buffer.fill(0.0);
+                        // CPU work: prepare the input buffer (fills time between predictions)
+                        let mut buffer = vec![0.0f32; window_samples];
                         let window = if idx < offsets_ref.len() {
                             &audio_ref[offsets_ref[idx]..offsets_ref[idx] + window_samples]
                         } else {
@@ -1162,15 +1167,24 @@ impl<'a> PipelineRunner<'a> {
                         };
                         buffer[..window.len()].copy_from_slice(window);
 
-                        let (data, out_shape) = model
-                            .predict_cached_async(&[(&cached_shape, &buffer)])
+                        let inputs = vec![(buffer, cached_shape.clone())];
+
+                        // submit to CoreML GCD queue — returns immediately
+                        let rx = model
+                            .submit_prediction(&inputs)
+                            .map_err(|e| PipelineError::Other(e.to_string()))?;
+
+                        // yield: tokio runs other seg tasks while CoreML processes
+                        let (data, out_shape) = rx
+                            .await
+                            .map_err(|e| PipelineError::Other(format!("seg recv: {e}")))?
                             .map_err(|e| PipelineError::Other(e.to_string()))?;
 
                         let frames = out_shape[1];
                         let classes = out_shape[2];
                         let raw_window = Array2::from_shape_vec((frames, classes), data).unwrap();
 
-                        if tx.blocking_send((idx, raw_window)).is_err() {
+                        if tx.send((idx, raw_window)).await.is_err() {
                             break;
                         }
                     }
@@ -1180,8 +1194,8 @@ impl<'a> PipelineRunner<'a> {
             drop(seg_tx);
 
             // emb: receive windows inline on the block_on thread. While
-            // process_chunk_group runs (CPU-bound), the blocking pool threads
-            // continue running seg workers concurrently
+            // process_chunk_group runs (CPU-bound), the async seg tasks
+            // continue submitting predictions concurrently
             let powerset = PowersetMapping::new(num_speakers, 2);
             let mut seg_rx = seg_rx;
             let mut decoded_windows: Vec<Array2<f32>> = Vec::new();
