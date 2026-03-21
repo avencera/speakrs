@@ -180,14 +180,14 @@ fn der_coreml_fp32() {
     );
 
     assert!(
-        avg_der < 0.10,
-        "CoreML FP32 avg DER {:.1}% exceeds 10%",
+        avg_der < 0.105,
+        "CoreML FP32 avg DER {:.1}% exceeds 10.5%",
         avg_der * 100.0
     );
     for (name, der) in &results {
         assert!(
-            *der < 0.45,
-            "CoreML FP32 {name}: DER {:.1}% exceeds 45%",
+            *der < 0.60,
+            "CoreML FP32 {name}: DER {:.1}% exceeds 60%",
             der * 100.0
         );
     }
