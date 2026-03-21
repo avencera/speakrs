@@ -20,7 +20,8 @@ pub enum SegmentationError {
     Disconnected(#[from] crossbeam_channel::SendError<Array2<f32>>),
 }
 
-const PRIMARY_BATCH_SIZE: usize = 64;
+// seg models exported with EnumeratedShapes for batch 1-32
+const PRIMARY_BATCH_SIZE: usize = 32;
 
 #[cfg(feature = "coreml")]
 type SegParallelResult = Result<Vec<Vec<(usize, Array2<f32>)>>, SegmentationError>;
