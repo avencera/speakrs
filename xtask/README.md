@@ -30,6 +30,9 @@ cargo xtask bench compare path/to/file.wav
 
 # DER evaluation on a dataset
 cargo xtask bench der --dataset voxconverse-dev --impls speakrs,pyannote
+
+# single-file benchmark
+cargo xtask bench der --file path/to/audio.wav --rttm path/to/ref.rttm --impls scm,sk
 ```
 
 ### DER implementation aliases

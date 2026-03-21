@@ -135,11 +135,17 @@ enum BenchCmd {
         #[arg(long, default_value_t = 1)]
         warmups: u32,
     },
-    /// DER evaluation on benchmark datasets
+    /// DER evaluation on benchmark datasets or a single file
     Der {
         /// Dataset to evaluate (use "all" for all datasets, "list" to show available)
         #[arg(long, default_value = "voxconverse-dev")]
         dataset: String,
+        /// Single WAV file to evaluate (bypasses dataset loading)
+        #[arg(long, requires = "rttm", conflicts_with_all = ["dataset", "max_files", "max_minutes"])]
+        file: Option<PathBuf>,
+        /// Reference RTTM file (required when --file is used)
+        #[arg(long, requires = "file")]
+        rttm: Option<PathBuf>,
         #[arg(long)]
         max_files: Option<u32>,
         #[arg(long)]
@@ -279,6 +285,8 @@ fn main() -> Result<()> {
             } => commands::benchmark::compare(&source, runs, warmups),
             BenchCmd::Der {
                 dataset,
+                file,
+                rttm,
                 max_files,
                 max_minutes,
                 description,
@@ -288,6 +296,8 @@ fn main() -> Result<()> {
                 emb_batch_size,
             } => commands::benchmark::der(
                 &dataset,
+                file,
+                rttm,
                 max_files.unwrap_or(u32::MAX),
                 max_minutes.unwrap_or(u32::MAX),
                 description.as_deref(),
