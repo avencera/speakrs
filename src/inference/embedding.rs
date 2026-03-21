@@ -64,6 +64,10 @@ pub struct EmbeddingModel {
     #[cfg(feature = "coreml")]
     native_fbank_batched_session: Option<SharedCoreMlModel>,
     #[cfg(feature = "coreml")]
+    native_fbank_30s_session: Option<SharedCoreMlModel>,
+    #[cfg(feature = "coreml")]
+    cached_fbank_30s_shape: CachedInputShape,
+    #[cfg(feature = "coreml")]
     native_multi_mask_session: Option<SharedCoreMlModel>,
     #[cfg(feature = "coreml")]
     native_chunk_sessions: Vec<ChunkEmbeddingSession>,
@@ -180,6 +184,10 @@ impl EmbeddingModel {
                 mode,
                 PRIMARY_BATCH_SIZE,
             ),
+            #[cfg(feature = "coreml")]
+            native_fbank_30s_session: Self::load_native_fbank_30s(model_path, mode),
+            #[cfg(feature = "coreml")]
+            cached_fbank_30s_shape: CachedInputShape::new("waveform", &[1, 1, 480_000]),
             #[cfg(feature = "coreml")]
             native_multi_mask_session: Self::load_native_multi_mask(model_path, mode),
             #[cfg(feature = "coreml")]
@@ -1192,6 +1200,56 @@ impl EmbeddingModel {
         }
     }
 
+    /// Load a 30s fbank model (480000 samples → ~2998 frames)
+    #[cfg(feature = "coreml")]
+    fn load_native_fbank_30s(model_path: &str, mode: ExecutionMode) -> Option<SharedCoreMlModel> {
+        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
+            return None;
+        }
+        let coreml_path = Path::new(model_path).with_file_name("wespeaker-fbank-30s.mlmodelc");
+        if !coreml_path.exists() {
+            return None;
+        }
+        match SharedCoreMlModel::load(
+            &coreml_path,
+            CoreMlModel::default_compute_units(),
+            "output",
+            GpuPrecision::Low,
+        ) {
+            Ok(model) => {
+                tracing::info!("Loaded 30s fbank model");
+                Some(model)
+            }
+            Err(e) => {
+                eprintln!("warning: failed to load 30s fbank model: {e}");
+                None
+            }
+        }
+    }
+
+    /// Compute fbank for up to 30s of audio in ONE call (no tiling)
+    #[cfg(feature = "coreml")]
+    pub fn compute_chunk_fbank_30s(
+        &mut self,
+        audio: &[f32],
+    ) -> Option<Result<Array2<f32>, ort::Error>> {
+        let native = self.native_fbank_30s_session.as_ref()?;
+        // only use if audio fits in 30s (480000 samples)
+        if audio.len() > 480_000 {
+            return None;
+        }
+        let mut buffer = vec![0.0f32; 480_000];
+        buffer[..audio.len()].copy_from_slice(audio);
+        let result = native
+            .predict_cached(&[(&self.cached_fbank_30s_shape, &buffer)])
+            .map_err(|e| ort::Error::new(e.to_string()));
+        Some(result.map(|(data, out_shape)| {
+            let frames = out_shape[1];
+            let features = out_shape[2];
+            Array2::from_shape_vec((frames, features), data).unwrap()
+        }))
+    }
+
     #[cfg(feature = "coreml")]
     fn load_native_multi_mask(model_path: &str, mode: ExecutionMode) -> Option<SharedCoreMlModel> {
         if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
@@ -1307,6 +1365,12 @@ impl EmbeddingModel {
         self.native_chunk_sessions
             .iter()
             .find(|s| s.num_windows >= num_windows)
+    }
+
+    /// Get the largest available chunk session
+    #[cfg(feature = "coreml")]
+    pub(crate) fn largest_chunk_session(&self) -> Option<&ChunkEmbeddingSession> {
+        self.native_chunk_sessions.last()
     }
 
     /// Run chunk embedding: full-audio fbank + all per-window masks in one call

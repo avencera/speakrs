@@ -896,7 +896,8 @@ impl<'a> PipelineRunner<'a> {
             return Ok(None);
         }
 
-        let session = match self.emb_model.chunk_session_for_windows(1) {
+        // use the LARGEST chunk model — fewer emb calls, more work per call
+        let session = match self.emb_model.largest_chunk_session() {
             Some(s) => s,
             None => return Ok(None),
         };
@@ -961,27 +962,58 @@ impl<'a> PipelineRunner<'a> {
                     let sess_num_masks = session.num_masks;
                     let _ = session;
 
-                    // fbank for this chunk
+                    // fbank for this chunk — use 30s model if available (1 call vs 3)
                     let chunk_audio_start = global_start * step_samples;
                     let chunk_audio_len = window_samples + (wins - 1) * step_samples;
                     let chunk_audio_end = (chunk_audio_start + chunk_audio_len).min(audio.len());
                     let chunk_audio = &audio[chunk_audio_start..chunk_audio_end];
 
                     let mut fbank = vec![0.0f32; sess_fbank_frames * 80];
-                    let mut fb_off = 0usize;
-                    let mut au_off = 0usize;
-                    while fb_off < sess_fbank_frames && au_off < chunk_audio.len() {
-                        let seg_end = (au_off + window_samples).min(chunk_audio.len());
-                        let seg_fbank =
-                            emb_model.compute_chunk_fbank(&chunk_audio[au_off..seg_end])?;
-                        let copy = seg_fbank.nrows().min(sess_fbank_frames - fb_off);
-                        for r in 0..copy {
-                            let dst = (fb_off + r) * 80;
+
+                    #[cfg(feature = "coreml")]
+                    if let Some(result) = emb_model.compute_chunk_fbank_30s(chunk_audio) {
+                        let full_fbank = result?;
+                        let copy_frames = full_fbank.nrows().min(sess_fbank_frames);
+                        for r in 0..copy_frames {
+                            let dst = r * 80;
                             fbank[dst..dst + 80]
-                                .copy_from_slice(seg_fbank.row(r).as_slice().unwrap());
+                                .copy_from_slice(full_fbank.row(r).as_slice().unwrap());
                         }
-                        fb_off += 998;
-                        au_off += window_samples;
+                    } else {
+                        // fallback: tile 10s segments
+                        let mut fb_off = 0usize;
+                        let mut au_off = 0usize;
+                        while fb_off < sess_fbank_frames && au_off < chunk_audio.len() {
+                            let seg_end = (au_off + window_samples).min(chunk_audio.len());
+                            let seg_fbank =
+                                emb_model.compute_chunk_fbank(&chunk_audio[au_off..seg_end])?;
+                            let copy = seg_fbank.nrows().min(sess_fbank_frames - fb_off);
+                            for r in 0..copy {
+                                let dst = (fb_off + r) * 80;
+                                fbank[dst..dst + 80]
+                                    .copy_from_slice(seg_fbank.row(r).as_slice().unwrap());
+                            }
+                            fb_off += 998;
+                            au_off += window_samples;
+                        }
+                    }
+                    #[cfg(not(feature = "coreml"))]
+                    {
+                        let mut fb_off = 0usize;
+                        let mut au_off = 0usize;
+                        while fb_off < sess_fbank_frames && au_off < chunk_audio.len() {
+                            let seg_end = (au_off + window_samples).min(chunk_audio.len());
+                            let seg_fbank =
+                                emb_model.compute_chunk_fbank(&chunk_audio[au_off..seg_end])?;
+                            let copy = seg_fbank.nrows().min(sess_fbank_frames - fb_off);
+                            for r in 0..copy {
+                                let dst = (fb_off + r) * 80;
+                                fbank[dst..dst + 80]
+                                    .copy_from_slice(seg_fbank.row(r).as_slice().unwrap());
+                            }
+                            fb_off += 998;
+                            au_off += window_samples;
+                        }
                     }
 
                     // masks
