@@ -465,6 +465,131 @@ impl SharedCoreMlModel {
             .recv()
             .map_err(|_| CoreMlError::PredictionFailed("channel disconnected".into()))?
     }
+
+    /// Tokio-compatible async prediction via CoreML's GCD dispatch.
+    /// Returns a Future that resolves when the prediction completes.
+    /// The calling tokio task yields while waiting, allowing other tasks to run
+    #[cfg(feature = "tokio")]
+    pub async fn predict_cached_tokio(
+        &self,
+        inputs: Vec<(Vec<f32>, CachedInputShapeRef)>,
+    ) -> Result<(Vec<f32>, Vec<usize>), CoreMlError> {
+        let deallocator = RcBlock::new(|_ptr: NonNull<c_void>| {});
+        let input_dict: Retained<NSMutableDictionary<NSString, AnyObject>> =
+            NSMutableDictionary::new();
+
+        for (data, cached) in &inputs {
+            debug_assert_eq!(data.len(), cached.total_elements);
+            let multi_array =
+                create_multi_array_cached_with_deallocator_ref(data, cached, &deallocator)?;
+            let feature_value = unsafe { MLFeatureValue::featureValueWithMultiArray(&multi_array) };
+            let key_copy: &ProtocolObject<dyn NSCopying> = ProtocolObject::from_ref(&*cached.name);
+            let value_ref: &AnyObject =
+                unsafe { &*((&*feature_value) as *const MLFeatureValue as *const AnyObject) };
+            unsafe { input_dict.setObject_forKey(value_ref, key_copy) };
+        }
+
+        let provider = unsafe {
+            MLDictionaryFeatureProvider::initWithDictionary_error(
+                MLDictionaryFeatureProvider::alloc(),
+                &input_dict,
+            )
+        }
+        .map_err(|e| CoreMlError::PredictionFailed(format!("feature provider: {e}")))?;
+
+        let input_ref: &ProtocolObject<dyn MLFeatureProvider> =
+            ProtocolObject::from_ref(&*provider);
+
+        let (result_tx, result_rx) =
+            tokio::sync::oneshot::channel::<Result<(Vec<f32>, Vec<usize>), CoreMlError>>();
+
+        let output_name = self.output_name.clone();
+        let output_key = self.output_key.clone();
+        // wrap oneshot sender in Mutex because RcBlock requires Fn (not FnOnce)
+        let result_tx = std::sync::Mutex::new(Some(result_tx));
+
+        let completion = RcBlock::new(
+            move |output_ptr: *mut ProtocolObject<dyn MLFeatureProvider>,
+                  error_ptr: *mut objc2_foundation::NSError| {
+                let result = if !error_ptr.is_null() {
+                    let error = unsafe { &*error_ptr };
+                    Err(CoreMlError::PredictionFailed(format!("{error}")))
+                } else if output_ptr.is_null() {
+                    Err(CoreMlError::PredictionFailed("null output".into()))
+                } else {
+                    let output = unsafe { &*output_ptr };
+                    let output_value = unsafe { output.featureValueForName(&output_key) };
+                    match output_value {
+                        Some(val) => {
+                            let output_array = unsafe { val.multiArrayValue() };
+                            match output_array {
+                                Some(arr) => extract_output(&arr),
+                                None => Err(CoreMlError::OutputNotFound(output_name.clone())),
+                            }
+                        }
+                        None => Err(CoreMlError::OutputNotFound(output_name.clone())),
+                    }
+                };
+                if let Some(tx) = result_tx.lock().unwrap().take() {
+                    let _ = tx.send(result);
+                }
+            },
+        );
+
+        unsafe {
+            self.model
+                .predictionFromFeatures_completionHandler(input_ref, &completion);
+        }
+
+        // await: yields this tokio task, letting other tasks run
+        result_rx
+            .await
+            .map_err(|_| CoreMlError::PredictionFailed("channel closed".into()))?
+    }
+}
+
+/// Owned copy of CachedInputShape data for async predictions (must be 'static)
+#[cfg(feature = "tokio")]
+pub(crate) struct CachedInputShapeRef {
+    pub name: Retained<NSString>,
+    pub ns_shape: Retained<NSArray<NSNumber>>,
+    pub ns_strides: Retained<NSArray<NSNumber>>,
+    pub total_elements: usize,
+}
+
+#[cfg(feature = "tokio")]
+impl CachedInputShapeRef {
+    pub fn from_cached(cached: &CachedInputShape) -> Self {
+        Self {
+            name: cached.name.clone(),
+            ns_shape: cached.ns_shape.clone(),
+            ns_strides: cached.ns_strides.clone(),
+            total_elements: cached.total_elements,
+        }
+    }
+}
+
+#[cfg(feature = "tokio")]
+fn create_multi_array_cached_with_deallocator_ref(
+    data: &[f32],
+    cached: &CachedInputShapeRef,
+    deallocator: &RcBlock<dyn Fn(NonNull<c_void>)>,
+) -> Result<Retained<MLMultiArray>, CoreMlError> {
+    let ptr = NonNull::new(data.as_ptr() as *mut c_void)
+        .ok_or_else(|| CoreMlError::ArrayCreationFailed("null data pointer".into()))?;
+
+    #[allow(deprecated)]
+    unsafe {
+        MLMultiArray::initWithDataPointer_shape_dataType_strides_deallocator_error(
+            MLMultiArray::alloc(),
+            ptr,
+            &cached.ns_shape,
+            MLMultiArrayDataType::Float32,
+            &cached.ns_strides,
+            Some(deallocator),
+        )
+    }
+    .map_err(|e| CoreMlError::ArrayCreationFailed(format!("{e}")))
 }
 
 /// Resolve .mlmodelc path next to an .onnx file
