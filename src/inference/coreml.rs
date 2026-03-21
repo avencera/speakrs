@@ -385,6 +385,7 @@ impl SharedCoreMlModel {
     /// Submits prediction to CoreML's internal dispatch queue and waits via channel.
     /// This allows multiple concurrent callers on the same model to pipeline
     /// GPU/ANE work, matching SpeakerKit's asyncPrediction pattern
+    #[expect(dead_code)]
     pub fn predict_cached_async(
         &self,
         inputs: &[(&CachedInputShape, &[f32])],

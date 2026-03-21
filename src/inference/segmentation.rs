@@ -24,6 +24,7 @@ pub enum SegmentationError {
 const PRIMARY_BATCH_SIZE: usize = 32;
 
 #[cfg(feature = "coreml")]
+#[expect(dead_code)]
 type SegParallelResult = Result<Vec<Vec<(usize, Array2<f32>)>>, SegmentationError>;
 
 pub struct SegmentationModel {

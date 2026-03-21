@@ -872,6 +872,15 @@ impl<'a> PipelineRunner<'a> {
         }
     }
 
+    /// Number of parallel segmentation workers for CoreML
+    #[cfg(feature = "coreml")]
+    fn seg_worker_count() -> usize {
+        std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(4)
+            .min(8)
+    }
+
     /// Try the chunk embedding path: seg first, then process embeddings in small chunks
     /// Returns None if chunk sessions aren't available for this audio length
     #[cfg(feature = "coreml")]
@@ -908,7 +917,7 @@ impl<'a> PipelineRunner<'a> {
                 ExecutionMode::CoreMl | ExecutionMode::CoreMlFast
             ) {
                 self.seg_model
-                    .run_streaming_parallel(audio, tx, seg_worker_count())?;
+                    .run_streaming_parallel(audio, tx, Self::seg_worker_count())?;
             } else {
                 self.seg_model.run_streaming(audio, tx)?;
             }
@@ -1899,14 +1908,6 @@ fn filter_embeddings(
     let filtered_embeddings =
         Array2::from_shape_vec((chunk_indices.len(), embeddings.shape()[2]), filtered).unwrap();
     (filtered_embeddings, chunk_indices, speaker_indices)
-}
-
-#[cfg(feature = "coreml")]
-fn seg_worker_count() -> usize {
-    std::thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(4)
-        .min(8)
 }
 
 /// Parameters for chunk group processing, avoids too-many-arguments lint
