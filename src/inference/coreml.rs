@@ -550,6 +550,7 @@ impl SharedCoreMlModel {
 
 /// Owned copy of CachedInputShape data for async predictions (must be 'static)
 #[cfg(feature = "tokio")]
+#[derive(Clone)]
 pub(crate) struct CachedInputShapeRef {
     pub name: Retained<NSString>,
     pub ns_shape: Retained<NSArray<NSNumber>>,

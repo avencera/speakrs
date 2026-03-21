@@ -863,7 +863,11 @@ impl<'a> PipelineRunner<'a> {
         match self.inference_path() {
             InferencePath::Sequential => self.run_sequential_inference(audio),
             InferencePath::Concurrent => {
-                #[cfg(feature = "coreml")]
+                #[cfg(all(feature = "coreml", feature = "tokio"))]
+                if let Some(result) = self.try_async_chunk_embedding(audio)? {
+                    return Ok(result);
+                }
+                #[cfg(all(feature = "coreml", not(feature = "tokio")))]
                 if let Some(result) = self.try_chunk_embedding(audio)? {
                     return Ok(result);
                 }
@@ -1031,6 +1035,249 @@ impl<'a> PipelineRunner<'a> {
                 }))
             },
         );
+
+        result
+    }
+
+    /// Async cooperative seg+emb using tokio. Seg workers run on the tokio
+    /// blocking pool, each calling `predict_cached_async` (GCD dispatch) on the
+    /// shared CoreML model. While one worker waits for a GPU prediction result,
+    /// other workers fill CPU time with buffer prep. The emb worker processes
+    /// decoded windows on its own blocking thread, overlapping with seg
+    #[cfg(all(feature = "coreml", feature = "tokio"))]
+    #[expect(dead_code)]
+    fn try_async_chunk_embedding(
+        &mut self,
+        audio: &[f32],
+    ) -> Result<Option<InferenceArtifacts>, PipelineError> {
+        use std::sync::Arc;
+
+        use crate::inference::coreml::{CachedInputShape, SharedCoreMlModel};
+
+        let step_samples = self.seg_model.step_samples();
+        let window_samples = self.seg_model.window_samples();
+        if audio.len() < window_samples {
+            return Ok(None);
+        }
+
+        let session = match self.emb_model.chunk_session_for_windows(1) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let chunk_win_capacity = session.num_windows;
+        let _ = session;
+
+        let shared_seg: &SharedCoreMlModel = match self.seg_model.shared_seg_model() {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+
+        let inference_start = std::time::Instant::now();
+        let audio_secs = audio.len() as f64 / 16_000.0;
+        let step_seconds = self.seg_model.step_seconds();
+        let num_speakers = 3;
+        let chunk_params = ChunkGroupParams {
+            step_samples,
+            window_samples,
+            num_speakers,
+            min_num_samples: self.emb_model.min_num_samples(),
+        };
+
+        // compute window offsets
+        let mut offsets = Vec::new();
+        let mut offset = 0;
+        while offset + window_samples <= audio.len() {
+            offsets.push(offset);
+            offset += step_samples;
+        }
+
+        let padded = if offset < audio.len() && audio.len() > window_samples {
+            let mut p = vec![0.0f32; window_samples];
+            let remaining = audio.len() - offset;
+            p[..remaining].copy_from_slice(&audio[offset..]);
+            Some(p)
+        } else {
+            None
+        };
+
+        let total_windows = offsets.len() + padded.is_some() as usize;
+        if total_windows == 0 {
+            return Ok(None);
+        }
+
+        let emb_model = &mut *self.emb_model;
+
+        // SAFETY: shared_seg is borrowed from self.seg_model which outlives this
+        // method. block_on does not return until all spawned tasks complete, so
+        // the reference remains valid for the lifetime of all tasks.
+        // SharedCoreMlModel is Send+Sync (MLModel.prediction is thread-safe)
+        let seg_ptr = shared_seg as *const SharedCoreMlModel;
+
+        struct SegModelPtr(*const SharedCoreMlModel);
+        unsafe impl Send for SegModelPtr {}
+        unsafe impl Sync for SegModelPtr {}
+
+        let seg_send = Arc::new(SegModelPtr(seg_ptr));
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .build()
+            .map_err(|e| PipelineError::Other(format!("tokio runtime: {e}")))?;
+
+        let result: Result<Option<InferenceArtifacts>, PipelineError> = runtime.block_on(async {
+            let (seg_tx, seg_rx) =
+                tokio::sync::mpsc::channel::<(usize, Array2<f32>)>(chunk_win_capacity * 2);
+
+            let num_seg_tasks = 4usize.min(total_windows);
+            let chunk_size = total_windows.div_ceil(num_seg_tasks);
+
+            let audio_arc: Arc<[f32]> = audio.into();
+            let offsets_arc: Arc<[usize]> = offsets.into();
+            let padded_arc: Arc<Option<Vec<f32>>> = Arc::new(padded);
+
+            // seg workers: each runs on a blocking thread, calling predict_cached_async
+            // (GCD dispatch). While one worker waits for GPU, others do buffer prep
+            let mut seg_handles = Vec::with_capacity(num_seg_tasks);
+            for task_idx in 0..num_seg_tasks {
+                let start = task_idx * chunk_size;
+                let end = (start + chunk_size).min(total_windows);
+                let seg_ref = seg_send.clone();
+                let tx = seg_tx.clone();
+                let audio_ref = audio_arc.clone();
+                let offsets_ref = offsets_arc.clone();
+                let padded_ref = padded_arc.clone();
+
+                seg_handles.push(tokio::task::spawn_blocking(move || {
+                    // SAFETY: pointer is valid for the duration of block_on
+                    let model = unsafe { &*seg_ref.0 };
+                    let cached_shape = CachedInputShape::new("input", &[1, 1, window_samples]);
+                    let mut buffer = vec![0.0f32; window_samples];
+
+                    for idx in start..end {
+                        buffer.fill(0.0);
+                        let window = if idx < offsets_ref.len() {
+                            &audio_ref[offsets_ref[idx]..offsets_ref[idx] + window_samples]
+                        } else {
+                            padded_ref.as_deref().unwrap()
+                        };
+                        buffer[..window.len()].copy_from_slice(window);
+
+                        let (data, out_shape) = model
+                            .predict_cached_async(&[(&cached_shape, &buffer)])
+                            .map_err(|e| PipelineError::Other(e.to_string()))?;
+
+                        let frames = out_shape[1];
+                        let classes = out_shape[2];
+                        let raw_window = Array2::from_shape_vec((frames, classes), data).unwrap();
+
+                        if tx.blocking_send((idx, raw_window)).is_err() {
+                            break;
+                        }
+                    }
+                    Ok::<(), PipelineError>(())
+                }));
+            }
+            drop(seg_tx);
+
+            // emb: receive windows inline on the block_on thread. While
+            // process_chunk_group runs (CPU-bound), the blocking pool threads
+            // continue running seg workers concurrently
+            let powerset = PowersetMapping::new(num_speakers, 2);
+            let mut seg_rx = seg_rx;
+            let mut decoded_windows: Vec<Array2<f32>> = Vec::new();
+            let mut embeddings_vec: Vec<(usize, usize, Vec<f32>)> = Vec::new();
+            let mut receive_buffer: Vec<(usize, Array2<f32>)> = Vec::new();
+            let mut next_expected = 0usize;
+            let mut group_buffer: Vec<Array2<f32>> = Vec::with_capacity(chunk_win_capacity);
+            let mut global_win = 0usize;
+            let mut emb_ms = 0u128;
+
+            while let Some((idx, raw_window)) = seg_rx.recv().await {
+                receive_buffer.push((idx, raw_window));
+                receive_buffer.sort_by_key(|(i, _)| *i);
+
+                while let Some(pos) = receive_buffer.iter().position(|(i, _)| *i == next_expected) {
+                    let (_, window) = receive_buffer.remove(pos);
+                    let decoded = powerset.hard_decode(&window);
+                    group_buffer.push(decoded);
+
+                    if group_buffer.len() == chunk_win_capacity {
+                        let emb_start = std::time::Instant::now();
+                        process_chunk_group(
+                            emb_model,
+                            audio,
+                            &group_buffer,
+                            global_win,
+                            &chunk_params,
+                            &mut decoded_windows,
+                            &mut embeddings_vec,
+                        )?;
+                        emb_ms += emb_start.elapsed().as_millis();
+                        global_win += group_buffer.len();
+                        group_buffer.clear();
+                    }
+                    next_expected += 1;
+                }
+            }
+
+            if !group_buffer.is_empty() {
+                let emb_start = std::time::Instant::now();
+                process_chunk_group(
+                    emb_model,
+                    audio,
+                    &group_buffer,
+                    global_win,
+                    &chunk_params,
+                    &mut decoded_windows,
+                    &mut embeddings_vec,
+                )?;
+                emb_ms += emb_start.elapsed().as_millis();
+            }
+
+            // collect seg task errors
+            for handle in seg_handles {
+                handle
+                    .await
+                    .map_err(|e| PipelineError::Other(format!("seg task join: {e}")))??;
+            }
+
+            let num_chunks = decoded_windows.len();
+            if num_chunks == 0 {
+                return Ok(None);
+            }
+
+            let num_frames = decoded_windows[0].nrows();
+            let mut segmentations = Array3::<f32>::zeros((num_chunks, num_frames, num_speakers));
+            for (i, w) in decoded_windows.iter().enumerate() {
+                segmentations.slice_mut(s![i, .., ..]).assign(w);
+            }
+
+            let mut embeddings =
+                Array3::<f32>::from_elem((num_chunks, num_speakers, 256), f32::NAN);
+            for (chunk_idx, speaker_idx, emb) in &embeddings_vec {
+                embeddings
+                    .slice_mut(s![*chunk_idx, *speaker_idx, ..])
+                    .assign(&ndarray::ArrayView1::from(emb.as_slice()));
+            }
+
+            let layout = ChunkLayout::new(step_seconds, step_samples, window_samples, num_chunks);
+
+            let inference_elapsed = inference_start.elapsed();
+            tracing::info!(
+                chunks = num_chunks,
+                chunk_capacity = chunk_win_capacity,
+                emb_ms,
+                total_ms = inference_elapsed.as_millis(),
+                audio_secs = format!("{audio_secs:.1}"),
+                "Async chunk embedding complete (tokio seg+emb)"
+            );
+
+            Ok(Some(InferenceArtifacts {
+                layout,
+                segmentations: DecodedSegmentations(segmentations),
+                embeddings: ChunkEmbeddings(embeddings),
+            }))
+        });
 
         result
     }
