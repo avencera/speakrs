@@ -466,19 +466,22 @@ impl SharedCoreMlModel {
             .map_err(|_| CoreMlError::PredictionFailed("channel disconnected".into()))?
     }
 
-    /// Tokio-compatible async prediction via CoreML's GCD dispatch.
-    /// Returns a Future that resolves when the prediction completes.
-    /// The calling tokio task yields while waiting, allowing other tasks to run
+    /// Submit prediction to CoreML's GCD queue, return a Send receiver.
+    /// All ObjC objects are created and dropped synchronously. Only the
+    /// oneshot Receiver crosses the await point, making the Future Send
     #[cfg(feature = "tokio")]
-    pub async fn predict_cached_tokio(
+    pub fn submit_prediction(
         &self,
-        inputs: Vec<(Vec<f32>, CachedInputShapeRef)>,
-    ) -> Result<(Vec<f32>, Vec<usize>), CoreMlError> {
+        inputs: &[(Vec<f32>, CachedInputShapeRef)],
+    ) -> Result<
+        tokio::sync::oneshot::Receiver<Result<(Vec<f32>, Vec<usize>), CoreMlError>>,
+        CoreMlError,
+    > {
         let deallocator = RcBlock::new(|_ptr: NonNull<c_void>| {});
         let input_dict: Retained<NSMutableDictionary<NSString, AnyObject>> =
             NSMutableDictionary::new();
 
-        for (data, cached) in &inputs {
+        for (data, cached) in inputs {
             debug_assert_eq!(data.len(), cached.total_elements);
             let multi_array =
                 create_multi_array_cached_with_deallocator_ref(data, cached, &deallocator)?;
@@ -505,7 +508,6 @@ impl SharedCoreMlModel {
 
         let output_name = self.output_name.clone();
         let output_key = self.output_key.clone();
-        // wrap oneshot sender in Mutex because RcBlock requires Fn (not FnOnce)
         let result_tx = std::sync::Mutex::new(Some(result_tx));
 
         let completion = RcBlock::new(
@@ -541,10 +543,9 @@ impl SharedCoreMlModel {
                 .predictionFromFeatures_completionHandler(input_ref, &completion);
         }
 
-        // await: yields this tokio task, letting other tasks run
-        result_rx
-            .await
-            .map_err(|_| CoreMlError::PredictionFailed("channel closed".into()))?
+        // ObjC objects (input_dict, provider, completion, deallocator) drop here
+        // CoreML retains the completion block internally
+        Ok(result_rx)
     }
 }
 
@@ -558,8 +559,45 @@ pub(crate) struct CachedInputShapeRef {
     pub total_elements: usize,
 }
 
+// SAFETY: CachedInputShapeRef holds only immutable NSString and NSArray<NSNumber>,
+// both documented as thread-safe by Apple. The Retained handles are reference-counted
+// and never mutated after construction
+#[cfg(feature = "tokio")]
+unsafe impl Send for CachedInputShapeRef {}
+#[cfg(feature = "tokio")]
+unsafe impl Sync for CachedInputShapeRef {}
+
 #[cfg(feature = "tokio")]
 impl CachedInputShapeRef {
+    /// Build directly from a name and shape, mirroring CachedInputShape::new
+    pub fn from_shape(name: &str, shape: &[usize]) -> Self {
+        let shape_nums: Vec<Retained<NSNumber>> = shape
+            .iter()
+            .map(|&d| NSNumber::new_isize(d as isize))
+            .collect();
+        let ns_shape = NSArray::from_retained_slice(&shape_nums);
+
+        let mut strides = vec![1usize; shape.len()];
+        for i in (0..shape.len().saturating_sub(1)).rev() {
+            strides[i] = strides[i + 1] * shape[i + 1];
+        }
+        let stride_nums: Vec<Retained<NSNumber>> = strides
+            .iter()
+            .map(|&s| NSNumber::new_isize(s as isize))
+            .collect();
+        let ns_strides = NSArray::from_retained_slice(&stride_nums);
+
+        let total_elements = shape.iter().product();
+
+        Self {
+            name: NSString::from_str(name),
+            ns_shape,
+            ns_strides,
+            total_elements,
+        }
+    }
+
+    #[expect(dead_code)]
     pub fn from_cached(cached: &CachedInputShape) -> Self {
         Self {
             name: cached.name.clone(),
