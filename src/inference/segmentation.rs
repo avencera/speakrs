@@ -235,7 +235,7 @@ impl SegmentationModel {
                             let input_data = buffer.as_slice().unwrap();
 
                             let (data, out_shape) = model
-                                .predict_cached_async(&[(&cached_shape, input_data)])
+                                .predict_cached(&[(&cached_shape, input_data)])
                                 .map_err(|e| SegmentationError::Ort(ort::Error::new(e.to_string())))
                                 .unwrap();
 
