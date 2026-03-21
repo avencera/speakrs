@@ -172,7 +172,10 @@ impl SegmentationModel {
             return Ok(0);
         }
 
-        // load fresh CPUOnly models for parallel execution
+        // load CPUOnly models for parallel execution
+        // NOTE: we tested caching these across files but it caused DER regression.
+        // Codex suggests the regression may have been from worker count change (8 vs 4)
+        // not from model reuse. Re-testing with fresh loads for now
         use objc2_core_ml::MLComputeUnits;
         let coreml_path = Self::resolve_coreml_path(&self.model_path, self.mode);
         let coreml_path = match coreml_path {
