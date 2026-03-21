@@ -417,16 +417,14 @@ CHUNK_CONFIGS_FAST = [
     (56, 12000, 168, 25),  # ~112s
 ]
 
-# CoreMl: 1.28s step = 16 resnet frames/step
+# CoreMl: 1.04s step = 13 resnet frames/step
 CHUNK_CONFIGS_DEFAULT = [
     # (num_windows, fbank_frames, num_masks, step_resnet_frames)
-    (16, 2920, 48, 16),  # ~25s
-    (24, 3944, 72, 16),  # ~35s
-    (32, 4968, 96, 16),  # ~46s
-    (40, 5992, 120, 16),  # ~56s
-    (56, 8040, 168, 16),  # ~76s
-    (72, 10088, 216, 16),  # ~97s
-    (86, 11880, 258, 16),  # ~115s
+    (20, 2976, 60, 13),  # ~30s
+    (34, 4432, 102, 13),  # ~45s
+    (49, 5992, 147, 13),  # ~60s
+    (77, 8904, 231, 13),  # ~90s
+    (106, 11920, 318, 13),  # ~120s
 ]
 
 CHUNK_STEM = "wespeaker-chunk-emb"

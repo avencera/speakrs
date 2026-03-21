@@ -92,9 +92,9 @@ impl PipelineConfig {
 }
 
 pub const SEGMENTATION_WINDOW_SECONDS: f64 = 10.0;
-// aligned to 8-frame ResNet stride: 128 fbank frames / 8 = 16 ResNet frames
-// same DER as 1.0s step but 35% faster, enables chunk embedding for CoreML mode
-pub const SEGMENTATION_STEP_SECONDS: f64 = 1.28;
+// aligned to 8-frame ResNet stride: 104 fbank frames / 8 = 13 ResNet frames
+// best DER of all tested steps (7.3% on 60min), enables chunk embedding
+pub const SEGMENTATION_STEP_SECONDS: f64 = 1.04;
 pub const FAST_SEGMENTATION_STEP_SECONDS: f64 = 2.0;
 pub const FRAME_DURATION_SECONDS: f64 = 0.0619375;
 pub const FRAME_STEP_SECONDS: f64 = 0.016875;
