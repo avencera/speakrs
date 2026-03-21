@@ -141,7 +141,7 @@ impl SegmentationModel {
         &self.model_path
     }
 
-    /// Run segmentation with N parallel workers, each loading their own CoreML model.
+    /// Run segmentation with N parallel workers, each with a fresh CoreML model.
     /// Workers use CPUOnly compute units to avoid GPU contention with embedding.
     /// Results are sent through `tx` in chunk_idx order
     #[cfg(feature = "coreml")]
@@ -151,8 +151,6 @@ impl SegmentationModel {
         tx: Sender<Array2<f32>>,
         num_workers: usize,
     ) -> Result<usize, SegmentationError> {
-        use objc2_core_ml::MLComputeUnits;
-
         let mut offsets = Vec::new();
         let mut offset = 0;
         while offset + self.window_samples <= audio.len() {
@@ -174,7 +172,8 @@ impl SegmentationModel {
             return Ok(0);
         }
 
-        // load N separate CPUOnly models for parallel execution
+        // load fresh CPUOnly models for parallel execution
+        use objc2_core_ml::MLComputeUnits;
         let coreml_path = Self::resolve_coreml_path(&self.model_path, self.mode);
         let coreml_path = match coreml_path {
             Some(p) if p.exists() => p,
@@ -207,7 +206,7 @@ impl SegmentationModel {
         let all_results: SegParallelResult = std::thread::scope(|scope| {
             let mut handles = Vec::new();
 
-            for (worker_idx, model) in worker_models.iter().enumerate() {
+            for (worker_idx, model) in worker_models.iter().take(num_workers).enumerate() {
                 let start = worker_idx * chunk_size;
                 let end = (start + chunk_size).min(total_windows);
                 if start >= total_windows {
