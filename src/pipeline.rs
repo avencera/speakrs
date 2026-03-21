@@ -84,6 +84,12 @@ impl PipelineConfig {
                     min_duration_off: 3,
                     ..BinarizeConfig::default()
                 },
+                // fast modes: 3 VBx iters avoids posterior over-fitting,
+                // improves DER on 2s step embeddings
+                vbx: VbxConfig {
+                    max_iters: 3,
+                    ..VbxConfig::default()
+                },
                 ..Self::default()
             },
             _ => Self::default(),
