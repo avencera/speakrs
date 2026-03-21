@@ -184,61 +184,62 @@ impl SegmentationModel {
         // divide windows into contiguous chunks for each worker
         let chunk_size = total_windows.div_ceil(num_workers);
 
-        // workers share one model, each with own buffers. Results merged in order
-        let all_results: SegParallelResult = std::thread::scope(|scope| {
-            let mut handles = Vec::new();
+        // rayon persistent thread pool + crossbeam channel (no mutex, no thread creation)
+        let all_results: SegParallelResult = {
+            let (result_tx, result_rx) = crossbeam_channel::unbounded();
 
-            for worker_idx in 0..num_workers {
-                let model = shared_model;
-                let start = worker_idx * chunk_size;
-                let end = (start + chunk_size).min(total_windows);
-                if start >= total_windows {
-                    break;
-                }
-
-                let offsets = &offsets;
-                let padded = &padded;
-
-                handles.push(scope.spawn(move || {
-                    let cached_shape = CachedInputShape::new("input", &[1, 1, win_samples]);
-                    let mut buffer = ndarray::Array3::<f32>::zeros((1, 1, win_samples));
-                    let mut results = Vec::with_capacity(end - start);
-
-                    for idx in start..end {
-                        let window = if idx < offsets.len() {
-                            &audio[offsets[idx]..offsets[idx] + win_samples]
-                        } else {
-                            padded.as_deref().unwrap()
-                        };
-
-                        buffer.fill(0.0);
-                        buffer
-                            .slice_mut(ndarray::s![0, 0, ..window.len()])
-                            .assign(&ndarray::ArrayView1::from(window));
-                        let input_data = buffer.as_slice().unwrap();
-
-                        let (data, out_shape) = model
-                            .predict_cached(&[(&cached_shape, input_data)])
-                            .map_err(|e| ort::Error::new(e.to_string()))?;
-
-                        let frames = out_shape[1];
-                        let classes = out_shape[2];
-                        results.push((
-                            idx,
-                            Array2::from_shape_vec((frames, classes), data).unwrap(),
-                        ));
+            rayon::scope(|scope| {
+                for worker_idx in 0..num_workers {
+                    let model = shared_model;
+                    let start = worker_idx * chunk_size;
+                    let end = (start + chunk_size).min(total_windows);
+                    if start >= total_windows {
+                        break;
                     }
 
-                    Ok::<Vec<(usize, Array2<f32>)>, SegmentationError>(results)
-                }));
-            }
+                    let result_tx = result_tx.clone();
+                    let offsets = &offsets;
+                    let padded = &padded;
 
-            let mut all = Vec::new();
-            for handle in handles {
-                all.push(handle.join().unwrap()?);
-            }
-            Ok(all)
-        });
+                    scope.spawn(move |_| {
+                        let cached_shape = CachedInputShape::new("input", &[1, 1, win_samples]);
+                        let mut buffer = ndarray::Array3::<f32>::zeros((1, 1, win_samples));
+                        let mut results = Vec::with_capacity(end - start);
+
+                        for idx in start..end {
+                            let window = if idx < offsets.len() {
+                                &audio[offsets[idx]..offsets[idx] + win_samples]
+                            } else {
+                                padded.as_deref().unwrap()
+                            };
+
+                            buffer.fill(0.0);
+                            buffer
+                                .slice_mut(ndarray::s![0, 0, ..window.len()])
+                                .assign(&ndarray::ArrayView1::from(window));
+                            let input_data = buffer.as_slice().unwrap();
+
+                            let (data, out_shape) = model
+                                .predict_cached(&[(&cached_shape, input_data)])
+                                .map_err(|e| SegmentationError::Ort(ort::Error::new(e.to_string())))
+                                .unwrap();
+
+                            let frames = out_shape[1];
+                            let classes = out_shape[2];
+                            results.push((
+                                idx,
+                                Array2::from_shape_vec((frames, classes), data).unwrap(),
+                            ));
+                        }
+
+                        let _ = result_tx.send(results);
+                    });
+                }
+            });
+            drop(result_tx);
+
+            Ok(result_rx.iter().collect())
+        };
 
         // merge sorted results and send in global order
         let mut merged: Vec<(usize, Array2<f32>)> = all_results?.into_iter().flatten().collect();

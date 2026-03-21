@@ -31,6 +31,7 @@ kodama = "0.3.0"
 tracing = "0.1.44"
 thiserror = "2.0.18"
 crossbeam-channel = "0.5"
+rayon = "1.11.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6", optional = true }
