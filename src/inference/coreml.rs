@@ -380,6 +380,91 @@ impl SharedCoreMlModel {
 
         extract_output(&output_array)
     }
+
+    /// Async prediction via CoreML's GCD dispatch — does NOT block the calling thread.
+    /// Submits prediction to CoreML's internal dispatch queue and waits via channel.
+    /// This allows multiple concurrent callers on the same model to pipeline
+    /// GPU/ANE work, matching SpeakerKit's asyncPrediction pattern
+    pub fn predict_cached_async(
+        &self,
+        inputs: &[(&CachedInputShape, &[f32])],
+    ) -> Result<(Vec<f32>, Vec<usize>), CoreMlError> {
+        // allocate owned input data that lives until completion handler fires
+        let owned_inputs: Vec<(Vec<f32>, &CachedInputShape)> = inputs
+            .iter()
+            .map(|&(cached, data)| (data.to_vec(), cached))
+            .collect();
+
+        let deallocator = RcBlock::new(|_ptr: NonNull<c_void>| {});
+        let input_dict: Retained<NSMutableDictionary<NSString, AnyObject>> =
+            NSMutableDictionary::new();
+
+        for (data, cached) in &owned_inputs {
+            debug_assert_eq!(data.len(), cached.total_elements);
+            let multi_array =
+                create_multi_array_cached_with_deallocator(data, cached, &deallocator)?;
+            let feature_value = unsafe { MLFeatureValue::featureValueWithMultiArray(&multi_array) };
+            let key_copy: &ProtocolObject<dyn NSCopying> = ProtocolObject::from_ref(&*cached.name);
+            let value_ref: &AnyObject =
+                unsafe { &*((&*feature_value) as *const MLFeatureValue as *const AnyObject) };
+            unsafe { input_dict.setObject_forKey(value_ref, key_copy) };
+        }
+
+        let provider = unsafe {
+            MLDictionaryFeatureProvider::initWithDictionary_error(
+                MLDictionaryFeatureProvider::alloc(),
+                &input_dict,
+            )
+        }
+        .map_err(|e| CoreMlError::PredictionFailed(format!("feature provider: {e}")))?;
+
+        let input_ref: &ProtocolObject<dyn MLFeatureProvider> =
+            ProtocolObject::from_ref(&*provider);
+
+        // channel to receive result from GCD completion handler
+        let (result_tx, result_rx) =
+            crossbeam_channel::bounded::<Result<(Vec<f32>, Vec<usize>), CoreMlError>>(1);
+
+        let output_name = self.output_name.clone();
+        let output_key = self.output_key.clone();
+
+        let completion = RcBlock::new(
+            move |output_ptr: *mut ProtocolObject<dyn MLFeatureProvider>,
+                  error_ptr: *mut objc2_foundation::NSError| {
+                let result = if !error_ptr.is_null() {
+                    let error = unsafe { &*error_ptr };
+                    Err(CoreMlError::PredictionFailed(format!("{error}")))
+                } else if output_ptr.is_null() {
+                    Err(CoreMlError::PredictionFailed("null output".into()))
+                } else {
+                    let output = unsafe { &*output_ptr };
+                    let output_value = unsafe { output.featureValueForName(&output_key) };
+                    match output_value {
+                        Some(val) => {
+                            let output_array = unsafe { val.multiArrayValue() };
+                            match output_array {
+                                Some(arr) => extract_output(&arr),
+                                None => Err(CoreMlError::OutputNotFound(output_name.clone())),
+                            }
+                        }
+                        None => Err(CoreMlError::OutputNotFound(output_name.clone())),
+                    }
+                };
+                let _ = result_tx.send(result);
+            },
+        );
+
+        // submit to CoreML's GCD dispatch queue — returns immediately
+        unsafe {
+            self.model
+                .predictionFromFeatures_completionHandler(input_ref, &completion);
+        }
+
+        // wait for completion (thread is free for other work while waiting)
+        result_rx
+            .recv()
+            .map_err(|_| CoreMlError::PredictionFailed("channel disconnected".into()))?
+    }
 }
 
 /// Resolve .mlmodelc path next to an .onnx file
