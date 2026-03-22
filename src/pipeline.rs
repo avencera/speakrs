@@ -1513,9 +1513,15 @@ impl<'a> PipelineRunner<'a> {
         let total_windows = audio.len().saturating_sub(window_samples) / step_samples + 1;
         let est_chunks = total_windows.div_ceil(chunk_win_capacity);
         let use_pipelined = !chunk_sessions.is_empty() && est_chunks >= 3;
+        let profile_chunk_timing = std::env::var_os("SPEAKRS_PROFILE_CHUNKS").is_some();
 
         // seg → bridge → emb pipeline via channels
-        type ChunkMsg = (usize, Vec<Array2<f32>>, Option<Vec<f32>>);
+        type ChunkMsg = (
+            usize,
+            Vec<Array2<f32>>,
+            Option<Vec<f32>>,
+            std::time::Instant,
+        );
         let (seg_tx, seg_rx) = crossbeam_channel::unbounded::<Array2<f32>>();
         let (chunk_tx, chunk_rx) = crossbeam_channel::bounded::<ChunkMsg>(2);
         let chunk_tx_seg = chunk_tx.clone();
@@ -1552,7 +1558,11 @@ impl<'a> PipelineRunner<'a> {
                             // send decoded chunk directly to chunk_tx, bypassing bridge
                             let decoded: Vec<_> =
                                 windows.iter().map(|w| powerset.hard_decode(w)).collect();
-                            if chunk_tx_seg.send((global_win, decoded, None)).is_err() {
+                            let bridge_ready_at = std::time::Instant::now();
+                            if chunk_tx_seg
+                                .send((global_win, decoded, None, bridge_ready_at))
+                                .is_err()
+                            {
                                 return Ok(());
                             }
                             global_win += windows.len();
@@ -1575,8 +1585,14 @@ impl<'a> PipelineRunner<'a> {
                         group.push(powerset.hard_decode(&raw_window));
 
                         if group.len() == chunk_win_capacity {
+                            let bridge_ready_at = std::time::Instant::now();
                             if chunk_tx
-                                .send((global_start, std::mem::take(&mut group), None))
+                                .send((
+                                    global_start,
+                                    std::mem::take(&mut group),
+                                    None,
+                                    bridge_ready_at,
+                                ))
                                 .is_err()
                             {
                                 break;
@@ -1586,7 +1602,8 @@ impl<'a> PipelineRunner<'a> {
                         }
                     }
                     if !group.is_empty() {
-                        let _ = chunk_tx.send((global_start, group, None));
+                        let bridge_ready_at = std::time::Instant::now();
+                        let _ = chunk_tx.send((global_start, group, None, bridge_ready_at));
                     }
                 });
 
@@ -1608,20 +1625,32 @@ impl<'a> PipelineRunner<'a> {
                         num_masks: usize,
                         fbank_frames: usize,
                         num_windows: usize,
+                        bridge_ready_at: std::time::Instant,
+                        prep_start_at: std::time::Instant,
+                        fbank_done_at: std::time::Instant,
+                        prep_done_at: std::time::Instant,
+                    }
+
+                    #[derive(Default)]
+                    struct PrepStats {
+                        chunks: u32,
+                        fbank_us: u64,
+                        mask_us: u64,
                     }
 
                     let chunk_rx = chunk_rx_opt.take().unwrap();
                     let (prep_tx, prep_rx) = crossbeam_channel::bounded::<PreparedChunk>(1);
 
-                    let prep_handle = scope.spawn(move || -> Result<(), PipelineError> {
+                    let prep_handle = scope.spawn(move || -> Result<PrepStats, PipelineError> {
                         let fbank_30s_shape = CachedInputShape::new("waveform", &[1, 1, 480_000]);
                         let fbank_10s_shape =
                             CachedInputShape::new("waveform", &[1, 1, window_samples]);
 
                         let mut fbank_30s_buf = vec![0.0f32; 480_000];
                         let mut waveform_10s_buf = vec![0.0f32; window_samples];
+                        let mut prep_stats = PrepStats::default();
 
-                        for (global_start, decoded_chunk, _) in chunk_rx {
+                        for (global_start, decoded_chunk, _, bridge_ready_at) in chunk_rx {
                             let wins = decoded_chunk.len();
                             let (sess_fbank_frames, sess_num_masks) = chunk_lookup
                                 .iter()
@@ -1639,6 +1668,7 @@ impl<'a> PipelineRunner<'a> {
                             let chunk_audio = &audio[chunk_audio_start..chunk_audio_end];
 
                             // fbank
+                            let prep_start_at = std::time::Instant::now();
                             let mut fbank = vec![0.0f32; sess_fbank_frames * 80];
 
                             if chunk_audio.len() <= 480_000 {
@@ -1688,6 +1718,9 @@ impl<'a> PipelineRunner<'a> {
                                     au_off += window_samples;
                                 }
                             }
+                            let fbank_done_at = std::time::Instant::now();
+                            prep_stats.fbank_us +=
+                                fbank_done_at.duration_since(prep_start_at).as_micros() as u64;
 
                             // masks
                             let mut masks = vec![0.0f32; sess_num_masks * 589];
@@ -1720,6 +1753,10 @@ impl<'a> PipelineRunner<'a> {
                                     }
                                 }
                             }
+                            let prep_done_at = std::time::Instant::now();
+                            prep_stats.mask_us +=
+                                prep_done_at.duration_since(fbank_done_at).as_micros() as u64;
+                            prep_stats.chunks += 1;
 
                             if prep_tx
                                 .send(PreparedChunk {
@@ -1731,13 +1768,17 @@ impl<'a> PipelineRunner<'a> {
                                     num_masks: sess_num_masks,
                                     fbank_frames: sess_fbank_frames,
                                     num_windows: wins,
+                                    bridge_ready_at,
+                                    prep_start_at,
+                                    fbank_done_at,
+                                    prep_done_at,
                                 })
                                 .is_err()
                             {
                                 break;
                             }
                         }
-                        Ok(())
+                        Ok(prep_stats)
                     });
 
                     // GPU thread (main scope): consume prepared chunks
@@ -1748,8 +1789,25 @@ impl<'a> PipelineRunner<'a> {
 
                     let mut gpu_predict_us = 0u64;
                     let mut gpu_wait_us = 0u64;
+                    let mut bridge_wait_us = 0u64;
+                    let mut prep_queue_wait_us = 0u64;
+                    let mut prep_fbank_wait_us = 0u64;
+                    let mut prep_mask_wait_us = 0u64;
                     let mut gpu_unpack_us = 0u64;
                     let mut gpu_chunks = 0u32;
+                    let overlap_us = |wait_start: std::time::Instant,
+                                      wait_end: std::time::Instant,
+                                      span_start: std::time::Instant,
+                                      span_end: std::time::Instant|
+                     -> u64 {
+                        let start = wait_start.max(span_start);
+                        let end = wait_end.min(span_end);
+                        if end <= start {
+                            0
+                        } else {
+                            end.duration_since(start).as_micros() as u64
+                        }
+                    };
 
                     loop {
                         let wait_start = std::time::Instant::now();
@@ -1757,7 +1815,28 @@ impl<'a> PipelineRunner<'a> {
                             Ok(p) => p,
                             Err(_) => break,
                         };
-                        gpu_wait_us += wait_start.elapsed().as_micros() as u64;
+                        let wait_end = std::time::Instant::now();
+                        gpu_wait_us += wait_end.duration_since(wait_start).as_micros() as u64;
+                        bridge_wait_us +=
+                            overlap_us(wait_start, wait_end, wait_start, prepared.bridge_ready_at);
+                        prep_queue_wait_us += overlap_us(
+                            wait_start,
+                            wait_end,
+                            prepared.bridge_ready_at,
+                            prepared.prep_start_at,
+                        );
+                        prep_fbank_wait_us += overlap_us(
+                            wait_start,
+                            wait_end,
+                            prepared.prep_start_at,
+                            prepared.fbank_done_at,
+                        );
+                        prep_mask_wait_us += overlap_us(
+                            wait_start,
+                            wait_end,
+                            prepared.fbank_done_at,
+                            prepared.prep_done_at,
+                        );
 
                         let (fbank_shape, masks_shape) = shape_cache
                             .entry((prepared.fbank_frames, prepared.num_masks))
@@ -1782,7 +1861,8 @@ impl<'a> PipelineRunner<'a> {
                                 (masks_shape, &prepared.masks),
                             ])
                             .map_err(|e| PipelineError::Other(e.to_string()))?;
-                        gpu_predict_us += predict_start.elapsed().as_micros() as u64;
+                        let predict_us = predict_start.elapsed().as_micros() as u64;
+                        gpu_predict_us += predict_us;
 
                         let unpack_start = std::time::Instant::now();
                         let batch_emb =
@@ -1800,22 +1880,70 @@ impl<'a> PipelineRunner<'a> {
                         decoded_all.extend(prepared.decoded_chunk);
                         gpu_unpack_us += unpack_start.elapsed().as_micros() as u64;
                         gpu_chunks += 1;
+
+                        if profile_chunk_timing {
+                            tracing::info!(
+                                chunk_start = prepared.global_start,
+                                chunk_windows = prepared.num_windows,
+                                gpu_wait_ms = wait_end.duration_since(wait_start).as_millis(),
+                                bridge_wait_ms = overlap_us(
+                                    wait_start,
+                                    wait_end,
+                                    wait_start,
+                                    prepared.bridge_ready_at,
+                                ) / 1000,
+                                prep_queue_wait_ms = overlap_us(
+                                    wait_start,
+                                    wait_end,
+                                    prepared.bridge_ready_at,
+                                    prepared.prep_start_at,
+                                ) / 1000,
+                                prep_fbank_wait_ms = overlap_us(
+                                    wait_start,
+                                    wait_end,
+                                    prepared.prep_start_at,
+                                    prepared.fbank_done_at,
+                                ) / 1000,
+                                prep_mask_wait_ms = overlap_us(
+                                    wait_start,
+                                    wait_end,
+                                    prepared.fbank_done_at,
+                                    prepared.prep_done_at,
+                                ) / 1000,
+                                prep_fbank_ms = prepared
+                                    .fbank_done_at
+                                    .duration_since(prepared.prep_start_at)
+                                    .as_millis(),
+                                prep_mask_ms = prepared
+                                    .prep_done_at
+                                    .duration_since(prepared.fbank_done_at)
+                                    .as_millis(),
+                                gpu_predict_ms = predict_us / 1000,
+                                "Chunk pipeline profile"
+                            );
+                        }
                     }
 
+                    let prep_stats = prep_handle.join().unwrap()?;
                     tracing::info!(
                         gpu_chunks,
                         gpu_predict_ms = gpu_predict_us / 1000,
                         gpu_wait_ms = gpu_wait_us / 1000,
+                        bridge_wait_ms = bridge_wait_us / 1000,
+                        prep_queue_wait_ms = prep_queue_wait_us / 1000,
+                        prep_fbank_wait_ms = prep_fbank_wait_us / 1000,
+                        prep_mask_wait_ms = prep_mask_wait_us / 1000,
+                        prep_chunks = prep_stats.chunks,
+                        prep_fbank_ms = prep_stats.fbank_us / 1000,
+                        prep_mask_ms = prep_stats.mask_us / 1000,
                         gpu_unpack_ms = gpu_unpack_us / 1000,
                         "GPU loop breakdown"
                     );
-
-                    prep_handle.join().unwrap()?;
                 } else {
                     // fallback: sequential fbank + masks + embed (small files)
                     let chunk_rx = chunk_rx_opt.take().unwrap();
 
-                    for (global_start, decoded_chunk, precomputed_fbank) in &chunk_rx {
+                    for (global_start, decoded_chunk, precomputed_fbank, _) in &chunk_rx {
                         let wins = decoded_chunk.len();
                         let session = emb_model.chunk_session_for_windows(wins).unwrap();
                         let sess_fbank_frames = session.fbank_frames;

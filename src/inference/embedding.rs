@@ -1395,12 +1395,6 @@ impl EmbeddingModel {
             .find(|s| s.num_windows >= num_windows)
     }
 
-    /// Get the smallest available chunk session (for early first-chunk dispatch)
-    #[cfg(feature = "coreml")]
-    pub(crate) fn smallest_chunk_size(&self) -> Option<usize> {
-        self.native_chunk_sessions.first().map(|s| s.num_windows)
-    }
-
     /// Get the largest available chunk session
     #[cfg(feature = "coreml")]
     pub(crate) fn largest_chunk_session(&self) -> Option<&ChunkEmbeddingSession> {

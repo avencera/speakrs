@@ -308,6 +308,8 @@ impl SegmentationModel {
         tx: Sender<Array2<f32>>,
         num_workers: usize,
     ) -> Result<usize, SegmentationError> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
         let mut offsets = Vec::new();
         let mut offset = 0;
         while offset + self.window_samples <= audio.len() {
@@ -352,89 +354,206 @@ impl SegmentationModel {
 
         let seg_start = std::time::Instant::now();
         let win_samples = self.window_samples;
+        let profile_batches = std::env::var_os("SPEAKRS_PROFILE_SEG_BATCHES").is_some();
+        let seg_predict_us = AtomicU64::new(0);
+        let seg_batched_calls = AtomicU64::new(0);
+        let seg_batched_windows = AtomicU64::new(0);
+        let seg_single_calls = AtomicU64::new(0);
+        let use_warm_start_b32 = batch_size == LARGE_BATCH_SIZE
+            && total_windows < 1024
+            && total_windows > PRIMARY_BATCH_SIZE
+            && self.native_batched_session.is_some();
 
-        // streaming parallel seg: workers compute in parallel, merger thread
-        // forwards results to pipeline tx in global order WHILE workers run
-        let chunk_size = total_windows.div_ceil(num_workers);
-        let actual_workers = total_windows.div_ceil(chunk_size).min(num_workers);
+        if batch_size > 1 {
+            struct BatchTask<'a> {
+                batch_idx: usize,
+                start: usize,
+                end: usize,
+                batch_capacity: usize,
+                model: &'a SharedCoreMlModel,
+            }
 
-        // per-worker channels: each worker sends results one at a time
-        let mut worker_txs = Vec::with_capacity(actual_workers);
-        let mut worker_rxs = Vec::with_capacity(actual_workers);
-        for _ in 0..actual_workers {
-            let (wtx, wrx) = crossbeam_channel::unbounded::<Array2<f32>>();
-            worker_txs.push(wtx);
-            worker_rxs.push(wrx);
-        }
+            let mut batch_tasks: Vec<BatchTask<'_>> = Vec::new();
+            if use_warm_start_b32 {
+                let small_model = self.native_batched_session.as_ref().unwrap();
+                let mut start = 0usize;
+                let mut batch_idx = 0usize;
 
-        // use std::thread::scope so merger thread runs concurrently with rayon workers
-        std::thread::scope(|scope| {
-            // merger thread: drains per-worker channels in order, forwards to pipeline tx
-            let merge_handle = scope.spawn(move || -> Result<(), SegmentationError> {
-                for wrx in &worker_rxs {
-                    for result in wrx {
-                        tx.send(result)?;
+                for _ in 0..2 {
+                    if start >= total_windows {
+                        break;
                     }
+                    let end = (start + PRIMARY_BATCH_SIZE).min(total_windows);
+                    batch_tasks.push(BatchTask {
+                        batch_idx,
+                        start,
+                        end,
+                        batch_capacity: PRIMARY_BATCH_SIZE,
+                        model: small_model,
+                    });
+                    start = end;
+                    batch_idx += 1;
                 }
-                Ok(())
-            });
 
-            // rayon workers: compute in parallel on persistent thread pool
-            rayon::scope(|rscope| {
-                for (worker_idx, worker_tx) in worker_txs.into_iter().enumerate() {
-                    let model = shared_model;
-                    let start = worker_idx * chunk_size;
-                    let end = (start + chunk_size).min(total_windows);
-                    let offsets = &offsets;
-                    let padded = &padded;
+                while start < total_windows {
+                    let end = (start + LARGE_BATCH_SIZE).min(total_windows);
+                    batch_tasks.push(BatchTask {
+                        batch_idx,
+                        start,
+                        end,
+                        batch_capacity: LARGE_BATCH_SIZE,
+                        model: shared_model,
+                    });
+                    start = end;
+                    batch_idx += 1;
+                }
+            } else {
+                for batch_idx in 0..total_windows.div_ceil(batch_size) {
+                    let start = batch_idx * batch_size;
+                    let end = (start + batch_size).min(total_windows);
+                    batch_tasks.push(BatchTask {
+                        batch_idx,
+                        start,
+                        end,
+                        batch_capacity: batch_size,
+                        model: shared_model,
+                    });
+                }
+            }
 
-                    rscope.spawn(move |_| {
-                        if batch_size > 1 {
-                            // batched: process windows in groups of batch_size
-                            let cached_batch =
-                                CachedInputShape::new("input", &[batch_size, 1, win_samples]);
-                            let mut batch_buf = vec![0.0f32; batch_size * win_samples];
+            let (batch_tx, batch_rx) = crossbeam_channel::unbounded::<(usize, Vec<Array2<f32>>)>();
 
-                            let mut idx = start;
-                            while idx < end {
-                                let batch_end = (idx + batch_size).min(end);
-                                let actual_batch = batch_end - idx;
+            // use std::thread::scope so the merger can stream batches in order
+            // while rayon computes future batches out of order
+            std::thread::scope(|scope| {
+                let merge_handle = scope.spawn(move || -> Result<(), SegmentationError> {
+                    let mut next_batch = 0usize;
+                    let mut pending = std::collections::BTreeMap::<usize, Vec<Array2<f32>>>::new();
 
-                                batch_buf.fill(0.0);
-                                for (b, widx) in (idx..batch_end).enumerate() {
-                                    let window = if widx < offsets.len() {
-                                        &audio[offsets[widx]..offsets[widx] + win_samples]
-                                    } else {
-                                        padded.as_deref().unwrap()
-                                    };
-                                    let dst = b * win_samples;
-                                    batch_buf[dst..dst + window.len()].copy_from_slice(window);
-                                }
-
-                                let (data, out_shape) = model
-                                    .predict_cached(&[(&cached_batch, &batch_buf)])
-                                    .map_err(|e| {
-                                        SegmentationError::Ort(ort::Error::new(e.to_string()))
-                                    })
-                                    .unwrap();
-
-                                let frames = out_shape[1];
-                                let classes = out_shape[2];
-                                let stride = frames * classes;
-                                for b in 0..actual_batch {
-                                    let s = b * stride;
-                                    let _ = worker_tx.send(
-                                        Array2::from_shape_vec(
-                                            (frames, classes),
-                                            data[s..s + stride].to_vec(),
-                                        )
-                                        .unwrap(),
-                                    );
-                                }
-                                idx = batch_end;
+                    for (batch_idx, results) in batch_rx {
+                        pending.insert(batch_idx, results);
+                        while let Some(results) = pending.remove(&next_batch) {
+                            for result in results {
+                                tx.send(result)?;
                             }
-                        } else {
-                            // single: one window per call
+                            next_batch += 1;
+                        }
+                    }
+
+                    Ok(())
+                });
+
+                rayon::scope(|rscope| {
+                    let seg_predict_us = &seg_predict_us;
+                    let seg_batched_calls = &seg_batched_calls;
+                    let seg_batched_windows = &seg_batched_windows;
+
+                    for task in batch_tasks {
+                        let BatchTask {
+                            batch_idx,
+                            start,
+                            end,
+                            batch_capacity,
+                            model,
+                        } = task;
+                        let offsets = &offsets;
+                        let padded = &padded;
+                        let batch_tx = batch_tx.clone();
+
+                        rscope.spawn(move |_| {
+                            let actual_batch = end - start;
+                            let cached_batch =
+                                CachedInputShape::new("input", &[batch_capacity, 1, win_samples]);
+                            let mut batch_buf = vec![0.0f32; batch_capacity * win_samples];
+
+                            batch_buf.fill(0.0);
+                            for (b, widx) in (start..end).enumerate() {
+                                let window = if widx < offsets.len() {
+                                    &audio[offsets[widx]..offsets[widx] + win_samples]
+                                } else {
+                                    padded.as_deref().unwrap()
+                                };
+                                let dst = b * win_samples;
+                                batch_buf[dst..dst + window.len()].copy_from_slice(window);
+                            }
+
+                            let batch_start = std::time::Instant::now();
+                            let (data, out_shape) = model
+                                .predict_cached(&[(&cached_batch, &batch_buf)])
+                                .map_err(|e| SegmentationError::Ort(ort::Error::new(e.to_string())))
+                                .unwrap();
+                            let batch_us = batch_start.elapsed().as_micros() as u64;
+                            seg_predict_us.fetch_add(batch_us, Ordering::Relaxed);
+                            seg_batched_calls.fetch_add(1, Ordering::Relaxed);
+                            seg_batched_windows.fetch_add(actual_batch as u64, Ordering::Relaxed);
+                            if profile_batches {
+                                tracing::info!(
+                                    batch_idx,
+                                    batch_capacity,
+                                    batch_size = actual_batch,
+                                    batch_ms = batch_us / 1000,
+                                    "Seg batch profile"
+                                );
+                            }
+
+                            let frames = out_shape[1];
+                            let classes = out_shape[2];
+                            let stride = frames * classes;
+                            let mut results = Vec::with_capacity(actual_batch);
+                            for b in 0..actual_batch {
+                                let s = b * stride;
+                                results.push(
+                                    Array2::from_shape_vec(
+                                        (frames, classes),
+                                        data[s..s + stride].to_vec(),
+                                    )
+                                    .unwrap(),
+                                );
+                            }
+                            let _ = batch_tx.send((batch_idx, results));
+                        });
+                    }
+                });
+
+                drop(batch_tx);
+                merge_handle.join().unwrap()?;
+                Ok::<(), SegmentationError>(())
+            })?;
+        } else {
+            // single: keep the old worker-sharded path because this code path is
+            // only used when no batched CoreML segmenter is available
+            let chunk_size = total_windows.div_ceil(num_workers);
+            let actual_workers = total_windows.div_ceil(chunk_size).min(num_workers);
+
+            let mut worker_txs = Vec::with_capacity(actual_workers);
+            let mut worker_rxs = Vec::with_capacity(actual_workers);
+            for _ in 0..actual_workers {
+                let (wtx, wrx) = crossbeam_channel::unbounded::<Array2<f32>>();
+                worker_txs.push(wtx);
+                worker_rxs.push(wrx);
+            }
+
+            std::thread::scope(|scope| {
+                let merge_handle = scope.spawn(move || -> Result<(), SegmentationError> {
+                    for wrx in &worker_rxs {
+                        for result in wrx {
+                            tx.send(result)?;
+                        }
+                    }
+                    Ok(())
+                });
+
+                rayon::scope(|rscope| {
+                    let seg_predict_us = &seg_predict_us;
+                    let seg_single_calls = &seg_single_calls;
+                    for (worker_idx, worker_tx) in worker_txs.into_iter().enumerate() {
+                        let model = shared_model;
+                        let start = worker_idx * chunk_size;
+                        let end = (start + chunk_size).min(total_windows);
+                        let offsets = &offsets;
+                        let padded = &padded;
+
+                        rscope.spawn(move |_| {
                             let cached_shape = CachedInputShape::new("input", &[1, 1, win_samples]);
                             let mut buffer = ndarray::Array3::<f32>::zeros((1, 1, win_samples));
 
@@ -451,33 +570,49 @@ impl SegmentationModel {
                                     .assign(&ndarray::ArrayView1::from(window));
                                 let input_data = buffer.as_slice().unwrap();
 
+                                let predict_start = std::time::Instant::now();
                                 let (data, out_shape) = model
                                     .predict_cached(&[(&cached_shape, input_data)])
                                     .map_err(|e| {
                                         SegmentationError::Ort(ort::Error::new(e.to_string()))
                                     })
                                     .unwrap();
+                                let predict_us = predict_start.elapsed().as_micros() as u64;
+                                seg_predict_us.fetch_add(predict_us, Ordering::Relaxed);
+                                seg_single_calls.fetch_add(1, Ordering::Relaxed);
+                                if profile_batches {
+                                    tracing::info!(
+                                        worker_idx,
+                                        batch_size = 1,
+                                        batch_ms = predict_us / 1000,
+                                        "Seg batch profile"
+                                    );
+                                }
 
                                 let frames = out_shape[1];
                                 let classes = out_shape[2];
                                 let _ = worker_tx
                                     .send(Array2::from_shape_vec((frames, classes), data).unwrap());
                             }
-                        }
-                    });
-                }
-            });
-            // rayon scope done → all worker_txs dropped → per-worker channels close
-            // → merger drains remaining items and finishes
+                        });
+                    }
+                });
 
-            merge_handle.join().unwrap()?;
-            Ok::<(), SegmentationError>(())
-        })?;
+                merge_handle.join().unwrap()?;
+                Ok::<(), SegmentationError>(())
+            })?;
+        }
 
         let total_seg = seg_start.elapsed();
+        let seg_predict_ms = seg_predict_us.load(Ordering::Relaxed) / 1000;
         tracing::info!(
             windows = total_windows,
             workers = num_workers,
+            seg_warm_start_b32 = use_warm_start_b32,
+            seg_batched_calls = seg_batched_calls.load(Ordering::Relaxed),
+            seg_batched_windows = seg_batched_windows.load(Ordering::Relaxed),
+            seg_single_calls = seg_single_calls.load(Ordering::Relaxed),
+            seg_predict_ms_sum = seg_predict_ms,
             seg_total_ms = total_seg.as_millis(),
             "Parallel segmentation complete"
         );
