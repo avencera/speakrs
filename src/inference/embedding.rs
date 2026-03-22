@@ -372,6 +372,21 @@ impl EmbeddingModel {
             .map(|s| (s, &self.cached_fbank_30s_shape))
     }
 
+    /// Get 10s fbank model ref for tiling on prep thread
+    #[cfg(feature = "coreml")]
+    pub(crate) fn fbank_10s_ref(&self) -> Option<&SharedCoreMlModel> {
+        self.native_fbank_session.as_ref()
+    }
+
+    /// Get all chunk session metadata + model refs for pipelined embedding
+    #[cfg(feature = "coreml")]
+    pub(crate) fn chunk_session_refs(&self) -> Vec<(usize, usize, usize, &SharedCoreMlModel)> {
+        self.native_chunk_sessions
+            .iter()
+            .map(|s| (s.num_windows, s.fbank_frames, s.num_masks, &s.model))
+            .collect()
+    }
+
     pub fn primary_batch_size(&self) -> usize {
         if self.primary_batched_session.is_some() {
             PRIMARY_BATCH_SIZE
@@ -1378,6 +1393,12 @@ impl EmbeddingModel {
         self.native_chunk_sessions
             .iter()
             .find(|s| s.num_windows >= num_windows)
+    }
+
+    /// Get the smallest available chunk session (for early first-chunk dispatch)
+    #[cfg(feature = "coreml")]
+    pub(crate) fn smallest_chunk_size(&self) -> Option<usize> {
+        self.native_chunk_sessions.first().map(|s| s.num_windows)
     }
 
     /// Get the largest available chunk session

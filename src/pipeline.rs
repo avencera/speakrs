@@ -1475,11 +1475,51 @@ impl<'a> PipelineRunner<'a> {
         let min_num_samples = self.emb_model.min_num_samples();
         let step_seconds = self.seg_model.step_seconds();
 
+        // --- pipelining setup ---
+        // SendPtr: SharedCoreMlModel is Send+Sync but CachedInputShape fields on
+        // EmbeddingModel prevent borrowing it across threads. Raw pointers bypass
+        // this; the models live on self which outlives the scope
+        use crate::inference::coreml::{CachedInputShape, SharedCoreMlModel};
+
+        #[derive(Clone, Copy)]
+        struct SendPtr(*const SharedCoreMlModel);
+        unsafe impl Send for SendPtr {}
+        unsafe impl Sync for SendPtr {}
+
+        let fbank_30s_ptr = self
+            .emb_model
+            .fbank_30s_refs()
+            .map(|(m, _)| SendPtr(m as *const _));
+        let fbank_10s_ptr = self
+            .emb_model
+            .fbank_10s_ref()
+            .map(|m| SendPtr(m as *const _));
+
+        // (num_windows, fbank_frames, num_masks, model_ptr) — sorted by num_windows
+        let chunk_sessions: Vec<(usize, usize, usize, SendPtr)> = self
+            .emb_model
+            .chunk_session_refs()
+            .into_iter()
+            .map(|(nw, ff, nm, m)| (nw, ff, nm, SendPtr(m as *const _)))
+            .collect();
+
+        // dimension-only lookup for prep thread (no pointers)
+        let chunk_lookup: Vec<(usize, usize, usize)> = chunk_sessions
+            .iter()
+            .map(|&(nw, ff, nm, _)| (nw, ff, nm))
+            .collect();
+
+        // pipelining threshold: only for files with 3+ chunks
+        let total_windows = audio.len().saturating_sub(window_samples) / step_samples + 1;
+        let est_chunks = total_windows.div_ceil(chunk_win_capacity);
+        let use_pipelined = !chunk_sessions.is_empty() && est_chunks >= 3;
+
         // seg → bridge → emb pipeline via channels
-        type ChunkMsg = (usize, Vec<Array2<f32>>, Option<Vec<f32>>); // (start, decoded, fbank)
+        type ChunkMsg = (usize, Vec<Array2<f32>>, Option<Vec<f32>>);
         let (seg_tx, seg_rx) = crossbeam_channel::unbounded::<Array2<f32>>();
         let (chunk_tx, chunk_rx) = crossbeam_channel::bounded::<ChunkMsg>(2);
-        let chunk_tx_seg = chunk_tx.clone(); // for 30s segmenter path
+        let chunk_tx_seg = chunk_tx.clone();
+        let mut chunk_rx_opt = Some(chunk_rx);
 
         let seg_model = &mut *self.seg_model;
         let emb_model = &mut *self.emb_model;
@@ -1545,127 +1585,348 @@ impl<'a> PipelineRunner<'a> {
                             group = Vec::with_capacity(chunk_win_capacity);
                         }
                     }
-                    // flush remaining
                     if !group.is_empty() {
                         let _ = chunk_tx.send((global_start, group, None));
                     }
                 });
 
-                // emb processing on main scope thread: fbank + masks + chunk model
+                // emb processing: pipelined (3+ chunks) or sequential fallback
+                let emb_start = std::time::Instant::now();
                 let mut decoded_all: Vec<Array2<f32>> = Vec::new();
                 let mut embeddings_vec: Vec<SpeakerEmbedding> = Vec::new();
 
-                for (global_start, decoded_chunk, precomputed_fbank) in &chunk_rx {
-                    let wins = decoded_chunk.len();
-                    let session = emb_model.chunk_session_for_windows(wins).unwrap();
-                    let sess_fbank_frames = session.fbank_frames;
-                    let sess_num_masks = session.num_masks;
-                    let _ = session;
-
-                    // fbank for this chunk — use 30s model if available (1 call vs 3)
-                    let chunk_audio_start = global_start * step_samples;
-                    if chunk_audio_start + window_samples > audio.len() {
-                        continue;
+                if use_pipelined {
+                    // prep thread computes fbank+masks on CPU while GPU thread
+                    // runs chunk embedding — overlapping CPU prep for chunk N+1
+                    // with GPU inference for chunk N
+                    struct PreparedChunk {
+                        global_start: usize,
+                        decoded_chunk: Vec<Array2<f32>>,
+                        fbank: Vec<f32>,
+                        masks: Vec<f32>,
+                        active: Vec<(usize, usize)>,
+                        num_masks: usize,
+                        fbank_frames: usize,
+                        num_windows: usize,
                     }
-                    let chunk_audio_len = window_samples + (wins - 1) * step_samples;
-                    let chunk_audio_end = (chunk_audio_start + chunk_audio_len).min(audio.len());
-                    let chunk_audio = &audio[chunk_audio_start..chunk_audio_end];
 
-                    let mut fbank = vec![0.0f32; sess_fbank_frames * 80];
+                    let chunk_rx = chunk_rx_opt.take().unwrap();
+                    let (prep_tx, prep_rx) = crossbeam_channel::bounded::<PreparedChunk>(1);
 
-                    // use pre-computed fbank from bridge thread when available
-                    #[cfg(feature = "coreml")]
-                    if let Some(ref pre_data) = precomputed_fbank {
-                        let copy_len = pre_data.len().min(fbank.len());
-                        fbank[..copy_len].copy_from_slice(&pre_data[..copy_len]);
-                    } else if let Some(result) = emb_model.compute_chunk_fbank_30s(chunk_audio) {
-                        let full_fbank = result?;
-                        let copy_frames = full_fbank.nrows().min(sess_fbank_frames);
-                        for r in 0..copy_frames {
-                            let dst = r * 80;
-                            fbank[dst..dst + 80]
-                                .copy_from_slice(full_fbank.row(r).as_slice().unwrap());
-                        }
-                    } else {
-                        // fallback: tile 10s segments
-                        let mut fb_off = 0usize;
-                        let mut au_off = 0usize;
-                        while fb_off < sess_fbank_frames && au_off < chunk_audio.len() {
-                            let seg_end = (au_off + window_samples).min(chunk_audio.len());
-                            let seg_fbank =
-                                emb_model.compute_chunk_fbank(&chunk_audio[au_off..seg_end])?;
-                            let copy = seg_fbank.nrows().min(sess_fbank_frames - fb_off);
-                            for r in 0..copy {
-                                let dst = (fb_off + r) * 80;
-                                fbank[dst..dst + 80]
-                                    .copy_from_slice(seg_fbank.row(r).as_slice().unwrap());
+                    let prep_handle = scope.spawn(move || -> Result<(), PipelineError> {
+                        let fbank_30s_shape = CachedInputShape::new("waveform", &[1, 1, 480_000]);
+                        let fbank_10s_shape =
+                            CachedInputShape::new("waveform", &[1, 1, window_samples]);
+
+                        let mut fbank_30s_buf = vec![0.0f32; 480_000];
+                        let mut waveform_10s_buf = vec![0.0f32; window_samples];
+
+                        for (global_start, decoded_chunk, _) in chunk_rx {
+                            let wins = decoded_chunk.len();
+                            let (sess_fbank_frames, sess_num_masks) = chunk_lookup
+                                .iter()
+                                .find(|&&(nw, _, _)| nw >= wins)
+                                .map(|&(_, ff, nm)| (ff, nm))
+                                .unwrap();
+
+                            let chunk_audio_start = global_start * step_samples;
+                            if chunk_audio_start + window_samples > audio.len() {
+                                continue;
                             }
-                            fb_off += 998;
-                            au_off += window_samples;
-                        }
-                    }
-                    #[cfg(not(feature = "coreml"))]
-                    {
-                        let mut fb_off = 0usize;
-                        let mut au_off = 0usize;
-                        while fb_off < sess_fbank_frames && au_off < chunk_audio.len() {
-                            let seg_end = (au_off + window_samples).min(chunk_audio.len());
-                            let seg_fbank =
-                                emb_model.compute_chunk_fbank(&chunk_audio[au_off..seg_end])?;
-                            let copy = seg_fbank.nrows().min(sess_fbank_frames - fb_off);
-                            for r in 0..copy {
-                                let dst = (fb_off + r) * 80;
-                                fbank[dst..dst + 80]
-                                    .copy_from_slice(seg_fbank.row(r).as_slice().unwrap());
-                            }
-                            fb_off += 998;
-                            au_off += window_samples;
-                        }
-                    }
+                            let chunk_audio_len = window_samples + (wins - 1) * step_samples;
+                            let chunk_audio_end =
+                                (chunk_audio_start + chunk_audio_len).min(audio.len());
+                            let chunk_audio = &audio[chunk_audio_start..chunk_audio_end];
 
-                    // masks
-                    let mut masks = vec![0.0f32; sess_num_masks * 589];
-                    let mut active: Vec<(usize, usize)> = Vec::new();
-                    for (local, decoded) in decoded_chunk.iter().enumerate() {
-                        let global_idx = global_start + local;
-                        let win_audio =
-                            chunk_audio_raw(audio, step_samples, window_samples, global_idx);
-                        let clean = clean_masks(&decoded.view());
-                        for speaker_idx in 0..num_speakers {
-                            let mask_idx = local * num_speakers + speaker_idx;
-                            if mask_idx >= sess_num_masks {
+                            // fbank
+                            let mut fbank = vec![0.0f32; sess_fbank_frames * 80];
+
+                            if chunk_audio.len() <= 480_000 {
+                                if let Some(SendPtr(ptr)) = fbank_30s_ptr {
+                                    let model = unsafe { &*ptr };
+                                    fbank_30s_buf[..chunk_audio.len()].copy_from_slice(chunk_audio);
+                                    fbank_30s_buf[chunk_audio.len()..].fill(0.0);
+                                    let (data, out_shape) = model
+                                        .predict_cached(&[(
+                                            &fbank_30s_shape,
+                                            fbank_30s_buf.as_slice(),
+                                        )])
+                                        .map_err(|e| PipelineError::Other(e.to_string()))?;
+                                    let frames = out_shape[1];
+                                    let copy_frames = frames.min(sess_fbank_frames);
+                                    for r in 0..copy_frames {
+                                        let off = r * 80;
+                                        fbank[off..off + 80].copy_from_slice(&data[off..off + 80]);
+                                    }
+                                }
+                            } else if let Some(SendPtr(ptr)) = fbank_10s_ptr {
+                                let model = unsafe { &*ptr };
+                                let mut fb_off = 0usize;
+                                let mut au_off = 0usize;
+                                while fb_off < sess_fbank_frames && au_off < chunk_audio.len() {
+                                    let seg_end = (au_off + window_samples).min(chunk_audio.len());
+                                    let seg_len = seg_end - au_off;
+                                    waveform_10s_buf[..seg_len]
+                                        .copy_from_slice(&chunk_audio[au_off..seg_end]);
+                                    if seg_len < window_samples {
+                                        waveform_10s_buf[seg_len..].fill(0.0);
+                                    }
+                                    let (data, out_shape) = model
+                                        .predict_cached(&[(
+                                            &fbank_10s_shape,
+                                            waveform_10s_buf.as_slice(),
+                                        )])
+                                        .map_err(|e| PipelineError::Other(e.to_string()))?;
+                                    let frames = out_shape[1];
+                                    let copy = frames.min(sess_fbank_frames - fb_off);
+                                    for r in 0..copy {
+                                        let src = r * 80;
+                                        let dst = (fb_off + r) * 80;
+                                        fbank[dst..dst + 80].copy_from_slice(&data[src..src + 80]);
+                                    }
+                                    fb_off += 998;
+                                    au_off += window_samples;
+                                }
+                            }
+
+                            // masks
+                            let mut masks = vec![0.0f32; sess_num_masks * 589];
+                            let mut active: Vec<(usize, usize)> = Vec::new();
+                            for (local, decoded) in decoded_chunk.iter().enumerate() {
+                                let global_idx = global_start + local;
+                                let win_audio = chunk_audio_raw(
+                                    audio,
+                                    step_samples,
+                                    window_samples,
+                                    global_idx,
+                                );
+                                let clean = clean_masks(&decoded.view());
+                                for speaker_idx in 0..num_speakers {
+                                    let mask_idx = local * num_speakers + speaker_idx;
+                                    if mask_idx >= sess_num_masks {
+                                        break;
+                                    }
+                                    if let Some(weights) = select_speaker_weights(
+                                        &decoded.view(),
+                                        &clean,
+                                        speaker_idx,
+                                        win_audio.len(),
+                                        min_num_samples,
+                                    ) {
+                                        let dst = mask_idx * 589;
+                                        let cl = weights.len().min(589);
+                                        masks[dst..dst + cl].copy_from_slice(&weights[..cl]);
+                                        active.push((local, speaker_idx));
+                                    }
+                                }
+                            }
+
+                            if prep_tx
+                                .send(PreparedChunk {
+                                    global_start,
+                                    decoded_chunk,
+                                    fbank,
+                                    masks,
+                                    active,
+                                    num_masks: sess_num_masks,
+                                    fbank_frames: sess_fbank_frames,
+                                    num_windows: wins,
+                                })
+                                .is_err()
+                            {
                                 break;
                             }
-                            if let Some(weights) = select_speaker_weights(
-                                &decoded.view(),
-                                &clean,
+                        }
+                        Ok(())
+                    });
+
+                    // GPU thread (main scope): consume prepared chunks
+                    let mut shape_cache: std::collections::HashMap<
+                        (usize, usize),
+                        (CachedInputShape, CachedInputShape),
+                    > = std::collections::HashMap::new();
+
+                    let mut gpu_predict_us = 0u64;
+                    let mut gpu_wait_us = 0u64;
+                    let mut gpu_unpack_us = 0u64;
+                    let mut gpu_chunks = 0u32;
+
+                    loop {
+                        let wait_start = std::time::Instant::now();
+                        let prepared = match prep_rx.recv() {
+                            Ok(p) => p,
+                            Err(_) => break,
+                        };
+                        gpu_wait_us += wait_start.elapsed().as_micros() as u64;
+
+                        let (fbank_shape, masks_shape) = shape_cache
+                            .entry((prepared.fbank_frames, prepared.num_masks))
+                            .or_insert_with(|| {
+                                (
+                                    CachedInputShape::new("fbank", &[1, prepared.fbank_frames, 80]),
+                                    CachedInputShape::new("masks", &[prepared.num_masks, 589]),
+                                )
+                            });
+
+                        let model_ptr = chunk_sessions
+                            .iter()
+                            .find(|&&(nw, _, _, _)| nw >= prepared.num_windows)
+                            .map(|&(_, _, _, SendPtr(ptr))| ptr)
+                            .unwrap();
+                        let model = unsafe { &*model_ptr };
+
+                        let predict_start = std::time::Instant::now();
+                        let (data, _) = model
+                            .predict_cached(&[
+                                (fbank_shape, &prepared.fbank),
+                                (masks_shape, &prepared.masks),
+                            ])
+                            .map_err(|e| PipelineError::Other(e.to_string()))?;
+                        gpu_predict_us += predict_start.elapsed().as_micros() as u64;
+
+                        let unpack_start = std::time::Instant::now();
+                        let batch_emb =
+                            Array2::from_shape_vec((prepared.num_masks, 256), data).unwrap();
+
+                        for &(local, speaker_idx) in &prepared.active {
+                            let mask_idx = local * num_speakers + speaker_idx;
+                            embeddings_vec.push(SpeakerEmbedding {
+                                chunk_idx: prepared.global_start + local,
                                 speaker_idx,
-                                win_audio.len(),
-                                min_num_samples,
-                            ) {
-                                let dst = mask_idx * 589;
-                                let cl = weights.len().min(589);
-                                masks[dst..dst + cl].copy_from_slice(&weights[..cl]);
-                                active.push((local, speaker_idx));
+                                embedding: batch_emb.row(mask_idx).to_vec(),
+                            });
+                        }
+
+                        decoded_all.extend(prepared.decoded_chunk);
+                        gpu_unpack_us += unpack_start.elapsed().as_micros() as u64;
+                        gpu_chunks += 1;
+                    }
+
+                    tracing::info!(
+                        gpu_chunks,
+                        gpu_predict_ms = gpu_predict_us / 1000,
+                        gpu_wait_ms = gpu_wait_us / 1000,
+                        gpu_unpack_ms = gpu_unpack_us / 1000,
+                        "GPU loop breakdown"
+                    );
+
+                    prep_handle.join().unwrap()?;
+                } else {
+                    // fallback: sequential fbank + masks + embed (small files)
+                    let chunk_rx = chunk_rx_opt.take().unwrap();
+
+                    for (global_start, decoded_chunk, precomputed_fbank) in &chunk_rx {
+                        let wins = decoded_chunk.len();
+                        let session = emb_model.chunk_session_for_windows(wins).unwrap();
+                        let sess_fbank_frames = session.fbank_frames;
+                        let sess_num_masks = session.num_masks;
+                        let _ = session;
+
+                        let chunk_audio_start = global_start * step_samples;
+                        if chunk_audio_start + window_samples > audio.len() {
+                            continue;
+                        }
+                        let chunk_audio_len = window_samples + (wins - 1) * step_samples;
+                        let chunk_audio_end =
+                            (chunk_audio_start + chunk_audio_len).min(audio.len());
+                        let chunk_audio = &audio[chunk_audio_start..chunk_audio_end];
+
+                        let mut fbank = vec![0.0f32; sess_fbank_frames * 80];
+
+                        #[cfg(feature = "coreml")]
+                        if let Some(ref pre_data) = precomputed_fbank {
+                            let copy_len = pre_data.len().min(fbank.len());
+                            fbank[..copy_len].copy_from_slice(&pre_data[..copy_len]);
+                        } else if let Some(result) = emb_model.compute_chunk_fbank_30s(chunk_audio)
+                        {
+                            let full_fbank = result?;
+                            let copy_frames = full_fbank.nrows().min(sess_fbank_frames);
+                            for r in 0..copy_frames {
+                                let dst = r * 80;
+                                fbank[dst..dst + 80]
+                                    .copy_from_slice(full_fbank.row(r).as_slice().unwrap());
+                            }
+                        } else {
+                            let mut fb_off = 0usize;
+                            let mut au_off = 0usize;
+                            while fb_off < sess_fbank_frames && au_off < chunk_audio.len() {
+                                let seg_end = (au_off + window_samples).min(chunk_audio.len());
+                                let seg_fbank =
+                                    emb_model.compute_chunk_fbank(&chunk_audio[au_off..seg_end])?;
+                                let copy = seg_fbank.nrows().min(sess_fbank_frames - fb_off);
+                                for r in 0..copy {
+                                    let dst = (fb_off + r) * 80;
+                                    fbank[dst..dst + 80]
+                                        .copy_from_slice(seg_fbank.row(r).as_slice().unwrap());
+                                }
+                                fb_off += 998;
+                                au_off += window_samples;
                             }
                         }
+                        #[cfg(not(feature = "coreml"))]
+                        {
+                            let mut fb_off = 0usize;
+                            let mut au_off = 0usize;
+                            while fb_off < sess_fbank_frames && au_off < chunk_audio.len() {
+                                let seg_end = (au_off + window_samples).min(chunk_audio.len());
+                                let seg_fbank =
+                                    emb_model.compute_chunk_fbank(&chunk_audio[au_off..seg_end])?;
+                                let copy = seg_fbank.nrows().min(sess_fbank_frames - fb_off);
+                                for r in 0..copy {
+                                    let dst = (fb_off + r) * 80;
+                                    fbank[dst..dst + 80]
+                                        .copy_from_slice(seg_fbank.row(r).as_slice().unwrap());
+                                }
+                                fb_off += 998;
+                                au_off += window_samples;
+                            }
+                        }
+
+                        // masks
+                        let mut masks = vec![0.0f32; sess_num_masks * 589];
+                        let mut active: Vec<(usize, usize)> = Vec::new();
+                        for (local, decoded) in decoded_chunk.iter().enumerate() {
+                            let global_idx = global_start + local;
+                            let win_audio =
+                                chunk_audio_raw(audio, step_samples, window_samples, global_idx);
+                            let clean = clean_masks(&decoded.view());
+                            for speaker_idx in 0..num_speakers {
+                                let mask_idx = local * num_speakers + speaker_idx;
+                                if mask_idx >= sess_num_masks {
+                                    break;
+                                }
+                                if let Some(weights) = select_speaker_weights(
+                                    &decoded.view(),
+                                    &clean,
+                                    speaker_idx,
+                                    win_audio.len(),
+                                    min_num_samples,
+                                ) {
+                                    let dst = mask_idx * 589;
+                                    let cl = weights.len().min(589);
+                                    masks[dst..dst + cl].copy_from_slice(&weights[..cl]);
+                                    active.push((local, speaker_idx));
+                                }
+                            }
+                        }
+
+                        let session = emb_model.chunk_session_for_windows(wins).unwrap();
+                        let batch_emb = emb_model.embed_chunk(session, &fbank, &masks)?;
+
+                        for &(local, speaker_idx) in &active {
+                            let mask_idx = local * num_speakers + speaker_idx;
+                            embeddings_vec.push(SpeakerEmbedding {
+                                chunk_idx: global_start + local,
+                                speaker_idx,
+                                embedding: batch_emb.row(mask_idx).to_vec(),
+                            });
+                        }
+
+                        decoded_all.extend(decoded_chunk);
                     }
-
-                    // chunk embedding
-                    let session = emb_model.chunk_session_for_windows(wins).unwrap();
-                    let batch_emb = emb_model.embed_chunk(session, &fbank, &masks)?;
-
-                    for &(local, speaker_idx) in &active {
-                        let mask_idx = local * num_speakers + speaker_idx;
-                        embeddings_vec.push(SpeakerEmbedding {
-                            chunk_idx: global_start + local,
-                            speaker_idx,
-                            embedding: batch_emb.row(mask_idx).to_vec(),
-                        });
-                    }
-
-                    decoded_all.extend(decoded_chunk);
                 }
+
+                let emb_elapsed = emb_start.elapsed();
 
                 seg_handle.join().unwrap()?;
                 bridge_handle.join().unwrap();
@@ -1694,11 +1955,15 @@ impl<'a> PipelineRunner<'a> {
                     ChunkLayout::new(step_seconds, step_samples, window_samples, num_chunks);
 
                 let inference_elapsed = inference_start.elapsed();
+                let audio_secs = audio.len() as f64 / 16_000.0;
                 tracing::info!(
                     chunks = num_chunks,
                     chunk_capacity = chunk_win_capacity,
+                    pipelined = use_pipelined,
+                    emb_ms = emb_elapsed.as_millis(),
                     total_ms = inference_elapsed.as_millis(),
-                    "Pipelined chunk embedding complete"
+                    audio_secs = audio_secs as u64,
+                    "Chunk embedding complete"
                 );
 
                 Ok(Some(InferenceArtifacts {
