@@ -307,6 +307,7 @@ impl SegmentationModel {
         audio: &[f32],
         tx: Sender<Array2<f32>>,
         num_workers: usize,
+        warm_start_target_windows: Option<usize>,
     ) -> Result<usize, SegmentationError> {
         use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -359,9 +360,11 @@ impl SegmentationModel {
         let seg_batched_calls = AtomicU64::new(0);
         let seg_batched_windows = AtomicU64::new(0);
         let seg_single_calls = AtomicU64::new(0);
+        let warm_start_small_windows = warm_start_target_windows.unwrap_or(PRIMARY_BATCH_SIZE * 2);
         let use_warm_start_b32 = batch_size == LARGE_BATCH_SIZE
             && total_windows < 1024
             && total_windows > PRIMARY_BATCH_SIZE
+            && warm_start_small_windows > PRIMARY_BATCH_SIZE
             && self.native_batched_session.is_some();
 
         if batch_size > 1 {
@@ -378,11 +381,9 @@ impl SegmentationModel {
                 let small_model = self.native_batched_session.as_ref().unwrap();
                 let mut start = 0usize;
                 let mut batch_idx = 0usize;
+                let warm_start_end = total_windows.min(warm_start_small_windows);
 
-                for _ in 0..2 {
-                    if start >= total_windows {
-                        break;
-                    }
+                while start < warm_start_end {
                     let end = (start + PRIMARY_BATCH_SIZE).min(total_windows);
                     batch_tasks.push(BatchTask {
                         batch_idx,
@@ -609,6 +610,11 @@ impl SegmentationModel {
             windows = total_windows,
             workers = num_workers,
             seg_warm_start_b32 = use_warm_start_b32,
+            seg_warm_start_windows = if use_warm_start_b32 {
+                total_windows.min(warm_start_small_windows)
+            } else {
+                0
+            },
             seg_batched_calls = seg_batched_calls.load(Ordering::Relaxed),
             seg_batched_windows = seg_batched_windows.load(Ordering::Relaxed),
             seg_single_calls = seg_single_calls.load(Ordering::Relaxed),

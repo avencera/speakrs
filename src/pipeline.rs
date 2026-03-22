@@ -1514,6 +1514,7 @@ impl<'a> PipelineRunner<'a> {
         let est_chunks = total_windows.div_ceil(chunk_win_capacity);
         let use_pipelined = !chunk_sessions.is_empty() && est_chunks >= 3;
         let profile_chunk_timing = std::env::var_os("SPEAKRS_PROFILE_CHUNKS").is_some();
+        let seg_warm_start_windows = chunk_win_capacity * 2;
 
         // seg → bridge → emb pipeline via channels
         type ChunkMsg = (
@@ -1572,7 +1573,12 @@ impl<'a> PipelineRunner<'a> {
                         drop(chunk_tx_seg);
                         return Ok(());
                     }
-                    seg_model.run_streaming_parallel(audio, seg_tx, Self::seg_worker_count())?;
+                    seg_model.run_streaming_parallel(
+                        audio,
+                        seg_tx,
+                        Self::seg_worker_count(),
+                        Some(seg_warm_start_windows),
+                    )?;
                     Ok(())
                 });
 
@@ -2429,7 +2435,7 @@ impl<'a> PipelineRunner<'a> {
             let segmentation_handle = if use_parallel_seg {
                 #[cfg(feature = "coreml")]
                 {
-                    scope.spawn(|| self.seg_model.run_streaming_parallel(audio, tx, 4))
+                    scope.spawn(|| self.seg_model.run_streaming_parallel(audio, tx, 4, None))
                 }
                 #[cfg(not(feature = "coreml"))]
                 {
