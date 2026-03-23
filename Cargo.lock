@@ -2294,6 +2294,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3249,6 +3250,7 @@ dependencies = [
  "serde_json",
  "speakrs",
  "tempfile",
+ "tracing",
  "tracing-subscriber",
  "ureq",
  "wait-timeout",

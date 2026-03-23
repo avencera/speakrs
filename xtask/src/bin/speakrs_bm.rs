@@ -79,6 +79,30 @@ struct Cli {
     /// Skip the pre-flight smoke test
     #[arg(long)]
     no_preflight: bool,
+
+    /// Path to models directory
+    #[arg(long, env = "SPEAKRS_MODELS_DIR", default_value = "/workspace/models")]
+    models_dir: PathBuf,
+
+    /// Path to datasets directory
+    #[arg(
+        long,
+        env = "SPEAKRS_DATASETS_DIR",
+        default_value = "/workspace/datasets"
+    )]
+    datasets_dir: PathBuf,
+
+    /// Project root directory
+    #[arg(long, env = "SPEAKRS_ROOT", default_value = "/workspace")]
+    root: PathBuf,
+
+    /// Path to results directory
+    #[arg(
+        long,
+        env = "SPEAKRS_RESULTS_DIR",
+        default_value = "/workspace/_benchmarks"
+    )]
+    results_dir: PathBuf,
 }
 
 fn main() -> Result<()> {
@@ -141,33 +165,27 @@ fn main() -> Result<()> {
         })?]
     };
 
-    let models_dir = resolve_models_dir();
-    let datasets_dir = resolve_datasets_dir();
-    let root = resolve_root();
     let max_files = cli.max_files.unwrap_or(u32::MAX);
     let max_minutes = cli.max_minutes.unwrap_or(u32::MAX);
     let implementations = resolve_bm_impls(&cli.impls);
     let multi_dataset = datasets_list.len() > 1;
 
-    // SAFETY: single-threaded CLI
-    unsafe { std::env::set_var("SPEAKRS_MODELS_DIR", &models_dir) };
-
     if !cli.no_preflight {
         preflight(
             &datasets_list,
-            &datasets_dir,
+            &cli.datasets_dir,
             &implementations,
-            &models_dir,
-            &root,
+            &cli.models_dir,
+            &cli.root,
         )?;
     }
 
     for dataset in datasets_list {
         let config = BenchmarkJobConfig {
-            models_dir: models_dir.clone(),
-            datasets_dir: datasets_dir.clone(),
-            root: root.clone(),
-            results_dir: resolve_results_dir(),
+            models_dir: cli.models_dir.clone(),
+            datasets_dir: cli.datasets_dir.clone(),
+            root: cli.root.clone(),
+            results_dir: cli.results_dir.clone(),
             dataset,
             implementations: implementations.clone(),
             max_files,
@@ -180,30 +198,6 @@ fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-fn resolve_models_dir() -> PathBuf {
-    std::env::var("SPEAKRS_MODELS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/workspace/models"))
-}
-
-fn resolve_datasets_dir() -> PathBuf {
-    std::env::var("SPEAKRS_DATASETS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/workspace/datasets"))
-}
-
-fn resolve_root() -> PathBuf {
-    std::env::var("SPEAKRS_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/workspace"))
-}
-
-fn resolve_results_dir() -> PathBuf {
-    std::env::var("SPEAKRS_RESULTS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/workspace/_benchmarks"))
 }
 
 fn preflight(

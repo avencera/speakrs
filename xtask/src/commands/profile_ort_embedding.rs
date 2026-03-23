@@ -13,7 +13,15 @@ use speakrs::powerset::PowersetMapping;
 
 use crate::wav;
 
-pub fn run(mode: &str, wav_path: &str, iterations: usize, log_every: usize) -> Result<()> {
+pub fn run(
+    mode: &str,
+    wav_path: &str,
+    iterations: usize,
+    log_every: usize,
+    model_path: Option<PathBuf>,
+    batch_size: Option<usize>,
+    ort_defaults: bool,
+) -> Result<()> {
     let iterations = if mode.starts_with("stream-") {
         0
     } else if iterations == 0 {
@@ -49,10 +57,9 @@ pub fn run(mode: &str, wav_path: &str, iterations: usize, log_every: usize) -> R
 
     let raw_windows = seg_model.run(&samples)?;
     let segmentations = decode_windows(raw_windows, &powerset);
-    let model_path = std::env::var_os("SPEAKRS_PROFILE_ORT_MODEL_PATH")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| models_dir.join("wespeaker-voxceleb-resnet34.onnx"));
-    let mut session = build_embedding_session(&model_path)?;
+    let resolved_model_path =
+        model_path.unwrap_or_else(|| models_dir.join("wespeaker-voxceleb-resnet34.onnx"));
+    let mut session = build_embedding_session(&resolved_model_path, ort_defaults)?;
 
     eprintln!("start rss_mb={:.1}", rss_mb());
     let output_name = session.outputs()[0].name().to_owned();
@@ -157,10 +164,7 @@ pub fn run(mode: &str, wav_path: &str, iterations: usize, log_every: usize) -> R
     } else if mode == "stream-batched" {
         let num_chunks = segmentations.shape()[0];
         let num_speakers = segmentations.shape()[2];
-        let batch_size = std::env::var("SPEAKRS_PROFILE_ORT_BATCH")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(16);
+        let batch_size = batch_size.unwrap_or(16);
         let mut waveform_buffer = ndarray::Array3::<f32>::zeros((batch_size, 1, 160_000));
         let mut weights_buffer = ndarray::Array2::<f32>::zeros((batch_size, 589));
         let mut batch_fill = 0usize;
@@ -228,8 +232,8 @@ fn ort_err(e: impl std::fmt::Display) -> color_eyre::eyre::Report {
     color_eyre::eyre::eyre!("{e}")
 }
 
-fn build_embedding_session(model_path: &Path) -> Result<Session> {
-    if std::env::var_os("SPEAKRS_PROFILE_ORT_DEFAULTS").is_some() {
+fn build_embedding_session(model_path: &Path, ort_defaults: bool) -> Result<Session> {
+    if ort_defaults {
         return Session::builder()
             .map_err(ort_err)?
             .commit_from_file(model_path)

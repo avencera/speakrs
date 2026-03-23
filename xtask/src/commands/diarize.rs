@@ -9,7 +9,8 @@ use speakrs::inference::ExecutionMode;
 use speakrs::inference::embedding::EmbeddingModel;
 use speakrs::inference::segmentation::SegmentationModel;
 use speakrs::pipeline::{
-    DiarizationPipeline, FAST_SEGMENTATION_STEP_SECONDS, SEGMENTATION_STEP_SECONDS,
+    COREML_SEGMENTATION_STEP_SECONDS, CUDA_SEGMENTATION_STEP_SECONDS, DiarizationPipeline,
+    FAST_SEGMENTATION_STEP_SECONDS, SEGMENTATION_STEP_SECONDS,
 };
 
 use crate::wav;
@@ -50,7 +51,9 @@ impl SpeakrsMode {
     fn step_seconds(self) -> f64 {
         match self {
             Self::CoremlFast | Self::CudaFast => FAST_SEGMENTATION_STEP_SECONDS,
-            _ => SEGMENTATION_STEP_SECONDS,
+            Self::Coreml => COREML_SEGMENTATION_STEP_SECONDS,
+            Self::Cuda => CUDA_SEGMENTATION_STEP_SECONDS,
+            Self::Cpu => SEGMENTATION_STEP_SECONDS,
         }
     }
 }
@@ -100,11 +103,8 @@ impl fmt::Display for DiarizeMode {
     }
 }
 
-pub fn run(mode: DiarizeMode, wav_files: Vec<PathBuf>) -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(std::io::stderr)
-        .init();
+pub fn run(mode: DiarizeMode, models_dir: Option<PathBuf>, wav_files: Vec<PathBuf>) -> Result<()> {
+    let command_start = Instant::now();
 
     ensure!(!wav_files.is_empty(), "no WAV files specified");
 
@@ -116,14 +116,21 @@ pub fn run(mode: DiarizeMode, wav_files: Vec<PathBuf>) -> Result<()> {
         }
         DiarizeMode::Speakrs(speakrs_mode) => {
             let execution_mode = speakrs_mode.execution_mode();
-            let models_dir = resolve_models_dir();
+
+            let models_dir_start = Instant::now();
+            let models_dir = models_dir.unwrap_or_else(default_models_dir);
+            let models_dir_elapsed = models_dir_start.elapsed();
 
             let step = speakrs_mode.step_seconds();
+            let seg_model_start = Instant::now();
             let mut seg_model = SegmentationModel::with_mode(
                 models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
                 step as f32,
                 execution_mode,
             )?;
+            let seg_model_elapsed = seg_model_start.elapsed();
+
+            let emb_model_start = Instant::now();
             let mut emb_model = EmbeddingModel::with_mode(
                 models_dir
                     .join("wespeaker-voxceleb-resnet34.onnx")
@@ -131,12 +138,25 @@ pub fn run(mode: DiarizeMode, wav_files: Vec<PathBuf>) -> Result<()> {
                     .unwrap(),
                 execution_mode,
             )?;
+            let emb_model_elapsed = emb_model_start.elapsed();
+
+            let pipeline_start = Instant::now();
             let mut pipeline =
                 DiarizationPipeline::new(&mut seg_model, &mut emb_model, &models_dir)?;
+            let pipeline_elapsed = pipeline_start.elapsed();
+
+            let loop_start = Instant::now();
+            tracing::trace!(
+                models_dir_ms = models_dir_elapsed.as_millis(),
+                seg_model_ms = seg_model_elapsed.as_millis(),
+                emb_model_ms = emb_model_elapsed.as_millis(),
+                pipeline_ms = pipeline_elapsed.as_millis(),
+                startup_ms = loop_start.duration_since(command_start).as_millis(),
+                "Startup timing",
+            );
 
             let total = wav_files.len();
             let mut cumulative = 0.0f64;
-            let profile_file_timing = std::env::var_os("SPEAKRS_PROFILE_FILE_TIMING").is_some();
 
             for (i, wav_path) in wav_files.iter().enumerate() {
                 let file_id = wav_path
@@ -171,28 +191,36 @@ pub fn run(mode: DiarizeMode, wav_files: Vec<PathBuf>) -> Result<()> {
                 let output_start = Instant::now();
                 print!("{rttm}");
                 let output_elapsed = output_start.elapsed();
-                if profile_file_timing {
-                    eprintln!(
-                        "    file timing {file_id}: load_ms={} pipeline_ms={} drop_ms={} output_ms={} total_ms={}",
-                        load_elapsed.as_millis(),
-                        (elapsed * 1000.0).round() as u64,
-                        drop_elapsed.as_millis(),
-                        output_elapsed.as_millis(),
-                        file_start.elapsed().as_millis(),
+                tracing::trace!(
+                    %file_id,
+                    load_ms = load_elapsed.as_millis(),
+                    pipeline_ms = (elapsed * 1000.0).round() as u64,
+                    drop_ms = drop_elapsed.as_millis(),
+                    output_ms = output_elapsed.as_millis(),
+                    total_ms = file_start.elapsed().as_millis(),
+                    "File timing",
+                );
+                if i == 0 {
+                    tracing::trace!(
+                        command_to_result_ms = command_start.elapsed().as_millis(),
+                        "First result timing",
                     );
                 }
             }
+
+            tracing::trace!(
+                startup_ms = loop_start.duration_since(command_start).as_millis(),
+                loop_ms = loop_start.elapsed().as_millis(),
+                total_ms = command_start.elapsed().as_millis(),
+                "Command timing",
+            );
         }
     }
 
     Ok(())
 }
 
-fn resolve_models_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("SPEAKRS_MODELS_DIR") {
-        return PathBuf::from(dir);
-    }
-
+fn default_models_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -201,13 +229,16 @@ fn resolve_models_dir() -> PathBuf {
 }
 
 fn run_pyannote_sidecar(device: &str, wav_path: &str) -> Result<String> {
-    let script_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let project_path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
-        .join("scripts/diarize_pyannote.py");
+        .join("scripts/pyannote-bench");
     let output = Command::new("uv")
         .arg("run")
-        .arg(script_path)
+        .arg("--project")
+        .arg(&project_path)
+        .arg("python")
+        .arg(project_path.join("diarize.py"))
         .arg("--device")
         .arg(device)
         .arg(wav_path)

@@ -122,7 +122,10 @@ pub fn run(
         &[
             "uv",
             "run",
-            "scripts/diarize_pyannote.py",
+            "--project",
+            "scripts/pyannote-bench",
+            "python",
+            "scripts/pyannote-bench/diarize.py",
             "--device",
             python_device,
             wav.to_str().unwrap(),
@@ -355,7 +358,10 @@ pub fn compare(source: &str, runs: u32, warmups: u32) -> Result<()> {
             vec![
                 "uv".into(),
                 "run".into(),
-                "scripts/diarize_pyannote.py".into(),
+                "--project".into(),
+                "scripts/pyannote-bench".into(),
+                "python".into(),
+                "scripts/pyannote-bench/diarize.py".into(),
                 "--device".into(),
                 "mps".into(),
                 wav_str.to_string(),
@@ -1257,7 +1263,10 @@ impl BatchCommandRunner {
         let mut command_spec = CommandSpec::new(uv_path.into_os_string())
             .current_dir(root)
             .arg("run")
-            .arg("scripts/diarize_pyannote.py")
+            .arg("--project")
+            .arg("scripts/pyannote-bench")
+            .arg("python")
+            .arg("scripts/pyannote-bench/diarize.py")
             .arg("--device")
             .arg(device.to_string());
         for wav_path in wav_paths {
@@ -1890,8 +1899,8 @@ fn der_skip_reason(
     emb_model: &Path,
 ) -> Option<String> {
     match impl_type {
-        ImplType::Pyannote(_) => (!root.join("scripts/diarize_pyannote.py").exists())
-            .then(|| "scripts/diarize_pyannote.py not found".to_string()),
+        ImplType::Pyannote(_) => (!root.join("scripts/pyannote-bench/diarize.py").exists())
+            .then(|| "scripts/pyannote-bench/diarize.py not found".to_string()),
         ImplType::Speakrs(mode) => {
             #[cfg(not(target_os = "macos"))]
             if mode.starts_with("coreml") {
@@ -2164,7 +2173,7 @@ pub fn run_speakrs_gpu(
     use speakrs::inference::embedding::EmbeddingModel;
     use speakrs::inference::segmentation::SegmentationModel;
     use speakrs::pipeline::{
-        DiarizationPipeline, FAST_SEGMENTATION_STEP_SECONDS, SEGMENTATION_STEP_SECONDS,
+        CUDA_SEGMENTATION_STEP_SECONDS, DiarizationPipeline, FAST_SEGMENTATION_STEP_SECONDS,
     };
 
     use crate::wav;
@@ -2175,7 +2184,7 @@ pub fn run_speakrs_gpu(
     };
     let step = match execution_mode {
         ExecutionMode::CudaFast => FAST_SEGMENTATION_STEP_SECONDS,
-        _ => SEGMENTATION_STEP_SECONDS,
+        _ => CUDA_SEGMENTATION_STEP_SECONDS,
     };
     let mut seg_model = SegmentationModel::with_mode(
         models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
@@ -2194,8 +2203,6 @@ pub fn run_speakrs_gpu(
     let mut per_file_rttm = HashMap::new();
     let total_files = files.len();
     let start = Instant::now();
-    let profile_file_timing = std::env::var_os("SPEAKRS_PROFILE_FILE_TIMING").is_some();
-
     for (i, (wav_path, _)) in files.iter().enumerate() {
         let file_id = wav_path
             .file_stem()
@@ -2226,13 +2233,13 @@ pub fn run_speakrs_gpu(
             total_files,
             now_stamp()
         );
-        if profile_file_timing {
-            eprintln!(
-                "    file timing {file_id}: load_ms={} pipeline_ms={} total_ms={total_elapsed_ms}",
-                load_elapsed.as_millis(),
-                (file_elapsed * 1000.0).round() as u64,
-            );
-        }
+        tracing::trace!(
+            %file_id,
+            load_ms = load_elapsed.as_millis(),
+            pipeline_ms = (file_elapsed * 1000.0).round() as u64,
+            total_ms = total_elapsed_ms,
+            "File timing",
+        );
 
         if let Some(cb) = progress_cb {
             cb(&ProgressUpdate {

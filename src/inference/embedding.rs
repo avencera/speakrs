@@ -1,7 +1,9 @@
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ndarray::{Array1, Array2, Array3, ArrayView2, s};
+#[cfg(feature = "coreml")]
+use objc2_core_ml::MLComputeUnits;
 use ort::memory::Allocator;
 use ort::session::{HasSelectedOutputs, OutputSelector, RunOptions, Session};
 use ort::value::{Tensor, TensorRef};
@@ -43,6 +45,25 @@ pub(crate) struct ChunkEmbeddingSession {
     cached_masks_shape: CachedInputShape,
 }
 
+#[cfg(feature = "coreml")]
+#[derive(Clone)]
+struct ChunkSessionSpec {
+    coreml_path: PathBuf,
+    num_windows: usize,
+    fbank_frames: usize,
+    num_masks: usize,
+}
+
+#[cfg(feature = "coreml")]
+pub(crate) struct ChunkSessionRefs<'a> {
+    pub num_windows: usize,
+    pub fbank_frames: usize,
+    pub num_masks: usize,
+    pub cached_fbank_shape: &'a CachedInputShape,
+    pub cached_masks_shape: &'a CachedInputShape,
+    pub model: &'a SharedCoreMlModel,
+}
+
 pub struct EmbeddingModel {
     model_path: String,
     mode: ExecutionMode,
@@ -69,6 +90,10 @@ pub struct EmbeddingModel {
     cached_fbank_30s_shape: CachedInputShape,
     #[cfg(feature = "coreml")]
     native_multi_mask_session: Option<SharedCoreMlModel>,
+    #[cfg(feature = "coreml")]
+    native_chunk_compute_units: MLComputeUnits,
+    #[cfg(feature = "coreml")]
+    native_chunk_specs: Vec<ChunkSessionSpec>,
     #[cfg(feature = "coreml")]
     native_chunk_sessions: Vec<ChunkEmbeddingSession>,
     multi_mask_session: Option<Session>,
@@ -112,6 +137,15 @@ impl EmbeddingModel {
 
     /// Load the WeSpeaker embedding model with the requested execution mode
     pub fn with_mode(model_path: &str, mode: ExecutionMode) -> Result<Self, ort::Error> {
+        Self::with_mode_and_config(model_path, mode, &crate::pipeline::RuntimeConfig::default())
+    }
+
+    /// Load the WeSpeaker embedding model with the requested execution mode and runtime config
+    pub fn with_mode_and_config(
+        model_path: &str,
+        mode: ExecutionMode,
+        config: &crate::pipeline::RuntimeConfig,
+    ) -> Result<Self, ort::Error> {
         let metadata_path = Path::new(model_path)
             .with_extension("min_num_samples.txt")
             .to_string_lossy()
@@ -121,89 +155,210 @@ impl EmbeddingModel {
         let split_tail_path = split_tail_model_path(model_path, 1);
         let split_tail_batched_path = split_tail_model_path(model_path, CHUNK_SPEAKER_BATCH_SIZE);
         let split_primary_tail_batched_path = split_tail_model_path(model_path, PRIMARY_BATCH_SIZE);
-        let is_coreml = matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast);
         let has_multi_mask = multi_mask_model_path(model_path, 1).is_some_and(|p| p.exists());
-        // split-backend only on CoreML (CPU fbank + GPU tail/multi-mask);
-        // on CUDA the fused model runs the full pipeline on GPU
+        #[cfg(feature = "coreml")]
+        let native_chunk_compute_units = config.chunk_emb_compute_units.to_ml_compute_units();
+        // split-backend: CPU fbank + GPU tail/multi-mask
         let use_split_backend =
-            is_coreml && split_fbank_path.exists() && (split_tail_path.exists() || has_multi_mask);
+            split_fbank_path.exists() && (split_tail_path.exists() || has_multi_mask);
 
-        Ok(Self {
-            model_path: model_path.to_owned(),
-            mode,
-            session: Self::build_session(model_path, Self::single_execution_mode(mode))?,
-            primary_batched_session: batched_model_path(model_path, PRIMARY_BATCH_SIZE)
+        macro_rules! timed {
+            ($expr:expr) => {{
+                let start = std::time::Instant::now();
+                let value = $expr;
+                (value, start.elapsed())
+            }};
+        }
+
+        let (session, session_elapsed) = timed!(Self::build_session(
+            model_path,
+            Self::single_execution_mode(mode)
+        )?);
+        let (primary_batched_session, primary_batched_elapsed) = timed!(
+            batched_model_path(model_path, PRIMARY_BATCH_SIZE)
                 .filter(|path| path.exists())
                 .map(|path| Self::build_batched_session(path.to_str().unwrap(), mode))
-                .transpose()?,
-            split_fbank_session: use_split_backend
+                .transpose()?
+        );
+        let (split_fbank_session, split_fbank_elapsed) = timed!(
+            use_split_backend
                 .then(|| {
                     Self::build_fbank_session(
                         split_fbank_path.to_str().unwrap(),
                         ExecutionMode::Cpu,
                     )
                 })
-                .transpose()?,
-            split_fbank_batched_session: use_split_backend
+                .transpose()?
+        );
+        let (split_fbank_batched_session, split_fbank_batched_elapsed) = timed!(
+            use_split_backend
                 .then_some(split_fbank_batched_path)
                 .filter(|path| path.exists())
                 .map(|path| Self::build_fbank_session(path.to_str().unwrap(), ExecutionMode::Cpu))
-                .transpose()?,
-            split_tail_session: use_split_backend
+                .transpose()?
+        );
+        let (split_tail_session, split_tail_elapsed) = timed!(
+            use_split_backend
                 .then(|| Self::build_session(split_tail_path.to_str().unwrap(), mode))
-                .transpose()?,
-            split_tail_batched_session: use_split_backend
+                .transpose()?
+        );
+        let (split_tail_batched_session, split_tail_batched_elapsed) = timed!(
+            use_split_backend
                 .then_some(split_tail_batched_path)
                 .filter(|path| path.exists())
                 .map(|path| Self::build_session(path.to_str().unwrap(), mode))
-                .transpose()?,
-            split_primary_tail_batched_session: use_split_backend
+                .transpose()?
+        );
+        let (split_primary_tail_batched_session, split_primary_tail_batched_elapsed) = timed!(
+            use_split_backend
                 .then_some(split_primary_tail_batched_path)
                 .filter(|path| path.exists())
                 .map(|path| Self::build_session(path.to_str().unwrap(), mode))
-                .transpose()?,
+                .transpose()?
+        );
+        #[cfg(feature = "coreml")]
+        let (native_tail_session, native_tail_elapsed) = (None, std::time::Duration::ZERO);
+        #[cfg(feature = "coreml")]
+        let (native_tail_batched_session, native_tail_batched_elapsed) =
+            timed!(Option::<CoreMlModel>::None);
+        #[cfg(feature = "coreml")]
+        let (native_tail_primary_batched_session, native_tail_primary_batched_elapsed) =
+            (None, std::time::Duration::ZERO);
+        #[cfg(feature = "coreml")]
+        let (native_fbank_session, native_fbank_elapsed) = (None, std::time::Duration::ZERO);
+        #[cfg(feature = "coreml")]
+        let (native_fbank_batched_session, native_fbank_batched_elapsed) =
+            timed!(Option::<SharedCoreMlModel>::None);
+        #[cfg(feature = "coreml")]
+        let (native_fbank_30s_session, native_fbank_30s_elapsed) =
+            (None, std::time::Duration::ZERO);
+        #[cfg(feature = "coreml")]
+        let (native_multi_mask_session, native_multi_mask_elapsed) =
+            (None, std::time::Duration::ZERO);
+        #[cfg(feature = "coreml")]
+        let (native_chunk_specs, native_chunk_specs_elapsed) =
+            timed!(Self::chunk_session_specs(model_path, mode));
+        #[cfg(feature = "coreml")]
+        let (native_chunk_sessions, native_chunk_sessions_elapsed) =
+            (Vec::new(), std::time::Duration::ZERO);
+        let (multi_mask_session, multi_mask_elapsed) = timed!(
+            multi_mask_model_path(model_path, 1)
+                .filter(|p| p.exists())
+                .map(|p| Self::build_session(p.to_str().unwrap(), mode))
+                .transpose()?
+        );
+        let (multi_mask_batched_session, multi_mask_batched_elapsed) = timed!(
+            multi_mask_model_path(model_path, PRIMARY_BATCH_SIZE)
+                .filter(|p| p.exists())
+                .map(|p| Self::build_session(p.to_str().unwrap(), mode))
+                .transpose()?
+        );
+
+        #[cfg(feature = "coreml")]
+        {
+            let total_ms = (session_elapsed
+                + primary_batched_elapsed
+                + split_fbank_elapsed
+                + split_fbank_batched_elapsed
+                + split_tail_elapsed
+                + split_tail_batched_elapsed
+                + split_primary_tail_batched_elapsed
+                + native_tail_elapsed
+                + native_tail_batched_elapsed
+                + native_tail_primary_batched_elapsed
+                + native_fbank_elapsed
+                + native_fbank_batched_elapsed
+                + native_fbank_30s_elapsed
+                + native_multi_mask_elapsed
+                + native_chunk_specs_elapsed
+                + native_chunk_sessions_elapsed
+                + multi_mask_elapsed
+                + multi_mask_batched_elapsed)
+                .as_millis();
+            tracing::trace!(
+                ort_single_ms = session_elapsed.as_millis(),
+                ort_b64_ms = primary_batched_elapsed.as_millis(),
+                split_fbank_ms = split_fbank_elapsed.as_millis(),
+                split_fbank_b64_ms = split_fbank_batched_elapsed.as_millis(),
+                split_tail_ms = split_tail_elapsed.as_millis(),
+                split_tail_b32_ms = split_tail_batched_elapsed.as_millis(),
+                split_tail_b64_ms = split_primary_tail_batched_elapsed.as_millis(),
+                native_tail_ms = native_tail_elapsed.as_millis(),
+                native_tail_b32_ms = native_tail_batched_elapsed.as_millis(),
+                native_tail_b64_ms = native_tail_primary_batched_elapsed.as_millis(),
+                native_fbank_ms = native_fbank_elapsed.as_millis(),
+                native_fbank_b64_ms = native_fbank_batched_elapsed.as_millis(),
+                native_fbank_30s_ms = native_fbank_30s_elapsed.as_millis(),
+                native_multi_mask_ms = native_multi_mask_elapsed.as_millis(),
+                native_chunk_spec_ms = native_chunk_specs_elapsed.as_millis(),
+                native_chunk_ms = native_chunk_sessions_elapsed.as_millis(),
+                ort_multi_mask_ms = multi_mask_elapsed.as_millis(),
+                ort_multi_mask_b64_ms = multi_mask_batched_elapsed.as_millis(),
+                total_ms,
+                "Embedding model init",
+            );
+        }
+        #[cfg(not(feature = "coreml"))]
+        {
+            let total_ms = (session_elapsed
+                + primary_batched_elapsed
+                + split_fbank_elapsed
+                + split_fbank_batched_elapsed
+                + split_tail_elapsed
+                + split_tail_batched_elapsed
+                + split_primary_tail_batched_elapsed
+                + multi_mask_elapsed
+                + multi_mask_batched_elapsed)
+                .as_millis();
+            tracing::trace!(
+                ort_single_ms = session_elapsed.as_millis(),
+                ort_b64_ms = primary_batched_elapsed.as_millis(),
+                split_fbank_ms = split_fbank_elapsed.as_millis(),
+                split_fbank_b64_ms = split_fbank_batched_elapsed.as_millis(),
+                split_tail_ms = split_tail_elapsed.as_millis(),
+                split_tail_b32_ms = split_tail_batched_elapsed.as_millis(),
+                split_tail_b64_ms = split_primary_tail_batched_elapsed.as_millis(),
+                ort_multi_mask_ms = multi_mask_elapsed.as_millis(),
+                ort_multi_mask_b64_ms = multi_mask_batched_elapsed.as_millis(),
+                total_ms,
+                "Embedding model init",
+            );
+        }
+
+        Ok(Self {
+            model_path: model_path.to_owned(),
+            mode,
+            session,
+            primary_batched_session,
+            split_fbank_session,
+            split_fbank_batched_session,
+            split_tail_session,
+            split_tail_batched_session,
+            split_primary_tail_batched_session,
             #[cfg(feature = "coreml")]
-            native_tail_session: Self::load_native_tail(model_path, mode, 1),
+            native_tail_session,
             #[cfg(feature = "coreml")]
-            native_tail_batched_session: Self::load_native_tail(
-                model_path,
-                mode,
-                CHUNK_SPEAKER_BATCH_SIZE,
-            ),
+            native_tail_batched_session,
             #[cfg(feature = "coreml")]
-            native_tail_primary_batched_session: Self::load_native_tail(
-                model_path,
-                mode,
-                PRIMARY_BATCH_SIZE,
-            ),
+            native_tail_primary_batched_session,
             #[cfg(feature = "coreml")]
-            native_fbank_session: Self::load_native_fbank(model_path, mode, 1),
+            native_fbank_session,
             #[cfg(feature = "coreml")]
-            native_fbank_batched_session: Self::load_native_fbank(
-                model_path,
-                mode,
-                PRIMARY_BATCH_SIZE,
-            ),
+            native_fbank_batched_session,
             #[cfg(feature = "coreml")]
-            native_fbank_30s_session: Self::load_native_fbank_30s(model_path, mode),
+            native_fbank_30s_session,
             #[cfg(feature = "coreml")]
             cached_fbank_30s_shape: CachedInputShape::new("waveform", &[1, 1, 480_000]),
             #[cfg(feature = "coreml")]
-            native_multi_mask_session: Self::load_native_multi_mask(model_path, mode),
+            native_multi_mask_session,
             #[cfg(feature = "coreml")]
-            native_chunk_sessions: Self::load_chunk_sessions(model_path, mode),
-            multi_mask_session: is_coreml
-                .then(|| multi_mask_model_path(model_path, 1))
-                .flatten()
-                .filter(|p| p.exists())
-                .map(|p| Self::build_session(p.to_str().unwrap(), mode))
-                .transpose()?,
-            multi_mask_batched_session: is_coreml
-                .then(|| multi_mask_model_path(model_path, PRIMARY_BATCH_SIZE))
-                .flatten()
-                .filter(|p| p.exists())
-                .map(|p| Self::build_session(p.to_str().unwrap(), mode))
-                .transpose()?,
+            native_chunk_compute_units,
+            #[cfg(feature = "coreml")]
+            native_chunk_specs,
+            #[cfg(feature = "coreml")]
+            native_chunk_sessions,
+            multi_mask_session,
+            multi_mask_batched_session,
             #[cfg(feature = "coreml")]
             cached_tail_fbank_shape: CachedInputShape::new(
                 "fbank",
@@ -309,7 +464,7 @@ impl EmbeddingModel {
         use ort::ep;
         Ok(builder.with_execution_providers([ep::CUDA::default()
             .with_device_id(0)
-            .with_tf32(false)
+            .with_tf32(true)
             .with_conv_algorithm_search(ep::cuda::ConvAlgorithmSearch::Exhaustive)
             .with_conv_max_workspace(true)
             .with_arena_extend_strategy(ep::ArenaExtendStrategy::SameAsRequested)
@@ -360,27 +515,206 @@ impl EmbeddingModel {
         self.min_num_samples
     }
 
+    #[cfg(feature = "coreml")]
+    fn ensure_native_fbank_loaded(&mut self) -> Option<&SharedCoreMlModel> {
+        if self.native_fbank_session.is_none() {
+            let start = std::time::Instant::now();
+            self.native_fbank_session = Self::load_native_fbank(&self.model_path, self.mode, 1);
+            if self.native_fbank_session.is_some() {
+                tracing::trace!(
+                    ms = start.elapsed().as_millis(),
+                    "Lazy loaded native fbank 10s"
+                );
+            }
+        }
+        self.native_fbank_session.as_ref()
+    }
+
+    #[cfg(feature = "coreml")]
+    fn ensure_native_fbank_batched_loaded(&mut self) -> Option<&SharedCoreMlModel> {
+        if self.native_fbank_batched_session.is_none() {
+            let start = std::time::Instant::now();
+            self.native_fbank_batched_session =
+                Self::load_native_fbank(&self.model_path, self.mode, PRIMARY_BATCH_SIZE);
+            if self.native_fbank_batched_session.is_some() {
+                tracing::trace!(
+                    ms = start.elapsed().as_millis(),
+                    "Lazy loaded native fbank b64"
+                );
+            }
+        }
+        self.native_fbank_batched_session.as_ref()
+    }
+
+    #[cfg(feature = "coreml")]
+    fn ensure_native_fbank_30s_loaded(&mut self) -> Option<&SharedCoreMlModel> {
+        if self.native_fbank_30s_session.is_none() {
+            let start = std::time::Instant::now();
+            self.native_fbank_30s_session =
+                Self::load_native_fbank_30s(&self.model_path, self.mode);
+            if self.native_fbank_30s_session.is_some() {
+                tracing::trace!(
+                    ms = start.elapsed().as_millis(),
+                    "Lazy loaded native fbank 30s"
+                );
+            }
+        }
+        self.native_fbank_30s_session.as_ref()
+    }
+
     /// Get the shared fbank 30s model + shape for use from bridge thread
     #[cfg(feature = "coreml")]
-    pub(crate) fn fbank_30s_refs(&self) -> Option<(&SharedCoreMlModel, &CachedInputShape)> {
-        self.native_fbank_30s_session
-            .as_ref()
-            .map(|s| (s, &self.cached_fbank_30s_shape))
+    pub(crate) fn fbank_30s_refs(&mut self) -> Option<(&SharedCoreMlModel, &CachedInputShape)> {
+        let _ = self.ensure_native_fbank_30s_loaded();
+        let session = self.native_fbank_30s_session.as_ref()?;
+        Some((session, &self.cached_fbank_30s_shape))
     }
 
     /// Get 10s fbank model ref for tiling on prep thread
     #[cfg(feature = "coreml")]
-    pub(crate) fn fbank_10s_ref(&self) -> Option<&SharedCoreMlModel> {
+    pub(crate) fn fbank_10s_ref(&mut self) -> Option<&SharedCoreMlModel> {
+        let _ = self.ensure_native_fbank_loaded();
         self.native_fbank_session.as_ref()
+    }
+
+    #[cfg(feature = "coreml")]
+    fn ensure_native_multi_mask_loaded(&mut self) -> Option<&SharedCoreMlModel> {
+        if self.native_multi_mask_session.is_none() {
+            let start = std::time::Instant::now();
+            self.native_multi_mask_session =
+                Self::load_native_multi_mask(&self.model_path, self.mode);
+            if self.native_multi_mask_session.is_some() {
+                tracing::trace!(
+                    ms = start.elapsed().as_millis(),
+                    "Lazy loaded native multi mask"
+                );
+            }
+        }
+        self.native_multi_mask_session.as_ref()
+    }
+
+    #[cfg(feature = "coreml")]
+    fn ensure_native_tail_loaded(&mut self) -> Option<&mut CoreMlModel> {
+        if self.native_tail_session.is_none() {
+            let start = std::time::Instant::now();
+            self.native_tail_session = Self::load_native_tail(&self.model_path, self.mode, 1);
+            if self.native_tail_session.is_some() {
+                tracing::trace!(ms = start.elapsed().as_millis(), "Lazy loaded native tail");
+            }
+        }
+        self.native_tail_session.as_mut()
+    }
+
+    #[cfg(feature = "coreml")]
+    fn ensure_native_tail_batched_loaded(&mut self) -> Option<&mut CoreMlModel> {
+        if self.native_tail_batched_session.is_none() {
+            let start = std::time::Instant::now();
+            self.native_tail_batched_session =
+                Self::load_native_tail(&self.model_path, self.mode, CHUNK_SPEAKER_BATCH_SIZE);
+            if self.native_tail_batched_session.is_some() {
+                tracing::trace!(
+                    ms = start.elapsed().as_millis(),
+                    "Lazy loaded native tail b32"
+                );
+            }
+        }
+        self.native_tail_batched_session.as_mut()
+    }
+
+    #[cfg(feature = "coreml")]
+    fn ensure_native_tail_primary_batched_loaded(&mut self) -> Option<&mut CoreMlModel> {
+        if self.native_tail_primary_batched_session.is_none() {
+            let start = std::time::Instant::now();
+            self.native_tail_primary_batched_session =
+                Self::load_native_tail(&self.model_path, self.mode, PRIMARY_BATCH_SIZE);
+            if self.native_tail_primary_batched_session.is_some() {
+                tracing::trace!(
+                    ms = start.elapsed().as_millis(),
+                    "Lazy loaded native tail b64"
+                );
+            }
+        }
+        self.native_tail_primary_batched_session.as_mut()
+    }
+
+    #[cfg(feature = "coreml")]
+    pub(crate) fn chunk_window_capacity(&self) -> Option<usize> {
+        self.native_chunk_specs.last().map(|spec| spec.num_windows)
+    }
+
+    #[cfg(feature = "coreml")]
+    fn ensure_chunk_session_loaded(&mut self, num_windows: usize) -> bool {
+        let Some(spec) = self
+            .native_chunk_specs
+            .iter()
+            .find(|spec| spec.num_windows >= num_windows)
+            .cloned()
+        else {
+            return false;
+        };
+
+        if self
+            .native_chunk_sessions
+            .iter()
+            .any(|session| session.num_windows == spec.num_windows)
+        {
+            return true;
+        }
+
+        let start = std::time::Instant::now();
+        match Self::load_chunk_session(&spec, self.native_chunk_compute_units) {
+            Ok(session) => {
+                tracing::trace!(
+                    num_windows = spec.num_windows,
+                    ms = start.elapsed().as_millis(),
+                    "Lazy loaded chunk embedding",
+                );
+                self.native_chunk_sessions.push(session);
+                self.native_chunk_sessions
+                    .sort_by_key(|session| session.num_windows);
+                true
+            }
+            Err(err) => {
+                tracing::warn!(
+                    num_windows = spec.num_windows,
+                    "Failed to lazy load chunk embedding: {err}",
+                );
+                false
+            }
+        }
+    }
+
+    #[cfg(feature = "coreml")]
+    pub(crate) fn ensure_all_chunk_sessions_loaded(&mut self) {
+        let windows: Vec<_> = self
+            .native_chunk_specs
+            .iter()
+            .map(|spec| spec.num_windows)
+            .collect();
+        for num_windows in windows {
+            let _ = self.ensure_chunk_session_loaded(num_windows);
+        }
     }
 
     /// Get all chunk session metadata + model refs for pipelined embedding
     #[cfg(feature = "coreml")]
-    pub(crate) fn chunk_session_refs(&self) -> Vec<(usize, usize, usize, &SharedCoreMlModel)> {
+    pub(crate) fn chunk_session_refs(&self) -> Vec<ChunkSessionRefs<'_>> {
         self.native_chunk_sessions
             .iter()
-            .map(|s| (s.num_windows, s.fbank_frames, s.num_masks, &s.model))
+            .map(|s| ChunkSessionRefs {
+                num_windows: s.num_windows,
+                fbank_frames: s.fbank_frames,
+                num_masks: s.num_masks,
+                cached_fbank_shape: &s.cached_fbank_shape,
+                cached_masks_shape: &s.cached_masks_shape,
+                model: &s.model,
+            })
             .collect()
+    }
+
+    #[cfg(feature = "coreml")]
+    pub(crate) fn chunk_compute_units(&self) -> MLComputeUnits {
+        self.native_chunk_compute_units
     }
 
     pub fn primary_batch_size(&self) -> usize {
@@ -444,17 +778,16 @@ impl EmbeddingModel {
             .transpose()?;
         #[cfg(feature = "coreml")]
         {
-            self.native_tail_session = Self::load_native_tail(&self.model_path, self.mode, 1);
-            self.native_tail_batched_session =
-                Self::load_native_tail(&self.model_path, self.mode, CHUNK_SPEAKER_BATCH_SIZE);
-            self.native_tail_primary_batched_session =
-                Self::load_native_tail(&self.model_path, self.mode, PRIMARY_BATCH_SIZE);
-            self.native_fbank_session = Self::load_native_fbank(&self.model_path, self.mode, 1);
-            self.native_fbank_batched_session =
-                Self::load_native_fbank(&self.model_path, self.mode, PRIMARY_BATCH_SIZE);
-            self.native_multi_mask_session =
-                Self::load_native_multi_mask(&self.model_path, self.mode);
-            self.native_chunk_sessions = Self::load_chunk_sessions(&self.model_path, self.mode);
+            // keep existing compute units on reload
+            self.native_tail_session = None;
+            self.native_tail_batched_session = None;
+            self.native_tail_primary_batched_session = None;
+            self.native_fbank_session = None;
+            self.native_fbank_batched_session = None;
+            self.native_fbank_30s_session = None;
+            self.native_multi_mask_session = None;
+            self.native_chunk_specs = Self::chunk_session_specs(&self.model_path, self.mode);
+            self.native_chunk_sessions.clear();
         }
         self.multi_mask_session = multi_mask_model_path(&self.model_path, 1)
             .filter(|p| p.exists())
@@ -471,7 +804,7 @@ impl EmbeddingModel {
     pub fn prefers_chunk_embedding_path(&self) -> bool {
         let ort_split = self.split_fbank_session.is_some() && self.split_tail_session.is_some();
         #[cfg(feature = "coreml")]
-        let ort_split = ort_split || self.native_tail_session.is_some();
+        let ort_split = ort_split || Self::has_native_tail_model(&self.model_path, self.mode, 1);
         ort_split
     }
 
@@ -480,7 +813,7 @@ impl EmbeddingModel {
             return PRIMARY_BATCH_SIZE;
         }
         #[cfg(feature = "coreml")]
-        if self.native_tail_primary_batched_session.is_some() {
+        if Self::has_native_tail_model(&self.model_path, self.mode, PRIMARY_BATCH_SIZE) {
             return PRIMARY_BATCH_SIZE;
         }
         0
@@ -585,7 +918,8 @@ impl EmbeddingModel {
         let fbank = self.compute_chunk_fbank(audio)?;
         let has_batched_tail = self.split_tail_batched_session.is_some();
         #[cfg(feature = "coreml")]
-        let has_batched_tail = has_batched_tail || self.native_tail_batched_session.is_some();
+        let has_batched_tail = has_batched_tail
+            || Self::has_native_tail_model(&self.model_path, self.mode, CHUNK_SPEAKER_BATCH_SIZE);
         if speaker_count == CHUNK_SPEAKER_BATCH_SIZE && has_batched_tail {
             return self.embed_tail_batch(&fbank, &segmentations, clean_masks, audio.len());
         }
@@ -639,7 +973,11 @@ impl EmbeddingModel {
         }
 
         #[cfg(feature = "coreml")]
-        if let Some(ref native) = self.native_fbank_session {
+        {
+            let _ = self.ensure_native_fbank_loaded();
+        }
+        #[cfg(feature = "coreml")]
+        if let Some(native) = self.native_fbank_session.as_ref() {
             let input_data = self.split_waveform_buffer.as_slice().unwrap();
             let (data, out_shape) = native
                 .predict_cached(&[(&self.cached_fbank_single_shape, input_data)])
@@ -667,7 +1005,8 @@ impl EmbeddingModel {
     ) -> Result<Vec<Array2<f32>>, ort::Error> {
         let has_batched = self.split_fbank_batched_session.is_some();
         #[cfg(feature = "coreml")]
-        let has_batched = has_batched || self.native_fbank_batched_session.is_some();
+        let has_batched = has_batched
+            || Self::has_native_fbank_model(&self.model_path, self.mode, PRIMARY_BATCH_SIZE);
         if !has_batched {
             tracing::debug!(
                 count = audios.len(),
@@ -697,7 +1036,11 @@ impl EmbeddingModel {
                 }
 
                 #[cfg(feature = "coreml")]
-                if let Some(ref native) = self.native_fbank_batched_session {
+                {
+                    let _ = self.ensure_native_fbank_batched_loaded();
+                }
+                #[cfg(feature = "coreml")]
+                if let Some(native) = self.native_fbank_batched_session.as_ref() {
                     let input_data = self.split_fbank_batch_buffer.as_slice().unwrap();
                     let (data, out_shape) = native
                         .predict_cached(&[(&self.cached_fbank_batch_shape, input_data)])
@@ -762,7 +1105,11 @@ impl EmbeddingModel {
                 }
 
                 #[cfg(feature = "coreml")]
-                if let Some(ref native) = self.native_fbank_batched_session {
+                {
+                    let _ = self.ensure_native_fbank_batched_loaded();
+                }
+                #[cfg(feature = "coreml")]
+                if let Some(native) = self.native_fbank_batched_session.as_ref() {
                     let input_data = self.split_fbank_batch_buffer.as_slice().unwrap();
                     let (data, out_shape) = native
                         .predict_cached(&[(&self.cached_fbank_batch_shape, input_data)])
@@ -800,21 +1147,23 @@ impl EmbeddingModel {
     pub fn has_batched_fbank(&self) -> bool {
         let has = self.split_fbank_batched_session.is_some();
         #[cfg(feature = "coreml")]
-        let has = has || self.native_fbank_batched_session.is_some();
+        let has =
+            has || Self::has_native_fbank_model(&self.model_path, self.mode, PRIMARY_BATCH_SIZE);
         has
     }
 
     pub fn prefers_multi_mask_path(&self) -> bool {
         let has = self.multi_mask_session.is_some();
         #[cfg(feature = "coreml")]
-        let has = has || self.native_multi_mask_session.is_some();
+        let has = has || Self::has_native_multi_mask_model(&self.model_path, self.mode);
         has
     }
 
     pub fn multi_mask_batch_size(&self) -> usize {
         let has_batched = self.multi_mask_batched_session.is_some();
         #[cfg(feature = "coreml")]
-        let has_batched = has_batched || self.native_multi_mask_session.is_some();
+        let has_batched =
+            has_batched || Self::has_native_multi_mask_model(&self.model_path, self.mode);
         if has_batched {
             MULTI_MASK_BATCH_SIZE
         } else if self.multi_mask_session.is_some() {
@@ -866,7 +1215,11 @@ impl EmbeddingModel {
         let full_mask_batch = MULTI_MASK_BATCH_SIZE * NUM_SPEAKERS;
 
         #[cfg(feature = "coreml")]
-        if let Some(ref native) = self.native_multi_mask_session {
+        {
+            let _ = self.ensure_native_multi_mask_loaded();
+        }
+        #[cfg(feature = "coreml")]
+        if let Some(native) = self.native_multi_mask_session.as_ref() {
             let fbank_data = self.multi_mask_fbank_buffer.as_slice().unwrap();
             let masks_data = self.multi_mask_masks_buffer.as_slice().unwrap();
             let (data, _) = native
@@ -972,7 +1325,11 @@ impl EmbeddingModel {
         }
 
         #[cfg(feature = "coreml")]
-        if let Some(ref mut native) = self.native_tail_primary_batched_session {
+        {
+            let _ = self.ensure_native_tail_primary_batched_loaded();
+        }
+        #[cfg(feature = "coreml")]
+        if let Some(native) = self.native_tail_primary_batched_session.as_mut() {
             let fbank_data = self.split_primary_feature_batch_buffer.as_slice().unwrap();
             let weights_data = self.split_primary_weights_batch_buffer.as_slice().unwrap();
             let (data, _) = native
@@ -1015,7 +1372,11 @@ impl EmbeddingModel {
         );
 
         #[cfg(feature = "coreml")]
-        if let Some(ref mut native) = self.native_tail_session {
+        {
+            let _ = self.ensure_native_tail_loaded();
+        }
+        #[cfg(feature = "coreml")]
+        if let Some(native) = self.native_tail_session.as_mut() {
             let feature_slice = self.split_feature_batch_buffer.slice(s![0..1, .., ..]);
             let weight_slice = self.split_weights_batch_buffer.slice(s![0..1, ..]);
             let fbank_data = feature_slice.as_slice().unwrap();
@@ -1083,7 +1444,11 @@ impl EmbeddingModel {
         }
 
         #[cfg(feature = "coreml")]
-        if let Some(ref mut native) = self.native_tail_batched_session {
+        {
+            let _ = self.ensure_native_tail_batched_loaded();
+        }
+        #[cfg(feature = "coreml")]
+        if let Some(native) = self.native_tail_batched_session.as_mut() {
             let fbank_data = self.split_feature_batch_buffer.as_slice().unwrap();
             let weights_data = self.split_weights_batch_buffer.as_slice().unwrap();
             let batch = CHUNK_SPEAKER_BATCH_SIZE;
@@ -1174,9 +1539,9 @@ impl EmbeddingModel {
         let coreml_path = resolve_path(tail_onnx.to_str().unwrap());
         if !coreml_path.exists() {
             if batch_size == 1 {
-                eprintln!(
-                    "warning: native CoreML tail model not found at {}, falling back to ORT CPU",
-                    coreml_path.display()
+                tracing::warn!(
+                    path = %coreml_path.display(),
+                    "Native CoreML tail model not found, falling back to ORT CPU",
                 );
             }
             return None;
@@ -1184,10 +1549,22 @@ impl EmbeddingModel {
         match CoreMlModel::load(&coreml_path, compute_units, "output", GpuPrecision::Low) {
             Ok(model) => Some(model),
             Err(e) => {
-                eprintln!("warning: failed to load native CoreML tail (batch={batch_size}): {e}");
+                tracing::warn!(batch_size, "Failed to load native CoreML tail: {e}");
                 None
             }
         }
+    }
+
+    #[cfg(feature = "coreml")]
+    fn has_native_tail_model(model_path: &str, mode: ExecutionMode, batch_size: usize) -> bool {
+        let resolve_path = match mode {
+            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => {
+                coreml_model_path as fn(&str) -> std::path::PathBuf
+            }
+            _ => return false,
+        };
+        let tail_onnx = split_tail_model_path(model_path, batch_size);
+        resolve_path(tail_onnx.to_str().unwrap()).exists()
     }
 
     #[cfg(feature = "coreml")]
@@ -1217,10 +1594,23 @@ impl EmbeddingModel {
         ) {
             Ok(model) => Some(model),
             Err(e) => {
-                eprintln!("warning: failed to load native CoreML fbank (batch={batch_size}): {e}");
+                tracing::warn!(batch_size, "Failed to load native CoreML fbank: {e}");
                 None
             }
         }
+    }
+
+    #[cfg(feature = "coreml")]
+    fn has_native_fbank_model(model_path: &str, mode: ExecutionMode, batch_size: usize) -> bool {
+        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
+            return false;
+        }
+        let fbank_onnx = if batch_size == 1 {
+            split_fbank_model_path(model_path)
+        } else {
+            split_fbank_batched_model_path(model_path)
+        };
+        coreml_model_path(fbank_onnx.to_str().unwrap()).exists()
     }
 
     /// Load a 30s fbank model (480000 samples → ~2998 frames)
@@ -1245,7 +1635,7 @@ impl EmbeddingModel {
                 Some(model)
             }
             Err(e) => {
-                eprintln!("warning: failed to load 30s fbank model: {e}");
+                tracing::warn!("Failed to load 30s fbank model: {e}");
                 None
             }
         }
@@ -1257,11 +1647,12 @@ impl EmbeddingModel {
         &mut self,
         audio: &[f32],
     ) -> Option<Result<Array2<f32>, ort::Error>> {
-        let native = self.native_fbank_30s_session.as_ref()?;
         // only use if audio fits in 30s (480000 samples)
         if audio.len() > 480_000 {
             return None;
         }
+        let _ = self.ensure_native_fbank_30s_loaded();
+        let native = self.native_fbank_30s_session.as_ref()?;
         let mut buffer = vec![0.0f32; 480_000];
         buffer[..audio.len()].copy_from_slice(audio);
         let result = native
@@ -1294,21 +1685,24 @@ impl EmbeddingModel {
         ) {
             Ok(model) => Some(model),
             Err(e) => {
-                eprintln!("warning: failed to load native CoreML multi-mask: {e}");
+                tracing::warn!("Failed to load native CoreML multi-mask: {e}");
                 None
             }
         }
     }
 
-    /// Load chunk embedding models for different audio durations (30s, 60s, 120s)
     #[cfg(feature = "coreml")]
-    fn load_chunk_sessions(model_path: &str, mode: ExecutionMode) -> Vec<ChunkEmbeddingSession> {
+    fn has_native_multi_mask_model(model_path: &str, mode: ExecutionMode) -> bool {
         if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
-            return Vec::new();
+            return false;
         }
+        let onnx_path = Path::new(model_path).with_file_name("wespeaker-multimask-tail-b32.onnx");
+        coreml_model_path(onnx_path.to_str().unwrap()).exists()
+    }
 
-        // (step_resnet, num_windows, fbank_frames, num_masks)
-        let configs: &[(usize, usize, usize, usize)] = match mode {
+    #[cfg(feature = "coreml")]
+    fn chunk_session_config(mode: ExecutionMode) -> &'static [(usize, usize, usize, usize)] {
+        match mode {
             ExecutionMode::CoreMlFast => &[
                 (25, 11, 3000, 33),
                 (25, 16, 4000, 48),
@@ -1325,82 +1719,81 @@ impl EmbeddingModel {
                 (12, 84, 8968, 252),
                 (12, 116, 12040, 348),
             ],
-        };
-        let mut sessions = Vec::new();
+        }
+    }
 
-        for &(step_resnet, num_windows, fbank_frames, num_masks) in configs {
-            let stem = format!("wespeaker-chunk-emb-s{step_resnet}-w{num_windows}");
-            let w8a16_path = Path::new(model_path).with_file_name(format!("{stem}-w8a16.mlmodelc"));
-            let fp32_path = Path::new(model_path).with_file_name(format!("{stem}.mlmodelc"));
-
-            // prefer FP32 for now (W8A16 chunk causes 0.8% DER regression)
-            let coreml_path = if fp32_path.exists() {
-                fp32_path
-            } else if w8a16_path.exists() {
-                w8a16_path
-            } else {
-                continue;
-            };
-
-            match SharedCoreMlModel::load(
-                &coreml_path,
-                CoreMlModel::default_compute_units(),
-                "output",
-                GpuPrecision::Low,
-            ) {
-                Ok(model) => {
-                    sessions.push(ChunkEmbeddingSession {
-                        model,
-                        num_windows,
-                        fbank_frames,
-                        num_masks,
-                        cached_fbank_shape: CachedInputShape::new(
-                            "fbank",
-                            &[1, fbank_frames, FBANK_FEATURES],
-                        ),
-                        cached_masks_shape: CachedInputShape::new(
-                            "masks",
-                            &[num_masks, MASK_FRAMES],
-                        ),
-                    });
-                }
-                Err(e) => {
-                    eprintln!("warning: failed to load chunk embedding w{num_windows}: {e}");
-                }
-            }
+    #[cfg(feature = "coreml")]
+    fn chunk_session_specs(model_path: &str, mode: ExecutionMode) -> Vec<ChunkSessionSpec> {
+        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
+            return Vec::new();
         }
 
-        // sort by num_windows ascending for binary search
-        sessions.sort_by_key(|s| s.num_windows);
-        if !sessions.is_empty() {
-            let sizes: Vec<_> = sessions.iter().map(|s| s.num_windows).collect();
-            tracing::info!(?sizes, "Loaded chunk embedding models");
-        }
-        sessions
+        Self::chunk_session_config(mode)
+            .iter()
+            .filter_map(|&(step_resnet, num_windows, fbank_frames, num_masks)| {
+                let stem = format!("wespeaker-chunk-emb-s{step_resnet}-w{num_windows}");
+                let w8a16_path =
+                    Path::new(model_path).with_file_name(format!("{stem}-w8a16.mlmodelc"));
+                let fp32_path = Path::new(model_path).with_file_name(format!("{stem}.mlmodelc"));
+
+                let coreml_path = if fp32_path.exists() {
+                    fp32_path
+                } else if w8a16_path.exists() {
+                    w8a16_path
+                } else {
+                    return None;
+                };
+
+                Some(ChunkSessionSpec {
+                    coreml_path,
+                    num_windows,
+                    fbank_frames,
+                    num_masks,
+                })
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "coreml")]
+    fn load_chunk_session(
+        spec: &ChunkSessionSpec,
+        compute_units: MLComputeUnits,
+    ) -> Result<ChunkEmbeddingSession, crate::inference::coreml::CoreMlError> {
+        let model = SharedCoreMlModel::load(
+            &spec.coreml_path,
+            compute_units,
+            "output",
+            GpuPrecision::Low,
+        )?;
+        Ok(ChunkEmbeddingSession {
+            model,
+            num_windows: spec.num_windows,
+            fbank_frames: spec.fbank_frames,
+            num_masks: spec.num_masks,
+            cached_fbank_shape: CachedInputShape::new(
+                "fbank",
+                &[1, spec.fbank_frames, FBANK_FEATURES],
+            ),
+            cached_masks_shape: CachedInputShape::new("masks", &[spec.num_masks, MASK_FRAMES]),
+        })
     }
 
     /// Find the best chunk session for a given number of windows
     #[cfg(feature = "coreml")]
     pub(crate) fn chunk_session_for_windows(
-        &self,
+        &mut self,
         num_windows: usize,
     ) -> Option<&ChunkEmbeddingSession> {
-        // find the smallest chunk that fits
+        if !self.ensure_chunk_session_loaded(num_windows) {
+            return None;
+        }
         self.native_chunk_sessions
             .iter()
             .find(|s| s.num_windows >= num_windows)
     }
 
-    /// Get the largest available chunk session
     #[cfg(feature = "coreml")]
-    pub(crate) fn largest_chunk_session(&self) -> Option<&ChunkEmbeddingSession> {
-        self.native_chunk_sessions.last()
-    }
-
-    /// Run chunk embedding: full-audio fbank + all per-window masks in one call
-    #[cfg(feature = "coreml")]
-    pub(crate) fn embed_chunk(
-        &self,
+    pub(crate) fn embed_chunk_session(
         session: &ChunkEmbeddingSession,
         full_fbank: &[f32],
         masks: &[f32],

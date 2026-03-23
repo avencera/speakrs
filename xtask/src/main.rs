@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::Result;
+use tracing_subscriber::EnvFilter;
 use xtask::commands;
 use xtask::commands::diarize::DiarizeMode;
 
@@ -48,6 +49,9 @@ enum Command {
     Diarize {
         #[arg(long, default_value = "cpu", value_parser = clap::value_parser!(DiarizeMode))]
         mode: DiarizeMode,
+        /// Path to models directory
+        #[arg(long, env = "SPEAKRS_MODELS_DIR")]
+        models_dir: Option<PathBuf>,
         /// WAV files to diarize
         wav_files: Vec<PathBuf>,
     },
@@ -61,6 +65,15 @@ enum Command {
         iterations: usize,
         #[arg(long, default_value_t = 100)]
         log_every: usize,
+        /// Path to ONNX embedding model
+        #[arg(long)]
+        model_path: Option<PathBuf>,
+        /// Batch size for stream-batched mode
+        #[arg(long)]
+        batch_size: Option<usize>,
+        /// Use default ORT session configuration
+        #[arg(long)]
+        ort_defaults: bool,
     },
     /// Profile pipeline stages
     ProfileStages {
@@ -250,6 +263,10 @@ enum DatasetCmd {
 
 fn main() -> Result<()> {
     color_eyre::install()?;
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
     let cli = Cli::parse();
 
     match cli.cmd {
@@ -414,17 +431,27 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Command::Diarize { mode, wav_files } => commands::diarize::run(mode, wav_files),
+        Command::Diarize {
+            mode,
+            models_dir,
+            wav_files,
+        } => commands::diarize::run(mode, models_dir, wav_files),
         Command::ProfileOrtEmbedding {
             mode,
             wav_path,
             iterations,
             log_every,
+            model_path,
+            batch_size,
+            ort_defaults,
         } => commands::profile_ort_embedding::run(
             &mode,
             &wav_path.to_string_lossy(),
             iterations,
             log_every,
+            model_path,
+            batch_size,
+            ort_defaults,
         ),
         Command::ProfileStages {
             mode,

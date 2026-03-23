@@ -8,6 +8,8 @@ use crate::binarize::{BinarizeConfig, binarize};
 use crate::clustering::ahc::{AhcConfig, cluster as cluster_ahc};
 use crate::clustering::plda::PldaTransform;
 use crate::clustering::vbx::{VbxConfig, cluster_vbx};
+#[cfg(feature = "coreml")]
+use crate::inference::CoreMlComputeUnits;
 use crate::inference::ExecutionMode;
 use crate::inference::embedding::{
     EmbeddingModel, MaskedEmbeddingInput, SplitTailInput, should_use_clean_mask,
@@ -98,10 +100,35 @@ impl PipelineConfig {
     }
 }
 
+/// Runtime configuration for the diarization pipeline
+///
+/// Controls execution parameters that don't affect correctness
+/// but influence performance characteristics
+#[derive(Debug, Clone)]
+pub struct RuntimeConfig {
+    /// Number of parallel chunk embedding workers (default: 1)
+    pub chunk_emb_workers: usize,
+    /// CoreML compute units for chunk embedding (CoreML modes only)
+    #[cfg(feature = "coreml")]
+    pub chunk_emb_compute_units: CoreMlComputeUnits,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            chunk_emb_workers: 1,
+            #[cfg(feature = "coreml")]
+            chunk_emb_compute_units: CoreMlComputeUnits::All,
+        }
+    }
+}
+
 pub const SEGMENTATION_WINDOW_SECONDS: f64 = 10.0;
+pub const SEGMENTATION_STEP_SECONDS: f64 = 1.0;
 // aligned to 8-frame ResNet stride: 96 fbank frames / 8 = 12 ResNet frames
 // closest aligned step below 1.0s, enables chunk embedding
-pub const SEGMENTATION_STEP_SECONDS: f64 = 0.96;
+pub const COREML_SEGMENTATION_STEP_SECONDS: f64 = 0.96;
+pub const CUDA_SEGMENTATION_STEP_SECONDS: f64 = 1.0;
 pub const FAST_SEGMENTATION_STEP_SECONDS: f64 = 2.0;
 pub const FRAME_DURATION_SECONDS: f64 = 0.0619375;
 pub const FRAME_STEP_SECONDS: f64 = 0.016875;
@@ -249,18 +276,26 @@ struct InferenceArtifacts {
 
 #[cfg(feature = "coreml")]
 #[derive(Clone, Copy)]
-struct SharedModelPtr(*const crate::inference::coreml::SharedCoreMlModel);
+struct SharedModelPtr(usize);
 
 #[cfg(feature = "coreml")]
-unsafe impl Send for SharedModelPtr {}
+#[derive(Clone, Copy)]
+struct SharedShapePtr(usize);
 
 #[cfg(feature = "coreml")]
-unsafe impl Sync for SharedModelPtr {}
+#[derive(Clone, Copy)]
+struct ChunkSessionPtr {
+    num_windows: usize,
+    num_masks: usize,
+    cached_fbank_shape: SharedShapePtr,
+    cached_masks_shape: SharedShapePtr,
+    model: SharedModelPtr,
+}
 
 #[cfg(feature = "coreml")]
+#[derive(Clone)]
 struct ChunkEmbeddingResources {
-    chunk_win_capacity: usize,
-    chunk_sessions: Vec<(usize, usize, usize, SharedModelPtr)>,
+    chunk_sessions: Vec<ChunkSessionPtr>,
     chunk_lookup: Vec<(usize, usize, usize)>,
     fbank_30s_ptr: Option<SharedModelPtr>,
     fbank_10s_ptr: Option<SharedModelPtr>,
@@ -282,7 +317,6 @@ struct PreparedChunk {
     masks: Vec<f32>,
     active: Vec<(usize, usize)>,
     num_masks: usize,
-    fbank_frames: usize,
     num_windows: usize,
     bridge_ready_at: std::time::Instant,
     prep_start_at: std::time::Instant,
@@ -296,6 +330,20 @@ struct PreparedBuffers {
     fbank: Vec<f32>,
     masks: Vec<f32>,
     active: Vec<(usize, usize)>,
+}
+
+#[cfg(feature = "coreml")]
+struct EmbeddedChunk {
+    global_start: usize,
+    decoded_chunk: Vec<Array2<f32>>,
+    data: Vec<f32>,
+    buffers: PreparedBuffers,
+    num_masks: usize,
+    num_windows: usize,
+    prep_start_at: std::time::Instant,
+    fbank_done_at: std::time::Instant,
+    prep_done_at: std::time::Instant,
+    predict_us: u64,
 }
 
 #[cfg(feature = "coreml")]
@@ -731,18 +779,30 @@ pub struct OwnedDiarizationPipeline {
     plda: PldaTransform,
     powerset: PowersetMapping,
     mode: ExecutionMode,
+    runtime_config: RuntimeConfig,
 }
 
 impl OwnedDiarizationPipeline {
     /// Download models from HuggingFace and build the pipeline
     #[cfg(feature = "online")]
     pub fn from_pretrained(mode: ExecutionMode) -> Result<Self, PipelineError> {
+        Self::from_pretrained_with_config(mode, RuntimeConfig::default())
+    }
+
+    /// Download models from HuggingFace and build the pipeline with runtime config
+    #[cfg(feature = "online")]
+    pub fn from_pretrained_with_config(
+        mode: ExecutionMode,
+        config: RuntimeConfig,
+    ) -> Result<Self, PipelineError> {
         let manager = crate::models::ModelManager::new()?;
         let models_dir = manager.ensure(mode)?;
 
         let step = match mode {
             ExecutionMode::CoreMlFast | ExecutionMode::CudaFast => FAST_SEGMENTATION_STEP_SECONDS,
-            _ => SEGMENTATION_STEP_SECONDS,
+            ExecutionMode::CoreMl => COREML_SEGMENTATION_STEP_SECONDS,
+            ExecutionMode::Cuda => CUDA_SEGMENTATION_STEP_SECONDS,
+            ExecutionMode::Cpu => SEGMENTATION_STEP_SECONDS,
         };
 
         let seg_model = SegmentationModel::with_mode(
@@ -750,12 +810,13 @@ impl OwnedDiarizationPipeline {
             step as f32,
             mode,
         )?;
-        let emb_model = EmbeddingModel::with_mode(
+        let emb_model = EmbeddingModel::with_mode_and_config(
             models_dir
                 .join("wespeaker-voxceleb-resnet34.onnx")
                 .to_str()
                 .unwrap(),
             mode,
+            &config,
         )?;
         let plda = PldaTransform::from_dir(&models_dir)?;
 
@@ -765,6 +826,7 @@ impl OwnedDiarizationPipeline {
             plda,
             powerset: PowersetMapping::new(3, 2),
             mode,
+            runtime_config: config,
         })
     }
 
@@ -791,9 +853,20 @@ impl OwnedDiarizationPipeline {
 
     /// Build the pipeline from a local models directory
     pub fn from_dir(models_dir: &Path, mode: ExecutionMode) -> Result<Self, PipelineError> {
+        Self::from_dir_with_config(models_dir, mode, RuntimeConfig::default())
+    }
+
+    /// Build the pipeline from a local models directory with runtime config
+    pub fn from_dir_with_config(
+        models_dir: &Path,
+        mode: ExecutionMode,
+        config: RuntimeConfig,
+    ) -> Result<Self, PipelineError> {
         let step = match mode {
             ExecutionMode::CoreMlFast | ExecutionMode::CudaFast => FAST_SEGMENTATION_STEP_SECONDS,
-            _ => SEGMENTATION_STEP_SECONDS,
+            ExecutionMode::CoreMl => COREML_SEGMENTATION_STEP_SECONDS,
+            ExecutionMode::Cuda => CUDA_SEGMENTATION_STEP_SECONDS,
+            ExecutionMode::Cpu => SEGMENTATION_STEP_SECONDS,
         };
 
         let seg_model = SegmentationModel::with_mode(
@@ -801,12 +874,13 @@ impl OwnedDiarizationPipeline {
             step as f32,
             mode,
         )?;
-        let emb_model = EmbeddingModel::with_mode(
+        let emb_model = EmbeddingModel::with_mode_and_config(
             models_dir
                 .join("wespeaker-voxceleb-resnet34.onnx")
                 .to_str()
                 .unwrap(),
             mode,
+            &config,
         )?;
         let plda = PldaTransform::from_dir(models_dir)?;
 
@@ -816,6 +890,7 @@ impl OwnedDiarizationPipeline {
             plda,
             powerset: PowersetMapping::new(3, 2),
             mode,
+            runtime_config: config,
         })
     }
 
@@ -830,6 +905,7 @@ pub struct DiarizationPipeline<'a> {
     plda: PldaTransform,
     powerset: PowersetMapping,
     mode: ExecutionMode,
+    runtime_config: RuntimeConfig,
 }
 
 impl<'a> DiarizationPipeline<'a> {
@@ -838,6 +914,15 @@ impl<'a> DiarizationPipeline<'a> {
         emb_model: &'a mut EmbeddingModel,
         models_dir: &Path,
     ) -> Result<Self, PipelineError> {
+        Self::new_with_config(seg_model, emb_model, models_dir, RuntimeConfig::default())
+    }
+
+    pub fn new_with_config(
+        seg_model: &'a mut SegmentationModel,
+        emb_model: &'a mut EmbeddingModel,
+        models_dir: &Path,
+        config: RuntimeConfig,
+    ) -> Result<Self, PipelineError> {
         let mode = seg_model.mode();
         Ok(Self {
             seg_model,
@@ -845,6 +930,7 @@ impl<'a> DiarizationPipeline<'a> {
             plda: PldaTransform::from_dir(models_dir)?,
             powerset: PowersetMapping::new(3, 2),
             mode,
+            runtime_config: config,
         })
     }
 
@@ -896,6 +982,7 @@ impl OwnedDiarizationPipeline {
             emb_model: &mut self.emb_model,
             plda: &self.plda,
             powerset: &self.powerset,
+            runtime_config: &self.runtime_config,
         }
     }
 }
@@ -907,6 +994,7 @@ impl<'a> DiarizationPipeline<'a> {
             emb_model: self.emb_model,
             plda: &self.plda,
             powerset: &self.powerset,
+            runtime_config: &self.runtime_config,
         }
     }
 }
@@ -916,6 +1004,7 @@ struct PipelineRunner<'a> {
     emb_model: &'a mut EmbeddingModel,
     plda: &'a PldaTransform,
     powerset: &'a PowersetMapping,
+    runtime_config: &'a RuntimeConfig,
 }
 
 impl<'a> PipelineRunner<'a> {
@@ -927,13 +1016,20 @@ impl<'a> PipelineRunner<'a> {
     ) -> Result<DiarizationResult, PipelineError> {
         let run_start = std::time::Instant::now();
         let inference_artifacts = self.run_inference(audio)?;
+        let inference_ms = run_start.elapsed().as_millis();
+        let post_start = std::time::Instant::now();
         let result = self.run_post_inference(inference_artifacts, file_id, config)?;
-        if std::env::var_os("SPEAKRS_PROFILE_FILE_TIMING").is_some() {
-            trace!(
-                pipeline_total_ms = run_start.elapsed().as_millis(),
-                "Pipeline file complete"
-            );
-        }
+        let post_ms = post_start.elapsed().as_millis();
+        let total_ms = run_start.elapsed().as_millis();
+        let audio_secs = audio.len() as f64 / 16_000.0;
+        trace!(
+            %file_id,
+            inference_ms,
+            post_ms,
+            total_ms,
+            audio_secs,
+            "Pipeline complete",
+        );
         Ok(result)
     }
 
@@ -990,32 +1086,44 @@ impl<'a> PipelineRunner<'a> {
     }
 
     #[cfg(feature = "coreml")]
-    fn chunk_embedding_resources(&self) -> Option<ChunkEmbeddingResources> {
-        let session = self.emb_model.largest_chunk_session()?;
-        let chunk_win_capacity = session.num_windows;
-        let chunk_sessions: Vec<(usize, usize, usize, SharedModelPtr)> = self
+    fn emb_worker_count(&self, _est_chunks: usize) -> usize {
+        self.runtime_config.chunk_emb_workers.max(1)
+    }
+
+    #[cfg(feature = "coreml")]
+    fn chunk_embedding_resources(&mut self) -> Option<ChunkEmbeddingResources> {
+        self.emb_model.ensure_all_chunk_sessions_loaded();
+        let _ = self.emb_model.chunk_window_capacity()?;
+        let chunk_sessions: Vec<ChunkSessionPtr> = self
             .emb_model
             .chunk_session_refs()
             .into_iter()
-            .map(|(nw, ff, nm, model)| (nw, ff, nm, SharedModelPtr(model as *const _)))
+            .map(|session| ChunkSessionPtr {
+                num_windows: session.num_windows,
+                num_masks: session.num_masks,
+                cached_fbank_shape: SharedShapePtr(session.cached_fbank_shape as *const _ as usize),
+                cached_masks_shape: SharedShapePtr(session.cached_masks_shape as *const _ as usize),
+                model: SharedModelPtr(session.model as *const _ as usize),
+            })
             .collect();
-        let chunk_lookup = chunk_sessions
-            .iter()
-            .map(|&(nw, ff, nm, _)| (nw, ff, nm))
+        let chunk_lookup = self
+            .emb_model
+            .chunk_session_refs()
+            .into_iter()
+            .map(|session| (session.num_windows, session.fbank_frames, session.num_masks))
             .collect();
 
         Some(ChunkEmbeddingResources {
-            chunk_win_capacity,
             chunk_sessions,
             chunk_lookup,
             fbank_30s_ptr: self
                 .emb_model
                 .fbank_30s_refs()
-                .map(|(model, _)| SharedModelPtr(model as *const _)),
+                .map(|(model, _)| SharedModelPtr(model as *const _ as usize)),
             fbank_10s_ptr: self
                 .emb_model
                 .fbank_10s_ref()
-                .map(|model| SharedModelPtr(model as *const _)),
+                .map(|model| SharedModelPtr(model as *const _ as usize)),
         })
     }
 
@@ -1034,16 +1142,9 @@ impl<'a> PipelineRunner<'a> {
             return Ok(None);
         }
 
-        let Some(chunk_resources) = self.chunk_embedding_resources() else {
+        let Some(chunk_win_capacity) = self.emb_model.chunk_window_capacity() else {
             return Ok(None);
         };
-        let ChunkEmbeddingResources {
-            chunk_win_capacity,
-            chunk_sessions,
-            chunk_lookup,
-            fbank_30s_ptr,
-            fbank_10s_ptr,
-        } = chunk_resources;
 
         let inference_start = std::time::Instant::now();
         let num_speakers = 3;
@@ -1055,9 +1156,15 @@ impl<'a> PipelineRunner<'a> {
         // pipelining threshold: only for files with 3+ chunks
         let total_windows = audio.len().saturating_sub(window_samples) / step_samples + 1;
         let est_chunks = total_windows.div_ceil(chunk_win_capacity);
-        let use_pipelined = !chunk_sessions.is_empty() && est_chunks >= 3;
-        let profile_chunk_timing = std::env::var_os("SPEAKRS_PROFILE_CHUNKS").is_some();
+        let use_pipelined = est_chunks >= 3;
+        let emb_worker_count = self.emb_worker_count(est_chunks);
+        let use_ane_emb_workers = self.emb_model.chunk_compute_units()
+            == objc2_core_ml::MLComputeUnits::CPUAndNeuralEngine
+            && emb_worker_count > 1;
         let seg_warm_start_windows = chunk_win_capacity * 2;
+        let chunk_resources = use_pipelined
+            .then(|| self.chunk_embedding_resources())
+            .flatten();
 
         let (seg_tx, seg_rx) = crossbeam_channel::unbounded::<Array2<f32>>();
         let (chunk_tx, chunk_rx) = crossbeam_channel::bounded::<DecodedChunk>(2);
@@ -1069,6 +1176,7 @@ impl<'a> PipelineRunner<'a> {
         let result: Result<Option<InferenceArtifacts>, PipelineError> =
             std::thread::scope(|scope| {
                 // seg thread: batched CPU-only segmentation feeding the bridge
+                let seg_start = std::time::Instant::now();
                 let seg_handle = scope.spawn(|| -> Result<(), PipelineError> {
                     seg_model.run_streaming_parallel(
                         audio,
@@ -1121,6 +1229,15 @@ impl<'a> PipelineRunner<'a> {
                 let mut embeddings_vec: Vec<SpeakerEmbedding> = Vec::new();
 
                 if use_pipelined {
+                    let Some(ChunkEmbeddingResources {
+                        chunk_sessions,
+                        chunk_lookup,
+                        fbank_30s_ptr,
+                        fbank_10s_ptr,
+                    }) = chunk_resources.clone()
+                    else {
+                        return Ok(None);
+                    };
                     // prep thread computes fbank+masks on CPU while GPU thread
                     // runs chunk embedding — overlapping CPU prep for chunk N+1
                     // with GPU inference for chunk N
@@ -1191,7 +1308,10 @@ impl<'a> PipelineRunner<'a> {
 
                             if chunk_audio.len() <= 480_000 {
                                 if let Some(SharedModelPtr(ptr)) = fbank_30s_ptr {
-                                    let model = unsafe { &*ptr };
+                                    let model = unsafe {
+                                        &*(ptr
+                                            as *const crate::inference::coreml::SharedCoreMlModel)
+                                    };
                                     fbank_30s_buf[..chunk_audio.len()].copy_from_slice(chunk_audio);
                                     fbank_30s_buf[chunk_audio.len()..].fill(0.0);
                                     let (data, out_shape) = model
@@ -1208,7 +1328,9 @@ impl<'a> PipelineRunner<'a> {
                                     }
                                 }
                             } else if let Some(SharedModelPtr(ptr)) = fbank_10s_ptr {
-                                let model = unsafe { &*ptr };
+                                let model = unsafe {
+                                    &*(ptr as *const crate::inference::coreml::SharedCoreMlModel)
+                                };
                                 let mut fb_off = 0usize;
                                 let mut au_off = 0usize;
                                 while fb_off < sess_fbank_frames && au_off < chunk_audio.len() {
@@ -1284,7 +1406,6 @@ impl<'a> PipelineRunner<'a> {
                                     masks: buffers.masks,
                                     active: buffers.active,
                                     num_masks: sess_num_masks,
-                                    fbank_frames: sess_fbank_frames,
                                     num_windows: wins,
                                     bridge_ready_at,
                                     prep_start_at,
@@ -1298,12 +1419,6 @@ impl<'a> PipelineRunner<'a> {
                         }
                         Ok(prep_stats)
                     });
-
-                    // GPU thread (main scope): consume prepared chunks
-                    let mut shape_cache: std::collections::HashMap<
-                        (usize, usize),
-                        (CachedInputShape, CachedInputShape),
-                    > = std::collections::HashMap::new();
 
                     let mut gpu_predict_us = 0u64;
                     let mut gpu_wait_us = 0u64;
@@ -1327,130 +1442,262 @@ impl<'a> PipelineRunner<'a> {
                         }
                     };
 
-                    loop {
-                        let wait_start = std::time::Instant::now();
-                        let prepared = match prep_rx.recv() {
-                            Ok(p) => p,
-                            Err(_) => break,
-                        };
-                        let wait_end = std::time::Instant::now();
-                        gpu_wait_us += wait_end.duration_since(wait_start).as_micros() as u64;
-                        bridge_wait_us +=
-                            overlap_us(wait_start, wait_end, wait_start, prepared.bridge_ready_at);
-                        prep_queue_wait_us += overlap_us(
-                            wait_start,
-                            wait_end,
-                            prepared.bridge_ready_at,
-                            prepared.prep_start_at,
-                        );
-                        prep_fbank_wait_us += overlap_us(
-                            wait_start,
-                            wait_end,
-                            prepared.prep_start_at,
-                            prepared.fbank_done_at,
-                        );
-                        prep_mask_wait_us += overlap_us(
-                            wait_start,
-                            wait_end,
-                            prepared.fbank_done_at,
-                            prepared.prep_done_at,
-                        );
-                        let PreparedChunk {
-                            global_start,
-                            decoded_chunk,
-                            fbank,
-                            masks,
-                            active,
-                            num_masks,
-                            fbank_frames,
-                            num_windows,
-                            bridge_ready_at: _,
-                            prep_start_at: _,
-                            fbank_done_at: _,
-                            prep_done_at: _,
-                        } = prepared;
+                    let mut decoded_slots = use_ane_emb_workers.then(|| {
+                        std::iter::repeat_with(|| None)
+                            .take(total_windows)
+                            .collect::<Vec<Option<Array2<f32>>>>()
+                    });
 
-                        let (fbank_shape, masks_shape) = shape_cache
-                            .entry((fbank_frames, num_masks))
-                            .or_insert_with(|| {
-                                (
-                                    CachedInputShape::new("fbank", &[1, fbank_frames, 80]),
-                                    CachedInputShape::new("masks", &[num_masks, 589]),
-                                )
-                            });
+                    if use_ane_emb_workers {
+                        let (emb_tx, emb_rx) = crossbeam_channel::unbounded::<EmbeddedChunk>();
+                        let mut emb_handles = Vec::with_capacity(emb_worker_count);
 
-                        let model_ptr = chunk_sessions
-                            .iter()
-                            .find(|&&(nw, _, _, _)| nw >= num_windows)
-                            .map(|&(_, _, _, SharedModelPtr(ptr))| ptr)
-                            .unwrap();
-                        let model = unsafe { &*model_ptr };
+                        for _ in 0..emb_worker_count {
+                            let prep_rx = prep_rx.clone();
+                            let emb_tx = emb_tx.clone();
+                            let chunk_sessions = chunk_sessions.clone();
+                            emb_handles.push(scope.spawn(move || -> Result<(), PipelineError> {
+                                while let Ok(prepared) = prep_rx.recv() {
+                                    let session = chunk_sessions
+                                        .iter()
+                                        .find(|session| session.num_windows >= prepared.num_windows)
+                                        .copied()
+                                        .ok_or_else(|| {
+                                            PipelineError::Other(format!(
+                                                "missing chunk session for {} windows",
+                                                prepared.num_windows
+                                            ))
+                                        })?;
+                                    let model = unsafe {
+                                        &*(session.model.0
+                                            as *const crate::inference::coreml::SharedCoreMlModel)
+                                    };
+                                    let fbank_shape = unsafe {
+                                        &*(session.cached_fbank_shape.0
+                                            as *const crate::inference::coreml::CachedInputShape)
+                                    };
+                                    let masks_shape = unsafe {
+                                        &*(session.cached_masks_shape.0
+                                            as *const crate::inference::coreml::CachedInputShape)
+                                    };
+                                    let PreparedChunk {
+                                        global_start,
+                                        decoded_chunk,
+                                        fbank,
+                                        masks,
+                                        active,
+                                        num_masks,
+                                        num_windows,
+                                        bridge_ready_at: _,
+                                        prep_start_at,
+                                        fbank_done_at,
+                                        prep_done_at,
+                                    } = prepared;
+                                    let predict_start = std::time::Instant::now();
+                                    let (data, _) = model
+                                        .predict_cached(&[
+                                            (fbank_shape, &fbank),
+                                            (masks_shape, &masks),
+                                        ])
+                                        .map_err(|e| PipelineError::Other(e.to_string()))?;
+                                    let predict_us = predict_start.elapsed().as_micros() as u64;
 
-                        let predict_start = std::time::Instant::now();
-                        let (data, _) = model
-                            .predict_cached(&[(fbank_shape, &fbank), (masks_shape, &masks)])
-                            .map_err(|e| PipelineError::Other(e.to_string()))?;
-                        let predict_us = predict_start.elapsed().as_micros() as u64;
-                        gpu_predict_us += predict_us;
+                                    if emb_tx
+                                        .send(EmbeddedChunk {
+                                            global_start,
+                                            decoded_chunk,
+                                            data,
+                                            buffers: PreparedBuffers {
+                                                fbank,
+                                                masks,
+                                                active,
+                                            },
+                                            num_masks,
+                                            num_windows,
+                                            prep_start_at,
+                                            fbank_done_at,
+                                            prep_done_at,
+                                            predict_us,
+                                        })
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                                Ok(())
+                            }));
+                        }
+                        drop(emb_tx);
 
-                        let unpack_start = std::time::Instant::now();
-                        let batch_emb = Array2::from_shape_vec((num_masks, 256), data).unwrap();
+                        while let Ok(embedded) = emb_rx.recv() {
+                            gpu_predict_us += embedded.predict_us;
 
-                        for &(local, speaker_idx) in &active {
-                            let mask_idx = local * num_speakers + speaker_idx;
-                            embeddings_vec.push(SpeakerEmbedding {
-                                chunk_idx: global_start + local,
-                                speaker_idx,
-                                embedding: batch_emb.row(mask_idx).to_vec(),
-                            });
+                            let unpack_start = std::time::Instant::now();
+                            let batch_emb =
+                                Array2::from_shape_vec((embedded.num_masks, 256), embedded.data)
+                                    .unwrap();
+
+                            for &(local, speaker_idx) in &embedded.buffers.active {
+                                let mask_idx = local * num_speakers + speaker_idx;
+                                embeddings_vec.push(SpeakerEmbedding {
+                                    chunk_idx: embedded.global_start + local,
+                                    speaker_idx,
+                                    embedding: batch_emb.row(mask_idx).to_vec(),
+                                });
+                            }
+
+                            if let Some(slots) = decoded_slots.as_mut() {
+                                for (local, decoded) in
+                                    embedded.decoded_chunk.into_iter().enumerate()
+                                {
+                                    slots[embedded.global_start + local] = Some(decoded);
+                                }
+                            }
+
+                            let _ = recycle_tx.try_send(embedded.buffers);
+                            gpu_unpack_us += unpack_start.elapsed().as_micros() as u64;
+                            gpu_chunks += 1;
+
+                            trace!(
+                                chunk_start = embedded.global_start,
+                                chunk_windows = embedded.num_windows,
+                                prep_fbank_ms = embedded
+                                    .fbank_done_at
+                                    .duration_since(embedded.prep_start_at)
+                                    .as_millis(),
+                                prep_mask_ms = embedded
+                                    .prep_done_at
+                                    .duration_since(embedded.fbank_done_at)
+                                    .as_millis(),
+                                gpu_predict_ms = embedded.predict_us / 1000,
+                                "Chunk pipeline profile"
+                            );
                         }
 
-                        decoded_all.extend(decoded_chunk);
-                        let _ = recycle_tx.try_send(PreparedBuffers {
-                            fbank,
-                            masks,
-                            active,
-                        });
-                        gpu_unpack_us += unpack_start.elapsed().as_micros() as u64;
-                        gpu_chunks += 1;
+                        for handle in emb_handles {
+                            handle.join().unwrap()?;
+                        }
+                    } else {
+                        loop {
+                            let wait_start = std::time::Instant::now();
+                            let prepared = match prep_rx.recv() {
+                                Ok(p) => p,
+                                Err(_) => break,
+                            };
+                            let wait_end = std::time::Instant::now();
+                            gpu_wait_us += wait_end.duration_since(wait_start).as_micros() as u64;
+                            bridge_wait_us += overlap_us(
+                                wait_start,
+                                wait_end,
+                                wait_start,
+                                prepared.bridge_ready_at,
+                            );
+                            prep_queue_wait_us += overlap_us(
+                                wait_start,
+                                wait_end,
+                                prepared.bridge_ready_at,
+                                prepared.prep_start_at,
+                            );
+                            prep_fbank_wait_us += overlap_us(
+                                wait_start,
+                                wait_end,
+                                prepared.prep_start_at,
+                                prepared.fbank_done_at,
+                            );
+                            prep_mask_wait_us += overlap_us(
+                                wait_start,
+                                wait_end,
+                                prepared.fbank_done_at,
+                                prepared.prep_done_at,
+                            );
+                            let session = chunk_sessions
+                                .iter()
+                                .find(|session| session.num_windows >= prepared.num_windows)
+                                .copied()
+                                .ok_or_else(|| {
+                                    PipelineError::Other(format!(
+                                        "missing chunk session for {} windows",
+                                        prepared.num_windows
+                                    ))
+                                })?;
+                            let model = unsafe {
+                                &*(session.model.0
+                                    as *const crate::inference::coreml::SharedCoreMlModel)
+                            };
+                            let fbank_shape = unsafe {
+                                &*(session.cached_fbank_shape.0
+                                    as *const crate::inference::coreml::CachedInputShape)
+                            };
+                            let masks_shape = unsafe {
+                                &*(session.cached_masks_shape.0
+                                    as *const crate::inference::coreml::CachedInputShape)
+                            };
+                            let PreparedChunk {
+                                global_start,
+                                decoded_chunk,
+                                fbank,
+                                masks,
+                                active,
+                                num_masks: _,
+                                num_windows,
+                                bridge_ready_at,
+                                prep_start_at,
+                                fbank_done_at,
+                                prep_done_at,
+                            } = prepared;
 
-                        if profile_chunk_timing {
+                            let predict_start = std::time::Instant::now();
+                            let (data, _) = model
+                                .predict_cached(&[(fbank_shape, &fbank), (masks_shape, &masks)])
+                                .map_err(|e| PipelineError::Other(e.to_string()))?;
+                            let predict_us = predict_start.elapsed().as_micros() as u64;
+                            gpu_predict_us += predict_us;
+
+                            let unpack_start = std::time::Instant::now();
+                            let batch_emb =
+                                Array2::from_shape_vec((session.num_masks, 256), data).unwrap();
+
+                            for &(local, speaker_idx) in &active {
+                                let mask_idx = local * num_speakers + speaker_idx;
+                                embeddings_vec.push(SpeakerEmbedding {
+                                    chunk_idx: global_start + local,
+                                    speaker_idx,
+                                    embedding: batch_emb.row(mask_idx).to_vec(),
+                                });
+                            }
+
+                            decoded_all.extend(decoded_chunk);
+                            let _ = recycle_tx.try_send(PreparedBuffers {
+                                fbank,
+                                masks,
+                                active,
+                            });
+                            gpu_unpack_us += unpack_start.elapsed().as_micros() as u64;
+                            gpu_chunks += 1;
+
                             trace!(
-                                chunk_start = prepared.global_start,
-                                chunk_windows = prepared.num_windows,
+                                chunk_start = global_start,
+                                chunk_windows = num_windows,
                                 gpu_wait_ms = wait_end.duration_since(wait_start).as_millis(),
-                                bridge_wait_ms = overlap_us(
-                                    wait_start,
-                                    wait_end,
-                                    wait_start,
-                                    prepared.bridge_ready_at,
-                                ) / 1000,
+                                bridge_wait_ms =
+                                    overlap_us(wait_start, wait_end, wait_start, bridge_ready_at,)
+                                        / 1000,
                                 prep_queue_wait_ms = overlap_us(
                                     wait_start,
                                     wait_end,
-                                    prepared.bridge_ready_at,
-                                    prepared.prep_start_at,
+                                    bridge_ready_at,
+                                    prep_start_at,
                                 ) / 1000,
-                                prep_fbank_wait_ms = overlap_us(
-                                    wait_start,
-                                    wait_end,
-                                    prepared.prep_start_at,
-                                    prepared.fbank_done_at,
-                                ) / 1000,
-                                prep_mask_wait_ms = overlap_us(
-                                    wait_start,
-                                    wait_end,
-                                    prepared.fbank_done_at,
-                                    prepared.prep_done_at,
-                                ) / 1000,
-                                prep_fbank_ms = prepared
-                                    .fbank_done_at
-                                    .duration_since(prepared.prep_start_at)
-                                    .as_millis(),
-                                prep_mask_ms = prepared
-                                    .prep_done_at
-                                    .duration_since(prepared.fbank_done_at)
-                                    .as_millis(),
+                                prep_fbank_wait_ms =
+                                    overlap_us(wait_start, wait_end, prep_start_at, fbank_done_at,)
+                                        / 1000,
+                                prep_mask_wait_ms =
+                                    overlap_us(wait_start, wait_end, fbank_done_at, prep_done_at,)
+                                        / 1000,
+                                prep_fbank_ms =
+                                    fbank_done_at.duration_since(prep_start_at).as_millis(),
+                                prep_mask_ms =
+                                    prep_done_at.duration_since(fbank_done_at).as_millis(),
                                 gpu_predict_ms = predict_us / 1000,
                                 "Chunk pipeline profile"
                             );
@@ -1458,6 +1705,29 @@ impl<'a> PipelineRunner<'a> {
                     }
 
                     let prep_stats = prep_handle.join().unwrap()?;
+                    if let Some(slots) = decoded_slots.take() {
+                        decoded_all =
+                            slots
+                                .into_iter()
+                                .collect::<Option<Vec<_>>>()
+                                .ok_or_else(|| {
+                                    PipelineError::Other(
+                                        "missing decoded chunk output from ANE workers".to_string(),
+                                    )
+                                })?;
+                    }
+                    trace!(
+                        gpu_chunks,
+                        gpu_predict_ms = gpu_predict_us / 1000,
+                        gpu_wait_ms = gpu_wait_us / 1000,
+                        bridge_wait_ms = bridge_wait_us / 1000,
+                        prep_queue_wait_ms = prep_queue_wait_us / 1000,
+                        prep_fbank_wait_ms = prep_fbank_wait_us / 1000,
+                        prep_mask_wait_ms = prep_mask_wait_us / 1000,
+                        gpu_unpack_ms = gpu_unpack_us / 1000,
+                        emb_wall_ms = emb_start.elapsed().as_millis(),
+                        "EMB breakdown",
+                    );
                     debug!(
                         gpu_chunks,
                         gpu_predict_ms = gpu_predict_us / 1000,
@@ -1475,6 +1745,10 @@ impl<'a> PipelineRunner<'a> {
                 } else {
                     // fallback: sequential fbank + masks + embed (small files)
                     let chunk_rx = chunk_rx_opt.take().unwrap();
+                    let mut seq_fbank_us = 0u64;
+                    let mut seq_mask_us = 0u64;
+                    let mut seq_predict_us = 0u64;
+                    let mut seq_chunks = 0u32;
 
                     for DecodedChunk {
                         global_start,
@@ -1499,6 +1773,7 @@ impl<'a> PipelineRunner<'a> {
                         let chunk_audio = &audio[chunk_audio_start..chunk_audio_end];
 
                         let mut fbank = vec![0.0f32; sess_fbank_frames * 80];
+                        let fbank_start = std::time::Instant::now();
 
                         #[cfg(feature = "coreml")]
                         if let Some(ref pre_data) = precomputed_fbank {
@@ -1549,7 +1824,10 @@ impl<'a> PipelineRunner<'a> {
                             }
                         }
 
+                        seq_fbank_us += fbank_start.elapsed().as_micros() as u64;
+
                         // masks
+                        let mask_start = std::time::Instant::now();
                         let mut masks = vec![0.0f32; sess_num_masks * 589];
                         let mut active: Vec<(usize, usize)> = Vec::new();
                         for (local, decoded) in decoded_chunk.iter().enumerate() {
@@ -1577,8 +1855,14 @@ impl<'a> PipelineRunner<'a> {
                             }
                         }
 
+                        seq_mask_us += mask_start.elapsed().as_micros() as u64;
+
+                        let predict_start = std::time::Instant::now();
                         let session = emb_model.chunk_session_for_windows(wins).unwrap();
-                        let batch_emb = emb_model.embed_chunk(session, &fbank, &masks)?;
+                        let batch_emb =
+                            EmbeddingModel::embed_chunk_session(session, &fbank, &masks)?;
+                        seq_predict_us += predict_start.elapsed().as_micros() as u64;
+                        seq_chunks += 1;
 
                         for &(local, speaker_idx) in &active {
                             let mask_idx = local * num_speakers + speaker_idx;
@@ -1591,12 +1875,22 @@ impl<'a> PipelineRunner<'a> {
 
                         decoded_all.extend(decoded_chunk);
                     }
+                    trace!(
+                        seq_chunks,
+                        fbank_ms = seq_fbank_us / 1000,
+                        mask_ms = seq_mask_us / 1000,
+                        predict_ms = seq_predict_us / 1000,
+                        wall_ms = emb_start.elapsed().as_millis(),
+                        "EMB sequential",
+                    );
                 }
 
                 let emb_elapsed = emb_start.elapsed();
 
                 seg_handle.join().unwrap()?;
+                let seg_elapsed = seg_start.elapsed();
                 bridge_handle.join().unwrap();
+                trace!(seg_wall_ms = seg_elapsed.as_millis(), "SEG wall");
 
                 let num_chunks = decoded_all.len();
                 let Some(artifacts) = build_chunk_artifacts(
