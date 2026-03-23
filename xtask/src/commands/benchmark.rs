@@ -685,18 +685,35 @@ fn resolve_impl(name: &str) -> Option<usize> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn der(
-    dataset_id: &str,
-    file: Option<PathBuf>,
-    rttm: Option<PathBuf>,
-    max_files: u32,
-    max_minutes: u32,
-    description: Option<&str>,
-    impls: &[String],
-    no_preflight: bool,
-    seg_batch_size: Option<u32>,
-    emb_batch_size: Option<u32>,
-) -> Result<()> {
+pub struct DerArgs {
+    pub dataset_id: String,
+    pub file: Option<PathBuf>,
+    pub rttm: Option<PathBuf>,
+    pub max_files: u32,
+    pub max_minutes: u32,
+    pub description: Option<String>,
+    pub impls: Vec<String>,
+    pub no_preflight: bool,
+    pub seg_batch_size: Option<u32>,
+    pub emb_batch_size: Option<u32>,
+    pub sleep_between: Option<u64>,
+}
+
+pub fn der(args: DerArgs) -> Result<()> {
+    let DerArgs {
+        ref dataset_id,
+        ref file,
+        ref rttm,
+        max_files,
+        max_minutes,
+        ref description,
+        ref impls,
+        no_preflight,
+        seg_batch_size,
+        emb_batch_size,
+        sleep_between,
+    } = args;
+
     if let Some(seg) = seg_batch_size {
         unsafe { std::env::set_var("PYANNOTE_SEGMENTATION_BATCH_SIZE", seg.to_string()) };
     }
@@ -738,7 +755,7 @@ pub fn der(
 
     // single-file mode: --file and --rttm provided directly
     let single_file_mode = file.is_some();
-    if let Some(ref wav_path) = file {
+    if let Some(wav_path) = file {
         let rttm_path = rttm
             .as_ref()
             .ok_or_else(|| color_eyre::eyre::eyre!("--rttm is required when using --file"))?;
@@ -794,8 +811,8 @@ pub fn der(
 
     // collect all (dataset_name, files) pairs to evaluate
     let eval_sets: Vec<(String, Vec<(PathBuf, PathBuf)>)> = if single_file_mode {
-        let wav_path = file.unwrap();
-        let rttm_path = rttm.unwrap();
+        let wav_path = file.clone().unwrap();
+        let rttm_path = rttm.clone().unwrap();
         let display_name = wav_path
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
@@ -857,7 +874,7 @@ pub fn der(
         };
         fs::create_dir_all(&run_dir)?;
 
-        if let Some(desc) = description {
+        if let Some(desc) = description.as_deref() {
             fs::write(run_dir.join("README.md"), format!("{desc}\n"))?;
         }
 
@@ -868,15 +885,16 @@ pub fn der(
         println!("Run ID: {run_id}");
         println!();
 
-        let (implementations, all_results) = run_der_implementations(
-            &root,
+        let (implementations, all_results) = run_der_implementations(&DerRunContext {
+            root: &root,
             files,
-            &seg_model,
-            &emb_model,
+            seg_model: &seg_model,
+            emb_model: &emb_model,
             impls,
             total_audio_seconds,
-            &preflight_failures,
-        )?;
+            preflight_failures: &preflight_failures,
+            sleep_between: sleep_between.map(Duration::from_secs),
+        })?;
 
         DerResultsWriter {
             run_dir: &run_dir,
@@ -886,7 +904,7 @@ pub fn der(
             files,
             total_audio_minutes,
             collar: 0.0,
-            description,
+            description: description.as_deref(),
             max_files,
             max_minutes,
             metadata: &metadata,
@@ -902,15 +920,28 @@ type DerResults = (
     HashMap<String, DerImplResult>,
 );
 
-fn run_der_implementations(
-    root: &Path,
-    files: &[(PathBuf, PathBuf)],
-    seg_model: &Path,
-    emb_model: &Path,
-    impls: &[String],
+struct DerRunContext<'a> {
+    root: &'a Path,
+    files: &'a [(PathBuf, PathBuf)],
+    seg_model: &'a Path,
+    emb_model: &'a Path,
+    impls: &'a [String],
     total_audio_seconds: f64,
-    preflight_failures: &HashMap<String, String>,
-) -> Result<DerResults> {
+    preflight_failures: &'a HashMap<String, String>,
+    sleep_between: Option<Duration>,
+}
+
+fn run_der_implementations(ctx: &DerRunContext) -> Result<DerResults> {
+    let DerRunContext {
+        root,
+        files,
+        seg_model,
+        emb_model,
+        impls,
+        total_audio_seconds,
+        preflight_failures,
+        sleep_between,
+    } = ctx;
     let speakrs_binary = root.join("target/release/xtask");
     let pyannote_rs_binary =
         root.join("scripts/pyannote_rs_bench/target/release/diarize-pyannote-rs");
@@ -1046,6 +1077,14 @@ fn run_der_implementations(
                 acc.file_count,
             ),
         );
+
+        if let Some(delay) = *sleep_between {
+            println!(
+                "  Sleeping {}s before next implementation...",
+                delay.as_secs()
+            );
+            std::thread::sleep(delay);
+        }
     }
 
     Ok((implementations, all_results))
@@ -2155,6 +2194,7 @@ pub fn run_speakrs_gpu(
     let mut per_file_rttm = HashMap::new();
     let total_files = files.len();
     let start = Instant::now();
+    let profile_file_timing = std::env::var_os("SPEAKRS_PROFILE_FILE_TIMING").is_some();
 
     for (i, (wav_path, _)) in files.iter().enumerate() {
         let file_id = wav_path
@@ -2162,12 +2202,16 @@ pub fn run_speakrs_gpu(
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "file1".to_string());
 
+        let file_start = Instant::now();
+        let load_start = Instant::now();
         let (samples, sr) = wav::load_wav_samples(&wav_path.to_string_lossy())?;
+        let load_elapsed = load_start.elapsed();
         color_eyre::eyre::ensure!(sr == 16000, "expected 16kHz WAV, got {sr}Hz");
 
-        let file_start = Instant::now();
+        let pipeline_start = Instant::now();
         let result = pipeline.run_with_file_id(&samples, &file_id)?;
-        let file_elapsed = file_start.elapsed().as_secs_f64();
+        let file_elapsed = pipeline_start.elapsed().as_secs_f64();
+        let total_elapsed_ms = file_start.elapsed().as_millis();
 
         per_file_rttm.insert(file_id.clone(), result.rttm);
 
@@ -2182,6 +2226,13 @@ pub fn run_speakrs_gpu(
             total_files,
             now_stamp()
         );
+        if profile_file_timing {
+            eprintln!(
+                "    file timing {file_id}: load_ms={} pipeline_ms={} total_ms={total_elapsed_ms}",
+                load_elapsed.as_millis(),
+                (file_elapsed * 1000.0).round() as u64,
+            );
+        }
 
         if let Some(cb) = progress_cb {
             cb(&ProgressUpdate {

@@ -165,6 +165,9 @@ enum BenchCmd {
         /// Embedding batch size (sets PYANNOTE_EMBEDDING_BATCH_SIZE)
         #[arg(long)]
         emb_batch_size: Option<u32>,
+        /// Seconds to sleep between implementations (for thermal cooldown)
+        #[arg(long, short = 's')]
+        sleep_between: Option<u64>,
     },
 }
 
@@ -294,18 +297,20 @@ fn main() -> Result<()> {
                 no_preflight,
                 seg_batch_size,
                 emb_batch_size,
-            } => commands::benchmark::der(
-                &dataset,
+                sleep_between,
+            } => commands::benchmark::der(commands::benchmark::DerArgs {
+                dataset_id: dataset,
                 file,
                 rttm,
-                max_files.unwrap_or(u32::MAX),
-                max_minutes.unwrap_or(u32::MAX),
-                description.as_deref(),
-                &impls,
+                max_files: max_files.unwrap_or(u32::MAX),
+                max_minutes: max_minutes.unwrap_or(u32::MAX),
+                description,
+                impls,
                 no_preflight,
                 seg_batch_size,
                 emb_batch_size,
-            ),
+                sleep_between,
+            }),
         },
         Command::Dstack { cmd } => match cmd {
             DstackCmd::Bench {
