@@ -2,6 +2,7 @@ use crossbeam_channel::Sender;
 use ndarray::Array2;
 use ort::session::Session;
 use ort::value::TensorRef;
+use tracing::debug;
 
 #[cfg(feature = "coreml")]
 use crate::inference::coreml::{
@@ -11,6 +12,8 @@ use crate::inference::coreml::{
 use crate::inference::{ExecutionMode, with_execution_mode};
 #[cfg(feature = "coreml")]
 use objc2_core_ml::MLComputeUnits;
+#[cfg(feature = "coreml")]
+use tracing::{info, trace};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SegmentationError {
@@ -22,11 +25,8 @@ pub enum SegmentationError {
 
 // seg models exported with EnumeratedShapes for batch 1-32 and b64
 const PRIMARY_BATCH_SIZE: usize = 32;
-const LARGE_BATCH_SIZE: usize = 64;
-
 #[cfg(feature = "coreml")]
-#[expect(dead_code)]
-type SegParallelResult = Result<Vec<Vec<(usize, Array2<f32>)>>, SegmentationError>;
+const LARGE_BATCH_SIZE: usize = 64;
 
 pub struct SegmentationModel {
     model_path: String,
@@ -143,161 +143,6 @@ impl SegmentationModel {
         self.mode
     }
 
-    pub(crate) fn model_path(&self) -> &str {
-        &self.model_path
-    }
-
-    #[cfg(feature = "coreml")]
-    pub(crate) fn shared_seg_model(&self) -> Option<&SharedCoreMlModel> {
-        self.native_session.as_ref()
-    }
-
-    /// Load a 30s chunk segmenter model (SpeakerKit-style: internal sliding_windows)
-    #[cfg(feature = "coreml")]
-    pub fn load_chunk_segmenter(model_path: &str) -> Option<SharedCoreMlModel> {
-        let path = std::path::Path::new(model_path).with_file_name("speakerkit-segmenter.mlmodelc");
-        if !path.exists() {
-            return None;
-        }
-        SharedCoreMlModel::load(
-            &path,
-            CoreMlModel::default_compute_units(),
-            "speaker_ids",
-            GpuPrecision::Low,
-        )
-        .ok()
-    }
-
-    /// Run 30s chunk segmenter: one call → 21 raw logit windows (1s step)
-    /// `step_subsample`: take every Nth window to match desired step
-    #[cfg(feature = "coreml")]
-    pub fn run_chunk_segmenter(
-        model: &SharedCoreMlModel,
-        audio: &[f32],
-        step_subsample: usize,
-    ) -> Result<Vec<Array2<f32>>, ort::Error> {
-        let chunk_samples = 480_000usize;
-        let window_samples = 160_000usize;
-        let model_step = 16_000usize; // 1s step internal to model
-
-        let mut buffer = vec![0.0f32; chunk_samples];
-        let copy_len = audio.len().min(chunk_samples);
-        buffer[..copy_len].copy_from_slice(&audio[..copy_len]);
-
-        let shape = CachedInputShape::new("waveform", &[chunk_samples]);
-        let (data, out_shape) = model
-            .predict_cached(&[(&shape, &buffer)])
-            .map_err(|e| ort::Error::new(e.to_string()))?;
-
-        let num_windows = out_shape[0];
-        let frames = out_shape[1];
-        let classes = out_shape[2];
-        let stride = frames * classes;
-
-        // only keep windows that correspond to actual audio (not zero-padding)
-        let valid_windows = if audio.len() >= window_samples {
-            ((audio.len() - window_samples) / model_step + 1).min(num_windows)
-        } else {
-            1.min(num_windows)
-        };
-
-        let mut results = Vec::new();
-        for win_idx in 0..valid_windows {
-            if win_idx % step_subsample != 0 {
-                continue;
-            }
-            let start = win_idx * stride;
-            let window_data = &data[start..start + stride];
-            results.push(Array2::from_shape_vec((frames, classes), window_data.to_vec()).unwrap());
-        }
-
-        Ok(results)
-    }
-
-    /// Load the SpeakerKit multi-output segmenter for the experiment pipeline
-    #[cfg(feature = "coreml")]
-    pub(crate) fn load_speakerkit_segmenter(model_path: &str) -> Option<SharedCoreMlModel> {
-        let path = std::path::Path::new(model_path).with_file_name("speakerkit-segmenter.mlmodelc");
-        if !path.exists() {
-            return None;
-        }
-        // SpeakerKit uses cpuOnly for segmentation
-        SharedCoreMlModel::load_multi_output(
-            &path,
-            objc2_core_ml::MLComputeUnits::CPUOnly,
-            GpuPrecision::Low,
-        )
-        .ok()
-    }
-
-    /// Diagnostic: dump raw model output values for first chunk
-    #[cfg(feature = "coreml")]
-    pub(crate) fn diagnose_speakerkit_segmenter(model_path: &str, audio: &[f32]) {
-        let chunk_samples = 480_000usize;
-        if audio.len() < chunk_samples {
-            return;
-        }
-        let model = match Self::load_speakerkit_segmenter(model_path) {
-            Some(m) => m,
-            None => return,
-        };
-
-        // use audio from 30min mark (known to have continuous speech)
-        let start = 30 * 60 * 16000usize;
-        if start + chunk_samples > audio.len() {
-            return;
-        }
-
-        let shape = CachedInputShape::new("waveform", &[chunk_samples]);
-        let mut buffer = vec![0.0f32; chunk_samples];
-        buffer.copy_from_slice(&audio[start..start + chunk_samples]);
-
-        let outputs = model
-            .predict_cached_multi(&[(&shape, &buffer)], &["speaker_probs", "speaker_activity"])
-            .unwrap();
-        let (ids_data, ids_shape) = &outputs[0];
-        let (act_data, _) = &outputs[1];
-
-        // raw value analysis for speaker_ids
-        let mut unique_vals: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
-        for &v in ids_data.iter() {
-            unique_vals.insert(v.to_bits());
-        }
-        let unique_f32: Vec<f32> = unique_vals
-            .iter()
-            .map(|&bits| f32::from_bits(bits))
-            .collect();
-
-        // per-window analysis: count nonzero AND print actual values for window 5
-        let frames = ids_shape[1];
-        let spks = ids_shape[2];
-        let stride = frames * spks;
-        let mut per_win_nonzero: Vec<usize> = Vec::new();
-        for w in 0..ids_shape[0] {
-            let start = w * stride;
-            let nz = ids_data[start..start + stride]
-                .iter()
-                .filter(|&&v| v != 0.0)
-                .count();
-            per_win_nonzero.push(nz);
-        }
-
-        // window 5 first 30 values (frames 0-9, all 3 speakers)
-        let w5 = 5 * stride;
-        let w5_vals: Vec<f32> = ids_data[w5..w5 + 30].to_vec();
-
-        // speaker_activity for all windows
-        let all_act: Vec<f32> = act_data.to_vec();
-
-        tracing::info!(
-            unique_values = ?unique_f32,
-            per_win_nonzero = ?per_win_nonzero,
-            w5_first30 = ?w5_vals,
-            all_activity = ?all_act,
-            "SpeakerKit segmenter diagnosis"
-        );
-    }
-
     /// Run segmentation with N parallel workers, each with a fresh CoreML model.
     /// Workers use CPUOnly compute units to avoid GPU contention with embedding.
     /// Results are sent through `tx` in chunk_idx order
@@ -309,7 +154,10 @@ impl SegmentationModel {
         num_workers: usize,
         warm_start_target_windows: Option<usize>,
     ) -> Result<usize, SegmentationError> {
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicU64, AtomicUsize, Ordering},
+        };
 
         let mut offsets = Vec::new();
         let mut offset = 0;
@@ -360,7 +208,25 @@ impl SegmentationModel {
         let seg_batched_calls = AtomicU64::new(0);
         let seg_batched_windows = AtomicU64::new(0);
         let seg_single_calls = AtomicU64::new(0);
-        let warm_start_small_windows = warm_start_target_windows.unwrap_or(PRIMARY_BATCH_SIZE * 2);
+        let est_embed_chunks = warm_start_target_windows
+            .and_then(|target| target.checked_div(2))
+            .filter(|&chunk_windows| chunk_windows > 0)
+            .map(|chunk_windows| total_windows.div_ceil(chunk_windows));
+        let upper_medium_warm_start = est_embed_chunks
+            .map(|chunks| chunks >= 12)
+            .unwrap_or(total_windows >= 640);
+        let default_warm_start_small_windows = if upper_medium_warm_start {
+            PRIMARY_BATCH_SIZE * 2
+        } else {
+            140
+        };
+        let warm_start_small_windows =
+            warm_start_target_windows.unwrap_or(default_warm_start_small_windows);
+        let warm_start_batch_capacity = if upper_medium_warm_start {
+            PRIMARY_BATCH_SIZE / 2
+        } else {
+            28
+        };
         let use_warm_start_b32 = batch_size == LARGE_BATCH_SIZE
             && total_windows < 1024
             && total_windows > PRIMARY_BATCH_SIZE
@@ -384,12 +250,12 @@ impl SegmentationModel {
                 let warm_start_end = total_windows.min(warm_start_small_windows);
 
                 while start < warm_start_end {
-                    let end = (start + PRIMARY_BATCH_SIZE).min(total_windows);
+                    let end = (start + warm_start_batch_capacity).min(total_windows);
                     batch_tasks.push(BatchTask {
                         batch_idx,
                         start,
                         end,
-                        batch_capacity: PRIMARY_BATCH_SIZE,
+                        batch_capacity: warm_start_batch_capacity,
                         model: small_model,
                     });
                     start = end;
@@ -448,70 +314,90 @@ impl SegmentationModel {
                     let seg_predict_us = &seg_predict_us;
                     let seg_batched_calls = &seg_batched_calls;
                     let seg_batched_windows = &seg_batched_windows;
+                    let next_task = Arc::new(AtomicUsize::new(0));
+                    let worker_count = batch_tasks.len().min(num_workers.max(1));
 
-                    for task in batch_tasks {
-                        let BatchTask {
-                            batch_idx,
-                            start,
-                            end,
-                            batch_capacity,
-                            model,
-                        } = task;
+                    for _worker_idx in 0..worker_count {
+                        let batch_tasks = &batch_tasks;
                         let offsets = &offsets;
                         let padded = &padded;
                         let batch_tx = batch_tx.clone();
+                        let next_task = Arc::clone(&next_task);
 
                         rscope.spawn(move |_| {
-                            let actual_batch = end - start;
-                            let cached_batch =
-                                CachedInputShape::new("input", &[batch_capacity, 1, win_samples]);
-                            let mut batch_buf = vec![0.0f32; batch_capacity * win_samples];
+                            let mut scratch_by_capacity = std::collections::BTreeMap::<
+                                usize,
+                                (CachedInputShape, Vec<f32>),
+                            >::new();
 
-                            batch_buf.fill(0.0);
-                            for (b, widx) in (start..end).enumerate() {
-                                let window = if widx < offsets.len() {
-                                    &audio[offsets[widx]..offsets[widx] + win_samples]
-                                } else {
-                                    padded.as_deref().unwrap()
+                            loop {
+                                let task_idx = next_task.fetch_add(1, Ordering::Relaxed);
+                                let Some(task) = batch_tasks.get(task_idx) else {
+                                    break;
                                 };
-                                let dst = b * win_samples;
-                                batch_buf[dst..dst + window.len()].copy_from_slice(window);
-                            }
+                                let actual_batch = task.end - task.start;
+                                let (cached_batch, batch_buf) = scratch_by_capacity
+                                    .entry(task.batch_capacity)
+                                    .or_insert_with(|| {
+                                        (
+                                            CachedInputShape::new(
+                                                "input",
+                                                &[task.batch_capacity, 1, win_samples],
+                                            ),
+                                            vec![0.0f32; task.batch_capacity * win_samples],
+                                        )
+                                    });
 
-                            let batch_start = std::time::Instant::now();
-                            let (data, out_shape) = model
-                                .predict_cached(&[(&cached_batch, &batch_buf)])
-                                .map_err(|e| SegmentationError::Ort(ort::Error::new(e.to_string())))
-                                .unwrap();
-                            let batch_us = batch_start.elapsed().as_micros() as u64;
-                            seg_predict_us.fetch_add(batch_us, Ordering::Relaxed);
-                            seg_batched_calls.fetch_add(1, Ordering::Relaxed);
-                            seg_batched_windows.fetch_add(actual_batch as u64, Ordering::Relaxed);
-                            if profile_batches {
-                                tracing::info!(
-                                    batch_idx,
-                                    batch_capacity,
-                                    batch_size = actual_batch,
-                                    batch_ms = batch_us / 1000,
-                                    "Seg batch profile"
-                                );
-                            }
+                                batch_buf.fill(0.0);
+                                for (b, widx) in (task.start..task.end).enumerate() {
+                                    let window = if widx < offsets.len() {
+                                        &audio[offsets[widx]..offsets[widx] + win_samples]
+                                    } else {
+                                        padded.as_deref().unwrap()
+                                    };
+                                    let dst = b * win_samples;
+                                    batch_buf[dst..dst + window.len()].copy_from_slice(window);
+                                }
 
-                            let frames = out_shape[1];
-                            let classes = out_shape[2];
-                            let stride = frames * classes;
-                            let mut results = Vec::with_capacity(actual_batch);
-                            for b in 0..actual_batch {
-                                let s = b * stride;
-                                results.push(
-                                    Array2::from_shape_vec(
-                                        (frames, classes),
-                                        data[s..s + stride].to_vec(),
-                                    )
-                                    .unwrap(),
-                                );
+                                let batch_start = std::time::Instant::now();
+                                let (data, out_shape) = task
+                                    .model
+                                    .predict_cached(&[(&*cached_batch, batch_buf.as_slice())])
+                                    .map_err(|e| {
+                                        SegmentationError::Ort(ort::Error::new(e.to_string()))
+                                    })
+                                    .unwrap();
+                                let batch_us = batch_start.elapsed().as_micros() as u64;
+                                seg_predict_us.fetch_add(batch_us, Ordering::Relaxed);
+                                seg_batched_calls.fetch_add(1, Ordering::Relaxed);
+                                seg_batched_windows
+                                    .fetch_add(actual_batch as u64, Ordering::Relaxed);
+                                if profile_batches {
+                                    trace!(
+                                        batch_idx = task.batch_idx,
+                                        batch_capacity = task.batch_capacity,
+                                        batch_size = actual_batch,
+                                        batch_ms = batch_us / 1000,
+                                        "Seg batch profile"
+                                    );
+                                }
+
+                                let frames = out_shape[1];
+                                let classes = out_shape[2];
+                                let stride = frames * classes;
+                                let mut results = Vec::with_capacity(actual_batch);
+                                for b in 0..actual_batch {
+                                    let s = b * stride;
+                                    results.push(
+                                        Array2::from_shape_vec(
+                                            (frames, classes),
+                                            data[s..s + stride].to_vec(),
+                                        )
+                                        .unwrap(),
+                                    );
+                                }
+                                let _ = batch_tx.send((task.batch_idx, results));
                             }
-                            let _ = batch_tx.send((batch_idx, results));
                         });
                     }
                 });
@@ -582,7 +468,7 @@ impl SegmentationModel {
                                 seg_predict_us.fetch_add(predict_us, Ordering::Relaxed);
                                 seg_single_calls.fetch_add(1, Ordering::Relaxed);
                                 if profile_batches {
-                                    tracing::info!(
+                                    trace!(
                                         worker_idx,
                                         batch_size = 1,
                                         batch_ms = predict_us / 1000,
@@ -606,12 +492,18 @@ impl SegmentationModel {
 
         let total_seg = seg_start.elapsed();
         let seg_predict_ms = seg_predict_us.load(Ordering::Relaxed) / 1000;
-        tracing::info!(
+        debug!(
             windows = total_windows,
             workers = num_workers,
+            seg_est_embed_chunks = est_embed_chunks.unwrap_or(0),
             seg_warm_start_b32 = use_warm_start_b32,
             seg_warm_start_windows = if use_warm_start_b32 {
                 total_windows.min(warm_start_small_windows)
+            } else {
+                0
+            },
+            seg_warm_start_batch_capacity = if use_warm_start_b32 {
+                warm_start_batch_capacity
             } else {
                 0
             },
@@ -732,7 +624,7 @@ impl SegmentationModel {
         }
 
         let total_seg = seg_start.elapsed();
-        tracing::info!(
+        debug!(
             windows = total_windows,
             seg_batched,
             seg_single,
@@ -966,7 +858,7 @@ impl SegmentationModel {
             GpuPrecision::Low,
         ) {
             Ok(model) => {
-                tracing::info!("Loaded b64 segmentation model");
+                info!("Loaded b64 segmentation model");
                 Some(model)
             }
             Err(e) => {
@@ -1029,92 +921,6 @@ impl SegmentationModel {
             })
             .collect())
     }
-}
-
-/// Output from SpeakerKit's multi-output segmenter (one 30s chunk)
-#[cfg(feature = "coreml")]
-pub(crate) struct SpeakerKitSegOutput {
-    /// Binary speaker masks per window: 21 × [589, 3]
-    pub speaker_ids: Vec<Array2<f32>>,
-    /// Per-window speaker activity summary: [21, 3]
-    pub speaker_activity: Array2<f32>,
-    /// Per-window overlap flags: [21, 589]
-    pub overlapped_activity: Array2<f32>,
-}
-
-/// Run SpeakerKit's multi-output segmenter on a 30s chunk
-#[cfg(feature = "coreml")]
-pub(crate) fn run_speakerkit_segmenter(
-    model: &SharedCoreMlModel,
-    audio: &[f32],
-) -> Result<SpeakerKitSegOutput, SegmentationError> {
-    use crate::inference::coreml::CachedInputShape;
-
-    let chunk_samples = 480_000usize;
-    let window_samples = 160_000usize;
-    let model_step = 16_000usize;
-
-    let mut buffer = vec![0.0f32; chunk_samples];
-    let copy_len = audio.len().min(chunk_samples);
-    buffer[..copy_len].copy_from_slice(&audio[..copy_len]);
-
-    let shape = CachedInputShape::new("waveform", &[chunk_samples]);
-    let outputs = model
-        .predict_cached_multi(
-            &[(&shape, &buffer)],
-            &[
-                "speaker_probs",
-                "speaker_activity",
-                "overlapped_speaker_activity",
-            ],
-        )
-        .map_err(|e| SegmentationError::Ort(ort::Error::new(e.to_string())))?;
-
-    // use speaker_probs (continuous) instead of speaker_ids (sparse binary)
-    let (ids_data, ids_shape) = &outputs[0]; // [21, 589, 3]
-    let (act_data, act_shape) = &outputs[1]; // [21, 3]
-    let (overlap_data, overlap_shape) = &outputs[2]; // [21, 589]
-
-    let num_windows = ids_shape[0];
-    let frames = ids_shape[1];
-    let speakers = ids_shape[2];
-
-    // only keep windows that correspond to actual audio
-    let valid_windows = if audio.len() >= window_samples {
-        ((audio.len() - window_samples) / model_step + 1).min(num_windows)
-    } else {
-        1.min(num_windows)
-    };
-
-    let ids_stride = frames * speakers;
-    let speaker_ids: Vec<Array2<f32>> = (0..valid_windows)
-        .map(|w| {
-            let start = w * ids_stride;
-            Array2::from_shape_vec(
-                (frames, speakers),
-                ids_data[start..start + ids_stride].to_vec(),
-            )
-            .unwrap()
-        })
-        .collect();
-
-    let speaker_activity = Array2::from_shape_vec(
-        (valid_windows, act_shape[1]),
-        act_data[..valid_windows * act_shape[1]].to_vec(),
-    )
-    .unwrap();
-
-    let overlapped_activity = Array2::from_shape_vec(
-        (valid_windows, overlap_shape[1]),
-        overlap_data[..valid_windows * overlap_shape[1]].to_vec(),
-    )
-    .unwrap();
-
-    Ok(SpeakerKitSegOutput {
-        speaker_ids,
-        speaker_activity,
-        overlapped_activity,
-    })
 }
 
 fn batched_model_path(model_path: &str, batch_size: usize) -> Option<std::path::PathBuf> {

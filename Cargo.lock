@@ -2293,7 +2293,6 @@ dependencies = [
  "rayon",
  "serde_json",
  "thiserror",
- "tokio",
  "tracing",
 ]
 

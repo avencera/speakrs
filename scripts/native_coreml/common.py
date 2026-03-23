@@ -378,9 +378,8 @@ class ChunkEmbeddingWrapper(nn.Module):
 
         # gather per-window features using pre-computed indices
         frames_flat = frames.squeeze(0)  # [2560, T_out]
-        gathered = torch.index_select(
-            frames_flat, 1, self.gather_indices
-        )  # [2560, N*125]
+        gather_indices = cast(torch.Tensor, self.gather_indices)
+        gathered = torch.index_select(frames_flat, 1, gather_indices)  # [2560, N*125]
         window_features = gathered.reshape(
             2560, self.num_windows, self.WINDOW_RESNET_FRAMES
         )  # [2560, N, 125]
