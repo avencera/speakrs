@@ -136,6 +136,7 @@ pub fn run(mode: DiarizeMode, wav_files: Vec<PathBuf>) -> Result<()> {
 
             let total = wav_files.len();
             let mut cumulative = 0.0f64;
+            let profile_file_timing = std::env::var_os("SPEAKRS_PROFILE_FILE_TIMING").is_some();
 
             for (i, wav_path) in wav_files.iter().enumerate() {
                 let file_id = wav_path
@@ -143,12 +144,18 @@ pub fn run(mode: DiarizeMode, wav_files: Vec<PathBuf>) -> Result<()> {
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "file1".to_string());
 
+                let file_start = Instant::now();
+                let load_start = Instant::now();
                 let (samples, sr) = wav::load_wav_samples(&wav_path.to_string_lossy())?;
+                let load_elapsed = load_start.elapsed();
                 ensure!(sr == 16000, "expected 16kHz WAV, got {sr}Hz");
 
                 let start = Instant::now();
                 let result = pipeline.run_with_file_id(&samples, &file_id)?;
                 let elapsed = start.elapsed().as_secs_f64();
+                let drop_start = Instant::now();
+                let speakrs::pipeline::DiarizationResult { rttm, .. } = result;
+                let drop_elapsed = drop_start.elapsed();
                 cumulative += elapsed;
 
                 let avg = cumulative / (i + 1) as f64;
@@ -161,7 +168,19 @@ pub fn run(mode: DiarizeMode, wav_files: Vec<PathBuf>) -> Result<()> {
                     i + 1,
                     total
                 );
-                print!("{}", result.rttm);
+                let output_start = Instant::now();
+                print!("{rttm}");
+                let output_elapsed = output_start.elapsed();
+                if profile_file_timing {
+                    eprintln!(
+                        "    file timing {file_id}: load_ms={} pipeline_ms={} drop_ms={} output_ms={} total_ms={}",
+                        load_elapsed.as_millis(),
+                        (elapsed * 1000.0).round() as u64,
+                        drop_elapsed.as_millis(),
+                        output_elapsed.as_millis(),
+                        file_start.elapsed().as_millis(),
+                    );
+                }
             }
         }
     }
