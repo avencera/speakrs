@@ -16,6 +16,7 @@ struct TranscriptRow {
 }
 
 fn main() -> ExampleResult<()> {
+    support::init_tracing();
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 4 {
         eprintln!(

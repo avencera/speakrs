@@ -74,20 +74,71 @@ impl SegmentationModel {
         let window_samples = (window_duration * sample_rate as f32) as usize;
         let step_samples = (step_duration * sample_rate as f32) as usize;
 
+        macro_rules! timed {
+            ($expr:expr) => {{
+                let start = std::time::Instant::now();
+                let value = $expr;
+                (value, start.elapsed())
+            }};
+        }
+
+        let (session, session_elapsed) = timed!(Self::build_session(model_path, mode)?);
+        let (primary_batched_session, primary_batched_elapsed) = timed!(
+            batched_model_path(model_path, PRIMARY_BATCH_SIZE)
+                .filter(|path| path.exists())
+                .map(|path| Self::build_session(path.to_str().unwrap(), mode))
+                .transpose()?
+        );
+        #[cfg(feature = "coreml")]
+        let (native_session, native_session_elapsed) =
+            timed!(Self::load_native_coreml(model_path, mode));
+        #[cfg(feature = "coreml")]
+        let (native_batched_session, native_batched_elapsed) =
+            timed!(Self::load_native_coreml_batched(model_path, mode));
+        #[cfg(feature = "coreml")]
+        let (native_large_batched_session, native_large_batched_elapsed) =
+            timed!(Self::load_native_coreml_large_batched(model_path, mode));
+
+        #[cfg(feature = "coreml")]
+        {
+            let total_ms = (session_elapsed
+                + primary_batched_elapsed
+                + native_session_elapsed
+                + native_batched_elapsed
+                + native_large_batched_elapsed)
+                .as_millis();
+            tracing::trace!(
+                ort_single_ms = session_elapsed.as_millis(),
+                ort_batched_ms = primary_batched_elapsed.as_millis(),
+                native_single_ms = native_session_elapsed.as_millis(),
+                native_b32_ms = native_batched_elapsed.as_millis(),
+                native_b64_ms = native_large_batched_elapsed.as_millis(),
+                total_ms,
+                "Segmentation model init",
+            );
+        }
+        #[cfg(not(feature = "coreml"))]
+        {
+            let total_ms = (session_elapsed + primary_batched_elapsed).as_millis();
+            tracing::trace!(
+                ort_single_ms = session_elapsed.as_millis(),
+                ort_batched_ms = primary_batched_elapsed.as_millis(),
+                total_ms,
+                "Segmentation model init",
+            );
+        }
+
         Ok(Self {
             model_path: model_path.to_owned(),
             mode,
-            session: Self::build_session(model_path, mode)?,
-            primary_batched_session: batched_model_path(model_path, PRIMARY_BATCH_SIZE)
-                .filter(|path| path.exists())
-                .map(|path| Self::build_session(path.to_str().unwrap(), mode))
-                .transpose()?,
+            session,
+            primary_batched_session,
             #[cfg(feature = "coreml")]
-            native_session: Self::load_native_coreml(model_path, mode),
+            native_session,
             #[cfg(feature = "coreml")]
-            native_batched_session: Self::load_native_coreml_batched(model_path, mode),
+            native_batched_session,
             #[cfg(feature = "coreml")]
-            native_large_batched_session: Self::load_native_coreml_large_batched(model_path, mode),
+            native_large_batched_session,
             #[cfg(feature = "coreml")]
             cached_single_input_shape: CachedInputShape::new("input", &[1, 1, window_samples]),
             #[cfg(feature = "coreml")]
@@ -203,7 +254,6 @@ impl SegmentationModel {
 
         let seg_start = std::time::Instant::now();
         let win_samples = self.window_samples;
-        let profile_batches = std::env::var_os("SPEAKRS_PROFILE_SEG_BATCHES").is_some();
         let seg_predict_us = AtomicU64::new(0);
         let seg_batched_calls = AtomicU64::new(0);
         let seg_batched_windows = AtomicU64::new(0);
@@ -372,15 +422,13 @@ impl SegmentationModel {
                                 seg_batched_calls.fetch_add(1, Ordering::Relaxed);
                                 seg_batched_windows
                                     .fetch_add(actual_batch as u64, Ordering::Relaxed);
-                                if profile_batches {
-                                    trace!(
-                                        batch_idx = task.batch_idx,
-                                        batch_capacity = task.batch_capacity,
-                                        batch_size = actual_batch,
-                                        batch_ms = batch_us / 1000,
-                                        "Seg batch profile"
-                                    );
-                                }
+                                trace!(
+                                    batch_idx = task.batch_idx,
+                                    batch_capacity = task.batch_capacity,
+                                    batch_size = actual_batch,
+                                    batch_ms = batch_us / 1000,
+                                    "Seg batch profile"
+                                );
 
                                 let frames = out_shape[1];
                                 let classes = out_shape[2];
@@ -467,14 +515,12 @@ impl SegmentationModel {
                                 let predict_us = predict_start.elapsed().as_micros() as u64;
                                 seg_predict_us.fetch_add(predict_us, Ordering::Relaxed);
                                 seg_single_calls.fetch_add(1, Ordering::Relaxed);
-                                if profile_batches {
-                                    trace!(
-                                        worker_idx,
-                                        batch_size = 1,
-                                        batch_ms = predict_us / 1000,
-                                        "Seg batch profile"
-                                    );
-                                }
+                                trace!(
+                                    worker_idx,
+                                    batch_size = 1,
+                                    batch_ms = predict_us / 1000,
+                                    "Seg batch profile"
+                                );
 
                                 let frames = out_shape[1];
                                 let classes = out_shape[2];
@@ -779,9 +825,9 @@ impl SegmentationModel {
     fn load_native_coreml(model_path: &str, mode: ExecutionMode) -> Option<SharedCoreMlModel> {
         let coreml_path = Self::resolve_coreml_path(model_path, mode)?;
         if !coreml_path.exists() {
-            eprintln!(
-                "warning: native CoreML model not found at {}, falling back to ORT CPU",
-                coreml_path.display()
+            tracing::warn!(
+                path = %coreml_path.display(),
+                "Native CoreML segmentation model not found, falling back to ORT CPU",
             );
             return None;
         }
@@ -793,7 +839,7 @@ impl SegmentationModel {
         ) {
             Ok(model) => Some(model),
             Err(e) => {
-                eprintln!("warning: failed to load native CoreML segmentation: {e}");
+                tracing::warn!("Failed to load native CoreML segmentation: {e}");
                 None
             }
         }
@@ -826,7 +872,7 @@ impl SegmentationModel {
         ) {
             Ok(model) => Some(model),
             Err(e) => {
-                eprintln!("warning: failed to load native CoreML batched segmentation: {e}");
+                tracing::warn!("Failed to load native CoreML batched segmentation: {e}");
                 None
             }
         }
@@ -862,7 +908,7 @@ impl SegmentationModel {
                 Some(model)
             }
             Err(e) => {
-                eprintln!("warning: failed to load b64 segmentation: {e}");
+                tracing::warn!("Failed to load b64 segmentation: {e}");
                 None
             }
         }

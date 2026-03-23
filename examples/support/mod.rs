@@ -10,6 +10,17 @@ use speakrs::pipeline::DiarizationPipeline;
 pub type ExampleResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[allow(dead_code)]
+pub fn init_tracing() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "speakrs=info".parse().unwrap()),
+        )
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
+#[allow(dead_code)]
 pub fn file_id_from_path(path: &Path) -> String {
     path.file_stem()
         .and_then(OsStr::to_str)

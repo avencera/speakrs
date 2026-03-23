@@ -7,6 +7,7 @@ use speakrs::pipeline::DiarizationPipeline;
 use support::{ExampleResult, file_id_from_path, load_models, load_wav_samples};
 
 fn main() -> ExampleResult<()> {
+    support::init_tracing();
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 || args.len() > 4 {
         eprintln!("Usage: cargo run --example diarize_wav -- <models-dir> <audio.wav> [file-id]");
