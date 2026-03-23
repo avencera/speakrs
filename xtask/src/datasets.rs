@@ -12,6 +12,23 @@ use color_eyre::eyre::Result;
 
 use crate::cmd::run_cmd;
 
+fn dataset_has_expected_files(dataset_dir: &Path) -> bool {
+    has_files_with_extension(&dataset_dir.join("wav"), "wav")
+        && has_files_with_extension(&dataset_dir.join("rttm"), "rttm")
+}
+
+fn has_files_with_extension(dir: &Path, extension: &str) -> bool {
+    fs::read_dir(dir).is_ok_and(|entries| {
+        entries.filter_map(|entry| entry.ok()).any(|entry| {
+            entry.path().is_file()
+                && entry
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case(extension))
+        })
+    })
+}
+
 #[derive(Clone)]
 pub struct Dataset {
     pub id: String,
@@ -46,6 +63,10 @@ impl Dataset {
 
     pub fn ensure(&self, base_dir: &Path) -> Result<()> {
         let dir = self.dataset_dir(base_dir);
+
+        if dataset_has_expected_files(&dir) {
+            return Ok(());
+        }
 
         // try Tigris first (voxconverse-dev is baked into the Docker image)
         if !matches!(self.source, Source::VoxConverseDev) && S5cmd::try_download(&self.id, &dir)? {
@@ -220,7 +241,7 @@ impl S5cmd {
         println!("=== Downloading {dataset_id} via s5cmd from Tigris ===");
         match Self::sync(dataset_id, dataset_dir) {
             Ok(()) => {
-                if dataset_dir.join("wav").is_dir() && dataset_dir.join("rttm").is_dir() {
+                if dataset_has_expected_files(dataset_dir) {
                     println!("{dataset_id}: s5cmd download complete");
                     Ok(true)
                 } else {
@@ -286,4 +307,59 @@ fn ensure_hf(display_name: &str, repo: &str, dir: &Path) -> Result<()> {
     let _ = fs::remove_dir_all(&tmp_dir);
     println!("{display_name} setup complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use tempfile::TempDir;
+
+    #[test]
+    fn dataset_has_expected_files_when_wav_and_rttm_are_present() {
+        let temp_dir = TempDir::new().unwrap();
+        let dataset_dir = temp_dir.path();
+        let wav_dir = dataset_dir.join("wav");
+        let rttm_dir = dataset_dir.join("rttm");
+
+        fs::create_dir_all(&wav_dir).unwrap();
+        fs::create_dir_all(&rttm_dir).unwrap();
+        fs::write(wav_dir.join("sample.wav"), []).unwrap();
+        fs::write(rttm_dir.join("sample.rttm"), []).unwrap();
+
+        assert!(dataset_has_expected_files(dataset_dir));
+    }
+
+    #[test]
+    fn dataset_has_expected_files_is_false_when_directories_are_missing() {
+        let temp_dir = TempDir::new().unwrap();
+
+        assert!(!dataset_has_expected_files(temp_dir.path()));
+    }
+
+    #[test]
+    fn dataset_has_expected_files_is_false_when_directories_are_empty() {
+        let temp_dir = TempDir::new().unwrap();
+        let dataset_dir = temp_dir.path();
+
+        fs::create_dir_all(dataset_dir.join("wav")).unwrap();
+        fs::create_dir_all(dataset_dir.join("rttm")).unwrap();
+
+        assert!(!dataset_has_expected_files(dataset_dir));
+    }
+
+    #[test]
+    fn dataset_has_expected_files_is_false_for_wrong_file_types() {
+        let temp_dir = TempDir::new().unwrap();
+        let dataset_dir = temp_dir.path();
+        let wav_dir = dataset_dir.join("wav");
+        let rttm_dir = dataset_dir.join("rttm");
+
+        fs::create_dir_all(&wav_dir).unwrap();
+        fs::create_dir_all(&rttm_dir).unwrap();
+        fs::write(wav_dir.join("sample.mp3"), []).unwrap();
+        fs::write(rttm_dir.join("sample.txt"), []).unwrap();
+
+        assert!(!dataset_has_expected_files(dataset_dir));
+    }
 }
