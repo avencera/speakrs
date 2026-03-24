@@ -690,7 +690,6 @@ fn resolve_impl(name: &str) -> Option<usize> {
         .position(|(cli_id, alias, _, _)| *cli_id == name || *alias == name)
 }
 
-#[allow(clippy::too_many_arguments)]
 pub struct DerArgs {
     pub dataset_id: String,
     pub file: Option<PathBuf>,
