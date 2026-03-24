@@ -306,6 +306,7 @@ impl DecodedSegmentations {
         layout: &ChunkLayout,
         embeddings: &mut Array3<f32>,
     ) -> Result<(), PipelineError> {
+        let mut storage = Array3Writer(embeddings);
         let mut pending = Vec::with_capacity(emb_model.primary_batch_size());
 
         for chunk_idx in 0..self.0.shape()[0] {
@@ -328,7 +329,7 @@ impl DecodedSegmentations {
                     clean_mask: clean_masks.column(speaker_idx).to_vec(),
                 });
                 if pending.len() == emb_model.primary_batch_size() {
-                    flush_embedding_batch(emb_model, &pending, embeddings)?;
+                    flush_masked(emb_model, &pending, &mut storage)?;
                     pending.clear();
                 }
             }
@@ -336,7 +337,7 @@ impl DecodedSegmentations {
 
         while !pending.is_empty() {
             let batch_len = emb_model.best_batch_len(pending.len());
-            flush_embedding_batch(emb_model, &pending[..batch_len], embeddings)?;
+            flush_masked(emb_model, &pending[..batch_len], &mut storage)?;
             pending.drain(..batch_len);
         }
 
@@ -354,6 +355,7 @@ impl DecodedSegmentations {
         let num_speakers = self.0.shape()[2];
         let min_num_samples = emb_model.min_num_samples();
 
+        let mut storage = Array3Writer(embeddings);
         let mut pending: Vec<PendingSplitEmbedding> = Vec::with_capacity(batch_size);
         let mut fbanks: Vec<Array2<f32>> = Vec::new();
         let mut tail_batches = 0usize;
@@ -386,7 +388,7 @@ impl DecodedSegmentations {
                     weights,
                 });
                 if pending.len() == batch_size {
-                    flush_split_embedding_batch(emb_model, &pending, &fbanks, embeddings)?;
+                    flush_split(emb_model, &pending, &fbanks, &mut storage)?;
                     tail_batches += 1;
                     pending.clear();
 
@@ -403,7 +405,7 @@ impl DecodedSegmentations {
         }
 
         if !pending.is_empty() {
-            flush_split_embedding_batch(emb_model, &pending, &fbanks, embeddings)?;
+            flush_split(emb_model, &pending, &fbanks, &mut storage)?;
             tail_batches += 1;
         }
 
@@ -429,6 +431,7 @@ impl DecodedSegmentations {
         let num_chunks = self.0.shape()[0];
         let min_num_samples = emb_model.min_num_samples();
 
+        let mut storage = Array3Writer(embeddings);
         let mut fbank_buffer: Vec<Array2<f32>> = Vec::with_capacity(batch_size);
         let mut masks_buffer: Vec<Vec<f32>> = Vec::with_capacity(batch_size * num_speakers);
         let mut chunk_indices: Vec<usize> = Vec::with_capacity(batch_size);
@@ -458,13 +461,13 @@ impl DecodedSegmentations {
             }
 
             if fbank_buffer.len() == batch_size {
-                flush_multi_mask_batch(
+                flush_multi_mask(
                     emb_model,
                     &fbank_buffer,
                     &masks_buffer,
                     &chunk_indices,
                     num_speakers,
-                    embeddings,
+                    &mut storage,
                 )?;
                 batches += 1;
                 fbank_buffer.clear();
@@ -474,13 +477,13 @@ impl DecodedSegmentations {
         }
 
         if !fbank_buffer.is_empty() {
-            flush_multi_mask_batch(
+            flush_multi_mask(
                 emb_model,
                 &fbank_buffer,
                 &masks_buffer,
                 &chunk_indices,
                 num_speakers,
-                embeddings,
+                &mut storage,
             )?;
             batches += 1;
         }
@@ -495,12 +498,42 @@ impl DecodedSegmentations {
     }
 }
 
+// --- Embedding storage trait ---
+
+pub(super) trait EmbeddingStorage {
+    fn store(&mut self, chunk_idx: usize, speaker_idx: usize, embedding: &[f32]);
+}
+
+/// Writes embeddings into a pre-allocated Array3 by (chunk, speaker) index
+pub(super) struct Array3Writer<'a>(pub &'a mut Array3<f32>);
+
+impl EmbeddingStorage for Array3Writer<'_> {
+    fn store(&mut self, chunk_idx: usize, speaker_idx: usize, embedding: &[f32]) {
+        self.0
+            .slice_mut(s![chunk_idx, speaker_idx, ..])
+            .assign(&ndarray::ArrayView1::from(embedding));
+    }
+}
+
+/// Appends embeddings as SpeakerEmbedding structs to a Vec
+pub(super) struct VecWriter<'a>(pub &'a mut Vec<SpeakerEmbedding>);
+
+impl EmbeddingStorage for VecWriter<'_> {
+    fn store(&mut self, chunk_idx: usize, speaker_idx: usize, embedding: &[f32]) {
+        self.0.push(SpeakerEmbedding {
+            chunk_idx,
+            speaker_idx,
+            embedding: embedding.to_vec(),
+        });
+    }
+}
+
 // --- Flush helpers ---
 
-pub(super) fn flush_embedding_batch(
+pub(super) fn flush_masked<S: EmbeddingStorage>(
     emb_model: &mut EmbeddingModel,
     pending: &[PendingEmbedding<'_>],
-    embeddings: &mut Array3<f32>,
+    storage: &mut S,
 ) -> Result<(), PipelineError> {
     let batch_inputs: Vec<_> = pending
         .iter()
@@ -513,19 +546,21 @@ pub(super) fn flush_embedding_batch(
     let batch_embeddings = emb_model.embed_batch(&batch_inputs)?;
 
     for (batch_idx, item) in pending.iter().enumerate() {
-        embeddings
-            .slice_mut(s![item.chunk_idx, item.speaker_idx, ..])
-            .assign(&batch_embeddings.row(batch_idx));
+        storage.store(
+            item.chunk_idx,
+            item.speaker_idx,
+            batch_embeddings.row(batch_idx).as_slice().unwrap(),
+        );
     }
 
     Ok(())
 }
 
-fn flush_split_embedding_batch(
+pub(super) fn flush_split<S: EmbeddingStorage>(
     emb_model: &mut EmbeddingModel,
     pending: &[PendingSplitEmbedding],
     fbanks: &[Array2<f32>],
-    embeddings: &mut Array3<f32>,
+    storage: &mut S,
 ) -> Result<(), PipelineError> {
     let batch_inputs: Vec<_> = pending
         .iter()
@@ -537,21 +572,23 @@ fn flush_split_embedding_batch(
     let batch_embeddings = emb_model.embed_tail_batch_inputs(&batch_inputs)?;
 
     for (batch_idx, item) in pending.iter().enumerate() {
-        embeddings
-            .slice_mut(s![item.chunk_idx, item.speaker_idx, ..])
-            .assign(&batch_embeddings.row(batch_idx));
+        storage.store(
+            item.chunk_idx,
+            item.speaker_idx,
+            batch_embeddings.row(batch_idx).as_slice().unwrap(),
+        );
     }
 
     Ok(())
 }
 
-fn flush_multi_mask_batch(
+pub(super) fn flush_multi_mask<S: EmbeddingStorage>(
     emb_model: &mut EmbeddingModel,
     fbanks: &[Array2<f32>],
     masks: &[Vec<f32>],
     chunk_indices: &[usize],
     num_speakers: usize,
-    embeddings: &mut Array3<f32>,
+    storage: &mut S,
 ) -> Result<(), PipelineError> {
     let fbank_refs: Vec<_> = fbanks.iter().collect();
     let mask_refs: Vec<_> = masks.iter().map(|m| m.as_slice()).collect();
@@ -564,13 +601,45 @@ fn flush_multi_mask_batch(
             if !is_active {
                 continue;
             }
-            embeddings
-                .slice_mut(s![chunk_idx, speaker_idx, ..])
-                .assign(&batch_embeddings.row(mask_idx));
+            storage.store(
+                chunk_idx,
+                speaker_idx,
+                batch_embeddings.row(mask_idx).as_slice().unwrap(),
+            );
         }
     }
 
     Ok(())
+}
+
+// --- Array reconstruction ---
+
+/// Build segmentation and embedding arrays from decoded windows and speaker embeddings
+pub(super) fn build_inference_arrays(
+    decoded_windows: Vec<Array2<f32>>,
+    embeddings: Vec<SpeakerEmbedding>,
+    num_speakers: usize,
+) -> Option<(Array3<f32>, Array3<f32>)> {
+    if decoded_windows.is_empty() {
+        return None;
+    }
+
+    let num_chunks = decoded_windows.len();
+    let num_frames = decoded_windows[0].nrows();
+
+    let mut segmentations = Array3::<f32>::zeros((num_chunks, num_frames, num_speakers));
+    for (i, window) in decoded_windows.iter().enumerate() {
+        segmentations.slice_mut(s![i, .., ..]).assign(window);
+    }
+
+    let mut emb_array = Array3::<f32>::from_elem((num_chunks, num_speakers, 256), f32::NAN);
+    for emb in &embeddings {
+        emb_array
+            .slice_mut(s![emb.chunk_idx, emb.speaker_idx, ..])
+            .assign(&ndarray::ArrayView1::from(emb.embedding.as_slice()));
+    }
+
+    Some((segmentations, emb_array))
 }
 
 // --- Audio helpers ---

@@ -487,3 +487,49 @@ fn fast_apple_single_embedding_matches_python_fixture() {
         }
     }
 }
+
+#[test]
+fn run_inference_only_plus_finish_matches_run_with_config() {
+    let models_dir = fixture_path("models");
+    let mut pipeline = OwnedDiarizationPipeline::from_dir(&models_dir, ExecutionMode::Cpu).unwrap();
+    let (audio, sample_rate) = load_wav_samples(&fixture_path("test.wav"));
+    assert_eq!(sample_rate, 16_000);
+
+    let config = pipeline.pipeline_config();
+    let combined = pipeline.run_with_config(&audio, "file1", &config).unwrap();
+
+    let artifacts = pipeline.run_inference_only(&audio).unwrap();
+    let split = pipeline
+        .finish_post_inference(artifacts, "file1", &config)
+        .unwrap();
+
+    assert_eq!(combined.rttm, split.rttm);
+}
+
+#[cfg(feature = "coreml")]
+#[test]
+fn chunk_embedding_pipelined_vs_sequential_baseline() {
+    let models_dir = fixture_path("models");
+    let mut pipeline =
+        OwnedDiarizationPipeline::from_dir(&models_dir, ExecutionMode::CoreMl).unwrap();
+
+    // multi-chunk audio (triggers pipelined path)
+    let (audio, sample_rate) = load_wav_samples(&fixture_path("test.wav"));
+    assert_eq!(sample_rate, 16_000);
+
+    // run full pipeline twice: chunk embedding path uses try_chunk_embedding
+    // which internally picks pipelined vs sequential based on chunk count
+    let result_a = pipeline.run(&audio).unwrap();
+    let result_b = pipeline.run(&audio).unwrap();
+
+    // both runs should produce identical RTTM
+    assert_eq!(result_a.rttm, result_b.rttm);
+
+    // also verify run_inference_only + finish_post_inference round-trips
+    let config = pipeline.pipeline_config();
+    let artifacts = pipeline.run_inference_only(&audio).unwrap();
+    let result_split = pipeline
+        .finish_post_inference(artifacts, "file1", &config)
+        .unwrap();
+    assert_eq!(result_a.rttm, result_split.rttm);
+}

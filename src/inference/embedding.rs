@@ -58,14 +58,22 @@ struct ChunkSessionSpec {
     num_masks: usize,
 }
 
+/// All resources needed for chunk embedding, returned by `prepare_chunk_resources`
 #[cfg(feature = "coreml")]
-pub(crate) struct ChunkSessionRefs {
+pub(crate) struct ChunkResourceBundle {
+    pub sessions: Vec<ChunkSessionInfo>,
+    pub fbank_30s: Option<Arc<SharedCoreMlModel>>,
+    pub fbank_10s: Option<Arc<SharedCoreMlModel>>,
+}
+
+#[cfg(feature = "coreml")]
+pub(crate) struct ChunkSessionInfo {
+    pub model: Arc<SharedCoreMlModel>,
+    pub cached_fbank_shape: Arc<CachedInputShape>,
+    pub cached_masks_shape: Arc<CachedInputShape>,
     pub num_windows: usize,
     pub fbank_frames: usize,
     pub num_masks: usize,
-    pub cached_fbank_shape: Arc<CachedInputShape>,
-    pub cached_masks_shape: Arc<CachedInputShape>,
-    pub model: Arc<SharedCoreMlModel>,
 }
 
 pub struct EmbeddingModel {
@@ -569,18 +577,40 @@ impl EmbeddingModel {
         self.native_fbank_30s_session.as_ref()
     }
 
-    /// Get the shared fbank 30s model for use from worker threads
+    /// Load all chunk sessions and fbank models, returning everything needed for chunk embedding
     #[cfg(feature = "coreml")]
-    pub(crate) fn fbank_30s_refs(&mut self) -> Option<Arc<SharedCoreMlModel>> {
-        let _ = self.ensure_native_fbank_30s_loaded();
-        self.native_fbank_30s_session.as_ref().map(Arc::clone)
-    }
+    pub(crate) fn prepare_chunk_resources(&mut self) -> Option<ChunkResourceBundle> {
+        let capacity = self.chunk_window_capacity()?;
+        self.ensure_chunk_session_loaded(capacity);
 
-    /// Get 10s fbank model for use from worker threads
-    #[cfg(feature = "coreml")]
-    pub(crate) fn fbank_10s_ref(&mut self) -> Option<Arc<SharedCoreMlModel>> {
+        if self.native_chunk_sessions.is_empty() {
+            return None;
+        }
+
+        let sessions = self
+            .native_chunk_sessions
+            .iter()
+            .map(|s| ChunkSessionInfo {
+                model: Arc::clone(&s.model),
+                cached_fbank_shape: Arc::clone(&s.cached_fbank_shape),
+                cached_masks_shape: Arc::clone(&s.cached_masks_shape),
+                num_windows: s.num_windows,
+                fbank_frames: s.fbank_frames,
+                num_masks: s.num_masks,
+            })
+            .collect();
+
+        let _ = self.ensure_native_fbank_30s_loaded();
+        let fbank_30s = self.native_fbank_30s_session.as_ref().map(Arc::clone);
+
         let _ = self.ensure_native_fbank_loaded();
-        self.native_fbank_session.as_ref().map(Arc::clone)
+        let fbank_10s = self.native_fbank_session.as_ref().map(Arc::clone);
+
+        Some(ChunkResourceBundle {
+            sessions,
+            fbank_30s,
+            fbank_10s,
+        })
     }
 
     #[cfg(feature = "coreml")]
@@ -688,27 +718,6 @@ impl EmbeddingModel {
                 false
             }
         }
-    }
-
-    #[cfg(feature = "coreml")]
-    pub(crate) fn ensure_chunk_session_loaded_pub(&mut self, num_windows: usize) {
-        let _ = self.ensure_chunk_session_loaded(num_windows);
-    }
-
-    /// Get all chunk session metadata + model refs for pipelined embedding
-    #[cfg(feature = "coreml")]
-    pub(crate) fn chunk_session_refs(&self) -> Vec<ChunkSessionRefs> {
-        self.native_chunk_sessions
-            .iter()
-            .map(|s| ChunkSessionRefs {
-                num_windows: s.num_windows,
-                fbank_frames: s.fbank_frames,
-                num_masks: s.num_masks,
-                cached_fbank_shape: Arc::clone(&s.cached_fbank_shape),
-                cached_masks_shape: Arc::clone(&s.cached_masks_shape),
-                model: Arc::clone(&s.model),
-            })
-            .collect()
     }
 
     pub fn primary_batch_size(&self) -> usize {

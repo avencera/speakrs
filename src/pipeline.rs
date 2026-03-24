@@ -5,9 +5,9 @@ pub mod types;
 pub use types::*;
 
 pub(crate) mod clustering;
-pub(crate) use clustering::{clean_masks, select_speaker_weights};
 #[cfg(test)]
 use clustering::mark_inactive_speakers;
+pub(crate) use clustering::{clean_masks, select_speaker_weights};
 
 mod concurrent;
 use concurrent::*;
@@ -31,6 +31,50 @@ use crate::inference::ExecutionMode;
 use crate::inference::embedding::EmbeddingModel;
 use crate::inference::segmentation::SegmentationModel;
 use crate::powerset::PowersetMapping;
+
+/// Shared run/query methods for both owned and borrowed pipeline facades.
+/// Both structs provide `runner()`, `mode`, and `seg_model` with compatible types
+macro_rules! pipeline_run_methods {
+    () => {
+        pub fn run(&mut self, audio: &[f32]) -> Result<DiarizationResult, PipelineError> {
+            self.run_with_file_id(audio, "file1")
+        }
+
+        pub fn run_with_file_id(
+            &mut self,
+            audio: &[f32],
+            file_id: &str,
+        ) -> Result<DiarizationResult, PipelineError> {
+            self.run_with_config(audio, file_id, &PipelineConfig::for_mode(self.mode))
+        }
+
+        pub fn run_with_config(
+            &mut self,
+            audio: &[f32],
+            file_id: &str,
+            config: &PipelineConfig,
+        ) -> Result<DiarizationResult, PipelineError> {
+            self.runner().run(audio, file_id, config)
+        }
+
+        /// Run only inference (segmentation + embedding), returning intermediate artifacts
+        pub fn run_inference_only(
+            &mut self,
+            audio: &[f32],
+        ) -> Result<InferenceArtifacts, PipelineError> {
+            self.runner().run_inference(audio)
+        }
+
+        /// Pipeline config for the current execution mode
+        pub fn pipeline_config(&self) -> PipelineConfig {
+            PipelineConfig::for_mode(self.mode)
+        }
+
+        pub fn segmentation_step(&self) -> f64 {
+            self.seg_model.step_seconds()
+        }
+    };
+}
 
 /// Owned pipeline that manages its own model lifetimes
 pub struct OwnedDiarizationPipeline {
@@ -88,38 +132,7 @@ impl OwnedDiarizationPipeline {
         })
     }
 
-    pub fn run(&mut self, audio: &[f32]) -> Result<DiarizationResult, PipelineError> {
-        self.run_with_file_id(audio, "file1")
-    }
-
-    pub fn run_with_file_id(
-        &mut self,
-        audio: &[f32],
-        file_id: &str,
-    ) -> Result<DiarizationResult, PipelineError> {
-        self.run_with_config(audio, file_id, &PipelineConfig::for_mode(self.mode))
-    }
-
-    pub fn run_with_config(
-        &mut self,
-        audio: &[f32],
-        file_id: &str,
-        config: &PipelineConfig,
-    ) -> Result<DiarizationResult, PipelineError> {
-        self.runner().run(audio, file_id, config)
-    }
-
-    /// Run only inference (segmentation + embedding), returning intermediate artifacts
-    ///
-    /// Use with `finish_post_inference` to enable multi-file overlap:
-    /// post-inference for file N runs on a background thread while
-    /// inference for file N+1 starts
-    pub fn run_inference_only(
-        &mut self,
-        audio: &[f32],
-    ) -> Result<InferenceArtifacts, PipelineError> {
-        self.runner().run_inference(audio)
-    }
+    pipeline_run_methods!();
 
     /// Run post-inference (clustering + reconstruction) on pre-computed artifacts
     ///
@@ -132,11 +145,6 @@ impl OwnedDiarizationPipeline {
         config: &PipelineConfig,
     ) -> Result<DiarizationResult, PipelineError> {
         post_inference(artifacts, file_id, config, &self.plda)
-    }
-
-    /// Pipeline config for the current execution mode
-    pub fn pipeline_config(&self) -> PipelineConfig {
-        PipelineConfig::for_mode(self.mode)
     }
 
     /// Build the pipeline from a local models directory
@@ -180,10 +188,6 @@ impl OwnedDiarizationPipeline {
             mode,
         })
     }
-
-    pub fn segmentation_step(&self) -> f64 {
-        self.seg_model.step_seconds()
-    }
 }
 
 pub struct DiarizationPipeline<'a> {
@@ -223,43 +227,7 @@ impl<'a> DiarizationPipeline<'a> {
         SEGMENTATION_STEP_SECONDS as f32
     }
 
-    pub fn run(&mut self, audio: &[f32]) -> Result<DiarizationResult, PipelineError> {
-        self.run_with_file_id(audio, "file1")
-    }
-
-    pub fn run_with_file_id(
-        &mut self,
-        audio: &[f32],
-        file_id: &str,
-    ) -> Result<DiarizationResult, PipelineError> {
-        self.run_with_config(audio, file_id, &PipelineConfig::for_mode(self.mode))
-    }
-
-    pub fn run_with_config(
-        &mut self,
-        audio: &[f32],
-        file_id: &str,
-        config: &PipelineConfig,
-    ) -> Result<DiarizationResult, PipelineError> {
-        self.runner().run(audio, file_id, config)
-    }
-
-    pub fn segmentation_step(&self) -> f64 {
-        self.seg_model.step_seconds()
-    }
-
-    /// Run only inference, returning intermediate artifacts for deferred post-processing
-    pub fn run_inference_only(
-        &mut self,
-        audio: &[f32],
-    ) -> Result<InferenceArtifacts, PipelineError> {
-        self.runner().run_inference(audio)
-    }
-
-    /// Pipeline config for the current execution mode
-    pub fn pipeline_config(&self) -> PipelineConfig {
-        PipelineConfig::for_mode(self.mode)
-    }
+    pipeline_run_methods!();
 }
 
 impl OwnedDiarizationPipeline {
