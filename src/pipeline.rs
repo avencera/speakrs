@@ -7,9 +7,7 @@ pub use types::*;
 pub(crate) mod clustering;
 #[cfg(test)]
 use clustering::mark_inactive_speakers;
-#[cfg(feature = "coreml")]
-pub(crate) use clustering::write_speaker_mask_to_slice;
-pub(crate) use clustering::{clean_masks, select_speaker_weights};
+pub(crate) use clustering::{clean_masks, select_speaker_weights, write_speaker_mask_to_slice};
 
 mod concurrent;
 use concurrent::*;
@@ -70,6 +68,23 @@ macro_rules! pipeline_run_methods {
         /// Pipeline config for the current execution mode
         pub fn pipeline_config(&self) -> PipelineConfig {
             PipelineConfig::for_mode(self.mode)
+        }
+
+        /// Diarize a batch of files, keeping all hardware busy across file boundaries
+        pub fn run_batch(
+            &mut self,
+            files: &[BatchInput<'_>],
+        ) -> Result<Vec<DiarizationResult>, PipelineError> {
+            self.run_batch_with_config(files, &PipelineConfig::for_mode(self.mode))
+        }
+
+        /// Diarize a batch of files with custom config
+        pub fn run_batch_with_config(
+            &mut self,
+            files: &[BatchInput<'_>],
+            config: &PipelineConfig,
+        ) -> Result<Vec<DiarizationResult>, PipelineError> {
+            self.runner().run_batch(files, config)
         }
 
         pub fn segmentation_step(&self) -> f64 {
@@ -317,6 +332,37 @@ impl<'a> PipelineRunner<'a> {
         path
     }
 
+    fn run_batch(
+        &mut self,
+        files: &[BatchInput<'_>],
+        config: &PipelineConfig,
+    ) -> Result<Vec<DiarizationResult>, PipelineError> {
+        if files.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // try batch chunk embedding for CoreML concurrent path
+        #[cfg(feature = "coreml")]
+        if matches!(self.inference_path(), InferencePath::Concurrent)
+            && let Some(results) = chunk_embedding::try_batch_chunk_embedding(
+                self.seg_model,
+                self.emb_model,
+                self.powerset,
+                self.plda,
+                files,
+                config,
+            )?
+        {
+            return Ok(results);
+        }
+
+        // fallback: per-file sequential with post-inference overlap
+        files
+            .iter()
+            .map(|f| self.run(f.audio, f.file_id, config))
+            .collect()
+    }
+
     fn run_inference(&mut self, audio: &[f32]) -> Result<InferenceArtifacts, PipelineError> {
         match self.inference_path() {
             InferencePath::Sequential => self.run_sequential_inference(audio),
@@ -447,12 +493,11 @@ impl<'a> PipelineRunner<'a> {
             });
         }
 
-        let num_chunks = concurrent_result.decoded_windows.len();
-        let (segmentations, embeddings) = concurrent_result.into_arrays();
+        let num_chunks = concurrent_result.num_chunks;
         let layout = layout.with_num_chunks(num_chunks);
         info!(
-            chunks = segmentations.shape()[0],
-            speakers = segmentations.shape()[2],
+            chunks = concurrent_result.segmentations.shape()[0],
+            speakers = concurrent_result.segmentations.shape()[2],
             inference_ms = inference_elapsed.as_millis(),
             embedding_path = ?embedding_path,
             "Concurrent seg+emb complete"
@@ -460,8 +505,8 @@ impl<'a> PipelineRunner<'a> {
 
         Ok(InferenceArtifacts {
             layout,
-            segmentations: DecodedSegmentations(segmentations),
-            embeddings: ChunkEmbeddings(embeddings),
+            segmentations: DecodedSegmentations(concurrent_result.segmentations),
+            embeddings: ChunkEmbeddings(concurrent_result.embeddings),
         })
     }
 

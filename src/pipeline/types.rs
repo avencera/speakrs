@@ -35,12 +35,6 @@ impl From<crate::inference::segmentation::SegmentationError> for PipelineError {
     }
 }
 
-pub(crate) struct SpeakerEmbedding {
-    pub chunk_idx: usize,
-    pub speaker_idx: usize,
-    pub embedding: Vec<f32>,
-}
-
 pub(super) struct PendingEmbedding<'a> {
     pub chunk_idx: usize,
     pub speaker_idx: usize,
@@ -198,6 +192,12 @@ impl ChunkLayout {
     pub fn chunk_audio<'a>(&self, audio: &'a [f32], chunk_idx: usize) -> &'a [f32] {
         chunk_audio_raw(audio, self.step_samples, self.window_samples, chunk_idx)
     }
+}
+
+/// Input for batch diarization
+pub struct BatchInput<'a> {
+    pub audio: &'a [f32],
+    pub file_id: &'a str,
 }
 
 pub struct InferenceArtifacts {
@@ -515,19 +515,6 @@ impl EmbeddingStorage for Array3Writer<'_> {
     }
 }
 
-/// Appends embeddings as SpeakerEmbedding structs to a Vec
-pub(super) struct VecWriter<'a>(pub &'a mut Vec<SpeakerEmbedding>);
-
-impl EmbeddingStorage for VecWriter<'_> {
-    fn store(&mut self, chunk_idx: usize, speaker_idx: usize, embedding: &[f32]) {
-        self.0.push(SpeakerEmbedding {
-            chunk_idx,
-            speaker_idx,
-            embedding: embedding.to_vec(),
-        });
-    }
-}
-
 // --- Flush helpers ---
 
 pub(super) fn flush_masked<S: EmbeddingStorage>(
@@ -610,36 +597,6 @@ pub(super) fn flush_multi_mask<S: EmbeddingStorage>(
     }
 
     Ok(())
-}
-
-// --- Array reconstruction ---
-
-/// Build segmentation and embedding arrays from decoded windows and speaker embeddings
-pub(super) fn build_inference_arrays(
-    decoded_windows: Vec<Array2<f32>>,
-    embeddings: Vec<SpeakerEmbedding>,
-    num_speakers: usize,
-) -> Option<(Array3<f32>, Array3<f32>)> {
-    if decoded_windows.is_empty() {
-        return None;
-    }
-
-    let num_chunks = decoded_windows.len();
-    let num_frames = decoded_windows[0].nrows();
-
-    let mut segmentations = Array3::<f32>::zeros((num_chunks, num_frames, num_speakers));
-    for (i, window) in decoded_windows.iter().enumerate() {
-        segmentations.slice_mut(s![i, .., ..]).assign(window);
-    }
-
-    let mut emb_array = Array3::<f32>::from_elem((num_chunks, num_speakers, 256), f32::NAN);
-    for emb in &embeddings {
-        emb_array
-            .slice_mut(s![emb.chunk_idx, emb.speaker_idx, ..])
-            .assign(&ndarray::ArrayView1::from(emb.embedding.as_slice()));
-    }
-
-    Some((segmentations, emb_array))
 }
 
 // --- Audio helpers ---
