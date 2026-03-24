@@ -206,3 +206,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, model downloads, fixture
 - [pyannote-audio](https://github.com/pyannote/pyannote-audio) - Python reference implementation
 - [pyannote community-1](https://huggingface.co/pyannote/speaker-diarization-community-1) - VBx + PLDA pipeline
 - [FluidAudio](https://github.com/FluidInference/FluidAudio) - Swift reference (same VBx architecture)
+
+## Links
+
+[![Hypercommit](https://img.shields.io/badge/Hypercommit-DB2475)](https://hypercommit.com/speakrs)
