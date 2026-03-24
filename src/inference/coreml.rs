@@ -11,7 +11,9 @@ use objc2_core_ml::{
     MLComputeUnits, MLDictionaryFeatureProvider, MLFeatureProvider, MLFeatureValue, MLModel,
     MLModelConfiguration, MLMultiArray, MLMultiArrayDataType,
 };
-use objc2_foundation::{NSArray, NSCopying, NSMutableDictionary, NSNumber, NSString, NSURL};
+use objc2_foundation::{
+    NSArray, NSCopying, NSError, NSMutableDictionary, NSNumber, NSString, NSURL,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum GpuPrecision {
@@ -401,6 +403,81 @@ impl SharedCoreMlModel {
             ProtocolObject::from_ref(&*provider);
         let output = unsafe { self.model.predictionFromFeatures_error(input_ref) }
             .map_err(|e| CoreMlError::PredictionFailed(format!("{e}")))?;
+
+        let output_value = unsafe { output.featureValueForName(&self.output_key) }
+            .ok_or_else(|| CoreMlError::OutputNotFound(self.output_name.clone()))?;
+        let output_array = unsafe { output_value.multiArrayValue() }
+            .ok_or_else(|| CoreMlError::OutputNotFound(self.output_name.clone()))?;
+
+        extract_output(&output_array)
+    }
+
+    /// Async prediction: queues work on ANE and returns via callback
+    ///
+    /// Uses predictionFromFeatures:completionHandler: which lets CoreML
+    /// pipeline multiple predictions onto ANE simultaneously. Critical for
+    /// concurrent ANE workers — sync prediction serializes while async
+    /// lets the ANE queue depth (127) fill up
+    pub fn predict_async(
+        &self,
+        inputs: &[(&CachedInputShape, &[f32])],
+    ) -> Result<(Vec<f32>, Vec<usize>), CoreMlError> {
+        let deallocator = RcBlock::new(|_ptr: NonNull<c_void>| {});
+        let input_dict: Retained<NSMutableDictionary<NSString, AnyObject>> =
+            NSMutableDictionary::new();
+
+        for &(cached, data) in inputs {
+            debug_assert_eq!(data.len(), cached.total_elements);
+            let multi_array =
+                create_multi_array_cached_with_deallocator(data, cached, &deallocator)?;
+            let feature_value = unsafe { MLFeatureValue::featureValueWithMultiArray(&multi_array) };
+            let key_copy: &ProtocolObject<dyn NSCopying> = ProtocolObject::from_ref(&*cached.name);
+            let value_ref: &AnyObject =
+                unsafe { &*((&*feature_value) as *const MLFeatureValue as *const AnyObject) };
+            unsafe { input_dict.setObject_forKey(value_ref, key_copy) };
+        }
+
+        let provider = unsafe {
+            MLDictionaryFeatureProvider::initWithDictionary_error(
+                MLDictionaryFeatureProvider::alloc(),
+                &input_dict,
+            )
+        }
+        .map_err(|e| CoreMlError::PredictionFailed(format!("feature provider: {e}")))?;
+
+        let input_ref: &ProtocolObject<dyn MLFeatureProvider> =
+            ProtocolObject::from_ref(&*provider);
+
+        // bridge the async callback to a blocking channel
+        let (tx, rx) = std::sync::mpsc::sync_channel::<
+            Result<Retained<ProtocolObject<dyn MLFeatureProvider>>, String>,
+        >(1);
+
+        let completion = block2::RcBlock::new(
+            move |output: *mut ProtocolObject<dyn MLFeatureProvider>, error: *mut NSError| {
+                if !error.is_null() {
+                    let err_msg = unsafe { (*error).localizedDescription() }.to_string();
+                    let _ = tx.send(Err(err_msg));
+                } else if output.is_null() {
+                    let _ = tx.send(Err("nil output with no error".to_owned()));
+                } else {
+                    // retain the output so it survives the callback
+                    let retained = unsafe { Retained::retain(output) }.unwrap();
+                    let _ = tx.send(Ok(retained));
+                }
+            },
+        );
+
+        unsafe {
+            self.model
+                .predictionFromFeatures_completionHandler(input_ref, &completion);
+        }
+
+        // block until the callback fires
+        let output = rx
+            .recv()
+            .map_err(|_| CoreMlError::PredictionFailed("channel closed".to_owned()))?
+            .map_err(|e| CoreMlError::PredictionFailed(e))?;
 
         let output_value = unsafe { output.featureValueForName(&self.output_key) }
             .ok_or_else(|| CoreMlError::OutputNotFound(self.output_name.clone()))?;

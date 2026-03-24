@@ -1224,8 +1224,9 @@ impl<'a> PipelineRunner<'a> {
             .map(|session| (session.num_windows, session.fbank_frames, session.num_masks))
             .collect();
 
-        // ANE disabled: ResNet34 runs ~6x slower on ANE than GPU and
-        // does not scale with concurrent workers (tested 1-4 workers)
+        // ANE disabled: ResNet34 is ~6x slower on ANE than GPU even with
+        // async prediction API (tested sync and async, 1-4 workers, FP32 and W8A16).
+        // The model likely exceeds ANE SRAM causing memory bandwidth bottleneck
         let ane_session: Option<ChunkSessionPtr> = None;
 
         Some(ChunkEmbeddingResources {
@@ -1566,7 +1567,7 @@ impl<'a> PipelineRunner<'a> {
                                 while let Ok(prepared) = prep_rx_ref.recv() {
                                     let predict_start = std::time::Instant::now();
                                     let (data, _) = model
-                                        .predict_cached(&[
+                                        .predict_async(&[
                                             (fbank_shape, &prepared.fbank),
                                             (masks_shape, &prepared.masks),
                                         ])
