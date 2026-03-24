@@ -344,7 +344,6 @@ pub(crate) fn select_speaker_weights(
 
 /// Write the chosen speaker mask directly into a destination slice, avoiding
 /// the intermediate Array2 and Vec allocations of clean_masks + select_speaker_weights
-#[cfg(any(feature = "coreml", test))]
 pub(crate) fn write_speaker_mask_to_slice(
     seg_view: &ArrayView2<f32>,
     speaker_idx: usize,
