@@ -341,3 +341,173 @@ pub(crate) fn select_speaker_weights(
         Some(mask_col.iter().copied().collect())
     }
 }
+
+/// Write the chosen speaker mask directly into a destination slice, avoiding
+/// the intermediate Array2 and Vec allocations of clean_masks + select_speaker_weights
+#[cfg(any(feature = "coreml", test))]
+pub(crate) fn write_speaker_mask_to_slice(
+    seg_view: &ArrayView2<f32>,
+    speaker_idx: usize,
+    audio_len: usize,
+    min_num_samples: usize,
+    dest: &mut [f32],
+) -> bool {
+    let mask_col = seg_view.column(speaker_idx);
+    let activity: f32 = mask_col.iter().sum();
+    if activity < MIN_SPEAKER_ACTIVITY {
+        return false;
+    }
+
+    let nrows = seg_view.nrows();
+
+    // compute clean column sum to decide which mask to use
+    let mut clean_sum = 0.0f32;
+    for row_idx in 0..nrows {
+        let row_sum: f32 = seg_view.row(row_idx).iter().sum();
+        if row_sum < 2.0 {
+            clean_sum += seg_view[[row_idx, speaker_idx]];
+        }
+    }
+
+    // inline should_use_clean_mask logic
+    let use_clean = audio_len > 0 && {
+        let min_mask_frames = (nrows * min_num_samples).div_ceil(audio_len) as f32;
+        clean_sum > min_mask_frames
+    };
+
+    let copy_len = nrows.min(dest.len());
+    if use_clean {
+        for row_idx in 0..copy_len {
+            let row_sum: f32 = seg_view.row(row_idx).iter().sum();
+            dest[row_idx] = if row_sum < 2.0 {
+                seg_view[[row_idx, speaker_idx]]
+            } else {
+                0.0
+            };
+        }
+    } else {
+        for row_idx in 0..copy_len {
+            dest[row_idx] = mask_col[row_idx];
+        }
+    }
+
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify write_speaker_mask_to_slice matches clean_masks + select_speaker_weights
+    fn assert_matches_original(seg: &Array2<f32>, audio_len: usize, min_num_samples: usize) {
+        let clean = clean_masks(&seg.view());
+        for speaker_idx in 0..seg.ncols() {
+            let original = select_speaker_weights(
+                &seg.view(),
+                &clean,
+                speaker_idx,
+                audio_len,
+                min_num_samples,
+            );
+
+            let mut dest = vec![0.0f32; seg.nrows()];
+            let active = write_speaker_mask_to_slice(
+                &seg.view(),
+                speaker_idx,
+                audio_len,
+                min_num_samples,
+                &mut dest,
+            );
+
+            match original {
+                None => assert!(!active, "speaker {speaker_idx}: expected inactive"),
+                Some(expected) => {
+                    assert!(active, "speaker {speaker_idx}: expected active");
+                    assert_eq!(
+                        dest[..expected.len()],
+                        expected[..],
+                        "speaker {speaker_idx}: mask mismatch"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn single_active_speaker() {
+        // speaker 0 active on all frames, speakers 1 and 2 inactive
+        let mut seg = Array2::<f32>::zeros((20, 3));
+        for i in 0..20 {
+            seg[[i, 0]] = 1.0;
+        }
+        assert_matches_original(&seg, 160_000, 640);
+    }
+
+    #[test]
+    fn inactive_speaker_below_threshold() {
+        // speaker with activity sum < 10.0
+        let mut seg = Array2::<f32>::zeros((20, 3));
+        for i in 0..9 {
+            seg[[i, 0]] = 1.0;
+        }
+        assert_matches_original(&seg, 160_000, 640);
+    }
+
+    #[test]
+    fn overlapping_speakers_uses_clean_mask() {
+        // frames where two speakers are active should be zeroed in clean mask
+        let mut seg = Array2::<f32>::zeros((20, 3));
+        for i in 0..20 {
+            seg[[i, 0]] = 1.0;
+        }
+        // speaker 1 overlaps on frames 5-9
+        for i in 5..10 {
+            seg[[i, 1]] = 1.0;
+        }
+        // speaker 1 also active alone on 10-19
+        for i in 10..20 {
+            seg[[i, 1]] = 1.0;
+        }
+        assert_matches_original(&seg, 160_000, 640);
+    }
+
+    #[test]
+    fn fallback_to_raw_mask_when_clean_too_sparse() {
+        // clean mask has too few active frames, should fall back to raw
+        let mut seg = Array2::<f32>::zeros((20, 3));
+        for i in 0..20 {
+            seg[[i, 0]] = 1.0;
+            seg[[i, 1]] = 1.0; // overlap on all frames
+        }
+        // speaker 0 has zero clean frames but 20 raw frames
+        assert_matches_original(&seg, 160_000, 640);
+    }
+
+    #[test]
+    fn zero_audio_len() {
+        let mut seg = Array2::<f32>::zeros((20, 3));
+        for i in 0..20 {
+            seg[[i, 0]] = 1.0;
+        }
+        assert_matches_original(&seg, 0, 640);
+    }
+
+    #[test]
+    fn realistic_three_speaker_scenario() {
+        // simulate a realistic window with three speakers
+        let mut seg = Array2::<f32>::zeros((589, 3));
+        // speaker 0: active frames 0-300
+        for i in 0..300 {
+            seg[[i, 0]] = 1.0;
+        }
+        // speaker 1: active frames 200-500 (overlaps with 0 on 200-300)
+        for i in 200..500 {
+            seg[[i, 1]] = 1.0;
+        }
+        // speaker 2: active frames 450-589 (overlaps with 1 on 450-500)
+        for i in 450..589 {
+            seg[[i, 2]] = 1.0;
+        }
+        assert_matches_original(&seg, 160_000, 640);
+    }
+}
