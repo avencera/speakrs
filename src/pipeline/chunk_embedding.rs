@@ -118,6 +118,10 @@ impl PrepScratch {
 }
 
 impl ChunkPrep {
+    fn chunk_win_capacity(&self) -> usize {
+        self.max_active / self.num_speakers
+    }
+
     fn prep(
         &self,
         decoded: DecodedChunk,
@@ -912,4 +916,539 @@ pub(super) fn try_chunk_embedding(
     });
 
     result
+}
+
+// --- Batch types ---
+
+struct TaggedDecoded {
+    file_idx: usize,
+    local_start: usize,
+    decoded_chunk: Vec<Array2<f32>>,
+}
+
+struct TaggedPrepared {
+    file_idx: usize,
+    local_start: usize,
+    prepared: PreparedChunk,
+}
+
+struct TaggedEmbedded {
+    file_idx: usize,
+    local_start: usize,
+    embedded: EmbeddedChunk,
+}
+
+struct FileCollector {
+    seg_array: Array3<f32>,
+    emb_array: Array3<f32>,
+    max_slot_used: usize,
+    chunks_received: usize,
+    expected_chunks: usize,
+}
+
+impl FileCollector {
+    fn new(
+        max_slots: usize,
+        num_frames: usize,
+        num_speakers: usize,
+        expected_chunks: usize,
+    ) -> Self {
+        Self {
+            seg_array: Array3::zeros((max_slots, num_frames, num_speakers)),
+            emb_array: Array3::from_elem((max_slots, num_speakers, 256), f32::NAN),
+            max_slot_used: 0,
+            chunks_received: 0,
+            expected_chunks,
+        }
+    }
+
+    fn add(
+        &mut self,
+        local_start: usize,
+        chunk_win_capacity: usize,
+        num_speakers: usize,
+        embedded: EmbeddedChunk,
+    ) {
+        let batch_emb = Array2::from_shape_vec((embedded.num_masks, 256), embedded.data).unwrap();
+
+        for &(local, speaker_idx) in &embedded.active {
+            let slot = local_start * chunk_win_capacity + local;
+            if slot < self.emb_array.shape()[0] {
+                let mask_idx = local * num_speakers + speaker_idx;
+                self.emb_array
+                    .slice_mut(ndarray::s![slot, speaker_idx, ..])
+                    .assign(&batch_emb.row(mask_idx));
+            }
+        }
+
+        for (local, decoded) in embedded.decoded_chunk.into_iter().enumerate() {
+            let slot = local_start * chunk_win_capacity + local;
+            if slot < self.seg_array.shape()[0] {
+                self.seg_array
+                    .slice_mut(ndarray::s![slot, .., ..])
+                    .assign(&decoded);
+                self.max_slot_used = self.max_slot_used.max(slot + 1);
+            }
+        }
+
+        self.chunks_received += 1;
+    }
+
+    fn is_complete(&self) -> bool {
+        self.chunks_received >= self.expected_chunks
+    }
+
+    fn into_artifacts(
+        self,
+        step_seconds: f64,
+        step_samples: usize,
+        window_samples: usize,
+    ) -> Option<InferenceArtifacts> {
+        if self.max_slot_used == 0 {
+            return None;
+        }
+        let n = self.max_slot_used;
+        Some(InferenceArtifacts {
+            layout: ChunkLayout::new(step_seconds, step_samples, window_samples, n),
+            segmentations: DecodedSegmentations(self.seg_array.slice_move(ndarray::s![
+                ..n,
+                ..,
+                ..
+            ])),
+            embeddings: ChunkEmbeddings(self.emb_array.slice_move(ndarray::s![..n, .., ..])),
+        })
+    }
+}
+
+// --- Batch prep worker ---
+
+struct BatchPrepWorker {
+    prep: ChunkPrep,
+    scratch: PrepScratch,
+}
+
+impl BatchPrepWorker {
+    fn run(
+        mut self,
+        audios: &[&[f32]],
+        decoded_rx: &Receiver<TaggedDecoded>,
+        prepared_tx: Sender<TaggedPrepared>,
+    ) -> Result<PrepStats, PipelineError> {
+        let mut stats = PrepStats::default();
+
+        while let Ok(tagged) = decoded_rx.recv() {
+            let audio = audios[tagged.file_idx];
+            let decoded = DecodedChunk {
+                global_start: tagged.local_start * self.prep.chunk_win_capacity(),
+                decoded_chunk: tagged.decoded_chunk,
+            };
+            let chunk_audio_start = decoded.global_start * self.prep.step_samples;
+            if chunk_audio_start + self.prep.window_samples > audio.len() {
+                continue;
+            }
+            let prep_start = std::time::Instant::now();
+            let prepared = self.prep.prep(decoded, audio, &mut self.scratch)?;
+            stats.fbank_us += prep_start.elapsed().as_micros() as u64;
+            stats.chunks += 1;
+            if prepared_tx
+                .send(TaggedPrepared {
+                    file_idx: tagged.file_idx,
+                    local_start: tagged.local_start,
+                    prepared,
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+        Ok(stats)
+    }
+}
+
+// --- Batch GPU worker ---
+
+struct BatchGpuWorker {
+    model: Arc<SharedCoreMlModel>,
+    fbank_shape: Arc<CachedInputShape>,
+    masks_shape: Arc<CachedInputShape>,
+    prep: ChunkPrep,
+    scratch: PrepScratch,
+}
+
+impl BatchGpuWorker {
+    fn predict(&self, prepared: &PreparedChunk) -> Result<(Vec<f32>, u64), PipelineError> {
+        let predict_start = std::time::Instant::now();
+        let (data, _) = self
+            .model
+            .predict_cached(&[
+                (&*self.fbank_shape, &prepared.fbank),
+                (&*self.masks_shape, &prepared.masks),
+            ])
+            .map_err(|e| PipelineError::Other(e.to_string()))?;
+        Ok((data, predict_start.elapsed().as_micros() as u64))
+    }
+
+    fn run(
+        mut self,
+        audios: &[&[f32]],
+        prepared_rx: Receiver<TaggedPrepared>,
+        decoded_rx: Receiver<TaggedDecoded>,
+        embedded_tx: Sender<TaggedEmbedded>,
+    ) -> Result<GpuStats, PipelineError> {
+        let mut total_predict_us = 0u64;
+        let mut total_prep_us = 0u64;
+        let mut chunk_num = 0u32;
+        let mut decoded_done = false;
+
+        loop {
+            // priority 1: predict a prepared chunk (any file)
+            let (file_idx, local_start, prepared) = match prepared_rx.try_recv() {
+                Ok(t) => (t.file_idx, t.local_start, t.prepared),
+                Err(crossbeam_channel::TryRecvError::Disconnected) => break,
+                Err(crossbeam_channel::TryRecvError::Empty) => {
+                    if decoded_done {
+                        match prepared_rx.recv() {
+                            Ok(t) => (t.file_idx, t.local_start, t.prepared),
+                            Err(_) => break,
+                        }
+                    } else {
+                        // priority 2: steal decoded and self-prep
+                        match decoded_rx.try_recv() {
+                            Ok(tagged) => {
+                                let audio = audios[tagged.file_idx];
+                                let decoded = DecodedChunk {
+                                    global_start: tagged.local_start
+                                        * self.prep.chunk_win_capacity(),
+                                    decoded_chunk: tagged.decoded_chunk,
+                                };
+                                let prep_start = std::time::Instant::now();
+                                let p = self.prep.prep(decoded, audio, &mut self.scratch)?;
+                                total_prep_us += prep_start.elapsed().as_micros() as u64;
+                                (tagged.file_idx, tagged.local_start, p)
+                            }
+                            Err(crossbeam_channel::TryRecvError::Empty) => {
+                                // block on whichever has work
+                                crossbeam_channel::select! {
+                                    recv(prepared_rx) -> msg => match msg {
+                                        Ok(t) => (t.file_idx, t.local_start, t.prepared),
+                                        Err(_) => break,
+                                    },
+                                    recv(decoded_rx) -> msg => match msg {
+                                        Ok(tagged) => {
+                                            let audio = audios[tagged.file_idx];
+                                            let decoded = DecodedChunk {
+                                                global_start: tagged.local_start * self.prep.chunk_win_capacity(),
+                                                decoded_chunk: tagged.decoded_chunk,
+                                            };
+                                            let prep_start = std::time::Instant::now();
+                                            let p = self.prep.prep(decoded, audio, &mut self.scratch)?;
+                                            total_prep_us += prep_start.elapsed().as_micros() as u64;
+                                            (tagged.file_idx, tagged.local_start, p)
+                                        }
+                                        Err(_) => {
+                                            decoded_done = true;
+                                            match prepared_rx.recv() {
+                                                Ok(t) => (t.file_idx, t.local_start, t.prepared),
+                                                Err(_) => break,
+                                            }
+                                        }
+                                    },
+                                }
+                            }
+                            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                                decoded_done = true;
+                                match prepared_rx.recv() {
+                                    Ok(t) => (t.file_idx, t.local_start, t.prepared),
+                                    Err(_) => break,
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+
+            let (data, predict_us) = self.predict(&prepared)?;
+            total_predict_us += predict_us;
+            chunk_num += 1;
+
+            if embedded_tx
+                .send(TaggedEmbedded {
+                    file_idx,
+                    local_start,
+                    embedded: EmbeddedChunk {
+                        global_start: local_start * self.prep.chunk_win_capacity(),
+                        decoded_chunk: prepared.decoded_chunk,
+                        data,
+                        active: prepared.active,
+                        num_masks: prepared.num_masks,
+                        predict_us,
+                    },
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+
+        Ok(GpuStats {
+            predict_us: total_predict_us,
+            chunks: chunk_num,
+            self_prep_us: total_prep_us,
+        })
+    }
+}
+
+// --- Batch entry point ---
+
+pub(super) fn try_batch_chunk_embedding(
+    seg_model: &mut SegmentationModel,
+    emb_model: &mut EmbeddingModel,
+    powerset: &PowersetMapping,
+    plda: &crate::clustering::plda::PldaTransform,
+    files: &[super::types::BatchInput<'_>],
+    config: &super::config::PipelineConfig,
+) -> Result<Option<Vec<super::types::DiarizationResult>>, PipelineError> {
+    use super::post_inference::post_inference;
+
+    if files.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+
+    // check that chunk embedding is available
+    let chunk_win_capacity = match emb_model.chunk_window_capacity() {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+
+    let step_samples = seg_model.step_samples();
+    let window_samples = seg_model.window_samples();
+    let step_seconds = seg_model.step_seconds();
+    let num_speakers = 3usize;
+    let min_num_samples = emb_model.min_num_samples();
+
+    // check all files are long enough
+    for file in files {
+        if file.audio.len() < window_samples {
+            return Ok(None);
+        }
+    }
+
+    // compute expected chunks per file
+    let expected_chunks: Vec<usize> = files
+        .iter()
+        .map(|f| {
+            let total_windows = f.audio.len().saturating_sub(window_samples) / step_samples + 1;
+            total_windows.div_ceil(chunk_win_capacity)
+        })
+        .collect();
+
+    let total_expected: usize = expected_chunks.iter().sum();
+    if total_expected < 2 {
+        return Ok(None);
+    }
+
+    // load chunk embedding resources
+    let Some(resources) = chunk_embedding_resources(emb_model) else {
+        return Ok(None);
+    };
+
+    let largest_session = resources.chunk_sessions.last().unwrap().clone();
+    let largest_fbank_frames = resources.chunk_lookup.last().unwrap().1;
+    let largest_num_masks = resources.chunk_lookup.last().unwrap().2;
+    let max_active = chunk_win_capacity * num_speakers;
+
+    let prep_config = ChunkPrep {
+        step_samples,
+        window_samples,
+        num_speakers,
+        min_num_samples,
+        largest_fbank_frames,
+        largest_num_masks,
+        max_active,
+        fbank_30s: resources.fbank_30s.clone(),
+        fbank_10s: resources.fbank_10s.clone(),
+    };
+
+    let audios: Vec<&[f32]> = files.iter().map(|f| f.audio).collect();
+    let num_prep_workers = 2usize;
+
+    let batch_start = std::time::Instant::now();
+
+    // shared channels across all files (created outside scope for lifetime)
+    let (decoded_tx, decoded_rx) = crossbeam_channel::bounded::<TaggedDecoded>(100);
+    let (prepared_tx, prepared_rx) = crossbeam_channel::bounded::<TaggedPrepared>(48);
+    let (embedded_tx, embedded_rx) = crossbeam_channel::bounded::<TaggedEmbedded>(16);
+    let decoded_rx_ref = &decoded_rx;
+    let audios_ref = &audios;
+
+    let result: Result<Vec<super::types::DiarizationResult>, PipelineError> =
+        std::thread::scope(|scope| {
+            // seg+bridge producer: sequential per file
+            // seg and bridge must run concurrently (seg fills seg_tx, bridge drains seg_rx)
+            let decoded_tx_seg = decoded_tx.clone();
+            let seg_handle = scope.spawn(move || -> Result<(), PipelineError> {
+                for (file_idx, file) in files.iter().enumerate() {
+                    let (seg_tx, seg_rx) = crossbeam_channel::bounded::<Array2<f32>>(100);
+
+                    // bridge runs in a nested scope so it drains seg_rx concurrently with seg
+                    std::thread::scope(|inner| {
+                        let decoded_tx_bridge = &decoded_tx_seg;
+                        let bridge_handle = inner.spawn(move || {
+                            let mut group: Vec<Array2<f32>> =
+                                Vec::with_capacity(chunk_win_capacity);
+                            let mut local_start = 0usize;
+
+                            for raw_window in &seg_rx {
+                                group.push(powerset.hard_decode(&raw_window));
+                                if group.len() == chunk_win_capacity {
+                                    if decoded_tx_bridge
+                                        .send(TaggedDecoded {
+                                            file_idx,
+                                            local_start,
+                                            decoded_chunk: std::mem::take(&mut group),
+                                        })
+                                        .is_err()
+                                    {
+                                        return;
+                                    }
+                                    local_start += 1;
+                                    group = Vec::with_capacity(chunk_win_capacity);
+                                }
+                            }
+                            if !group.is_empty() {
+                                let _ = decoded_tx_bridge.send(TaggedDecoded {
+                                    file_idx,
+                                    local_start,
+                                    decoded_chunk: group,
+                                });
+                            }
+                        });
+
+                        let seg_warm_start_windows = chunk_win_capacity;
+                        seg_model.run_streaming_parallel(
+                            file.audio,
+                            seg_tx,
+                            seg_worker_count(),
+                            Some(seg_warm_start_windows),
+                        )?;
+
+                        bridge_handle.join().unwrap();
+                        Ok::<(), PipelineError>(())
+                    })?;
+                }
+                drop(decoded_tx_seg);
+                Ok(())
+            });
+            drop(decoded_tx);
+
+            // CPU prep workers
+            let mut prep_handles = Vec::with_capacity(num_prep_workers);
+            for _ in 0..num_prep_workers {
+                let ptx = prepared_tx.clone();
+                let worker = BatchPrepWorker {
+                    prep: prep_config.clone(),
+                    scratch: PrepScratch::new(window_samples),
+                };
+                prep_handles.push(scope.spawn(move || -> Result<PrepStats, PipelineError> {
+                    worker.run(audios_ref, decoded_rx_ref, ptx)
+                }));
+            }
+            drop(prepared_tx);
+
+            // GPU predictor
+            let gpu_emb_tx = embedded_tx.clone();
+            let gpu_decoded_rx = decoded_rx.clone();
+            let gpu_worker = BatchGpuWorker {
+                model: largest_session.model,
+                fbank_shape: largest_session.cached_fbank_shape,
+                masks_shape: largest_session.cached_masks_shape,
+                prep: prep_config,
+                scratch: PrepScratch::new(window_samples),
+            };
+            let gpu_handle = scope.spawn(move || -> Result<GpuStats, PipelineError> {
+                gpu_worker.run(audios_ref, prepared_rx, gpu_decoded_rx, gpu_emb_tx)
+            });
+            drop(embedded_tx);
+
+            // collector: per-file direct-write Array3, finalize when complete
+            let mut collectors: Vec<Option<FileCollector>> =
+                std::iter::repeat_with(|| None).take(files.len()).collect();
+            let mut results: Vec<Option<super::types::DiarizationResult>> =
+                std::iter::repeat_with(|| None).take(files.len()).collect();
+            let mut files_complete = 0usize;
+
+            let expected_windows: Vec<usize> = files
+                .iter()
+                .map(|f| f.audio.len().saturating_sub(window_samples) / step_samples + 1)
+                .collect();
+
+            for tagged in std::iter::from_fn(|| embedded_rx.recv().ok()) {
+                let fc = collectors[tagged.file_idx].get_or_insert_with(|| {
+                    let num_frames = tagged.embedded.decoded_chunk[0].nrows();
+                    let max_slots = expected_windows[tagged.file_idx] + chunk_win_capacity;
+                    FileCollector::new(
+                        max_slots,
+                        num_frames,
+                        num_speakers,
+                        expected_chunks[tagged.file_idx],
+                    )
+                });
+
+                fc.add(
+                    tagged.local_start,
+                    chunk_win_capacity,
+                    num_speakers,
+                    tagged.embedded,
+                );
+
+                if fc.is_complete() {
+                    let fc = collectors[tagged.file_idx].take().unwrap();
+                    if let Some(artifacts) =
+                        fc.into_artifacts(step_seconds, step_samples, window_samples)
+                    {
+                        let file = &files[tagged.file_idx];
+                        let result = post_inference(artifacts, file.file_id, config, plda)?;
+                        results[tagged.file_idx] = Some(result);
+                    }
+                    files_complete += 1;
+                }
+            }
+
+            // join workers
+            seg_handle.join().unwrap()?;
+            let _gpu_stats = gpu_handle.join().unwrap()?;
+            for handle in prep_handles {
+                handle.join().unwrap()?;
+            }
+
+            let batch_elapsed = batch_start.elapsed();
+            info!(
+                files = files.len(),
+                files_complete,
+                batch_ms = batch_elapsed.as_millis(),
+                "Batch chunk embedding complete"
+            );
+
+            // collect results in input order, filling empty files
+            let results: Vec<super::types::DiarizationResult> = results
+                .into_iter()
+                .map(|r| {
+                    r.unwrap_or_else(|| super::types::DiarizationResult {
+                        segmentations: DecodedSegmentations(Array3::zeros((0, 0, num_speakers))),
+                        embeddings: ChunkEmbeddings(Array3::from_elem(
+                            (0, num_speakers, 256),
+                            f32::NAN,
+                        )),
+                        speaker_count: SpeakerCountTrack(Vec::new()),
+                        hard_clusters: ChunkSpeakerClusters(Array2::zeros((0, 0))),
+                        discrete_diarization: DiscreteDiarization(Array2::zeros((0, 0))),
+                        rttm: String::new(),
+                    })
+                })
+                .collect();
+
+            Ok(results)
+        });
+
+    result.map(Some)
 }

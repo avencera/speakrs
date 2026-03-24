@@ -183,86 +183,60 @@ pub fn run(
             );
 
             let total = wav_files.len();
-            let mut cumulative = 0.0f64;
-            let pipeline_config = pipeline.pipeline_config();
 
-            // separate PLDA for background post-inference thread (no model access needed)
-            let bg_plda = std::sync::Arc::new(
-                speakrs::clustering::plda::PldaTransform::from_dir(&models_dir)?,
-            );
-
-            // multi-file overlap: post-inference for file N runs on a background
-            // thread while inference for file N+1 starts on the main thread
-            let mut pending_post: Option<std::thread::JoinHandle<color_eyre::Result<(String, String)>>> =
-                None;
-
-            for (i, wav_path) in wav_files.iter().enumerate() {
+            // load all audio files
+            let load_start = Instant::now();
+            let mut audio_data: Vec<(String, Vec<f32>)> = Vec::with_capacity(total);
+            for wav_path in &wav_files {
                 let file_id = wav_path
                     .file_stem()
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "file1".to_string());
-
-                let file_start = Instant::now();
-                let load_start = Instant::now();
                 let (samples, sr) = wav::load_wav_samples(&wav_path.to_string_lossy())?;
-                let load_elapsed = load_start.elapsed();
                 ensure!(sr == 16000, "expected 16kHz WAV, got {sr}Hz");
+                audio_data.push((file_id, samples));
+            }
+            tracing::trace!(
+                load_ms = load_start.elapsed().as_millis(),
+                files = total,
+                "All audio loaded",
+            );
 
-                let start = Instant::now();
-                let artifacts = pipeline.run_inference_only(&samples)?;
-                let inference_elapsed = start.elapsed();
+            // build batch inputs
+            let batch_inputs: Vec<speakrs::pipeline::BatchInput<'_>> = audio_data
+                .iter()
+                .map(|(file_id, samples)| speakrs::pipeline::BatchInput {
+                    audio: samples,
+                    file_id,
+                })
+                .collect();
 
-                // spawn post-inference on background thread
-                let config = pipeline_config.clone();
-                let fid = file_id.clone();
-                let plda = bg_plda.clone();
-                let post_handle = std::thread::spawn(move || {
-                    let result = speakrs::pipeline::post_inference(artifacts, &fid, &config, &plda)?;
-                    Ok((fid, result.rttm))
-                });
+            // run batch
+            let batch_start = Instant::now();
+            let results = pipeline.run_batch(&batch_inputs)?;
+            let batch_elapsed = batch_start.elapsed();
 
-                // collect previous file's post-inference result (if any)
-                if let Some(prev_handle) = pending_post.take() {
-                    let (prev_id, prev_rttm) = prev_handle.join().unwrap()?;
-                    print!("{prev_rttm}");
-                    tracing::trace!(%prev_id, "Previous post-inference collected");
-                }
-
-                pending_post = Some(post_handle);
-
-                let elapsed = inference_elapsed.as_secs_f64();
-                cumulative += elapsed;
-
-                let avg = cumulative / (i + 1) as f64;
-                let remaining = (total - i - 1) as f64 * avg;
-                let eta = format_eta(remaining);
-                let total_elapsed = format_eta(cumulative);
+            // output results in order
+            for (i, result) in results.iter().enumerate() {
+                let file_id = &audio_data[i].0;
+                let audio_secs = audio_data[i].1.len() as f64 / 16_000.0;
+                let per_file = batch_elapsed.as_secs_f64() / (i + 1) as f64;
+                let eta = format_eta((total - i - 1) as f64 * per_file);
+                let elapsed = format_eta(batch_elapsed.as_secs_f64());
                 let now = chrono::Local::now().format("%H:%M:%S");
                 eprintln!(
-                    "  [{}/{}] {file_id}: {elapsed:.1}s (elapsed {total_elapsed}, ETA {eta}) [{now}]",
+                    "  [{}/{}] {file_id}: {audio_secs:.0}s audio (elapsed {elapsed}, ETA {eta}) [{now}]",
                     i + 1,
-                    total
+                    total,
                 );
-                tracing::trace!(
-                    %file_id,
-                    load_ms = load_elapsed.as_millis(),
-                    inference_ms = (elapsed * 1000.0).round() as u64,
-                    total_ms = file_start.elapsed().as_millis(),
-                    "File timing",
-                );
-                if i == 0 {
-                    tracing::trace!(
-                        command_to_result_ms = command_start.elapsed().as_millis(),
-                        "First result timing",
-                    );
-                }
+                print!("{}", result.rttm);
             }
 
-            // collect last file's post-inference
-            if let Some(handle) = pending_post.take() {
-                let (_fid, rttm) = handle.join().unwrap()?;
-                print!("{rttm}");
-            }
+            eprintln!(
+                "  Total: {:.1}s for {} files",
+                batch_elapsed.as_secs_f64(),
+                total,
+            );
 
             tracing::trace!(
                 startup_ms = loop_start.duration_since(command_start).as_millis(),
