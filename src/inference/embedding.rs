@@ -96,6 +96,8 @@ pub struct EmbeddingModel {
     native_chunk_specs: Vec<ChunkSessionSpec>,
     #[cfg(feature = "coreml")]
     native_chunk_sessions: Vec<ChunkEmbeddingSession>,
+    #[cfg(feature = "coreml")]
+    native_chunk_session_ane: Option<ChunkEmbeddingSession>,
     multi_mask_session: Option<Session>,
     multi_mask_batched_session: Option<Session>,
     #[cfg(feature = "coreml")]
@@ -158,6 +160,8 @@ impl EmbeddingModel {
         let has_multi_mask = multi_mask_model_path(model_path, 1).is_some_and(|p| p.exists());
         #[cfg(feature = "coreml")]
         let native_chunk_compute_units = config.chunk_emb_compute_units.to_ml_compute_units();
+        #[cfg(not(feature = "coreml"))]
+        let _ = config;
         // split-backend: CPU fbank + GPU tail/multi-mask
         let use_split_backend =
             split_fbank_path.exists() && (split_tail_path.exists() || has_multi_mask);
@@ -357,6 +361,8 @@ impl EmbeddingModel {
             native_chunk_specs,
             #[cfg(feature = "coreml")]
             native_chunk_sessions,
+            #[cfg(feature = "coreml")]
+            native_chunk_session_ane: None,
             multi_mask_session,
             multi_mask_batched_session,
             #[cfg(feature = "coreml")]
@@ -685,15 +691,8 @@ impl EmbeddingModel {
     }
 
     #[cfg(feature = "coreml")]
-    pub(crate) fn ensure_all_chunk_sessions_loaded(&mut self) {
-        let windows: Vec<_> = self
-            .native_chunk_specs
-            .iter()
-            .map(|spec| spec.num_windows)
-            .collect();
-        for num_windows in windows {
-            let _ = self.ensure_chunk_session_loaded(num_windows);
-        }
+    pub(crate) fn ensure_chunk_session_loaded_pub(&mut self, num_windows: usize) {
+        let _ = self.ensure_chunk_session_loaded(num_windows);
     }
 
     /// Get all chunk session metadata + model refs for pipelined embedding
@@ -712,9 +711,47 @@ impl EmbeddingModel {
             .collect()
     }
 
+    /// Load the largest chunk session with CPUAndNeuralEngine compute units for ANE predict worker
     #[cfg(feature = "coreml")]
-    pub(crate) fn chunk_compute_units(&self) -> MLComputeUnits {
-        self.native_chunk_compute_units
+    pub(crate) fn ensure_chunk_session_ane_loaded(&mut self) {
+        if self.native_chunk_session_ane.is_some() {
+            return;
+        }
+        let Some(spec) = self.native_chunk_specs.last().cloned() else {
+            return;
+        };
+        let start = std::time::Instant::now();
+        match Self::load_chunk_session(&spec, MLComputeUnits::CPUAndNeuralEngine) {
+            Ok(session) => {
+                tracing::trace!(
+                    num_windows = spec.num_windows,
+                    ms = start.elapsed().as_millis(),
+                    "Loaded ANE chunk embedding session",
+                );
+                self.native_chunk_session_ane = Some(session);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    num_windows = spec.num_windows,
+                    "Failed to load ANE chunk embedding: {err}",
+                );
+            }
+        }
+    }
+
+    /// Get the ANE chunk session refs for pipelined embedding
+    #[cfg(feature = "coreml")]
+    pub(crate) fn chunk_session_ane_ref(&self) -> Option<ChunkSessionRefs<'_>> {
+        self.native_chunk_session_ane
+            .as_ref()
+            .map(|s| ChunkSessionRefs {
+                num_windows: s.num_windows,
+                fbank_frames: s.fbank_frames,
+                num_masks: s.num_masks,
+                cached_fbank_shape: &s.cached_fbank_shape,
+                cached_masks_shape: &s.cached_masks_shape,
+                model: &s.model,
+            })
     }
 
     pub fn primary_batch_size(&self) -> usize {
@@ -788,6 +825,7 @@ impl EmbeddingModel {
             self.native_multi_mask_session = None;
             self.native_chunk_specs = Self::chunk_session_specs(&self.model_path, self.mode);
             self.native_chunk_sessions.clear();
+            self.native_chunk_session_ane = None;
         }
         self.multi_mask_session = multi_mask_model_path(&self.model_path, 1)
             .filter(|p| p.exists())
@@ -1623,15 +1661,15 @@ impl EmbeddingModel {
         if !coreml_path.exists() {
             return None;
         }
-        // fbank on CPUOnly avoids GPU contention with chunk embedding
+        // fbank on ANE frees CPU prep threads for mask extraction
         match SharedCoreMlModel::load(
             &coreml_path,
-            objc2_core_ml::MLComputeUnits::CPUOnly,
+            objc2_core_ml::MLComputeUnits::CPUAndNeuralEngine,
             "output",
             GpuPrecision::Low,
         ) {
             Ok(model) => {
-                tracing::info!("Loaded 30s fbank model (CPUOnly)");
+                tracing::info!("Loaded 30s fbank model (CPUAndNeuralEngine)");
                 Some(model)
             }
             Err(e) => {
