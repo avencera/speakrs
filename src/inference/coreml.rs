@@ -82,6 +82,11 @@ impl CachedInputShape {
     }
 }
 
+// Safety: CachedInputShape fields (Retained<NSString>, Retained<NSArray<NSNumber>>, usize)
+// are immutable after construction and only accessed via &self
+unsafe impl Send for CachedInputShape {}
+unsafe impl Sync for CachedInputShape {}
+
 pub(crate) struct CoreMlModel {
     model: Retained<MLModel>,
     output_name: String,
@@ -416,8 +421,9 @@ impl SharedCoreMlModel {
     ///
     /// Uses predictionFromFeatures:completionHandler: which lets CoreML
     /// pipeline multiple predictions onto ANE simultaneously. Critical for
-    /// concurrent ANE workers — sync prediction serializes while async
+    /// concurrent ANE workers -- sync prediction serializes while async
     /// lets the ANE queue depth (127) fill up
+    #[expect(dead_code)]
     pub fn predict_async(
         &self,
         inputs: &[(&CachedInputShape, &[f32])],
@@ -477,7 +483,7 @@ impl SharedCoreMlModel {
         let output = rx
             .recv()
             .map_err(|_| CoreMlError::PredictionFailed("channel closed".to_owned()))?
-            .map_err(|e| CoreMlError::PredictionFailed(e))?;
+            .map_err(CoreMlError::PredictionFailed)?;
 
         let output_value = unsafe { output.featureValueForName(&self.output_key) }
             .ok_or_else(|| CoreMlError::OutputNotFound(self.output_name.clone()))?;
