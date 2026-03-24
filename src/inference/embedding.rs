@@ -1,5 +1,9 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "coreml")]
+use std::path::PathBuf;
+#[cfg(feature = "coreml")]
+use std::sync::Arc;
 
 use ndarray::{Array1, Array2, Array3, ArrayView2, s};
 #[cfg(feature = "coreml")]
@@ -37,12 +41,12 @@ pub(crate) struct SplitTailInput<'a> {
 /// Chunk embedding model: runs ResNet once on full-audio fbank, gathers per-window features
 #[cfg(feature = "coreml")]
 pub(crate) struct ChunkEmbeddingSession {
-    model: SharedCoreMlModel,
+    model: Arc<SharedCoreMlModel>,
     pub num_windows: usize,
     pub fbank_frames: usize,
     pub num_masks: usize,
-    cached_fbank_shape: CachedInputShape,
-    cached_masks_shape: CachedInputShape,
+    cached_fbank_shape: Arc<CachedInputShape>,
+    cached_masks_shape: Arc<CachedInputShape>,
 }
 
 #[cfg(feature = "coreml")]
@@ -55,13 +59,13 @@ struct ChunkSessionSpec {
 }
 
 #[cfg(feature = "coreml")]
-pub(crate) struct ChunkSessionRefs<'a> {
+pub(crate) struct ChunkSessionRefs {
     pub num_windows: usize,
     pub fbank_frames: usize,
     pub num_masks: usize,
-    pub cached_fbank_shape: &'a CachedInputShape,
-    pub cached_masks_shape: &'a CachedInputShape,
-    pub model: &'a SharedCoreMlModel,
+    pub cached_fbank_shape: Arc<CachedInputShape>,
+    pub cached_masks_shape: Arc<CachedInputShape>,
+    pub model: Arc<SharedCoreMlModel>,
 }
 
 pub struct EmbeddingModel {
@@ -81,11 +85,11 @@ pub struct EmbeddingModel {
     #[cfg(feature = "coreml")]
     native_tail_primary_batched_session: Option<CoreMlModel>,
     #[cfg(feature = "coreml")]
-    native_fbank_session: Option<SharedCoreMlModel>,
+    native_fbank_session: Option<Arc<SharedCoreMlModel>>,
     #[cfg(feature = "coreml")]
     native_fbank_batched_session: Option<SharedCoreMlModel>,
     #[cfg(feature = "coreml")]
-    native_fbank_30s_session: Option<SharedCoreMlModel>,
+    native_fbank_30s_session: Option<Arc<SharedCoreMlModel>>,
     #[cfg(feature = "coreml")]
     cached_fbank_30s_shape: CachedInputShape,
     #[cfg(feature = "coreml")]
@@ -96,8 +100,6 @@ pub struct EmbeddingModel {
     native_chunk_specs: Vec<ChunkSessionSpec>,
     #[cfg(feature = "coreml")]
     native_chunk_sessions: Vec<ChunkEmbeddingSession>,
-    #[cfg(feature = "coreml")]
-    native_chunk_session_ane: Option<ChunkEmbeddingSession>,
     multi_mask_session: Option<Session>,
     multi_mask_batched_session: Option<Session>,
     #[cfg(feature = "coreml")]
@@ -361,8 +363,6 @@ impl EmbeddingModel {
             native_chunk_specs,
             #[cfg(feature = "coreml")]
             native_chunk_sessions,
-            #[cfg(feature = "coreml")]
-            native_chunk_session_ane: None,
             multi_mask_session,
             multi_mask_batched_session,
             #[cfg(feature = "coreml")]
@@ -522,10 +522,11 @@ impl EmbeddingModel {
     }
 
     #[cfg(feature = "coreml")]
-    fn ensure_native_fbank_loaded(&mut self) -> Option<&SharedCoreMlModel> {
+    fn ensure_native_fbank_loaded(&mut self) -> Option<&Arc<SharedCoreMlModel>> {
         if self.native_fbank_session.is_none() {
             let start = std::time::Instant::now();
-            self.native_fbank_session = Self::load_native_fbank(&self.model_path, self.mode, 1);
+            self.native_fbank_session =
+                Self::load_native_fbank(&self.model_path, self.mode, 1).map(Arc::new);
             if self.native_fbank_session.is_some() {
                 tracing::trace!(
                     ms = start.elapsed().as_millis(),
@@ -553,11 +554,11 @@ impl EmbeddingModel {
     }
 
     #[cfg(feature = "coreml")]
-    fn ensure_native_fbank_30s_loaded(&mut self) -> Option<&SharedCoreMlModel> {
+    fn ensure_native_fbank_30s_loaded(&mut self) -> Option<&Arc<SharedCoreMlModel>> {
         if self.native_fbank_30s_session.is_none() {
             let start = std::time::Instant::now();
             self.native_fbank_30s_session =
-                Self::load_native_fbank_30s(&self.model_path, self.mode);
+                Self::load_native_fbank_30s(&self.model_path, self.mode).map(Arc::new);
             if self.native_fbank_30s_session.is_some() {
                 tracing::trace!(
                     ms = start.elapsed().as_millis(),
@@ -568,19 +569,18 @@ impl EmbeddingModel {
         self.native_fbank_30s_session.as_ref()
     }
 
-    /// Get the shared fbank 30s model + shape for use from bridge thread
+    /// Get the shared fbank 30s model for use from worker threads
     #[cfg(feature = "coreml")]
-    pub(crate) fn fbank_30s_refs(&mut self) -> Option<(&SharedCoreMlModel, &CachedInputShape)> {
+    pub(crate) fn fbank_30s_refs(&mut self) -> Option<Arc<SharedCoreMlModel>> {
         let _ = self.ensure_native_fbank_30s_loaded();
-        let session = self.native_fbank_30s_session.as_ref()?;
-        Some((session, &self.cached_fbank_30s_shape))
+        self.native_fbank_30s_session.as_ref().map(Arc::clone)
     }
 
-    /// Get 10s fbank model ref for tiling on prep thread
+    /// Get 10s fbank model for use from worker threads
     #[cfg(feature = "coreml")]
-    pub(crate) fn fbank_10s_ref(&mut self) -> Option<&SharedCoreMlModel> {
+    pub(crate) fn fbank_10s_ref(&mut self) -> Option<Arc<SharedCoreMlModel>> {
         let _ = self.ensure_native_fbank_loaded();
-        self.native_fbank_session.as_ref()
+        self.native_fbank_session.as_ref().map(Arc::clone)
     }
 
     #[cfg(feature = "coreml")]
@@ -697,61 +697,18 @@ impl EmbeddingModel {
 
     /// Get all chunk session metadata + model refs for pipelined embedding
     #[cfg(feature = "coreml")]
-    pub(crate) fn chunk_session_refs(&self) -> Vec<ChunkSessionRefs<'_>> {
+    pub(crate) fn chunk_session_refs(&self) -> Vec<ChunkSessionRefs> {
         self.native_chunk_sessions
             .iter()
             .map(|s| ChunkSessionRefs {
                 num_windows: s.num_windows,
                 fbank_frames: s.fbank_frames,
                 num_masks: s.num_masks,
-                cached_fbank_shape: &s.cached_fbank_shape,
-                cached_masks_shape: &s.cached_masks_shape,
-                model: &s.model,
+                cached_fbank_shape: Arc::clone(&s.cached_fbank_shape),
+                cached_masks_shape: Arc::clone(&s.cached_masks_shape),
+                model: Arc::clone(&s.model),
             })
             .collect()
-    }
-
-    /// Load the largest chunk session with CPUAndNeuralEngine compute units for ANE predict worker
-    #[cfg(feature = "coreml")]
-    pub(crate) fn ensure_chunk_session_ane_loaded(&mut self) {
-        if self.native_chunk_session_ane.is_some() {
-            return;
-        }
-        let Some(spec) = self.native_chunk_specs.last().cloned() else {
-            return;
-        };
-        let start = std::time::Instant::now();
-        match Self::load_chunk_session(&spec, MLComputeUnits::CPUAndNeuralEngine) {
-            Ok(session) => {
-                tracing::trace!(
-                    num_windows = spec.num_windows,
-                    ms = start.elapsed().as_millis(),
-                    "Loaded ANE chunk embedding session",
-                );
-                self.native_chunk_session_ane = Some(session);
-            }
-            Err(err) => {
-                tracing::warn!(
-                    num_windows = spec.num_windows,
-                    "Failed to load ANE chunk embedding: {err}",
-                );
-            }
-        }
-    }
-
-    /// Get the ANE chunk session refs for pipelined embedding
-    #[cfg(feature = "coreml")]
-    pub(crate) fn chunk_session_ane_ref(&self) -> Option<ChunkSessionRefs<'_>> {
-        self.native_chunk_session_ane
-            .as_ref()
-            .map(|s| ChunkSessionRefs {
-                num_windows: s.num_windows,
-                fbank_frames: s.fbank_frames,
-                num_masks: s.num_masks,
-                cached_fbank_shape: &s.cached_fbank_shape,
-                cached_masks_shape: &s.cached_masks_shape,
-                model: &s.model,
-            })
     }
 
     pub fn primary_batch_size(&self) -> usize {
@@ -825,7 +782,6 @@ impl EmbeddingModel {
             self.native_multi_mask_session = None;
             self.native_chunk_specs = Self::chunk_session_specs(&self.model_path, self.mode);
             self.native_chunk_sessions.clear();
-            self.native_chunk_session_ane = None;
         }
         self.multi_mask_session = multi_mask_model_path(&self.model_path, 1)
             .filter(|p| p.exists())
@@ -1804,15 +1760,18 @@ impl EmbeddingModel {
             GpuPrecision::Low,
         )?;
         Ok(ChunkEmbeddingSession {
-            model,
+            model: Arc::new(model),
             num_windows: spec.num_windows,
             fbank_frames: spec.fbank_frames,
             num_masks: spec.num_masks,
-            cached_fbank_shape: CachedInputShape::new(
+            cached_fbank_shape: Arc::new(CachedInputShape::new(
                 "fbank",
                 &[1, spec.fbank_frames, FBANK_FEATURES],
-            ),
-            cached_masks_shape: CachedInputShape::new("masks", &[spec.num_masks, MASK_FRAMES]),
+            )),
+            cached_masks_shape: Arc::new(CachedInputShape::new(
+                "masks",
+                &[spec.num_masks, MASK_FRAMES],
+            )),
         })
     }
 
