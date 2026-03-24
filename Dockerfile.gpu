@@ -60,15 +60,8 @@ RUN cargo build --release -p xtask --features cuda --bin speakrs-bm && \
     cp -P target/release/speakrs-bm /opt/bin/
 
 # =============================================================================
-# Pre-built images for models and datasets (avoids rebuilding on remote CI)
-#
-# Rebuild with:
-#   just gpu-models-image
-#   just gpu-datasets-image
-# =============================================================================
-
-# =============================================================================
-# Runtime image with the benchmark binary, ORT shared libs, and models
+# Slim runtime: binary + ORT libs + pyannote script only
+# Models and datasets are downloaded from S3 (Tigris) at startup
 #
 # Pre-built runtime base: just gpu-runtime-image
 # =============================================================================
@@ -76,21 +69,10 @@ FROM ghcr.io/avencera/speakrs-gpu-runtime:latest
 
 COPY --from=builder /opt/bin/speakrs-bm /usr/local/bin/
 COPY --from=ort-download /opt/ort-libs/ /usr/local/lib/
-COPY --from=ghcr.io/avencera/speakrs-models:latest /opt/models/ /opt/models/
-COPY fixtures/models/wespeaker-fbank.onnx /opt/models/
-COPY fixtures/models/wespeaker-fbank-b32.onnx /opt/models/
-COPY fixtures/models/wespeaker-voxceleb-resnet34-tail.onnx /opt/models/
-COPY fixtures/models/wespeaker-voxceleb-resnet34-tail-b3.onnx /opt/models/
-COPY fixtures/models/wespeaker-voxceleb-resnet34-tail-b32.onnx /opt/models/
-COPY fixtures/models/wespeaker-multimask-tail.onnx /opt/models/
-COPY fixtures/models/wespeaker-multimask-tail-b32.onnx /opt/models/
-COPY fixtures/models/segmentation-3.0-b32.onnx /opt/models/
-COPY fixtures/models/segmentation-3.0-b64.onnx /opt/models/
-COPY fixtures/models/wespeaker-voxceleb-resnet34-b32.onnx /opt/models/
-COPY fixtures/models/wespeaker-voxceleb-resnet34-b32.onnx.data /opt/models/
-COPY fixtures/models/wespeaker-voxceleb-resnet34-b64.onnx /opt/models/
-COPY --from=ghcr.io/avencera/speakrs-datasets:latest /opt/datasets/ /opt/datasets/
-COPY scripts/diarize_pyannote.py /opt/scripts/
+COPY scripts/pyannote-bench/ /opt/pyannote-bench/
+
+# pre-install pyannote venv (torch 2.10+cu128 matches PyPI torchcodec 0.10 ABI)
+RUN cd /opt/pyannote-bench && uv sync --frozen
 
 RUN ldconfig && \
     ln -s /usr/local/bin/speakrs-bm /usr/local/bin/sbm
