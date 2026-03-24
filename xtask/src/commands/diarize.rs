@@ -5,12 +5,13 @@ use std::str::FromStr;
 use std::time::Instant;
 
 use color_eyre::eyre::{Result, bail, ensure};
+use speakrs::inference::CoreMlComputeUnits;
 use speakrs::inference::ExecutionMode;
 use speakrs::inference::embedding::EmbeddingModel;
 use speakrs::inference::segmentation::SegmentationModel;
 use speakrs::pipeline::{
     COREML_SEGMENTATION_STEP_SECONDS, CUDA_SEGMENTATION_STEP_SECONDS, DiarizationPipeline,
-    FAST_SEGMENTATION_STEP_SECONDS, SEGMENTATION_STEP_SECONDS,
+    FAST_SEGMENTATION_STEP_SECONDS, RuntimeConfig, SEGMENTATION_STEP_SECONDS,
 };
 
 use crate::wav;
@@ -103,7 +104,13 @@ impl fmt::Display for DiarizeMode {
     }
 }
 
-pub fn run(mode: DiarizeMode, models_dir: Option<PathBuf>, wav_files: Vec<PathBuf>) -> Result<()> {
+pub fn run(
+    mode: DiarizeMode,
+    models_dir: Option<PathBuf>,
+    chunk_emb_workers: usize,
+    chunk_emb_compute_units: &str,
+    wav_files: Vec<PathBuf>,
+) -> Result<()> {
     let command_start = Instant::now();
 
     ensure!(!wav_files.is_empty(), "no WAV files specified");
@@ -116,6 +123,21 @@ pub fn run(mode: DiarizeMode, models_dir: Option<PathBuf>, wav_files: Vec<PathBu
         }
         DiarizeMode::Speakrs(speakrs_mode) => {
             let execution_mode = speakrs_mode.execution_mode();
+
+            let compute_units = match chunk_emb_compute_units {
+                "ane" | "cpu-and-neural-engine" => CoreMlComputeUnits::CpuAndNeuralEngine,
+                _ => CoreMlComputeUnits::All,
+            };
+            let runtime_config = RuntimeConfig {
+                chunk_emb_workers,
+                #[cfg(feature = "coreml")]
+                chunk_emb_compute_units: compute_units,
+            };
+            if chunk_emb_workers > 1 || compute_units != CoreMlComputeUnits::All {
+                eprintln!(
+                    "runtime config: workers={chunk_emb_workers} compute_units={chunk_emb_compute_units}"
+                );
+            }
 
             let models_dir_start = Instant::now();
             let models_dir = models_dir.unwrap_or_else(default_models_dir);
@@ -131,18 +153,23 @@ pub fn run(mode: DiarizeMode, models_dir: Option<PathBuf>, wav_files: Vec<PathBu
             let seg_model_elapsed = seg_model_start.elapsed();
 
             let emb_model_start = Instant::now();
-            let mut emb_model = EmbeddingModel::with_mode(
+            let mut emb_model = EmbeddingModel::with_mode_and_config(
                 models_dir
                     .join("wespeaker-voxceleb-resnet34.onnx")
                     .to_str()
                     .unwrap(),
                 execution_mode,
+                &runtime_config,
             )?;
             let emb_model_elapsed = emb_model_start.elapsed();
 
             let pipeline_start = Instant::now();
-            let mut pipeline =
-                DiarizationPipeline::new(&mut seg_model, &mut emb_model, &models_dir)?;
+            let mut pipeline = DiarizationPipeline::new_with_config(
+                &mut seg_model,
+                &mut emb_model,
+                &models_dir,
+                runtime_config,
+            )?;
             let pipeline_elapsed = pipeline_start.elapsed();
 
             let loop_start = Instant::now();
@@ -157,6 +184,17 @@ pub fn run(mode: DiarizeMode, models_dir: Option<PathBuf>, wav_files: Vec<PathBu
 
             let total = wav_files.len();
             let mut cumulative = 0.0f64;
+            let pipeline_config = pipeline.pipeline_config();
+
+            // separate PLDA for background post-inference thread (no model access needed)
+            let bg_plda = std::sync::Arc::new(
+                speakrs::clustering::plda::PldaTransform::from_dir(&models_dir)?,
+            );
+
+            // multi-file overlap: post-inference for file N runs on a background
+            // thread while inference for file N+1 starts on the main thread
+            let mut pending_post: Option<std::thread::JoinHandle<color_eyre::Result<(String, String)>>> =
+                None;
 
             for (i, wav_path) in wav_files.iter().enumerate() {
                 let file_id = wav_path
@@ -171,11 +209,28 @@ pub fn run(mode: DiarizeMode, models_dir: Option<PathBuf>, wav_files: Vec<PathBu
                 ensure!(sr == 16000, "expected 16kHz WAV, got {sr}Hz");
 
                 let start = Instant::now();
-                let result = pipeline.run_with_file_id(&samples, &file_id)?;
-                let elapsed = start.elapsed().as_secs_f64();
-                let drop_start = Instant::now();
-                let speakrs::pipeline::DiarizationResult { rttm, .. } = result;
-                let drop_elapsed = drop_start.elapsed();
+                let artifacts = pipeline.run_inference_only(&samples)?;
+                let inference_elapsed = start.elapsed();
+
+                // spawn post-inference on background thread
+                let config = pipeline_config.clone();
+                let fid = file_id.clone();
+                let plda = bg_plda.clone();
+                let post_handle = std::thread::spawn(move || {
+                    let result = speakrs::pipeline::post_inference(artifacts, &fid, &config, &plda)?;
+                    Ok((fid, result.rttm))
+                });
+
+                // collect previous file's post-inference result (if any)
+                if let Some(prev_handle) = pending_post.take() {
+                    let (prev_id, prev_rttm) = prev_handle.join().unwrap()?;
+                    print!("{prev_rttm}");
+                    tracing::trace!(%prev_id, "Previous post-inference collected");
+                }
+
+                pending_post = Some(post_handle);
+
+                let elapsed = inference_elapsed.as_secs_f64();
                 cumulative += elapsed;
 
                 let avg = cumulative / (i + 1) as f64;
@@ -188,15 +243,10 @@ pub fn run(mode: DiarizeMode, models_dir: Option<PathBuf>, wav_files: Vec<PathBu
                     i + 1,
                     total
                 );
-                let output_start = Instant::now();
-                print!("{rttm}");
-                let output_elapsed = output_start.elapsed();
                 tracing::trace!(
                     %file_id,
                     load_ms = load_elapsed.as_millis(),
-                    pipeline_ms = (elapsed * 1000.0).round() as u64,
-                    drop_ms = drop_elapsed.as_millis(),
-                    output_ms = output_elapsed.as_millis(),
+                    inference_ms = (elapsed * 1000.0).round() as u64,
                     total_ms = file_start.elapsed().as_millis(),
                     "File timing",
                 );
@@ -206,6 +256,12 @@ pub fn run(mode: DiarizeMode, models_dir: Option<PathBuf>, wav_files: Vec<PathBu
                         "First result timing",
                     );
                 }
+            }
+
+            // collect last file's post-inference
+            if let Some(handle) = pending_post.take() {
+                let (_fid, rttm) = handle.join().unwrap()?;
+                print!("{rttm}");
             }
 
             tracing::trace!(
