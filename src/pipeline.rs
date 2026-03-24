@@ -7,6 +7,8 @@ pub use types::*;
 pub(crate) mod clustering;
 #[cfg(test)]
 use clustering::mark_inactive_speakers;
+#[cfg(feature = "coreml")]
+pub(crate) use clustering::write_speaker_mask_to_slice;
 pub(crate) use clustering::{clean_masks, select_speaker_weights};
 
 mod concurrent;
