@@ -1,15 +1,3 @@
-# /// script
-# requires-python = ">=3.10"
-# dependencies = [
-#     "pyannote.audio>=3.3",
-#     "torch>=2.6",
-#     "torchaudio>=2.6",
-#     "soundfile>=0.12",
-# ]
-#
-# [tool.uv]
-# extra-index-url = ["https://download.pytorch.org/whl/cu128"]
-# ///
 """Run pyannote community-1 diarization on WAV files and print RTTM."""
 
 import argparse
@@ -158,9 +146,14 @@ def main() -> None:
         os.environ.get("PYANNOTE_EMBEDDING_BATCH_SIZE", str(default_batch))
     )
 
-    pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-community-1", token=token
-    )
+    try:
+        pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-community-1", token=token
+        )
+    except TypeError:
+        pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-community-1", use_auth_token=token
+        )
     assert pipeline is not None
     pipeline.to(device)
     if hasattr(pipeline, "segmentation_batch_size"):

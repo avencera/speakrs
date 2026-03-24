@@ -32,7 +32,10 @@ pub fn run(source: &str, python_device: &str, rust_mode: &str) -> Result<()> {
         Command::new("uv")
             .args([
                 "run",
-                "scripts/diarize_pyannote.py",
+                "--project",
+                "scripts/pyannote-bench",
+                "python",
+                "scripts/pyannote-bench/diarize.py",
                 "--device",
                 python_device,
             ])
@@ -78,7 +81,10 @@ pub fn accuracy(source: &str, rust_mode: &str) -> Result<()> {
         Command::new("uv")
             .args([
                 "run",
-                "scripts/diarize_pyannote.py",
+                "--project",
+                "scripts/pyannote-bench",
+                "python",
+                "scripts/pyannote-bench/diarize.py",
                 "--device",
                 "cpu",
                 "--output",

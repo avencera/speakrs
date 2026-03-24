@@ -1,0 +1,24 @@
+[project]
+name = "pyannote-bench"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "pyannote.audio>=4.0",
+    "torch>=2.10,<2.11",
+    "torchaudio>=2.10,<2.11",
+    "torchcodec>=0.10,<0.11",
+    "soundfile>=0.12",
+]
+
+[tool.uv]
+index-strategy = "unsafe-best-match"
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+# torchcodec from PyPI (not cu128 index) -- it links against libtorch at runtime
