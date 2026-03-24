@@ -1,0 +1,68 @@
+type: task
+name: benchmark-fp16seg
+
+image: avencera/speakrs-gpu:64a6695-timing
+
+env:
+  - NVIDIA_VISIBLE_DEVICES=all
+  - LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64
+  - RUST_BACKTRACE=1
+  - DATASET
+  - IMPLS
+  - MAX_FILES
+  - MAX_MINUTES
+  - RUN_NAME
+  - HF_TOKEN
+  - AWS_ACCESS_KEY_ID
+  - AWS_SECRET_ACCESS_KEY
+  - AWS_ENDPOINT_URL
+  - AWS_REGION
+
+commands:
+  - |
+    echo "CPU: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)"
+
+    if [ ! -f /workspace/models/segmentation-3.0.onnx ]; then
+      echo "Downloading models from S3..."
+      mkdir -p /workspace/models
+      s5cmd --endpoint-url $AWS_ENDPOINT_URL \
+        cp --concurrency 20 "s3://speakrs/models/*" /workspace/models/
+    fi
+
+    # download FP16 conversion script and convert seg models
+    mkdir -p /workspace/scripts
+    s5cmd --endpoint-url $AWS_ENDPOINT_URL cp "s3://speakrs/scripts/convert_fp16.py" /workspace/scripts/
+    echo "Converting segmentation models to FP16..."
+    cd /workspace/models
+    uv run --script /workspace/scripts/convert_fp16.py \
+        segmentation-3.0.onnx \
+        segmentation-3.0-b32.onnx \
+        segmentation-3.0-b64.onnx
+    mv segmentation-3.0-fp16.onnx segmentation-3.0.onnx
+    mv segmentation-3.0-b32-fp16.onnx segmentation-3.0-b32.onnx
+    mv segmentation-3.0-b64-fp16.onnx segmentation-3.0-b64.onnx
+    cd /workspace
+
+    mkdir -p /workspace/datasets
+    mkdir -p /workspace/scripts
+    ln -sf /opt/pyannote-bench /workspace/scripts/pyannote-bench
+    for lib in libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so; do
+      [ -f /usr/local/lib/$lib ] && ln -sf /usr/local/lib/$lib /workspace/$lib || true
+    done
+
+    export SPEAKRS_RESULTS_DIR=/workspace/_benchmarks/$RUN_NAME
+    mkdir -p $SPEAKRS_RESULTS_DIR
+    speakrs-bm --dataset $DATASET \
+      ${IMPLS:+--impls $IMPLS} \
+      ${MAX_FILES:+--max-files $MAX_FILES} \
+      ${MAX_MINUTES:+--max-minutes $MAX_MINUTES}
+    s5cmd --endpoint-url $AWS_ENDPOINT_URL \
+      cp $SPEAKRS_RESULTS_DIR/* s3://speakrs/benchmarks/$RUN_NAME/
+
+resources:
+  gpu:
+    name: [RTX5090, RTX4090, RTX6000Ada, L40S]
+    count: 1
+
+regions: [EU-RO-1, US-IL-1, US-NC-1, US-TX-4]
+spot_policy: on-demand

@@ -1,0 +1,63 @@
+type: task
+name: benchmark-int8
+
+image: avencera/speakrs-gpu:64a6695-timing
+
+env:
+  - NVIDIA_VISIBLE_DEVICES=all
+  - LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64
+  - RUST_BACKTRACE=1
+  - DATASET
+  - IMPLS
+  - MAX_FILES
+  - MAX_MINUTES
+  - RUN_NAME
+  - HF_TOKEN
+  - AWS_ACCESS_KEY_ID
+  - AWS_SECRET_ACCESS_KEY
+  - AWS_ENDPOINT_URL
+  - AWS_REGION
+
+commands:
+  - |
+    echo "CPU: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)"
+
+    # download models from S3
+    if [ ! -f /workspace/models/segmentation-3.0.onnx ]; then
+      echo "Downloading models from S3..."
+      mkdir -p /workspace/models
+      s5cmd --endpoint-url $AWS_ENDPOINT_URL \
+        cp --concurrency 20 "s3://speakrs/models/*" /workspace/models/
+    fi
+
+    # swap in INT8 segmentation models
+    echo "Swapping to INT8 segmentation models..."
+    cp /workspace/models/segmentation-3.0-int8.onnx /workspace/models/segmentation-3.0.onnx
+    cp /workspace/models/segmentation-3.0-b32-int8.onnx /workspace/models/segmentation-3.0-b32.onnx
+    cp /workspace/models/segmentation-3.0-b64-int8.onnx /workspace/models/segmentation-3.0-b64.onnx
+
+    mkdir -p /workspace/datasets
+
+    # symlink pyannote project
+    mkdir -p /workspace/scripts
+    ln -sf /opt/pyannote-bench /workspace/scripts/pyannote-bench
+    for lib in libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so; do
+      [ -f /usr/local/lib/$lib ] && ln -sf /usr/local/lib/$lib /workspace/$lib || true
+    done
+
+    export SPEAKRS_RESULTS_DIR=/workspace/_benchmarks/$RUN_NAME
+    mkdir -p $SPEAKRS_RESULTS_DIR
+    speakrs-bm --dataset $DATASET \
+      ${IMPLS:+--impls $IMPLS} \
+      ${MAX_FILES:+--max-files $MAX_FILES} \
+      ${MAX_MINUTES:+--max-minutes $MAX_MINUTES}
+    s5cmd --endpoint-url $AWS_ENDPOINT_URL \
+      cp $SPEAKRS_RESULTS_DIR/* s3://speakrs/benchmarks/$RUN_NAME/
+
+resources:
+  gpu:
+    name: [RTX5090, RTX4090, RTX6000Ada, L40S]
+    count: 1
+
+regions: [EU-RO-1, US-IL-1, US-NC-1, US-TX-4]
+spot_policy: on-demand
