@@ -1,7 +1,7 @@
-use ndarray::{Array2, Array3, ArrayView2, s};
+use ndarray::{Array2, Array3, ArrayView2};
 use tracing::{info, trace};
 
-use crate::inference::embedding::{EmbeddingModel, MaskedEmbeddingInput, SplitTailInput};
+use crate::inference::embedding::EmbeddingModel;
 use crate::powerset::PowersetMapping;
 
 use super::config::*;
@@ -20,23 +20,12 @@ impl ConcurrentEmbeddingResult {
     }
 
     pub fn into_arrays(self) -> (Array3<f32>, Array3<f32>) {
-        let num_chunks = self.decoded_windows.len();
-        let num_frames = self.decoded_windows[0].nrows();
-
-        let mut segmentations = Array3::<f32>::zeros((num_chunks, num_frames, self.num_speakers));
-        for (i, w) in self.decoded_windows.iter().enumerate() {
-            segmentations.slice_mut(s![i, .., ..]).assign(w);
-        }
-
-        let mut embeddings =
-            Array3::<f32>::from_elem((num_chunks, self.num_speakers, 256), f32::NAN);
-        for emb in &self.embeddings {
-            embeddings
-                .slice_mut(s![emb.chunk_idx, emb.speaker_idx, ..])
-                .assign(&ndarray::ArrayView1::from(emb.embedding.as_slice()));
-        }
-
-        (segmentations, embeddings)
+        super::types::build_inference_arrays(
+            self.decoded_windows,
+            self.embeddings,
+            self.num_speakers,
+        )
+        .unwrap()
     }
 }
 
@@ -104,7 +93,12 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
                     weights,
                 });
                 if pending.len() == batch_size {
-                    self.flush_split_pending(embedding_model, &pending, &fbanks, &mut embeddings)?;
+                    flush_split(
+                        embedding_model,
+                        &pending,
+                        &fbanks,
+                        &mut VecWriter(&mut embeddings),
+                    )?;
                     pending.clear();
 
                     // keep the current chunk fbank alive if later speakers in this chunk still need it
@@ -122,7 +116,12 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
         }
 
         if !pending.is_empty() {
-            self.flush_split_pending(embedding_model, &pending, &fbanks, &mut embeddings)?;
+            flush_split(
+                embedding_model,
+                &pending,
+                &fbanks,
+                &mut VecWriter(&mut embeddings),
+            )?;
         }
 
         Ok(ConcurrentEmbeddingResult {
@@ -243,54 +242,18 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
         let fbanks = embedding_model.compute_chunk_fbanks_batch(audio_slices)?;
         let fbank_us = fbank_start.elapsed().as_micros() as u64;
 
-        let fbank_refs: Vec<_> = fbanks.iter().collect();
-        let mask_refs: Vec<_> = masks.iter().map(|m| m.as_slice()).collect();
-
         let predict_start = std::time::Instant::now();
-        let batch_embeddings = embedding_model.embed_multi_mask_batch(&fbank_refs, &mask_refs)?;
+        flush_multi_mask(
+            embedding_model,
+            &fbanks,
+            masks,
+            chunk_indices,
+            self.num_speakers,
+            &mut VecWriter(embeddings),
+        )?;
         let predict_us = predict_start.elapsed().as_micros() as u64;
 
-        for (fbank_idx, &chunk_idx) in chunk_indices.iter().enumerate() {
-            for speaker_idx in 0..self.num_speakers {
-                let mask_idx = fbank_idx * self.num_speakers + speaker_idx;
-                let is_active = masks[mask_idx].iter().any(|&v| v > 0.0);
-                if !is_active {
-                    continue;
-                }
-                embeddings.push(SpeakerEmbedding {
-                    chunk_idx,
-                    speaker_idx,
-                    embedding: batch_embeddings.row(mask_idx).to_vec(),
-                });
-            }
-        }
-
         Ok((fbank_us, predict_us))
-    }
-
-    fn flush_split_pending(
-        &self,
-        embedding_model: &mut EmbeddingModel,
-        pending: &[PendingSplitEmbedding],
-        fbanks: &[Array2<f32>],
-        embeddings: &mut Vec<SpeakerEmbedding>,
-    ) -> Result<(), PipelineError> {
-        let batch_inputs: Vec<_> = pending
-            .iter()
-            .map(|item| SplitTailInput {
-                fbank: &fbanks[item.fbank_idx],
-                weights: &item.weights,
-            })
-            .collect();
-        let batch_embeddings = embedding_model.embed_tail_batch_inputs(&batch_inputs)?;
-        for (batch_idx, item) in pending.iter().enumerate() {
-            embeddings.push(SpeakerEmbedding {
-                chunk_idx: item.chunk_idx,
-                speaker_idx: item.speaker_idx,
-                embedding: batch_embeddings.row(batch_idx).to_vec(),
-            });
-        }
-        Ok(())
     }
 
     pub fn run_masked(
@@ -344,7 +307,7 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
                 if pending.len() == batch_size {
                     decode_time += decode_start.elapsed();
                     let flush_start = std::time::Instant::now();
-                    self.flush_masked_pending(embedding_model, &pending, &mut embeddings)?;
+                    flush_masked(embedding_model, &pending, &mut VecWriter(&mut embeddings))?;
                     embed_time += flush_start.elapsed();
                     emb_calls += 1;
                     emb_batched += 1;
@@ -358,7 +321,11 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
         while !pending.is_empty() {
             let batch_len = embedding_model.best_batch_len(pending.len());
             let flush_start = std::time::Instant::now();
-            self.flush_masked_pending(embedding_model, &pending[..batch_len], &mut embeddings)?;
+            flush_masked(
+                embedding_model,
+                &pending[..batch_len],
+                &mut VecWriter(&mut embeddings),
+            )?;
             embed_time += flush_start.elapsed();
             emb_calls += 1;
             emb_single += 1;
@@ -386,30 +353,5 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
             embeddings,
             num_speakers: self.num_speakers,
         })
-    }
-
-    fn flush_masked_pending(
-        &self,
-        embedding_model: &mut EmbeddingModel,
-        pending: &[PendingEmbedding<'_>],
-        embeddings: &mut Vec<SpeakerEmbedding>,
-    ) -> Result<(), PipelineError> {
-        let batch_inputs: Vec<_> = pending
-            .iter()
-            .map(|item| MaskedEmbeddingInput {
-                audio: item.audio,
-                mask: &item.mask,
-                clean_mask: Some(&item.clean_mask),
-            })
-            .collect();
-        let batch_embeddings = embedding_model.embed_batch(&batch_inputs)?;
-        for (batch_idx, item) in pending.iter().enumerate() {
-            embeddings.push(SpeakerEmbedding {
-                chunk_idx: item.chunk_idx,
-                speaker_idx: item.speaker_idx,
-                embedding: batch_embeddings.row(batch_idx).to_vec(),
-            });
-        }
-        Ok(())
     }
 }
