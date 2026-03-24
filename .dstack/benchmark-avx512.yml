@@ -1,7 +1,7 @@
 type: task
 name: bench-avx512
 
-image: ghcr.io/avencera/speakrs-gpu:b3de06a
+image: avencera/speakrs-gpu:64a6695-timing
 
 env:
   - NVIDIA_VISIBLE_DEVICES=all

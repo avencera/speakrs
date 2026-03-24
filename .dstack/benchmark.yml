@@ -1,12 +1,13 @@
 type: task
 name: benchmark
 
-image: ghcr.io/avencera/speakrs-gpu:b3de06a
+image: avencera/speakrs-gpu:64a6695-timing
 
 env:
   - NVIDIA_VISIBLE_DEVICES=all
   - LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64
   - RUST_BACKTRACE=1
+  - RUST_LOG=speakrs=trace
   - DATASET
   - IMPLS
   - MAX_FILES
@@ -22,13 +23,25 @@ commands:
   - |
     echo "CPU: $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs)"
 
-    # seed baked assets from /opt into /workspace (mirrors docker-entrypoint.sh)
-    mkdir -p /workspace/models && cp -rn /opt/models/* /workspace/models/ 2>/dev/null || true
-    mkdir -p /workspace/datasets && cp -rn /opt/datasets/* /workspace/datasets/ 2>/dev/null || true
-    mkdir -p /workspace/scripts && cp -n /opt/scripts/diarize_pyannote.py /workspace/scripts/ 2>/dev/null || true
+    # download models from S3 (Tigris) -- ~500MB, takes 5-15s
+    if [ ! -f /workspace/models/segmentation-3.0.onnx ]; then
+      echo "Downloading models from S3..."
+      mkdir -p /workspace/models
+      s5cmd --endpoint-url $AWS_ENDPOINT_URL \
+        cp --concurrency 20 "s3://speakrs/models/*" /workspace/models/
+    fi
+
+    # datasets are downloaded by speakrs-bm itself via S3
+    # (see xtask/src/datasets.rs -- checks S3 first, falls back to HF/HTTP)
+    mkdir -p /workspace/datasets
+
+    # symlink pyannote project (venv is pre-installed at /opt/pyannote-bench)
+    mkdir -p /workspace/scripts
+    ln -sf /opt/pyannote-bench /workspace/scripts/pyannote-bench
     for lib in libonnxruntime_providers_shared.so libonnxruntime_providers_cuda.so; do
       [ -f /usr/local/lib/$lib ] && ln -sf /usr/local/lib/$lib /workspace/$lib || true
     done
+
     export SPEAKRS_RESULTS_DIR=/workspace/_benchmarks/$RUN_NAME
     mkdir -p $SPEAKRS_RESULTS_DIR
     speakrs-bm --dataset $DATASET \
@@ -40,7 +53,8 @@ commands:
 
 resources:
   gpu:
-    name: [RTX4090, RTX5090, RTX6000Ada, L40S]
+    name: [RTX5090, RTX4090, RTX6000Ada, L40S]
     count: 1
 
+regions: [EU-RO-1, US-IL-1, US-NC-1, US-TX-4]
 spot_policy: on-demand
