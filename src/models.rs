@@ -75,8 +75,19 @@ fn required_files(mode: ExecutionMode) -> Vec<&'static str> {
     let mut files: Vec<&str> = PLDA_FILES.to_vec();
 
     match mode {
-        ExecutionMode::Cpu | ExecutionMode::Cuda | ExecutionMode::CudaFast => {
+        ExecutionMode::Cpu => {
             files.extend_from_slice(ONNX_FILES);
+        }
+        ExecutionMode::Cuda | ExecutionMode::CudaFast => {
+            files.extend_from_slice(ONNX_FILES);
+            // split models for multi-mask embedding (CPU fbank + GPU multi-mask)
+            files.push("wespeaker-fbank.onnx");
+            files.push("wespeaker-fbank-b32.onnx");
+            files.push("wespeaker-multimask-tail.onnx");
+            files.push("wespeaker-multimask-tail-b32.onnx");
+            // batched seg/emb models
+            files.push("segmentation-3.0-b32.onnx");
+            files.push("wespeaker-voxceleb-resnet34-b64.onnx");
         }
         ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => {
             // CoreML modes still need the ONNX segmentation model for the constructor
