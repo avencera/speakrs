@@ -49,17 +49,24 @@ bench-compare source runs="1" warmups="1":
 bench-der max_files="10" max_minutes="30" *args="":
     cargo xtask bench der --max-files {{max_files}} --max-minutes {{max_minutes}} {{args}}
 
-# GPU image
-gpu-image:
+# GPU image: build via nsc to GHCR, then copy to Docker Hub via skopeo
+gpu-image suffix="":
     #!/usr/bin/env bash
     set -euo pipefail
     TAG=$(git rev-parse --short HEAD)
-    IMAGE="ghcr.io/avencera/speakrs-gpu:${TAG}"
-    nsc build -f Dockerfile.gpu --platform linux/amd64 -t "$IMAGE" --push .
+    SUFFIX="{{suffix}}"
+    if [ -n "$SUFFIX" ]; then
+        TAG="${TAG}-${SUFFIX}"
+    fi
+    GHCR="ghcr.io/avencera/speakrs-gpu:${TAG}"
+    DOCKERHUB="docker.io/avencera/speakrs-gpu:${TAG}"
+    nsc build -f Dockerfile.gpu --platform linux/amd64 -t "$GHCR" --push .
+    echo "Copying to Docker Hub..."
+    skopeo copy "docker://${GHCR}" "docker://${DOCKERHUB}"
     mkdir -p _local
     echo "$TAG" > _local/gpu-image-tag
-    sed -i '' "s|ghcr.io/avencera/speakrs-gpu:[a-zA-Z0-9._-]*|ghcr.io/avencera/speakrs-gpu:${TAG}|g" .dstack/*.yml
-    echo "Built and pushed: $IMAGE (updated .dstack/*.yml)"
+    sed -i '' "s|image:.*speakrs-gpu:[a-zA-Z0-9._-]*|image: avencera/speakrs-gpu:${TAG}|g" .dstack/*.yml
+    echo "Built and pushed: $DOCKERHUB (updated .dstack/*.yml)"
 
 gpu-base-image:
     nsc build -f docker/base.Dockerfile --platform linux/amd64 -t ghcr.io/avencera/speakrs-gpu-base:latest --push .
