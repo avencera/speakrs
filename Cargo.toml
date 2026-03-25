@@ -6,13 +6,16 @@ exclude = ["scripts/"]
 name = "speakrs"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Speaker diarization in Rust"
 license = "Apache-2.0"
 repository = "https://github.com/praveenperera/speakrs"
+documentation = "https://docs.rs/speakrs"
 readme = "README.md"
 authors = ["Praveen Perera"]
 keywords = ["speaker", "diarization", "audio", "pyannote", "onnx"]
 categories = ["multimedia::audio", "science"]
+include = ["/src/**", "/examples/**", "/README.md", "/LICENSE", "/Cargo.toml"]
 
 [features]
 default = ["online"]
@@ -20,6 +23,10 @@ online = ["dep:hf-hub", "hf-hub/ureq", "hf-hub/native-tls"]
 coreml = ["dep:objc2", "dep:objc2-core-ml", "dep:objc2-foundation", "dep:block2"]
 cuda = ["ort/cuda"]
 load-dynamic = ["ort/load-dynamic"]
+_metrics = []
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dependencies]
 hf-hub = { version = "0.5", optional = true, default-features = false }

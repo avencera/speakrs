@@ -1,5 +1,8 @@
-pub mod embedding;
-pub mod segmentation;
+pub(crate) mod embedding;
+pub(crate) mod segmentation;
+
+pub use embedding::EmbeddingModel;
+pub use segmentation::{SegmentationError, SegmentationModel};
 
 #[cfg(feature = "coreml")]
 pub(crate) mod coreml;
@@ -27,13 +30,19 @@ impl CoreMlComputeUnits {
     }
 }
 
+/// Which backend and acceleration to use for inference
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionMode {
+    /// CPU-only via ORT (portable, slowest)
     Cpu,
-    CoreMl,     // FP32 native CoreML, CPU+GPU, 1s step
-    CoreMlFast, // FP32 native CoreML, CPU+GPU, 2s step
-    Cuda,       // NVIDIA GPU, concurrent fused seg+emb via crossbeam
-    CudaFast,   // NVIDIA GPU, concurrent fused seg+emb, 2s step
+    /// Native CoreML with FP32 precision and ~1s step
+    CoreMl,
+    /// Native CoreML with W8A16 segmentation and ~2s step
+    CoreMlFast,
+    /// NVIDIA GPU with concurrent fused seg+emb via crossbeam
+    Cuda,
+    /// NVIDIA GPU with concurrent fused seg+emb and ~2s step
+    CudaFast,
 }
 
 /// Map execution mode to ORT execution providers

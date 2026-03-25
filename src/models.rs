@@ -6,17 +6,20 @@ use crate::inference::ExecutionMode;
 
 const HF_REPO: &str = "avencera/speakrs-models";
 
+/// Manages downloading and caching speakrs ONNX models from HuggingFace
 pub struct ModelManager {
     repo: ApiRepo,
 }
 
 impl ModelManager {
+    /// Create a manager using the default HuggingFace cache directory
     pub fn new() -> Result<Self, hf_hub::api::sync::ApiError> {
         let api = Api::new()?;
         let repo = api.model(HF_REPO.to_string());
         Ok(Self { repo })
     }
 
+    /// Create a manager with a custom cache directory
     pub fn with_cache_dir(cache_dir: PathBuf) -> Result<Self, hf_hub::api::sync::ApiError> {
         let api = ApiBuilder::from_cache(hf_hub::Cache::new(cache_dir)).build()?;
         let repo = api.model(HF_REPO.to_string());

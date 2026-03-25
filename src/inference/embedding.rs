@@ -76,6 +76,7 @@ pub(crate) struct ChunkSessionInfo {
     pub num_masks: usize,
 }
 
+/// WeSpeaker speaker embedding model with split-backend and chunk embedding support
 pub struct EmbeddingModel {
     model_path: String,
     mode: ExecutionMode,
@@ -521,10 +522,12 @@ impl EmbeddingModel {
         Self::build_session(model_path, Self::single_execution_mode(mode))
     }
 
+    /// Audio sample rate in Hz (16000)
     pub fn sample_rate(&self) -> usize {
         self.sample_rate
     }
 
+    /// Minimum audio samples required for a valid embedding
     pub fn min_num_samples(&self) -> usize {
         self.min_num_samples
     }
@@ -720,6 +723,7 @@ impl EmbeddingModel {
         }
     }
 
+    /// Maximum batch size for the primary (fused) embedding session
     pub fn primary_batch_size(&self) -> usize {
         if self.primary_batched_session.is_some() {
             PRIMARY_BATCH_SIZE
@@ -728,6 +732,7 @@ impl EmbeddingModel {
         }
     }
 
+    /// Choose the best batch length given the number of pending embeddings
     pub fn best_batch_len(&self, pending_len: usize) -> usize {
         if pending_len >= PRIMARY_BATCH_SIZE && self.primary_batched_session.is_some() {
             PRIMARY_BATCH_SIZE
@@ -736,6 +741,7 @@ impl EmbeddingModel {
         }
     }
 
+    /// Reload all ORT sessions from disk, resetting internal state
     pub fn reset_session(&mut self) -> Result<(), ort::Error> {
         self.session =
             Self::build_session(&self.model_path, Self::single_execution_mode(self.mode))?;
@@ -804,6 +810,7 @@ impl EmbeddingModel {
         Ok(())
     }
 
+    /// Whether split fbank+tail models are available for chunk embedding
     pub fn prefers_chunk_embedding_path(&self) -> bool {
         let ort_split = self.split_fbank_session.is_some() && self.split_tail_session.is_some();
         #[cfg(feature = "coreml")]
@@ -822,11 +829,13 @@ impl EmbeddingModel {
         0
     }
 
+    /// Extract a speaker embedding from raw audio with a uniform mask
     pub fn embed(&mut self, audio: &[f32]) -> Result<Array1<f32>, ort::Error> {
         let weights = vec![1.0; self.mask_frames];
         self.embed_single(audio, &weights)
     }
 
+    /// Extract a speaker embedding weighted by a segmentation mask
     pub fn embed_masked(
         &mut self,
         audio: &[f32],
@@ -837,6 +846,7 @@ impl EmbeddingModel {
         self.embed_single(audio, used_mask)
     }
 
+    /// Extract speaker embeddings for a batch of masked audio windows
     pub fn embed_batch(
         &mut self,
         inputs: &[MaskedEmbeddingInput<'_>],
@@ -896,6 +906,7 @@ impl EmbeddingModel {
         Ok(stacked)
     }
 
+    /// Extract per-speaker embeddings for one audio chunk using segmentation masks
     pub fn embed_chunk_speakers(
         &mut self,
         audio: &[f32],
@@ -964,6 +975,7 @@ impl EmbeddingModel {
         Ok(Array1::from_vec(data.to_vec()))
     }
 
+    /// Compute fbank features for a single audio chunk via the split fbank model
     pub fn compute_chunk_fbank(&mut self, audio: &[f32]) -> Result<Array2<f32>, ort::Error> {
         let copy_len = audio.len().min(self.window_samples);
         self.split_waveform_buffer
@@ -1002,6 +1014,7 @@ impl EmbeddingModel {
         Ok(Array2::from_shape_vec((frames, features), data.to_vec()).unwrap())
     }
 
+    /// Compute fbank features for multiple audio chunks in a single batched call
     pub fn compute_chunk_fbanks_batch(
         &mut self,
         audios: &[&[f32]],
@@ -1147,6 +1160,7 @@ impl EmbeddingModel {
         Ok(results)
     }
 
+    /// Whether a batched fbank session is available for parallel chunk processing
     pub fn has_batched_fbank(&self) -> bool {
         let has = self.split_fbank_batched_session.is_some();
         #[cfg(feature = "coreml")]
@@ -1155,6 +1169,7 @@ impl EmbeddingModel {
         has
     }
 
+    /// Whether the multi-mask embedding model is available
     pub fn prefers_multi_mask_path(&self) -> bool {
         let has = self.multi_mask_session.is_some();
         #[cfg(feature = "coreml")]
@@ -1162,6 +1177,7 @@ impl EmbeddingModel {
         has
     }
 
+    /// Maximum batch size for multi-mask embedding, or 0 if unavailable
     pub fn multi_mask_batch_size(&self) -> usize {
         let has_batched = self.multi_mask_batched_session.is_some();
         #[cfg(feature = "coreml")]

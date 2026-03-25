@@ -9,6 +9,7 @@ use crate::segment::{merge_segments, to_rttm};
 use super::config::*;
 use super::types::*;
 
+/// Run clustering and reconstruction on pre-computed inference artifacts
 pub fn post_inference(
     inference_artifacts: InferenceArtifacts,
     file_id: &str,

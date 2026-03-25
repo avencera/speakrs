@@ -7,9 +7,9 @@ use ort::ep;
 use ort::memory::Allocator;
 use ort::session::{OutputSelector, RunOptions, Session};
 use ort::value::{Tensor, TensorRef};
-use speakrs::inference::segmentation::SegmentationModel;
+use speakrs::PowersetMapping;
+use speakrs::inference::SegmentationModel;
 use speakrs::pipeline::SEGMENTATION_STEP_SECONDS;
-use speakrs::powerset::PowersetMapping;
 
 use crate::wav;
 

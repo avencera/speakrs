@@ -1,7 +1,7 @@
-pub mod config;
+mod config;
 pub use config::*;
 
-pub mod types;
+mod types;
 pub use types::*;
 
 pub(crate) mod clustering;
@@ -39,10 +39,12 @@ use crate::powerset::PowersetMapping;
 /// Both structs provide `runner()`, `mode`, and `seg_model` with compatible types
 macro_rules! pipeline_run_methods {
     () => {
+        /// Diarize audio using default config, file id defaults to "file1"
         pub fn run(&mut self, audio: &[f32]) -> Result<DiarizationResult, PipelineError> {
             self.run_with_file_id(audio, "file1")
         }
 
+        /// Diarize audio with a custom file identifier for RTTM output
         pub fn run_with_file_id(
             &mut self,
             audio: &[f32],
@@ -51,6 +53,7 @@ macro_rules! pipeline_run_methods {
             self.run_with_config(audio, file_id, &PipelineConfig::for_mode(self.mode))
         }
 
+        /// Diarize audio with a custom file identifier and pipeline config
         pub fn run_with_config(
             &mut self,
             audio: &[f32],
@@ -90,6 +93,7 @@ macro_rules! pipeline_run_methods {
             self.runner().run_batch(files, config)
         }
 
+        /// Segmentation step size in seconds for the current execution mode
         pub fn segmentation_step(&self) -> f64 {
             self.seg_model.step_seconds()
         }
@@ -224,6 +228,7 @@ impl OwnedDiarizationPipeline {
     }
 }
 
+/// Borrowed pipeline for when you manage model lifetimes yourself
 pub struct DiarizationPipeline<'a> {
     seg_model: &'a mut SegmentationModel,
     emb_model: &'a mut EmbeddingModel,
@@ -233,6 +238,7 @@ pub struct DiarizationPipeline<'a> {
 }
 
 impl<'a> DiarizationPipeline<'a> {
+    /// Build a pipeline from pre-loaded models and a PLDA parameters directory
     pub fn new(
         seg_model: &'a mut SegmentationModel,
         emb_model: &'a mut EmbeddingModel,
@@ -241,6 +247,7 @@ impl<'a> DiarizationPipeline<'a> {
         Self::new_with_config(seg_model, emb_model, models_dir, RuntimeConfig::default())
     }
 
+    /// Build a pipeline from pre-loaded models with custom runtime config
     pub fn new_with_config(
         seg_model: &'a mut SegmentationModel,
         emb_model: &'a mut EmbeddingModel,
@@ -257,6 +264,7 @@ impl<'a> DiarizationPipeline<'a> {
         })
     }
 
+    /// Default segmentation step in seconds (CPU mode)
     pub fn default_segmentation_step() -> f32 {
         SEGMENTATION_STEP_SECONDS as f32
     }

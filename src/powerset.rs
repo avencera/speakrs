@@ -1,10 +1,12 @@
 use ndarray::Array2;
 
+/// Maps between powerset class indices and multi-speaker binary activations
 pub struct PowersetMapping {
     mapping: Array2<f32>,
 }
 
 impl PowersetMapping {
+    /// Build the powerset mapping for a given number of speakers and max simultaneous speakers
     pub fn new(num_speakers: usize, max_set_size: usize) -> Self {
         let mut rows: Vec<Vec<f32>> = Vec::new();
 
@@ -29,6 +31,7 @@ impl PowersetMapping {
         Self { mapping }
     }
 
+    /// Number of powerset classes (e.g. 7 for 3 speakers with max overlap 2)
     pub fn num_powerset_classes(&self) -> usize {
         self.mapping.nrows()
     }
@@ -51,26 +54,6 @@ impl PowersetMapping {
         }
 
         one_hot.dot(&self.mapping)
-    }
-
-    /// Encode binary multilabel matrix to powerset one-hot
-    pub fn encode(&self, multilabel: &Array2<f32>) -> Array2<f32> {
-        let num_frames = multilabel.nrows();
-        let num_classes = self.num_powerset_classes();
-        let mut output = Array2::zeros((num_frames, num_classes));
-
-        for i in 0..num_frames {
-            let frame = multilabel.row(i);
-            for c in 0..num_classes {
-                let mapping_row = self.mapping.row(c);
-                if frame == mapping_row {
-                    output[[i, c]] = 1.0;
-                    break;
-                }
-            }
-        }
-
-        output
     }
 }
 
@@ -116,6 +99,27 @@ mod tests {
     use ndarray_npy::ReadNpyExt;
     use std::fs::File;
     use std::path::PathBuf;
+
+    impl PowersetMapping {
+        fn encode(&self, multilabel: &Array2<f32>) -> Array2<f32> {
+            let num_frames = multilabel.nrows();
+            let num_classes = self.num_powerset_classes();
+            let mut output = Array2::zeros((num_frames, num_classes));
+
+            for i in 0..num_frames {
+                let frame = multilabel.row(i);
+                for c in 0..num_classes {
+                    let mapping_row = self.mapping.row(c);
+                    if frame == mapping_row {
+                        output[[i, c]] = 1.0;
+                        break;
+                    }
+                }
+            }
+
+            output
+        }
+    }
 
     fn fixture_path(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
