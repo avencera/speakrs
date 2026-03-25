@@ -140,7 +140,7 @@ pub fn list_dataset_ids() -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// S5cmd -- parallel S3 downloads from Tigris
+// s5cmd -- parallel S3 downloads from Tigris
 // ---------------------------------------------------------------------------
 
 const S3_BUCKET: &str = "s3://speakrs/datasets";
@@ -258,7 +258,7 @@ impl S5cmd {
 }
 
 // ---------------------------------------------------------------------------
-// HF download fallback for Tigris-sourced datasets
+// hf download fallback for Tigris-sourced datasets
 // ---------------------------------------------------------------------------
 
 fn hf_download(repo: &str, local_dir: &Path) -> Result<()> {

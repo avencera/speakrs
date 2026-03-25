@@ -790,8 +790,7 @@ fn run_sequential_chunks(
 // --- Coordinator ---
 
 /// Pipelined chunk embedding: seg (CPUOnly) and emb (GPU) run on separate
-/// threads processing 30s chunks. While emb processes chunk N, seg produces
-/// chunk N+1
+/// Threads processing 30s chunks. While emb processes chunk N, seg produces chunk N+1
 pub(super) fn try_chunk_embedding(
     seg_model: &mut SegmentationModel,
     emb_model: &mut EmbeddingModel,

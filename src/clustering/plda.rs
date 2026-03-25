@@ -7,9 +7,9 @@ use ndarray_npy::read_npy;
 
 use crate::utils::l2_normalize_rows_f64;
 
-/// PLDA transform computed entirely in f64 to match pyannote's numpy precision.
-/// Parameters are stored as f64 internally; the transform method returns f32
-/// for downstream consumption
+/// PLDA transform computed entirely in f64 to match pyannote's numpy precision
+/// Parameters are stored as f64 internally, and the transform method returns f32
+/// For downstream consumption
 #[derive(Debug, Clone)]
 pub struct PldaTransform {
     mean1: Array1<f64>,
