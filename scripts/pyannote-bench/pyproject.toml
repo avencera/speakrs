@@ -19,6 +19,10 @@ url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
-torchaudio = { index = "pytorch-cu128" }
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform != 'darwin'" },
+]
+torchaudio = [
+    { index = "pytorch-cu128", marker = "sys_platform != 'darwin'" },
+]
 # torchcodec from PyPI (not cu128 index) -- it links against libtorch at runtime
