@@ -45,10 +45,10 @@ pub enum ExecutionMode {
     CudaFast,
 }
 
-/// Map execution mode to ORT execution providers
+/// Map an execution mode to ORT execution providers
 ///
-/// CoreMl modes use ORT CPU for any sessions that still go through ORT (e.g. FBANK),
-/// while segmentation/embedding tail sessions use native CoreML directly
+/// CoreML modes use ORT CPU for any sessions that still go through ORT such as FBANK,
+/// While segmentation and embedding tail sessions use native CoreML directly
 pub fn with_execution_mode(
     builder: SessionBuilder,
     mode: ExecutionMode,

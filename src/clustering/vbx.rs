@@ -26,8 +26,8 @@ impl Default for VbxConfig {
 /// VBx clustering matching pyannote's algorithm
 ///
 /// Takes PLDA-transformed features and per-dimension eigenvalues (Phi),
-/// plus AHC-initialized gamma responsibilities. All computation is done
-/// in f64 to match pyannote's numpy default precision
+/// Plus AHC-initialized gamma responsibilities. All computation is done
+/// In f64 to match pyannote's numpy default precision
 pub fn vbx(
     features: &ArrayView2<f32>,
     phi: &ArrayView1<f32>,

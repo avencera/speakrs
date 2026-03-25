@@ -44,7 +44,7 @@ pub fn parse_rttm(text: &str) -> Vec<Segment> {
 /// Compute Diarization Error Rate between reference and hypothesis segments
 ///
 /// Uses interval-based NIST standard DER with collar=0 and optimal
-/// speaker mapping via the Jonker-Volgenant algorithm
+/// Speaker mapping via the Jonker-Volgenant algorithm
 pub fn compute_der(reference: &[Segment], hypothesis: &[Segment]) -> DerResult {
     if reference.is_empty() {
         let fa: f64 = hypothesis.iter().map(|s| s.duration()).sum();
@@ -163,13 +163,13 @@ fn active_speakers_at(
 }
 
 /// Find optimal 1-to-1 mapping from ref speakers to hyp speakers
-/// that maximizes total co-occurrence using the Hungarian algorithm (O(n³))
+/// That maximizes total co-occurrence using the Hungarian algorithm (O(n³))
 fn optimal_mapping(cooccurrence: &[Vec<f64>], n_ref: usize, n_hyp: usize) -> HashMap<usize, usize> {
     if n_ref == 0 || n_hyp == 0 {
         return HashMap::new();
     }
 
-    // pad to square, negate for minimization
+    // pad to square and negate for minimization
     let n = n_ref.max(n_hyp);
     let mut cost = vec![vec![0.0f64; n]; n];
     for ri in 0..n_ref {
