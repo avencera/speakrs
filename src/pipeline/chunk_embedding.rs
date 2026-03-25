@@ -245,7 +245,7 @@ impl PrepWorker {
     }
 }
 
-// --- GpuWorker actor: work-stealing GPU predict loop ---
+// --- GpuWorker actor: priority-pull GPU predict loop ---
 
 struct GpuWorker {
     model: Arc<SharedCoreMlModel>,
@@ -616,7 +616,7 @@ fn run_pipelined<'scope>(
         cpu_prep_ms = total_prep_fbank_us / 1000,
         predict_ms = total_predict_us / 1000,
         emb_wall_ms = emb_start.elapsed().as_millis(),
-        "Work-stealing breakdown"
+        "Priority-pull breakdown"
     );
 
     Ok(EmbeddingSummary {
