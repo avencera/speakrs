@@ -1,8 +1,18 @@
+macOS — Apple M4 Pro, macOS 26.3
 Earnings-21 DER (44 files, 2355.8 min, collar=0ms)
 
-Implementation             DER%    Missed%   FalseAlarm%   Confusion%     Time
-──────────────────────────────────────────────────────────────────────────────
-pyannote MPS               9.7%       2.6%          2.4%         4.7%  8009.6s
-speakrs CoreML             9.7%       2.6%          2.4%         4.7%  1238.8s
-speakrs CoreML Fast       10.9%       2.5%          2.5%         5.9%   615.1s
-FluidAudio                43.1%       4.4%          2.2%        36.5%  1040.2s
+Implementation             DER%    Missed%   FalseAlarm%   Confusion%     Time    RTFx
+──────────────────────────────────────────────────────────────────────────────────────────
+pyannote MPS               9.7%       2.6%          2.4%         4.7%  8009.6s     18x
+speakrs CoreML            10.6%       2.6%          2.4%         5.6%   219.6s    644x
+speakrs CoreML Fast        8.9%       3.0%          1.6%         4.2%   158.7s    890x
+SpeakerKit                 9.4%       2.8%          2.0%         4.6%   174.3s    811x
+
+Linux — NVIDIA RTX 4090, AMD EPYC 7B13
+Earnings-21 DER (44 files, 2355.8 min, collar=0ms)
+
+Implementation             DER%    Missed%   FalseAlarm%   Confusion%     Time    RTFx
+──────────────────────────────────────────────────────────────────────────────────────────
+speakrs CUDA               9.7%       2.6%          2.4%         4.7%  2692.1s     53x
+speakrs CUDA Fast          9.2%       2.5%          2.4%         4.2%  1284.1s    110x
+pyannote CUDA              9.7%       2.6%          2.4%         4.7%  8036.8s     18x
