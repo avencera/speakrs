@@ -40,6 +40,39 @@ impl AudioSource {
     }
 }
 
+fn prepare_youtube_audio(source: &str, temp_dir: &TempDir) -> Result<()> {
+    run_cmd(
+        Command::new("yt-dlp")
+            .args(["-x", "--audio-format", "wav"])
+            .arg("--postprocessor-args")
+            .arg("ffmpeg:-ar 16000 -ac 1")
+            .arg("-o")
+            .arg(temp_dir.path().join("audio.%(ext)s"))
+            .arg(source),
+    )
+}
+
+fn prepare_http_audio(source: &str, wav_path: &Path, temp_dir: &TempDir) -> Result<()> {
+    let input = temp_dir.path().join("input");
+    run_cmd(
+        Command::new("curl")
+            .args(["--fail", "--location", "--silent", "--show-error"])
+            .arg(source)
+            .arg("-o")
+            .arg(&input),
+    )?;
+    convert_to_16k_mono(&input, wav_path)
+}
+
+fn prepare_local_audio(source: &str, wav_path: &Path) -> Result<()> {
+    let input = Path::new(source);
+    if !input.is_file() {
+        bail!("Input does not exist: {source}");
+    }
+
+    convert_to_16k_mono(input, wav_path)
+}
+
 /// Prepare audio from a URL, YouTube link, or local file path into 16kHz mono WAV
 ///
 /// Returns the converted WAV path plus the temp dir guard that keeps it alive
@@ -50,34 +83,9 @@ pub fn prepare_audio(source: &str) -> Result<PreparedAudio> {
     println!("=== Preparing audio ===");
 
     match AudioSource::new(source) {
-        AudioSource::YouTube => {
-            run_cmd(
-                Command::new("yt-dlp")
-                    .args(["-x", "--audio-format", "wav"])
-                    .arg("--postprocessor-args")
-                    .arg("ffmpeg:-ar 16000 -ac 1")
-                    .arg("-o")
-                    .arg(temp_dir.path().join("audio.%(ext)s"))
-                    .arg(source),
-            )?;
-        }
-        AudioSource::HttpDownload => {
-            let input = temp_dir.path().join("input");
-            run_cmd(
-                Command::new("curl")
-                    .args(["--fail", "--location", "--silent", "--show-error"])
-                    .arg(source)
-                    .arg("-o")
-                    .arg(&input),
-            )?;
-            convert_to_16k_mono(&input, &wav_path)?;
-        }
-        AudioSource::LocalFile => {
-            if !Path::new(source).is_file() {
-                bail!("Input does not exist: {source}");
-            }
-            convert_to_16k_mono(Path::new(source), &wav_path)?;
-        }
+        AudioSource::YouTube => prepare_youtube_audio(source, &temp_dir)?,
+        AudioSource::HttpDownload => prepare_http_audio(source, &wav_path, &temp_dir)?,
+        AudioSource::LocalFile => prepare_local_audio(source, &wav_path)?,
     }
 
     Ok(PreparedAudio { wav_path, temp_dir })

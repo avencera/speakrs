@@ -704,6 +704,45 @@ pub struct DerArgs {
     pub sleep_between: Option<u64>,
 }
 
+fn validate_single_file_mode(file: &Option<PathBuf>, rttm: &Option<PathBuf>) -> Result<bool> {
+    let Some(wav_path) = file else {
+        return Ok(false);
+    };
+    let rttm_path = rttm
+        .as_ref()
+        .ok_or_else(|| color_eyre::eyre::eyre!("--rttm is required when using --file"))?;
+
+    if !wav_path.exists() {
+        bail!("WAV file not found: {}", wav_path.display());
+    }
+    if !rttm_path.exists() {
+        bail!("RTTM file not found: {}", rttm_path.display());
+    }
+
+    Ok(true)
+}
+
+fn resolve_eval_datasets(
+    dataset_id: &str,
+    single_file_mode: bool,
+) -> Result<Vec<crate::datasets::Dataset>> {
+    if single_file_mode {
+        return Ok(Vec::new());
+    }
+
+    if dataset_id == "all" {
+        return Ok(crate::datasets::all_datasets());
+    }
+
+    Ok(vec![crate::datasets::find_dataset(dataset_id).ok_or_else(
+        || {
+            color_eyre::eyre::eyre!(
+                "unknown dataset: {dataset_id}. Use --dataset list to see available datasets"
+            )
+        },
+    )?])
+}
+
 pub fn der(args: DerArgs) -> Result<()> {
     let DerArgs {
         ref dataset_id,
@@ -758,32 +797,8 @@ pub fn der(args: DerArgs) -> Result<()> {
         return Ok(());
     }
 
-    // single-file mode: --file and --rttm provided directly
-    let single_file_mode = file.is_some();
-    if let Some(wav_path) = file {
-        let rttm_path = rttm
-            .as_ref()
-            .ok_or_else(|| color_eyre::eyre::eyre!("--rttm is required when using --file"))?;
-
-        if !wav_path.exists() {
-            bail!("WAV file not found: {}", wav_path.display());
-        }
-        if !rttm_path.exists() {
-            bail!("RTTM file not found: {}", rttm_path.display());
-        }
-    }
-
-    let datasets: Vec<crate::datasets::Dataset> = if single_file_mode {
-        Vec::new()
-    } else if dataset_id == "all" {
-        crate::datasets::all_datasets()
-    } else {
-        vec![crate::datasets::find_dataset(dataset_id).ok_or_else(|| {
-            color_eyre::eyre::eyre!(
-                "unknown dataset: {dataset_id}. Use --dataset list to see available datasets"
-            )
-        })?]
-    };
+    let single_file_mode = validate_single_file_mode(file, rttm)?;
+    let datasets = resolve_eval_datasets(dataset_id, single_file_mode)?;
 
     let root = project_root();
 
@@ -2011,7 +2026,7 @@ fn ensure_pyannote_rs_emb_model(path: &Path) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// GPU benchmark job (used by speakrs-bm)
+// gpu benchmark job used by speakrs-bm
 // ---------------------------------------------------------------------------
 
 /// Progress update emitted per-file during a benchmark run
