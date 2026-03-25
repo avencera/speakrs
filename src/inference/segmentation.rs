@@ -54,10 +54,9 @@ pub struct SegmentationModel {
     sample_rate: usize,
 }
 
-// SAFETY: SegmentationModel is only used from one thread at a time via &mut self.
-// The non-Send fields (CachedInputShape) contain Objective-C objects that are safe
-// to move between threads when not accessed concurrently.
-// SharedCoreMlModel is already Send + Sync
+// SAFETY: SegmentationModel is only used from one thread at a time via &mut self
+// SAFETY: the non-Send fields contain Objective-C objects that are only moved, not shared
+// SAFETY: SharedCoreMlModel is already Send + Sync
 #[cfg(feature = "coreml")]
 unsafe impl Send for SegmentationModel {}
 
@@ -240,24 +239,8 @@ impl SegmentationModel {
             return Ok(0);
         }
 
-        // choose model and batch size based on window count:
-        // - large files (200+ windows): batched model with parallel workers
-        // - short files: individual native calls (2.5ms each vs 120ms per batch)
-        let min_batch_windows = PRIMARY_BATCH_SIZE * 6; // ~192
-        let (shared_model, batch_size) = if total_windows >= min_batch_windows {
-            if let Some(ref m) = self.native_large_batched_session {
-                (m, LARGE_BATCH_SIZE)
-            } else if let Some(ref m) = self.native_batched_session {
-                (m, PRIMARY_BATCH_SIZE)
-            } else if let Some(ref m) = self.native_session {
-                (m, 1)
-            } else {
-                return self.run_streaming(audio, tx);
-            }
-        } else if let Some(ref m) = self.native_session {
-            // short files: individual native calls, no batching
-            (m, 1)
-        } else {
+        let Some((shared_model, batch_size)) = self.select_parallel_native_model(total_windows)
+        else {
             return self.run_streaming(audio, tx);
         };
 
@@ -464,8 +447,7 @@ impl SegmentationModel {
                 Ok::<(), SegmentationError>(())
             })?;
         } else {
-            // single: keep the old worker-sharded path because this code path is
-            // only used when no batched CoreML segmenter is available
+            // keep the worker-sharded path when only the single-window native model is available
             let chunk_size = total_windows.div_ceil(num_workers);
             let actual_workers = total_windows.div_ceil(chunk_size).min(num_workers);
 
@@ -818,6 +800,27 @@ impl SegmentationModel {
     }
 
     #[cfg(feature = "coreml")]
+    fn select_parallel_native_model(
+        &self,
+        total_windows: usize,
+    ) -> Option<(&SharedCoreMlModel, usize)> {
+        let min_batch_windows = PRIMARY_BATCH_SIZE * 6;
+        if total_windows < min_batch_windows {
+            return self.native_session.as_ref().map(|model| (model, 1));
+        }
+
+        self.native_large_batched_session
+            .as_ref()
+            .map(|model| (model, LARGE_BATCH_SIZE))
+            .or_else(|| {
+                self.native_batched_session
+                    .as_ref()
+                    .map(|model| (model, PRIMARY_BATCH_SIZE))
+            })
+            .or_else(|| self.native_session.as_ref().map(|model| (model, 1)))
+    }
+
+    #[cfg(feature = "coreml")]
     fn resolve_coreml_path(model_path: &str, mode: ExecutionMode) -> Option<std::path::PathBuf> {
         match mode {
             ExecutionMode::CoreMlFast => Some(coreml_w8a16_model_path(model_path)),
@@ -832,27 +835,56 @@ impl SegmentationModel {
     }
 
     #[cfg(feature = "coreml")]
-    fn load_native_coreml(model_path: &str, mode: ExecutionMode) -> Option<SharedCoreMlModel> {
-        let coreml_path = Self::resolve_coreml_path(model_path, mode)?;
-        if !coreml_path.exists() {
-            tracing::warn!(
-                path = %coreml_path.display(),
-                "Native CoreML segmentation model not found, falling back to ORT CPU",
-            );
+    fn resolve_batched_coreml_path(
+        model_path: &str,
+        mode: ExecutionMode,
+        batch_size: usize,
+    ) -> Option<std::path::PathBuf> {
+        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
             return None;
         }
+
+        let batched_onnx = batched_model_path(model_path, batch_size)?;
+        Self::resolve_coreml_path(batched_onnx.to_str().unwrap(), mode)
+    }
+
+    #[cfg(feature = "coreml")]
+    fn load_native_coreml_model(
+        coreml_path: &std::path::Path,
+        mode: ExecutionMode,
+        missing_message: &str,
+        load_error_message: &str,
+    ) -> Option<SharedCoreMlModel> {
+        if !coreml_path.exists() {
+            if !missing_message.is_empty() {
+                tracing::warn!(path = %coreml_path.display(), "{missing_message}");
+            }
+            return None;
+        }
+
         match SharedCoreMlModel::load(
-            &coreml_path,
+            coreml_path,
             Self::compute_units_for_mode(mode),
             "output",
             GpuPrecision::Low,
         ) {
             Ok(model) => Some(model),
-            Err(e) => {
-                tracing::warn!("Failed to load native CoreML segmentation: {e}");
+            Err(err) => {
+                tracing::warn!("{load_error_message}: {err}");
                 None
             }
         }
+    }
+
+    #[cfg(feature = "coreml")]
+    fn load_native_coreml(model_path: &str, mode: ExecutionMode) -> Option<SharedCoreMlModel> {
+        let coreml_path = Self::resolve_coreml_path(model_path, mode)?;
+        Self::load_native_coreml_model(
+            &coreml_path,
+            mode,
+            "Native CoreML segmentation model not found, falling back to ORT CPU",
+            "Failed to load native CoreML segmentation",
+        )
     }
 
     #[cfg(feature = "coreml")]
@@ -860,32 +892,13 @@ impl SegmentationModel {
         model_path: &str,
         mode: ExecutionMode,
     ) -> Option<SharedCoreMlModel> {
-        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
-            return None;
-        }
-        let batched_onnx = batched_model_path(model_path, PRIMARY_BATCH_SIZE)?;
-        let onnx_str = batched_onnx.to_str().unwrap();
-        let resolve = if mode == ExecutionMode::CoreMlFast {
-            coreml_w8a16_model_path
-        } else {
-            coreml_model_path
-        };
-        let coreml_path = resolve(onnx_str);
-        if !coreml_path.exists() {
-            return None;
-        }
-        match SharedCoreMlModel::load(
+        let coreml_path = Self::resolve_batched_coreml_path(model_path, mode, PRIMARY_BATCH_SIZE)?;
+        Self::load_native_coreml_model(
             &coreml_path,
-            Self::compute_units_for_mode(mode),
-            "output",
-            GpuPrecision::Low,
-        ) {
-            Ok(model) => Some(model),
-            Err(e) => {
-                tracing::warn!("Failed to load native CoreML batched segmentation: {e}");
-                None
-            }
-        }
+            mode,
+            "",
+            "Failed to load native CoreML batched segmentation",
+        )
     }
 
     #[cfg(feature = "coreml")]
@@ -893,35 +906,15 @@ impl SegmentationModel {
         model_path: &str,
         mode: ExecutionMode,
     ) -> Option<SharedCoreMlModel> {
-        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
-            return None;
-        }
-        let batched_onnx = batched_model_path(model_path, LARGE_BATCH_SIZE)?;
-        let onnx_str = batched_onnx.to_str().unwrap();
-        let resolve = if mode == ExecutionMode::CoreMlFast {
-            coreml_w8a16_model_path
-        } else {
-            coreml_model_path
-        };
-        let coreml_path = resolve(onnx_str);
-        if !coreml_path.exists() {
-            return None;
-        }
-        match SharedCoreMlModel::load(
+        let coreml_path = Self::resolve_batched_coreml_path(model_path, mode, LARGE_BATCH_SIZE)?;
+        let model = Self::load_native_coreml_model(
             &coreml_path,
-            Self::compute_units_for_mode(mode),
-            "output",
-            GpuPrecision::Low,
-        ) {
-            Ok(model) => {
-                info!("Loaded b64 segmentation model");
-                Some(model)
-            }
-            Err(e) => {
-                tracing::warn!("Failed to load b64 segmentation: {e}");
-                None
-            }
-        }
+            mode,
+            "",
+            "Failed to load b64 segmentation",
+        )?;
+        info!("Loaded b64 segmentation model");
+        Some(model)
     }
 
     #[cfg(feature = "coreml")]

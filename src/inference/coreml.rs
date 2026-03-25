@@ -55,21 +55,8 @@ pub(crate) struct CachedInputShape {
 
 impl CachedInputShape {
     pub fn new(name: &str, shape: &[usize]) -> Self {
-        let shape_nums: Vec<Retained<NSNumber>> = shape
-            .iter()
-            .map(|&d| NSNumber::new_isize(d as isize))
-            .collect();
-        let ns_shape = NSArray::from_retained_slice(&shape_nums);
-
-        let mut strides = vec![1usize; shape.len()];
-        for i in (0..shape.len().saturating_sub(1)).rev() {
-            strides[i] = strides[i + 1] * shape[i + 1];
-        }
-        let stride_nums: Vec<Retained<NSNumber>> = strides
-            .iter()
-            .map(|&s| NSNumber::new_isize(s as isize))
-            .collect();
-        let ns_strides = NSArray::from_retained_slice(&stride_nums);
+        let ns_shape = ns_number_array(shape);
+        let ns_strides = ns_number_array(&contiguous_strides(shape));
 
         let total_elements = shape.iter().product();
 
@@ -82,8 +69,7 @@ impl CachedInputShape {
     }
 }
 
-// Safety: CachedInputShape fields (Retained<NSString>, Retained<NSArray<NSNumber>>, usize)
-// are immutable after construction and only accessed via &self
+// SAFETY: CachedInputShape fields are immutable after construction and only accessed via &self
 unsafe impl Send for CachedInputShape {}
 unsafe impl Sync for CachedInputShape {}
 
@@ -95,10 +81,9 @@ pub(crate) struct CoreMlModel {
     input_dict: Retained<NSMutableDictionary<NSString, AnyObject>>,
 }
 
-// SAFETY: CoreMlModel is only used from one thread at a time (&mut self).
-// MLModel.prediction is thread-safe per Apple docs, and the other fields
-// (NSString, NSMutableDictionary, RcBlock) are only accessed during predict
-// calls which require &mut self, preventing concurrent access
+// SAFETY: CoreMlModel is only used from one thread at a time via &mut self
+// SAFETY: MLModel prediction is thread-safe per Apple docs, and the remaining fields are only
+// SAFETY: accessed inside predict calls that require exclusive access
 unsafe impl Send for CoreMlModel {}
 
 impl CoreMlModel {
@@ -215,27 +200,33 @@ impl CoreMlModel {
     }
 }
 
+fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
+    let mut strides = vec![1usize; shape.len()];
+    for i in (0..shape.len().saturating_sub(1)).rev() {
+        strides[i] = strides[i + 1] * shape[i + 1];
+    }
+
+    strides
+}
+
+fn ns_number_array(values: &[usize]) -> Retained<NSArray<NSNumber>> {
+    let numbers: Vec<Retained<NSNumber>> = values
+        .iter()
+        .copied()
+        .map(|value| NSNumber::new_isize(value as isize))
+        .collect();
+
+    NSArray::from_retained_slice(&numbers)
+}
+
 /// Create an MLMultiArray wrapping a data pointer with a shared no-op deallocator
 fn create_multi_array_with_deallocator(
     data: &[f32],
     shape: &[usize],
     deallocator: &RcBlock<dyn Fn(NonNull<c_void>)>,
 ) -> Result<Retained<MLMultiArray>, CoreMlError> {
-    let shape_nums: Vec<Retained<NSNumber>> = shape
-        .iter()
-        .map(|&d| NSNumber::new_isize(d as isize))
-        .collect();
-    let ns_shape = NSArray::from_retained_slice(&shape_nums);
-
-    let mut strides = vec![1usize; shape.len()];
-    for i in (0..shape.len().saturating_sub(1)).rev() {
-        strides[i] = strides[i + 1] * shape[i + 1];
-    }
-    let stride_nums: Vec<Retained<NSNumber>> = strides
-        .iter()
-        .map(|&s| NSNumber::new_isize(s as isize))
-        .collect();
-    let ns_strides = NSArray::from_retained_slice(&stride_nums);
+    let ns_shape = ns_number_array(shape);
+    let ns_strides = ns_number_array(&contiguous_strides(shape));
 
     let ptr = NonNull::new(data.as_ptr() as *mut c_void)
         .ok_or_else(|| CoreMlError::ArrayCreationFailed("null data pointer".into()))?;
@@ -292,7 +283,7 @@ fn extract_output(array: &MLMultiArray) -> Result<(Vec<f32>, Vec<usize>), CoreMl
 
     let data = if dtype == MLMultiArrayDataType::Float16 {
         let fp16_data = unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const u16, count) };
-        fp16_data.iter().map(|&bits| f16_to_f32(bits)).collect()
+        fp16_data.iter().copied().map(f16_to_f32).collect()
     } else {
         let fp32_data = unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const f32, count) };
         fp32_data.to_vec()
@@ -333,8 +324,8 @@ fn f16_to_f32(bits: u16) -> f32 {
 
 /// Thread-safe CoreML model wrapper that can be shared across threads
 ///
-/// Unlike CoreMlModel which reuses a cached NSMutableDictionary (requiring &mut self),
-/// this allocates fresh input dicts per call, enabling &self predict methods.
+/// Unlike CoreMlModel, this allocates a fresh input dictionary per call
+/// So predict can take `&self`
 /// Multiple threads can call predict concurrently on the same model instance
 pub(crate) struct SharedCoreMlModel {
     model: Retained<MLModel>,
@@ -342,9 +333,8 @@ pub(crate) struct SharedCoreMlModel {
     output_key: Retained<NSString>,
 }
 
-// SAFETY: MLModel.predictionFromFeatures is documented as thread-safe by Apple.
-// All per-call mutable state (NSMutableDictionary, RcBlock deallocator) is allocated
-// fresh in each predict call, preventing data races. Retained<NSString> is immutable
+// SAFETY: MLModel predictionFromFeatures is documented as thread-safe by Apple
+// SAFETY: all per-call mutable state is allocated fresh inside predict_cached
 unsafe impl Send for SharedCoreMlModel {}
 unsafe impl Sync for SharedCoreMlModel {}
 

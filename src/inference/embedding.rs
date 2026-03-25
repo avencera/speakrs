@@ -143,6 +143,14 @@ pub struct EmbeddingModel {
 }
 
 impl EmbeddingModel {
+    fn split_backend_available(model_path: &str) -> bool {
+        let split_fbank_path = split_fbank_model_path(model_path);
+        let split_tail_path = split_tail_model_path(model_path, 1);
+        let has_multi_mask = multi_mask_model_path(model_path, 1).is_some_and(|path| path.exists());
+
+        split_fbank_path.exists() && (split_tail_path.exists() || has_multi_mask)
+    }
+
     /// Load the WeSpeaker embedding model
     pub fn new(model_path: &str) -> Result<Self, ort::Error> {
         Self::with_mode(model_path, ExecutionMode::Cpu)
@@ -168,14 +176,12 @@ impl EmbeddingModel {
         let split_tail_path = split_tail_model_path(model_path, 1);
         let split_tail_batched_path = split_tail_model_path(model_path, CHUNK_SPEAKER_BATCH_SIZE);
         let split_primary_tail_batched_path = split_tail_model_path(model_path, PRIMARY_BATCH_SIZE);
-        let has_multi_mask = multi_mask_model_path(model_path, 1).is_some_and(|p| p.exists());
         #[cfg(feature = "coreml")]
         let native_chunk_compute_units = config.chunk_emb_compute_units.to_ml_compute_units();
         #[cfg(not(feature = "coreml"))]
         let _ = config;
         // split-backend: CPU fbank + GPU tail/multi-mask
-        let use_split_backend =
-            split_fbank_path.exists() && (split_tail_path.exists() || has_multi_mask);
+        let use_split_backend = Self::split_backend_available(model_path);
 
         macro_rules! timed {
             ($expr:expr) => {{
@@ -755,12 +761,7 @@ impl EmbeddingModel {
             split_tail_model_path(&self.model_path, CHUNK_SPEAKER_BATCH_SIZE);
         let split_primary_tail_batched_path =
             split_tail_model_path(&self.model_path, PRIMARY_BATCH_SIZE);
-        let has_multi_mask = multi_mask_model_path(&self.model_path, 1).is_some_and(|p| p.exists());
-        let use_split_backend =
-            (matches!(self.mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast)
-                && split_fbank_path.exists()
-                && split_tail_path.exists())
-                || (has_multi_mask && split_fbank_path.exists());
+        let use_split_backend = Self::split_backend_available(&self.model_path);
         let split_fbank_batched_path = split_fbank_batched_model_path(&self.model_path);
         self.split_fbank_session = use_split_backend
             .then(|| {
@@ -1038,126 +1039,90 @@ impl EmbeddingModel {
             let batch_end = (batch_start + FBANK_BATCH_SIZE).min(audios.len());
             let batch = &audios[batch_start..batch_end];
 
-            if batch.len() == FBANK_BATCH_SIZE {
-                for (idx, audio) in batch.iter().enumerate() {
-                    let copy_len = audio.len().min(self.window_samples);
-                    self.split_fbank_batch_buffer
-                        .slice_mut(s![idx, 0, ..copy_len])
-                        .assign(&ndarray::ArrayView1::from(&audio[..copy_len]));
-                    if copy_len < self.window_samples {
-                        self.split_fbank_batch_buffer
-                            .slice_mut(s![idx, 0, copy_len..])
-                            .fill(0.0);
-                    }
-                }
-
-                #[cfg(feature = "coreml")]
-                {
-                    let _ = self.ensure_native_fbank_batched_loaded();
-                }
-                #[cfg(feature = "coreml")]
-                if let Some(native) = self.native_fbank_batched_session.as_ref() {
-                    let input_data = self.split_fbank_batch_buffer.as_slice().unwrap();
-                    let (data, out_shape) = native
-                        .predict_cached(&[(&self.cached_fbank_batch_shape, input_data)])
-                        .map_err(|e| ort::Error::new(e.to_string()))?;
-                    let frames = out_shape[1];
-                    let features = out_shape[2];
-                    let stride = frames * features;
-                    for idx in 0..FBANK_BATCH_SIZE {
-                        let start = idx * stride;
-                        results.push(
-                            Array2::from_shape_vec(
-                                (frames, features),
-                                data[start..start + stride].to_vec(),
-                            )
-                            .unwrap(),
-                        );
-                    }
-                    continue;
-                }
-
-                let waveform_tensor =
-                    TensorRef::from_array_view(self.split_fbank_batch_buffer.view())?;
-                let outputs = self
-                    .split_fbank_batched_session
-                    .as_mut()
-                    .unwrap()
-                    .run(ort::inputs!["waveform" => waveform_tensor])?;
-                let (shape, data) = outputs[0].try_extract_tensor::<f32>()?;
-                let frames = shape[1] as usize;
-                let features = shape[2] as usize;
-                let flat = data.to_vec();
-                let stride = frames * features;
-                for idx in 0..PRIMARY_BATCH_SIZE {
-                    let start = idx * stride;
-                    results.push(
-                        Array2::from_shape_vec(
-                            (frames, features),
-                            flat[start..start + stride].to_vec(),
-                        )
-                        .unwrap(),
-                    );
-                }
-            } else if batch.len() > 1 {
-                // zero-pad partial batch to full batch size for batched inference
-                let actual_count = batch.len();
-                for (idx, audio) in batch.iter().enumerate() {
-                    let copy_len = audio.len().min(self.window_samples);
-                    self.split_fbank_batch_buffer
-                        .slice_mut(s![idx, 0, ..copy_len])
-                        .assign(&ndarray::ArrayView1::from(&audio[..copy_len]));
-                    if copy_len < self.window_samples {
-                        self.split_fbank_batch_buffer
-                            .slice_mut(s![idx, 0, copy_len..])
-                            .fill(0.0);
-                    }
-                }
-                // zero unused rows
-                for idx in actual_count..FBANK_BATCH_SIZE {
-                    self.split_fbank_batch_buffer
-                        .slice_mut(s![idx, 0, ..])
-                        .fill(0.0);
-                }
-
-                #[cfg(feature = "coreml")]
-                {
-                    let _ = self.ensure_native_fbank_batched_loaded();
-                }
-                #[cfg(feature = "coreml")]
-                if let Some(native) = self.native_fbank_batched_session.as_ref() {
-                    let input_data = self.split_fbank_batch_buffer.as_slice().unwrap();
-                    let (data, out_shape) = native
-                        .predict_cached(&[(&self.cached_fbank_batch_shape, input_data)])
-                        .map_err(|e| ort::Error::new(e.to_string()))?;
-                    let frames = out_shape[1];
-                    let features = out_shape[2];
-                    let stride = frames * features;
-                    for idx in 0..actual_count {
-                        let start = idx * stride;
-                        results.push(
-                            Array2::from_shape_vec(
-                                (frames, features),
-                                data[start..start + stride].to_vec(),
-                            )
-                            .unwrap(),
-                        );
-                    }
-                    continue;
-                }
-
-                // ORT fallback for partial batch
+            if batch.len() == 1 {
                 for audio in batch {
                     results.push(self.compute_chunk_fbank(audio)?);
                 }
-            } else {
-                for audio in batch {
-                    results.push(self.compute_chunk_fbank(audio)?);
-                }
+                continue;
             }
+
+            self.fill_split_fbank_batch_buffer(batch);
+
+            #[cfg(feature = "coreml")]
+            if self.try_push_native_fbank_batch(&mut results, batch.len())? {
+                continue;
+            }
+
+            if batch.len() < FBANK_BATCH_SIZE {
+                for audio in batch {
+                    results.push(self.compute_chunk_fbank(audio)?);
+                }
+                continue;
+            }
+
+            let waveform_tensor = TensorRef::from_array_view(self.split_fbank_batch_buffer.view())?;
+            let outputs = self
+                .split_fbank_batched_session
+                .as_mut()
+                .unwrap()
+                .run(ort::inputs!["waveform" => waveform_tensor])?;
+            let (shape, data) = outputs[0].try_extract_tensor::<f32>()?;
+            Self::push_fbank_batch_results(
+                &mut results,
+                data,
+                shape[1] as usize,
+                shape[2] as usize,
+                batch.len(),
+            );
         }
 
         Ok(results)
+    }
+
+    fn fill_split_fbank_batch_buffer(&mut self, audios: &[&[f32]]) {
+        self.split_fbank_batch_buffer.fill(0.0);
+        for (idx, audio) in audios.iter().enumerate() {
+            let copy_len = audio.len().min(self.window_samples);
+            self.split_fbank_batch_buffer
+                .slice_mut(s![idx, 0, ..copy_len])
+                .assign(&ndarray::ArrayView1::from(&audio[..copy_len]));
+        }
+    }
+
+    fn push_fbank_batch_results(
+        results: &mut Vec<Array2<f32>>,
+        data: &[f32],
+        frames: usize,
+        features: usize,
+        count: usize,
+    ) {
+        let stride = frames * features;
+        for idx in 0..count {
+            let start = idx * stride;
+            results.push(
+                Array2::from_shape_vec((frames, features), data[start..start + stride].to_vec())
+                    .unwrap(),
+            );
+        }
+    }
+
+    #[cfg(feature = "coreml")]
+    fn try_push_native_fbank_batch(
+        &mut self,
+        results: &mut Vec<Array2<f32>>,
+        count: usize,
+    ) -> Result<bool, ort::Error> {
+        let _ = self.ensure_native_fbank_batched_loaded();
+        let Some(native) = self.native_fbank_batched_session.as_ref() else {
+            return Ok(false);
+        };
+
+        let input_data = self.split_fbank_batch_buffer.as_slice().unwrap();
+        let (data, out_shape) = native
+            .predict_cached(&[(&self.cached_fbank_batch_shape, input_data)])
+            .map_err(|e| ort::Error::new(e.to_string()))?;
+        Self::push_fbank_batch_results(results, &data, out_shape[1], out_shape[2], count);
+        Ok(true)
     }
 
     /// Whether a batched fbank session is available for parallel chunk processing
