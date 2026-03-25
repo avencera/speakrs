@@ -892,6 +892,7 @@ pub fn der(args: DerArgs) -> Result<()> {
 
         let (implementations, all_results) = run_der_implementations(&DerRunContext {
             root: &root,
+            run_dir: &run_dir,
             files,
             seg_model: &seg_model,
             emb_model: &emb_model,
@@ -927,6 +928,7 @@ type DerResults = (
 
 struct DerRunContext<'a> {
     root: &'a Path,
+    run_dir: &'a Path,
     files: &'a [(PathBuf, PathBuf)],
     seg_model: &'a Path,
     emb_model: &'a Path,
@@ -936,9 +938,35 @@ struct DerRunContext<'a> {
     sleep_between: Option<Duration>,
 }
 
+fn write_impl_result(
+    run_dir: &Path,
+    impl_name: &str,
+    result: &DerImplResult,
+    total_audio_seconds: f64,
+) {
+    let slug = impl_name.to_lowercase().replace(' ', "-");
+    let payload = serde_json::json!({
+        "implementation": impl_name,
+        "status": result.status,
+        "reason": result.reason,
+        "der": result.der,
+        "missed": result.missed,
+        "false_alarm": result.false_alarm,
+        "confusion": result.confusion,
+        "time": result.time,
+        "files": result.files,
+        "total_audio_seconds": total_audio_seconds,
+    });
+    let _ = fs::write(
+        run_dir.join(format!("{slug}.json")),
+        serde_json::to_string_pretty(&payload).unwrap_or_default() + "\n",
+    );
+}
+
 fn run_der_implementations(ctx: &DerRunContext) -> Result<DerResults> {
     let DerRunContext {
         root,
+        run_dir,
         files,
         seg_model,
         emb_model,
@@ -974,10 +1002,9 @@ fn run_der_implementations(ctx: &DerRunContext) -> Result<DerResults> {
         if let Some(reason) = preflight_failures.get(*impl_name) {
             println!("  → skipped (preflight failed): {reason}");
             println!();
-            all_results.insert(
-                impl_name.to_string(),
-                DerImplResult::failed(format!("preflight failed: {reason}")),
-            );
+            let result = DerImplResult::failed(format!("preflight failed: {reason}"));
+            write_impl_result(run_dir, impl_name, &result, *total_audio_seconds);
+            all_results.insert(impl_name.to_string(), result);
             continue;
         }
 
@@ -992,7 +1019,9 @@ fn run_der_implementations(ctx: &DerRunContext) -> Result<DerResults> {
         ) {
             println!("  → skipped: {reason}");
             println!();
-            all_results.insert(impl_name.to_string(), DerImplResult::skipped(reason));
+            let result = DerImplResult::skipped(reason);
+            write_impl_result(run_dir, impl_name, &result, *total_audio_seconds);
+            all_results.insert(impl_name.to_string(), result);
             continue;
         }
 
@@ -1046,10 +1075,9 @@ fn run_der_implementations(ctx: &DerRunContext) -> Result<DerResults> {
             Err(err) => {
                 println!("  → failed: {err}");
                 println!();
-                all_results.insert(
-                    impl_name.to_string(),
-                    DerImplResult::failed(err.to_string()),
-                );
+                let result = DerImplResult::failed(err.to_string());
+                write_impl_result(run_dir, impl_name, &result, *total_audio_seconds);
+                all_results.insert(impl_name.to_string(), result);
                 continue;
             }
         };
@@ -1060,8 +1088,11 @@ fn run_der_implementations(ctx: &DerRunContext) -> Result<DerResults> {
         let rtfx = total_audio_seconds / benchmark_output.total_seconds;
         if let Some(d) = der_pct {
             println!(
-                "  → DER: {d:.1}%, Time: {:.1}s, RTFx: {rtfx:.1}x",
-                benchmark_output.total_seconds
+                "  → DER: {d:.1}%, Missed: {:.1}%, FA: {:.1}%, Confusion: {:.1}%, Time: {:.1}s, RTFx: {rtfx:.1}x",
+                miss_pct.unwrap_or(0.0),
+                fa_pct.unwrap_or(0.0),
+                conf_pct.unwrap_or(0.0),
+                benchmark_output.total_seconds,
             );
         } else {
             println!(
@@ -1071,17 +1102,16 @@ fn run_der_implementations(ctx: &DerRunContext) -> Result<DerResults> {
         }
         println!();
 
-        all_results.insert(
-            impl_name.to_string(),
-            DerImplResult::completed(
-                der_pct,
-                miss_pct,
-                fa_pct,
-                conf_pct,
-                benchmark_output.total_seconds,
-                acc.file_count,
-            ),
+        let result = DerImplResult::completed(
+            der_pct,
+            miss_pct,
+            fa_pct,
+            conf_pct,
+            benchmark_output.total_seconds,
+            acc.file_count,
         );
+        write_impl_result(run_dir, impl_name, &result, *total_audio_seconds);
+        all_results.insert(impl_name.to_string(), result);
 
         if let Some(delay) = *sleep_between {
             println!(
@@ -2086,10 +2116,9 @@ pub fn run_benchmark_job(
             _ => {
                 println!("  → skipped: not a GPU implementation");
                 println!();
-                all_results.insert(
-                    impl_name.to_string(),
-                    DerImplResult::skipped("not a GPU implementation".to_string()),
-                );
+                let result = DerImplResult::skipped("not a GPU implementation".to_string());
+                write_impl_result(&run_dir, impl_name, &result, total_audio_seconds);
+                all_results.insert(impl_name.to_string(), result);
                 continue;
             }
         };
@@ -2099,10 +2128,9 @@ pub fn run_benchmark_job(
             Err(err) => {
                 println!("  → failed: {err}");
                 println!();
-                all_results.insert(
-                    impl_name.to_string(),
-                    DerImplResult::failed(err.to_string()),
-                );
+                let result = DerImplResult::failed(err.to_string());
+                write_impl_result(&run_dir, impl_name, &result, total_audio_seconds);
+                all_results.insert(impl_name.to_string(), result);
                 continue;
             }
         };
@@ -2113,8 +2141,11 @@ pub fn run_benchmark_job(
         let rtfx = total_audio_seconds / benchmark_output.total_seconds;
         if let Some(d) = der_pct {
             println!(
-                "  → DER: {d:.1}%, Time: {:.1}s, RTFx: {rtfx:.1}x",
-                benchmark_output.total_seconds
+                "  → DER: {d:.1}%, Missed: {:.1}%, FA: {:.1}%, Confusion: {:.1}%, Time: {:.1}s, RTFx: {rtfx:.1}x",
+                miss_pct.unwrap_or(0.0),
+                fa_pct.unwrap_or(0.0),
+                conf_pct.unwrap_or(0.0),
+                benchmark_output.total_seconds,
             );
         } else {
             println!(
@@ -2124,17 +2155,16 @@ pub fn run_benchmark_job(
         }
         println!();
 
-        all_results.insert(
-            impl_name.to_string(),
-            DerImplResult::completed(
-                der_pct,
-                miss_pct,
-                fa_pct,
-                conf_pct,
-                benchmark_output.total_seconds,
-                acc.file_count,
-            ),
+        let result = DerImplResult::completed(
+            der_pct,
+            miss_pct,
+            fa_pct,
+            conf_pct,
+            benchmark_output.total_seconds,
+            acc.file_count,
         );
+        write_impl_result(&run_dir, impl_name, &result, total_audio_seconds);
+        all_results.insert(impl_name.to_string(), result);
     }
 
     DerResultsWriter {
