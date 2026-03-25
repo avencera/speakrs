@@ -4,6 +4,7 @@ import argparse
 import os
 import sys
 import time
+import wave
 from datetime import datetime
 from typing import Any
 
@@ -167,17 +168,20 @@ def main() -> None:
 
     for i, wav_path in enumerate(args.wav_files):
         file_id = os.path.splitext(os.path.basename(wav_path))[0]
+        with wave.open(wav_path, "rb") as wf:
+            duration = wf.getnframes() / wf.getframerate()
         t0 = time.monotonic()
         all_output += diarize_file(pipeline, wav_path, file_id)
         elapsed = time.monotonic() - t0
         cumulative += elapsed
+        rtfx = duration / elapsed if elapsed > 0 else 0
 
         if total > 1:
             avg = cumulative / (i + 1)
             remaining = (total - i - 1) * avg
             eta = _format_eta(remaining)
             print(
-                f"  [{i + 1}/{total}] {file_id}: {elapsed:.1f}s (ETA {eta}) [{datetime.now():%H:%M:%S}]",
+                f"  [{i + 1}/{total}] {file_id}: {elapsed:.1f}s {rtfx:.1f}x RTFx (ETA {eta}) [{datetime.now():%H:%M:%S}]",
                 file=sys.stderr,
             )
 
