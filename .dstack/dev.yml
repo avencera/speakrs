@@ -1,7 +1,7 @@
 type: dev-environment
 name: gpu-dev
 
-image: avencera/speakrs-gpu:64a6695-timing
+image: avencera/speakrs-gpu:f7a1d98
 ide: vscode
 
 env:
