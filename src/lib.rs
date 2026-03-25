@@ -1,4 +1,5 @@
 #![warn(missing_docs)]
+#![warn(clippy::undocumented_unsafe_blocks)]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
 
 //! Speaker diarization in Rust

@@ -178,10 +178,10 @@ enum BenchCmd {
         /// Skip the pre-flight smoke test
         #[arg(long)]
         no_preflight: bool,
-        /// Segmentation batch size (sets PYANNOTE_SEGMENTATION_BATCH_SIZE)
+        /// Override pyannote segmentation batch size
         #[arg(long)]
         seg_batch_size: Option<u32>,
-        /// Embedding batch size (sets PYANNOTE_EMBEDDING_BATCH_SIZE)
+        /// Override pyannote embedding batch size
         #[arg(long)]
         emb_batch_size: Option<u32>,
         /// Seconds to sleep between implementations (for thermal cooldown)

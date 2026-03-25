@@ -71,6 +71,7 @@ impl CachedInputShape {
 
 // SAFETY: CachedInputShape fields are immutable after construction and only accessed via &self
 unsafe impl Send for CachedInputShape {}
+// SAFETY: CachedInputShape fields are immutable after construction and only accessed via &self
 unsafe impl Sync for CachedInputShape {}
 
 pub(crate) struct CoreMlModel {
@@ -94,19 +95,8 @@ impl CoreMlModel {
         output_name: &str,
         gpu_precision: GpuPrecision,
     ) -> Result<Self, CoreMlError> {
-        let path_str = NSString::from_str(&path.to_string_lossy());
-        let url = NSURL::fileURLWithPath_isDirectory(&path_str, true);
-
-        let config = unsafe { MLModelConfiguration::new() };
-        unsafe { config.setComputeUnits(compute_units) };
-        let low_precision = matches!(gpu_precision, GpuPrecision::Low);
-        unsafe { config.setAllowLowPrecisionAccumulationOnGPU(low_precision) };
-
-        let model = unsafe { MLModel::modelWithContentsOfURL_configuration_error(&url, &config) }
-            .map_err(|e| CoreMlError::LoadFailed(format!("{e}")))?;
-
         Ok(Self {
-            model,
+            model: load_model(path, compute_units, gpu_precision)?,
             output_key: NSString::from_str(output_name),
             noop_deallocator: RcBlock::new(|_ptr: NonNull<c_void>| {}),
             input_dict: NSMutableDictionary::new(),
@@ -126,32 +116,16 @@ impl CoreMlModel {
         for &(name, shape, data) in inputs {
             let multi_array =
                 create_multi_array_with_deallocator(data, shape, &self.noop_deallocator)?;
-            let feature_value = unsafe { MLFeatureValue::featureValueWithMultiArray(&multi_array) };
             let key = NSString::from_str(name);
             let key_copy: &ProtocolObject<dyn NSCopying> = ProtocolObject::from_ref(&*key);
-            let value_ref: &AnyObject =
-                unsafe { &*((&*feature_value) as *const MLFeatureValue as *const AnyObject) };
-            unsafe { self.input_dict.setObject_forKey(value_ref, key_copy) };
+            insert_input_feature(&self.input_dict, key_copy, &multi_array);
         }
 
-        let provider = unsafe {
-            MLDictionaryFeatureProvider::initWithDictionary_error(
-                MLDictionaryFeatureProvider::alloc(),
-                &self.input_dict,
-            )
-        }
-        .map_err(|e| CoreMlError::PredictionFailed(format!("feature provider: {e}")))?;
-
+        let provider = build_feature_provider(&self.input_dict)?;
         let input_ref: &ProtocolObject<dyn MLFeatureProvider> =
             ProtocolObject::from_ref(&*provider);
-        let output = unsafe { self.model.predictionFromFeatures_error(input_ref) }
-            .map_err(|e| CoreMlError::PredictionFailed(format!("{e}")))?;
-
-        let output_value = unsafe { output.featureValueForName(&self.output_key) }
-            .ok_or_else(|| CoreMlError::OutputNotFound(self.output_name.clone()))?;
-        let output_array = unsafe { output_value.multiArrayValue() }
-            .ok_or_else(|| CoreMlError::OutputNotFound(self.output_name.clone()))?;
-
+        let output_array =
+            predict_output(&self.model, input_ref, &self.output_key, &self.output_name)?;
         extract_output(&output_array)
     }
 
@@ -166,31 +140,15 @@ impl CoreMlModel {
             debug_assert_eq!(data.len(), cached.total_elements);
             let multi_array =
                 create_multi_array_cached_with_deallocator(data, cached, &self.noop_deallocator)?;
-            let feature_value = unsafe { MLFeatureValue::featureValueWithMultiArray(&multi_array) };
             let key_copy: &ProtocolObject<dyn NSCopying> = ProtocolObject::from_ref(&*cached.name);
-            let value_ref: &AnyObject =
-                unsafe { &*((&*feature_value) as *const MLFeatureValue as *const AnyObject) };
-            unsafe { self.input_dict.setObject_forKey(value_ref, key_copy) };
+            insert_input_feature(&self.input_dict, key_copy, &multi_array);
         }
 
-        let provider = unsafe {
-            MLDictionaryFeatureProvider::initWithDictionary_error(
-                MLDictionaryFeatureProvider::alloc(),
-                &self.input_dict,
-            )
-        }
-        .map_err(|e| CoreMlError::PredictionFailed(format!("feature provider: {e}")))?;
-
+        let provider = build_feature_provider(&self.input_dict)?;
         let input_ref: &ProtocolObject<dyn MLFeatureProvider> =
             ProtocolObject::from_ref(&*provider);
-        let output = unsafe { self.model.predictionFromFeatures_error(input_ref) }
-            .map_err(|e| CoreMlError::PredictionFailed(format!("{e}")))?;
-
-        let output_value = unsafe { output.featureValueForName(&self.output_key) }
-            .ok_or_else(|| CoreMlError::OutputNotFound(self.output_name.clone()))?;
-        let output_array = unsafe { output_value.multiArrayValue() }
-            .ok_or_else(|| CoreMlError::OutputNotFound(self.output_name.clone()))?;
-
+        let output_array =
+            predict_output(&self.model, input_ref, &self.output_key, &self.output_name)?;
         extract_output(&output_array)
     }
 
@@ -219,6 +177,85 @@ fn ns_number_array(values: &[usize]) -> Retained<NSArray<NSNumber>> {
     NSArray::from_retained_slice(&numbers)
 }
 
+fn load_model(
+    path: &Path,
+    compute_units: MLComputeUnits,
+    gpu_precision: GpuPrecision,
+) -> Result<Retained<MLModel>, CoreMlError> {
+    let path_str = NSString::from_str(&path.to_string_lossy());
+    let url = NSURL::fileURLWithPath_isDirectory(&path_str, true);
+    let low_precision = matches!(gpu_precision, GpuPrecision::Low);
+
+    // SAFETY: objc2 marks CoreML object construction as unsafe, but the URL and configuration
+    // SAFETY: objects are valid for the duration of this call and are only used synchronously here
+    unsafe {
+        let config = MLModelConfiguration::new();
+        config.setComputeUnits(compute_units);
+        config.setAllowLowPrecisionAccumulationOnGPU(low_precision);
+        MLModel::modelWithContentsOfURL_configuration_error(&url, &config)
+    }
+    .map_err(|e| CoreMlError::LoadFailed(format!("{e}")))
+}
+
+fn insert_input_feature(
+    input_dict: &NSMutableDictionary<NSString, AnyObject>,
+    key_copy: &ProtocolObject<dyn NSCopying>,
+    multi_array: &MLMultiArray,
+) {
+    // SAFETY: multi_array is a live CoreML object for this prediction call, and setObject retains
+    // SAFETY: the inserted feature value before the temporary Retained<MLFeatureValue> is dropped
+    unsafe {
+        let feature_value = MLFeatureValue::featureValueWithMultiArray(multi_array);
+        input_dict.setObject_forKey(feature_value_as_any_object(&feature_value), key_copy);
+    }
+}
+
+fn build_feature_provider(
+    input_dict: &NSMutableDictionary<NSString, AnyObject>,
+) -> Result<Retained<MLDictionaryFeatureProvider>, CoreMlError> {
+    // SAFETY: input_dict only contains NSString keys and MLFeatureValue-backed Objective-C objects
+    unsafe {
+        MLDictionaryFeatureProvider::initWithDictionary_error(
+            MLDictionaryFeatureProvider::alloc(),
+            input_dict,
+        )
+    }
+    .map_err(|e| CoreMlError::PredictionFailed(format!("feature provider: {e}")))
+}
+
+fn predict_output(
+    model: &MLModel,
+    input_ref: &ProtocolObject<dyn MLFeatureProvider>,
+    output_key: &NSString,
+    output_name: &str,
+) -> Result<Retained<MLMultiArray>, CoreMlError> {
+    // SAFETY: input_ref is a live feature provider constructed from valid CoreML objects and the
+    // SAFETY: returned provider remains retained for all subsequent output lookups in this function
+    let output = unsafe { model.predictionFromFeatures_error(input_ref) }
+        .map_err(|e| CoreMlError::PredictionFailed(format!("{e}")))?;
+    output_multi_array(&output, output_key, output_name)
+}
+
+fn output_multi_array(
+    output: &ProtocolObject<dyn MLFeatureProvider>,
+    output_key: &NSString,
+    output_name: &str,
+) -> Result<Retained<MLMultiArray>, CoreMlError> {
+    // SAFETY: output is a retained CoreML feature provider produced by a successful prediction call
+    let output_value = unsafe { output.featureValueForName(output_key) }
+        .ok_or_else(|| CoreMlError::OutputNotFound(output_name.to_owned()))?;
+    // SAFETY: output_key names the declared tensor output for this model and CoreML keeps the array
+    // SAFETY: alive as long as the owning feature provider is retained in this function
+    unsafe { output_value.multiArrayValue() }
+        .ok_or_else(|| CoreMlError::OutputNotFound(output_name.to_owned()))
+}
+
+fn feature_value_as_any_object(feature_value: &MLFeatureValue) -> &AnyObject {
+    // SAFETY: MLFeatureValue is an Objective-C object, so it has the same pointer representation as
+    // SAFETY: AnyObject and can be passed to NSDictionary APIs that erase the concrete class type
+    unsafe { &*(feature_value as *const MLFeatureValue).cast::<AnyObject>() }
+}
+
 /// Create an MLMultiArray wrapping a data pointer with a shared no-op deallocator
 fn create_multi_array_with_deallocator(
     data: &[f32],
@@ -232,6 +269,8 @@ fn create_multi_array_with_deallocator(
         .ok_or_else(|| CoreMlError::ArrayCreationFailed("null data pointer".into()))?;
 
     #[allow(deprecated)]
+    // SAFETY: ptr references the contiguous backing storage for data and the shape/stride metadata
+    // SAFETY: matches the buffer layout we computed from the same Rust slice
     unsafe {
         MLMultiArray::initWithDataPointer_shape_dataType_strides_deallocator_error(
             MLMultiArray::alloc(),
@@ -255,6 +294,8 @@ fn create_multi_array_cached_with_deallocator(
         .ok_or_else(|| CoreMlError::ArrayCreationFailed("null data pointer".into()))?;
 
     #[allow(deprecated)]
+    // SAFETY: ptr references the contiguous backing storage for data and cached shape/stride objects
+    // SAFETY: were derived from the same logical tensor layout at CachedInputShape construction time
     unsafe {
         MLMultiArray::initWithDataPointer_shape_dataType_strides_deallocator_error(
             MLMultiArray::alloc(),
@@ -272,19 +313,25 @@ fn create_multi_array_cached_with_deallocator(
 /// Handles both FP32 and FP16 output data types (FP16 is auto-converted to FP32)
 #[allow(deprecated)]
 fn extract_output(array: &MLMultiArray) -> Result<(Vec<f32>, Vec<usize>), CoreMlError> {
-    let count = unsafe { array.count() } as usize;
-    let ptr = unsafe { array.dataPointer() };
-    let dtype = unsafe { array.dataType() };
-
-    let ns_shape = unsafe { array.shape() };
+    // SAFETY: CoreML guarantees these metadata accessors describe the same live MLMultiArray
+    let (count, ptr, dtype, ns_shape) = unsafe {
+        (
+            array.count() as usize,
+            array.dataPointer(),
+            array.dataType(),
+            array.shape(),
+        )
+    };
     let shape: Vec<usize> = (0..ns_shape.len())
         .map(|i| ns_shape.objectAtIndex(i).as_isize() as usize)
         .collect();
 
     let data = if dtype == MLMultiArrayDataType::Float16 {
+        // SAFETY: CoreML reports count Float16 scalars backed by dataPointer for this array
         let fp16_data = unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const u16, count) };
         fp16_data.iter().copied().map(f16_to_f32).collect()
     } else {
+        // SAFETY: CoreML reports count Float32 scalars backed by dataPointer for this array
         let fp32_data = unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const f32, count) };
         fp32_data.to_vec()
     };
@@ -336,6 +383,8 @@ pub(crate) struct SharedCoreMlModel {
 // SAFETY: MLModel predictionFromFeatures is documented as thread-safe by Apple
 // SAFETY: all per-call mutable state is allocated fresh inside predict_cached
 unsafe impl Send for SharedCoreMlModel {}
+// SAFETY: MLModel predictionFromFeatures is documented as thread-safe by Apple
+// SAFETY: all per-call mutable state is allocated fresh inside predict_cached
 unsafe impl Sync for SharedCoreMlModel {}
 
 impl SharedCoreMlModel {
@@ -346,19 +395,8 @@ impl SharedCoreMlModel {
         output_name: &str,
         gpu_precision: GpuPrecision,
     ) -> Result<Self, CoreMlError> {
-        let path_str = NSString::from_str(&path.to_string_lossy());
-        let url = NSURL::fileURLWithPath_isDirectory(&path_str, true);
-
-        let config = unsafe { MLModelConfiguration::new() };
-        unsafe { config.setComputeUnits(compute_units) };
-        let low_precision = matches!(gpu_precision, GpuPrecision::Low);
-        unsafe { config.setAllowLowPrecisionAccumulationOnGPU(low_precision) };
-
-        let model = unsafe { MLModel::modelWithContentsOfURL_configuration_error(&url, &config) }
-            .map_err(|e| CoreMlError::LoadFailed(format!("{e}")))?;
-
         Ok(Self {
-            model,
+            model: load_model(path, compute_units, gpu_precision)?,
             output_key: NSString::from_str(output_name),
             output_name: output_name.to_owned(),
         })
@@ -379,31 +417,15 @@ impl SharedCoreMlModel {
             debug_assert_eq!(data.len(), cached.total_elements);
             let multi_array =
                 create_multi_array_cached_with_deallocator(data, cached, &deallocator)?;
-            let feature_value = unsafe { MLFeatureValue::featureValueWithMultiArray(&multi_array) };
             let key_copy: &ProtocolObject<dyn NSCopying> = ProtocolObject::from_ref(&*cached.name);
-            let value_ref: &AnyObject =
-                unsafe { &*((&*feature_value) as *const MLFeatureValue as *const AnyObject) };
-            unsafe { input_dict.setObject_forKey(value_ref, key_copy) };
+            insert_input_feature(&input_dict, key_copy, &multi_array);
         }
 
-        let provider = unsafe {
-            MLDictionaryFeatureProvider::initWithDictionary_error(
-                MLDictionaryFeatureProvider::alloc(),
-                &input_dict,
-            )
-        }
-        .map_err(|e| CoreMlError::PredictionFailed(format!("feature provider: {e}")))?;
-
+        let provider = build_feature_provider(&input_dict)?;
         let input_ref: &ProtocolObject<dyn MLFeatureProvider> =
             ProtocolObject::from_ref(&*provider);
-        let output = unsafe { self.model.predictionFromFeatures_error(input_ref) }
-            .map_err(|e| CoreMlError::PredictionFailed(format!("{e}")))?;
-
-        let output_value = unsafe { output.featureValueForName(&self.output_key) }
-            .ok_or_else(|| CoreMlError::OutputNotFound(self.output_name.clone()))?;
-        let output_array = unsafe { output_value.multiArrayValue() }
-            .ok_or_else(|| CoreMlError::OutputNotFound(self.output_name.clone()))?;
-
+        let output_array =
+            predict_output(&self.model, input_ref, &self.output_key, &self.output_name)?;
         extract_output(&output_array)
     }
 
@@ -426,21 +448,11 @@ impl SharedCoreMlModel {
             debug_assert_eq!(data.len(), cached.total_elements);
             let multi_array =
                 create_multi_array_cached_with_deallocator(data, cached, &deallocator)?;
-            let feature_value = unsafe { MLFeatureValue::featureValueWithMultiArray(&multi_array) };
             let key_copy: &ProtocolObject<dyn NSCopying> = ProtocolObject::from_ref(&*cached.name);
-            let value_ref: &AnyObject =
-                unsafe { &*((&*feature_value) as *const MLFeatureValue as *const AnyObject) };
-            unsafe { input_dict.setObject_forKey(value_ref, key_copy) };
+            insert_input_feature(&input_dict, key_copy, &multi_array);
         }
 
-        let provider = unsafe {
-            MLDictionaryFeatureProvider::initWithDictionary_error(
-                MLDictionaryFeatureProvider::alloc(),
-                &input_dict,
-            )
-        }
-        .map_err(|e| CoreMlError::PredictionFailed(format!("feature provider: {e}")))?;
-
+        let provider = build_feature_provider(&input_dict)?;
         let input_ref: &ProtocolObject<dyn MLFeatureProvider> =
             ProtocolObject::from_ref(&*provider);
 
@@ -452,18 +464,23 @@ impl SharedCoreMlModel {
         let completion = block2::RcBlock::new(
             move |output: *mut ProtocolObject<dyn MLFeatureProvider>, error: *mut NSError| {
                 if !error.is_null() {
+                    // SAFETY: error is non-null in this branch and points to the NSError passed
+                    // SAFETY: by CoreML for the duration of the callback invocation
                     let err_msg = unsafe { (*error).localizedDescription() }.to_string();
                     let _ = tx.send(Err(err_msg));
                 } else if output.is_null() {
                     let _ = tx.send(Err("nil output with no error".to_owned()));
                 } else {
-                    // retain the output so it survives the callback
+                    // SAFETY: output is non-null in this branch and retain extends the lifetime so
+                    // SAFETY: the returned feature provider survives after the callback returns
                     let retained = unsafe { Retained::retain(output) }.unwrap();
                     let _ = tx.send(Ok(retained));
                 }
             },
         );
 
+        // SAFETY: input_ref and completion stay alive for the duration of the Objective-C call and
+        // SAFETY: CoreML copies/retains the callback before invoking it asynchronously
         unsafe {
             self.model
                 .predictionFromFeatures_completionHandler(input_ref, &completion);
@@ -475,11 +492,7 @@ impl SharedCoreMlModel {
             .map_err(|_| CoreMlError::PredictionFailed("channel closed".to_owned()))?
             .map_err(CoreMlError::PredictionFailed)?;
 
-        let output_value = unsafe { output.featureValueForName(&self.output_key) }
-            .ok_or_else(|| CoreMlError::OutputNotFound(self.output_name.clone()))?;
-        let output_array = unsafe { output_value.multiArrayValue() }
-            .ok_or_else(|| CoreMlError::OutputNotFound(self.output_name.clone()))?;
-
+        let output_array = output_multi_array(&output, &self.output_key, &self.output_name)?;
         extract_output(&output_array)
     }
 }
