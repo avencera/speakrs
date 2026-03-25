@@ -53,7 +53,8 @@ macro_rules! pipeline_run_methods {
             audio: &[f32],
             file_id: &str,
         ) -> Result<DiarizationResult, PipelineError> {
-            self.run_with_config(audio, file_id, &PipelineConfig::for_mode(self.mode))
+            let config = self.pipeline_config();
+            self.run_with_config(audio, file_id, &config)
         }
 
         /// Diarize audio with a custom file identifier and pipeline config
@@ -74,9 +75,9 @@ macro_rules! pipeline_run_methods {
             self.runner().run_inference(audio)
         }
 
-        /// Pipeline config for the current execution mode
+        /// Default pipeline config used by `run` and `run_batch`
         pub fn pipeline_config(&self) -> PipelineConfig {
-            PipelineConfig::for_mode(self.mode)
+            self.default_config.clone()
         }
 
         /// Diarize a batch of files, keeping all hardware busy across file boundaries
@@ -84,7 +85,8 @@ macro_rules! pipeline_run_methods {
             &mut self,
             files: &[BatchInput<'_>],
         ) -> Result<Vec<DiarizationResult>, PipelineError> {
-            self.run_batch_with_config(files, &PipelineConfig::for_mode(self.mode))
+            let config = self.pipeline_config();
+            self.run_batch_with_config(files, &config)
         }
 
         /// Diarize a batch of files with custom config
@@ -117,7 +119,7 @@ pub struct OwnedDiarizationPipeline {
     pub(crate) emb_model: EmbeddingModel,
     pub(crate) plda: PldaTransform,
     pub(crate) powerset: PowersetMapping,
-    pub(crate) mode: ExecutionMode,
+    pub(crate) default_config: PipelineConfig,
 }
 
 impl OwnedDiarizationPipeline {
@@ -137,7 +139,7 @@ impl OwnedDiarizationPipeline {
 
     /// Convert into a background-processing queue
     pub fn into_queued(self) -> Result<QueuedDiarizationPipeline, QueueError> {
-        let config = PipelineConfig::for_mode(self.mode);
+        let config = self.default_config.clone();
         self.into_queued_with_config(config)
     }
 
@@ -156,7 +158,7 @@ pub struct DiarizationPipeline<'a> {
     emb_model: &'a mut EmbeddingModel,
     plda: PldaTransform,
     powerset: PowersetMapping,
-    mode: ExecutionMode,
+    default_config: PipelineConfig,
 }
 
 impl<'a> DiarizationPipeline<'a> {
@@ -166,23 +168,23 @@ impl<'a> DiarizationPipeline<'a> {
         emb_model: &'a mut EmbeddingModel,
         models_dir: &Path,
     ) -> Result<Self, PipelineError> {
-        Self::new_with_config(seg_model, emb_model, models_dir, RuntimeConfig::default())
+        let default_config = PipelineConfig::for_mode(seg_model.mode());
+        Self::new_with_config(seg_model, emb_model, models_dir, default_config)
     }
 
-    /// Build a pipeline from pre-loaded models with custom runtime config
+    /// Build a pipeline from pre-loaded models with custom pipeline config
     pub fn new_with_config(
         seg_model: &'a mut SegmentationModel,
         emb_model: &'a mut EmbeddingModel,
         models_dir: &Path,
-        _config: RuntimeConfig,
+        default_config: PipelineConfig,
     ) -> Result<Self, PipelineError> {
-        let mode = seg_model.mode();
         Ok(Self {
             seg_model,
             emb_model,
             plda: PldaTransform::from_dir(models_dir)?,
             powerset: PowersetMapping::new(3, 2),
-            mode,
+            default_config,
         })
     }
 

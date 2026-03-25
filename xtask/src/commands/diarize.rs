@@ -163,12 +163,8 @@ pub fn run(
             let emb_model_elapsed = emb_model_start.elapsed();
 
             let pipeline_start = Instant::now();
-            let mut pipeline = DiarizationPipeline::new_with_config(
-                &mut seg_model,
-                &mut emb_model,
-                &models_dir,
-                runtime_config,
-            )?;
+            let mut pipeline =
+                DiarizationPipeline::new(&mut seg_model, &mut emb_model, &models_dir)?;
             let pipeline_elapsed = pipeline_start.elapsed();
 
             let loop_start = Instant::now();

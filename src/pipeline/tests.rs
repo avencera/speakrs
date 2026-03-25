@@ -115,6 +115,15 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
+fn custom_pipeline_config() -> PipelineConfig {
+    PipelineConfig {
+        merge_gap: 0.75,
+        speaker_keep_threshold: 0.25,
+        reconstruct_method: ReconstructMethod::Standard,
+        ..PipelineConfig::default()
+    }
+}
+
 fn load_wav_samples(path: &Path) -> (Vec<f32>, u32) {
     let data = std::fs::read(path).unwrap();
     let sample_rate = u32::from_le_bytes(data[24..28].try_into().unwrap());
@@ -505,6 +514,57 @@ fn run_inference_only_plus_finish_matches_run_with_config() {
     let split = pipeline.finish_post_inference(artifacts, &config).unwrap();
 
     assert_eq!(combined.segments, split.segments);
+}
+
+#[test]
+fn pipeline_builder_applies_custom_default_config_to_build() {
+    let models_dir = fixture_path("models");
+    let expected = custom_pipeline_config();
+    let pipeline = PipelineBuilder::from_dir(&models_dir, ExecutionMode::Cpu)
+        .pipeline(expected.clone())
+        .build()
+        .unwrap();
+
+    let actual = pipeline.pipeline_config();
+    assert_eq!(actual.merge_gap, expected.merge_gap);
+    assert_eq!(
+        actual.speaker_keep_threshold,
+        expected.speaker_keep_threshold
+    );
+    assert_eq!(actual.reconstruct_method, expected.reconstruct_method);
+}
+
+#[test]
+fn borrowed_pipeline_new_with_config_stores_custom_default_config() {
+    let models_dir = fixture_path("models");
+    let mut seg_model = SegmentationModel::new(
+        models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
+        SEGMENTATION_STEP_SECONDS as f32,
+    )
+    .unwrap();
+    let mut emb_model = EmbeddingModel::new(
+        models_dir
+            .join("wespeaker-voxceleb-resnet34.onnx")
+            .to_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let expected = custom_pipeline_config();
+    let pipeline = DiarizationPipeline::new_with_config(
+        &mut seg_model,
+        &mut emb_model,
+        &models_dir,
+        expected.clone(),
+    )
+    .unwrap();
+
+    let actual = pipeline.pipeline_config();
+    assert_eq!(actual.merge_gap, expected.merge_gap);
+    assert_eq!(
+        actual.speaker_keep_threshold,
+        expected.speaker_keep_threshold
+    );
+    assert_eq!(actual.reconstruct_method, expected.reconstruct_method);
 }
 
 #[cfg(feature = "coreml")]
