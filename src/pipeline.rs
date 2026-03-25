@@ -124,13 +124,7 @@ impl OwnedDiarizationPipeline {
     ) -> Result<Self, PipelineError> {
         let manager = crate::models::ModelManager::new()?;
         let models_dir = manager.ensure(mode)?;
-
-        let step = match mode {
-            ExecutionMode::CoreMlFast | ExecutionMode::CudaFast => FAST_SEGMENTATION_STEP_SECONDS,
-            ExecutionMode::CoreMl => COREML_SEGMENTATION_STEP_SECONDS,
-            ExecutionMode::Cuda => CUDA_SEGMENTATION_STEP_SECONDS,
-            ExecutionMode::Cpu => SEGMENTATION_STEP_SECONDS,
-        };
+        let step = segmentation_step_seconds(mode);
 
         let seg_model = SegmentationModel::with_mode(
             models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
@@ -182,12 +176,7 @@ impl OwnedDiarizationPipeline {
         mode: ExecutionMode,
         config: RuntimeConfig,
     ) -> Result<Self, PipelineError> {
-        let step = match mode {
-            ExecutionMode::CoreMlFast | ExecutionMode::CudaFast => FAST_SEGMENTATION_STEP_SECONDS,
-            ExecutionMode::CoreMl => COREML_SEGMENTATION_STEP_SECONDS,
-            ExecutionMode::Cuda => CUDA_SEGMENTATION_STEP_SECONDS,
-            ExecutionMode::Cpu => SEGMENTATION_STEP_SECONDS,
-        };
+        let step = segmentation_step_seconds(mode);
 
         let seg_model = SegmentationModel::with_mode(
             models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
@@ -266,7 +255,7 @@ impl<'a> DiarizationPipeline<'a> {
 
     /// Default segmentation step in seconds (CPU mode)
     pub fn default_segmentation_step() -> f32 {
-        SEGMENTATION_STEP_SECONDS as f32
+        segmentation_step_seconds(ExecutionMode::Cpu) as f32
     }
 
     pipeline_run_methods!();
@@ -366,7 +355,7 @@ impl<'a> PipelineRunner<'a> {
             return Ok(Vec::new());
         }
 
-        // try batch chunk embedding for CoreML concurrent path
+        // try batch chunk embedding for the concurrent path before falling back
         #[cfg(feature = "coreml")]
         if matches!(self.inference_path(), InferencePath::Concurrent)
             && let Some(results) = chunk_embedding::try_batch_chunk_embedding(
@@ -511,11 +500,7 @@ impl<'a> PipelineRunner<'a> {
 
         let concurrent_result = embedding_result?;
         if concurrent_result.is_empty() {
-            return Ok(InferenceArtifacts {
-                layout: layout.with_num_chunks(0),
-                segmentations: DecodedSegmentations(Array3::zeros((0, 0, 0))),
-                embeddings: ChunkEmbeddings(Array3::zeros((0, 0, 0))),
-            });
+            return Ok(Self::empty_inference_artifacts(layout));
         }
 
         let num_chunks = concurrent_result.num_chunks;
@@ -542,5 +527,13 @@ impl<'a> PipelineRunner<'a> {
         config: &PipelineConfig,
     ) -> Result<DiarizationResult, PipelineError> {
         post_inference(inference_artifacts, file_id, config, self.plda)
+    }
+
+    fn empty_inference_artifacts(layout: ChunkLayout) -> InferenceArtifacts {
+        InferenceArtifacts {
+            layout: layout.with_num_chunks(0),
+            segmentations: DecodedSegmentations(Array3::zeros((0, 0, 0))),
+            embeddings: ChunkEmbeddings(Array3::zeros((0, 0, 0))),
+        }
     }
 }
