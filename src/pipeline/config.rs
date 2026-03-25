@@ -74,7 +74,7 @@ impl PipelineConfig {
 /// Runtime configuration for the diarization pipeline
 ///
 /// Controls execution parameters that don't affect correctness
-/// but influence performance characteristics
+/// But influence performance characteristics
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     /// Number of parallel chunk embedding workers (default: 1)
@@ -94,12 +94,22 @@ impl Default for RuntimeConfig {
     }
 }
 
+/// Segmentation step size in seconds for the selected execution mode
+pub const fn segmentation_step_seconds(mode: ExecutionMode) -> f64 {
+    match mode {
+        ExecutionMode::CoreMlFast | ExecutionMode::CudaFast => FAST_SEGMENTATION_STEP_SECONDS,
+        ExecutionMode::CoreMl => COREML_SEGMENTATION_STEP_SECONDS,
+        ExecutionMode::Cuda => CUDA_SEGMENTATION_STEP_SECONDS,
+        ExecutionMode::Cpu => SEGMENTATION_STEP_SECONDS,
+    }
+}
+
 /// Sliding window length for segmentation model input, in seconds
 pub const SEGMENTATION_WINDOW_SECONDS: f64 = 10.0;
 /// Default sliding window step for segmentation, in seconds
 pub const SEGMENTATION_STEP_SECONDS: f64 = 1.0;
 /// CoreML step aligned to 8-frame ResNet stride (96 fbank frames / 8 = 12 ResNet frames),
-/// closest aligned step below 1.0s that enables chunk embedding
+/// Closest aligned step below 1.0s that enables chunk embedding
 pub const COREML_SEGMENTATION_STEP_SECONDS: f64 = 0.96;
 /// CUDA segmentation step, in seconds
 pub const CUDA_SEGMENTATION_STEP_SECONDS: f64 = 1.0;
@@ -111,5 +121,5 @@ pub const FRAME_DURATION_SECONDS: f64 = 0.0619375;
 pub const FRAME_STEP_SECONDS: f64 = 0.016875;
 
 /// Minimum speaker activity (sum of weights) to run embedding inference.
-/// Speakers below this threshold are skipped — their NaN embedding is filtered out later
+/// Speakers below this threshold are skipped because their NaN embedding is filtered out later
 pub(crate) const MIN_SPEAKER_ACTIVITY: f32 = 10.0;

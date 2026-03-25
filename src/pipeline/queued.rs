@@ -68,7 +68,7 @@ struct WorkerRequest {
 ///
 /// The worker thread drains queued requests into batches and processes them via
 /// `run_batch_with_config`, preserving cross-file batch optimizations (chunk embedding,
-/// priority-pull) within each worker pass.
+/// Priority-pull) within each worker pass
 ///
 /// ```no_run
 /// # use speakrs::pipeline::*;
@@ -170,16 +170,10 @@ impl QueuedDiarizationPipeline {
     ///
     /// Callers should drain results via `recv` before calling this
     pub fn finish(mut self) -> Result<(), QueueError> {
-        // close request channel so worker exits after draining
+        // close the request channel so the worker exits after draining
         self.request_tx.take();
 
-        if let Some(handle) = self.worker.take() {
-            handle
-                .join()
-                .map_err(|e| QueueError::WorkerPanicked(format!("{e:?}")))?;
-        }
-
-        Ok(())
+        Self::join_worker(self.worker.take())
     }
 }
 
@@ -187,7 +181,7 @@ impl QueuedDiarizationPipeline {
 ///
 /// Created by calling `.into_iter()` on a `QueuedDiarizationPipeline`.
 /// Closes the request channel on creation so no more files can be pushed,
-/// then yields results until the worker has finished processing all queued jobs.
+/// Then yields results until the worker has finished processing all queued jobs
 pub struct QueuedDiarizationIter {
     result_rx: Receiver<QueuedDiarizationResult>,
     worker: Option<JoinHandle<()>>,
@@ -200,10 +194,8 @@ impl Iterator for QueuedDiarizationIter {
         match self.result_rx.recv() {
             Ok(result) => Some(result),
             Err(_) => {
-                // channel disconnected, worker is done — join to clean up
-                if let Some(handle) = self.worker.take() {
-                    let _ = handle.join();
-                }
+                // the worker is done, so join it for cleanup
+                let _ = QueuedDiarizationPipeline::join_worker(self.worker.take());
                 None
             }
         }
@@ -215,13 +207,25 @@ impl IntoIterator for QueuedDiarizationPipeline {
     type IntoIter = QueuedDiarizationIter;
 
     fn into_iter(mut self) -> Self::IntoIter {
-        // close request channel so worker finishes after draining
+        // close the request channel so the worker finishes after draining
         self.request_tx.take();
 
         QueuedDiarizationIter {
             result_rx: self.result_rx.clone(),
             worker: self.worker.take(),
         }
+    }
+}
+
+impl QueuedDiarizationPipeline {
+    fn join_worker(worker: Option<JoinHandle<()>>) -> Result<(), QueueError> {
+        if let Some(handle) = worker {
+            handle
+                .join()
+                .map_err(|err| QueueError::WorkerPanicked(format!("{err:?}")))?;
+        }
+
+        Ok(())
     }
 }
 
@@ -232,7 +236,7 @@ fn worker_loop(
     result_tx: Sender<QueuedDiarizationResult>,
 ) {
     while let Ok(first) = request_rx.recv() {
-        // drain all currently queued requests into a batch
+        // drain all currently queued requests into one batch
         let mut batch = vec![first];
         while let Ok(req) = request_rx.try_recv() {
             batch.push(req);
@@ -271,7 +275,7 @@ fn process_batch(
             })
             .collect(),
         Err(_) => {
-            // batch failed — run individually to isolate which file(s) broke
+            // the batch failed, so retry each file individually to isolate failures
             batch
                 .iter()
                 .map(|req| QueuedDiarizationResult {

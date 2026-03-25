@@ -301,19 +301,7 @@ impl DecodedSegmentations {
             }
             EmbeddingPath::Masked => {
                 if emb_model.prefers_chunk_embedding_path() {
-                    for chunk_idx in 0..num_chunks {
-                        let chunk_audio = layout.chunk_audio(audio, chunk_idx);
-                        let chunk_segmentations = self.0.slice(s![chunk_idx, .., ..]);
-                        let clean_masks = super::clean_masks(&chunk_segmentations);
-                        let chunk_embeddings = emb_model.embed_chunk_speakers(
-                            chunk_audio,
-                            chunk_segmentations,
-                            &clean_masks,
-                        )?;
-                        embeddings
-                            .slice_mut(s![chunk_idx, .., ..])
-                            .assign(&chunk_embeddings);
-                    }
+                    self.extract_chunk_embeddings(audio, emb_model, layout, &mut embeddings)?;
                 } else {
                     self.extract_masked_embeddings(audio, emb_model, layout, &mut embeddings)?;
                 }
@@ -321,6 +309,27 @@ impl DecodedSegmentations {
         }
 
         Ok(ChunkEmbeddings(embeddings))
+    }
+
+    fn extract_chunk_embeddings(
+        &self,
+        audio: &[f32],
+        emb_model: &mut EmbeddingModel,
+        layout: &ChunkLayout,
+        embeddings: &mut Array3<f32>,
+    ) -> Result<(), PipelineError> {
+        for chunk_idx in 0..self.0.shape()[0] {
+            let chunk_audio = layout.chunk_audio(audio, chunk_idx);
+            let chunk_segmentations = self.0.slice(s![chunk_idx, .., ..]);
+            let clean_masks = super::clean_masks(&chunk_segmentations);
+            let chunk_embeddings =
+                emb_model.embed_chunk_speakers(chunk_audio, chunk_segmentations, &clean_masks)?;
+            embeddings
+                .slice_mut(s![chunk_idx, .., ..])
+                .assign(&chunk_embeddings);
+        }
+
+        Ok(())
     }
 
     fn extract_masked_embeddings(

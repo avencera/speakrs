@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use super::*;
 #[cfg(feature = "coreml")]
 use crate::inference::ExecutionMode;
-use crate::inference::embedding::SplitTailInput;
 
 // --- test helpers ---
 
@@ -421,10 +420,12 @@ fn fast_apple_split_primary_batch_matches_single_tail_path() {
     let batch_inputs: Vec<_> = fbanks
         .iter()
         .zip(weights.iter())
-        .map(|(fbank, weights)| SplitTailInput {
-            fbank,
-            weights: weights.as_slice(),
-        })
+        .map(
+            |(fbank, weights)| crate::inference::embedding::SplitTailInput {
+                fbank,
+                weights: weights.as_slice(),
+            },
+        )
         .collect();
     let batched = emb_model.embed_tail_batch_inputs(&batch_inputs).unwrap();
 
