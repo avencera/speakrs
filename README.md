@@ -1,12 +1,12 @@
 # speakrs
 
-Speaker diarization in Rust. Runs **79–230x realtime** on Apple Silicon, matching pyannote accuracy at the high end and trading some accuracy for speed at the low end. On Apple Silicon you can choose `CoreML` mode for max accuracy, or `CoreMlFast` for 2x speed improvement trading off some accuracy for some workloads.
+Speaker diarization in Rust. Runs **312–912x realtime** on Apple Silicon and **50–121x on CUDA**, matching pyannote accuracy. On Apple Silicon you can choose `CoreML` mode for max accuracy, or `CoreMlFast` for more speed trading off some accuracy for some workloads.
 
 `speakrs` implements the full pyannote `community-1` pipeline in Rust: segmentation, powerset decode, aggregation, binarization, embedding, PLDA, and VBx clustering, plus temporal smoothing during reconstruction. There is no Python dependency. Inference runs on ONNX Runtime or native CoreML, and all post-processing stays in Rust.
 
 > **Work in progress.** The API, benchmarks, and documentation are still changing. Expect breaking changes.
 
-On the full VoxConverse dev set (216 files), speakrs CoreML achieves **7.0% DER vs pyannote's 7.2%**, slightly better accuracy at 4x the speed on Apple Silicon. On the test set (232 files) both match at 11.1% DER. speakrs CoreML Fast is the fastest implementation tested across all datasets, beating FluidAudio on both speed and accuracy. See [benchmarks/](benchmarks/) for full results.
+On VoxConverse dev (216 files), speakrs CoreML achieves **7.1% DER at 529x realtime** vs pyannote's 7.2% at 24x. On the test set (232 files) speakrs matches pyannote at 11.1% DER while running 27x faster. On CUDA, speakrs matches or beats pyannote DER on all datasets at 2–3x the speed. See [benchmarks/](benchmarks/) for full results across 8 datasets.
 
 ## Table of Contents
 
@@ -54,10 +54,10 @@ Requires the `coreml` Cargo feature. Uses Apple's CoreML framework for GPU/ANE-a
 
 | Mode          | Backend       | Step | Precision | Use case                     |
 | ------------- | ------------- | ---- | --------- | ---------------------------- |
-| `coreml`      | Native CoreML | 1s   | FP32      | Best accuracy (94x realtime) |
-| `coreml-fast` | Native CoreML | 2s   | FP32      | Best speed (178x realtime)   |
+| `coreml`      | Native CoreML | 1s   | FP32      | Best accuracy (529x realtime) |
+| `coreml-fast` | Native CoreML | 2s   | FP32      | Best speed (912x realtime)    |
 
-`coreml-fast` uses a wider step (2s instead of 1s) to get about 2x more speed. That follows the same throughput-first tradeoff [FluidAudio](https://github.com/FluidInference/FluidAudio) uses on Apple hardware. It matches `coreml` on most clips, but on some inputs the coarser step loses temporal resolution at speaker boundaries.
+`coreml-fast` uses a wider step (2s instead of 1s) to get about 1.5x more speed. That follows the same throughput-first tradeoff [SpeakerKit](https://github.com/FluidInference/SpeakerKit) uses on Apple hardware. It matches `coreml` on most clips, but on some inputs the coarser step loses temporal resolution at speaker boundaries.
 
 ### Benchmarks
 
@@ -65,18 +65,18 @@ All benchmarks on Apple M4 Pro, macOS 26.3, evaluated on VoxConverse dev (216 fi
 
 | Mode | DER | Time | RTFx |
 |------|-----|------|------|
-| `coreml` | **7.0%** | 779s | 94x |
-| `coreml-fast` | 7.8% | 410s | **178x** |
+| `coreml` | **7.1%** | 138s | 529x |
+| `coreml-fast` | 7.4% | 169s | 434x |
 | pyannote community-1 (MPS) | 7.2% | 2999s | 24x |
-| FluidAudio | 22.3% | 496s | 147x |
+| SpeakerKit | 7.8% | 234s | 312x |
 
-On VoxConverse test (232 files, 2612.2 min), both `coreml` and pyannote score 11.1% DER, with `coreml` at 97x realtime vs pyannote's 23x. FluidAudio scores 32.6% DER on the test set.
+On VoxConverse test (232 files, 2612.2 min), `coreml` matches pyannote at 11.1% DER while running at 631x realtime vs pyannote's 23x.
 
 CoreML may differ slightly from CPU due to GPU floating-point non-determinism. See [benchmarks/](benchmarks/) for full results across multiple datasets.
 
 ### Choosing a mode
 
-The accuracy gap between `coreml` and `coreml-fast` depends on the type of audio. On meeting recordings with orderly turn-taking (AMI), CoreML Fast matches CoreML within 0.2% DER. The 2x speed boost comes at essentially no accuracy cost. On broadcast content with frequent speaker changes (VoxConverse), the gap widens to ~0.8%. On earnings calls with many Q&A participants, expect ~1% difference.
+The accuracy gap between `coreml` and `coreml-fast` depends on the type of audio. On meeting recordings with orderly turn-taking (AMI), CoreML Fast matches CoreML within 0.4% DER. On broadcast content with frequent speaker changes (VoxConverse), the gap is ~0.3%. On some datasets like Earnings-21, CoreML Fast actually beats CoreML on DER.
 
 `coreml-fast` never misses speech or hallucinates extra speech. The only extra errors are misattributing speech to the wrong speaker near turn boundaries, because the 2s step gives fewer data points to pinpoint where one speaker stops and another starts.
 
@@ -90,12 +90,21 @@ Works on any platform with ONNX Runtime. No special Cargo features needed for CP
 
 | Mode   | Backend  | Step | Precision | Use case   |
 | ------ | -------- | ---- | --------- | ---------- |
-| `cpu`  | ORT CPU  | 1s   | FP32      | Reference  |
-| `cuda` | ORT CUDA | 1s   | FP32      | NVIDIA GPU |
+| `cpu`       | ORT CPU  | 1s   | FP32      | Reference        |
+| `cuda`      | ORT CUDA | 1s   | FP32      | Best accuracy    |
+| `cuda-fast` | ORT CUDA | 2s   | FP32      | Best speed       |
 
 ### Benchmarks
 
-Coming soon.
+NVIDIA RTX 4090, AMD EPYC 7B13, evaluated on VoxConverse dev (216 files, 1217.8 min, collar=0ms):
+
+| Mode | DER | Time | RTFx |
+|------|-----|------|------|
+| `cuda` | **7.0%** | 1236s | 59x |
+| `cuda-fast` | 7.4% | 604s | **121x** |
+| pyannote community-1 (CUDA) | 7.2% | 2312s | 32x |
+
+On VoxConverse test (232 files, 2612.2 min, L40S), `cuda` matches pyannote at 11.1% DER at 50x realtime vs pyannote's 18x.
 
 ## Usage
 
@@ -205,4 +214,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, model downloads, fixture
 
 - [pyannote-audio](https://github.com/pyannote/pyannote-audio) - Python reference implementation
 - [pyannote community-1](https://huggingface.co/pyannote/speaker-diarization-community-1) - VBx + PLDA pipeline
-- [FluidAudio](https://github.com/FluidInference/FluidAudio) - Swift reference (same VBx architecture)
+- [SpeakerKit](https://github.com/FluidInference/SpeakerKit) - Swift reference (same VBx architecture)
