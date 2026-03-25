@@ -15,10 +15,13 @@ use objc2_core_ml::MLComputeUnits;
 #[cfg(feature = "coreml")]
 use tracing::{info, trace};
 
+/// Errors that can occur during segmentation inference
 #[derive(Debug, thiserror::Error)]
 pub enum SegmentationError {
+    /// ONNX Runtime error
     #[error(transparent)]
     Ort(#[from] ort::Error),
+    /// Streaming channel was closed before all windows were sent
     #[error("receiver disconnected")]
     Disconnected(#[from] crossbeam_channel::SendError<Array2<f32>>),
 }
@@ -28,6 +31,7 @@ const PRIMARY_BATCH_SIZE: usize = 32;
 #[cfg(feature = "coreml")]
 const LARGE_BATCH_SIZE: usize = 64;
 
+/// Sliding-window segmentation model (pyannote segmentation-3.0)
 pub struct SegmentationModel {
     model_path: String,
     mode: ExecutionMode,
@@ -174,22 +178,27 @@ impl SegmentationModel {
             .unwrap_or(1)
     }
 
+    /// Audio sample rate in Hz (16000)
     pub fn sample_rate(&self) -> usize {
         self.sample_rate
     }
 
+    /// Number of audio samples per sliding window
     pub fn window_samples(&self) -> usize {
         self.window_samples
     }
 
+    /// Number of audio samples the window advances each step
     pub fn step_samples(&self) -> usize {
         self.step_samples
     }
 
+    /// Step size in seconds
     pub fn step_seconds(&self) -> f64 {
         self.step_samples as f64 / self.sample_rate as f64
     }
 
+    /// Execution mode this model was loaded with
     pub fn mode(&self) -> ExecutionMode {
         self.mode
     }
@@ -564,6 +573,7 @@ impl SegmentationModel {
         Ok(total_windows)
     }
 
+    /// Reload all ORT and native CoreML sessions from disk
     pub fn reset_session(&mut self) -> Result<(), ort::Error> {
         self.session = Self::build_session(&self.model_path, self.mode)?;
         self.primary_batched_session = batched_model_path(&self.model_path, PRIMARY_BATCH_SIZE)
@@ -685,7 +695,7 @@ impl SegmentationModel {
 
     /// Run segmentation on audio, returning raw logits per window
     ///
-    /// Returns Vec<Array2<f32>> where each element is [frames, 7] logits
+    /// Returns `Vec<Array2<f32>>` where each element is \[frames, 7\] logits
     pub fn run(&mut self, audio: &[f32]) -> Result<Vec<Array2<f32>>, ort::Error> {
         let mut offsets = Vec::new();
         let mut offset = 0;

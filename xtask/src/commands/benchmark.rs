@@ -2198,9 +2198,7 @@ pub fn run_speakrs_gpu(
     mode: &str,
     progress_cb: Option<&(dyn Fn(&ProgressUpdate) + Send + Sync)>,
 ) -> Result<BatchRunOutput> {
-    use speakrs::inference::ExecutionMode;
-    use speakrs::inference::embedding::EmbeddingModel;
-    use speakrs::inference::segmentation::SegmentationModel;
+    use speakrs::inference::{EmbeddingModel, ExecutionMode, SegmentationModel};
     use speakrs::pipeline::{
         CUDA_SEGMENTATION_STEP_SECONDS, DiarizationPipeline, FAST_SEGMENTATION_STEP_SECONDS,
     };

@@ -3,8 +3,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
 
-use speakrs::inference::embedding::EmbeddingModel;
-use speakrs::inference::segmentation::SegmentationModel;
+use speakrs::inference::{EmbeddingModel, SegmentationModel};
 use speakrs::pipeline::DiarizationPipeline;
 
 pub type ExampleResult<T> = Result<T, Box<dyn Error + Send + Sync>>;

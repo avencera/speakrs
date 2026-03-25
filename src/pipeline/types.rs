@@ -10,15 +10,20 @@ use crate::segment::to_segments;
 
 use super::config::*;
 
+/// Errors that can occur during the diarization pipeline
 #[derive(Debug, thiserror::Error)]
 pub enum PipelineError {
+    /// ONNX Runtime error
     #[error("{0}")]
     Ort(String),
+    /// PLDA scoring/training error
     #[error("{0}")]
     Plda(#[from] crate::clustering::plda::PldaError),
+    /// Hugging Face Hub download error
     #[cfg(feature = "online")]
     #[error("{0}")]
     HfHub(#[from] hf_hub::api::sync::ApiError),
+    /// Catch-all for other pipeline errors
     #[error("{0}")]
     Other(String),
 }
@@ -50,6 +55,7 @@ pub(super) struct PendingSplitEmbedding {
     pub weights: Vec<f32>,
 }
 
+/// Decoded powerset segmentations per chunk, shape (chunks, frames, speakers)
 #[derive(Debug, Clone)]
 pub struct DecodedSegmentations(pub Array3<f32>);
 
@@ -61,6 +67,7 @@ impl Deref for DecodedSegmentations {
     }
 }
 
+/// Speaker embeddings per chunk, shape (chunks, speakers, embedding_dim)
 #[derive(Debug, Clone)]
 pub struct ChunkEmbeddings(pub Array3<f32>);
 
@@ -72,6 +79,7 @@ impl Deref for ChunkEmbeddings {
     }
 }
 
+/// Number of active speakers per chunk
 #[derive(Debug, Clone)]
 pub struct SpeakerCountTrack(pub Vec<usize>);
 
@@ -83,6 +91,9 @@ impl Deref for SpeakerCountTrack {
     }
 }
 
+/// Cluster assignments per chunk-speaker pair, shape (chunks, speakers)
+///
+/// Values are cluster IDs (-1 for unassigned)
 #[derive(Debug, Clone)]
 pub struct ChunkSpeakerClusters(pub Array2<i32>);
 
@@ -94,6 +105,7 @@ impl Deref for ChunkSpeakerClusters {
     }
 }
 
+/// Frame-level binary speaker activations, shape (frames, speakers)
 #[derive(Debug, Clone)]
 pub struct DiscreteDiarization(pub Array2<f32>);
 
@@ -106,6 +118,7 @@ impl Deref for DiscreteDiarization {
 }
 
 impl DiscreteDiarization {
+    /// Convert frame activations to time-stamped speaker segments
     pub fn to_segments(
         &self,
         frame_step_seconds: f64,
@@ -196,26 +209,37 @@ impl ChunkLayout {
 
 /// Input for batch diarization
 pub struct BatchInput<'a> {
+    /// Mono 16kHz audio samples
     pub audio: &'a [f32],
+    /// Identifier used in RTTM output lines
     pub file_id: &'a str,
 }
 
+/// Intermediate results from segmentation and embedding inference
 pub struct InferenceArtifacts {
     pub(super) layout: ChunkLayout,
     pub(super) segmentations: DecodedSegmentations,
     pub(super) embeddings: ChunkEmbeddings,
 }
 
+/// Complete output from a diarization run
 pub struct DiarizationResult {
+    /// Decoded segmentations from the powerset model
     pub segmentations: DecodedSegmentations,
+    /// Speaker embeddings extracted from each chunk
     pub embeddings: ChunkEmbeddings,
+    /// Number of active speakers per chunk
     pub speaker_count: SpeakerCountTrack,
+    /// Cluster assignment for each chunk-speaker pair
     pub hard_clusters: ChunkSpeakerClusters,
+    /// Frame-level binary speaker activations after reconstruction
     pub discrete_diarization: DiscreteDiarization,
+    /// RTTM-formatted diarization output
     pub rttm: String,
 }
 
 impl DiarizationResult {
+    /// Return RTTM output with the given file ID substituted in
     pub fn rttm(&self, file_id: &str) -> String {
         if file_id == "file1" {
             return self.rttm.clone();

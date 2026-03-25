@@ -1,13 +1,18 @@
 use ndarray::Array2;
 
+/// A single speaker turn with start/end times in seconds
 #[derive(Debug, Clone, PartialEq)]
 pub struct Segment {
+    /// Start time in seconds
     pub start: f64,
+    /// End time in seconds
     pub end: f64,
+    /// Speaker label (e.g. "SPEAKER_00")
     pub speaker: String,
 }
 
 impl Segment {
+    /// Create a new segment
     pub fn new(start: f64, end: f64, speaker: impl Into<String>) -> Self {
         Self {
             start,
@@ -16,6 +21,7 @@ impl Segment {
         }
     }
 
+    /// Duration in seconds
     pub fn duration(&self) -> f64 {
         self.end - self.start
     }

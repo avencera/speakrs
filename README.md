@@ -1,12 +1,10 @@
 # speakrs
 
-Speaker diarization in Rust. Runs **312–912x realtime** on Apple Silicon and **50–121x on CUDA**, matching pyannote accuracy. On Apple Silicon you can choose `CoreML` mode for max accuracy, or `CoreMlFast` for more speed trading off some accuracy for some workloads.
+Speaker diarization in Rust. Runs **312-912x realtime** on Apple Silicon (**20-50x faster than pyannote**) and **50-121x on CUDA** (**2-7x faster than pyannote**), matching pyannote accuracy.
 
 `speakrs` implements the full pyannote `community-1` pipeline in Rust: segmentation, powerset decode, aggregation, binarization, embedding, PLDA, and VBx clustering, plus temporal smoothing during reconstruction. There is no Python dependency. Inference runs on ONNX Runtime or native CoreML, and all post-processing stays in Rust.
 
-> **Work in progress.** The API, benchmarks, and documentation are still changing. Expect breaking changes.
-
-On VoxConverse dev (216 files), speakrs CoreML achieves **7.1% DER at 529x realtime** vs pyannote's 7.2% at 24x. On the test set (232 files) speakrs matches pyannote at 11.1% DER while running 27x faster. On CUDA, speakrs matches or beats pyannote DER on all datasets at 2–3x the speed. See [benchmarks/](benchmarks/) for full results across 8 datasets.
+On VoxConverse dev (216 files), speakrs CoreML achieves **7.1% DER at 529x realtime** vs pyannote's 7.2% at 24x. On the test set (232 files) speakrs matches pyannote at 11.1% DER while running 27x faster. On CUDA, speakrs matches or beats pyannote DER on all datasets at 2-7x the speed. See [benchmarks/](benchmarks/) for full results across 8 datasets.
 
 ## Table of Contents
 
@@ -57,7 +55,7 @@ Requires the `coreml` Cargo feature. Uses Apple's CoreML framework for GPU/ANE-a
 | `coreml`      | Native CoreML | 1s   | FP32      | Best accuracy (529x realtime) |
 | `coreml-fast` | Native CoreML | 2s   | FP32      | Best speed (912x realtime)    |
 
-`coreml-fast` uses a wider step (2s instead of 1s) to get about 1.5x more speed. That follows the same throughput-first tradeoff [SpeakerKit](https://github.com/FluidInference/SpeakerKit) uses on Apple hardware. It matches `coreml` on most clips, but on some inputs the coarser step loses temporal resolution at speaker boundaries.
+`coreml-fast` uses a wider step (2s instead of 1s) to get about 1.5x more speed. That follows the same throughput-first tradeoff [SpeakerKit](https://github.com/argmaxinc/WhisperKit) uses on Apple hardware. It matches `coreml` on most clips, but on some inputs the coarser step loses temporal resolution at speaker boundaries.
 
 ### Benchmarks
 
@@ -72,7 +70,7 @@ All benchmarks on Apple M4 Pro, macOS 26.3, evaluated on VoxConverse dev (216 fi
 
 On VoxConverse test (232 files, 2612.2 min), `coreml` matches pyannote at 11.1% DER while running at 631x realtime vs pyannote's 23x.
 
-CoreML may differ slightly from CPU due to GPU floating-point non-determinism. See [benchmarks/](benchmarks/) for full results across multiple datasets.
+CoreML results may differ slightly from ONNX CPU — the two runtimes apply different graph optimizations (operator fusion, reduction order) that change floating-point rounding, even on CPU in FP32. Apple's own measurements show ~96 dB SNR between CoreML FP32 and source frameworks ([typed execution docs](https://apple.github.io/coremltools/docs-guides/source/typed-execution.html)). See [benchmarks/](benchmarks/) for full results across multiple datasets.
 
 ### Choosing a mode
 
@@ -108,14 +106,25 @@ On VoxConverse test (232 files, 2612.2 min, L40S), `cuda` matches pyannote at 11
 
 ## Usage
 
-### Library
+Add to your `Cargo.toml`:
+
+```toml
+# Apple Silicon (CoreML)
+speakrs = { version = "0.1", features = ["coreml"] }
+
+# NVIDIA GPU
+speakrs = { version = "0.1", features = ["cuda"] }
+
+# CPU only (default)
+speakrs = "0.1"
+```
+
+### Quick start
 
 ```rust
-use speakrs::inference::ExecutionMode;
-use speakrs::pipeline::OwnedDiarizationPipeline;
+use speakrs::{ExecutionMode, OwnedDiarizationPipeline};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // ExecutionMode::CoreMl, CoreMlFast, Cpu, or Cuda
     let mut pipeline = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::CoreMl)?;
 
     let audio: Vec<f32> = load_your_mono_16khz_audio_here();
@@ -124,10 +133,58 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     print!("{}", result.rttm("my-audio"));
     Ok(())
 }
+# fn load_your_mono_16khz_audio_here() -> Vec<f32> { unimplemented!() }
+```
 
-fn load_your_mono_16khz_audio_here() -> Vec<f32> {
-    unimplemented!()
+### Speaker turns
+
+```rust
+use speakrs::{ExecutionMode, OwnedDiarizationPipeline};
+use speakrs::pipeline::{FRAME_STEP_SECONDS, FRAME_DURATION_SECONDS};
+
+let mut pipeline = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::CoreMl)?;
+let result = pipeline.run(&audio)?;
+
+for segment in result.discrete_diarization.to_segments(FRAME_STEP_SECONDS, FRAME_DURATION_SECONDS) {
+    println!("{:.3} - {:.3}  {}", segment.start, segment.end, segment.speaker);
 }
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+### Background queue
+
+For processing many files, `QueuedDiarizationPipeline` runs a background worker that auto-batches requests for cross-file optimizations:
+
+```rust
+use speakrs::{ExecutionMode, OwnedDiarizationPipeline, QueuedDiarizationRequest};
+
+let pipeline = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::CoreMl)?;
+let queue = pipeline.into_queued()?;
+
+queue.push(QueuedDiarizationRequest::new("file1", audio1))?;
+queue.push(QueuedDiarizationRequest::new("file2", audio2))?;
+
+for result in queue {
+    let diarization = result.result?;
+    print!("{}", diarization.rttm(&result.file_id));
+}
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+### Local models
+
+For offline or airgapped usage, load models from a local directory:
+
+```rust
+use std::path::Path;
+use speakrs::{ExecutionMode, OwnedDiarizationPipeline};
+
+let mut pipeline = OwnedDiarizationPipeline::from_dir(
+    Path::new("/path/to/models"),
+    ExecutionMode::Cpu,
+)?;
+let result = pipeline.run(&audio)?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 ```
 
 ### CLI
@@ -144,42 +201,30 @@ cargo run --release -p xtask --bin diarize -- --mode cpu audio.wav
 
 # CUDA (NVIDIA GPU)
 cargo run --release -p xtask --features cuda,load-dynamic --bin diarize -- --mode cuda audio.wav
-
-# Compare with pyannote
-just compare audio.wav
 ```
 
-The result also gives you access to intermediate data:
-
-- `result.segmentations`
-- `result.embeddings`
-- `result.speaker_count`
-- `result.hard_clusters`
-- `result.discrete_diarization`
-
-See [examples/README.md](examples/README.md) for runnable end-to-end examples, including speaker turn iteration, airtime reporting, and transcript speaker assignment.
+See [examples/README.md](examples/README.md) for more runnable examples, including airtime reporting and transcript speaker assignment.
 
 ## Models
 
 Models download automatically on first use from [avencera/speakrs-models](https://huggingface.co/avencera/speakrs-models) on HuggingFace. If you want a custom model directory, set `SPEAKRS_MODELS_DIR`.
 
-For development, `just download-models` exports the ONNX models and converts them to CoreML. That command requires Python through `uv`.
+For development, `just export-models` exports the ONNX models and converts them to CoreML. That command requires Python through `uv`.
 
-## Modules
+## Public API
 
-| Module                    | Description                                                   |
-| ------------------------- | ------------------------------------------------------------- |
-| `inference::segmentation` | Sliding window segmentation (ONNX or CoreML)                  |
-| `inference::embedding`    | WeSpeaker embedding with fbank feature extraction             |
-| `inference::coreml`       | Native CoreML wrapper with cached allocation                  |
-| `powerset`                | 7-class → 3-speaker powerset decoding                         |
-| `aggregate`               | Hamming-windowed overlap-add with warmup trimming             |
-| `binarize`                | Hysteresis binarization + min-duration + padding              |
-| `clustering::plda`        | PLDA whitening/dimensionality reduction (256→128)             |
-| `clustering::vbx`         | VBx Bayesian HMM EM clustering                                |
-| `reconstruct`             | Cluster-to-frame mapping, top-K selection, temporal smoothing |
-| `segment`                 | Time segments, merging, RTTM formatting                       |
-| `utils`                   | Cosine similarity, L2 norm, logsumexp, centroids              |
+| Module / Type                  | Description                                             |
+| ------------------------------ | ------------------------------------------------------- |
+| `OwnedDiarizationPipeline`     | Main entry point, owns models and runs diarization      |
+| `QueuedDiarizationPipeline`    | Background worker with push/recv queue interface        |
+| `DiarizationPipeline`          | Borrowed pipeline for manual model lifetime control     |
+| `DiarizationResult`            | All outputs: segments, embeddings, clusters, RTTM       |
+| `ExecutionMode`                | CPU, CoreML, CoreMLFast, CUDA, CUDAFast                 |
+| `PipelineConfig` / `RuntimeConfig` | Tunable pipeline and hardware parameters           |
+| `Segment`                      | A single speaker turn with start/end times              |
+| `ModelManager`                 | Automatic model download from HuggingFace               |
+| `inference`                    | Segmentation and embedding model wrappers               |
+| `segment`                      | Segment conversion, merging, RTTM formatting            |
 
 ## Why Not pyannote-rs?
 
@@ -214,4 +259,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, model downloads, fixture
 
 - [pyannote-audio](https://github.com/pyannote/pyannote-audio) - Python reference implementation
 - [pyannote community-1](https://huggingface.co/pyannote/speaker-diarization-community-1) - VBx + PLDA pipeline
-- [SpeakerKit](https://github.com/FluidInference/SpeakerKit) - Swift reference (same VBx architecture)
+- [SpeakerKit](https://github.com/argmaxinc/WhisperKit) - Swift reference (same VBx architecture)

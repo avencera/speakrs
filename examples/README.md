@@ -15,7 +15,7 @@ All examples expect:
 Populate `fixtures/models` with:
 
 ```bash
-just download-models
+just export-models
 ```
 
 ## Run diarization and print RTTM

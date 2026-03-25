@@ -12,7 +12,7 @@ Download ONNX models and PLDA parameters (requires a [HuggingFace token](https:/
 # accept terms at:
 #   https://huggingface.co/pyannote/segmentation-3.0
 #   https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM
-HF_TOKEN=your_token just download-models
+HF_TOKEN=your_token just export-models
 ```
 
 Models are saved to `fixtures/models/` (gitignored).

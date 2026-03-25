@@ -2,15 +2,21 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::segment::Segment;
 
+/// Diarization error rate (DER) breakdown
 #[derive(Debug, Clone)]
 pub struct DerResult {
+    /// Total missed speech duration in seconds
     pub missed: f64,
+    /// Total false alarm duration in seconds
     pub false_alarm: f64,
+    /// Total speaker confusion duration in seconds
     pub confusion: f64,
+    /// Total reference speech duration in seconds
     pub total: f64,
 }
 
 impl DerResult {
+    /// Compute the overall DER as (missed + false_alarm + confusion) / total
     pub fn der(&self) -> f64 {
         if self.total == 0.0 {
             return 0.0;

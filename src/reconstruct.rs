@@ -167,6 +167,7 @@ impl<'a> Reconstructor<'a> {
     }
 }
 
+/// Zero out all but the highest-scoring speaker in each frame, making activations exclusive
 pub fn make_exclusive(activations: &mut Array2<f32>) {
     for mut row in activations.rows_mut() {
         let max_val = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);

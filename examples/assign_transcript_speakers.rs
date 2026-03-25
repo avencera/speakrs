@@ -3,8 +3,8 @@ mod support;
 use std::fs;
 use std::path::Path;
 
+use speakrs::make_exclusive;
 use speakrs::pipeline::{DiarizationPipeline, FRAME_DURATION_SECONDS, FRAME_STEP_SECONDS};
-use speakrs::reconstruct::make_exclusive;
 use speakrs::segment::{Segment, to_segments};
 
 use support::{ExampleResult, load_models, load_wav_samples};

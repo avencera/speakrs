@@ -3,10 +3,9 @@ use std::process::Command;
 
 use color_eyre::eyre::{Result, bail, ensure};
 use ndarray::{Array2, Array3, ArrayView2, s};
-use speakrs::inference::embedding::EmbeddingModel;
-use speakrs::inference::segmentation::SegmentationModel;
+use speakrs::PowersetMapping;
+use speakrs::inference::{EmbeddingModel, SegmentationModel};
 use speakrs::pipeline::SEGMENTATION_STEP_SECONDS;
-use speakrs::powerset::PowersetMapping;
 
 use crate::wav;
 

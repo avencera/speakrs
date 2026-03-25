@@ -36,16 +36,6 @@ pub fn cosine_similarity(lhs: &ArrayView1<f32>, rhs: &ArrayView1<f32>) -> f32 {
     lhs_norm.dot(&rhs_norm)
 }
 
-pub fn logsumexp(values: &ArrayView1<f32>) -> f32 {
-    let max = values.fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
-    if max.is_infinite() {
-        return max;
-    }
-
-    let sum_exp = values.mapv(|x| (x - max).exp()).sum();
-    max + sum_exp.ln()
-}
-
 pub fn logsumexp_f64(values: &ArrayView1<f64>) -> f64 {
     let max = values.fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
     if max.is_infinite() {
@@ -98,24 +88,5 @@ mod tests {
         let v = array![0.0, 0.0, 0.0];
         let normed = l2_normalize(&v.view());
         assert_eq!(normed, array![0.0, 0.0, 0.0]);
-    }
-
-    #[test]
-    fn logsumexp_matches_naive() {
-        let a = array![1.0, 2.0, 3.0];
-        let naive = a.mapv(|x: f32| x.exp()).sum().ln();
-        let stable = logsumexp(&a.view());
-        assert_abs_diff_eq!(stable, naive, epsilon = 1e-5);
-    }
-
-    #[test]
-    fn logsumexp_large_values_stability() {
-        let a = array![1000.0, 1001.0, 1002.0];
-        let result = logsumexp(&a.view());
-        assert!(result.is_finite());
-
-        let shifted = array![0.0, 1.0, 2.0];
-        let expected = logsumexp(&shifted.view()) + 1000.0;
-        assert_abs_diff_eq!(result, expected, epsilon = 1e-3);
     }
 }

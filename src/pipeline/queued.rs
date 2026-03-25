@@ -26,6 +26,7 @@ pub struct QueuedDiarizationRequest {
 }
 
 impl QueuedDiarizationRequest {
+    /// Create a request with a file identifier and 16 kHz mono f32 audio samples
     pub fn new(file_id: impl Into<String>, audio: Vec<f32>) -> Self {
         Self {
             file_id: file_id.into(),
@@ -38,15 +39,21 @@ impl QueuedDiarizationRequest {
 ///
 /// Per-job failures are surfaced here without stopping the worker
 pub struct QueuedDiarizationResult {
+    /// The job identifier returned by [`QueuedDiarizationPipeline::push`]
     pub job_id: QueuedDiarizationJobId,
+    /// The file identifier from the original request
     pub file_id: String,
+    /// Diarization result, or an error if this file failed
     pub result: Result<DiarizationResult, PipelineError>,
 }
 
+/// Errors from the queued diarization pipeline
 #[derive(Debug, thiserror::Error)]
 pub enum QueueError {
+    /// The background worker has shut down or was never started
     #[error("queue worker has shut down")]
     WorkerGone,
+    /// The background worker thread panicked
     #[error("worker thread panicked: {0}")]
     WorkerPanicked(String),
 }
@@ -69,12 +76,13 @@ struct WorkerRequest {
 /// let pipeline = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::Cpu)?;
 /// let queue = pipeline.into_queued()?;
 ///
-/// queue.push(QueuedDiarizationRequest::new("file1", audio_samples))?;
+/// let audio: Vec<f32> = vec![]; // 16 kHz mono samples
+/// queue.push(QueuedDiarizationRequest::new("file1", audio))?;
 /// let result = queue.recv()?;
-/// println!("{}", result.result.unwrap().rttm);
+/// println!("{}", result.result.unwrap().rttm("file1"));
 ///
 /// queue.finish()?;
-/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 /// ```
 pub struct QueuedDiarizationPipeline {
     request_tx: Option<Sender<WorkerRequest>>,
@@ -172,6 +180,48 @@ impl QueuedDiarizationPipeline {
         }
 
         Ok(())
+    }
+}
+
+/// Iterator that drains results from a [`QueuedDiarizationPipeline`]
+///
+/// Created by calling `.into_iter()` on a `QueuedDiarizationPipeline`.
+/// Closes the request channel on creation so no more files can be pushed,
+/// then yields results until the worker has finished processing all queued jobs.
+pub struct QueuedDiarizationIter {
+    result_rx: Receiver<QueuedDiarizationResult>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl Iterator for QueuedDiarizationIter {
+    type Item = QueuedDiarizationResult;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.result_rx.recv() {
+            Ok(result) => Some(result),
+            Err(_) => {
+                // channel disconnected, worker is done — join to clean up
+                if let Some(handle) = self.worker.take() {
+                    let _ = handle.join();
+                }
+                None
+            }
+        }
+    }
+}
+
+impl IntoIterator for QueuedDiarizationPipeline {
+    type Item = QueuedDiarizationResult;
+    type IntoIter = QueuedDiarizationIter;
+
+    fn into_iter(mut self) -> Self::IntoIter {
+        // close request channel so worker finishes after draining
+        self.request_tx.take();
+
+        QueuedDiarizationIter {
+            result_rx: self.result_rx.clone(),
+            worker: self.worker.take(),
+        }
     }
 }
 

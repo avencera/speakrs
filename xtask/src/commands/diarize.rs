@@ -7,8 +7,7 @@ use std::time::Instant;
 use color_eyre::eyre::{Result, bail, ensure};
 use speakrs::inference::CoreMlComputeUnits;
 use speakrs::inference::ExecutionMode;
-use speakrs::inference::embedding::EmbeddingModel;
-use speakrs::inference::segmentation::SegmentationModel;
+use speakrs::inference::{EmbeddingModel, SegmentationModel};
 use speakrs::pipeline::{
     COREML_SEGMENTATION_STEP_SECONDS, CUDA_SEGMENTATION_STEP_SECONDS, DiarizationPipeline,
     FAST_SEGMENTATION_STEP_SECONDS, RuntimeConfig, SEGMENTATION_STEP_SECONDS,

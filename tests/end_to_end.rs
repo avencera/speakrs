@@ -3,14 +3,13 @@ use std::path::{Path, PathBuf};
 
 use ndarray::{Array2, Array3};
 use ndarray_npy::ReadNpyExt;
-use speakrs::inference::embedding::EmbeddingModel;
-use speakrs::inference::segmentation::SegmentationModel;
+use speakrs::inference::{EmbeddingModel, SegmentationModel};
 use speakrs::pipeline::{
     DiarizationPipeline, FRAME_STEP_SECONDS, OwnedDiarizationPipeline, SEGMENTATION_STEP_SECONDS,
 };
 
 use speakrs::inference::ExecutionMode;
-#[cfg(feature = "coreml")]
+#[cfg(all(feature = "coreml", feature = "_metrics"))]
 use speakrs::metrics::{compute_der, parse_rttm};
 #[cfg(feature = "coreml")]
 use speakrs::pipeline::FAST_SEGMENTATION_STEP_SECONDS;
@@ -109,7 +108,7 @@ fn pipeline_runs_on_main_fixture_audio() {
     assert!(result.rttm.contains("SPEAKER fixture 1"));
 }
 
-#[cfg(feature = "coreml")]
+#[cfg(all(feature = "coreml", feature = "_metrics"))]
 const VOXCONVERSE_TEST_FILES: &[&str] = &[
     "hqyok", "tfvyr", "qrzjk", "qpylu", "szsyz", "gwtwd", "fxgvy", "whmpa", "rtvuw", "usbgm",
     "bkwns", "abjxc", "syiwe", "qppll", "cobal", "oenox", "bwzyf", "jiqvr", "jyirt", "hiyis",
@@ -117,7 +116,7 @@ const VOXCONVERSE_TEST_FILES: &[&str] = &[
     "jsmbi", "qydmg", "akthc", "exymw", "kbkon", "wmori", "ysgbf", "atgpi", "qjgpl",
 ];
 
-#[cfg(feature = "coreml")]
+#[cfg(all(feature = "coreml", feature = "_metrics"))]
 fn voxconverse_der(mode: ExecutionMode, step: f64) -> (Vec<(String, f64)>, Duration) {
     let models_dir = fixture_path("models");
     let mut seg_model = SegmentationModel::with_mode(
@@ -169,7 +168,7 @@ fn voxconverse_der(mode: ExecutionMode, step: f64) -> (Vec<(String, f64)>, Durat
 }
 
 #[test]
-#[cfg(feature = "coreml")]
+#[cfg(all(feature = "coreml", feature = "_metrics"))]
 fn der_coreml_fp32() {
     let (results, elapsed) = voxconverse_der(ExecutionMode::CoreMl, SEGMENTATION_STEP_SECONDS);
     let avg_der: f64 = results.iter().map(|(_, d)| d).sum::<f64>() / results.len() as f64;
@@ -194,7 +193,7 @@ fn der_coreml_fp32() {
 }
 
 #[test]
-#[cfg(feature = "coreml")]
+#[cfg(all(feature = "coreml", feature = "_metrics"))]
 fn der_coreml_fast() {
     let (results, elapsed) =
         voxconverse_der(ExecutionMode::CoreMlFast, FAST_SEGMENTATION_STEP_SECONDS);

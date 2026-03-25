@@ -5,21 +5,32 @@ use crate::clustering::vbx::VbxConfig;
 use crate::inference::CoreMlComputeUnits;
 use crate::inference::ExecutionMode;
 
+/// How to map cluster assignments back to per-frame speaker activations
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ReconstructMethod {
     /// Standard top-K selection (pyannote-compatible)
     Standard,
     /// Temporal smoothing — when scores are within epsilon, prefer previous frame's speaker
-    Smoothed { epsilon: f32 },
+    Smoothed {
+        /// Score difference below which the previous frame's speaker is preferred
+        epsilon: f32,
+    },
 }
 
+/// Tunable parameters for the diarization pipeline
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
+    /// Hysteresis binarization and min-duration filtering
     pub binarize: BinarizeConfig,
+    /// Agglomerative hierarchical clustering settings
     pub ahc: AhcConfig,
+    /// Variational Bayes HMM clustering settings
     pub vbx: VbxConfig,
+    /// Maximum gap in seconds between segments to merge into one
     pub merge_gap: f64,
+    /// Minimum speaker activity weight to keep a speaker in output
     pub speaker_keep_threshold: f64,
+    /// Strategy for mapping clusters back to frame activations
     pub reconstruct_method: ReconstructMethod,
 }
 
@@ -83,14 +94,20 @@ impl Default for RuntimeConfig {
     }
 }
 
+/// Sliding window length for segmentation model input, in seconds
 pub const SEGMENTATION_WINDOW_SECONDS: f64 = 10.0;
+/// Default sliding window step for segmentation, in seconds
 pub const SEGMENTATION_STEP_SECONDS: f64 = 1.0;
-// aligned to 8-frame ResNet stride: 96 fbank frames / 8 = 12 ResNet frames
-// closest aligned step below 1.0s, enables chunk embedding
+/// CoreML step aligned to 8-frame ResNet stride (96 fbank frames / 8 = 12 ResNet frames),
+/// closest aligned step below 1.0s that enables chunk embedding
 pub const COREML_SEGMENTATION_STEP_SECONDS: f64 = 0.96;
+/// CUDA segmentation step, in seconds
 pub const CUDA_SEGMENTATION_STEP_SECONDS: f64 = 1.0;
+/// Larger step for "fast" modes that trade DER accuracy for speed, in seconds
 pub const FAST_SEGMENTATION_STEP_SECONDS: f64 = 2.0;
+/// Duration of each output frame from the segmentation model, in seconds
 pub const FRAME_DURATION_SECONDS: f64 = 0.0619375;
+/// Hop between consecutive output frames from the segmentation model, in seconds
 pub const FRAME_STEP_SECONDS: f64 = 0.016875;
 
 /// Minimum speaker activity (sum of weights) to run embedding inference.
