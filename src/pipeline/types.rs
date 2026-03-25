@@ -234,19 +234,14 @@ pub struct DiarizationResult {
     pub hard_clusters: ChunkSpeakerClusters,
     /// Frame-level binary speaker activations after reconstruction
     pub discrete_diarization: DiscreteDiarization,
-    /// RTTM-formatted diarization output
-    pub rttm: String,
+    /// Merged speaker segments (time-stamped speaker turns)
+    pub segments: Vec<crate::segment::Segment>,
 }
 
 impl DiarizationResult {
-    /// Return RTTM output with the given file ID substituted in
+    /// Render RTTM output with the given file identifier
     pub fn rttm(&self, file_id: &str) -> String {
-        if file_id == "file1" {
-            return self.rttm.clone();
-        }
-
-        self.rttm
-            .replace("SPEAKER file1 1", &format!("SPEAKER {file_id} 1"))
+        crate::segment::to_rttm(&self.segments, file_id)
     }
 }
 

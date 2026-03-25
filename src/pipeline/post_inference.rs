@@ -4,7 +4,7 @@ use tracing::info;
 use crate::binarize::binarize;
 use crate::clustering::plda::PldaTransform;
 use crate::reconstruct::Reconstructor;
-use crate::segment::{merge_segments, to_rttm};
+use crate::segment::merge_segments;
 
 use super::config::*;
 use super::types::*;
@@ -12,7 +12,6 @@ use super::types::*;
 /// Run clustering and reconstruction on pre-computed inference artifacts
 pub fn post_inference(
     inference_artifacts: InferenceArtifacts,
-    file_id: &str,
     config: &PipelineConfig,
     plda: &PldaTransform,
 ) -> Result<DiarizationResult, PipelineError> {
@@ -34,7 +33,7 @@ pub fn post_inference(
             speaker_count,
             hard_clusters: ChunkSpeakerClusters(Array2::zeros((0, 0))),
             discrete_diarization: DiscreteDiarization(Array2::zeros((0, 0))),
-            rttm: String::new(),
+            segments: Vec::new(),
         });
     }
 
@@ -61,7 +60,6 @@ pub fn post_inference(
 
     let segments = discrete_diarization.to_segments(FRAME_STEP_SECONDS, FRAME_DURATION_SECONDS);
     let segments = merge_segments(&segments, config.merge_gap);
-    let rttm = to_rttm(&segments, file_id);
 
     info!(
         post_inference_ms = post_start.elapsed().as_millis(),
@@ -74,6 +72,6 @@ pub fn post_inference(
         speaker_count,
         hard_clusters,
         discrete_diarization,
-        rttm,
+        segments,
     })
 }

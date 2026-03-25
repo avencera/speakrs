@@ -122,16 +122,16 @@ impl ChunkPrep {
         self.max_active / self.num_speakers
     }
 
-    fn prep(
+    /// Compute fbank features for a chunk of decoded windows
+    fn compute_chunk_fbank(
         &self,
-        decoded: DecodedChunk,
+        global_start: usize,
+        num_windows: usize,
         audio: &[f32],
         scratch: &mut PrepScratch,
-    ) -> Result<PreparedChunk, PipelineError> {
-        let global_start = decoded.global_start;
-        let wins = decoded.decoded_chunk.len();
+    ) -> Result<Vec<f32>, PipelineError> {
         let chunk_audio_start = global_start * self.step_samples;
-        let chunk_audio_len = self.window_samples + (wins - 1) * self.step_samples;
+        let chunk_audio_len = self.window_samples + (num_windows - 1) * self.step_samples;
         let chunk_audio_end = (chunk_audio_start + chunk_audio_len).min(audio.len());
         let chunk_audio = &audio[chunk_audio_start..chunk_audio_end];
 
@@ -174,9 +174,20 @@ impl ChunkPrep {
             }
         }
 
+        Ok(fbank)
+    }
+
+    /// Extract per-speaker masks and active speaker indices from decoded segmentations
+    fn collect_chunk_masks(
+        &self,
+        global_start: usize,
+        decoded_chunk: &[Array2<f32>],
+        audio: &[f32],
+    ) -> (Vec<f32>, Vec<(usize, usize)>) {
         let mut masks = vec![0.0f32; self.largest_num_masks * 589];
         let mut active: Vec<(usize, usize)> = Vec::with_capacity(self.max_active);
-        for (local, dec) in decoded.decoded_chunk.iter().enumerate() {
+
+        for (local, dec) in decoded_chunk.iter().enumerate() {
             let global_idx = global_start + local;
             let win_audio =
                 chunk_audio_raw(audio, self.step_samples, self.window_samples, global_idx);
@@ -199,8 +210,26 @@ impl ChunkPrep {
             }
         }
 
+        (masks, active)
+    }
+
+    fn prep(
+        &self,
+        decoded: DecodedChunk,
+        audio: &[f32],
+        scratch: &mut PrepScratch,
+    ) -> Result<PreparedChunk, PipelineError> {
+        let fbank = self.compute_chunk_fbank(
+            decoded.global_start,
+            decoded.decoded_chunk.len(),
+            audio,
+            scratch,
+        )?;
+        let (masks, active) =
+            self.collect_chunk_masks(decoded.global_start, &decoded.decoded_chunk, audio);
+
         Ok(PreparedChunk {
-            global_start,
+            global_start: decoded.global_start,
             decoded_chunk: decoded.decoded_chunk,
             fbank,
             masks,
@@ -1405,8 +1434,7 @@ pub(super) fn try_batch_chunk_embedding(
                     if let Some(artifacts) =
                         fc.into_artifacts(step_seconds, step_samples, window_samples)
                     {
-                        let file = &files[tagged.file_idx];
-                        let result = post_inference(artifacts, file.file_id, config, plda)?;
+                        let result = post_inference(artifacts, config, plda)?;
                         results[tagged.file_idx] = Some(result);
                     }
                     files_complete += 1;
@@ -1441,7 +1469,7 @@ pub(super) fn try_batch_chunk_embedding(
                         speaker_count: SpeakerCountTrack(Vec::new()),
                         hard_clusters: ChunkSpeakerClusters(Array2::zeros((0, 0))),
                         discrete_diarization: DiscreteDiarization(Array2::zeros((0, 0))),
-                        rttm: String::new(),
+                        segments: Vec::new(),
                     })
                 })
                 .collect();

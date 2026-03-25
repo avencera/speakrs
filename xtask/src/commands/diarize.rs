@@ -228,7 +228,7 @@ pub fn run(
                     i + 1,
                     total,
                 );
-                print!("{}", result.rttm);
+                print!("{}", result.rttm(file_id));
             }
 
             eprintln!(
