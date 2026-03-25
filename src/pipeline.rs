@@ -18,6 +18,9 @@ pub use post_inference::post_inference;
 #[cfg(feature = "coreml")]
 mod chunk_embedding;
 
+mod queued;
+pub use queued::*;
+
 #[cfg(test)]
 mod tests;
 
@@ -204,6 +207,20 @@ impl OwnedDiarizationPipeline {
             powerset: PowersetMapping::new(3, 2),
             mode,
         })
+    }
+
+    /// Convert into a background-processing queue
+    pub fn into_queued(self) -> Result<QueuedDiarizationPipeline, QueueError> {
+        let config = PipelineConfig::for_mode(self.mode);
+        self.into_queued_with_config(config)
+    }
+
+    /// Convert into a background-processing queue with custom pipeline config
+    pub fn into_queued_with_config(
+        self,
+        config: PipelineConfig,
+    ) -> Result<QueuedDiarizationPipeline, QueueError> {
+        QueuedDiarizationPipeline::new(self, config)
     }
 }
 
