@@ -3,7 +3,10 @@ use std::fs;
 use std::path::PathBuf;
 
 use speakrs::inference::ExecutionMode;
-use speakrs::pipeline::{OwnedDiarizationPipeline, PipelineBuilder, QueuedDiarizationRequest};
+use speakrs::pipeline::{
+    OwnedDiarizationPipeline, PipelineBuilder, PipelineConfig, QueuedDiarizationRequest,
+    ReconstructMethod,
+};
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -36,6 +39,27 @@ fn make_pipeline() -> OwnedDiarizationPipeline {
     PipelineBuilder::from_dir(fixture_path("models"), ExecutionMode::Cpu)
         .build()
         .unwrap()
+}
+
+fn single_speaker_config() -> PipelineConfig {
+    PipelineConfig {
+        speaker_keep_threshold: f64::MAX,
+        ..PipelineConfig::default()
+    }
+}
+
+fn config_candidates() -> Vec<PipelineConfig> {
+    vec![
+        PipelineConfig {
+            merge_gap: 10.0,
+            ..PipelineConfig::default()
+        },
+        PipelineConfig {
+            reconstruct_method: ReconstructMethod::Standard,
+            ..PipelineConfig::default()
+        },
+        single_speaker_config(),
+    ]
 }
 
 #[test]
@@ -174,4 +198,39 @@ fn queued_results_match_sync() {
     queue.finish().unwrap();
 
     assert_eq!(sync_result.segments, queued_result.segments);
+}
+
+#[test]
+fn build_queued_preserves_custom_pipeline_config() {
+    let samples = load_wav_samples(&fixture_path("test.wav"));
+
+    let mut default_pipeline = make_pipeline();
+    let default_result = default_pipeline
+        .run_with_file_id(&samples, "compare")
+        .unwrap();
+
+    let (custom_config, custom_result) = config_candidates()
+        .into_iter()
+        .find_map(|config| {
+            let mut pipeline =
+                PipelineBuilder::from_dir(fixture_path("models"), ExecutionMode::Cpu)
+                    .pipeline(config.clone())
+                    .build()
+                    .unwrap();
+            let result = pipeline.run_with_file_id(&samples, "compare").unwrap();
+            (result.segments != default_result.segments).then_some((config, result))
+        })
+        .expect("expected at least one custom pipeline config to change fixture output");
+
+    let queue = PipelineBuilder::from_dir(fixture_path("models"), ExecutionMode::Cpu)
+        .pipeline(custom_config)
+        .build_queued()
+        .unwrap();
+    queue
+        .push(QueuedDiarizationRequest::new("compare", samples))
+        .unwrap();
+    let queued_result = queue.recv().unwrap().result.unwrap();
+    queue.finish().unwrap();
+
+    assert_eq!(custom_result.segments, queued_result.segments);
 }

@@ -75,9 +75,6 @@ impl PipelineBuilder {
     }
 
     /// Override pipeline config (thresholds, clustering)
-    ///
-    /// Only used by [`build_queued`](Self::build_queued); the non-queued pipeline
-    /// accepts config per-run via [`run_with_config`](OwnedDiarizationPipeline::run_with_config)
     pub fn pipeline(mut self, config: PipelineConfig) -> Self {
         self.pipeline = Some(config);
         self
@@ -85,6 +82,9 @@ impl PipelineBuilder {
 
     /// Build the owned pipeline
     pub fn build(self) -> Result<OwnedDiarizationPipeline, PipelineError> {
+        let pipeline = self
+            .pipeline
+            .unwrap_or_else(|| PipelineConfig::for_mode(self.mode));
         let runtime = self.runtime.unwrap_or_default();
         let step = segmentation_step_seconds(self.mode);
 
@@ -105,19 +105,15 @@ impl PipelineBuilder {
             emb_model,
             plda,
             powerset: PowersetMapping::new(3, 2),
-            mode: self.mode,
+            default_config: pipeline,
         })
     }
 
     /// Build and immediately convert to a background-processing queue
     pub fn build_queued(self) -> Result<QueuedDiarizationPipeline, PipelineError> {
-        let pipeline_config = self
-            .pipeline
-            .clone()
-            .unwrap_or_else(|| PipelineConfig::for_mode(self.mode));
         let pipeline = self.build()?;
         pipeline
-            .into_queued_with_config(pipeline_config)
+            .into_queued()
             .map_err(|e| PipelineError::Other(e.to_string()))
     }
 }
