@@ -1,8 +1,18 @@
+macOS — Apple M4 Pro, macOS 26.3
 VoxConverse Test DER (232 files, 2612.2 min, collar=0ms)
 
-Implementation             DER%    Missed%   FalseAlarm%   Confusion%     Time
-──────────────────────────────────────────────────────────────────────────────
-pyannote MPS              11.1%       3.4%          4.1%         3.7%  6705.3s
-speakrs CoreML            11.1%       3.4%          4.1%         3.7%  1610.8s
-speakrs CoreML Fast       11.9%       3.3%          4.1%         4.5%   826.3s
-FluidAudio                32.6%       5.4%          3.4%        23.8%  1044.4s
+Implementation             DER%    Missed%   FalseAlarm%   Confusion%     Time    RTFx
+──────────────────────────────────────────────────────────────────────────────────────────
+pyannote MPS              11.1%       3.4%          4.1%         3.7%  6705.3s     23x
+speakrs CoreML            11.1%       3.4%          4.1%         3.6%   248.5s    631x
+speakrs CoreML Fast       11.2%       3.1%          4.2%         3.9%   181.1s    865x
+SpeakerKit                11.2%       3.3%          4.6%         3.3%   211.3s    742x
+
+Linux — NVIDIA L40S, AMD EPYC 9354
+VoxConverse Test DER (232 files, 2612.2 min, collar=0ms)
+
+Implementation             DER%    Missed%   FalseAlarm%   Confusion%     Time    RTFx
+──────────────────────────────────────────────────────────────────────────────────────────
+speakrs CUDA              11.1%       3.4%          4.1%         3.7%  3109.7s     50x
+speakrs CUDA Fast         11.2%       3.3%          4.1%         3.8%  1566.2s    100x
+pyannote CUDA             11.1%       3.4%          4.1%         3.7%  8677.9s     18x

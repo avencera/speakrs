@@ -1,0 +1,9 @@
+macOS — Apple M4 Pro, macOS 26.3
+AISHELL-4 DER (20 files, 763.5 min, collar=0ms)
+
+Implementation             DER%    Missed%   FalseAlarm%   Confusion%     Time    RTFx
+──────────────────────────────────────────────────────────────────────────────────────────
+pyannote MPS              11.8%       3.9%          3.9%         4.0%  2268.4s     20x
+speakrs CoreML            11.1%       3.9%          3.9%         3.3%    72.7s    630x
+speakrs CoreML Fast       12.1%       4.4%          3.8%         3.9%    51.5s    890x
+SpeakerKit                11.7%       4.3%          4.1%         3.3%    56.5s    810x

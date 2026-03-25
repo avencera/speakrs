@@ -1,0 +1,9 @@
+macOS — Apple M4 Pro, macOS 26.3
+ICSI DER (75 files, 4301.2 min, collar=0ms)
+
+Implementation             DER%    Missed%   FalseAlarm%   Confusion%     Time    RTFx
+──────────────────────────────────────────────────────────────────────────────────────────
+pyannote MPS              33.4%      19.5%          9.5%         4.4% 14584.5s     18x
+speakrs CoreML            33.4%      19.5%          9.5%         4.4%   422.6s    611x
+speakrs CoreML Fast       34.0%      19.2%          9.9%         4.9%   283.8s    909x
+SpeakerKit                33.8%      19.4%         10.1%         4.3%   327.8s    787x

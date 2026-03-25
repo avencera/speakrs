@@ -1,8 +1,18 @@
+macOS — Apple M4 Pro, macOS 26.3
 AMI IHM DER (34 files, 1123.8 min, collar=0ms)
 
-Implementation             DER%    Missed%   FalseAlarm%   Confusion%     Time
-──────────────────────────────────────────────────────────────────────────────
-pyannote MPS              17.0%       8.1%          4.3%         4.5%  3326.2s
-speakrs CoreML            16.9%       8.1%          4.3%         4.5%   855.4s
-speakrs CoreML Fast       17.0%       8.2%          4.3%         4.6%   425.0s
-FluidAudio                59.4%      16.7%          3.1%        39.6%   464.2s
+Implementation             DER%    Missed%   FalseAlarm%   Confusion%     Time    RTFx
+──────────────────────────────────────────────────────────────────────────────────────────
+pyannote MPS              17.0%       8.1%          4.3%         4.5%  3326.2s     20x
+speakrs CoreML            17.2%       8.1%          4.3%         4.8%   101.3s    666x
+speakrs CoreML Fast       17.6%       7.8%          4.7%         5.1%    73.9s    912x
+SpeakerKit                18.0%       8.5%          5.2%         4.3%    82.8s    814x
+
+Linux — NVIDIA L40S, AMD EPYC 9354
+AMI IHM DER (34 files, 1123.8 min, collar=0ms)
+
+Implementation             DER%    Missed%   FalseAlarm%   Confusion%     Time    RTFx
+──────────────────────────────────────────────────────────────────────────────────────────
+speakrs CUDA              17.0%       8.1%          4.3%         4.5%  1375.1s     49x
+speakrs CUDA Fast         17.4%       8.2%          4.3%         4.9%   675.3s    100x
+pyannote CUDA             17.0%       8.1%          4.3%         4.5%  4388.1s     15x
