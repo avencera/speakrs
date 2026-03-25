@@ -12,9 +12,9 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use speakrs::{ExecutionMode, OwnedDiarizationPipeline};
+//! use speakrs::{ExecutionMode, PipelineBuilder};
 //!
-//! let mut pipeline = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::Cpu)?;
+//! let mut pipeline = PipelineBuilder::from_pretrained(ExecutionMode::Cpu)?.build()?;
 //! let audio: Vec<f32> = vec![]; // 16 kHz mono f32 samples
 //! let result = pipeline.run(&audio)?;
 //! print!("{}", result.rttm("my-file"));
@@ -51,8 +51,7 @@ pub mod inference;
 /// Diarization error rate (DER) evaluation utilities
 #[cfg(feature = "_metrics")]
 pub mod metrics;
-/// Automatic model download from HuggingFace
-#[cfg(feature = "online")]
+/// Model paths and automatic download from HuggingFace
 pub mod models;
 /// High-level diarization pipeline and result types
 pub mod pipeline;
@@ -64,11 +63,12 @@ pub(crate) mod utils;
 
 // crate-root re-exports for the common path
 pub use inference::ExecutionMode;
+pub use models::ModelBundle;
 #[cfg(feature = "online")]
 pub use models::ModelManager;
 pub use pipeline::{
-    BatchInput, DiarizationPipeline, DiarizationResult, OwnedDiarizationPipeline, PipelineConfig,
-    PipelineError, QueueError, QueuedDiarizationIter, QueuedDiarizationJobId,
+    BatchInput, DiarizationPipeline, DiarizationResult, OwnedDiarizationPipeline, PipelineBuilder,
+    PipelineConfig, PipelineError, QueueError, QueuedDiarizationIter, QueuedDiarizationJobId,
     QueuedDiarizationPipeline, QueuedDiarizationRequest, QueuedDiarizationResult, RuntimeConfig,
 };
 pub use reconstruct::make_exclusive;

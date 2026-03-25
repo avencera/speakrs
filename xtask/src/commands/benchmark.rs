@@ -2322,7 +2322,7 @@ pub fn run_speakrs_gpu(
         let file_elapsed = pipeline_start.elapsed().as_secs_f64();
         let total_elapsed_ms = file_start.elapsed().as_millis();
 
-        per_file_rttm.insert(file_id.clone(), result.rttm);
+        per_file_rttm.insert(file_id.clone(), result.rttm(&file_id));
 
         let cumulative = start.elapsed().as_secs_f64();
         let avg = cumulative / (i + 1) as f64;

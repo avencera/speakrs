@@ -73,8 +73,7 @@ struct WorkerRequest {
 /// ```no_run
 /// # use speakrs::pipeline::*;
 /// # use speakrs::inference::ExecutionMode;
-/// let pipeline = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::Cpu)?;
-/// let queue = pipeline.into_queued()?;
+/// let queue = PipelineBuilder::from_pretrained(ExecutionMode::Cpu)?.build_queued()?;
 ///
 /// let audio: Vec<f32> = vec![]; // 16 kHz mono samples
 /// queue.push(QueuedDiarizationRequest::new("file1", audio))?;

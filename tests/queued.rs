@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use speakrs::inference::ExecutionMode;
-use speakrs::pipeline::{OwnedDiarizationPipeline, QueuedDiarizationRequest};
+use speakrs::pipeline::{OwnedDiarizationPipeline, PipelineBuilder, QueuedDiarizationRequest};
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -33,7 +33,9 @@ fn load_wav_samples(path: &std::path::Path) -> Vec<f32> {
 }
 
 fn make_pipeline() -> OwnedDiarizationPipeline {
-    OwnedDiarizationPipeline::from_dir(&fixture_path("models"), ExecutionMode::Cpu).unwrap()
+    PipelineBuilder::from_dir(fixture_path("models"), ExecutionMode::Cpu)
+        .build()
+        .unwrap()
 }
 
 #[test]
@@ -53,8 +55,8 @@ fn queued_basic_round_trip() {
 
     assert!(r1.result.is_ok());
     assert!(r2.result.is_ok());
-    assert!(!r1.result.unwrap().rttm.is_empty());
-    assert!(!r2.result.unwrap().rttm.is_empty());
+    assert!(!r1.result.unwrap().segments.is_empty());
+    assert!(!r2.result.unwrap().segments.is_empty());
 
     queue.finish().unwrap();
 }
@@ -171,5 +173,5 @@ fn queued_results_match_sync() {
     let queued_result = queue.recv().unwrap().result.unwrap();
     queue.finish().unwrap();
 
-    assert_eq!(sync_result.rttm, queued_result.rttm);
+    assert_eq!(sync_result.segments, queued_result.segments);
 }

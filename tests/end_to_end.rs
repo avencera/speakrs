@@ -5,7 +5,7 @@ use ndarray::{Array2, Array3};
 use ndarray_npy::ReadNpyExt;
 use speakrs::inference::{EmbeddingModel, SegmentationModel};
 use speakrs::pipeline::{
-    DiarizationPipeline, FRAME_STEP_SECONDS, OwnedDiarizationPipeline, SEGMENTATION_STEP_SECONDS,
+    DiarizationPipeline, FRAME_STEP_SECONDS, PipelineBuilder, SEGMENTATION_STEP_SECONDS,
 };
 
 use speakrs::inference::ExecutionMode;
@@ -105,7 +105,7 @@ fn pipeline_runs_on_main_fixture_audio() {
             .iter()
             .all(|value| value.is_finite())
     );
-    assert!(result.rttm.contains("SPEAKER fixture 1"));
+    assert!(result.rttm("fixture").contains("SPEAKER fixture 1"));
 }
 
 #[cfg(all(feature = "coreml", feature = "_metrics"))]
@@ -149,7 +149,7 @@ fn voxconverse_der(mode: ExecutionMode, step: f64) -> (Vec<(String, f64)>, Durat
 
         let reference_rttm = fs::read_to_string(&rttm_path).unwrap();
         let reference = parse_rttm(&reference_rttm);
-        let hypothesis = parse_rttm(&result.rttm);
+        let hypothesis = parse_rttm(&result.rttm(name));
 
         let der_result = compute_der(&reference, &hypothesis);
         let file_elapsed = file_start.elapsed();
@@ -252,7 +252,9 @@ fn pipeline_handles_short_audio_fixture() {
 #[test]
 fn owned_pipeline_from_dir() {
     let models_dir = fixture_path("models");
-    let mut pipeline = OwnedDiarizationPipeline::from_dir(&models_dir, ExecutionMode::Cpu).unwrap();
+    let mut pipeline = PipelineBuilder::from_dir(&models_dir, ExecutionMode::Cpu)
+        .build()
+        .unwrap();
 
     let (samples, sr) = load_wav_samples(&fixture_path("test.wav"));
     assert_eq!(sr, 16_000);
@@ -267,7 +269,7 @@ fn owned_pipeline_from_dir() {
             .iter()
             .all(|value| value.is_finite())
     );
-    assert!(result.rttm.contains("SPEAKER file1 1"));
+    assert!(result.rttm("file1").contains("SPEAKER file1 1"));
 }
 
 /// Requires models deployed to HF (`cargo xtask models deploy`)
@@ -275,7 +277,10 @@ fn owned_pipeline_from_dir() {
 #[ignore]
 #[cfg(feature = "online")]
 fn online_pipeline_downloads_and_runs() {
-    let mut pipeline = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::Cpu).unwrap();
+    let mut pipeline = PipelineBuilder::from_pretrained(ExecutionMode::Cpu)
+        .unwrap()
+        .build()
+        .unwrap();
 
     let (samples, sr) = load_wav_samples(&fixture_path("test.wav"));
     assert_eq!(sr, 16_000);
@@ -290,5 +295,5 @@ fn online_pipeline_downloads_and_runs() {
             .iter()
             .all(|value| value.is_finite())
     );
-    assert!(result.rttm.contains("SPEAKER file1 1"));
+    assert!(result.rttm("file1").contains("SPEAKER file1 1"));
 }

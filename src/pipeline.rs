@@ -18,6 +18,9 @@ pub use post_inference::post_inference;
 #[cfg(feature = "coreml")]
 mod chunk_embedding;
 
+mod builder;
+pub use builder::*;
+
 mod queued;
 pub use queued::*;
 
@@ -101,55 +104,23 @@ macro_rules! pipeline_run_methods {
 }
 
 /// Owned pipeline that manages its own model lifetimes
+///
+/// Construct via [`PipelineBuilder`]:
+/// ```no_run
+/// use speakrs::{ExecutionMode, PipelineBuilder};
+///
+/// let mut pipeline = PipelineBuilder::from_pretrained(ExecutionMode::Cpu)?.build()?;
+/// # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+/// ```
 pub struct OwnedDiarizationPipeline {
-    seg_model: SegmentationModel,
-    emb_model: EmbeddingModel,
-    plda: PldaTransform,
-    powerset: PowersetMapping,
-    mode: ExecutionMode,
+    pub(crate) seg_model: SegmentationModel,
+    pub(crate) emb_model: EmbeddingModel,
+    pub(crate) plda: PldaTransform,
+    pub(crate) powerset: PowersetMapping,
+    pub(crate) mode: ExecutionMode,
 }
 
 impl OwnedDiarizationPipeline {
-    /// Download models from HuggingFace and build the pipeline
-    #[cfg(feature = "online")]
-    pub fn from_pretrained(mode: ExecutionMode) -> Result<Self, PipelineError> {
-        Self::from_pretrained_with_config(mode, RuntimeConfig::default())
-    }
-
-    /// Download models from HuggingFace and build the pipeline with runtime config
-    #[cfg(feature = "online")]
-    pub fn from_pretrained_with_config(
-        mode: ExecutionMode,
-        config: RuntimeConfig,
-    ) -> Result<Self, PipelineError> {
-        let manager = crate::models::ModelManager::new()?;
-        let models_dir = manager.ensure(mode)?;
-        let step = segmentation_step_seconds(mode);
-
-        let seg_model = SegmentationModel::with_mode(
-            models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
-            step as f32,
-            mode,
-        )?;
-        let emb_model = EmbeddingModel::with_mode_and_config(
-            models_dir
-                .join("wespeaker-voxceleb-resnet34.onnx")
-                .to_str()
-                .unwrap(),
-            mode,
-            &config,
-        )?;
-        let plda = PldaTransform::from_dir(&models_dir)?;
-
-        Ok(Self {
-            seg_model,
-            emb_model,
-            plda,
-            powerset: PowersetMapping::new(3, 2),
-            mode,
-        })
-    }
-
     pipeline_run_methods!();
 
     /// Run post-inference (clustering + reconstruction) on pre-computed artifacts
@@ -159,47 +130,9 @@ impl OwnedDiarizationPipeline {
     pub fn finish_post_inference(
         &self,
         artifacts: InferenceArtifacts,
-        file_id: &str,
         config: &PipelineConfig,
     ) -> Result<DiarizationResult, PipelineError> {
-        post_inference(artifacts, file_id, config, &self.plda)
-    }
-
-    /// Build the pipeline from a local models directory
-    pub fn from_dir(models_dir: &Path, mode: ExecutionMode) -> Result<Self, PipelineError> {
-        Self::from_dir_with_config(models_dir, mode, RuntimeConfig::default())
-    }
-
-    /// Build the pipeline from a local models directory with runtime config
-    pub fn from_dir_with_config(
-        models_dir: &Path,
-        mode: ExecutionMode,
-        config: RuntimeConfig,
-    ) -> Result<Self, PipelineError> {
-        let step = segmentation_step_seconds(mode);
-
-        let seg_model = SegmentationModel::with_mode(
-            models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
-            step as f32,
-            mode,
-        )?;
-        let emb_model = EmbeddingModel::with_mode_and_config(
-            models_dir
-                .join("wespeaker-voxceleb-resnet34.onnx")
-                .to_str()
-                .unwrap(),
-            mode,
-            &config,
-        )?;
-        let plda = PldaTransform::from_dir(models_dir)?;
-
-        Ok(Self {
-            seg_model,
-            emb_model,
-            plda,
-            powerset: PowersetMapping::new(3, 2),
-            mode,
-        })
+        post_inference(artifacts, config, &self.plda)
     }
 
     /// Convert into a background-processing queue
@@ -301,7 +234,7 @@ impl<'a> PipelineRunner<'a> {
         let inference_artifacts = self.run_inference(audio)?;
         let inference_ms = run_start.elapsed().as_millis();
         let post_start = std::time::Instant::now();
-        let result = self.run_post_inference(inference_artifacts, file_id, config)?;
+        let result = self.run_post_inference(inference_artifacts, config)?;
         let post_ms = post_start.elapsed().as_millis();
         let total_ms = run_start.elapsed().as_millis();
         let audio_secs = audio.len() as f64 / 16_000.0;
@@ -523,10 +456,9 @@ impl<'a> PipelineRunner<'a> {
     fn run_post_inference(
         &mut self,
         inference_artifacts: InferenceArtifacts,
-        file_id: &str,
         config: &PipelineConfig,
     ) -> Result<DiarizationResult, PipelineError> {
-        post_inference(inference_artifacts, file_id, config, self.plda)
+        post_inference(inference_artifacts, config, self.plda)
     }
 
     fn empty_inference_artifacts(layout: ChunkLayout) -> InferenceArtifacts {
