@@ -147,14 +147,9 @@ def main() -> None:
         os.environ.get("PYANNOTE_EMBEDDING_BATCH_SIZE", str(default_batch))
     )
 
-    try:
-        pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-community-1", token=token
-        )
-    except TypeError:
-        pipeline = Pipeline.from_pretrained(
-            "pyannote/speaker-diarization-community-1", use_auth_token=token
-        )
+    pipeline = Pipeline.from_pretrained(
+        "pyannote/speaker-diarization-community-1", token=token
+    )
     assert pipeline is not None
     pipeline.to(device)
     if hasattr(pipeline, "segmentation_batch_size"):
