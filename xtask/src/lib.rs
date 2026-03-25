@@ -1,3 +1,5 @@
+#![warn(clippy::undocumented_unsafe_blocks)]
+
 pub mod audio;
 pub mod cargo;
 pub mod cmd;

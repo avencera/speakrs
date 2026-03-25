@@ -36,6 +36,32 @@ impl BenchmarkMetadata {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PyannoteBatchSizes {
+    pub segmentation: Option<u32>,
+    pub embedding: Option<u32>,
+}
+
+impl PyannoteBatchSizes {
+    pub fn from_overrides(segmentation: Option<u32>, embedding: Option<u32>) -> Self {
+        Self {
+            segmentation,
+            embedding,
+        }
+    }
+
+    fn summary_values(self) -> (String, String) {
+        (
+            self.segmentation
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "default".to_string()),
+            self.embedding
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "default".to_string()),
+        )
+    }
+}
+
 fn detect_gpu() -> String {
     Command::new("nvidia-smi")
         .args(["--query-gpu=name", "--format=csv,noheader,nounits"])
@@ -226,6 +252,7 @@ pub struct CommandSpec {
     pub program: OsString,
     pub args: Vec<OsString>,
     pub current_dir: Option<PathBuf>,
+    pub envs: Vec<(OsString, OsString)>,
 }
 
 impl CommandSpec {
@@ -234,6 +261,7 @@ impl CommandSpec {
             program: program.into(),
             args: Vec::new(),
             current_dir: None,
+            envs: Vec::new(),
         }
     }
 
@@ -256,11 +284,19 @@ impl CommandSpec {
         self
     }
 
+    pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+        self.envs.push((key.into(), value.into()));
+        self
+    }
+
     pub fn build_command(&self) -> Command {
         let mut command = Command::new(&self.program);
         command.args(&self.args);
         if let Some(current_dir) = &self.current_dir {
             command.current_dir(current_dir);
+        }
+        for (key, value) in &self.envs {
+            command.env(key, value);
         }
         command
     }
@@ -757,13 +793,7 @@ pub fn der(args: DerArgs) -> Result<()> {
         emb_batch_size,
         sleep_between,
     } = args;
-
-    if let Some(seg) = seg_batch_size {
-        unsafe { std::env::set_var("PYANNOTE_SEGMENTATION_BATCH_SIZE", seg.to_string()) };
-    }
-    if let Some(emb) = emb_batch_size {
-        unsafe { std::env::set_var("PYANNOTE_EMBEDDING_BATCH_SIZE", emb.to_string()) };
-    }
+    let pyannote_batch_sizes = PyannoteBatchSizes::from_overrides(seg_batch_size, emb_batch_size);
 
     if impls.len() == 1 && impls[0] == "list" {
         println!("Available implementations:");
@@ -824,9 +854,6 @@ pub fn der(args: DerArgs) -> Result<()> {
         ensure_pyannote_rs_emb_model(&emb_model)?;
     }
 
-    // SAFETY: single-threaded CLI, no other threads reading env vars
-    unsafe { std::env::set_var("SPEAKRS_MODELS_DIR", &models_dir) };
-
     let metadata = BenchmarkMetadata::collect();
 
     // collect all (dataset_name, files) pairs to evaluate
@@ -871,7 +898,15 @@ pub fn der(args: DerArgs) -> Result<()> {
                     .unwrap()
             })
             .unwrap();
-        preflight_check(&root, first_file, &seg_model, &emb_model, impls)?
+        preflight_check(
+            &root,
+            first_file,
+            &models_dir,
+            &seg_model,
+            &emb_model,
+            impls,
+            pyannote_batch_sizes,
+        )?
     };
 
     for (dataset_name, files) in &eval_sets {
@@ -909,12 +944,14 @@ pub fn der(args: DerArgs) -> Result<()> {
             root: &root,
             run_dir: &run_dir,
             files,
+            models_dir: &models_dir,
             seg_model: &seg_model,
             emb_model: &emb_model,
             impls,
             total_audio_seconds,
             preflight_failures: &preflight_failures,
             sleep_between: sleep_between.map(Duration::from_secs),
+            pyannote_batch_sizes,
         })?;
 
         DerResultsWriter {
@@ -929,6 +966,7 @@ pub fn der(args: DerArgs) -> Result<()> {
             max_files,
             max_minutes,
             metadata: &metadata,
+            pyannote_batch_sizes,
         }
         .write()?;
     }
@@ -945,12 +983,14 @@ struct DerRunContext<'a> {
     root: &'a Path,
     run_dir: &'a Path,
     files: &'a [(PathBuf, PathBuf)],
+    models_dir: &'a Path,
     seg_model: &'a Path,
     emb_model: &'a Path,
     impls: &'a [String],
     total_audio_seconds: f64,
     preflight_failures: &'a HashMap<String, String>,
     sleep_between: Option<Duration>,
+    pyannote_batch_sizes: PyannoteBatchSizes,
 }
 
 fn write_impl_result(
@@ -983,12 +1023,14 @@ fn run_der_implementations(ctx: &DerRunContext) -> Result<DerResults> {
         root,
         run_dir,
         files,
+        models_dir,
         seg_model,
         emb_model,
         impls,
         total_audio_seconds,
         preflight_failures,
         sleep_between,
+        pyannote_batch_sizes,
     } = ctx;
     let speakrs_binary = root.join("target/release/xtask");
     let pyannote_rs_binary =
@@ -1042,7 +1084,7 @@ fn run_der_implementations(ctx: &DerRunContext) -> Result<DerResults> {
 
         let benchmark_result = match impl_type {
             ImplType::Speakrs(mode) => {
-                BatchCommandRunner::speakrs(&speakrs_binary, mode, &wav_paths)
+                BatchCommandRunner::speakrs(&speakrs_binary, mode, models_dir, &wav_paths)
                     .run_with_retries(batch_timeout)
             }
             ImplType::FluidAudioBench => {
@@ -1081,8 +1123,10 @@ fn run_der_implementations(ctx: &DerRunContext) -> Result<DerResults> {
                 emb_model.to_path_buf(),
             )
             .run(files),
-            ImplType::Pyannote(device) => BatchCommandRunner::pyannote(root, device, &wav_paths)
-                .run_with_retries(batch_timeout),
+            ImplType::Pyannote(device) => {
+                BatchCommandRunner::pyannote(root, device, &wav_paths, *pyannote_batch_sizes)
+                    .run_with_retries(batch_timeout)
+            }
         };
 
         let benchmark_output = match benchmark_result {
@@ -1286,18 +1330,25 @@ pub struct BatchCommandRunner {
 }
 
 impl BatchCommandRunner {
-    pub fn speakrs(binary: &Path, mode: &str, wav_paths: &[&Path]) -> Self {
+    pub fn speakrs(binary: &Path, mode: &str, models_dir: &Path, wav_paths: &[&Path]) -> Self {
         let mut command_spec = CommandSpec::new(binary.as_os_str().to_os_string())
             .arg("diarize")
             .arg("--mode")
-            .arg(mode.to_string());
+            .arg(mode.to_string())
+            .arg("--models-dir")
+            .arg(models_dir.as_os_str().to_os_string());
         for wav_path in wav_paths {
             command_spec = command_spec.arg(wav_path.as_os_str().to_os_string());
         }
         Self { command_spec }
     }
 
-    pub fn pyannote(root: &Path, device: &str, wav_paths: &[&Path]) -> Self {
+    pub fn pyannote(
+        root: &Path,
+        device: &str,
+        wav_paths: &[&Path],
+        batch_sizes: PyannoteBatchSizes,
+    ) -> Self {
         let uv_path = std::env::var("HOME")
             .ok()
             .map(|home| PathBuf::from(home).join(".local/bin/uv"))
@@ -1313,6 +1364,18 @@ impl BatchCommandRunner {
             .arg("scripts/pyannote-bench/diarize.py")
             .arg("--device")
             .arg(device.to_string());
+        if let Some(segmentation) = batch_sizes.segmentation {
+            command_spec = command_spec
+                .env("PYANNOTE_SEGMENTATION_BATCH_SIZE", segmentation.to_string())
+                .arg("--segmentation-batch-size")
+                .arg(segmentation.to_string());
+        }
+        if let Some(embedding) = batch_sizes.embedding {
+            command_spec = command_spec
+                .env("PYANNOTE_EMBEDDING_BATCH_SIZE", embedding.to_string())
+                .arg("--embedding-batch-size")
+                .arg(embedding.to_string());
+        }
         for wav_path in wav_paths {
             command_spec = command_spec.arg(wav_path.as_os_str().to_os_string());
         }
@@ -1477,6 +1540,7 @@ pub struct DerResultsWriter<'a> {
     pub max_files: u32,
     pub max_minutes: u32,
     pub metadata: &'a BenchmarkMetadata,
+    pub pyannote_batch_sizes: PyannoteBatchSizes,
 }
 
 impl<'a> DerResultsWriter<'a> {
@@ -1502,7 +1566,6 @@ impl<'a> DerResultsWriter<'a> {
     }
 
     fn json_payload(&self) -> Result<serde_json::Value> {
-        let (seg_batch_size, emb_batch_size) = self.pyannote_batch_sizes();
         let file_list = self.file_list();
         let mut json_results = serde_json::Map::new();
 
@@ -1533,9 +1596,9 @@ impl<'a> DerResultsWriter<'a> {
                 "max_minutes": self.max_minutes,
             },
             "pyannote_batch_sizes": {
-                "note": "device-dependent defaults, override via PYANNOTE_*_BATCH_SIZE env vars",
-                "segmentation": seg_batch_size,
-                "embedding": emb_batch_size,
+                "note": "null means the script default (cuda=32, non-cuda=16)",
+                "segmentation_override": self.pyannote_batch_sizes.segmentation,
+                "embedding_override": self.pyannote_batch_sizes.embedding,
             },
             "file_list": file_list,
             "results": json_results,
@@ -1549,7 +1612,7 @@ impl<'a> DerResultsWriter<'a> {
     }
 
     fn summary_lines(&self) -> Vec<String> {
-        let (seg_batch_size, emb_batch_size) = self.pyannote_batch_sizes();
+        let (seg_batch_size, emb_batch_size) = self.pyannote_batch_sizes.summary_values();
         let file_list = self.file_list();
         let total_audio_seconds = self.total_audio_minutes * 60.0;
         let name_width = 22;
@@ -1649,18 +1712,6 @@ impl<'a> DerResultsWriter<'a> {
             .iter()
             .map(|(wav_path, _)| wav_path.file_stem().unwrap().to_string_lossy().to_string())
             .collect()
-    }
-
-    fn pyannote_batch_sizes(&self) -> (u32, u32) {
-        let segmentation_batch_size = std::env::var("PYANNOTE_SEGMENTATION_BATCH_SIZE")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(32);
-        let embedding_batch_size = std::env::var("PYANNOTE_EMBEDDING_BATCH_SIZE")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(32);
-        (segmentation_batch_size, embedding_batch_size)
     }
 }
 
@@ -1790,9 +1841,11 @@ pub const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(180);
 fn preflight_check(
     root: &Path,
     file: &(PathBuf, PathBuf),
+    models_dir: &Path,
     seg_model: &Path,
     emb_model: &Path,
     impls: &[String],
+    pyannote_batch_sizes: PyannoteBatchSizes,
 ) -> Result<HashMap<String, String>> {
     let (wav_path, _rttm_path) = file;
     let stem = wav_path.file_stem().unwrap().to_string_lossy().to_string();
@@ -1838,7 +1891,7 @@ fn preflight_check(
 
         let result = match impl_type {
             ImplType::Speakrs(mode) => {
-                BatchCommandRunner::speakrs(&speakrs_binary, mode, &wav_paths)
+                BatchCommandRunner::speakrs(&speakrs_binary, mode, models_dir, &wav_paths)
                     .run_with_retries(PREFLIGHT_TIMEOUT)
             }
             ImplType::FluidAudioBench => {
@@ -1877,8 +1930,10 @@ fn preflight_check(
                 emb_model.to_path_buf(),
             )
             .run(&[(wav_path.clone(), PathBuf::new())]),
-            ImplType::Pyannote(device) => BatchCommandRunner::pyannote(root, device, &wav_paths)
-                .run_with_retries(PREFLIGHT_TIMEOUT),
+            ImplType::Pyannote(device) => {
+                BatchCommandRunner::pyannote(root, device, &wav_paths, pyannote_batch_sizes)
+                    .run_with_retries(PREFLIGHT_TIMEOUT)
+            }
         };
 
         match result {
@@ -2051,6 +2106,7 @@ pub struct BenchmarkJobConfig {
     pub description: Option<String>,
     /// When running multiple datasets, nest run_dir under dataset id
     pub multi_dataset: bool,
+    pub pyannote_batch_sizes: PyannoteBatchSizes,
 }
 
 /// Result of a completed benchmark job
@@ -2124,10 +2180,13 @@ pub fn run_benchmark_job(
             ImplType::Speakrs(mode) => {
                 run_speakrs_gpu(&config.models_dir, &files, mode, progress_cb)
             }
-            ImplType::Pyannote(device) => {
-                BatchCommandRunner::pyannote(&config.root, device, &wav_paths)
-                    .run_with_retries(batch_timeout)
-            }
+            ImplType::Pyannote(device) => BatchCommandRunner::pyannote(
+                &config.root,
+                device,
+                &wav_paths,
+                config.pyannote_batch_sizes,
+            )
+            .run_with_retries(batch_timeout),
             _ => {
                 println!("  → skipped: not a GPU implementation");
                 println!();
@@ -2194,6 +2253,7 @@ pub fn run_benchmark_job(
         max_files: config.max_files,
         max_minutes: config.max_minutes,
         metadata: &metadata,
+        pyannote_batch_sizes: config.pyannote_batch_sizes,
     }
     .write()?;
 

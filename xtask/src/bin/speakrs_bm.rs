@@ -5,8 +5,8 @@ use clap::Parser;
 use color_eyre::eyre::{Result, ensure};
 use xtask::cmd::wav_duration_seconds;
 use xtask::commands::benchmark::{
-    BatchCommandRunner, BenchmarkJobConfig, ImplType, discover_files, run_benchmark_job,
-    run_speakrs_gpu,
+    BatchCommandRunner, BenchmarkJobConfig, ImplType, PyannoteBatchSizes, discover_files,
+    run_benchmark_job, run_speakrs_gpu,
 };
 use xtask::datasets;
 
@@ -64,11 +64,11 @@ struct Cli {
     #[arg(long)]
     max_minutes: Option<u32>,
 
-    /// Segmentation batch size (sets PYANNOTE_SEGMENTATION_BATCH_SIZE)
+    /// Override pyannote segmentation batch size
     #[arg(long)]
     seg_batch_size: Option<u32>,
 
-    /// Embedding batch size (sets PYANNOTE_EMBEDDING_BATCH_SIZE)
+    /// Override pyannote embedding batch size
     #[arg(long)]
     emb_batch_size: Option<u32>,
 
@@ -114,13 +114,8 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    if let Some(seg) = cli.seg_batch_size {
-        // SAFETY: single-threaded CLI, no other threads reading env vars
-        unsafe { std::env::set_var("PYANNOTE_SEGMENTATION_BATCH_SIZE", seg.to_string()) };
-    }
-    if let Some(emb) = cli.emb_batch_size {
-        unsafe { std::env::set_var("PYANNOTE_EMBEDDING_BATCH_SIZE", emb.to_string()) };
-    }
+    let pyannote_batch_sizes =
+        PyannoteBatchSizes::from_overrides(cli.seg_batch_size, cli.emb_batch_size);
 
     if cli.impls.len() == 1 && cli.impls[0] == "list" {
         println!("Available implementations:");
@@ -177,6 +172,7 @@ fn main() -> Result<()> {
             &implementations,
             &cli.models_dir,
             &cli.root,
+            pyannote_batch_sizes,
         )?;
     }
 
@@ -192,6 +188,7 @@ fn main() -> Result<()> {
             max_minutes,
             description: cli.description.clone(),
             multi_dataset,
+            pyannote_batch_sizes,
         };
 
         run_benchmark_job(&config, None)?;
@@ -206,6 +203,7 @@ fn preflight(
     implementations: &[(&str, ImplType)],
     models_dir: &Path,
     root: &Path,
+    pyannote_batch_sizes: PyannoteBatchSizes,
 ) -> Result<()> {
     let first_dataset = &datasets[0];
     first_dataset.ensure(datasets_dir)?;
@@ -226,10 +224,13 @@ fn preflight(
     for (impl_name, impl_type) in implementations {
         let result = match impl_type {
             ImplType::Speakrs(mode) => run_speakrs_gpu(models_dir, &preflight_files, mode, None),
-            ImplType::Pyannote(device) => {
-                BatchCommandRunner::pyannote(root, device, &[wav_path.as_path()])
-                    .run_with_retries(Duration::from_secs(180))
-            }
+            ImplType::Pyannote(device) => BatchCommandRunner::pyannote(
+                root,
+                device,
+                &[wav_path.as_path()],
+                pyannote_batch_sizes,
+            )
+            .run_with_retries(Duration::from_secs(180)),
             _ => continue,
         };
 
