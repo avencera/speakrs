@@ -24,10 +24,20 @@ just generate-fixtures
 ```
 
 ```sh
-just check    # fmt + clippy + test
+just check    # fmt + lint + test
 just test     # run tests (e2e tests require ONNX models)
 just fmt      # cargo fmt + Python formatting
-just clippy   # cargo clippy -- -D warnings + ty check
+just lint     # cargo clippy + Python ty checks
+just clippy   # cargo clippy -- -D warnings
+just python-lint  # ty check across the root and Python subprojects
 ```
 
-All Python scripts in the repo are fully typed and type checked with `ty`.
+Sync the Python environments before running `just python-lint`:
+
+```sh
+uv sync --group dev
+uv sync --project scripts/native_coreml
+uv sync --project scripts/pyannote-bench
+```
+
+Python type checks run with `ty` in each script's intended environment.

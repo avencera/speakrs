@@ -4,12 +4,18 @@ fmt:
 
 clippy:
     cargo clippy --all --all-targets --all-features --workspace -- -D warnings
-    uv run --group dev ty check --python .venv --exclude 'scripts/pyannote_rs_bench/target' --exclude 'scripts/extract_hf_dataset.py' --exclude 'scripts/speakerkit-bench/Packages' scripts fixtures
+
+python-lint:
+    uv run --group dev ty check --python .venv --exclude 'scripts/pyannote_rs_bench/target' --exclude 'scripts/extract_hf_dataset.py' --exclude 'scripts/speakerkit-bench/Packages' --exclude 'scripts/native_coreml' --exclude 'scripts/pyannote-bench' --exclude 'scripts/convert_fp16.py' scripts fixtures
+    uv run --group dev ty check --project scripts/native_coreml --python scripts/native_coreml/.venv scripts/native_coreml
+    uv run --group dev ty check --project scripts/pyannote-bench --python scripts/pyannote-bench/.venv scripts/pyannote-bench
+
+lint: clippy python-lint
 
 test *args:
     cargo test --workspace {{args}}
 
-check: fmt clippy test
+check: fmt lint test
 
 # passthrough to cargo xtask
 x *args:
