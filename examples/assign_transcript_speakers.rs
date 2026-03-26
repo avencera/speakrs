@@ -3,9 +3,8 @@ mod support;
 use std::fs;
 use std::path::Path;
 
-use speakrs::make_exclusive;
 use speakrs::pipeline::{DiarizationPipeline, FRAME_DURATION_SECONDS, FRAME_STEP_SECONDS};
-use speakrs::segment::{Segment, to_segments};
+use speakrs::segment::Segment;
 
 use support::{ExampleResult, load_models, load_wav_samples};
 
@@ -35,8 +34,8 @@ fn main() -> ExampleResult<()> {
     let result = pipeline.run(&audio)?;
 
     let mut exclusive = result.discrete_diarization.clone();
-    make_exclusive(&mut exclusive.0);
-    let segments = to_segments(&exclusive.0, FRAME_STEP_SECONDS, FRAME_DURATION_SECONDS);
+    exclusive.make_exclusive();
+    let segments = exclusive.to_segments(FRAME_STEP_SECONDS, FRAME_DURATION_SECONDS);
     let transcript = load_transcript(transcript_path)?;
 
     println!("start\tend\tspeaker\ttext");
