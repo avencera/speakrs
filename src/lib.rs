@@ -81,8 +81,8 @@ pub use models::ModelBundle;
 pub use models::ModelManager;
 pub use pipeline::{
     BatchInput, DiarizationPipeline, DiarizationResult, OwnedDiarizationPipeline, PipelineBuilder,
-    PipelineConfig, PipelineError, QueueError, QueuedDiarizationIter, QueuedDiarizationJobId,
-    QueuedDiarizationPipeline, QueuedDiarizationRequest, QueuedDiarizationResult, RuntimeConfig,
+    PipelineConfig, PipelineError, QueueError, QueueReceiver, QueueReceiverIter, QueueSender,
+    QueuedDiarizationJobId, QueuedDiarizationRequest, QueuedDiarizationResult, RuntimeConfig,
 };
 pub use reconstruct::make_exclusive;
 pub use segment::Segment;

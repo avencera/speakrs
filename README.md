@@ -55,18 +55,20 @@ for segment in result.discrete_diarization.to_segments(FRAME_STEP_SECONDS, FRAME
 
 ### Background queue
 
-For processing many files, `QueuedDiarizationPipeline` runs a background worker that auto-batches requests for cross-file optimizations:
+For processing many files, `QueueSender` and `QueueReceiver` run a background worker that auto-batches requests for cross-file optimizations:
 
 ```rust
 use speakrs::{ExecutionMode, OwnedDiarizationPipeline, QueuedDiarizationRequest};
 
 let pipeline = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::CoreMl)?;
-let queue = pipeline.into_queued()?;
+let (tx, rx) = pipeline.into_queued()?;
 
-queue.push(QueuedDiarizationRequest::new("file1", audio1))?;
-queue.push(QueuedDiarizationRequest::new("file2", audio2))?;
+tx.push(QueuedDiarizationRequest::new("file1", audio1))?;
+tx.push(QueuedDiarizationRequest::new("file2", audio2))?;
+drop(tx);
 
-for result in queue {
+for result in rx {
+    let result = result?;
     let diarization = result.result?;
     print!("{}", diarization.rttm(&result.file_id));
 }
@@ -215,7 +217,7 @@ For development, `just export-models` exports the ONNX models and converts them 
 | Module / Type                  | Description                                             |
 | ------------------------------ | ------------------------------------------------------- |
 | `OwnedDiarizationPipeline`     | Main entry point, owns models and runs diarization      |
-| `QueuedDiarizationPipeline`    | Background worker with push/recv queue interface        |
+| `QueueSender` / `QueueReceiver`| Background worker split into push and drain halves      |
 | `DiarizationPipeline`          | Borrowed pipeline for manual model lifetime control     |
 | `DiarizationResult`            | All outputs: segments, embeddings, clusters, RTTM       |
 | `ExecutionMode`                | CPU, CoreML, CoreMLFast, CUDA, CUDAFast                 |

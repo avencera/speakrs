@@ -1,3 +1,5 @@
+use std::any::Any;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 
@@ -39,7 +41,7 @@ impl QueuedDiarizationRequest {
 ///
 /// Per-job failures are surfaced here without stopping the worker
 pub struct QueuedDiarizationResult {
-    /// The job identifier returned by [`QueuedDiarizationPipeline::push`]
+    /// The job identifier returned by [`QueueSender::push`]
     pub job_id: QueuedDiarizationJobId,
     /// The file identifier from the original request
     pub file_id: String,
@@ -50,6 +52,9 @@ pub struct QueuedDiarizationResult {
 /// Errors from the queued diarization pipeline
 #[derive(Debug, thiserror::Error)]
 pub enum QueueError {
+    /// The queue has finished processing all submitted jobs
+    #[error("queue has finished processing all submitted jobs")]
+    Closed,
     /// The background worker has shut down or was never started
     #[error("queue worker has shut down")]
     WorkerGone,
@@ -61,13 +66,19 @@ pub enum QueueError {
     WorkerPanicked(String),
 }
 
+impl QueueError {
+    fn format_worker_panic(err: Box<dyn Any + Send + 'static>) -> Self {
+        Self::WorkerPanicked(panic_payload_message(err))
+    }
+}
+
 struct WorkerRequest {
     job_id: QueuedDiarizationJobId,
     file_id: String,
     audio: Vec<f32>,
 }
 
-/// Background-processing pipeline that accepts files incrementally via push/push_batch
+/// Background queue sender for incremental diarization requests
 ///
 /// The worker thread drains queued requests into batches and processes them via
 /// `run_batch_with_config`, preserving cross-file batch optimizations (chunk embedding,
@@ -76,28 +87,32 @@ struct WorkerRequest {
 /// ```no_run
 /// # use speakrs::pipeline::*;
 /// # use speakrs::inference::ExecutionMode;
-/// let queue = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::Cpu)?.into_queued()?;
+/// let (tx, rx) = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::Cpu)?.into_queued()?;
 ///
-/// let audio: Vec<f32> = vec![]; // 16 kHz mono samples
-/// queue.push(QueuedDiarizationRequest::new("file1", audio))?;
-/// let result = queue.recv()?;
-/// println!("{}", result.result.unwrap().rttm("file1"));
+/// let audio1: Vec<f32> = vec![]; // 16 kHz mono samples
+/// let audio2: Vec<f32> = vec![];
+/// tx.push(QueuedDiarizationRequest::new("file1", audio1))?;
+/// tx.push(QueuedDiarizationRequest::new("file2", audio2))?;
+/// drop(tx);
 ///
-/// queue.finish()?;
+/// for result in rx {
+///     let result = result?;
+///     let diarization = result.result?;
+///     println!("{}", diarization.rttm(&result.file_id));
+/// }
 /// # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 /// ```
-pub struct QueuedDiarizationPipeline {
-    request_tx: Option<Sender<WorkerRequest>>,
-    result_rx: Receiver<QueuedDiarizationResult>,
-    worker: Option<JoinHandle<()>>,
-    next_job_id: AtomicU64,
+#[derive(Clone)]
+pub struct QueueSender {
+    request_tx: Sender<WorkerRequest>,
+    next_job_id: Arc<AtomicU64>,
 }
 
-impl QueuedDiarizationPipeline {
+impl QueueSender {
     pub(super) fn new(
         pipeline: OwnedDiarizationPipeline,
         config: PipelineConfig,
-    ) -> Result<Self, QueueError> {
+    ) -> Result<(Self, QueueReceiver), QueueError> {
         let (request_tx, request_rx) = crossbeam_channel::bounded::<WorkerRequest>(64);
         let (result_tx, result_rx) = crossbeam_channel::bounded::<QueuedDiarizationResult>(64);
 
@@ -106,12 +121,17 @@ impl QueuedDiarizationPipeline {
             .spawn(move || worker_loop(pipeline, config, request_rx, result_tx))
             .map_err(QueueError::WorkerStart)?;
 
-        Ok(Self {
-            request_tx: Some(request_tx),
-            result_rx,
-            worker: Some(worker),
-            next_job_id: AtomicU64::new(0),
-        })
+        Ok((
+            Self {
+                request_tx,
+                next_job_id: Arc::new(AtomicU64::new(0)),
+            },
+            QueueReceiver {
+                result_rx,
+                worker: Some(worker),
+                state: QueueReceiverState::Running,
+            },
+        ))
     }
 
     /// Submit a single file for background diarization
@@ -120,114 +140,149 @@ impl QueuedDiarizationPipeline {
         request: QueuedDiarizationRequest,
     ) -> Result<QueuedDiarizationJobId, QueueError> {
         let job_id = QueuedDiarizationJobId(self.next_job_id.fetch_add(1, Ordering::Relaxed));
-        let tx = self.request_tx.as_ref().ok_or(QueueError::WorkerGone)?;
 
-        tx.send(WorkerRequest {
-            job_id,
-            file_id: request.file_id,
-            audio: request.audio,
-        })
-        .map_err(|_| QueueError::WorkerGone)?;
-
-        Ok(job_id)
-    }
-
-    /// Submit multiple files at once, guaranteeing they land in the same worker batch
-    pub fn push_batch(
-        &self,
-        requests: Vec<QueuedDiarizationRequest>,
-    ) -> Result<Vec<QueuedDiarizationJobId>, QueueError> {
-        let tx = self.request_tx.as_ref().ok_or(QueueError::WorkerGone)?;
-        let mut job_ids = Vec::with_capacity(requests.len());
-
-        for request in requests {
-            let job_id = QueuedDiarizationJobId(self.next_job_id.fetch_add(1, Ordering::Relaxed));
-            tx.send(WorkerRequest {
+        self.request_tx
+            .send(WorkerRequest {
                 job_id,
                 file_id: request.file_id,
                 audio: request.audio,
             })
             .map_err(|_| QueueError::WorkerGone)?;
-            job_ids.push(job_id);
+
+        Ok(job_id)
+    }
+}
+
+#[derive(Debug)]
+enum QueueReceiverState {
+    Running,
+    Closed,
+    WorkerPanicked(String),
+}
+
+/// Background queue receiver for diarization results
+///
+/// `recv` and `try_recv` require mutable access so the receiver can join the worker once
+/// and transition into a terminal state without interior mutability
+pub struct QueueReceiver {
+    result_rx: Receiver<QueuedDiarizationResult>,
+    worker: Option<JoinHandle<()>>,
+    state: QueueReceiverState,
+}
+
+impl QueueReceiver {
+    /// Block until the next result is available
+    ///
+    /// Returns [`QueueError::Closed`] after the worker has finished and all queued results
+    /// have been drained
+    pub fn recv(&mut self) -> Result<QueuedDiarizationResult, QueueError> {
+        if !matches!(self.state, QueueReceiverState::Running) {
+            return Err(self.terminal_error());
         }
 
-        Ok(job_ids)
+        match self.result_rx.recv() {
+            Ok(result) => Ok(result),
+            Err(_) => Err(self.join_terminal_worker()),
+        }
     }
 
-    /// Block until the next result is available
-    pub fn recv(&self) -> Result<QueuedDiarizationResult, QueueError> {
-        self.result_rx.recv().map_err(|_| QueueError::WorkerGone)
-    }
+    /// Return a result if one is ready, or `None` if the worker is still processing
+    ///
+    /// Returns [`QueueError::Closed`] after the worker has finished and all queued results
+    /// have been drained
+    pub fn try_recv(&mut self) -> Result<Option<QueuedDiarizationResult>, QueueError> {
+        if !matches!(self.state, QueueReceiverState::Running) {
+            return Err(self.terminal_error());
+        }
 
-    /// Return a result if one is ready, or None if the worker is still processing
-    pub fn try_recv(&self) -> Result<Option<QueuedDiarizationResult>, QueueError> {
         match self.result_rx.try_recv() {
             Ok(result) => Ok(Some(result)),
             Err(crossbeam_channel::TryRecvError::Empty) => Ok(None),
-            Err(crossbeam_channel::TryRecvError::Disconnected) => Err(QueueError::WorkerGone),
+            Err(crossbeam_channel::TryRecvError::Disconnected) => Err(self.join_terminal_worker()),
         }
     }
 
-    /// Close the queue and wait for the worker to finish processing all submitted jobs
-    ///
-    /// Callers should drain results via `recv` before calling this
-    pub fn finish(mut self) -> Result<(), QueueError> {
-        // close the request channel so the worker exits after draining
-        self.request_tx.take();
-
-        Self::join_worker(self.worker.take())
+    fn join_terminal_worker(&mut self) -> QueueError {
+        match join_worker(self.worker.take()) {
+            Ok(()) => {
+                self.state = QueueReceiverState::Closed;
+                QueueError::Closed
+            }
+            Err(QueueError::WorkerPanicked(message)) => {
+                self.state = QueueReceiverState::WorkerPanicked(message.clone());
+                QueueError::WorkerPanicked(message)
+            }
+            Err(err) => unreachable!("unexpected terminal queue error: {err}"),
+        }
     }
-}
 
-/// Iterator that drains results from a [`QueuedDiarizationPipeline`]
-///
-/// Created by calling `.into_iter()` on a `QueuedDiarizationPipeline`.
-/// Closes the request channel on creation so no more files can be pushed,
-/// Then yields results until the worker has finished processing all queued jobs
-pub struct QueuedDiarizationIter {
-    result_rx: Receiver<QueuedDiarizationResult>,
-    worker: Option<JoinHandle<()>>,
-}
-
-impl Iterator for QueuedDiarizationIter {
-    type Item = QueuedDiarizationResult;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.result_rx.recv() {
-            Ok(result) => Some(result),
-            Err(_) => {
-                // the worker is done, so join it for cleanup
-                let _ = QueuedDiarizationPipeline::join_worker(self.worker.take());
-                None
+    fn terminal_error(&self) -> QueueError {
+        match &self.state {
+            QueueReceiverState::Running => unreachable!("running receiver has no terminal error"),
+            QueueReceiverState::Closed => QueueError::Closed,
+            QueueReceiverState::WorkerPanicked(message) => {
+                QueueError::WorkerPanicked(message.clone())
             }
         }
     }
 }
 
-impl IntoIterator for QueuedDiarizationPipeline {
-    type Item = QueuedDiarizationResult;
-    type IntoIter = QueuedDiarizationIter;
+/// Iterator that drains results from a [`QueueReceiver`]
+///
+/// Created by calling `.into_iter()` on a [`QueueReceiver`]
+/// Yields queued results until the worker has finished processing all queued jobs
+/// If the worker panics after sending partial results, the iterator yields one terminal error
+pub struct QueueReceiverIter {
+    receiver: QueueReceiver,
+    yielded_terminal_error: bool,
+}
 
-    fn into_iter(mut self) -> Self::IntoIter {
-        // close the request channel so the worker finishes after draining
-        self.request_tx.take();
+impl Iterator for QueueReceiverIter {
+    type Item = Result<QueuedDiarizationResult, QueueError>;
 
-        QueuedDiarizationIter {
-            result_rx: self.result_rx.clone(),
-            worker: self.worker.take(),
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.yielded_terminal_error {
+            return None;
+        }
+
+        match self.receiver.recv() {
+            Ok(result) => Some(Ok(result)),
+            Err(QueueError::Closed) => None,
+            Err(err) => {
+                self.yielded_terminal_error = true;
+                Some(Err(err))
+            }
         }
     }
 }
 
-impl QueuedDiarizationPipeline {
-    fn join_worker(worker: Option<JoinHandle<()>>) -> Result<(), QueueError> {
-        if let Some(handle) = worker {
-            handle
-                .join()
-                .map_err(|err| QueueError::WorkerPanicked(format!("{err:?}")))?;
-        }
+impl IntoIterator for QueueReceiver {
+    type Item = Result<QueuedDiarizationResult, QueueError>;
+    type IntoIter = QueueReceiverIter;
 
-        Ok(())
+    fn into_iter(self) -> Self::IntoIter {
+        QueueReceiverIter {
+            receiver: self,
+            yielded_terminal_error: false,
+        }
+    }
+}
+
+fn join_worker(worker: Option<JoinHandle<()>>) -> Result<(), QueueError> {
+    if let Some(handle) = worker {
+        handle.join().map_err(QueueError::format_worker_panic)?;
+    }
+
+    Ok(())
+}
+
+fn panic_payload_message(err: Box<dyn Any + Send + 'static>) -> String {
+    match err.downcast::<String>() {
+        Ok(message) => *message,
+        Err(err) => match err.downcast::<&'static str>() {
+            Ok(message) => (*message).to_string(),
+            Err(_) => "unknown panic payload".to_string(),
+        },
     }
 }
 
@@ -287,5 +342,81 @@ fn process_batch(
                 })
                 .collect()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn receiver_reports_clean_close_after_worker_exit() {
+        let (result_tx, result_rx) = crossbeam_channel::bounded(1);
+        drop(result_tx);
+
+        let worker = std::thread::spawn(|| {});
+        let mut receiver = QueueReceiver {
+            result_rx,
+            worker: Some(worker),
+            state: QueueReceiverState::Running,
+        };
+
+        assert!(matches!(receiver.recv(), Err(QueueError::Closed)));
+        assert!(matches!(receiver.try_recv(), Err(QueueError::Closed)));
+    }
+
+    #[test]
+    fn receiver_reports_worker_panic() {
+        let (result_tx, result_rx) = crossbeam_channel::bounded(1);
+        drop(result_tx);
+
+        let worker = std::thread::spawn(|| panic!("worker exploded"));
+        let mut receiver = QueueReceiver {
+            result_rx,
+            worker: Some(worker),
+            state: QueueReceiverState::Running,
+        };
+
+        assert!(
+            matches!(receiver.recv(), Err(QueueError::WorkerPanicked(message)) if message.contains("worker exploded"))
+        );
+        assert!(
+            matches!(receiver.try_recv(), Err(QueueError::WorkerPanicked(message)) if message.contains("worker exploded"))
+        );
+    }
+
+    #[test]
+    fn iterator_yields_terminal_worker_panic_once() {
+        let (result_tx, result_rx) = crossbeam_channel::bounded(1);
+        drop(result_tx);
+
+        let worker = std::thread::spawn(|| panic!("iterator panic"));
+        let receiver = QueueReceiver {
+            result_rx,
+            worker: Some(worker),
+            state: QueueReceiverState::Running,
+        };
+        let mut iter = receiver.into_iter();
+
+        assert!(
+            matches!(iter.next(), Some(Err(QueueError::WorkerPanicked(message))) if message.contains("iterator panic"))
+        );
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn sender_reports_worker_gone_after_request_channel_closes() {
+        let (request_tx, request_rx) = crossbeam_channel::bounded::<WorkerRequest>(1);
+        drop(request_rx);
+
+        let sender = QueueSender {
+            request_tx,
+            next_job_id: Arc::new(AtomicU64::new(0)),
+        };
+
+        assert!(matches!(
+            sender.push(QueuedDiarizationRequest::new("file", Vec::new())),
+            Err(QueueError::WorkerGone)
+        ));
     }
 }
