@@ -3,6 +3,70 @@ use ndarray::{Array2, Array3};
 
 use super::SegmentationError;
 
+pub(super) struct SegmentationWindows<'a> {
+    audio: &'a [f32],
+    offsets: Vec<usize>,
+    padded: Option<Vec<f32>>,
+    window_samples: usize,
+}
+
+impl<'a> SegmentationWindows<'a> {
+    pub(super) fn collect(audio: &'a [f32], window_samples: usize, step_samples: usize) -> Self {
+        let mut offsets = Vec::new();
+        let mut offset = 0;
+        while offset + window_samples <= audio.len() {
+            offsets.push(offset);
+            offset += step_samples;
+        }
+
+        let padded = if offset < audio.len() && audio.len() > window_samples {
+            let mut padded = vec![0.0f32; window_samples];
+            let remaining = audio.len() - offset;
+            padded[..remaining].copy_from_slice(&audio[offset..]);
+            Some(padded)
+        } else {
+            None
+        };
+
+        Self {
+            audio,
+            offsets,
+            padded,
+            window_samples,
+        }
+    }
+
+    pub(super) fn total_windows(&self) -> usize {
+        self.offsets.len() + self.padded.is_some() as usize
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.total_windows() == 0
+    }
+
+    pub(super) fn window(
+        &self,
+        idx: usize,
+        context: &'static str,
+    ) -> Result<&[f32], SegmentationError> {
+        if idx < self.offsets.len() {
+            let start = self.offsets[idx];
+            return Ok(&self.audio[start..start + self.window_samples]);
+        }
+        if idx == self.offsets.len() {
+            return padded_window(&self.padded, context);
+        }
+
+        Err(SegmentationError::Invariant {
+            context,
+            message: format!(
+                "window index {idx} exceeded total window count {}",
+                self.total_windows()
+            ),
+        })
+    }
+}
+
 #[cfg(feature = "coreml")]
 pub(super) fn array3_slice<'a>(
     buffer: &'a Array3<f32>,

@@ -4,7 +4,7 @@ use ort::value::TensorRef;
 use tracing::debug;
 
 use super::*;
-use crate::inference::segmentation::tensor::padded_window;
+use crate::inference::segmentation::tensor::SegmentationWindows;
 
 impl SegmentationModel {
     /// Run segmentation on audio, streaming raw logits through a channel
@@ -16,33 +16,11 @@ impl SegmentationModel {
         audio: &[f32],
         tx: Sender<Array2<f32>>,
     ) -> Result<usize, SegmentationError> {
-        let mut offsets = Vec::new();
-        let mut offset = 0;
-
-        while offset + self.window_samples <= audio.len() {
-            offsets.push(offset);
-            offset += self.step_samples;
+        let windows = SegmentationWindows::collect(audio, self.window_samples, self.step_samples);
+        let total_windows = windows.total_windows();
+        if windows.is_empty() {
+            return Ok(0);
         }
-
-        let padded = if offset < audio.len() && audio.len() > self.window_samples {
-            let mut p = vec![0.0f32; self.window_samples];
-            let remaining = audio.len() - offset;
-            p[..remaining].copy_from_slice(&audio[offset..]);
-            Some(p)
-        } else {
-            None
-        };
-
-        let total_windows = offsets.len() + padded.is_some() as usize;
-        let win_samples = self.window_samples;
-        let window_at = |i: usize| -> &[f32] {
-            if i < offsets.len() {
-                &audio[offsets[i]..offsets[i] + win_samples]
-            } else {
-                padded_window(&padded, "streaming segmentation window")
-                    .expect("padded window checked above")
-            }
-        };
 
         let seg_start = std::time::Instant::now();
         let mut seg_infer_time = std::time::Duration::ZERO;
@@ -50,7 +28,7 @@ impl SegmentationModel {
         let mut seg_single = 0u32;
 
         let has_batched = self.primary_batched_session.is_some();
-        let zeros = vec![0.0f32; win_samples];
+        let zeros = vec![0.0f32; self.window_samples];
 
         let mut next_idx = 0;
         while next_idx < total_windows {
@@ -58,8 +36,8 @@ impl SegmentationModel {
 
             if remaining >= PRIMARY_BATCH_SIZE && has_batched {
                 let batch: Vec<&[f32]> = (next_idx..next_idx + PRIMARY_BATCH_SIZE)
-                    .map(&window_at)
-                    .collect();
+                    .map(|idx| windows.window(idx, "streaming segmentation batch"))
+                    .collect::<Result<_, _>>()?;
 
                 let t = std::time::Instant::now();
                 let results = self.run_batch(&batch)?;
@@ -73,7 +51,9 @@ impl SegmentationModel {
             }
 
             if remaining > 1 && has_batched {
-                let mut batch: Vec<&[f32]> = (next_idx..total_windows).map(&window_at).collect();
+                let mut batch: Vec<&[f32]> = (next_idx..total_windows)
+                    .map(|idx| windows.window(idx, "streaming segmentation tail batch"))
+                    .collect::<Result<_, _>>()?;
                 batch.resize(PRIMARY_BATCH_SIZE, &zeros[..]);
 
                 let t = std::time::Instant::now();
@@ -88,7 +68,8 @@ impl SegmentationModel {
             }
 
             let t = std::time::Instant::now();
-            let result = self.run_window(window_at(next_idx))?;
+            let result =
+                self.run_window(windows.window(next_idx, "streaming segmentation single")?)?;
             seg_infer_time += t.elapsed();
             seg_single += 1;
             tx.send(result)?;
@@ -113,24 +94,8 @@ impl SegmentationModel {
     ///
     /// Returns `Vec<Array2<f32>>` where each element is [frames, 7] logits
     pub fn run(&mut self, audio: &[f32]) -> Result<Vec<Array2<f32>>, ort::Error> {
-        let mut offsets = Vec::new();
-        let mut offset = 0;
-
-        while offset + self.window_samples <= audio.len() {
-            offsets.push(offset);
-            offset += self.step_samples;
-        }
-
-        let padded = if offset < audio.len() && audio.len() > self.window_samples {
-            let mut p = vec![0.0f32; self.window_samples];
-            let remaining = audio.len() - offset;
-            p[..remaining].copy_from_slice(&audio[offset..]);
-            Some(p)
-        } else {
-            None
-        };
-
-        let total_windows = offsets.len() + padded.is_some() as usize;
+        let windows = SegmentationWindows::collect(audio, self.window_samples, self.step_samples);
+        let total_windows = windows.total_windows();
         let mut results = Vec::with_capacity(total_windows);
         let mut next_idx = 0;
 
@@ -138,26 +103,17 @@ impl SegmentationModel {
             let remaining = total_windows - next_idx;
             if remaining >= PRIMARY_BATCH_SIZE && self.primary_batched_session.is_some() {
                 let batch: Vec<&[f32]> = (next_idx..next_idx + PRIMARY_BATCH_SIZE)
-                    .map(|i| {
-                        if i < offsets.len() {
-                            &audio[offsets[i]..offsets[i] + self.window_samples]
-                        } else {
-                            padded_window(&padded, "segmentation run batch window")
-                                .expect("padded window checked above")
-                        }
-                    })
-                    .collect();
+                    .map(|idx| windows.window(idx, "segmentation run batch window"))
+                    .collect::<Result<_, _>>()
+                    .map_err(|error| ort::Error::new(error.to_string()))?;
                 results.extend(self.run_batch(&batch)?);
                 next_idx += PRIMARY_BATCH_SIZE;
                 continue;
             }
 
-            let window = if next_idx < offsets.len() {
-                &audio[offsets[next_idx]..offsets[next_idx] + self.window_samples]
-            } else {
-                padded_window(&padded, "segmentation run tail window")
-                    .expect("padded window checked above")
-            };
+            let window = windows
+                .window(next_idx, "segmentation run tail window")
+                .map_err(|error| ort::Error::new(error.to_string()))?;
             results.push(self.run_window(window)?);
             next_idx += 1;
         }

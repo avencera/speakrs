@@ -1,19 +1,24 @@
 #![cfg(feature = "coreml")]
 
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::Sender;
-use ndarray::{Array2, Array3, s};
+use ndarray::Array2;
 use tracing::{debug, trace};
 
 use super::SegmentationError;
 use super::{LARGE_BATCH_SIZE, PRIMARY_BATCH_SIZE, SegmentationModel};
-use crate::inference::coreml::{CachedInputShape, SharedCoreMlModel};
+use crate::inference::coreml::SharedCoreMlModel;
 use crate::inference::segmentation::tensor::{
-    array3_slice, padded_window, segmentation_array, segmentation_array_from_slice, worker_panic,
+    SegmentationWindows, segmentation_array, segmentation_array_from_slice, worker_panic,
 };
+
+mod batch;
+mod single;
+
+use batch::ParallelBatchExecutor;
+use single::ParallelSingleExecutor;
 
 #[derive(Clone, Default)]
 pub(super) struct WorkerErrorSlot(Arc<Mutex<Option<SegmentationError>>>);
@@ -38,71 +43,7 @@ impl WorkerErrorSlot {
     }
 }
 
-struct ParallelWindows<'a> {
-    audio: &'a [f32],
-    offsets: Vec<usize>,
-    padded: Option<Vec<f32>>,
-    window_samples: usize,
-}
-
-impl<'a> ParallelWindows<'a> {
-    fn collect(audio: &'a [f32], window_samples: usize, step_samples: usize) -> Self {
-        let mut offsets = Vec::new();
-        let mut offset = 0;
-        while offset + window_samples <= audio.len() {
-            offsets.push(offset);
-            offset += step_samples;
-        }
-
-        let padded = if offset < audio.len() && audio.len() > window_samples {
-            let mut padded = vec![0.0f32; window_samples];
-            let remaining = audio.len() - offset;
-            padded[..remaining].copy_from_slice(&audio[offset..]);
-            Some(padded)
-        } else {
-            None
-        };
-
-        Self {
-            audio,
-            offsets,
-            padded,
-            window_samples,
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.total_windows() == 0
-    }
-
-    fn total_windows(&self) -> usize {
-        self.offsets.len() + self.padded.is_some() as usize
-    }
-
-    fn window<'b>(
-        &'b self,
-        idx: usize,
-        context: &'static str,
-    ) -> Result<&'b [f32], SegmentationError> {
-        if idx < self.offsets.len() {
-            let start = self.offsets[idx];
-            return Ok(&self.audio[start..start + self.window_samples]);
-        }
-        if idx == self.offsets.len() {
-            return padded_window(&self.padded, context);
-        }
-
-        Err(SegmentationError::Invariant {
-            context,
-            message: format!(
-                "window index {idx} exceeded total window count {}",
-                self.total_windows()
-            ),
-        })
-    }
-}
-
-struct ParallelProfile {
+pub(super) struct ParallelProfile {
     predict_us: AtomicU64,
     batched_calls: AtomicU64,
     batched_windows: AtomicU64,
@@ -186,7 +127,7 @@ impl ParallelProfile {
     }
 }
 
-struct BatchTask<'a> {
+pub(super) struct BatchTask<'a> {
     batch_idx: usize,
     start: usize,
     end: usize,
@@ -264,264 +205,6 @@ impl<'a> BatchTaskPlanner<'a> {
     }
 }
 
-struct ParallelBatchExecutor<'a> {
-    windows: &'a ParallelWindows<'a>,
-    tx: Sender<Array2<f32>>,
-    tasks: Vec<BatchTask<'a>>,
-    num_workers: usize,
-    window_samples: usize,
-    profile: &'a ParallelProfile,
-}
-
-impl<'a> ParallelBatchExecutor<'a> {
-    fn run(self) -> Result<(), SegmentationError> {
-        let (batch_tx, batch_rx) = crossbeam_channel::unbounded::<(usize, Vec<Array2<f32>>)>();
-
-        std::thread::scope(|scope| {
-            let merge_handle = scope.spawn(move || -> Result<(), SegmentationError> {
-                let mut next_batch = 0usize;
-                let mut pending = BTreeMap::<usize, Vec<Array2<f32>>>::new();
-
-                for (batch_idx, results) in batch_rx {
-                    pending.insert(batch_idx, results);
-                    while let Some(results) = pending.remove(&next_batch) {
-                        for result in results {
-                            self.tx.send(result)?;
-                        }
-                        next_batch += 1;
-                    }
-                }
-
-                Ok(())
-            });
-
-            let worker_error = WorkerErrorSlot::default();
-            rayon::scope(|rscope| {
-                let next_task = Arc::new(AtomicUsize::new(0));
-                let worker_count = self.tasks.len().min(self.num_workers.max(1));
-
-                for _worker_idx in 0..worker_count {
-                    let tasks = &self.tasks;
-                    let windows = self.windows;
-                    let batch_tx = batch_tx.clone();
-                    let next_task = Arc::clone(&next_task);
-                    let worker_error = worker_error.clone();
-                    let profile = self.profile;
-                    let window_samples = self.window_samples;
-
-                    rscope.spawn(move |_| {
-                        let mut scratch_by_capacity =
-                            BTreeMap::<usize, (CachedInputShape, Vec<f32>)>::new();
-
-                        loop {
-                            let task_idx = next_task.fetch_add(1, Ordering::Relaxed);
-                            let Some(task) = tasks.get(task_idx) else {
-                                break;
-                            };
-                            let actual_batch = task.end - task.start;
-                            let (cached_batch, batch_buf) = scratch_by_capacity
-                                .entry(task.batch_capacity)
-                                .or_insert_with(|| {
-                                    (
-                                        CachedInputShape::new(
-                                            "input",
-                                            &[task.batch_capacity, 1, window_samples],
-                                        ),
-                                        vec![0.0f32; task.batch_capacity * window_samples],
-                                    )
-                                });
-
-                            batch_buf.fill(0.0);
-                            for (batch_offset, window_idx) in (task.start..task.end).enumerate() {
-                                let Ok(window) =
-                                    windows.window(window_idx, "parallel segmentation batch")
-                                else {
-                                    worker_error.record(SegmentationError::Invariant {
-                                        context: "parallel segmentation batch",
-                                        message: format!(
-                                            "failed to resolve window {window_idx} for batch {}",
-                                            task.batch_idx
-                                        ),
-                                    });
-                                    return;
-                                };
-                                let dst = batch_offset * window_samples;
-                                batch_buf[dst..dst + window.len()].copy_from_slice(window);
-                            }
-
-                            let batch_start = std::time::Instant::now();
-                            let predict = task
-                                .model
-                                .predict_cached(&[(&*cached_batch, batch_buf.as_slice())])
-                                .map_err(|error| {
-                                    SegmentationError::Ort(ort::Error::new(error.to_string()))
-                                });
-                            let Ok((data, out_shape)) = predict else {
-                                worker_error.record(predict.unwrap_err());
-                                return;
-                            };
-                            let batch_us = batch_start.elapsed().as_micros() as u64;
-                            profile.record_batch(
-                                task.batch_idx,
-                                task.batch_capacity,
-                                actual_batch,
-                                batch_us,
-                            );
-
-                            let frames = out_shape[1];
-                            let classes = out_shape[2];
-                            let stride = frames * classes;
-                            let mut results = Vec::with_capacity(actual_batch);
-                            for batch_offset in 0..actual_batch {
-                                let start = batch_offset * stride;
-                                let result = segmentation_array_from_slice(
-                                    frames,
-                                    classes,
-                                    &data[start..start + stride],
-                                    "parallel segmentation batched output",
-                                );
-                                let Ok(result) = result else {
-                                    worker_error.record(result.unwrap_err());
-                                    return;
-                                };
-                                results.push(result);
-                            }
-
-                            if batch_tx.send((task.batch_idx, results)).is_err() {
-                                return;
-                            }
-                        }
-                    });
-                }
-            });
-
-            if let Some(error) = worker_error.take()? {
-                return Err(error);
-            }
-
-            drop(batch_tx);
-            merge_handle
-                .join()
-                .map_err(|_| worker_panic("parallel segmentation merge"))??;
-            Ok::<(), SegmentationError>(())
-        })
-    }
-}
-
-struct ParallelSingleExecutor<'a> {
-    windows: &'a ParallelWindows<'a>,
-    tx: Sender<Array2<f32>>,
-    model: &'a SharedCoreMlModel,
-    num_workers: usize,
-    window_samples: usize,
-    profile: &'a ParallelProfile,
-}
-
-impl<'a> ParallelSingleExecutor<'a> {
-    fn run(self) -> Result<(), SegmentationError> {
-        let total_windows = self.windows.total_windows();
-        let chunk_size = total_windows.div_ceil(self.num_workers);
-        let actual_workers = total_windows.div_ceil(chunk_size).min(self.num_workers);
-
-        let mut worker_txs = Vec::with_capacity(actual_workers);
-        let mut worker_rxs = Vec::with_capacity(actual_workers);
-        for _ in 0..actual_workers {
-            let (worker_tx, worker_rx) = crossbeam_channel::unbounded::<Array2<f32>>();
-            worker_txs.push(worker_tx);
-            worker_rxs.push(worker_rx);
-        }
-
-        std::thread::scope(|scope| {
-            let merge_handle = scope.spawn(move || -> Result<(), SegmentationError> {
-                for worker_rx in &worker_rxs {
-                    for result in worker_rx {
-                        self.tx.send(result)?;
-                    }
-                }
-                Ok(())
-            });
-
-            let worker_error = WorkerErrorSlot::default();
-            rayon::scope(|rscope| {
-                for (worker_idx, worker_tx) in worker_txs.into_iter().enumerate() {
-                    let start = worker_idx * chunk_size;
-                    let end = (start + chunk_size).min(total_windows);
-                    let windows = self.windows;
-                    let model = self.model;
-                    let worker_error = worker_error.clone();
-                    let profile = self.profile;
-                    let window_samples = self.window_samples;
-
-                    rscope.spawn(move |_| {
-                        let cached_shape = CachedInputShape::new("input", &[1, 1, window_samples]);
-                        let mut buffer = Array3::<f32>::zeros((1, 1, window_samples));
-
-                        for window_idx in start..end {
-                            let Ok(window) =
-                                windows.window(window_idx, "parallel segmentation worker")
-                            else {
-                                worker_error.record(SegmentationError::Invariant {
-                                    context: "parallel segmentation worker",
-                                    message: format!(
-                                        "failed to resolve window {window_idx} for worker {worker_idx}"
-                                    ),
-                                });
-                                return;
-                            };
-
-                            buffer.fill(0.0);
-                            buffer
-                                .slice_mut(s![0, 0, ..window.len()])
-                                .assign(&ndarray::ArrayView1::from(window));
-                            let input_data =
-                                array3_slice(&buffer, "parallel segmentation worker input");
-                            let Ok(input_data) = input_data else {
-                                worker_error.record(input_data.unwrap_err());
-                                return;
-                            };
-
-                            let predict_start = std::time::Instant::now();
-                            let predict = model.predict_cached(&[(&cached_shape, input_data)]).map_err(
-                                |error| SegmentationError::Ort(ort::Error::new(error.to_string())),
-                            );
-                            let Ok((data, out_shape)) = predict else {
-                                worker_error.record(predict.unwrap_err());
-                                return;
-                            };
-                            let predict_us = predict_start.elapsed().as_micros() as u64;
-                            profile.record_single(worker_idx, predict_us);
-
-                            let result = segmentation_array(
-                                out_shape[1],
-                                out_shape[2],
-                                data,
-                                "parallel segmentation worker output",
-                            );
-                            let Ok(result) = result else {
-                                worker_error.record(result.unwrap_err());
-                                return;
-                            };
-
-                            if worker_tx.send(result).is_err() {
-                                return;
-                            }
-                        }
-                    });
-                }
-            });
-
-            if let Some(error) = worker_error.take()? {
-                return Err(error);
-            }
-
-            merge_handle
-                .join()
-                .map_err(|_| worker_panic("parallel segmentation merge"))??;
-            Ok::<(), SegmentationError>(())
-        })
-    }
-}
-
 impl SegmentationModel {
     /// Run segmentation with N parallel workers, each with a fresh CoreML model
     ///
@@ -534,7 +217,7 @@ impl SegmentationModel {
         num_workers: usize,
         warm_start_target_windows: Option<usize>,
     ) -> Result<usize, SegmentationError> {
-        let windows = ParallelWindows::collect(audio, self.window_samples, self.step_samples);
+        let windows = SegmentationWindows::collect(audio, self.window_samples, self.step_samples);
         let total_windows = windows.total_windows();
         if windows.is_empty() {
             return Ok(0);
