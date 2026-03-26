@@ -3,7 +3,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use color_eyre::eyre::{Result, bail};
+use color_eyre::eyre::{Result, bail, eyre};
 
 /// Run a command, inheriting stdio, and bail on non-zero exit
 pub fn run_cmd(cmd: &mut Command) -> Result<()> {
@@ -22,7 +22,12 @@ pub fn run_cmd(cmd: &mut Command) -> Result<()> {
 pub fn tee_cmd(cmd: &mut Command, path: &Path) -> Result<()> {
     cmd.stdout(Stdio::piped());
     let mut child = cmd.spawn()?;
-    let stdout = child.stdout.take().expect("stdout was piped");
+    let stdout = child.stdout.take().ok_or_else(|| {
+        eyre!(
+            "stdout was not piped for {}",
+            cmd.get_program().to_string_lossy()
+        )
+    })?;
     let mut file = File::create(path)?;
     let reader = BufReader::new(stdout);
 
@@ -45,11 +50,9 @@ pub fn tee_cmd(cmd: &mut Command, path: &Path) -> Result<()> {
 
 /// Resolve the project root (parent of xtask/)
 pub fn project_root() -> PathBuf {
-    let dir = env!("CARGO_MANIFEST_DIR");
-    PathBuf::from(dir)
-        .parent()
-        .expect("xtask should be in a subdirectory of the project root")
-        .to_path_buf()
+    let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    root.pop();
+    root
 }
 
 /// Locate the FluidAudio checkout, checking FLUIDAUDIO_PATH env var then the default cache location

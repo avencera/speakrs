@@ -1,5 +1,3 @@
-use std::process::Command;
-
 use color_eyre::eyre::{Result, bail, ensure};
 use ndarray::{Array3, s};
 use speakrs::PowersetMapping;
@@ -37,12 +35,12 @@ pub fn run(mode: &str, wav_path: &str, iterations: usize, log_every: usize) -> R
         "expected 16kHz WAV, got {sample_rate}Hz"
     );
 
-    eprintln!("start rss_mb={:.1}", rss_mb());
+    eprintln!("start rss_mb={:.1}", profile_support::rss_mb()?);
     let raw_windows = seg_model.run(&samples)?;
     eprintln!(
         "after_segmentation num_windows={} rss_mb={:.1}",
         raw_windows.len(),
-        rss_mb()
+        profile_support::rss_mb()?
     );
 
     if mode == "seg-only" {
@@ -55,7 +53,7 @@ pub fn run(mode: &str, wav_path: &str, iterations: usize, log_every: usize) -> R
         segmentations.shape()[0],
         segmentations.shape()[1],
         segmentations.shape()[2],
-        rss_mb()
+        profile_support::rss_mb()?
     );
 
     match mode {
@@ -65,14 +63,14 @@ pub fn run(mode: &str, wav_path: &str, iterations: usize, log_every: usize) -> R
             &samples,
             &segmentations,
             log_every,
-        ),
+        )?,
         "embed-store" => run_embedding_store(
             &seg_model,
             &mut emb_model,
             &samples,
             &segmentations,
             log_every,
-        ),
+        )?,
         "embed-repeat" => run_embedding_repeat(
             &seg_model,
             &mut emb_model,
@@ -80,7 +78,7 @@ pub fn run(mode: &str, wav_path: &str, iterations: usize, log_every: usize) -> R
             &segmentations,
             iterations,
             log_every,
-        ),
+        )?,
         _ => bail!("unknown mode: {mode}"),
     }
 
@@ -93,7 +91,7 @@ fn run_embedding_stream(
     audio: &[f32],
     segmentations: &Array3<f32>,
     log_every: usize,
-) {
+) -> Result<()> {
     let num_chunks = segmentations.shape()[0];
     let num_speakers = segmentations.shape()[2];
     for chunk_idx in 0..num_chunks {
@@ -107,17 +105,13 @@ fn run_embedding_stream(
             let _ = emb_model
                 .embed_masked(
                     chunk_audio,
-                    profile_support::array1_slice(&mask, "profile stages stream mask")
-                        .expect("mask should be contiguous"),
-                    Some(
-                        profile_support::array1_slice(
-                            &clean_mask,
-                            "profile stages stream clean mask",
-                        )
-                        .expect("clean mask should be contiguous"),
-                    ),
+                    profile_support::array1_slice(&mask, "profile stages stream mask")?,
+                    Some(profile_support::array1_slice(
+                        &clean_mask,
+                        "profile stages stream clean mask",
+                    )?),
                 )
-                .expect("embedding failed");
+                .map_err(|error| color_eyre::eyre::eyre!("embedding failed: {error}"))?;
         }
 
         if (chunk_idx + 1) % log_every == 0 || chunk_idx + 1 == num_chunks {
@@ -125,10 +119,12 @@ fn run_embedding_stream(
                 "embed_stream chunk={}/{} rss_mb={:.1}",
                 chunk_idx + 1,
                 num_chunks,
-                rss_mb()
+                profile_support::rss_mb()?
             );
         }
     }
+
+    Ok(())
 }
 
 fn run_embedding_store(
@@ -137,7 +133,7 @@ fn run_embedding_store(
     audio: &[f32],
     segmentations: &Array3<f32>,
     log_every: usize,
-) {
+) -> Result<()> {
     let num_chunks = segmentations.shape()[0];
     let num_speakers = segmentations.shape()[2];
     let mut embeddings = Array3::<f32>::from_elem((num_chunks, num_speakers, 256), f32::NAN);
@@ -153,17 +149,13 @@ fn run_embedding_store(
             let embedding = emb_model
                 .embed_masked(
                     chunk_audio,
-                    profile_support::array1_slice(&mask, "profile stages store mask")
-                        .expect("mask should be contiguous"),
-                    Some(
-                        profile_support::array1_slice(
-                            &clean_mask,
-                            "profile stages store clean mask",
-                        )
-                        .expect("clean mask should be contiguous"),
-                    ),
+                    profile_support::array1_slice(&mask, "profile stages store mask")?,
+                    Some(profile_support::array1_slice(
+                        &clean_mask,
+                        "profile stages store clean mask",
+                    )?),
                 )
-                .expect("embedding failed");
+                .map_err(|error| color_eyre::eyre::eyre!("embedding failed: {error}"))?;
             embeddings
                 .slice_mut(s![chunk_idx, speaker_idx, ..])
                 .assign(&embedding);
@@ -174,7 +166,7 @@ fn run_embedding_store(
                 "embed_store chunk={}/{} rss_mb={:.1}",
                 chunk_idx + 1,
                 num_chunks,
-                rss_mb()
+                profile_support::rss_mb()?
             );
         }
     }
@@ -184,11 +176,12 @@ fn run_embedding_store(
         embeddings.shape()[0],
         embeddings.shape()[1],
         embeddings.shape()[2],
-        rss_mb()
+        profile_support::rss_mb()?
     );
     let finite_count = embeddings.iter().filter(|value| value.is_finite()).count();
     let total_count = embeddings.len();
     eprintln!("embed_store finite={finite_count}/{total_count}");
+    Ok(())
 }
 
 fn run_embedding_repeat(
@@ -198,7 +191,7 @@ fn run_embedding_repeat(
     segmentations: &Array3<f32>,
     iterations: usize,
     log_every: usize,
-) {
+) -> Result<()> {
     let chunk_audio = profile_support::chunk_audio(audio, seg_model, 0);
     let chunk_segmentations = segmentations.slice(s![0, .., ..]);
     let clean_masks = profile_support::clean_masks(&chunk_segmentations);
@@ -212,35 +205,22 @@ fn run_embedding_repeat(
         let _ = emb_model
             .embed_masked(
                 chunk_audio,
-                profile_support::array1_slice(&mask, "profile stages repeat mask")
-                    .expect("mask should be contiguous"),
-                Some(
-                    profile_support::array1_slice(&clean_mask, "profile stages repeat clean mask")
-                        .expect("clean mask should be contiguous"),
-                ),
+                profile_support::array1_slice(&mask, "profile stages repeat mask")?,
+                Some(profile_support::array1_slice(
+                    &clean_mask,
+                    "profile stages repeat clean mask",
+                )?),
             )
-            .expect("embedding failed");
+            .map_err(|error| color_eyre::eyre::eyre!("embedding failed: {error}"))?;
 
         if (iteration + 1) % log_every == 0 || iteration + 1 == iterations {
             eprintln!(
                 "embed_repeat iter={}/{} rss_mb={:.1}",
                 iteration + 1,
                 iterations,
-                rss_mb()
+                profile_support::rss_mb()?
             );
         }
     }
-}
-
-fn rss_mb() -> f64 {
-    let pid = std::process::id().to_string();
-    let output = Command::new("ps")
-        .args(["-o", "rss=", "-p", &pid])
-        .output()
-        .expect("failed to read rss from ps");
-    let rss_kb = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<f64>()
-        .unwrap_or(0.0);
-    rss_kb / 1024.0
+    Ok(())
 }

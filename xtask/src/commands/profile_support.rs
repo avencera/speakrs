@@ -1,3 +1,5 @@
+use std::process::Command;
+
 use color_eyre::eyre::{Result, eyre};
 use ndarray::{Array1, Array2, Array3, ArrayView2, s};
 use speakrs::PowersetMapping;
@@ -65,4 +67,16 @@ pub(crate) fn array1_slice<'a>(array: &'a Array1<f32>, context: &str) -> Result<
     array
         .as_slice()
         .ok_or_else(|| eyre!("{context}: array was not contiguous"))
+}
+
+pub(crate) fn rss_mb() -> Result<f64> {
+    let pid = std::process::id().to_string();
+    let output = Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid])
+        .output()?;
+    let rss_kb = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<f64>()
+        .unwrap_or(0.0);
+    Ok(rss_kb / 1024.0)
 }

@@ -1,6 +1,3 @@
-use std::path::{Path, PathBuf};
-use std::process::Command;
-
 use color_eyre::eyre::{Result, bail, ensure};
 use ndarray::s;
 use ort::ep;
@@ -10,6 +7,7 @@ use ort::value::{Tensor, TensorRef};
 use speakrs::PowersetMapping;
 use speakrs::inference::SegmentationModel;
 use speakrs::pipeline::SEGMENTATION_STEP_SECONDS;
+use std::path::{Path, PathBuf};
 
 use crate::commands::profile_support;
 use crate::wav;
@@ -61,7 +59,7 @@ pub fn run(
         model_path.unwrap_or_else(|| models_dir.join("wespeaker-voxceleb-resnet34.onnx"));
     let mut session = build_embedding_session(&resolved_model_path, ort_defaults)?;
 
-    eprintln!("start rss_mb={:.1}", rss_mb());
+    eprintln!("start rss_mb={:.1}", profile_support::rss_mb()?);
     let output_name = session.outputs()[0].name().to_owned();
     let run_options = RunOptions::new()
         .map_err(|e| color_eyre::eyre::eyre!("{e}"))?
@@ -108,13 +106,13 @@ pub fn run(
                 &waveform_buffer,
                 &weights_buffer,
                 Some(&run_options),
-            );
+            )?;
             if (iteration + 1) % log_every == 0 || iteration + 1 == iterations {
                 eprintln!(
                     "mode={mode} iter={}/{} rss_mb={:.1}",
                     iteration + 1,
                     iterations,
-                    rss_mb()
+                    profile_support::rss_mb()?
                 );
             }
         }
@@ -155,7 +153,7 @@ pub fn run(
                     &waveform_buffer,
                     &weights_buffer,
                     Some(&run_options),
-                );
+                )?;
             }
 
             if (chunk_idx + 1) % log_every == 0 || chunk_idx + 1 == num_chunks {
@@ -163,7 +161,7 @@ pub fn run(
                     "mode={mode} chunk={}/{} rss_mb={:.1}",
                     chunk_idx + 1,
                     num_chunks,
-                    rss_mb()
+                    profile_support::rss_mb()?
                 );
             }
         }
@@ -208,7 +206,7 @@ pub fn run(
                         &mut session,
                         &waveform_buffer.slice(s![..batch_fill, .., ..]).to_owned(),
                         &weights_buffer.slice(s![..batch_fill, ..]).to_owned(),
-                    );
+                    )?;
                     batch_fill = 0;
                 }
             }
@@ -219,14 +217,14 @@ pub fn run(
                         &mut session,
                         &waveform_buffer.slice(s![..batch_fill, .., ..]).to_owned(),
                         &weights_buffer.slice(s![..batch_fill, ..]).to_owned(),
-                    );
+                    )?;
                     batch_fill = 0;
                 }
                 eprintln!(
                     "mode={mode} chunk={}/{} rss_mb={:.1}",
                     chunk_idx + 1,
                     num_chunks,
-                    rss_mb()
+                    profile_support::rss_mb()?
                 );
             }
         }
@@ -271,66 +269,53 @@ fn run_one_embedding(
     waveform_buffer: &ndarray::Array3<f32>,
     weights_buffer: &ndarray::Array2<f32>,
     run_options: Option<&RunOptions<ort::session::HasSelectedOutputs>>,
-) {
+) -> Result<()> {
     match mode {
         "borrow" | "stream-borrow" => {
-            let waveform = TensorRef::from_array_view(waveform_buffer.view())
-                .expect("failed to build waveform tensor");
-            let weights = TensorRef::from_array_view(weights_buffer.view())
-                .expect("failed to build weights tensor");
+            let waveform = TensorRef::from_array_view(waveform_buffer.view()).map_err(ort_err)?;
+            let weights = TensorRef::from_array_view(weights_buffer.view()).map_err(ort_err)?;
             let outputs = session
                 .run(ort::inputs!["waveform" => waveform, "weights" => weights])
-                .expect("embedding inference failed");
-            let _ = outputs[0]
-                .try_extract_tensor::<f32>()
-                .expect("failed to extract output");
+                .map_err(ort_err)?;
+            let _ = outputs[0].try_extract_tensor::<f32>().map_err(ort_err)?;
         }
         "owned" | "stream-owned" => {
-            let waveform = Tensor::from_array(waveform_buffer.clone())
-                .expect("failed to build waveform tensor");
-            let weights =
-                Tensor::from_array(weights_buffer.clone()).expect("failed to build weights tensor");
+            let waveform = Tensor::from_array(waveform_buffer.clone()).map_err(ort_err)?;
+            let weights = Tensor::from_array(weights_buffer.clone()).map_err(ort_err)?;
             let outputs = session
                 .run(ort::inputs!["waveform" => waveform, "weights" => weights])
-                .expect("embedding inference failed");
-            let _ = outputs[0]
-                .try_extract_tensor::<f32>()
-                .expect("failed to extract output");
+                .map_err(ort_err)?;
+            let _ = outputs[0].try_extract_tensor::<f32>().map_err(ort_err)?;
         }
         "prealloc" | "stream-prealloc" => {
-            let waveform = TensorRef::from_array_view(waveform_buffer.view())
-                .expect("failed to build waveform tensor");
-            let weights = TensorRef::from_array_view(weights_buffer.view())
-                .expect("failed to build weights tensor");
+            let waveform = TensorRef::from_array_view(waveform_buffer.view()).map_err(ort_err)?;
+            let weights = TensorRef::from_array_view(weights_buffer.view()).map_err(ort_err)?;
             let outputs = session
                 .run_with_options(
                     ort::inputs!["waveform" => waveform, "weights" => weights],
-                    run_options.expect("missing run options"),
+                    run_options.ok_or_else(|| color_eyre::eyre::eyre!("missing run options"))?,
                 )
-                .expect("embedding inference failed");
-            let _ = outputs[0]
-                .try_extract_tensor::<f32>()
-                .expect("failed to extract output");
+                .map_err(ort_err)?;
+            let _ = outputs[0].try_extract_tensor::<f32>().map_err(ort_err)?;
         }
         _ => unreachable!("unknown mode"),
     }
+
+    Ok(())
 }
 
 fn run_batched_embedding(
     session: &mut Session,
     waveform_buffer: &ndarray::Array3<f32>,
     weights_buffer: &ndarray::Array2<f32>,
-) {
-    let waveform = TensorRef::from_array_view(waveform_buffer.view())
-        .expect("failed to build waveform tensor");
-    let weights =
-        TensorRef::from_array_view(weights_buffer.view()).expect("failed to build weights tensor");
+) -> Result<()> {
+    let waveform = TensorRef::from_array_view(waveform_buffer.view()).map_err(ort_err)?;
+    let weights = TensorRef::from_array_view(weights_buffer.view()).map_err(ort_err)?;
     let outputs = session
         .run(ort::inputs!["waveform" => waveform, "weights" => weights])
-        .expect("embedding inference failed");
-    let _ = outputs[0]
-        .try_extract_tensor::<f32>()
-        .expect("failed to extract output");
+        .map_err(ort_err)?;
+    let _ = outputs[0].try_extract_tensor::<f32>().map_err(ort_err)?;
+    Ok(())
 }
 
 fn select_mask<'a>(
@@ -354,17 +339,4 @@ fn select_mask<'a>(
     } else {
         mask
     }
-}
-
-fn rss_mb() -> f64 {
-    let pid = std::process::id().to_string();
-    let output = Command::new("ps")
-        .args(["-o", "rss=", "-p", &pid])
-        .output()
-        .expect("failed to read rss from ps");
-    let rss_kb = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<f64>()
-        .unwrap_or(0.0);
-    rss_kb / 1024.0
 }
