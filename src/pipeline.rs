@@ -1,8 +1,21 @@
 mod config;
-pub use config::*;
+pub(crate) use config::MIN_SPEAKER_ACTIVITY;
+pub use config::{
+    COREML_SEGMENTATION_STEP_SECONDS, CUDA_SEGMENTATION_STEP_SECONDS,
+    FAST_SEGMENTATION_STEP_SECONDS, FRAME_DURATION_SECONDS, FRAME_STEP_SECONDS, PipelineConfig,
+    ReconstructMethod, RuntimeConfig, SEGMENTATION_STEP_SECONDS, SEGMENTATION_WINDOW_SECONDS,
+    segmentation_step_seconds,
+};
 
 mod types;
-pub use types::*;
+pub(crate) use types::FrameActivations;
+pub use types::{
+    BatchInput, ChunkEmbeddings, ChunkSpeakerClusters, DecodedSegmentations, DiarizationResult,
+    DiscreteDiarization, InferenceArtifacts, PipelineError, SpeakerCountTrack,
+};
+use types::{ChunkLayout, EmbeddingPath, InferencePath, RawSegmentationWindows};
+#[cfg(test)]
+use types::{chunk_audio_raw, chunk_start_frames, total_output_frames};
 
 pub(crate) mod clustering;
 #[cfg(test)]
@@ -10,7 +23,7 @@ use clustering::mark_inactive_speakers;
 pub(crate) use clustering::{clean_masks, select_speaker_weights, write_speaker_mask_to_slice};
 
 mod concurrent;
-use concurrent::*;
+use concurrent::ConcurrentEmbeddingRunner;
 
 mod post_inference;
 pub use post_inference::post_inference;
@@ -19,10 +32,13 @@ pub use post_inference::post_inference;
 mod chunk_embedding;
 
 mod builder;
-pub use builder::*;
+pub use builder::PipelineBuilder;
 
 mod queued;
-pub use queued::*;
+pub use queued::{
+    QueueError, QueuedDiarizationIter, QueuedDiarizationJobId, QueuedDiarizationPipeline,
+    QueuedDiarizationRequest, QueuedDiarizationResult,
+};
 
 #[cfg(test)]
 mod tests;

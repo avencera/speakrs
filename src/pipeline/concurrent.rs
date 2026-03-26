@@ -4,8 +4,11 @@ use tracing::{info, trace};
 use crate::inference::embedding::EmbeddingModel;
 use crate::powerset::PowersetMapping;
 
-use super::config::*;
-use super::types::*;
+use super::config::MIN_SPEAKER_ACTIVITY;
+use super::types::{
+    Array3Writer, EmbeddingStorage, PendingEmbedding, PendingSplitEmbedding, PipelineError,
+    chunk_audio_raw, flush_masked, flush_split,
+};
 use super::{clean_masks, select_speaker_weights, write_speaker_mask_to_slice};
 
 pub(super) struct ConcurrentEmbeddingResult {
@@ -20,7 +23,7 @@ impl ConcurrentEmbeddingResult {
     }
 }
 
-/// Compute total window count matching streaming segmentation (segmentation.rs:596-610).
+/// Compute total window count matching the streaming segmentation sliding-window logic
 /// Includes the zero-padded tail window. Returns 0 when audio is shorter than one window
 fn streaming_total_windows(audio_len: usize, window_samples: usize, step_samples: usize) -> usize {
     let full_windows = if audio_len >= window_samples {

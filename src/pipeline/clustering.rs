@@ -7,8 +7,8 @@ use crate::clustering::vbx::cluster_vbx;
 use crate::inference::embedding::should_use_clean_mask;
 use crate::utils::cosine_similarity;
 
-use super::config::*;
-use super::types::*;
+use super::config::{MIN_SPEAKER_ACTIVITY, PipelineConfig};
+use super::types::{ChunkEmbeddings, ChunkSpeakerClusters, DecodedSegmentations};
 
 pub(super) struct TrainingEmbeddings(pub Array2<f32>);
 
