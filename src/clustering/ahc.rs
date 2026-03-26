@@ -60,12 +60,12 @@ fn flat_clusters(observations: usize, steps: &[Step<f32>], threshold: f32) -> Ve
     }
 
     let total_nodes = observations + steps.len();
-    let mut children = vec![None; total_nodes];
+    let mut children = Vec::with_capacity(steps.len());
     let mut heights = vec![f32::INFINITY; total_nodes];
 
     for (step_idx, step) in steps.iter().enumerate() {
         let node_idx = observations + step_idx;
-        children[node_idx] = Some((step.cluster1, step.cluster2));
+        children.push((step.cluster1, step.cluster2));
         heights[node_idx] = step.dissimilarity;
     }
 
@@ -88,7 +88,7 @@ fn assign_flat_labels(
     node_idx: usize,
     observations: usize,
     threshold: f32,
-    children: &[Option<(usize, usize)>],
+    children: &[(usize, usize)],
     heights: &[f32],
     labels: &mut [usize],
     next_label: &mut usize,
@@ -105,7 +105,7 @@ fn assign_flat_labels(
         return;
     }
 
-    let (left, right) = child_pair(children, node_idx);
+    let (left, right) = child_pair(children, observations, node_idx);
     assign_flat_labels(
         left,
         observations,
@@ -129,7 +129,7 @@ fn assign_flat_labels(
 fn label_subtree(
     node_idx: usize,
     observations: usize,
-    children: &[Option<(usize, usize)>],
+    children: &[(usize, usize)],
     labels: &mut [usize],
     label: usize,
 ) {
@@ -138,13 +138,17 @@ fn label_subtree(
         return;
     }
 
-    let (left, right) = child_pair(children, node_idx);
+    let (left, right) = child_pair(children, observations, node_idx);
     label_subtree(left, observations, children, labels, label);
     label_subtree(right, observations, children, labels, label);
 }
 
-fn child_pair(children: &[Option<(usize, usize)>], node_idx: usize) -> (usize, usize) {
-    children[node_idx].expect("ahc merge node must have child indices")
+fn child_pair(children: &[(usize, usize)], observations: usize, node_idx: usize) -> (usize, usize) {
+    debug_assert!(
+        node_idx >= observations,
+        "child_pair should only be called for merge nodes"
+    );
+    children[node_idx - observations]
 }
 
 #[cfg(test)]

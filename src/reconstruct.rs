@@ -83,9 +83,9 @@ impl<'a> Reconstructor<'a> {
     }
 
     pub(crate) fn frame_activations(&self, speaker_count: &SpeakerCountTrack) -> FrameActivations {
-        let hard_clusters = self
-            .hard_clusters
-            .expect("frame_activations requires hard clusters");
+        let Some(hard_clusters) = self.hard_clusters else {
+            return FrameActivations(Array2::zeros((speaker_count.len(), 0)));
+        };
         let num_chunks = self.segmentations.shape()[0];
         let num_frames = self.segmentations.shape()[1];
         let num_clusters = hard_clusters
