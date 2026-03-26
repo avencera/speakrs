@@ -1,7 +1,7 @@
 use ndarray::{Array1, s};
 use ort::value::TensorRef;
 
-use super::*;
+use super::{EmbeddingModel, select_mask};
 
 impl EmbeddingModel {
     /// Extract a speaker embedding from raw audio with a uniform mask

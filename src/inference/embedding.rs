@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 #[cfg(feature = "coreml")]
-use crate::inference::coreml::{CachedInputShape, CoreMlModel, GpuPrecision, SharedCoreMlModel};
-use crate::inference::{ExecutionMode, ModelLoadError, ensure_ort_ready};
+use crate::inference::coreml::{CachedInputShape, CoreMlModel, SharedCoreMlModel};
+use crate::inference::{ExecutionMode, ModelLoadError};
 use ndarray::{Array2, Array3, s};
 #[cfg(feature = "coreml")]
 use objc2_core_ml::MLComputeUnits;

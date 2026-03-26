@@ -1,10 +1,18 @@
 #![cfg(feature = "coreml")]
 
+use std::path::Path;
 use std::sync::Arc;
 
 use objc2_core_ml::MLComputeUnits;
 
-use super::*;
+use crate::inference::ExecutionMode;
+use crate::inference::coreml::{CachedInputShape, CoreMlModel, GpuPrecision, SharedCoreMlModel};
+
+use super::super::{
+    ChunkEmbeddingSession, ChunkSessionSpec, EmbeddingModel, FBANK_FEATURES, MASK_FRAMES,
+    fp32_coreml_path, split_fbank_batched_model_path, split_fbank_model_path,
+    split_tail_model_path,
+};
 
 impl EmbeddingModel {
     pub(in crate::inference::embedding) fn load_native_tail(

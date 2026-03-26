@@ -2,8 +2,10 @@ use ndarray::{Array2, s};
 use ort::value::TensorRef;
 
 #[cfg(feature = "coreml")]
+use super::PRIMARY_BATCH_SIZE;
+#[cfg(feature = "coreml")]
 use super::tensor::array3_slice;
-use super::*;
+use super::{EmbeddingModel, FBANK_BATCH_SIZE, array2_from_shape_vec};
 
 impl EmbeddingModel {
     /// Compute fbank features for a single audio chunk via the split fbank model

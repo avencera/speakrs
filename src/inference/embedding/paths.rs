@@ -28,7 +28,6 @@ pub(super) fn split_tail_model_path(model_path: &Path, batch_size: usize) -> Pat
     }
 }
 
-#[allow(dead_code)]
 pub(super) fn multi_mask_model_path(model_path: &Path, batch_size: usize) -> Option<PathBuf> {
     if batch_size == 1 {
         Some(model_path.with_file_name("wespeaker-multimask-tail.onnx"))

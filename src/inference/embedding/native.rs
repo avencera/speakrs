@@ -2,8 +2,14 @@
 
 use std::sync::Arc;
 
-use super::*;
 use ndarray::Array2;
+
+use crate::inference::coreml::{CoreMlModel, SharedCoreMlModel};
+
+use super::{
+    CHUNK_SPEAKER_BATCH_SIZE, ChunkEmbeddingSession, ChunkResourceBundle, ChunkSessionInfo,
+    EmbeddingModel, PRIMARY_BATCH_SIZE, array2_from_shape_vec,
+};
 
 mod loaders;
 

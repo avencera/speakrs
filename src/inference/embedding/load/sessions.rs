@@ -1,6 +1,26 @@
 use std::path::Path;
 
-use super::*;
+#[cfg(feature = "coreml")]
+use std::sync::Arc;
+
+use ndarray::{Array2, Array3};
+#[cfg(feature = "coreml")]
+use objc2_core_ml::MLComputeUnits;
+use ort::session::{HasSelectedOutputs, RunOptions, Session};
+
+#[cfg(feature = "coreml")]
+use crate::inference::coreml::{CachedInputShape, CoreMlModel, SharedCoreMlModel};
+use crate::inference::{ExecutionMode, ModelLoadError};
+
+use super::super::{
+    CHUNK_SPEAKER_BATCH_SIZE, EmbeddingBuffers, EmbeddingMeta, EmbeddingModel, FBANK_BATCH_SIZE,
+    FBANK_FEATURES, FBANK_FRAMES, MASK_FRAMES, MULTI_MASK_BATCH_SIZE, NUM_SPEAKERS,
+    OrtEmbeddingState, PRIMARY_BATCH_SIZE, batched_model_path, multi_mask_model_path,
+    preallocated_run_options, read_min_num_samples, split_fbank_batched_model_path,
+    split_fbank_model_path, split_tail_model_path,
+};
+#[cfg(feature = "coreml")]
+use super::super::{ChunkEmbeddingSession, ChunkSessionSpec, CoreMlEmbeddingState};
 
 pub(super) struct LoadedOrtSessions {
     session: Session,

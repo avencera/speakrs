@@ -3,7 +3,10 @@ use ort::value::TensorRef;
 
 #[cfg(feature = "coreml")]
 use super::tensor::{array2_slice, array3_slice};
-use super::*;
+use super::{
+    CHUNK_SPEAKER_BATCH_SIZE, EmbeddingModel, FBANK_FEATURES, FBANK_FRAMES, array1_slice,
+    array2_from_shape_vec, array3_slice_mut, select_mask, should_use_clean_mask,
+};
 
 impl EmbeddingModel {
     /// Extract per-speaker embeddings for one audio chunk using segmentation masks
