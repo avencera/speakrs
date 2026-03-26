@@ -133,14 +133,14 @@ fn mlmodelc_files(name: &str) -> Vec<String> {
 
 #[cfg(feature = "online")]
 fn required_files(mode: ExecutionMode) -> Vec<String> {
-    let mut files: Vec<String> = PLDA_FILES.iter().map(|file| (*file).to_string()).collect();
+    let mut files: Vec<String> = PLDA_FILES.iter().map(|s| s.to_string()).collect();
 
     match mode {
         ExecutionMode::Cpu => {
-            files.extend(ONNX_FILES.iter().map(|file| (*file).to_string()));
+            files.extend(ONNX_FILES.iter().map(|s| s.to_string()));
         }
         ExecutionMode::Cuda | ExecutionMode::CudaFast => {
-            files.extend(ONNX_FILES.iter().map(|file| (*file).to_string()));
+            files.extend(ONNX_FILES.iter().map(|s| s.to_string()));
             // split models for multi-mask embedding (CPU fbank + GPU multi-mask)
             files.push("wespeaker-fbank.onnx".to_string());
             files.push("wespeaker-fbank-b32.onnx".to_string());
