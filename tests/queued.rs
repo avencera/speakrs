@@ -1,9 +1,10 @@
 use std::collections::HashMap;
+use std::thread;
 
 use speakrs::inference::ExecutionMode;
 use speakrs::pipeline::{
-    OwnedDiarizationPipeline, PipelineBuilder, PipelineConfig, QueuedDiarizationRequest,
-    ReconstructMethod,
+    OwnedDiarizationPipeline, PipelineBuilder, PipelineConfig, QueueError,
+    QueuedDiarizationRequest, ReconstructMethod,
 };
 
 mod support;
@@ -40,151 +41,167 @@ fn config_candidates() -> Vec<PipelineConfig> {
 #[test]
 fn queued_basic_round_trip() {
     let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
-    let Some(queue) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
+    let Some((tx, mut rx)) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
         return;
     };
 
-    queue
-        .push(QueuedDiarizationRequest::new("file_a", samples.clone()))
+    tx.push(QueuedDiarizationRequest::new("file_a", samples.clone()))
         .unwrap();
-    queue
-        .push(QueuedDiarizationRequest::new("file_b", samples))
+    tx.push(QueuedDiarizationRequest::new("file_b", samples))
         .unwrap();
+    drop(tx);
 
-    let r1 = queue.recv().unwrap();
-    let r2 = queue.recv().unwrap();
+    let r1 = rx.recv().unwrap();
+    let r2 = rx.recv().unwrap();
 
     assert!(r1.result.is_ok());
     assert!(r2.result.is_ok());
     assert!(!r1.result.unwrap().segments.is_empty());
     assert!(!r2.result.unwrap().segments.is_empty());
-
-    queue.finish().unwrap();
+    assert!(matches!(rx.recv(), Err(QueueError::Closed)));
 }
 
 #[test]
-fn queued_push_batch() {
+fn queued_shared_senders_across_threads() {
     let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
-    let Some(queue) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
+    let Some((tx, mut rx)) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
         return;
     };
 
-    let requests = vec![
-        QueuedDiarizationRequest::new("batch_1", samples.clone()),
-        QueuedDiarizationRequest::new("batch_2", samples.clone()),
-        QueuedDiarizationRequest::new("batch_3", samples),
-    ];
-    let job_ids = queue.push_batch(requests).unwrap();
-    assert_eq!(job_ids.len(), 3);
+    let handles: Vec<_> = ["thread_a", "thread_b", "thread_c"]
+        .into_iter()
+        .map(|file_id| {
+            let tx = tx.clone();
+            let samples = samples.clone();
+            thread::spawn(move || {
+                tx.push(QueuedDiarizationRequest::new(file_id, samples))
+                    .unwrap();
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    drop(tx);
 
     let mut results = HashMap::new();
     for _ in 0..3 {
-        let r = queue.recv().unwrap();
-        results.insert(r.file_id.clone(), r);
+        let result = rx.recv().unwrap();
+        results.insert(result.file_id.clone(), result);
     }
 
-    assert!(results.contains_key("batch_1"));
-    assert!(results.contains_key("batch_2"));
-    assert!(results.contains_key("batch_3"));
-    for r in results.values() {
-        assert!(r.result.is_ok());
-    }
-
-    queue.finish().unwrap();
+    assert!(results.contains_key("thread_a"));
+    assert!(results.contains_key("thread_b"));
+    assert!(results.contains_key("thread_c"));
+    assert!(results.values().all(|result| result.result.is_ok()));
+    assert!(matches!(rx.recv(), Err(QueueError::Closed)));
 }
 
 #[test]
-fn queued_job_ids_are_monotonic() {
+fn queued_job_ids_are_monotonic_across_sender_clones() {
     let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
-    let Some(queue) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
+    let Some((tx, mut rx)) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
         return;
     };
+    let tx_clone = tx.clone();
 
-    let id0 = queue
+    let id0 = tx
         .push(QueuedDiarizationRequest::new("f0", samples.clone()))
         .unwrap();
-    let id1 = queue
+    let id1 = tx_clone
         .push(QueuedDiarizationRequest::new("f1", samples.clone()))
         .unwrap();
-    let id2 = queue
+    let id2 = tx
         .push(QueuedDiarizationRequest::new("f2", samples))
         .unwrap();
 
-    // job IDs are distinct and ordered
     assert_ne!(id0, id1);
     assert_ne!(id1, id2);
     assert_ne!(id0, id2);
 
+    drop(tx_clone);
+    drop(tx);
+
     for _ in 0..3 {
-        let _ = queue.recv().unwrap();
+        let _ = rx.recv().unwrap();
     }
-    queue.finish().unwrap();
+    assert!(matches!(rx.recv(), Err(QueueError::Closed)));
 }
 
 #[test]
 fn queued_clean_shutdown() {
     let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
-    let Some(queue) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
+    let Some((tx, mut rx)) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
         return;
     };
 
-    queue
-        .push(QueuedDiarizationRequest::new("only", samples))
+    tx.push(QueuedDiarizationRequest::new("only", samples))
         .unwrap();
-    let r = queue.recv().unwrap();
-    assert!(r.result.is_ok());
+    drop(tx);
 
-    queue.finish().unwrap();
+    let result = rx.recv().unwrap();
+    assert!(result.result.is_ok());
+    assert!(matches!(rx.recv(), Err(QueueError::Closed)));
+}
+
+#[test]
+fn queued_drop_sender_unblocks_iteration() {
+    let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
+    let Some((tx, rx)) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
+        return;
+    };
+
+    tx.push(QueuedDiarizationRequest::new("iter", samples))
+        .unwrap();
+    drop(tx);
+
+    let results: Vec<_> = rx.into_iter().collect();
+    assert_eq!(results.len(), 1);
+    assert!(results[0].as_ref().unwrap().result.is_ok());
 }
 
 #[test]
 fn queued_handles_short_and_normal_audio() {
     let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
-    let Some(queue) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
+    let Some((tx, rx)) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
         return;
     };
 
-    queue
-        .push(QueuedDiarizationRequest::new("normal", samples))
+    tx.push(QueuedDiarizationRequest::new("normal", samples))
         .unwrap();
-    // very short audio — pipeline handles gracefully
-    queue
-        .push(QueuedDiarizationRequest::new("short", vec![0.0; 100]))
+    tx.push(QueuedDiarizationRequest::new("short", vec![0.0; 100]))
         .unwrap();
+    drop(tx);
 
     let mut results = HashMap::new();
-    for _ in 0..2 {
-        let r = queue.recv().unwrap();
-        results.insert(r.file_id.clone(), r);
+    for result in rx {
+        let result = result.unwrap();
+        results.insert(result.file_id.clone(), result);
     }
 
-    // normal file produces valid RTTM
     assert!(results["normal"].result.is_ok());
-    // queue continues processing regardless of per-file outcome
     assert!(results.contains_key("short"));
-
-    queue.finish().unwrap();
 }
 
 #[test]
 fn queued_results_match_sync() {
     let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
 
-    // run synchronously
     let Some(mut pipeline) = make_pipeline() else {
         return;
     };
     let sync_result = pipeline.run_with_file_id(&samples, "compare").unwrap();
 
-    // run via queue
-    let Some(queue) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
+    let Some((tx, mut rx)) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
         return;
     };
-    queue
-        .push(QueuedDiarizationRequest::new("compare", samples))
+    tx.push(QueuedDiarizationRequest::new("compare", samples))
         .unwrap();
-    let queued_result = queue.recv().unwrap().result.unwrap();
-    queue.finish().unwrap();
+    drop(tx);
+
+    let queued_result = rx.recv().unwrap().result.unwrap();
+    assert!(matches!(rx.recv(), Err(QueueError::Closed)));
 
     assert_eq!(sync_result.segments, queued_result.segments);
 }
@@ -213,18 +230,19 @@ fn build_queued_preserves_custom_pipeline_config() {
         })
         .expect("expected at least one custom pipeline config to change fixture output");
 
-    let Some(queue) = build_pipeline_or_skip(
+    let Some((tx, mut rx)) = build_pipeline_or_skip(
         PipelineBuilder::from_dir(fixture_path("models"), ExecutionMode::Cpu)
             .pipeline(custom_config)
             .build_queued(),
     ) else {
         return;
     };
-    queue
-        .push(QueuedDiarizationRequest::new("compare", samples))
+    tx.push(QueuedDiarizationRequest::new("compare", samples))
         .unwrap();
-    let queued_result = queue.recv().unwrap().result.unwrap();
-    queue.finish().unwrap();
+    drop(tx);
+
+    let queued_result = rx.recv().unwrap().result.unwrap();
+    assert!(matches!(rx.recv(), Err(QueueError::Closed)));
 
     assert_eq!(custom_result.segments, queued_result.segments);
 }

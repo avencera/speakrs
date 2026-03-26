@@ -9,7 +9,7 @@ use crate::powerset::PowersetMapping;
 
 use super::OwnedDiarizationPipeline;
 use super::config::{PipelineConfig, RuntimeConfig, segmentation_step_seconds};
-use super::queued::QueuedDiarizationPipeline;
+use super::queued::{QueueReceiver, QueueSender};
 use super::types::PipelineError;
 
 /// Builder for constructing diarization pipelines
@@ -110,7 +110,7 @@ impl PipelineBuilder {
     }
 
     /// Build and immediately convert to a background-processing queue
-    pub fn build_queued(self) -> Result<QueuedDiarizationPipeline, PipelineError> {
+    pub fn build_queued(self) -> Result<(QueueSender, QueueReceiver), PipelineError> {
         let pipeline = self.build()?;
         Ok(pipeline.into_queued()?)
     }
