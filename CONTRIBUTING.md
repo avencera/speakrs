@@ -32,6 +32,12 @@ just clippy   # cargo clippy -- -D warnings
 just python-lint  # ty check across the root and Python subprojects
 ```
 
+The README is generated from `src/lib.rs` doc comments via [cargo-rdme](https://github.com/orium/cargo-rdme). After editing crate docs, regenerate:
+
+```sh
+cargo rdme
+```
+
 Sync the Python environments before running `just python-lint`:
 
 ```sh
