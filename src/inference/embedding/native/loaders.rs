@@ -14,6 +14,20 @@ use super::super::{
     split_tail_model_path,
 };
 
+fn load_shared_or_warn(
+    path: &Path,
+    compute_units: MLComputeUnits,
+    error_context: &str,
+) -> Option<SharedCoreMlModel> {
+    match SharedCoreMlModel::load(path, compute_units, "output", GpuPrecision::Low) {
+        Ok(model) => Some(model),
+        Err(e) => {
+            tracing::warn!("{error_context}: {e}");
+            None
+        }
+    }
+}
+
 impl EmbeddingModel {
     pub(in crate::inference::embedding) fn load_native_tail(
         model_path: &Path,
@@ -76,18 +90,11 @@ impl EmbeddingModel {
         if !coreml_path.exists() {
             return None;
         }
-        match SharedCoreMlModel::load(
+        load_shared_or_warn(
             &coreml_path,
             CoreMlModel::default_compute_units(),
-            "output",
-            GpuPrecision::Low,
-        ) {
-            Ok(model) => Some(model),
-            Err(e) => {
-                tracing::warn!(batch_size, "Failed to load native CoreML fbank: {e}");
-                None
-            }
-        }
+            &format!("Failed to load native CoreML fbank (batch_size={batch_size})"),
+        )
     }
 
     pub(in crate::inference::embedding) fn has_native_fbank_model(
@@ -117,21 +124,13 @@ impl EmbeddingModel {
         if !coreml_path.exists() {
             return None;
         }
-        match SharedCoreMlModel::load(
+        let model = load_shared_or_warn(
             &coreml_path,
             MLComputeUnits::CPUAndNeuralEngine,
-            "output",
-            GpuPrecision::Low,
-        ) {
-            Ok(model) => {
-                tracing::info!("Loaded 30s fbank model (CPUAndNeuralEngine)");
-                Some(model)
-            }
-            Err(e) => {
-                tracing::warn!("Failed to load 30s fbank model: {e}");
-                None
-            }
-        }
+            "Failed to load 30s fbank model",
+        )?;
+        tracing::info!("Loaded 30s fbank model (CPUAndNeuralEngine)");
+        Some(model)
     }
 
     pub(in crate::inference::embedding) fn load_native_multi_mask(
@@ -146,18 +145,11 @@ impl EmbeddingModel {
         if !coreml_path.exists() {
             return None;
         }
-        match SharedCoreMlModel::load(
+        load_shared_or_warn(
             &coreml_path,
             CoreMlModel::default_compute_units(),
-            "output",
-            GpuPrecision::Low,
-        ) {
-            Ok(model) => Some(model),
-            Err(e) => {
-                tracing::warn!("Failed to load native CoreML multi-mask: {e}");
-                None
-            }
-        }
+            "Failed to load native CoreML multi-mask",
+        )
     }
 
     pub(in crate::inference::embedding) fn has_native_multi_mask_model(

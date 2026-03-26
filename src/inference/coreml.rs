@@ -17,6 +17,10 @@ use array::{
     contiguous_strides, create_multi_array_cached_with_deallocator,
     create_multi_array_with_deallocator, extract_output, ns_number_array,
 };
+
+fn noop_deallocator() -> RcBlock<dyn Fn(NonNull<c_void>)> {
+    RcBlock::new(|_ptr: NonNull<c_void>| {})
+}
 pub(crate) use path::{coreml_model_path, coreml_w8a16_model_path};
 use runtime::{
     build_feature_provider, insert_input_feature, load_model, output_multi_array, predict_output,
@@ -105,7 +109,7 @@ impl CoreMlModel {
         Ok(Self {
             model: load_model(path, compute_units, gpu_precision)?,
             output_key: NSString::from_str(output_name),
-            noop_deallocator: RcBlock::new(|_ptr: NonNull<c_void>| {}),
+            noop_deallocator: noop_deallocator(),
             input_dict: NSMutableDictionary::new(),
             output_name: output_name.to_owned(),
         })
@@ -205,7 +209,7 @@ impl SharedCoreMlModel {
         &self,
         inputs: &[(&CachedInputShape, &[f32])],
     ) -> Result<(Vec<f32>, Vec<usize>), CoreMlError> {
-        let deallocator = RcBlock::new(|_ptr: NonNull<c_void>| {});
+        let deallocator = noop_deallocator();
         let input_dict: Retained<NSMutableDictionary<NSString, AnyObject>> =
             NSMutableDictionary::new();
 
@@ -236,7 +240,7 @@ impl SharedCoreMlModel {
         &self,
         inputs: &[(&CachedInputShape, &[f32])],
     ) -> Result<(Vec<f32>, Vec<usize>), CoreMlError> {
-        let deallocator = RcBlock::new(|_ptr: NonNull<c_void>| {});
+        let deallocator = noop_deallocator();
         let input_dict: Retained<NSMutableDictionary<NSString, AnyObject>> =
             NSMutableDictionary::new();
 

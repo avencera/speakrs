@@ -13,49 +13,46 @@ use super::{
 
 mod loaders;
 
-impl EmbeddingModel {
-    pub(super) fn ensure_native_fbank_loaded(&mut self) -> Option<&Arc<SharedCoreMlModel>> {
-        if self.coreml.native_fbank_session.is_none() {
+macro_rules! ensure_loaded {
+    ($self:expr, $field:ident, $load:expr, $msg:literal) => {{
+        if $self.coreml.$field.is_none() {
             let start = std::time::Instant::now();
-            self.coreml.native_fbank_session =
-                Self::load_native_fbank(&self.meta.model_path, self.meta.mode, 1).map(Arc::new);
-            if self.coreml.native_fbank_session.is_some() {
-                tracing::trace!(
-                    ms = start.elapsed().as_millis(),
-                    "Lazy loaded native fbank 10s"
-                );
+            $self.coreml.$field = $load;
+            if $self.coreml.$field.is_some() {
+                tracing::trace!(ms = start.elapsed().as_millis(), $msg);
             }
         }
+    }};
+}
+
+impl EmbeddingModel {
+    pub(super) fn ensure_native_fbank_loaded(&mut self) -> Option<&Arc<SharedCoreMlModel>> {
+        ensure_loaded!(
+            self,
+            native_fbank_session,
+            Self::load_native_fbank(&self.meta.model_path, self.meta.mode, 1).map(Arc::new),
+            "Lazy loaded native fbank 10s"
+        );
         self.coreml.native_fbank_session.as_ref()
     }
 
     pub(super) fn ensure_native_fbank_batched_loaded(&mut self) -> Option<&SharedCoreMlModel> {
-        if self.coreml.native_fbank_batched_session.is_none() {
-            let start = std::time::Instant::now();
-            self.coreml.native_fbank_batched_session =
-                Self::load_native_fbank(&self.meta.model_path, self.meta.mode, PRIMARY_BATCH_SIZE);
-            if self.coreml.native_fbank_batched_session.is_some() {
-                tracing::trace!(
-                    ms = start.elapsed().as_millis(),
-                    "Lazy loaded native fbank b64"
-                );
-            }
-        }
+        ensure_loaded!(
+            self,
+            native_fbank_batched_session,
+            Self::load_native_fbank(&self.meta.model_path, self.meta.mode, PRIMARY_BATCH_SIZE),
+            "Lazy loaded native fbank b64"
+        );
         self.coreml.native_fbank_batched_session.as_ref()
     }
 
     pub(super) fn ensure_native_fbank_30s_loaded(&mut self) -> Option<&Arc<SharedCoreMlModel>> {
-        if self.coreml.native_fbank_30s_session.is_none() {
-            let start = std::time::Instant::now();
-            self.coreml.native_fbank_30s_session =
-                Self::load_native_fbank_30s(&self.meta.model_path, self.meta.mode).map(Arc::new);
-            if self.coreml.native_fbank_30s_session.is_some() {
-                tracing::trace!(
-                    ms = start.elapsed().as_millis(),
-                    "Lazy loaded native fbank 30s"
-                );
-            }
-        }
+        ensure_loaded!(
+            self,
+            native_fbank_30s_session,
+            Self::load_native_fbank_30s(&self.meta.model_path, self.meta.mode).map(Arc::new),
+            "Lazy loaded native fbank 30s"
+        );
         self.coreml.native_fbank_30s_session.as_ref()
     }
 
@@ -99,62 +96,46 @@ impl EmbeddingModel {
     }
 
     pub(super) fn ensure_native_multi_mask_loaded(&mut self) -> Option<&SharedCoreMlModel> {
-        if self.coreml.native_multi_mask_session.is_none() {
-            let start = std::time::Instant::now();
-            self.coreml.native_multi_mask_session =
-                Self::load_native_multi_mask(&self.meta.model_path, self.meta.mode);
-            if self.coreml.native_multi_mask_session.is_some() {
-                tracing::trace!(
-                    ms = start.elapsed().as_millis(),
-                    "Lazy loaded native multi mask"
-                );
-            }
-        }
+        ensure_loaded!(
+            self,
+            native_multi_mask_session,
+            Self::load_native_multi_mask(&self.meta.model_path, self.meta.mode),
+            "Lazy loaded native multi mask"
+        );
         self.coreml.native_multi_mask_session.as_ref()
     }
 
     pub(super) fn ensure_native_tail_loaded(&mut self) -> Option<&mut CoreMlModel> {
-        if self.coreml.native_tail_session.is_none() {
-            let start = std::time::Instant::now();
-            self.coreml.native_tail_session =
-                Self::load_native_tail(&self.meta.model_path, self.meta.mode, 1);
-            if self.coreml.native_tail_session.is_some() {
-                tracing::trace!(ms = start.elapsed().as_millis(), "Lazy loaded native tail");
-            }
-        }
+        ensure_loaded!(
+            self,
+            native_tail_session,
+            Self::load_native_tail(&self.meta.model_path, self.meta.mode, 1),
+            "Lazy loaded native tail"
+        );
         self.coreml.native_tail_session.as_mut()
     }
 
     pub(super) fn ensure_native_tail_batched_loaded(&mut self) -> Option<&mut CoreMlModel> {
-        if self.coreml.native_tail_batched_session.is_none() {
-            let start = std::time::Instant::now();
-            self.coreml.native_tail_batched_session = Self::load_native_tail(
+        ensure_loaded!(
+            self,
+            native_tail_batched_session,
+            Self::load_native_tail(
                 &self.meta.model_path,
                 self.meta.mode,
-                CHUNK_SPEAKER_BATCH_SIZE,
-            );
-            if self.coreml.native_tail_batched_session.is_some() {
-                tracing::trace!(
-                    ms = start.elapsed().as_millis(),
-                    "Lazy loaded native tail b32"
-                );
-            }
-        }
+                CHUNK_SPEAKER_BATCH_SIZE
+            ),
+            "Lazy loaded native tail b32"
+        );
         self.coreml.native_tail_batched_session.as_mut()
     }
 
     pub(super) fn ensure_native_tail_primary_batched_loaded(&mut self) -> Option<&mut CoreMlModel> {
-        if self.coreml.native_tail_primary_batched_session.is_none() {
-            let start = std::time::Instant::now();
-            self.coreml.native_tail_primary_batched_session =
-                Self::load_native_tail(&self.meta.model_path, self.meta.mode, PRIMARY_BATCH_SIZE);
-            if self.coreml.native_tail_primary_batched_session.is_some() {
-                tracing::trace!(
-                    ms = start.elapsed().as_millis(),
-                    "Lazy loaded native tail b64"
-                );
-            }
-        }
+        ensure_loaded!(
+            self,
+            native_tail_primary_batched_session,
+            Self::load_native_tail(&self.meta.model_path, self.meta.mode, PRIMARY_BATCH_SIZE),
+            "Lazy loaded native tail b64"
+        );
         self.coreml.native_tail_primary_batched_session.as_mut()
     }
 
