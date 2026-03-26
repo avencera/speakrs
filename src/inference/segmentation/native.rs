@@ -6,7 +6,13 @@ use ndarray::Array2;
 use objc2_core_ml::MLComputeUnits;
 use tracing::info;
 
-use super::*;
+use crate::inference::ExecutionMode;
+use crate::inference::coreml::{
+    CachedInputShape, CoreMlModel, GpuPrecision, SharedCoreMlModel, coreml_model_path,
+    coreml_w8a16_model_path,
+};
+
+use super::{LARGE_BATCH_SIZE, PRIMARY_BATCH_SIZE, SegmentationModel, batched_model_path};
 
 impl SegmentationModel {
     pub(super) fn select_parallel_native_model(

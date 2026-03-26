@@ -3,7 +3,11 @@ use ort::value::TensorRef;
 
 #[cfg(feature = "coreml")]
 use super::tensor::{array2_slice, array3_slice};
-use super::*;
+use super::{
+    EmbeddingModel, FBANK_FEATURES, FBANK_FRAMES, MULTI_MASK_BATCH_SIZE, MaskedEmbeddingInput,
+    NUM_SPEAKERS, PRIMARY_BATCH_SIZE, SplitTailInput, array2_from_shape_vec, array2_slice_mut,
+    array3_slice_mut, select_mask,
+};
 
 impl EmbeddingModel {
     /// Extract speaker embeddings for a batch of masked audio windows

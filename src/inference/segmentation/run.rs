@@ -3,7 +3,7 @@ use ndarray::Array2;
 use ort::value::TensorRef;
 use tracing::debug;
 
-use super::*;
+use super::{PRIMARY_BATCH_SIZE, SegmentationError, SegmentationModel};
 use crate::inference::segmentation::tensor::SegmentationWindows;
 
 impl SegmentationModel {

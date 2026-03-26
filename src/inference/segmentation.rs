@@ -4,10 +4,7 @@ use ndarray::Array2;
 use ort::session::Session;
 
 #[cfg(feature = "coreml")]
-use crate::inference::coreml::{
-    CachedInputShape, CoreMlModel, GpuPrecision, SharedCoreMlModel, coreml_model_path,
-    coreml_w8a16_model_path,
-};
+use crate::inference::coreml::{CachedInputShape, SharedCoreMlModel};
 use crate::inference::{ExecutionMode, ModelLoadError, ensure_ort_ready, with_execution_mode};
 #[cfg(feature = "coreml")]
 mod native;
