@@ -17,6 +17,23 @@ test *args:
 
 check: fmt lint test
 
+# Bump version: just bump major|minor|patch
+bump level:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    CURRENT=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="speakrs") | .version')
+    IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+    case "{{level}}" in
+        major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+        minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+        patch) PATCH=$((PATCH + 1)) ;;
+        *) echo "Usage: just bump major|minor|patch"; exit 1 ;;
+    esac
+    NEW="${MAJOR}.${MINOR}.${PATCH}"
+    sed -i '' "s/^version = \"${CURRENT}\"/version = \"${NEW}\"/" Cargo.toml
+    cargo generate-lockfile --quiet
+    echo "Bumped ${CURRENT} → ${NEW}"
+
 # passthrough to cargo xtask
 x *args:
     cargo xtask {{args}}
