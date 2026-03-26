@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use crossbeam_channel::Sender;
 use ndarray::Array2;
 use ort::session::Session;
@@ -9,7 +11,7 @@ use crate::inference::coreml::{
     CachedInputShape, CoreMlModel, GpuPrecision, SharedCoreMlModel, coreml_model_path,
     coreml_w8a16_model_path,
 };
-use crate::inference::{ExecutionMode, with_execution_mode};
+use crate::inference::{ExecutionMode, ModelLoadError, ensure_ort_ready, with_execution_mode};
 #[cfg(feature = "coreml")]
 use objc2_core_ml::MLComputeUnits;
 #[cfg(feature = "coreml")]
@@ -33,7 +35,7 @@ const LARGE_BATCH_SIZE: usize = 64;
 
 /// Sliding-window segmentation model (pyannote segmentation-3.0)
 pub struct SegmentationModel {
-    model_path: String,
+    model_path: PathBuf,
     mode: ExecutionMode,
     session: Session,
     primary_batched_session: Option<Session>,
@@ -62,16 +64,20 @@ unsafe impl Send for SegmentationModel {}
 
 impl SegmentationModel {
     /// Load a segmentation-3.0 ONNX model
-    pub fn new(model_path: &str, step_duration: f32) -> Result<Self, ort::Error> {
+    pub fn new(model_path: impl AsRef<Path>, step_duration: f32) -> Result<Self, ModelLoadError> {
         Self::with_mode(model_path, step_duration, ExecutionMode::Cpu)
     }
 
     /// Load a segmentation-3.0 ONNX model with the requested execution mode
     pub fn with_mode(
-        model_path: &str,
+        model_path: impl AsRef<Path>,
         step_duration: f32,
         mode: ExecutionMode,
-    ) -> Result<Self, ort::Error> {
+    ) -> Result<Self, ModelLoadError> {
+        mode.validate()?;
+        ensure_ort_ready()?;
+
+        let model_path = model_path.as_ref();
         let sample_rate = 16000;
         let window_duration = 10.0;
         let window_samples = (window_duration * sample_rate as f32) as usize;
@@ -89,7 +95,7 @@ impl SegmentationModel {
         let (primary_batched_session, primary_batched_elapsed) = timed!(
             batched_model_path(model_path, PRIMARY_BATCH_SIZE)
                 .filter(|path| path.exists())
-                .map(|path| Self::build_session(path.to_str().unwrap(), mode))
+                .map(|path| Self::build_session(&path, mode))
                 .transpose()?
         );
         #[cfg(feature = "coreml")]
@@ -132,7 +138,7 @@ impl SegmentationModel {
         }
 
         Ok(Self {
-            model_path: model_path.to_owned(),
+            model_path: model_path.to_path_buf(),
             mode,
             session,
             primary_batched_session,
@@ -161,7 +167,7 @@ impl SegmentationModel {
         })
     }
 
-    fn build_session(model_path: &str, mode: ExecutionMode) -> Result<Session, ort::Error> {
+    fn build_session(model_path: &Path, mode: ExecutionMode) -> Result<Session, ort::Error> {
         let builder = Session::builder()?
             .with_independent_thread_pool()?
             .with_intra_threads(Self::available_threads().min(6))?
@@ -560,7 +566,7 @@ impl SegmentationModel {
         self.session = Self::build_session(&self.model_path, self.mode)?;
         self.primary_batched_session = batched_model_path(&self.model_path, PRIMARY_BATCH_SIZE)
             .filter(|path| path.exists())
-            .map(|path| Self::build_session(path.to_str().unwrap(), self.mode))
+            .map(|path| Self::build_session(&path, self.mode))
             .transpose()?;
         #[cfg(feature = "coreml")]
         {
@@ -821,7 +827,7 @@ impl SegmentationModel {
     }
 
     #[cfg(feature = "coreml")]
-    fn resolve_coreml_path(model_path: &str, mode: ExecutionMode) -> Option<std::path::PathBuf> {
+    fn resolve_coreml_path(model_path: &Path, mode: ExecutionMode) -> Option<PathBuf> {
         match mode {
             ExecutionMode::CoreMlFast => Some(coreml_w8a16_model_path(model_path)),
             ExecutionMode::CoreMl => Some(coreml_model_path(model_path)),
@@ -836,16 +842,16 @@ impl SegmentationModel {
 
     #[cfg(feature = "coreml")]
     fn resolve_batched_coreml_path(
-        model_path: &str,
+        model_path: &Path,
         mode: ExecutionMode,
         batch_size: usize,
-    ) -> Option<std::path::PathBuf> {
+    ) -> Option<PathBuf> {
         if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
             return None;
         }
 
         let batched_onnx = batched_model_path(model_path, batch_size)?;
-        Self::resolve_coreml_path(batched_onnx.to_str().unwrap(), mode)
+        Self::resolve_coreml_path(&batched_onnx, mode)
     }
 
     #[cfg(feature = "coreml")]
@@ -877,7 +883,7 @@ impl SegmentationModel {
     }
 
     #[cfg(feature = "coreml")]
-    fn load_native_coreml(model_path: &str, mode: ExecutionMode) -> Option<SharedCoreMlModel> {
+    fn load_native_coreml(model_path: &Path, mode: ExecutionMode) -> Option<SharedCoreMlModel> {
         let coreml_path = Self::resolve_coreml_path(model_path, mode)?;
         Self::load_native_coreml_model(
             &coreml_path,
@@ -889,7 +895,7 @@ impl SegmentationModel {
 
     #[cfg(feature = "coreml")]
     fn load_native_coreml_batched(
-        model_path: &str,
+        model_path: &Path,
         mode: ExecutionMode,
     ) -> Option<SharedCoreMlModel> {
         let coreml_path = Self::resolve_batched_coreml_path(model_path, mode, PRIMARY_BATCH_SIZE)?;
@@ -903,7 +909,7 @@ impl SegmentationModel {
 
     #[cfg(feature = "coreml")]
     fn load_native_coreml_large_batched(
-        model_path: &str,
+        model_path: &Path,
         mode: ExecutionMode,
     ) -> Option<SharedCoreMlModel> {
         let coreml_path = Self::resolve_batched_coreml_path(model_path, mode, LARGE_BATCH_SIZE)?;
@@ -972,8 +978,8 @@ impl SegmentationModel {
     }
 }
 
-fn batched_model_path(model_path: &str, batch_size: usize) -> Option<std::path::PathBuf> {
-    let path = std::path::Path::new(model_path);
+fn batched_model_path(model_path: &Path, batch_size: usize) -> Option<PathBuf> {
+    let path = model_path;
     let file_name = path.file_name()?.to_str()?;
     let stem = file_name.strip_suffix(".onnx")?;
     Some(path.with_file_name(format!("{stem}-b{batch_size}.onnx")))

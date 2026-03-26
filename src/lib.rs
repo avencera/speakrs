@@ -12,9 +12,9 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use speakrs::{ExecutionMode, PipelineBuilder};
+//! use speakrs::{ExecutionMode, OwnedDiarizationPipeline};
 //!
-//! let mut pipeline = PipelineBuilder::from_pretrained(ExecutionMode::Cpu)?.build()?;
+//! let mut pipeline = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::Cpu)?;
 //! let audio: Vec<f32> = vec![]; // 16 kHz mono f32 samples
 //! let result = pipeline.run(&audio)?;
 //! print!("{}", result.rttm("my-file"));

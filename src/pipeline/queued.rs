@@ -53,6 +53,9 @@ pub enum QueueError {
     /// The background worker has shut down or was never started
     #[error("queue worker has shut down")]
     WorkerGone,
+    /// The background worker thread could not be started
+    #[error("failed to start queue worker: {0}")]
+    WorkerStart(#[source] std::io::Error),
     /// The background worker thread panicked
     #[error("worker thread panicked: {0}")]
     WorkerPanicked(String),
@@ -73,7 +76,7 @@ struct WorkerRequest {
 /// ```no_run
 /// # use speakrs::pipeline::*;
 /// # use speakrs::inference::ExecutionMode;
-/// let queue = PipelineBuilder::from_pretrained(ExecutionMode::Cpu)?.build_queued()?;
+/// let queue = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::Cpu)?.into_queued()?;
 ///
 /// let audio: Vec<f32> = vec![]; // 16 kHz mono samples
 /// queue.push(QueuedDiarizationRequest::new("file1", audio))?;
@@ -101,7 +104,7 @@ impl QueuedDiarizationPipeline {
         let worker = std::thread::Builder::new()
             .name("speakrs-queue-worker".into())
             .spawn(move || worker_loop(pipeline, config, request_rx, result_tx))
-            .map_err(|e| QueueError::WorkerPanicked(e.to_string()))?;
+            .map_err(QueueError::WorkerStart)?;
 
         Ok(Self {
             request_tx: Some(request_tx),

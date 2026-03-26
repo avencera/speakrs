@@ -4,6 +4,7 @@ use ndarray::{Array2, Array3, s};
 use tracing::info;
 
 use crate::inference::embedding::{EmbeddingModel, MaskedEmbeddingInput, SplitTailInput};
+use crate::inference::{ExecutionModeError, ModelLoadError};
 use crate::powerset::PowersetMapping;
 use crate::reconstruct::Reconstructor;
 use crate::segment::to_segments;
@@ -13,31 +14,31 @@ use super::config::*;
 /// Errors that can occur during the diarization pipeline
 #[derive(Debug, thiserror::Error)]
 pub enum PipelineError {
+    /// Model construction or ONNX Runtime initialization error
+    #[error(transparent)]
+    ModelLoad(#[from] ModelLoadError),
     /// ONNX Runtime error
-    #[error("{0}")]
-    Ort(String),
+    #[error(transparent)]
+    Ort(#[from] ort::Error),
+    /// Requested execution mode is not supported by this build
+    #[error(transparent)]
+    UnsupportedExecutionMode(#[from] ExecutionModeError),
+    /// Segmentation inference error
+    #[error(transparent)]
+    Segmentation(#[from] crate::inference::segmentation::SegmentationError),
     /// PLDA scoring/training error
-    #[error("{0}")]
+    #[error(transparent)]
     Plda(#[from] crate::clustering::plda::PldaError),
     /// Hugging Face Hub download error
     #[cfg(feature = "online")]
-    #[error("{0}")]
+    #[error(transparent)]
     HfHub(#[from] hf_hub::api::sync::ApiError),
+    /// Queue setup or execution error
+    #[error(transparent)]
+    Queue(#[from] super::queued::QueueError),
     /// Catch-all for other pipeline errors
     #[error("{0}")]
     Other(String),
-}
-
-impl From<ort::Error> for PipelineError {
-    fn from(e: ort::Error) -> Self {
-        Self::Ort(e.to_string())
-    }
-}
-
-impl From<crate::inference::segmentation::SegmentationError> for PipelineError {
-    fn from(e: crate::inference::segmentation::SegmentationError) -> Self {
-        Self::Other(e.to_string())
-    }
 }
 
 pub(super) struct PendingEmbedding<'a> {
