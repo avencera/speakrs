@@ -9,6 +9,19 @@
 //! clustering. There is no Python dependency. Inference runs on ONNX Runtime or native
 //! CoreML, and all post-processing stays in Rust.
 //!
+//! # Usage
+//!
+//! ```toml
+//! # Apple Silicon (CoreML)
+//! speakrs = { version = "0.2", features = ["coreml"] }
+//!
+//! # NVIDIA GPU
+//! speakrs = { version = "0.2", features = ["cuda"] }
+//!
+//! # CPU only (default)
+//! speakrs = "0.2"
+//! ```
+//!
 //! # Quick start
 //!
 //! ```no_run

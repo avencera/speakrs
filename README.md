@@ -6,14 +6,114 @@ Speaker diarization in Rust. Runs **312-912x realtime** on Apple Silicon (**20-5
 
 On VoxConverse dev (216 files), speakrs CoreML achieves **7.1% DER at 529x realtime** vs pyannote's 7.2% at 24x. On the test set (232 files) speakrs matches pyannote at 11.1% DER while running 27x faster. On CUDA, speakrs matches or beats pyannote DER on all datasets at 2-7x the speed. See [benchmarks/](benchmarks/) for full results across 8 datasets.
 
+## Usage
+
+Add to your `Cargo.toml`:
+
+```toml
+# Apple Silicon (CoreML)
+speakrs = { version = "0.2", features = ["coreml"] }
+
+# NVIDIA GPU
+speakrs = { version = "0.2", features = ["cuda"] }
+
+# CPU only (default)
+speakrs = "0.2"
+```
+
+### Quick start
+
+```rust
+use speakrs::{ExecutionMode, OwnedDiarizationPipeline};
+
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut pipeline = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::CoreMl)?;
+
+    let audio: Vec<f32> = load_your_mono_16khz_audio_here();
+    let result = pipeline.run(&audio)?;
+
+    print!("{}", result.rttm("my-audio"));
+    Ok(())
+}
+# fn load_your_mono_16khz_audio_here() -> Vec<f32> { unimplemented!() }
+```
+
+### Speaker turns
+
+```rust
+use speakrs::{ExecutionMode, OwnedDiarizationPipeline};
+use speakrs::pipeline::{FRAME_STEP_SECONDS, FRAME_DURATION_SECONDS};
+
+let mut pipeline = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::CoreMl)?;
+let result = pipeline.run(&audio)?;
+
+for segment in result.discrete_diarization.to_segments(FRAME_STEP_SECONDS, FRAME_DURATION_SECONDS) {
+    println!("{:.3} - {:.3}  {}", segment.start, segment.end, segment.speaker);
+}
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+### Background queue
+
+For processing many files, `QueuedDiarizationPipeline` runs a background worker that auto-batches requests for cross-file optimizations:
+
+```rust
+use speakrs::{ExecutionMode, OwnedDiarizationPipeline, QueuedDiarizationRequest};
+
+let pipeline = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::CoreMl)?;
+let queue = pipeline.into_queued()?;
+
+queue.push(QueuedDiarizationRequest::new("file1", audio1))?;
+queue.push(QueuedDiarizationRequest::new("file2", audio2))?;
+
+for result in queue {
+    let diarization = result.result?;
+    print!("{}", diarization.rttm(&result.file_id));
+}
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+### Local models
+
+For offline or airgapped usage, load models from a local directory:
+
+```rust
+use std::path::Path;
+use speakrs::{ExecutionMode, OwnedDiarizationPipeline};
+
+let mut pipeline = OwnedDiarizationPipeline::from_dir(
+    Path::new("/path/to/models"),
+    ExecutionMode::Cpu,
+)?;
+let result = pipeline.run(&audio)?;
+# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
+```
+
+### CLI
+
+```bash
+# CoreML (best accuracy, requires coreml feature)
+cargo run --release -p xtask --features coreml --bin diarize -- --mode coreml audio.wav
+
+# CoreML Fast (fastest on Apple Silicon)
+cargo run --release -p xtask --features coreml --bin diarize -- --mode coreml-fast audio.wav
+
+# CPU
+cargo run --release -p xtask --bin diarize -- --mode cpu audio.wav
+
+# CUDA (NVIDIA GPU)
+cargo run --release -p xtask --features cuda,load-dynamic --bin diarize -- --mode cuda audio.wav
+```
+
+See [examples/README.md](examples/README.md) for more runnable examples, including airtime reporting and transcript speaker assignment.
+
 ## Table of Contents
 
 - [Pipeline](#pipeline)
 - [macOS / iOS (CoreML)](#macos--ios-coreml)
 - [CPU & CUDA (Linux, Windows, macOS)](#cpu--cuda-linux-windows-macos)
-- [Usage](#usage)
 - [Models](#models)
-- [Modules](#modules)
+- [Public API](#public-api)
 - [Why Not pyannote-rs?](#why-not-pyannote-rs)
 - [Contributing](#contributing)
 - [References](#references)
@@ -103,107 +203,6 @@ NVIDIA RTX 4090, AMD EPYC 7B13, evaluated on VoxConverse dev (216 files, 1217.8 
 | pyannote community-1 (CUDA) | 7.2% | 2312s | 32x |
 
 On VoxConverse test (232 files, 2612.2 min, L40S), `cuda` matches pyannote at 11.1% DER at 50x realtime vs pyannote's 18x.
-
-## Usage
-
-Add to your `Cargo.toml`:
-
-```toml
-# Apple Silicon (CoreML)
-speakrs = { version = "0.1", features = ["coreml"] }
-
-# NVIDIA GPU
-speakrs = { version = "0.1", features = ["cuda"] }
-
-# CPU only (default)
-speakrs = "0.1"
-```
-
-### Quick start
-
-```rust
-use speakrs::{ExecutionMode, OwnedDiarizationPipeline};
-
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut pipeline = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::CoreMl)?;
-
-    let audio: Vec<f32> = load_your_mono_16khz_audio_here();
-    let result = pipeline.run(&audio)?;
-
-    print!("{}", result.rttm("my-audio"));
-    Ok(())
-}
-# fn load_your_mono_16khz_audio_here() -> Vec<f32> { unimplemented!() }
-```
-
-### Speaker turns
-
-```rust
-use speakrs::{ExecutionMode, OwnedDiarizationPipeline};
-use speakrs::pipeline::{FRAME_STEP_SECONDS, FRAME_DURATION_SECONDS};
-
-let mut pipeline = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::CoreMl)?;
-let result = pipeline.run(&audio)?;
-
-for segment in result.discrete_diarization.to_segments(FRAME_STEP_SECONDS, FRAME_DURATION_SECONDS) {
-    println!("{:.3} - {:.3}  {}", segment.start, segment.end, segment.speaker);
-}
-# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
-```
-
-### Background queue
-
-For processing many files, `QueuedDiarizationPipeline` runs a background worker that auto-batches requests for cross-file optimizations:
-
-```rust
-use speakrs::{ExecutionMode, OwnedDiarizationPipeline, QueuedDiarizationRequest};
-
-let pipeline = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::CoreMl)?;
-let queue = pipeline.into_queued()?;
-
-queue.push(QueuedDiarizationRequest::new("file1", audio1))?;
-queue.push(QueuedDiarizationRequest::new("file2", audio2))?;
-
-for result in queue {
-    let diarization = result.result?;
-    print!("{}", diarization.rttm(&result.file_id));
-}
-# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
-```
-
-### Local models
-
-For offline or airgapped usage, load models from a local directory:
-
-```rust
-use std::path::Path;
-use speakrs::{ExecutionMode, OwnedDiarizationPipeline};
-
-let mut pipeline = OwnedDiarizationPipeline::from_dir(
-    Path::new("/path/to/models"),
-    ExecutionMode::Cpu,
-)?;
-let result = pipeline.run(&audio)?;
-# Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
-```
-
-### CLI
-
-```bash
-# CoreML (best accuracy, requires coreml feature)
-cargo run --release -p xtask --features coreml --bin diarize -- --mode coreml audio.wav
-
-# CoreML Fast (fastest on Apple Silicon)
-cargo run --release -p xtask --features coreml --bin diarize -- --mode coreml-fast audio.wav
-
-# CPU
-cargo run --release -p xtask --bin diarize -- --mode cpu audio.wav
-
-# CUDA (NVIDIA GPU)
-cargo run --release -p xtask --features cuda,load-dynamic --bin diarize -- --mode cuda audio.wav
-```
-
-See [examples/README.md](examples/README.md) for more runnable examples, including airtime reporting and transcript speaker assignment.
 
 ## Models
 
