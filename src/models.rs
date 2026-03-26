@@ -9,12 +9,11 @@ const EMBEDDING_ONNX: &str = "wespeaker-voxceleb-resnet34.onnx";
 /// Resolved model paths for the speakrs pipeline
 ///
 /// Captures the three root paths needed by [`SegmentationModel`], [`EmbeddingModel`],
-/// and [`PldaTransform`]. Variant models (batched, CoreML, split) are derived
+/// and `PldaTransform`. Variant models (batched, CoreML, split) are derived
 /// internally by each model constructor from the base ONNX path.
 ///
 /// [`SegmentationModel`]: crate::inference::segmentation::SegmentationModel
 /// [`EmbeddingModel`]: crate::inference::embedding::EmbeddingModel
-/// [`PldaTransform`]: crate::clustering::plda::PldaTransform
 #[derive(Debug, Clone)]
 pub struct ModelBundle {
     segmentation_onnx: PathBuf,
