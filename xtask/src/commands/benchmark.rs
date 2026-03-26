@@ -130,35 +130,25 @@ pub fn run(
     println!();
     println!("=== Benchmark ===");
 
-    let rust_result = bench_tool(
-        "Rust",
-        &[
-            binary.to_str().unwrap(),
-            "diarize",
-            "--mode",
-            rust_mode,
-            wav.to_str().unwrap(),
-        ],
-        runs,
-        warmups,
-    )?;
+    let rust_command = CommandSpec::new(&binary)
+        .arg("diarize")
+        .arg("--mode")
+        .arg(rust_mode)
+        .arg(wav)
+        .current_dir(&root);
+    let rust_result = bench_tool("Rust", &rust_command, runs, warmups)?;
 
-    let python_result = bench_tool(
-        "Python",
-        &[
-            "uv",
-            "run",
-            "--project",
-            "scripts/pyannote-bench",
-            "python",
-            "scripts/pyannote-bench/diarize.py",
-            "--device",
-            python_device,
-            wav.to_str().unwrap(),
-        ],
-        runs,
-        warmups,
-    )?;
+    let python_command = CommandSpec::new("uv")
+        .arg("run")
+        .arg("--project")
+        .arg("scripts/pyannote-bench")
+        .arg("python")
+        .arg("scripts/pyannote-bench/diarize.py")
+        .arg("--device")
+        .arg(python_device)
+        .arg(wav)
+        .current_dir(&root);
+    let python_result = bench_tool("Python", &python_command, runs, warmups)?;
 
     println!(
         "Audio duration: {:.2} minutes ({audio_seconds:.1}s)",
@@ -178,16 +168,14 @@ pub fn run(
     Ok(())
 }
 
-fn bench_tool(name: &str, command: &[&str], runs: u32, warmups: u32) -> Result<Vec<f64>> {
-    let root = project_root();
-
+fn bench_tool(name: &str, command: &CommandSpec, runs: u32, warmups: u32) -> Result<Vec<f64>> {
     for _ in 0..warmups {
-        run_once(command, &root)?;
+        run_once(command)?;
     }
 
     let mut times = Vec::with_capacity(runs as usize);
     for _ in 0..runs {
-        let elapsed = run_once(command, &root)?;
+        let elapsed = run_once(command)?;
         times.push(elapsed);
         print!("  {name}: {elapsed:.2}s\r");
     }
@@ -195,9 +183,8 @@ fn bench_tool(name: &str, command: &[&str], runs: u32, warmups: u32) -> Result<V
     Ok(times)
 }
 
-fn run_once(command: &[&str], cwd: &Path) -> Result<f64> {
-    let mut benchmark_command = Command::new(command[0]);
-    benchmark_command.args(&command[1..]).current_dir(cwd);
+fn run_once(command: &CommandSpec) -> Result<f64> {
+    let mut benchmark_command = command.build_command();
     let output = capture_benchmark_cmd(&mut benchmark_command, Duration::from_secs(30 * 60))?;
     Ok(output.elapsed_seconds)
 }

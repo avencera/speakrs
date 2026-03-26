@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use super::*;
 #[cfg(feature = "coreml")]
 use crate::inference::ExecutionMode;
+use crate::inference::{DynamicRuntimeError, ModelLoadError, OrtRuntimeError};
 
 // --- test helpers ---
 
@@ -147,6 +148,32 @@ fn load_wav_samples(path: &Path) -> (Vec<f32>, u32) {
     panic!("no data chunk found in WAV");
 }
 
+fn load_model_or_skip<T>(result: Result<T, ModelLoadError>) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(ModelLoadError::Runtime(OrtRuntimeError::Dynamic(DynamicRuntimeError::Missing {
+            ..
+        }))) if cfg!(feature = "load-dynamic") => {
+            eprintln!("skipping model-loading test because ORT_DYLIB_PATH is not configured");
+            None
+        }
+        Err(error) => panic!("failed to load model: {error}"),
+    }
+}
+
+fn build_pipeline_or_skip<T>(result: Result<T, PipelineError>) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(PipelineError::ModelLoad(ModelLoadError::Runtime(OrtRuntimeError::Dynamic(
+            DynamicRuntimeError::Missing { .. },
+        )))) if cfg!(feature = "load-dynamic") => {
+            eprintln!("skipping pipeline test because ORT_DYLIB_PATH is not configured");
+            None
+        }
+        Err(error) => panic!("failed to build pipeline: {error}"),
+    }
+}
+
 // --- tests ---
 
 #[test]
@@ -247,18 +274,20 @@ fn assign_embeddings_matches_python_fixture() {
 #[test]
 fn extract_embeddings_matches_python_fixture() {
     let models_dir = fixture_path("models");
-    let seg_model = SegmentationModel::new(
+    let Some(seg_model) = load_model_or_skip(SegmentationModel::new(
         models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
         SEGMENTATION_STEP_SECONDS as f32,
-    )
-    .unwrap();
-    let mut emb_model = EmbeddingModel::new(
+    )) else {
+        return;
+    };
+    let Some(mut emb_model) = load_model_or_skip(EmbeddingModel::new(
         models_dir
             .join("wespeaker-voxceleb-resnet34.onnx")
             .to_str()
             .unwrap(),
-    )
-    .unwrap();
+    )) else {
+        return;
+    };
     let segmentations: Array3<f32> =
         Array3::read_npy(File::open(fixture_path("pipeline_segmentation_data.npy")).unwrap())
             .unwrap();
@@ -290,12 +319,13 @@ fn extract_embeddings_matches_python_fixture() {
 #[test]
 fn fast_apple_segmentation_matches_python_fixture() {
     let models_dir = fixture_path("models");
-    let mut seg_model = SegmentationModel::with_mode(
+    let Some(mut seg_model) = load_model_or_skip(SegmentationModel::with_mode(
         models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
         SEGMENTATION_STEP_SECONDS as f32,
         ExecutionMode::CoreMl,
-    )
-    .unwrap();
+    )) else {
+        return;
+    };
     let expected: Array3<f32> =
         Array3::read_npy(File::open(fixture_path("pipeline_segmentation_data.npy")).unwrap())
             .unwrap();
@@ -325,19 +355,21 @@ fn fast_apple_segmentation_matches_python_fixture() {
 #[test]
 fn fast_apple_embeddings_match_python_fixture() {
     let models_dir = fixture_path("models");
-    let seg_model = SegmentationModel::new(
+    let Some(seg_model) = load_model_or_skip(SegmentationModel::new(
         models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
         SEGMENTATION_STEP_SECONDS as f32,
-    )
-    .unwrap();
-    let mut emb_model = EmbeddingModel::with_mode(
+    )) else {
+        return;
+    };
+    let Some(mut emb_model) = load_model_or_skip(EmbeddingModel::with_mode(
         models_dir
             .join("wespeaker-voxceleb-resnet34.onnx")
             .to_str()
             .unwrap(),
         ExecutionMode::CoreMl,
-    )
-    .unwrap();
+    )) else {
+        return;
+    };
     let segmentations: Array3<f32> =
         Array3::read_npy(File::open(fixture_path("pipeline_segmentation_data.npy")).unwrap())
             .unwrap();
@@ -369,19 +401,21 @@ fn fast_apple_embeddings_match_python_fixture() {
 #[test]
 fn fast_apple_split_primary_batch_matches_single_tail_path() {
     let models_dir = fixture_path("models");
-    let seg_model = SegmentationModel::new(
+    let Some(seg_model) = load_model_or_skip(SegmentationModel::new(
         models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
         SEGMENTATION_STEP_SECONDS as f32,
-    )
-    .unwrap();
-    let mut emb_model = EmbeddingModel::with_mode(
+    )) else {
+        return;
+    };
+    let Some(mut emb_model) = load_model_or_skip(EmbeddingModel::with_mode(
         models_dir
             .join("wespeaker-voxceleb-resnet34.onnx")
             .to_str()
             .unwrap(),
         ExecutionMode::CoreMl,
-    )
-    .unwrap();
+    )) else {
+        return;
+    };
     let segmentations: Array3<f32> =
         Array3::read_npy(File::open(fixture_path("pipeline_segmentation_data.npy")).unwrap())
             .unwrap();
@@ -453,19 +487,21 @@ fn fast_apple_split_primary_batch_matches_single_tail_path() {
 #[test]
 fn fast_apple_single_embedding_matches_python_fixture() {
     let models_dir = fixture_path("models");
-    let seg_model = SegmentationModel::new(
+    let Some(seg_model) = load_model_or_skip(SegmentationModel::new(
         models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
         SEGMENTATION_STEP_SECONDS as f32,
-    )
-    .unwrap();
-    let mut emb_model = EmbeddingModel::with_mode(
+    )) else {
+        return;
+    };
+    let Some(mut emb_model) = load_model_or_skip(EmbeddingModel::with_mode(
         models_dir
             .join("wespeaker-voxceleb-resnet34.onnx")
             .to_str()
             .unwrap(),
         ExecutionMode::CoreMl,
-    )
-    .unwrap();
+    )) else {
+        return;
+    };
     let segmentations: Array3<f32> =
         Array3::read_npy(File::open(fixture_path("pipeline_segmentation_data.npy")).unwrap())
             .unwrap();
@@ -501,9 +537,11 @@ fn fast_apple_single_embedding_matches_python_fixture() {
 #[test]
 fn run_inference_only_plus_finish_matches_run_with_config() {
     let models_dir = fixture_path("models");
-    let mut pipeline = PipelineBuilder::from_dir(&models_dir, ExecutionMode::Cpu)
-        .build()
-        .unwrap();
+    let Some(mut pipeline) =
+        build_pipeline_or_skip(PipelineBuilder::from_dir(&models_dir, ExecutionMode::Cpu).build())
+    else {
+        return;
+    };
     let (audio, sample_rate) = load_wav_samples(&fixture_path("test.wav"));
     assert_eq!(sample_rate, 16_000);
 
@@ -520,10 +558,13 @@ fn run_inference_only_plus_finish_matches_run_with_config() {
 fn pipeline_builder_applies_custom_default_config_to_build() {
     let models_dir = fixture_path("models");
     let expected = custom_pipeline_config();
-    let pipeline = PipelineBuilder::from_dir(&models_dir, ExecutionMode::Cpu)
-        .pipeline(expected.clone())
-        .build()
-        .unwrap();
+    let Some(pipeline) = build_pipeline_or_skip(
+        PipelineBuilder::from_dir(&models_dir, ExecutionMode::Cpu)
+            .pipeline(expected.clone())
+            .build(),
+    ) else {
+        return;
+    };
 
     let actual = pipeline.pipeline_config();
     assert_eq!(actual.merge_gap, expected.merge_gap);
@@ -537,18 +578,20 @@ fn pipeline_builder_applies_custom_default_config_to_build() {
 #[test]
 fn borrowed_pipeline_new_with_config_stores_custom_default_config() {
     let models_dir = fixture_path("models");
-    let mut seg_model = SegmentationModel::new(
+    let Some(mut seg_model) = load_model_or_skip(SegmentationModel::new(
         models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
         SEGMENTATION_STEP_SECONDS as f32,
-    )
-    .unwrap();
-    let mut emb_model = EmbeddingModel::new(
+    )) else {
+        return;
+    };
+    let Some(mut emb_model) = load_model_or_skip(EmbeddingModel::new(
         models_dir
             .join("wespeaker-voxceleb-resnet34.onnx")
             .to_str()
             .unwrap(),
-    )
-    .unwrap();
+    )) else {
+        return;
+    };
     let expected = custom_pipeline_config();
     let pipeline = DiarizationPipeline::new_with_config(
         &mut seg_model,
@@ -571,9 +614,11 @@ fn borrowed_pipeline_new_with_config_stores_custom_default_config() {
 #[test]
 fn chunk_embedding_pipelined_vs_sequential_baseline() {
     let models_dir = fixture_path("models");
-    let mut pipeline = PipelineBuilder::from_dir(&models_dir, ExecutionMode::CoreMl)
-        .build()
-        .unwrap();
+    let Some(mut pipeline) = build_pipeline_or_skip(
+        PipelineBuilder::from_dir(&models_dir, ExecutionMode::CoreMl).build(),
+    ) else {
+        return;
+    };
 
     // multi-chunk audio (triggers pipelined path)
     let (audio, sample_rate) = load_wav_samples(&fixture_path("test.wav"));

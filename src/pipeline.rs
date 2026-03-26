@@ -107,11 +107,11 @@ macro_rules! pipeline_run_methods {
 
 /// Owned pipeline that manages its own model lifetimes
 ///
-/// Construct via [`PipelineBuilder`]:
+/// Construct directly for the default path, or use [`PipelineBuilder`] for custom config:
 /// ```no_run
-/// use speakrs::{ExecutionMode, PipelineBuilder};
+/// use speakrs::{ExecutionMode, OwnedDiarizationPipeline};
 ///
-/// let mut pipeline = PipelineBuilder::from_pretrained(ExecutionMode::Cpu)?.build()?;
+/// let mut pipeline = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::Cpu)?;
 /// # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 /// ```
 pub struct OwnedDiarizationPipeline {
@@ -123,6 +123,28 @@ pub struct OwnedDiarizationPipeline {
 }
 
 impl OwnedDiarizationPipeline {
+    /// Load models from a local directory using default pipeline and runtime config
+    pub fn from_dir(
+        models_dir: impl Into<std::path::PathBuf>,
+        mode: ExecutionMode,
+    ) -> Result<Self, PipelineError> {
+        PipelineBuilder::from_dir(models_dir, mode).build()
+    }
+
+    /// Build from a resolved [`ModelBundle`](crate::models::ModelBundle) using default config
+    pub fn from_bundle(
+        bundle: crate::models::ModelBundle,
+        mode: ExecutionMode,
+    ) -> Result<Self, PipelineError> {
+        PipelineBuilder::from_bundle(bundle, mode).build()
+    }
+
+    /// Download models from HuggingFace and build with default config
+    #[cfg(feature = "online")]
+    pub fn from_pretrained(mode: ExecutionMode) -> Result<Self, PipelineError> {
+        PipelineBuilder::from_pretrained(mode)?.build()
+    }
+
     pipeline_run_methods!();
 
     /// Run post-inference (clustering + reconstruction) on pre-computed artifacts

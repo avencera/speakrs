@@ -497,18 +497,23 @@ impl SharedCoreMlModel {
     }
 }
 
+fn coreml_stem(path: &Path) -> std::borrow::Cow<'_, str> {
+    path.file_stem()
+        .filter(|stem| !stem.is_empty())
+        .unwrap_or_else(|| path.file_name().unwrap_or(path.as_os_str()))
+        .to_string_lossy()
+}
+
 /// Resolve .mlmodelc path next to an .onnx file
-pub(crate) fn coreml_model_path(onnx_path: &str) -> std::path::PathBuf {
-    let path = Path::new(onnx_path);
-    let stem = path.file_stem().unwrap().to_str().unwrap();
-    path.with_file_name(format!("{stem}.mlmodelc"))
+pub(crate) fn coreml_model_path(onnx_path: &Path) -> std::path::PathBuf {
+    let stem = coreml_stem(onnx_path);
+    onnx_path.with_file_name(format!("{stem}.mlmodelc"))
 }
 
 /// Resolve W8A16 .mlmodelc path, falling back to FP32 if not found
-pub(crate) fn coreml_w8a16_model_path(onnx_path: &str) -> std::path::PathBuf {
-    let path = Path::new(onnx_path);
-    let stem = path.file_stem().unwrap().to_str().unwrap();
-    let w8a16_path = path.with_file_name(format!("{stem}-w8a16.mlmodelc"));
+pub(crate) fn coreml_w8a16_model_path(onnx_path: &Path) -> std::path::PathBuf {
+    let stem = coreml_stem(onnx_path);
+    let w8a16_path = onnx_path.with_file_name(format!("{stem}-w8a16.mlmodelc"));
     if w8a16_path.exists() {
         w8a16_path
     } else {

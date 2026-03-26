@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::Path;
-#[cfg(feature = "coreml")]
 use std::path::PathBuf;
 #[cfg(feature = "coreml")]
 use std::sync::Arc;
@@ -16,7 +15,7 @@ use ort::value::{Tensor, TensorRef};
 use crate::inference::coreml::{
     CachedInputShape, CoreMlModel, GpuPrecision, SharedCoreMlModel, coreml_model_path,
 };
-use crate::inference::{ExecutionMode, with_execution_mode};
+use crate::inference::{ExecutionMode, ModelLoadError, ensure_ort_ready, with_execution_mode};
 
 const PRIMARY_BATCH_SIZE: usize = 64;
 const MULTI_MASK_BATCH_SIZE: usize = 32;
@@ -78,7 +77,7 @@ pub(crate) struct ChunkSessionInfo {
 
 /// WeSpeaker speaker embedding model with split-backend and chunk embedding support
 pub struct EmbeddingModel {
-    model_path: String,
+    model_path: PathBuf,
     mode: ExecutionMode,
     session: Session,
     primary_batched_session: Option<Session>,
@@ -143,7 +142,7 @@ pub struct EmbeddingModel {
 }
 
 impl EmbeddingModel {
-    fn split_backend_available(model_path: &str) -> bool {
+    fn split_backend_available(model_path: &Path) -> bool {
         let split_fbank_path = split_fbank_model_path(model_path);
         let split_tail_path = split_tail_model_path(model_path, 1);
         let has_multi_mask = multi_mask_model_path(model_path, 1).is_some_and(|path| path.exists());
@@ -152,25 +151,29 @@ impl EmbeddingModel {
     }
 
     /// Load the WeSpeaker embedding model
-    pub fn new(model_path: &str) -> Result<Self, ort::Error> {
+    pub fn new(model_path: impl AsRef<Path>) -> Result<Self, ModelLoadError> {
         Self::with_mode(model_path, ExecutionMode::Cpu)
     }
 
     /// Load the WeSpeaker embedding model with the requested execution mode
-    pub fn with_mode(model_path: &str, mode: ExecutionMode) -> Result<Self, ort::Error> {
+    pub fn with_mode(
+        model_path: impl AsRef<Path>,
+        mode: ExecutionMode,
+    ) -> Result<Self, ModelLoadError> {
         Self::with_mode_and_config(model_path, mode, &crate::pipeline::RuntimeConfig::default())
     }
 
     /// Load the WeSpeaker embedding model with the requested execution mode and runtime config
     pub fn with_mode_and_config(
-        model_path: &str,
+        model_path: impl AsRef<Path>,
         mode: ExecutionMode,
         config: &crate::pipeline::RuntimeConfig,
-    ) -> Result<Self, ort::Error> {
-        let metadata_path = Path::new(model_path)
-            .with_extension("min_num_samples.txt")
-            .to_string_lossy()
-            .into_owned();
+    ) -> Result<Self, ModelLoadError> {
+        mode.validate()?;
+        ensure_ort_ready()?;
+
+        let model_path = model_path.as_ref();
+        let metadata_path = model_path.with_extension("min_num_samples.txt");
         let split_fbank_path = split_fbank_model_path(model_path);
         let split_fbank_batched_path = split_fbank_batched_model_path(model_path);
         let split_tail_path = split_tail_model_path(model_path, 1);
@@ -198,43 +201,38 @@ impl EmbeddingModel {
         let (primary_batched_session, primary_batched_elapsed) = timed!(
             batched_model_path(model_path, PRIMARY_BATCH_SIZE)
                 .filter(|path| path.exists())
-                .map(|path| Self::build_batched_session(path.to_str().unwrap(), mode))
+                .map(|path| Self::build_batched_session(&path, mode))
                 .transpose()?
         );
         let (split_fbank_session, split_fbank_elapsed) = timed!(
             use_split_backend
-                .then(|| {
-                    Self::build_fbank_session(
-                        split_fbank_path.to_str().unwrap(),
-                        ExecutionMode::Cpu,
-                    )
-                })
+                .then(|| { Self::build_fbank_session(&split_fbank_path, ExecutionMode::Cpu,) })
                 .transpose()?
         );
         let (split_fbank_batched_session, split_fbank_batched_elapsed) = timed!(
             use_split_backend
                 .then_some(split_fbank_batched_path)
                 .filter(|path| path.exists())
-                .map(|path| Self::build_fbank_session(path.to_str().unwrap(), ExecutionMode::Cpu))
+                .map(|path| Self::build_fbank_session(&path, ExecutionMode::Cpu))
                 .transpose()?
         );
         let (split_tail_session, split_tail_elapsed) = timed!(
             use_split_backend
-                .then(|| Self::build_session(split_tail_path.to_str().unwrap(), mode))
+                .then(|| Self::build_session(&split_tail_path, mode))
                 .transpose()?
         );
         let (split_tail_batched_session, split_tail_batched_elapsed) = timed!(
             use_split_backend
                 .then_some(split_tail_batched_path)
                 .filter(|path| path.exists())
-                .map(|path| Self::build_session(path.to_str().unwrap(), mode))
+                .map(|path| Self::build_session(&path, mode))
                 .transpose()?
         );
         let (split_primary_tail_batched_session, split_primary_tail_batched_elapsed) = timed!(
             use_split_backend
                 .then_some(split_primary_tail_batched_path)
                 .filter(|path| path.exists())
-                .map(|path| Self::build_session(path.to_str().unwrap(), mode))
+                .map(|path| Self::build_session(&path, mode))
                 .transpose()?
         );
         #[cfg(feature = "coreml")]
@@ -265,13 +263,13 @@ impl EmbeddingModel {
         let (multi_mask_session, multi_mask_elapsed) = timed!(
             multi_mask_model_path(model_path, 1)
                 .filter(|p| p.exists())
-                .map(|p| Self::build_session(p.to_str().unwrap(), mode))
+                .map(|p| Self::build_session(&p, mode))
                 .transpose()?
         );
         let (multi_mask_batched_session, multi_mask_batched_elapsed) = timed!(
             multi_mask_model_path(model_path, PRIMARY_BATCH_SIZE)
                 .filter(|p| p.exists())
-                .map(|p| Self::build_session(p.to_str().unwrap(), mode))
+                .map(|p| Self::build_session(&p, mode))
                 .transpose()?
         );
 
@@ -347,7 +345,7 @@ impl EmbeddingModel {
         }
 
         Ok(Self {
-            model_path: model_path.to_owned(),
+            model_path: model_path.to_path_buf(),
             mode,
             session,
             primary_batched_session,
@@ -455,12 +453,12 @@ impl EmbeddingModel {
         })
     }
 
-    fn build_session(model_path: &str, mode: ExecutionMode) -> Result<Session, ort::Error> {
+    fn build_session(model_path: &Path, mode: ExecutionMode) -> Result<Session, ort::Error> {
         Self::build_session_with_graph(model_path, mode, false)
     }
 
     fn build_session_with_graph(
-        model_path: &str,
+        model_path: &Path,
         mode: ExecutionMode,
         cuda_graph: bool,
     ) -> Result<Session, ort::Error> {
@@ -502,7 +500,7 @@ impl EmbeddingModel {
         with_execution_mode(builder, ExecutionMode::Cpu)
     }
 
-    fn build_fbank_session(model_path: &str, mode: ExecutionMode) -> Result<Session, ort::Error> {
+    fn build_fbank_session(model_path: &Path, mode: ExecutionMode) -> Result<Session, ort::Error> {
         let threads = std::thread::available_parallelism()
             .map(|n| n.get().min(4))
             .unwrap_or(1);
@@ -523,7 +521,10 @@ impl EmbeddingModel {
         }
     }
 
-    fn build_batched_session(model_path: &str, mode: ExecutionMode) -> Result<Session, ort::Error> {
+    fn build_batched_session(
+        model_path: &Path,
+        mode: ExecutionMode,
+    ) -> Result<Session, ort::Error> {
         // CUDA graphs don't work with fused model (has CPU-only fbank ops)
         Self::build_session(model_path, Self::single_execution_mode(mode))
     }
@@ -753,7 +754,7 @@ impl EmbeddingModel {
             Self::build_session(&self.model_path, Self::single_execution_mode(self.mode))?;
         self.primary_batched_session = batched_model_path(&self.model_path, PRIMARY_BATCH_SIZE)
             .filter(|path| path.exists())
-            .map(|path| Self::build_batched_session(path.to_str().unwrap(), self.mode))
+            .map(|path| Self::build_batched_session(&path, self.mode))
             .transpose()?;
         let split_fbank_path = split_fbank_model_path(&self.model_path);
         let split_tail_path = split_tail_model_path(&self.model_path, 1);
@@ -764,27 +765,25 @@ impl EmbeddingModel {
         let use_split_backend = Self::split_backend_available(&self.model_path);
         let split_fbank_batched_path = split_fbank_batched_model_path(&self.model_path);
         self.split_fbank_session = use_split_backend
-            .then(|| {
-                Self::build_fbank_session(split_fbank_path.to_str().unwrap(), ExecutionMode::Cpu)
-            })
+            .then(|| Self::build_fbank_session(&split_fbank_path, ExecutionMode::Cpu))
             .transpose()?;
         self.split_fbank_batched_session = use_split_backend
             .then_some(split_fbank_batched_path)
             .filter(|path| path.exists())
-            .map(|path| Self::build_fbank_session(path.to_str().unwrap(), ExecutionMode::Cpu))
+            .map(|path| Self::build_fbank_session(&path, ExecutionMode::Cpu))
             .transpose()?;
         self.split_tail_session = use_split_backend
-            .then(|| Self::build_session(split_tail_path.to_str().unwrap(), self.mode))
+            .then(|| Self::build_session(&split_tail_path, self.mode))
             .transpose()?;
         self.split_tail_batched_session = use_split_backend
             .then_some(split_tail_batched_path)
             .filter(|path| path.exists())
-            .map(|path| Self::build_session(path.to_str().unwrap(), self.mode))
+            .map(|path| Self::build_session(&path, self.mode))
             .transpose()?;
         self.split_primary_tail_batched_session = use_split_backend
             .then_some(split_primary_tail_batched_path)
             .filter(|path| path.exists())
-            .map(|path| Self::build_session(path.to_str().unwrap(), self.mode))
+            .map(|path| Self::build_session(&path, self.mode))
             .transpose()?;
         #[cfg(feature = "coreml")]
         {
@@ -801,12 +800,12 @@ impl EmbeddingModel {
         }
         self.multi_mask_session = multi_mask_model_path(&self.model_path, 1)
             .filter(|p| p.exists())
-            .map(|p| Self::build_session(p.to_str().unwrap(), self.mode))
+            .map(|p| Self::build_session(&p, self.mode))
             .transpose()?;
         self.multi_mask_batched_session =
             multi_mask_model_path(&self.model_path, PRIMARY_BATCH_SIZE)
                 .filter(|p| p.exists())
-                .map(|p| Self::build_session(p.to_str().unwrap(), self.mode))
+                .map(|p| Self::build_session(&p, self.mode))
                 .transpose()?;
         Ok(())
     }
@@ -1508,19 +1507,18 @@ impl EmbeddingModel {
 
     #[cfg(feature = "coreml")]
     fn load_native_tail(
-        model_path: &str,
+        model_path: &Path,
         mode: ExecutionMode,
         batch_size: usize,
     ) -> Option<CoreMlModel> {
-        let (resolve_path, compute_units) = match mode {
-            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => (
-                coreml_model_path as fn(&str) -> std::path::PathBuf,
-                CoreMlModel::default_compute_units(),
-            ),
+        let compute_units = match mode {
+            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => {
+                CoreMlModel::default_compute_units()
+            }
             _ => return None,
         };
         let tail_onnx = split_tail_model_path(model_path, batch_size);
-        let coreml_path = resolve_path(tail_onnx.to_str().unwrap());
+        let coreml_path = fp32_coreml_path(&tail_onnx);
         if !coreml_path.exists() {
             if batch_size == 1 {
                 tracing::warn!(
@@ -1540,20 +1538,18 @@ impl EmbeddingModel {
     }
 
     #[cfg(feature = "coreml")]
-    fn has_native_tail_model(model_path: &str, mode: ExecutionMode, batch_size: usize) -> bool {
-        let resolve_path = match mode {
-            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => {
-                coreml_model_path as fn(&str) -> std::path::PathBuf
-            }
+    fn has_native_tail_model(model_path: &Path, mode: ExecutionMode, batch_size: usize) -> bool {
+        match mode {
+            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => {}
             _ => return false,
-        };
+        }
         let tail_onnx = split_tail_model_path(model_path, batch_size);
-        resolve_path(tail_onnx.to_str().unwrap()).exists()
+        fp32_coreml_path(&tail_onnx).exists()
     }
 
     #[cfg(feature = "coreml")]
     fn load_native_fbank(
-        model_path: &str,
+        model_path: &Path,
         mode: ExecutionMode,
         batch_size: usize,
     ) -> Option<SharedCoreMlModel> {
@@ -1566,7 +1562,7 @@ impl EmbeddingModel {
             split_fbank_batched_model_path(model_path)
         };
         // fbank DFT matmul needs FP32 for accuracy -- always use FP32 CPU+GPU
-        let coreml_path = coreml_model_path(fbank_onnx.to_str().unwrap());
+        let coreml_path = fp32_coreml_path(&fbank_onnx);
         if !coreml_path.exists() {
             return None;
         }
@@ -1585,7 +1581,7 @@ impl EmbeddingModel {
     }
 
     #[cfg(feature = "coreml")]
-    fn has_native_fbank_model(model_path: &str, mode: ExecutionMode, batch_size: usize) -> bool {
+    fn has_native_fbank_model(model_path: &Path, mode: ExecutionMode, batch_size: usize) -> bool {
         if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
             return false;
         }
@@ -1594,16 +1590,16 @@ impl EmbeddingModel {
         } else {
             split_fbank_batched_model_path(model_path)
         };
-        coreml_model_path(fbank_onnx.to_str().unwrap()).exists()
+        fp32_coreml_path(&fbank_onnx).exists()
     }
 
     /// Load a 30s fbank model (480000 samples → ~2998 frames)
     #[cfg(feature = "coreml")]
-    fn load_native_fbank_30s(model_path: &str, mode: ExecutionMode) -> Option<SharedCoreMlModel> {
+    fn load_native_fbank_30s(model_path: &Path, mode: ExecutionMode) -> Option<SharedCoreMlModel> {
         if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
             return None;
         }
-        let coreml_path = Path::new(model_path).with_file_name("wespeaker-fbank-30s.mlmodelc");
+        let coreml_path = model_path.with_file_name("wespeaker-fbank-30s.mlmodelc");
         if !coreml_path.exists() {
             return None;
         }
@@ -1650,14 +1646,14 @@ impl EmbeddingModel {
     }
 
     #[cfg(feature = "coreml")]
-    fn load_native_multi_mask(model_path: &str, mode: ExecutionMode) -> Option<SharedCoreMlModel> {
+    fn load_native_multi_mask(model_path: &Path, mode: ExecutionMode) -> Option<SharedCoreMlModel> {
         if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
             return None;
         }
         // use the b32 compiled model (supports both b1 and b32 via EnumeratedShapes)
-        let onnx_path = Path::new(model_path).with_file_name("wespeaker-multimask-tail-b32.onnx");
+        let onnx_path = model_path.with_file_name("wespeaker-multimask-tail-b32.onnx");
         // W8A16 embedding disabled pending DER validation
-        let coreml_path = coreml_model_path(onnx_path.to_str().unwrap());
+        let coreml_path = fp32_coreml_path(&onnx_path);
         if !coreml_path.exists() {
             return None;
         }
@@ -1676,12 +1672,12 @@ impl EmbeddingModel {
     }
 
     #[cfg(feature = "coreml")]
-    fn has_native_multi_mask_model(model_path: &str, mode: ExecutionMode) -> bool {
+    fn has_native_multi_mask_model(model_path: &Path, mode: ExecutionMode) -> bool {
         if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
             return false;
         }
-        let onnx_path = Path::new(model_path).with_file_name("wespeaker-multimask-tail-b32.onnx");
-        coreml_model_path(onnx_path.to_str().unwrap()).exists()
+        let onnx_path = model_path.with_file_name("wespeaker-multimask-tail-b32.onnx");
+        fp32_coreml_path(&onnx_path).exists()
     }
 
     #[cfg(feature = "coreml")]
@@ -1707,7 +1703,7 @@ impl EmbeddingModel {
     }
 
     #[cfg(feature = "coreml")]
-    fn chunk_session_specs(model_path: &str, mode: ExecutionMode) -> Vec<ChunkSessionSpec> {
+    fn chunk_session_specs(model_path: &Path, mode: ExecutionMode) -> Vec<ChunkSessionSpec> {
         if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
             return Vec::new();
         }
@@ -1716,9 +1712,8 @@ impl EmbeddingModel {
             .iter()
             .filter_map(|&(step_resnet, num_windows, fbank_frames, num_masks)| {
                 let stem = format!("wespeaker-chunk-emb-s{step_resnet}-w{num_windows}");
-                let w8a16_path =
-                    Path::new(model_path).with_file_name(format!("{stem}-w8a16.mlmodelc"));
-                let fp32_path = Path::new(model_path).with_file_name(format!("{stem}.mlmodelc"));
+                let w8a16_path = model_path.with_file_name(format!("{stem}-w8a16.mlmodelc"));
+                let fp32_path = model_path.with_file_name(format!("{stem}.mlmodelc"));
 
                 let coreml_path = if fp32_path.exists() {
                     fp32_path
@@ -1797,25 +1792,25 @@ impl EmbeddingModel {
     }
 }
 
-fn batched_model_path(model_path: &str, batch_size: usize) -> Option<std::path::PathBuf> {
-    let path = Path::new(model_path);
+fn batched_model_path(model_path: &Path, batch_size: usize) -> Option<PathBuf> {
+    let path = model_path;
     let file_name = path.file_name()?.to_str()?;
     let stem = file_name.strip_suffix(".onnx")?;
     Some(path.with_file_name(format!("{stem}-b{batch_size}.onnx")))
 }
 
-fn split_fbank_model_path(model_path: &str) -> std::path::PathBuf {
-    let path = Path::new(model_path);
+fn split_fbank_model_path(model_path: &Path) -> PathBuf {
+    let path = model_path;
     path.with_file_name("wespeaker-fbank.onnx")
 }
 
-fn split_fbank_batched_model_path(model_path: &str) -> std::path::PathBuf {
-    let path = Path::new(model_path);
+fn split_fbank_batched_model_path(model_path: &Path) -> PathBuf {
+    let path = model_path;
     path.with_file_name("wespeaker-fbank-b32.onnx")
 }
 
-fn split_tail_model_path(model_path: &str, batch_size: usize) -> std::path::PathBuf {
-    let path = Path::new(model_path);
+fn split_tail_model_path(model_path: &Path, batch_size: usize) -> PathBuf {
+    let path = model_path;
     if batch_size == 1 {
         path.with_file_name("wespeaker-voxceleb-resnet34-tail.onnx")
     } else {
@@ -1826,8 +1821,8 @@ fn split_tail_model_path(model_path: &str, batch_size: usize) -> std::path::Path
 }
 
 #[allow(dead_code)]
-fn multi_mask_model_path(model_path: &str, batch_size: usize) -> Option<std::path::PathBuf> {
-    let path = Path::new(model_path);
+fn multi_mask_model_path(model_path: &Path, batch_size: usize) -> Option<PathBuf> {
+    let path = model_path;
     if batch_size == 1 {
         Some(path.with_file_name("wespeaker-multimask-tail.onnx"))
     } else {
@@ -1835,7 +1830,12 @@ fn multi_mask_model_path(model_path: &str, batch_size: usize) -> Option<std::pat
     }
 }
 
-fn read_min_num_samples(path: &str) -> Option<usize> {
+#[cfg(feature = "coreml")]
+fn fp32_coreml_path(model_path: &Path) -> PathBuf {
+    coreml_model_path(model_path)
+}
+
+fn read_min_num_samples(path: &Path) -> Option<usize> {
     fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 

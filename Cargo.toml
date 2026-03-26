@@ -22,7 +22,7 @@ default = ["online"]
 online = ["dep:hf-hub", "hf-hub/ureq", "hf-hub/native-tls"]
 coreml = ["dep:objc2", "dep:objc2-core-ml", "dep:objc2-foundation", "dep:block2"]
 cuda = ["ort/cuda"]
-load-dynamic = ["ort/load-dynamic"]
+load-dynamic = ["ort/load-dynamic", "dep:libloading"]
 _metrics = []
 
 [package.metadata.docs.rs]
@@ -34,6 +34,7 @@ ndarray = "0.17.2"
 ndarray-linalg = { version = "0.18.1", features = ["openblas-static"] }
 ndarray-npy = "0.10.0"
 ort = { version = "2.0.0-rc.12", features = ["ndarray"] }
+libloading = { version = "0.8.9", optional = true }
 kodama = "0.3.0"
 tracing = "0.1.44"
 thiserror = "2.0.18"

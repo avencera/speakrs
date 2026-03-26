@@ -27,6 +27,30 @@ struct ChunkEmbeddingResources {
     fbank_10s: Option<Arc<SharedCoreMlModel>>,
 }
 
+struct LargestChunkSession {
+    session: ChunkSessionHandle,
+    fbank_frames: usize,
+    num_masks: usize,
+}
+
+impl ChunkEmbeddingResources {
+    fn largest_session(&self) -> Result<LargestChunkSession, PipelineError> {
+        let session =
+            self.chunk_sessions.last().cloned().ok_or_else(|| {
+                PipelineError::Other("missing chunk embedding session".to_owned())
+            })?;
+        let (_, fbank_frames, num_masks) = self.chunk_lookup.last().copied().ok_or_else(|| {
+            PipelineError::Other("missing chunk embedding session metadata".to_owned())
+        })?;
+
+        Ok(LargestChunkSession {
+            session,
+            fbank_frames,
+            num_masks,
+        })
+    }
+}
+
 struct DecodedChunk {
     global_start: usize,
     decoded_chunk: Vec<Array2<f32>>,
@@ -81,6 +105,38 @@ struct EmbeddingSummary {
     gpu_predict_us: u64,
     prep_fbank_us: u64,
     prep_mask_us: u64,
+}
+
+fn join_scoped_result<T>(
+    name: &str,
+    handle: std::thread::ScopedJoinHandle<'_, Result<T, PipelineError>>,
+) -> Result<T, PipelineError> {
+    handle
+        .join()
+        .map_err(|_| PipelineError::Other(format!("{name} thread panicked")))?
+}
+
+fn batch_embeddings(
+    num_masks: usize,
+    data: Vec<f32>,
+    context: &str,
+) -> Result<Array2<f32>, PipelineError> {
+    Array2::from_shape_vec((num_masks, 256), data).map_err(|error| {
+        PipelineError::Other(format!(
+            "{context} produced invalid embedding shape: {error}"
+        ))
+    })
+}
+
+fn chunk_session_for_windows(
+    emb_model: &mut EmbeddingModel,
+    wins: usize,
+) -> Result<&crate::inference::embedding::ChunkEmbeddingSession, PipelineError> {
+    emb_model.chunk_session_for_windows(wins).ok_or_else(|| {
+        PipelineError::Other(format!(
+            "missing chunk embedding session for {wins} windows"
+        ))
+    })
 }
 
 // --- ChunkPrep actor: encapsulates the 14 parameters of prep_decoded_chunk ---
@@ -512,9 +568,7 @@ fn run_pipelined<'scope>(
     audio: &'scope [f32],
     params: &ChunkParams,
 ) -> Result<EmbeddingSummary, PipelineError> {
-    let largest_session = resources.chunk_sessions.last().unwrap().clone();
-    let largest_fbank_frames = resources.chunk_lookup.last().unwrap().1;
-    let largest_num_masks = resources.chunk_lookup.last().unwrap().2;
+    let largest = resources.largest_session()?;
     let max_active = params.chunk_win_capacity * params.num_speakers;
 
     let step_samples = params.step_samples;
@@ -526,8 +580,8 @@ fn run_pipelined<'scope>(
         window_samples,
         num_speakers,
         min_num_samples: params.min_num_samples,
-        largest_fbank_frames,
-        largest_num_masks,
+        largest_fbank_frames: largest.fbank_frames,
+        largest_num_masks: largest.num_masks,
         max_active,
         fbank_30s: resources.fbank_30s.clone(),
         fbank_10s: resources.fbank_10s.clone(),
@@ -556,9 +610,9 @@ fn run_pipelined<'scope>(
     let gpu_prep_rx = prep_rx;
     let gpu_chunk_rx = chunk_rx.clone();
     let gpu_worker = GpuWorker {
-        model: largest_session.model,
-        fbank_shape: largest_session.cached_fbank_shape,
-        masks_shape: largest_session.cached_masks_shape,
+        model: largest.session.model,
+        fbank_shape: largest.session.cached_fbank_shape,
+        masks_shape: largest.session.cached_masks_shape,
         prep: prep_config,
         scratch: PrepScratch::new(window_samples),
     };
@@ -577,10 +631,10 @@ fn run_pipelined<'scope>(
     let first = match emb_rx.recv() {
         Ok(e) => e,
         Err(_) => {
-            let _gpu_stats = gpu_handle.join().unwrap()?;
+            let _gpu_stats = join_scoped_result("chunk embedding gpu", gpu_handle)?;
             let mut total_prep_fbank_us = 0u64;
             for handle in prep_handles {
-                total_prep_fbank_us += handle.join().unwrap()?.fbank_us;
+                total_prep_fbank_us += join_scoped_result("chunk embedding prep", handle)?.fbank_us;
             }
             return Ok(EmbeddingSummary {
                 segmentations: Array3::zeros((0, 0, num_speakers)),
@@ -601,7 +655,11 @@ fn run_pipelined<'scope>(
     for embedded in std::iter::once(first).chain(std::iter::from_fn(|| emb_rx.recv().ok())) {
         total_predict_us += embedded.predict_us;
 
-        let batch_emb = Array2::from_shape_vec((embedded.num_masks, 256), embedded.data).unwrap();
+        let batch_emb = batch_embeddings(
+            embedded.num_masks,
+            embedded.data,
+            "pipelined chunk embedding",
+        )?;
 
         for &(local, speaker_idx) in &embedded.active {
             let slot = embedded.global_start + local;
@@ -624,11 +682,11 @@ fn run_pipelined<'scope>(
         total_chunks += 1;
     }
 
-    let gpu_stats = gpu_handle.join().unwrap()?;
+    let gpu_stats = join_scoped_result("chunk embedding gpu", gpu_handle)?;
 
     let mut total_prep_fbank_us = 0u64;
     for handle in prep_handles {
-        total_prep_fbank_us += handle.join().unwrap()?.fbank_us;
+        total_prep_fbank_us += join_scoped_result("chunk embedding prep", handle)?.fbank_us;
     }
 
     // truncate to actual filled range
@@ -688,10 +746,9 @@ fn run_sequential_chunks(
     } in chunk_rx
     {
         let wins = decoded_chunk.len();
-        let session = emb_model.chunk_session_for_windows(wins).unwrap();
+        let session = chunk_session_for_windows(emb_model, wins)?;
         let sess_fbank_frames = session.fbank_frames;
         let sess_num_masks = session.num_masks;
-        let _ = session;
 
         let chunk_audio_start = global_start * step_samples;
         if chunk_audio_start + window_samples > audio.len() {
@@ -716,7 +773,11 @@ fn run_sequential_chunks(
             let copy_frames = full_fbank.nrows().min(sess_fbank_frames);
             for r in 0..copy_frames {
                 let dst = r * 80;
-                fbank[dst..dst + 80].copy_from_slice(full_fbank.row(r).as_slice().unwrap());
+                let row = full_fbank.row(r);
+                let row = row.as_slice().ok_or_else(|| {
+                    PipelineError::Other("30s chunk fbank row was not contiguous".to_owned())
+                })?;
+                fbank[dst..dst + 80].copy_from_slice(row);
             }
         } else {
             let mut fb_off = 0usize;
@@ -727,7 +788,11 @@ fn run_sequential_chunks(
                 let copy = seg_fbank.nrows().min(sess_fbank_frames - fb_off);
                 for r in 0..copy {
                     let dst = (fb_off + r) * 80;
-                    fbank[dst..dst + 80].copy_from_slice(seg_fbank.row(r).as_slice().unwrap());
+                    let row = seg_fbank.row(r);
+                    let row = row.as_slice().ok_or_else(|| {
+                        PipelineError::Other("10s chunk fbank row was not contiguous".to_owned())
+                    })?;
+                    fbank[dst..dst + 80].copy_from_slice(row);
                 }
                 fb_off += 998;
                 au_off += window_samples;
@@ -765,7 +830,7 @@ fn run_sequential_chunks(
         seq_mask_us += mask_start.elapsed().as_micros() as u64;
 
         let predict_start = std::time::Instant::now();
-        let session = emb_model.chunk_session_for_windows(wins).unwrap();
+        let session = chunk_session_for_windows(emb_model, wins)?;
         let batch_emb = EmbeddingModel::embed_chunk_session(session, &fbank, &masks)?;
         seq_predict_us += predict_start.elapsed().as_micros() as u64;
         seq_chunks += 1;
@@ -903,8 +968,12 @@ pub(super) fn try_chunk_embedding(
         };
         let emb_elapsed = emb_start.elapsed();
 
-        let seg_thread_elapsed = seg_handle.join().unwrap()?;
-        bridge_handle.join().unwrap();
+        let seg_thread_elapsed = seg_handle
+            .join()
+            .map_err(|_| PipelineError::Other("segmentation thread panicked".to_owned()))??;
+        bridge_handle
+            .join()
+            .map_err(|_| PipelineError::Other("segmentation bridge thread panicked".to_owned()))?;
         trace!(
             seg_thread_ms = seg_thread_elapsed.as_millis(),
             seg_wall_ms = seg_start.elapsed().as_millis(),
@@ -996,8 +1065,9 @@ impl FileCollector {
         chunk_win_capacity: usize,
         num_speakers: usize,
         embedded: EmbeddedChunk,
-    ) {
-        let batch_emb = Array2::from_shape_vec((embedded.num_masks, 256), embedded.data).unwrap();
+    ) -> Result<(), PipelineError> {
+        let batch_emb =
+            batch_embeddings(embedded.num_masks, embedded.data, "batch chunk embedding")?;
 
         for &(local, speaker_idx) in &embedded.active {
             let slot = local_start * chunk_win_capacity + local;
@@ -1020,6 +1090,7 @@ impl FileCollector {
         }
 
         self.chunks_received += 1;
+        Ok(())
     }
 
     fn is_complete(&self) -> bool {
@@ -1280,9 +1351,7 @@ pub(super) fn try_batch_chunk_embedding(
         return Ok(None);
     };
 
-    let largest_session = resources.chunk_sessions.last().unwrap().clone();
-    let largest_fbank_frames = resources.chunk_lookup.last().unwrap().1;
-    let largest_num_masks = resources.chunk_lookup.last().unwrap().2;
+    let largest = resources.largest_session()?;
     let max_active = chunk_win_capacity * num_speakers;
 
     let prep_config = ChunkPrep {
@@ -1290,8 +1359,8 @@ pub(super) fn try_batch_chunk_embedding(
         window_samples,
         num_speakers,
         min_num_samples,
-        largest_fbank_frames,
-        largest_num_masks,
+        largest_fbank_frames: largest.fbank_frames,
+        largest_num_masks: largest.num_masks,
         max_active,
         fbank_30s: resources.fbank_30s.clone(),
         fbank_10s: resources.fbank_10s.clone(),
@@ -1360,7 +1429,11 @@ pub(super) fn try_batch_chunk_embedding(
                             Some(seg_warm_start_windows),
                         )?;
 
-                        bridge_handle.join().unwrap();
+                        bridge_handle.join().map_err(|_| {
+                            PipelineError::Other(
+                                "batch segmentation bridge thread panicked".to_owned(),
+                            )
+                        })?;
                         Ok::<(), PipelineError>(())
                     })?;
                 }
@@ -1387,9 +1460,9 @@ pub(super) fn try_batch_chunk_embedding(
             let gpu_emb_tx = embedded_tx.clone();
             let gpu_decoded_rx = decoded_rx.clone();
             let gpu_worker = BatchGpuWorker {
-                model: largest_session.model,
-                fbank_shape: largest_session.cached_fbank_shape,
-                masks_shape: largest_session.cached_masks_shape,
+                model: largest.session.model,
+                fbank_shape: largest.session.cached_fbank_shape,
+                masks_shape: largest.session.cached_masks_shape,
                 prep: prep_config,
                 scratch: PrepScratch::new(window_samples),
             };
@@ -1427,10 +1500,15 @@ pub(super) fn try_batch_chunk_embedding(
                     chunk_win_capacity,
                     num_speakers,
                     tagged.embedded,
-                );
+                )?;
 
                 if fc.is_complete() {
-                    let fc = collectors[tagged.file_idx].take().unwrap();
+                    let fc = collectors[tagged.file_idx].take().ok_or_else(|| {
+                        PipelineError::Other(format!(
+                            "collector for file {} completed without state",
+                            tagged.file_idx
+                        ))
+                    })?;
                     if let Some(artifacts) =
                         fc.into_artifacts(step_seconds, step_samples, window_samples)
                     {
@@ -1442,10 +1520,10 @@ pub(super) fn try_batch_chunk_embedding(
             }
 
             // join workers
-            seg_handle.join().unwrap()?;
-            let _gpu_stats = gpu_handle.join().unwrap()?;
+            join_scoped_result("batch segmentation", seg_handle)?;
+            let _gpu_stats = join_scoped_result("batch chunk embedding gpu", gpu_handle)?;
             for handle in prep_handles {
-                handle.join().unwrap()?;
+                join_scoped_result("batch chunk embedding prep", handle)?;
             }
 
             let batch_elapsed = batch_start.elapsed();

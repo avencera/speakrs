@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "online")]
 use crate::inference::ExecutionMode;
 
 const SEGMENTATION_ONNX: &str = "segmentation-3.0.onnx";
@@ -83,19 +84,22 @@ impl ModelManager {
     }
 
     /// Download a single file, returns path to cached copy
-    pub fn get(&self, filename: &str) -> Result<PathBuf, hf_hub::api::sync::ApiError> {
-        self.repo.get(filename)
+    pub fn get(&self, filename: impl AsRef<str>) -> Result<PathBuf, hf_hub::api::sync::ApiError> {
+        self.repo.get(filename.as_ref())
     }
 
     /// Ensure all files for a mode are downloaded, return base models dir
     pub fn ensure(&self, mode: ExecutionMode) -> Result<PathBuf, hf_hub::api::sync::ApiError> {
         let files = required_files(mode);
-        for f in &files {
-            self.repo.get(f)?;
+        for file in &files {
+            self.repo.get(file)?;
         }
         // all files land in the same snapshot dir
-        let first = self.repo.get(files[0])?;
-        Ok(first.parent().unwrap().to_path_buf())
+        let first = self.repo.get(&files[0])?;
+        let Some(parent) = first.parent() else {
+            return Ok(first);
+        };
+        Ok(parent.to_path_buf())
     }
 }
 
@@ -118,53 +122,47 @@ const ONNX_FILES: &[&str] = &[
 ];
 
 #[cfg(feature = "online")]
-fn mlmodelc_files(name: &str) -> Vec<&'static str> {
-    // each .mlmodelc dir has these 4 files
-    // we leak the strings since they're constructed at runtime
-    let paths = [
+fn mlmodelc_files(name: &str) -> Vec<String> {
+    vec![
         format!("{name}/model.mil"),
         format!("{name}/coremldata.bin"),
         format!("{name}/weights/weight.bin"),
         format!("{name}/analytics/coremldata.bin"),
-    ];
-    paths
-        .into_iter()
-        .map(|s| &*Box::leak(s.into_boxed_str()))
-        .collect()
+    ]
 }
 
 #[cfg(feature = "online")]
-fn required_files(mode: ExecutionMode) -> Vec<&'static str> {
-    let mut files: Vec<&str> = PLDA_FILES.to_vec();
+fn required_files(mode: ExecutionMode) -> Vec<String> {
+    let mut files: Vec<String> = PLDA_FILES.iter().map(|file| (*file).to_string()).collect();
 
     match mode {
         ExecutionMode::Cpu => {
-            files.extend_from_slice(ONNX_FILES);
+            files.extend(ONNX_FILES.iter().map(|file| (*file).to_string()));
         }
         ExecutionMode::Cuda | ExecutionMode::CudaFast => {
-            files.extend_from_slice(ONNX_FILES);
+            files.extend(ONNX_FILES.iter().map(|file| (*file).to_string()));
             // split models for multi-mask embedding (CPU fbank + GPU multi-mask)
-            files.push("wespeaker-fbank.onnx");
-            files.push("wespeaker-fbank-b32.onnx");
-            files.push("wespeaker-multimask-tail.onnx");
-            files.push("wespeaker-multimask-tail-b32.onnx");
+            files.push("wespeaker-fbank.onnx".to_string());
+            files.push("wespeaker-fbank-b32.onnx".to_string());
+            files.push("wespeaker-multimask-tail.onnx".to_string());
+            files.push("wespeaker-multimask-tail-b32.onnx".to_string());
             // batched seg/emb models
-            files.push("segmentation-3.0-b32.onnx");
-            files.push("wespeaker-voxceleb-resnet34-b64.onnx");
+            files.push("segmentation-3.0-b32.onnx".to_string());
+            files.push("wespeaker-voxceleb-resnet34-b64.onnx".to_string());
         }
         ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => {
             // CoreML modes still need the ONNX segmentation model for the constructor
-            files.push("segmentation-3.0.onnx");
-            files.push("wespeaker-voxceleb-resnet34.onnx");
-            files.push("wespeaker-voxceleb-resnet34.onnx.data");
+            files.push("segmentation-3.0.onnx".to_string());
+            files.push("wespeaker-voxceleb-resnet34.onnx".to_string());
+            files.push("wespeaker-voxceleb-resnet34.onnx.data".to_string());
             // b32 batched ONNX for segmentation
-            files.push("segmentation-3.0-b32.onnx");
+            files.push("segmentation-3.0-b32.onnx".to_string());
             // split ONNX models for embedding
-            files.push("wespeaker-fbank.onnx");
-            files.push("wespeaker-fbank-b32.onnx");
-            files.push("wespeaker-voxceleb-resnet34-tail.onnx");
-            files.push("wespeaker-voxceleb-resnet34-tail-b3.onnx");
-            files.push("wespeaker-voxceleb-resnet34-tail-b32.onnx");
+            files.push("wespeaker-fbank.onnx".to_string());
+            files.push("wespeaker-fbank-b32.onnx".to_string());
+            files.push("wespeaker-voxceleb-resnet34-tail.onnx".to_string());
+            files.push("wespeaker-voxceleb-resnet34-tail-b3.onnx".to_string());
+            files.push("wespeaker-voxceleb-resnet34-tail-b32.onnx".to_string());
             // FP32 CoreML models
             files.extend(mlmodelc_files("segmentation-3.0-b32.mlmodelc"));
             files.extend(mlmodelc_files("segmentation-3.0.mlmodelc"));

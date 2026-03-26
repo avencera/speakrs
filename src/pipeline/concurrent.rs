@@ -236,7 +236,7 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
         }
 
         if !audio_buffer.is_empty() {
-            let nf = num_frames.unwrap();
+            let nf = self.require_num_frames(num_frames, chunk_idx)?;
             let emb = emb_array.get_or_insert_with(|| {
                 Array3::from_elem((total_windows, self.num_speakers, 256), f32::NAN)
             });
@@ -294,10 +294,11 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
                 if !batch.active_flags[mask_idx] {
                     continue;
                 }
-                storage.store(
+                self.store_embedding_row(
+                    storage,
                     chunk_idx,
                     speaker_idx,
-                    batch_embeddings.row(mask_idx).as_slice().unwrap(),
+                    batch_embeddings.row(mask_idx),
                 );
             }
         }
@@ -441,7 +442,7 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
             "streaming window count mismatch: got {chunk_idx}, expected {total_windows}"
         );
 
-        let seg = seg_array.unwrap();
+        let seg = self.require_segmentations(seg_array, chunk_idx)?;
         // all speakers inactive → no flush happened, emb_array stays None
         let emb = emb_array
             .unwrap_or_else(|| Array3::from_elem((chunk_idx, self.num_speakers, 256), f32::NAN));
@@ -461,5 +462,45 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
             embeddings: emb,
             num_chunks: chunk_idx,
         })
+    }
+
+    fn require_num_frames(
+        &self,
+        num_frames: Option<usize>,
+        chunk_idx: usize,
+    ) -> Result<usize, PipelineError> {
+        num_frames.ok_or_else(|| {
+            PipelineError::Other(format!(
+                "multi-mask path buffered audio without any decoded frames at chunk {chunk_idx}"
+            ))
+        })
+    }
+
+    fn require_segmentations(
+        &self,
+        segmentations: Option<Array3<f32>>,
+        chunk_idx: usize,
+    ) -> Result<Array3<f32>, PipelineError> {
+        segmentations.ok_or_else(|| {
+            PipelineError::Other(format!(
+                "embedding path processed {chunk_idx} chunks without storing segmentations"
+            ))
+        })
+    }
+
+    fn store_embedding_row<S: EmbeddingStorage>(
+        &self,
+        storage: &mut S,
+        chunk_idx: usize,
+        speaker_idx: usize,
+        row: ndarray::ArrayView1<'_, f32>,
+    ) {
+        if let Some(values) = row.as_slice() {
+            storage.store(chunk_idx, speaker_idx, values);
+            return;
+        }
+
+        let values = row.to_vec();
+        storage.store(chunk_idx, speaker_idx, &values);
     }
 }

@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-use speakrs::inference::ExecutionMode;
+use speakrs::inference::{DynamicRuntimeError, ExecutionMode, ModelLoadError, OrtRuntimeError};
 use speakrs::pipeline::{
-    OwnedDiarizationPipeline, PipelineBuilder, PipelineConfig, QueuedDiarizationRequest,
-    ReconstructMethod,
+    OwnedDiarizationPipeline, PipelineBuilder, PipelineConfig, PipelineError,
+    QueuedDiarizationRequest, ReconstructMethod,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -35,10 +35,23 @@ fn load_wav_samples(path: &std::path::Path) -> Vec<f32> {
     panic!("no data chunk found in WAV");
 }
 
-fn make_pipeline() -> OwnedDiarizationPipeline {
-    PipelineBuilder::from_dir(fixture_path("models"), ExecutionMode::Cpu)
-        .build()
-        .unwrap()
+fn build_pipeline_or_skip<T>(result: Result<T, PipelineError>) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(PipelineError::ModelLoad(ModelLoadError::Runtime(OrtRuntimeError::Dynamic(
+            DynamicRuntimeError::Missing { .. },
+        )))) if cfg!(feature = "load-dynamic") => {
+            eprintln!("skipping queued test because ORT_DYLIB_PATH is not configured");
+            None
+        }
+        Err(error) => panic!("failed to build pipeline: {error}"),
+    }
+}
+
+fn make_pipeline() -> Option<OwnedDiarizationPipeline> {
+    build_pipeline_or_skip(
+        PipelineBuilder::from_dir(fixture_path("models"), ExecutionMode::Cpu).build(),
+    )
 }
 
 fn single_speaker_config() -> PipelineConfig {
@@ -65,7 +78,9 @@ fn config_candidates() -> Vec<PipelineConfig> {
 #[test]
 fn queued_basic_round_trip() {
     let samples = load_wav_samples(&fixture_path("test.wav"));
-    let queue = make_pipeline().into_queued().unwrap();
+    let Some(queue) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
+        return;
+    };
 
     queue
         .push(QueuedDiarizationRequest::new("file_a", samples.clone()))
@@ -88,7 +103,9 @@ fn queued_basic_round_trip() {
 #[test]
 fn queued_push_batch() {
     let samples = load_wav_samples(&fixture_path("test.wav"));
-    let queue = make_pipeline().into_queued().unwrap();
+    let Some(queue) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
+        return;
+    };
 
     let requests = vec![
         QueuedDiarizationRequest::new("batch_1", samples.clone()),
@@ -117,7 +134,9 @@ fn queued_push_batch() {
 #[test]
 fn queued_job_ids_are_monotonic() {
     let samples = load_wav_samples(&fixture_path("test.wav"));
-    let queue = make_pipeline().into_queued().unwrap();
+    let Some(queue) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
+        return;
+    };
 
     let id0 = queue
         .push(QueuedDiarizationRequest::new("f0", samples.clone()))
@@ -143,7 +162,9 @@ fn queued_job_ids_are_monotonic() {
 #[test]
 fn queued_clean_shutdown() {
     let samples = load_wav_samples(&fixture_path("test.wav"));
-    let queue = make_pipeline().into_queued().unwrap();
+    let Some(queue) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
+        return;
+    };
 
     queue
         .push(QueuedDiarizationRequest::new("only", samples))
@@ -157,7 +178,9 @@ fn queued_clean_shutdown() {
 #[test]
 fn queued_handles_short_and_normal_audio() {
     let samples = load_wav_samples(&fixture_path("test.wav"));
-    let queue = make_pipeline().into_queued().unwrap();
+    let Some(queue) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
+        return;
+    };
 
     queue
         .push(QueuedDiarizationRequest::new("normal", samples))
@@ -186,11 +209,15 @@ fn queued_results_match_sync() {
     let samples = load_wav_samples(&fixture_path("test.wav"));
 
     // run synchronously
-    let mut pipeline = make_pipeline();
+    let Some(mut pipeline) = make_pipeline() else {
+        return;
+    };
     let sync_result = pipeline.run_with_file_id(&samples, "compare").unwrap();
 
     // run via queue
-    let queue = make_pipeline().into_queued().unwrap();
+    let Some(queue) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
+        return;
+    };
     queue
         .push(QueuedDiarizationRequest::new("compare", samples))
         .unwrap();
@@ -204,7 +231,9 @@ fn queued_results_match_sync() {
 fn build_queued_preserves_custom_pipeline_config() {
     let samples = load_wav_samples(&fixture_path("test.wav"));
 
-    let mut default_pipeline = make_pipeline();
+    let Some(mut default_pipeline) = make_pipeline() else {
+        return;
+    };
     let default_result = default_pipeline
         .run_with_file_id(&samples, "compare")
         .unwrap();
@@ -212,20 +241,23 @@ fn build_queued_preserves_custom_pipeline_config() {
     let (custom_config, custom_result) = config_candidates()
         .into_iter()
         .find_map(|config| {
-            let mut pipeline =
+            let mut pipeline = build_pipeline_or_skip(
                 PipelineBuilder::from_dir(fixture_path("models"), ExecutionMode::Cpu)
                     .pipeline(config.clone())
-                    .build()
-                    .unwrap();
+                    .build(),
+            )?;
             let result = pipeline.run_with_file_id(&samples, "compare").unwrap();
             (result.segments != default_result.segments).then_some((config, result))
         })
         .expect("expected at least one custom pipeline config to change fixture output");
 
-    let queue = PipelineBuilder::from_dir(fixture_path("models"), ExecutionMode::Cpu)
-        .pipeline(custom_config)
-        .build_queued()
-        .unwrap();
+    let Some(queue) = build_pipeline_or_skip(
+        PipelineBuilder::from_dir(fixture_path("models"), ExecutionMode::Cpu)
+            .pipeline(custom_config)
+            .build_queued(),
+    ) else {
+        return;
+    };
     queue
         .push(QueuedDiarizationRequest::new("compare", samples))
         .unwrap();

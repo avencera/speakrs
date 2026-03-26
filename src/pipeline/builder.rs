@@ -64,6 +64,7 @@ impl PipelineBuilder {
     /// Download models from HuggingFace and start building
     #[cfg(feature = "online")]
     pub fn from_pretrained(mode: ExecutionMode) -> Result<Self, PipelineError> {
+        mode.validate()?;
         let bundle = ModelBundle::from_pretrained(mode)?;
         Ok(Self::from_bundle(bundle, mode))
     }
@@ -82,19 +83,18 @@ impl PipelineBuilder {
 
     /// Build the owned pipeline
     pub fn build(self) -> Result<OwnedDiarizationPipeline, PipelineError> {
+        self.mode.validate()?;
+
         let pipeline = self
             .pipeline
             .unwrap_or_else(|| PipelineConfig::for_mode(self.mode));
         let runtime = self.runtime.unwrap_or_default();
         let step = segmentation_step_seconds(self.mode);
 
-        let seg_model = SegmentationModel::with_mode(
-            self.bundle.segmentation_path().to_str().unwrap(),
-            step as f32,
-            self.mode,
-        )?;
+        let seg_model =
+            SegmentationModel::with_mode(self.bundle.segmentation_path(), step as f32, self.mode)?;
         let emb_model = EmbeddingModel::with_mode_and_config(
-            self.bundle.embedding_path().to_str().unwrap(),
+            self.bundle.embedding_path(),
             self.mode,
             &runtime,
         )?;
@@ -112,8 +112,6 @@ impl PipelineBuilder {
     /// Build and immediately convert to a background-processing queue
     pub fn build_queued(self) -> Result<QueuedDiarizationPipeline, PipelineError> {
         let pipeline = self.build()?;
-        pipeline
-            .into_queued()
-            .map_err(|e| PipelineError::Other(e.to_string()))
+        Ok(pipeline.into_queued()?)
     }
 }

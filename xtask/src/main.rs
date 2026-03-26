@@ -13,6 +13,12 @@ struct Cli {
     cmd: Command,
 }
 
+impl Cli {
+    fn run(self) -> Result<()> {
+        self.cmd.run()
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Model management (download, convert, deploy)
@@ -94,6 +100,60 @@ enum Command {
     },
 }
 
+impl Command {
+    fn run(self) -> Result<()> {
+        match self {
+            Self::Models { cmd } => cmd.run(),
+            Self::Fixtures { cmd } => cmd.run(),
+            Self::Compare { cmd } => cmd.run(),
+            Self::Bench { cmd } => cmd.run(),
+            Self::Dstack { cmd } => cmd.run(),
+            Self::Dataset { cmd } => cmd.run(),
+            Self::Diarize {
+                mode,
+                models_dir,
+                chunk_emb_workers,
+                chunk_emb_compute_units,
+                wav_files,
+            } => commands::diarize::run(
+                mode,
+                models_dir,
+                chunk_emb_workers,
+                &chunk_emb_compute_units,
+                wav_files,
+            ),
+            Self::ProfileOrtEmbedding {
+                mode,
+                wav_path,
+                iterations,
+                log_every,
+                model_path,
+                batch_size,
+                ort_defaults,
+            } => commands::profile_ort_embedding::run(
+                &mode,
+                &wav_path.to_string_lossy(),
+                iterations,
+                log_every,
+                model_path,
+                batch_size,
+                ort_defaults,
+            ),
+            Self::ProfileStages {
+                mode,
+                wav_path,
+                iterations,
+                log_every,
+            } => commands::profile_stages::run(
+                &mode,
+                &wav_path.to_string_lossy(),
+                iterations,
+                log_every,
+            ),
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum ModelsCmd {
     /// Export ONNX models and PLDA params, then build native CoreML bundles on macOS
@@ -106,10 +166,29 @@ enum ModelsCmd {
     Deploy,
 }
 
+impl ModelsCmd {
+    fn run(self) -> Result<()> {
+        match self {
+            Self::Export => commands::models::export(),
+            Self::ExportCoreml => commands::models::export_coreml(),
+            Self::CompareCoreml => commands::models::compare_coreml(),
+            Self::Deploy => commands::models::deploy(),
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum FixturesCmd {
     /// Regenerate test fixtures via Python
     Generate,
+}
+
+impl FixturesCmd {
+    fn run(self) -> Result<()> {
+        match self {
+            Self::Generate => commands::fixtures::generate(),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -130,6 +209,22 @@ enum CompareCmd {
         #[arg(long, default_value = "pyannote-mps")]
         rust_mode: String,
     },
+}
+
+impl CompareCmd {
+    fn run(self) -> Result<()> {
+        match self {
+            Self::Run {
+                source,
+                python_device,
+                rust_mode,
+            } => commands::compare::run(&source, &python_device, &rust_mode),
+            Self::Rttm { a, b } => commands::compare::rttm(&a, &b),
+            Self::Accuracy { source, rust_mode } => {
+                commands::compare::accuracy(&source, &rust_mode)
+            }
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -188,6 +283,50 @@ enum BenchCmd {
         #[arg(long, short = 's')]
         sleep_between: Option<u64>,
     },
+}
+
+impl BenchCmd {
+    fn run(self) -> Result<()> {
+        match self {
+            Self::Run {
+                source,
+                python_device,
+                runs,
+                warmups,
+                rust_mode,
+            } => commands::benchmark::run(&source, &python_device, runs, warmups, &rust_mode),
+            Self::Compare {
+                source,
+                runs,
+                warmups,
+            } => commands::benchmark::compare(&source, runs, warmups),
+            Self::Der {
+                dataset,
+                file,
+                rttm,
+                max_files,
+                max_minutes,
+                description,
+                impls,
+                no_preflight,
+                seg_batch_size,
+                emb_batch_size,
+                sleep_between,
+            } => commands::benchmark::der(commands::benchmark::DerArgs {
+                dataset_id: dataset,
+                file,
+                rttm,
+                max_files: max_files.unwrap_or(u32::MAX),
+                max_minutes: max_minutes.unwrap_or(u32::MAX),
+                description,
+                impls,
+                no_preflight,
+                seg_batch_size,
+                emb_batch_size,
+                sleep_between,
+            }),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -251,92 +390,10 @@ enum DstackCmd {
     },
 }
 
-#[derive(Subcommand)]
-enum DatasetCmd {
-    /// Download one or all datasets (use "list" as id to show available)
-    Ensure {
-        /// Dataset id, or "all"
-        #[arg(default_value = "all")]
-        id: String,
-    },
-    /// Upload local datasets to Tigris S3
-    Upload {
-        /// Dataset id, or "all"
-        #[arg(default_value = "all")]
-        id: String,
-    },
-}
-
-fn main() -> Result<()> {
-    color_eyre::install()?;
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .with_writer(std::io::stderr)
-        .init();
-    let cli = Cli::parse();
-
-    match cli.cmd {
-        Command::Models { cmd } => match cmd {
-            ModelsCmd::Export => commands::models::export(),
-            ModelsCmd::ExportCoreml => commands::models::export_coreml(),
-            ModelsCmd::CompareCoreml => commands::models::compare_coreml(),
-            ModelsCmd::Deploy => commands::models::deploy(),
-        },
-        Command::Fixtures { cmd } => match cmd {
-            FixturesCmd::Generate => commands::fixtures::generate(),
-        },
-        Command::Compare { cmd } => match cmd {
-            CompareCmd::Run {
-                source,
-                python_device,
-                rust_mode,
-            } => commands::compare::run(&source, &python_device, &rust_mode),
-            CompareCmd::Rttm { a, b } => commands::compare::rttm(&a, &b),
-            CompareCmd::Accuracy { source, rust_mode } => {
-                commands::compare::accuracy(&source, &rust_mode)
-            }
-        },
-        Command::Bench { cmd } => match cmd {
-            BenchCmd::Run {
-                source,
-                python_device,
-                runs,
-                warmups,
-                rust_mode,
-            } => commands::benchmark::run(&source, &python_device, runs, warmups, &rust_mode),
-            BenchCmd::Compare {
-                source,
-                runs,
-                warmups,
-            } => commands::benchmark::compare(&source, runs, warmups),
-            BenchCmd::Der {
-                dataset,
-                file,
-                rttm,
-                max_files,
-                max_minutes,
-                description,
-                impls,
-                no_preflight,
-                seg_batch_size,
-                emb_batch_size,
-                sleep_between,
-            } => commands::benchmark::der(commands::benchmark::DerArgs {
-                dataset_id: dataset,
-                file,
-                rttm,
-                max_files: max_files.unwrap_or(u32::MAX),
-                max_minutes: max_minutes.unwrap_or(u32::MAX),
-                description,
-                impls,
-                no_preflight,
-                seg_batch_size,
-                emb_batch_size,
-                sleep_between,
-            }),
-        },
-        Command::Dstack { cmd } => match cmd {
-            DstackCmd::Bench {
+impl DstackCmd {
+    fn run(self) -> Result<()> {
+        match self {
+            Self::Bench {
                 name,
                 dataset,
                 impls,
@@ -353,7 +410,7 @@ fn main() -> Result<()> {
                 reuse,
                 detach,
             ),
-            DstackCmd::BenchParallel {
+            Self::BenchParallel {
                 name,
                 dataset,
                 impls,
@@ -368,112 +425,103 @@ fn main() -> Result<()> {
                 max_minutes,
                 reuse,
             ),
-            DstackCmd::Fleet => commands::dstack::fleet(),
-            DstackCmd::Attach { name } => commands::dstack::attach(&name),
-            DstackCmd::Logs { name } => commands::dstack::logs(&name),
-            DstackCmd::Ps => commands::dstack::ps(),
-            DstackCmd::Stop { name } => commands::dstack::stop(&name),
-            DstackCmd::Dev => commands::dstack::dev(),
-            DstackCmd::Download { name } => commands::dstack::download(&name),
-            DstackCmd::Delete { path } => commands::dstack::delete(&path),
-        },
-        Command::Dataset { cmd } => {
-            use xtask::cmd::project_root;
-            use xtask::datasets::{self, S5cmd};
-
-            let base_dir = project_root().join("fixtures/datasets");
-
-            match cmd {
-                DatasetCmd::Ensure { id } => {
-                    if id == "list" {
-                        for ds_id in datasets::list_dataset_ids() {
-                            println!("  {ds_id}");
-                        }
-                        return Ok(());
-                    }
-
-                    let targets = if id == "all" {
-                        datasets::all_datasets()
-                    } else {
-                        vec![
-                            datasets::find_dataset(&id)
-                                .ok_or_else(|| color_eyre::eyre::eyre!("unknown dataset: {id}"))?,
-                        ]
-                    };
-
-                    for ds in &targets {
-                        println!("--- {} ---", ds.display_name);
-                        ds.ensure(&base_dir)?;
-                    }
-                    Ok(())
-                }
-                DatasetCmd::Upload { id } => {
-                    if !S5cmd::available() {
-                        color_eyre::eyre::bail!("s5cmd not available or AWS_ACCESS_KEY_ID not set");
-                    }
-
-                    let targets = if id == "all" {
-                        datasets::all_datasets()
-                            .into_iter()
-                            .filter(|d| d.id != "voxconverse-dev")
-                            .collect()
-                    } else {
-                        vec![
-                            datasets::find_dataset(&id)
-                                .ok_or_else(|| color_eyre::eyre::eyre!("unknown dataset: {id}"))?,
-                        ]
-                    };
-
-                    for ds in &targets {
-                        let ds_dir = ds.dataset_dir(&base_dir);
-                        if !ds_dir.join("wav").is_dir() || !ds_dir.join("rttm").is_dir() {
-                            println!("Skipping {} (not downloaded yet)", ds.id);
-                            continue;
-                        }
-                        println!("Uploading {}...", ds.id);
-                        S5cmd::upload(&ds.id, &ds_dir)?;
-                    }
-                    Ok(())
-                }
-            }
-        }
-        Command::Diarize {
-            mode,
-            models_dir,
-            chunk_emb_workers,
-            chunk_emb_compute_units,
-            wav_files,
-        } => commands::diarize::run(
-            mode,
-            models_dir,
-            chunk_emb_workers,
-            &chunk_emb_compute_units,
-            wav_files,
-        ),
-        Command::ProfileOrtEmbedding {
-            mode,
-            wav_path,
-            iterations,
-            log_every,
-            model_path,
-            batch_size,
-            ort_defaults,
-        } => commands::profile_ort_embedding::run(
-            &mode,
-            &wav_path.to_string_lossy(),
-            iterations,
-            log_every,
-            model_path,
-            batch_size,
-            ort_defaults,
-        ),
-        Command::ProfileStages {
-            mode,
-            wav_path,
-            iterations,
-            log_every,
-        } => {
-            commands::profile_stages::run(&mode, &wav_path.to_string_lossy(), iterations, log_every)
+            Self::Fleet => commands::dstack::fleet(),
+            Self::Attach { name } => commands::dstack::attach(&name),
+            Self::Logs { name } => commands::dstack::logs(&name),
+            Self::Ps => commands::dstack::ps(),
+            Self::Stop { name } => commands::dstack::stop(&name),
+            Self::Dev => commands::dstack::dev(),
+            Self::Download { name } => commands::dstack::download(&name),
+            Self::Delete { path } => commands::dstack::delete(&path),
         }
     }
+}
+
+#[derive(Subcommand)]
+enum DatasetCmd {
+    /// Download one or all datasets (use "list" as id to show available)
+    Ensure {
+        /// Dataset id, or "all"
+        #[arg(default_value = "all")]
+        id: String,
+    },
+    /// Upload local datasets to Tigris S3
+    Upload {
+        /// Dataset id, or "all"
+        #[arg(default_value = "all")]
+        id: String,
+    },
+}
+
+impl DatasetCmd {
+    fn run(self) -> Result<()> {
+        use xtask::cmd::project_root;
+        use xtask::datasets::{self, S5cmd};
+
+        let base_dir = project_root().join("fixtures/datasets");
+
+        match self {
+            Self::Ensure { id } => {
+                if id == "list" {
+                    for ds_id in datasets::list_dataset_ids() {
+                        println!("  {ds_id}");
+                    }
+                    return Ok(());
+                }
+
+                let targets = if id == "all" {
+                    datasets::all_datasets()
+                } else {
+                    vec![
+                        datasets::find_dataset(&id)
+                            .ok_or_else(|| color_eyre::eyre::eyre!("unknown dataset: {id}"))?,
+                    ]
+                };
+
+                for ds in &targets {
+                    println!("--- {} ---", ds.display_name);
+                    ds.ensure(&base_dir)?;
+                }
+                Ok(())
+            }
+            Self::Upload { id } => {
+                if !S5cmd::available() {
+                    color_eyre::eyre::bail!("s5cmd not available or AWS_ACCESS_KEY_ID not set");
+                }
+
+                let targets = if id == "all" {
+                    datasets::all_datasets()
+                        .into_iter()
+                        .filter(|dataset| dataset.id != "voxconverse-dev")
+                        .collect()
+                } else {
+                    vec![
+                        datasets::find_dataset(&id)
+                            .ok_or_else(|| color_eyre::eyre::eyre!("unknown dataset: {id}"))?,
+                    ]
+                };
+
+                for ds in &targets {
+                    let ds_dir = ds.dataset_dir(&base_dir);
+                    if !ds_dir.join("wav").is_dir() || !ds_dir.join("rttm").is_dir() {
+                        println!("Skipping {} (not downloaded yet)", ds.id);
+                        continue;
+                    }
+
+                    println!("Uploading {}...", ds.id);
+                    S5cmd::upload(&ds.id, &ds_dir)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+fn main() -> Result<()> {
+    color_eyre::install()?;
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
+    Cli::parse().run()
 }
