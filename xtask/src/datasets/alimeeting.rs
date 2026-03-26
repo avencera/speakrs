@@ -6,6 +6,7 @@ use color_eyre::eyre::Result;
 
 use crate::cmd::run_cmd;
 use crate::convert::{convert_to_16k_mono, textgrid_to_rttm};
+use crate::path::file_stem_string;
 
 /// AliMeeting eval set -- Mandarin meetings with high overlap
 /// Far-field audio + TextGrid from OpenSLR
@@ -61,7 +62,7 @@ pub fn ensure(dir: &Path) -> Result<()> {
 
         for entry in &entries {
             let path = entry.path();
-            let session_id = path.file_stem().unwrap().to_string_lossy().to_string();
+            let session_id = file_stem_string(&path)?;
             textgrid_to_rttm(
                 &path,
                 &rttm_dir.join(format!("{session_id}.rttm")),
@@ -79,7 +80,7 @@ pub fn ensure(dir: &Path) -> Result<()> {
 
         for entry in &entries {
             let path = entry.path();
-            let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+            let stem = file_stem_string(&path)?;
             // wav filenames have a mic suffix (e.g. R8001_M8004_MS801.wav)
             // textgrid filenames don't (R8001_M8004.TextGrid)
             // use the wav stem as-is for the output filename

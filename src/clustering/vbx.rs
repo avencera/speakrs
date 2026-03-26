@@ -246,7 +246,7 @@ mod tests {
             .map(|row| {
                 row.iter()
                     .enumerate()
-                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                    .max_by(|(_, a), (_, b)| a.total_cmp(b))
                     .unwrap()
                     .0
             })

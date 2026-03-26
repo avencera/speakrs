@@ -470,7 +470,7 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
         chunk_idx: usize,
     ) -> Result<usize, PipelineError> {
         num_frames.ok_or_else(|| {
-            PipelineError::Other(format!(
+            PipelineError::Invariant(format!(
                 "multi-mask path buffered audio without any decoded frames at chunk {chunk_idx}"
             ))
         })
@@ -482,7 +482,7 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
         chunk_idx: usize,
     ) -> Result<Array3<f32>, PipelineError> {
         segmentations.ok_or_else(|| {
-            PipelineError::Other(format!(
+            PipelineError::Invariant(format!(
                 "embedding path processed {chunk_idx} chunks without storing segmentations"
             ))
         })

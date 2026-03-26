@@ -1,52 +1,14 @@
 use std::collections::HashMap;
-use std::fs;
-use std::path::PathBuf;
 
-use speakrs::inference::{DynamicRuntimeError, ExecutionMode, ModelLoadError, OrtRuntimeError};
+use speakrs::inference::ExecutionMode;
 use speakrs::pipeline::{
-    OwnedDiarizationPipeline, PipelineBuilder, PipelineConfig, PipelineError,
-    QueuedDiarizationRequest, ReconstructMethod,
+    OwnedDiarizationPipeline, PipelineBuilder, PipelineConfig, QueuedDiarizationRequest,
+    ReconstructMethod,
 };
 
-fn fixture_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures")
-        .join(name)
-}
+mod support;
 
-fn load_wav_samples(path: &std::path::Path) -> Vec<f32> {
-    let data = fs::read(path).unwrap();
-    let bits_per_sample = u16::from_le_bytes(data[34..36].try_into().unwrap());
-    assert_eq!(bits_per_sample, 16);
-
-    let mut pos = 12;
-    while pos + 8 < data.len() {
-        let chunk_id = &data[pos..pos + 4];
-        let chunk_size = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize;
-        if chunk_id == b"data" {
-            return data[pos + 8..pos + 8 + chunk_size]
-                .chunks_exact(2)
-                .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / 32768.0)
-                .collect();
-        }
-        pos += 8 + chunk_size;
-    }
-
-    panic!("no data chunk found in WAV");
-}
-
-fn build_pipeline_or_skip<T>(result: Result<T, PipelineError>) -> Option<T> {
-    match result {
-        Ok(value) => Some(value),
-        Err(PipelineError::ModelLoad(ModelLoadError::Runtime(OrtRuntimeError::Dynamic(
-            DynamicRuntimeError::Missing { .. },
-        )))) if cfg!(feature = "load-dynamic") => {
-            eprintln!("skipping queued test because ORT_DYLIB_PATH is not configured");
-            None
-        }
-        Err(error) => panic!("failed to build pipeline: {error}"),
-    }
-}
+use support::{build_pipeline_or_skip, fixture_path, load_wav_samples};
 
 fn make_pipeline() -> Option<OwnedDiarizationPipeline> {
     build_pipeline_or_skip(
@@ -77,7 +39,7 @@ fn config_candidates() -> Vec<PipelineConfig> {
 
 #[test]
 fn queued_basic_round_trip() {
-    let samples = load_wav_samples(&fixture_path("test.wav"));
+    let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
     let Some(queue) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
         return;
     };
@@ -102,7 +64,7 @@ fn queued_basic_round_trip() {
 
 #[test]
 fn queued_push_batch() {
-    let samples = load_wav_samples(&fixture_path("test.wav"));
+    let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
     let Some(queue) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
         return;
     };
@@ -133,7 +95,7 @@ fn queued_push_batch() {
 
 #[test]
 fn queued_job_ids_are_monotonic() {
-    let samples = load_wav_samples(&fixture_path("test.wav"));
+    let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
     let Some(queue) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
         return;
     };
@@ -161,7 +123,7 @@ fn queued_job_ids_are_monotonic() {
 
 #[test]
 fn queued_clean_shutdown() {
-    let samples = load_wav_samples(&fixture_path("test.wav"));
+    let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
     let Some(queue) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
         return;
     };
@@ -177,7 +139,7 @@ fn queued_clean_shutdown() {
 
 #[test]
 fn queued_handles_short_and_normal_audio() {
-    let samples = load_wav_samples(&fixture_path("test.wav"));
+    let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
     let Some(queue) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
         return;
     };
@@ -206,7 +168,7 @@ fn queued_handles_short_and_normal_audio() {
 
 #[test]
 fn queued_results_match_sync() {
-    let samples = load_wav_samples(&fixture_path("test.wav"));
+    let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
 
     // run synchronously
     let Some(mut pipeline) = make_pipeline() else {
@@ -229,7 +191,7 @@ fn queued_results_match_sync() {
 
 #[test]
 fn build_queued_preserves_custom_pipeline_config() {
-    let samples = load_wav_samples(&fixture_path("test.wav"));
+    let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
 
     let Some(mut default_pipeline) = make_pipeline() else {
         return;

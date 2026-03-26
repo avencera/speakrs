@@ -44,12 +44,15 @@ impl PowersetMapping {
         let mut one_hot = Array2::zeros((num_frames, num_classes));
         for i in 0..num_frames {
             let row = logits.row(i);
+            if row.is_empty() {
+                continue;
+            }
             let argmax = row
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-                .unwrap()
-                .0;
+                .max_by(|(_, a), (_, b)| a.total_cmp(b))
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
             one_hot[[i, argmax]] = 1.0;
         }
 

@@ -1,5 +1,5 @@
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::str::FromStr;
 use std::time::Instant;
@@ -145,7 +145,7 @@ pub fn run(
             let step = speakrs_mode.step_seconds();
             let seg_model_start = Instant::now();
             let mut seg_model = SegmentationModel::with_mode(
-                models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
+                models_dir.join("segmentation-3.0.onnx"),
                 step as f32,
                 execution_mode,
             )?;
@@ -153,10 +153,7 @@ pub fn run(
 
             let emb_model_start = Instant::now();
             let mut emb_model = EmbeddingModel::with_mode_and_config(
-                models_dir
-                    .join("wespeaker-voxceleb-resnet34.onnx")
-                    .to_str()
-                    .unwrap(),
+                models_dir.join("wespeaker-voxceleb-resnet34.onnx"),
                 execution_mode,
                 &runtime_config,
             )?;
@@ -246,17 +243,14 @@ pub fn run(
 }
 
 fn default_models_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
         .join("fixtures/models")
-        .to_path_buf()
 }
 
 fn run_pyannote_sidecar(device: &str, wav_path: &str) -> Result<String> {
-    let project_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
+    let project_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
         .join("scripts/pyannote-bench");
     let output = Command::new("uv")
         .arg("run")

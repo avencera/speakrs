@@ -6,6 +6,7 @@ use color_eyre::eyre::Result;
 
 use crate::cmd::run_cmd;
 use crate::convert::convert_to_16k_mono;
+use crate::path::file_stem_string;
 
 /// AISHELL-4 test set -- Mandarin conference meetings
 /// Audio (FLAC) + RTTM from OpenSLR
@@ -68,7 +69,7 @@ pub fn ensure(dir: &Path) -> Result<()> {
 
         for entry in &entries {
             let path = entry.path();
-            let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+            let stem = file_stem_string(&path)?;
             convert_to_16k_mono(&path, &wav_dir.join(format!("{stem}.wav")))?;
         }
     }

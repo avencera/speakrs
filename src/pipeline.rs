@@ -448,12 +448,17 @@ impl<'a> PipelineRunner<'a> {
                 }
             };
 
-            let segmentation_result = segmentation_handle.join().unwrap();
+            let segmentation_result =
+                segmentation_handle
+                    .join()
+                    .map_err(|_| PipelineError::WorkerPanic {
+                        worker: "concurrent segmentation".to_owned(),
+                    });
             (segmentation_result, embedding_result)
         });
         let inference_elapsed = inference_start.elapsed();
 
-        segmentation_result?;
+        segmentation_result??;
 
         let concurrent_result = embedding_result?;
         if concurrent_result.is_empty() {

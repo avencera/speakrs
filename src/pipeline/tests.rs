@@ -116,6 +116,35 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
+fn models_dir() -> PathBuf {
+    fixture_path("models")
+}
+
+fn load_fixture_array1<T>(name: &str) -> Array1<T>
+where
+    Array1<T>: ReadNpyExt,
+{
+    Array1::read_npy(File::open(fixture_path(name)).unwrap()).unwrap()
+}
+
+fn load_fixture_array2<T>(name: &str) -> Array2<T>
+where
+    Array2<T>: ReadNpyExt,
+{
+    Array2::read_npy(File::open(fixture_path(name)).unwrap()).unwrap()
+}
+
+fn load_fixture_array3<T>(name: &str) -> Array3<T>
+where
+    Array3<T>: ReadNpyExt,
+{
+    Array3::read_npy(File::open(fixture_path(name)).unwrap()).unwrap()
+}
+
+fn load_test_audio() -> (Vec<f32>, u32) {
+    load_wav_samples(&fixture_path("test.wav"))
+}
+
 fn custom_pipeline_config() -> PipelineConfig {
     PipelineConfig {
         merge_gap: 0.75,
@@ -200,21 +229,12 @@ fn best_assignment_handles_more_speakers_than_clusters() {
 
 #[test]
 fn filter_embeddings_matches_python_fixture() {
-    let segmentations: Array3<f32> =
-        Array3::read_npy(File::open(fixture_path("pipeline_segmentation_data.npy")).unwrap())
-            .unwrap();
-    let embeddings: Array3<f32> =
-        Array3::read_npy(File::open(fixture_path("pipeline_embeddings_data.npy")).unwrap())
-            .unwrap();
+    let segmentations: Array3<f32> = load_fixture_array3("pipeline_segmentation_data.npy");
+    let embeddings: Array3<f32> = load_fixture_array3("pipeline_embeddings_data.npy");
     let expected_train_embeddings: Array2<f32> =
-        Array2::read_npy(File::open(fixture_path("pipeline_train_embeddings.npy")).unwrap())
-            .unwrap();
-    let expected_chunk_idx: Array1<i64> =
-        Array1::read_npy(File::open(fixture_path("pipeline_train_chunk_idx.npy")).unwrap())
-            .unwrap();
-    let expected_speaker_idx: Array1<i64> =
-        Array1::read_npy(File::open(fixture_path("pipeline_train_speaker_idx.npy")).unwrap())
-            .unwrap();
+        load_fixture_array2("pipeline_train_embeddings.npy");
+    let expected_chunk_idx: Array1<i64> = load_fixture_array1("pipeline_train_chunk_idx.npy");
+    let expected_speaker_idx: Array1<i64> = load_fixture_array1("pipeline_train_speaker_idx.npy");
 
     let (train_embeddings, chunk_idx, speaker_idx) = filter_embeddings(&segmentations, &embeddings);
 
@@ -236,21 +256,12 @@ fn filter_embeddings_matches_python_fixture() {
 
 #[test]
 fn assign_embeddings_matches_python_fixture() {
-    let segmentations: Array3<f32> =
-        Array3::read_npy(File::open(fixture_path("pipeline_segmentation_data.npy")).unwrap())
-            .unwrap();
-    let embeddings: Array3<f32> =
-        Array3::read_npy(File::open(fixture_path("pipeline_embeddings_data.npy")).unwrap())
-            .unwrap();
-    let train_embeddings: Array2<f32> =
-        Array2::read_npy(File::open(fixture_path("pipeline_train_embeddings.npy")).unwrap())
-            .unwrap();
-    let gamma: Array2<f64> =
-        Array2::read_npy(File::open(fixture_path("pipeline_vbx_gamma.npy")).unwrap()).unwrap();
-    let pi: Array1<f64> =
-        Array1::read_npy(File::open(fixture_path("pipeline_vbx_pi.npy")).unwrap()).unwrap();
-    let expected: Array2<i8> =
-        Array2::read_npy(File::open(fixture_path("pipeline_hard_clusters.npy")).unwrap()).unwrap();
+    let segmentations: Array3<f32> = load_fixture_array3("pipeline_segmentation_data.npy");
+    let embeddings: Array3<f32> = load_fixture_array3("pipeline_embeddings_data.npy");
+    let train_embeddings: Array2<f32> = load_fixture_array2("pipeline_train_embeddings.npy");
+    let gamma: Array2<f64> = load_fixture_array2("pipeline_vbx_gamma.npy");
+    let pi: Array1<f64> = load_fixture_array1("pipeline_vbx_pi.npy");
+    let expected: Array2<i8> = load_fixture_array2("pipeline_hard_clusters.npy");
 
     let kept_speakers: Vec<usize> = pi
         .iter()
@@ -273,28 +284,21 @@ fn assign_embeddings_matches_python_fixture() {
 
 #[test]
 fn extract_embeddings_matches_python_fixture() {
-    let models_dir = fixture_path("models");
+    let models_dir = models_dir();
     let Some(seg_model) = load_model_or_skip(SegmentationModel::new(
-        models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
+        models_dir.join("segmentation-3.0.onnx"),
         SEGMENTATION_STEP_SECONDS as f32,
     )) else {
         return;
     };
     let Some(mut emb_model) = load_model_or_skip(EmbeddingModel::new(
-        models_dir
-            .join("wespeaker-voxceleb-resnet34.onnx")
-            .to_str()
-            .unwrap(),
+        models_dir.join("wespeaker-voxceleb-resnet34.onnx"),
     )) else {
         return;
     };
-    let segmentations: Array3<f32> =
-        Array3::read_npy(File::open(fixture_path("pipeline_segmentation_data.npy")).unwrap())
-            .unwrap();
-    let expected: Array3<f32> =
-        Array3::read_npy(File::open(fixture_path("pipeline_embeddings_data.npy")).unwrap())
-            .unwrap();
-    let (audio, sample_rate) = load_wav_samples(&fixture_path("test.wav"));
+    let segmentations: Array3<f32> = load_fixture_array3("pipeline_segmentation_data.npy");
+    let expected: Array3<f32> = load_fixture_array3("pipeline_embeddings_data.npy");
+    let (audio, sample_rate) = load_test_audio();
     assert_eq!(sample_rate, 16_000);
 
     let embeddings =
@@ -318,19 +322,17 @@ fn extract_embeddings_matches_python_fixture() {
 #[cfg(feature = "coreml")]
 #[test]
 fn fast_apple_segmentation_matches_python_fixture() {
-    let models_dir = fixture_path("models");
+    let models_dir = models_dir();
     let Some(mut seg_model) = load_model_or_skip(SegmentationModel::with_mode(
-        models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
+        models_dir.join("segmentation-3.0.onnx"),
         SEGMENTATION_STEP_SECONDS as f32,
         ExecutionMode::CoreMl,
     )) else {
         return;
     };
-    let expected: Array3<f32> =
-        Array3::read_npy(File::open(fixture_path("pipeline_segmentation_data.npy")).unwrap())
-            .unwrap();
+    let expected: Array3<f32> = load_fixture_array3("pipeline_segmentation_data.npy");
     let powerset = PowersetMapping::new(3, 2);
-    let (audio, sample_rate) = load_wav_samples(&fixture_path("test.wav"));
+    let (audio, sample_rate) = load_test_audio();
     assert_eq!(sample_rate, 16_000);
 
     let raw_windows = seg_model.run(&audio).unwrap();
@@ -354,29 +356,22 @@ fn fast_apple_segmentation_matches_python_fixture() {
 #[cfg(feature = "coreml")]
 #[test]
 fn fast_apple_embeddings_match_python_fixture() {
-    let models_dir = fixture_path("models");
+    let models_dir = models_dir();
     let Some(seg_model) = load_model_or_skip(SegmentationModel::new(
-        models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
+        models_dir.join("segmentation-3.0.onnx"),
         SEGMENTATION_STEP_SECONDS as f32,
     )) else {
         return;
     };
     let Some(mut emb_model) = load_model_or_skip(EmbeddingModel::with_mode(
-        models_dir
-            .join("wespeaker-voxceleb-resnet34.onnx")
-            .to_str()
-            .unwrap(),
+        models_dir.join("wespeaker-voxceleb-resnet34.onnx"),
         ExecutionMode::CoreMl,
     )) else {
         return;
     };
-    let segmentations: Array3<f32> =
-        Array3::read_npy(File::open(fixture_path("pipeline_segmentation_data.npy")).unwrap())
-            .unwrap();
-    let expected: Array3<f32> =
-        Array3::read_npy(File::open(fixture_path("pipeline_embeddings_data.npy")).unwrap())
-            .unwrap();
-    let (audio, sample_rate) = load_wav_samples(&fixture_path("test.wav"));
+    let segmentations: Array3<f32> = load_fixture_array3("pipeline_segmentation_data.npy");
+    let expected: Array3<f32> = load_fixture_array3("pipeline_embeddings_data.npy");
+    let (audio, sample_rate) = load_test_audio();
     assert_eq!(sample_rate, 16_000);
 
     let embeddings =
@@ -400,26 +395,21 @@ fn fast_apple_embeddings_match_python_fixture() {
 #[cfg(feature = "coreml")]
 #[test]
 fn fast_apple_split_primary_batch_matches_single_tail_path() {
-    let models_dir = fixture_path("models");
+    let models_dir = models_dir();
     let Some(seg_model) = load_model_or_skip(SegmentationModel::new(
-        models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
+        models_dir.join("segmentation-3.0.onnx"),
         SEGMENTATION_STEP_SECONDS as f32,
     )) else {
         return;
     };
     let Some(mut emb_model) = load_model_or_skip(EmbeddingModel::with_mode(
-        models_dir
-            .join("wespeaker-voxceleb-resnet34.onnx")
-            .to_str()
-            .unwrap(),
+        models_dir.join("wespeaker-voxceleb-resnet34.onnx"),
         ExecutionMode::CoreMl,
     )) else {
         return;
     };
-    let segmentations: Array3<f32> =
-        Array3::read_npy(File::open(fixture_path("pipeline_segmentation_data.npy")).unwrap())
-            .unwrap();
-    let (audio, sample_rate) = load_wav_samples(&fixture_path("test.wav"));
+    let segmentations: Array3<f32> = load_fixture_array3("pipeline_segmentation_data.npy");
+    let (audio, sample_rate) = load_test_audio();
     assert_eq!(sample_rate, 16_000);
 
     let mut fbanks = Vec::new();
@@ -486,29 +476,22 @@ fn fast_apple_split_primary_batch_matches_single_tail_path() {
 #[cfg(feature = "coreml")]
 #[test]
 fn fast_apple_single_embedding_matches_python_fixture() {
-    let models_dir = fixture_path("models");
+    let models_dir = models_dir();
     let Some(seg_model) = load_model_or_skip(SegmentationModel::new(
-        models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
+        models_dir.join("segmentation-3.0.onnx"),
         SEGMENTATION_STEP_SECONDS as f32,
     )) else {
         return;
     };
     let Some(mut emb_model) = load_model_or_skip(EmbeddingModel::with_mode(
-        models_dir
-            .join("wespeaker-voxceleb-resnet34.onnx")
-            .to_str()
-            .unwrap(),
+        models_dir.join("wespeaker-voxceleb-resnet34.onnx"),
         ExecutionMode::CoreMl,
     )) else {
         return;
     };
-    let segmentations: Array3<f32> =
-        Array3::read_npy(File::open(fixture_path("pipeline_segmentation_data.npy")).unwrap())
-            .unwrap();
-    let expected: Array3<f32> =
-        Array3::read_npy(File::open(fixture_path("pipeline_embeddings_data.npy")).unwrap())
-            .unwrap();
-    let (audio, sample_rate) = load_wav_samples(&fixture_path("test.wav"));
+    let segmentations: Array3<f32> = load_fixture_array3("pipeline_segmentation_data.npy");
+    let expected: Array3<f32> = load_fixture_array3("pipeline_embeddings_data.npy");
+    let (audio, sample_rate) = load_test_audio();
     assert_eq!(sample_rate, 16_000);
 
     let chunk_idx = 0;
@@ -536,13 +519,13 @@ fn fast_apple_single_embedding_matches_python_fixture() {
 
 #[test]
 fn run_inference_only_plus_finish_matches_run_with_config() {
-    let models_dir = fixture_path("models");
+    let models_dir = models_dir();
     let Some(mut pipeline) =
         build_pipeline_or_skip(PipelineBuilder::from_dir(&models_dir, ExecutionMode::Cpu).build())
     else {
         return;
     };
-    let (audio, sample_rate) = load_wav_samples(&fixture_path("test.wav"));
+    let (audio, sample_rate) = load_test_audio();
     assert_eq!(sample_rate, 16_000);
 
     let config = pipeline.pipeline_config();
@@ -556,7 +539,7 @@ fn run_inference_only_plus_finish_matches_run_with_config() {
 
 #[test]
 fn pipeline_builder_applies_custom_default_config_to_build() {
-    let models_dir = fixture_path("models");
+    let models_dir = models_dir();
     let expected = custom_pipeline_config();
     let Some(pipeline) = build_pipeline_or_skip(
         PipelineBuilder::from_dir(&models_dir, ExecutionMode::Cpu)
@@ -577,18 +560,15 @@ fn pipeline_builder_applies_custom_default_config_to_build() {
 
 #[test]
 fn borrowed_pipeline_new_with_config_stores_custom_default_config() {
-    let models_dir = fixture_path("models");
+    let models_dir = models_dir();
     let Some(mut seg_model) = load_model_or_skip(SegmentationModel::new(
-        models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
+        models_dir.join("segmentation-3.0.onnx"),
         SEGMENTATION_STEP_SECONDS as f32,
     )) else {
         return;
     };
     let Some(mut emb_model) = load_model_or_skip(EmbeddingModel::new(
-        models_dir
-            .join("wespeaker-voxceleb-resnet34.onnx")
-            .to_str()
-            .unwrap(),
+        models_dir.join("wespeaker-voxceleb-resnet34.onnx"),
     )) else {
         return;
     };
@@ -613,7 +593,7 @@ fn borrowed_pipeline_new_with_config_stores_custom_default_config() {
 #[cfg(feature = "coreml")]
 #[test]
 fn chunk_embedding_pipelined_vs_sequential_baseline() {
-    let models_dir = fixture_path("models");
+    let models_dir = models_dir();
     let Some(mut pipeline) = build_pipeline_or_skip(
         PipelineBuilder::from_dir(&models_dir, ExecutionMode::CoreMl).build(),
     ) else {
@@ -621,7 +601,7 @@ fn chunk_embedding_pipelined_vs_sequential_baseline() {
     };
 
     // multi-chunk audio (triggers pipelined path)
-    let (audio, sample_rate) = load_wav_samples(&fixture_path("test.wav"));
+    let (audio, sample_rate) = load_test_audio();
     assert_eq!(sample_rate, 16_000);
 
     // run full pipeline twice: chunk embedding path uses try_chunk_embedding
