@@ -1,6 +1,8 @@
 # Changelog
 
-## [0.3.0]
+## [unreleased]
+
+## [0.3.0] - 2026-03-26
 
 - Split `QueuedDiarizationPipeline` into `QueueSender` and `QueueReceiver`, enabling cloneable senders for multi-threaded push
 - Add `QueueError::Closed` variant to distinguish clean shutdown from worker panics
