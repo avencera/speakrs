@@ -2,6 +2,10 @@
 
 ## [unreleased]
 
+## [0.3.1] - 2026-03-26
+
+- Fix docs.rs build: replace removed `doc_auto_cfg` feature with `doc_cfg`
+
 ## [0.3.0] - 2026-03-26
 
 - Split `QueuedDiarizationPipeline` into `QueueSender` and `QueueReceiver`, enabling cloneable senders for multi-threaded push
