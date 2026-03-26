@@ -8,12 +8,14 @@ use super::*;
 impl EmbeddingModel {
     /// Compute fbank features for a single audio chunk via the split fbank model
     pub(crate) fn compute_chunk_fbank(&mut self, audio: &[f32]) -> Result<Array2<f32>, ort::Error> {
-        let copy_len = audio.len().min(self.window_samples);
-        self.split_waveform_buffer
+        let copy_len = audio.len().min(self.meta.window_samples);
+        self.buffers
+            .split_waveform_buffer
             .slice_mut(s![0, 0, ..copy_len])
             .assign(&ndarray::ArrayView1::from(&audio[..copy_len]));
-        if copy_len < self.window_samples {
-            self.split_waveform_buffer
+        if copy_len < self.meta.window_samples {
+            self.buffers
+                .split_waveform_buffer
                 .slice_mut(s![0, 0, copy_len..])
                 .fill(0.0);
         }
@@ -23,18 +25,23 @@ impl EmbeddingModel {
             let _ = self.ensure_native_fbank_loaded();
         }
         #[cfg(feature = "coreml")]
-        if let Some(native) = self.native_fbank_session.as_ref() {
-            let input_data = array3_slice(&self.split_waveform_buffer, "native chunk fbank input")?;
+        if let Some(native) = self.coreml.native_fbank_session.as_ref() {
+            let input_data = array3_slice(
+                &self.buffers.split_waveform_buffer,
+                "native chunk fbank input",
+            )?;
             let (data, out_shape) = native
-                .predict_cached(&[(&self.cached_fbank_single_shape, input_data)])
+                .predict_cached(&[(&self.coreml.cached_fbank_single_shape, input_data)])
                 .map_err(|e| ort::Error::new(e.to_string()))?;
             let frames = out_shape[1];
             let features = out_shape[2];
             return array2_from_shape_vec(frames, features, data, "native chunk fbank output");
         }
 
-        let waveform_tensor = TensorRef::from_array_view(self.split_waveform_buffer.view())?;
+        let waveform_tensor =
+            TensorRef::from_array_view(self.buffers.split_waveform_buffer.view())?;
         let outputs = self
+            .ort
             .split_fbank_session
             .as_mut()
             .ok_or_else(|| ort::Error::new("missing split fbank session"))?
@@ -50,10 +57,14 @@ impl EmbeddingModel {
         &mut self,
         audios: &[&[f32]],
     ) -> Result<Vec<Array2<f32>>, ort::Error> {
-        let has_batched = self.split_fbank_batched_session.is_some();
+        let has_batched = self.ort.split_fbank_batched_session.is_some();
         #[cfg(feature = "coreml")]
         let has_batched = has_batched
-            || Self::has_native_fbank_model(&self.model_path, self.mode, PRIMARY_BATCH_SIZE);
+            || Self::has_native_fbank_model(
+                &self.meta.model_path,
+                self.meta.mode,
+                PRIMARY_BATCH_SIZE,
+            );
         if !has_batched {
             tracing::debug!(
                 count = audios.len(),
@@ -90,8 +101,10 @@ impl EmbeddingModel {
                 continue;
             }
 
-            let waveform_tensor = TensorRef::from_array_view(self.split_fbank_batch_buffer.view())?;
+            let waveform_tensor =
+                TensorRef::from_array_view(self.buffers.split_fbank_batch_buffer.view())?;
             let outputs = self
+                .ort
                 .split_fbank_batched_session
                 .as_mut()
                 .ok_or_else(|| ort::Error::new("missing split fbank batched session"))?
@@ -103,17 +116,18 @@ impl EmbeddingModel {
                 shape[1] as usize,
                 shape[2] as usize,
                 batch.len(),
-            );
+            )?;
         }
 
         Ok(results)
     }
 
     fn fill_split_fbank_batch_buffer(&mut self, audios: &[&[f32]]) {
-        self.split_fbank_batch_buffer.fill(0.0);
+        self.buffers.split_fbank_batch_buffer.fill(0.0);
         for (idx, audio) in audios.iter().enumerate() {
-            let copy_len = audio.len().min(self.window_samples);
-            self.split_fbank_batch_buffer
+            let copy_len = audio.len().min(self.meta.window_samples);
+            self.buffers
+                .split_fbank_batch_buffer
                 .slice_mut(s![idx, 0, ..copy_len])
                 .assign(&ndarray::ArrayView1::from(&audio[..copy_len]));
         }
@@ -125,7 +139,7 @@ impl EmbeddingModel {
         frames: usize,
         features: usize,
         count: usize,
-    ) {
+    ) -> Result<(), ort::Error> {
         let stride = frames * features;
         for idx in 0..count {
             let start = idx * stride;
@@ -134,10 +148,10 @@ impl EmbeddingModel {
                 features,
                 data[start..start + stride].to_vec(),
                 "batched fbank output",
-            )
-            .expect("batched fbank output shape is validated by model output");
+            )?;
             results.push(batch);
         }
+        Ok(())
     }
 
     #[cfg(feature = "coreml")]
@@ -147,16 +161,18 @@ impl EmbeddingModel {
         count: usize,
     ) -> Result<bool, ort::Error> {
         let _ = self.ensure_native_fbank_batched_loaded();
-        let Some(native) = self.native_fbank_batched_session.as_ref() else {
+        let Some(native) = self.coreml.native_fbank_batched_session.as_ref() else {
             return Ok(false);
         };
 
-        let input_data =
-            array3_slice(&self.split_fbank_batch_buffer, "native batched fbank input")?;
+        let input_data = array3_slice(
+            &self.buffers.split_fbank_batch_buffer,
+            "native batched fbank input",
+        )?;
         let (data, out_shape) = native
-            .predict_cached(&[(&self.cached_fbank_batch_shape, input_data)])
+            .predict_cached(&[(&self.coreml.cached_fbank_batch_shape, input_data)])
             .map_err(|e| ort::Error::new(e.to_string()))?;
-        Self::push_fbank_batch_results(results, &data, out_shape[1], out_shape[2], count);
+        Self::push_fbank_batch_results(results, &data, out_shape[1], out_shape[2], count)?;
         Ok(true)
     }
 }

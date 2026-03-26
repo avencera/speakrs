@@ -30,10 +30,14 @@ impl EmbeddingModel {
         }
 
         let fbank = self.compute_chunk_fbank(audio)?;
-        let has_batched_tail = self.split_tail_batched_session.is_some();
+        let has_batched_tail = self.ort.split_tail_batched_session.is_some();
         #[cfg(feature = "coreml")]
         let has_batched_tail = has_batched_tail
-            || Self::has_native_tail_model(&self.model_path, self.mode, CHUNK_SPEAKER_BATCH_SIZE);
+            || Self::has_native_tail_model(
+                &self.meta.model_path,
+                self.meta.mode,
+                CHUNK_SPEAKER_BATCH_SIZE,
+            );
         if speaker_count == CHUNK_SPEAKER_BATCH_SIZE && has_batched_tail {
             return self.embed_tail_batch(&fbank, &segmentations, clean_masks, audio.len());
         }
@@ -45,7 +49,7 @@ impl EmbeddingModel {
                 array1_slice(&mask, "chunk tail mask")?,
                 Some(array1_slice(&clean_mask, "chunk tail clean mask")?),
                 audio.len(),
-                self.min_num_samples,
+                self.meta.min_num_samples,
             );
             let embedding = self.embed_tail_single(&fbank, used_mask)?;
             embeddings.row_mut(speaker_idx).assign(&embedding);
@@ -59,14 +63,15 @@ impl EmbeddingModel {
         fbank: &Array2<f32>,
         weights: &[f32],
     ) -> Result<Array1<f32>, ort::Error> {
-        self.split_feature_batch_buffer
+        self.buffers
+            .split_feature_batch_buffer
             .slice_mut(s![0, ..fbank.nrows(), ..fbank.ncols()])
             .assign(fbank);
         Self::prepare_weights(
             0,
             weights,
-            self.mask_frames,
-            &mut self.split_weights_batch_buffer.view_mut(),
+            self.meta.mask_frames,
+            &mut self.buffers.split_weights_batch_buffer.view_mut(),
         );
 
         #[cfg(feature = "coreml")]
@@ -74,9 +79,12 @@ impl EmbeddingModel {
             let _ = self.ensure_native_tail_loaded();
         }
         #[cfg(feature = "coreml")]
-        if let Some(native) = self.native_tail_session.as_mut() {
-            let feature_slice = self.split_feature_batch_buffer.slice(s![0..1, .., ..]);
-            let weight_slice = self.split_weights_batch_buffer.slice(s![0..1, ..]);
+        if let Some(native) = self.coreml.native_tail_session.as_mut() {
+            let feature_slice = self
+                .buffers
+                .split_feature_batch_buffer
+                .slice(s![0..1, .., ..]);
+            let weight_slice = self.buffers.split_weights_batch_buffer.slice(s![0..1, ..]);
             let fbank_data = feature_slice.as_slice().ok_or_else(|| {
                 ort::Error::new("native tail fbank input: array view was not contiguous")
             })?;
@@ -86,17 +94,21 @@ impl EmbeddingModel {
             let (data, _) = native
                 .predict(&[
                     ("fbank", &[1, FBANK_FRAMES, FBANK_FEATURES], fbank_data),
-                    ("weights", &[1, self.mask_frames], weights_data),
+                    ("weights", &[1, self.meta.mask_frames], weights_data),
                 ])
                 .map_err(|e| ort::Error::new(e.to_string()))?;
             return Ok(Array1::from_vec(data));
         }
 
-        let feature_slice = self.split_feature_batch_buffer.slice(s![0..1, .., ..]);
-        let weight_slice = self.split_weights_batch_buffer.slice(s![0..1, ..]);
+        let feature_slice = self
+            .buffers
+            .split_feature_batch_buffer
+            .slice(s![0..1, .., ..]);
+        let weight_slice = self.buffers.split_weights_batch_buffer.slice(s![0..1, ..]);
         let fbank_tensor = TensorRef::from_array_view(feature_slice.view())?;
         let weights_tensor = TensorRef::from_array_view(weight_slice.view())?;
         let outputs = self
+            .ort
             .split_tail_session
             .as_mut()
             .ok_or_else(|| ort::Error::new("missing split tail session"))?
@@ -112,13 +124,14 @@ impl EmbeddingModel {
         clean_masks: &Array2<f32>,
         num_samples: usize,
     ) -> Result<Array2<f32>, ort::Error> {
-        self.split_feature_batch_buffer
+        self.buffers
+            .split_feature_batch_buffer
             .slice_mut(s![0, ..fbank.nrows(), ..fbank.ncols()])
             .assign(fbank);
         let row_stride = FBANK_FRAMES * FBANK_FEATURES;
         let fbank_elems = fbank.nrows() * fbank.ncols();
         let buf = array3_slice_mut(
-            &mut self.split_feature_batch_buffer,
+            &mut self.buffers.split_feature_batch_buffer,
             "split feature batch buffer",
         )?;
         for speaker_idx in 1..segmentations.ncols() {
@@ -132,7 +145,7 @@ impl EmbeddingModel {
                 &clean_col,
                 mask_col.len(),
                 num_samples,
-                self.min_num_samples,
+                self.meta.min_num_samples,
             );
             let weights: Vec<f32> = if use_clean {
                 clean_col.iter().copied().collect()
@@ -142,8 +155,8 @@ impl EmbeddingModel {
             Self::prepare_weights(
                 speaker_idx,
                 &weights,
-                self.mask_frames,
-                &mut self.split_weights_batch_buffer.view_mut(),
+                self.meta.mask_frames,
+                &mut self.buffers.split_weights_batch_buffer.view_mut(),
             );
         }
 
@@ -152,20 +165,20 @@ impl EmbeddingModel {
             let _ = self.ensure_native_tail_batched_loaded();
         }
         #[cfg(feature = "coreml")]
-        if let Some(native) = self.native_tail_batched_session.as_mut() {
+        if let Some(native) = self.coreml.native_tail_batched_session.as_mut() {
             let fbank_data = array3_slice(
-                &self.split_feature_batch_buffer,
+                &self.buffers.split_feature_batch_buffer,
                 "native tail batch fbank input",
             )?;
             let weights_data = array2_slice(
-                &self.split_weights_batch_buffer,
+                &self.buffers.split_weights_batch_buffer,
                 "native tail batch weights input",
             )?;
             let batch = CHUNK_SPEAKER_BATCH_SIZE;
             let (data, _) = native
                 .predict(&[
                     ("fbank", &[batch, FBANK_FRAMES, FBANK_FEATURES], fbank_data),
-                    ("weights", &[batch, self.mask_frames], weights_data),
+                    ("weights", &[batch, self.meta.mask_frames], weights_data),
                 ])
                 .map_err(|e| ort::Error::new(e.to_string()))?;
             return array2_from_shape_vec(
@@ -176,9 +189,12 @@ impl EmbeddingModel {
             );
         }
 
-        let fbank_tensor = TensorRef::from_array_view(self.split_feature_batch_buffer.view())?;
-        let weights_tensor = TensorRef::from_array_view(self.split_weights_batch_buffer.view())?;
+        let fbank_tensor =
+            TensorRef::from_array_view(self.buffers.split_feature_batch_buffer.view())?;
+        let weights_tensor =
+            TensorRef::from_array_view(self.buffers.split_weights_batch_buffer.view())?;
         let outputs = self
+            .ort
             .split_tail_batched_session
             .as_mut()
             .ok_or_else(|| ort::Error::new("missing split tail batched session"))?
