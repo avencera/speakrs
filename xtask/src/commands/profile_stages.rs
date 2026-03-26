@@ -1,12 +1,12 @@
-use std::path::Path;
 use std::process::Command;
 
 use color_eyre::eyre::{Result, bail, ensure};
-use ndarray::{Array2, Array3, ArrayView2, s};
+use ndarray::{Array3, s};
 use speakrs::PowersetMapping;
 use speakrs::inference::{EmbeddingModel, SegmentationModel};
 use speakrs::pipeline::SEGMENTATION_STEP_SECONDS;
 
+use crate::commands::profile_support;
 use crate::wav;
 
 pub fn run(mode: &str, wav_path: &str, iterations: usize, log_every: usize) -> Result<()> {
@@ -21,20 +21,14 @@ pub fn run(mode: &str, wav_path: &str, iterations: usize, log_every: usize) -> R
         iterations
     };
 
-    let models_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
+    let models_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
         .join("fixtures/models");
     let mut seg_model = SegmentationModel::new(
-        models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
+        models_dir.join("segmentation-3.0.onnx"),
         SEGMENTATION_STEP_SECONDS as f32,
     )?;
-    let mut emb_model = EmbeddingModel::new(
-        models_dir
-            .join("wespeaker-voxceleb-resnet34.onnx")
-            .to_str()
-            .unwrap(),
-    )?;
+    let mut emb_model = EmbeddingModel::new(models_dir.join("wespeaker-voxceleb-resnet34.onnx"))?;
     let powerset = PowersetMapping::new(3, 2);
 
     let (samples, sample_rate) = wav::load_wav_samples(wav_path)?;
@@ -55,7 +49,7 @@ pub fn run(mode: &str, wav_path: &str, iterations: usize, log_every: usize) -> R
         return Ok(());
     }
 
-    let segmentations = decode_windows(raw_windows, &powerset);
+    let segmentations = profile_support::decode_windows(raw_windows, &powerset);
     eprintln!(
         "after_decode shape=({}, {}, {}) rss_mb={:.1}",
         segmentations.shape()[0],
@@ -103,9 +97,9 @@ fn run_embedding_stream(
     let num_chunks = segmentations.shape()[0];
     let num_speakers = segmentations.shape()[2];
     for chunk_idx in 0..num_chunks {
-        let chunk_audio = chunk_audio(audio, seg_model, chunk_idx);
+        let chunk_audio = profile_support::chunk_audio(audio, seg_model, chunk_idx);
         let chunk_segmentations = segmentations.slice(s![chunk_idx, .., ..]);
-        let clean_masks = clean_masks(&chunk_segmentations);
+        let clean_masks = profile_support::clean_masks(&chunk_segmentations);
 
         for speaker_idx in 0..num_speakers {
             let mask = chunk_segmentations.column(speaker_idx).to_owned();
@@ -113,8 +107,15 @@ fn run_embedding_stream(
             let _ = emb_model
                 .embed_masked(
                     chunk_audio,
-                    mask.as_slice().unwrap(),
-                    Some(clean_mask.as_slice().unwrap()),
+                    profile_support::array1_slice(&mask, "profile stages stream mask")
+                        .expect("mask should be contiguous"),
+                    Some(
+                        profile_support::array1_slice(
+                            &clean_mask,
+                            "profile stages stream clean mask",
+                        )
+                        .expect("clean mask should be contiguous"),
+                    ),
                 )
                 .expect("embedding failed");
         }
@@ -142,9 +143,9 @@ fn run_embedding_store(
     let mut embeddings = Array3::<f32>::from_elem((num_chunks, num_speakers, 256), f32::NAN);
 
     for chunk_idx in 0..num_chunks {
-        let chunk_audio = chunk_audio(audio, seg_model, chunk_idx);
+        let chunk_audio = profile_support::chunk_audio(audio, seg_model, chunk_idx);
         let chunk_segmentations = segmentations.slice(s![chunk_idx, .., ..]);
-        let clean_masks = clean_masks(&chunk_segmentations);
+        let clean_masks = profile_support::clean_masks(&chunk_segmentations);
 
         for speaker_idx in 0..num_speakers {
             let mask = chunk_segmentations.column(speaker_idx).to_owned();
@@ -152,8 +153,15 @@ fn run_embedding_store(
             let embedding = emb_model
                 .embed_masked(
                     chunk_audio,
-                    mask.as_slice().unwrap(),
-                    Some(clean_mask.as_slice().unwrap()),
+                    profile_support::array1_slice(&mask, "profile stages store mask")
+                        .expect("mask should be contiguous"),
+                    Some(
+                        profile_support::array1_slice(
+                            &clean_mask,
+                            "profile stages store clean mask",
+                        )
+                        .expect("clean mask should be contiguous"),
+                    ),
                 )
                 .expect("embedding failed");
             embeddings
@@ -191,9 +199,9 @@ fn run_embedding_repeat(
     iterations: usize,
     log_every: usize,
 ) {
-    let chunk_audio = chunk_audio(audio, seg_model, 0);
+    let chunk_audio = profile_support::chunk_audio(audio, seg_model, 0);
     let chunk_segmentations = segmentations.slice(s![0, .., ..]);
-    let clean_masks = clean_masks(&chunk_segmentations);
+    let clean_masks = profile_support::clean_masks(&chunk_segmentations);
     let local_idx = (0..chunk_segmentations.ncols())
         .find(|&speaker_idx| chunk_segmentations.column(speaker_idx).sum() > 0.0)
         .unwrap_or(0);
@@ -204,8 +212,12 @@ fn run_embedding_repeat(
         let _ = emb_model
             .embed_masked(
                 chunk_audio,
-                mask.as_slice().unwrap(),
-                Some(clean_mask.as_slice().unwrap()),
+                profile_support::array1_slice(&mask, "profile stages repeat mask")
+                    .expect("mask should be contiguous"),
+                Some(
+                    profile_support::array1_slice(&clean_mask, "profile stages repeat clean mask")
+                        .expect("clean mask should be contiguous"),
+                ),
             )
             .expect("embedding failed");
 
@@ -217,53 +229,6 @@ fn run_embedding_repeat(
                 rss_mb()
             );
         }
-    }
-}
-
-fn decode_windows(raw_windows: Vec<Array2<f32>>, powerset: &PowersetMapping) -> Array3<f32> {
-    let num_windows = raw_windows.len();
-    let mut windows = raw_windows.into_iter();
-    let first = powerset.hard_decode(&windows.next().unwrap());
-    let mut stacked = Array3::<f32>::zeros((num_windows, first.nrows(), first.ncols()));
-    stacked.slice_mut(s![0, .., ..]).assign(&first);
-
-    for (window_idx, window) in windows.enumerate() {
-        let decoded = powerset.hard_decode(&window);
-        stacked
-            .slice_mut(s![window_idx + 1, .., ..])
-            .assign(&decoded);
-    }
-
-    stacked
-}
-
-fn clean_masks(segmentations: &ArrayView2<f32>) -> Array2<f32> {
-    let single_active: Vec<bool> = segmentations
-        .rows()
-        .into_iter()
-        .map(|row| row.iter().copied().sum::<f32>() < 2.0)
-        .collect();
-    let mut clean = Array2::<f32>::zeros(segmentations.raw_dim());
-    for (frame_idx, is_single_active) in single_active.iter().enumerate() {
-        if !*is_single_active {
-            continue;
-        }
-
-        clean
-            .slice_mut(s![frame_idx, ..])
-            .assign(&segmentations.slice(s![frame_idx, ..]));
-    }
-    clean
-}
-
-fn chunk_audio<'a>(audio: &'a [f32], seg_model: &SegmentationModel, chunk_idx: usize) -> &'a [f32] {
-    let step_samples = (SEGMENTATION_STEP_SECONDS * seg_model.sample_rate() as f64) as usize;
-    let start = chunk_idx * step_samples;
-    let end = (start + seg_model.window_samples()).min(audio.len());
-    if start < audio.len() {
-        &audio[start..end]
-    } else {
-        &[]
     }
 }
 

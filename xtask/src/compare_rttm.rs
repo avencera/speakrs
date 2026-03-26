@@ -51,7 +51,7 @@ fn timeline_overlap(segs_a: &[Segment], segs_b: &[Segment]) -> f64 {
         .iter()
         .map(|s| (s.start, s.start + s.duration))
         .collect();
-    intervals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    intervals.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     if intervals.is_empty() {
         return 0.0;
@@ -60,12 +60,13 @@ fn timeline_overlap(segs_a: &[Segment], segs_b: &[Segment]) -> f64 {
     // merge overlapping intervals
     let mut merged = vec![intervals[0]];
     for &(start, end) in &intervals[1..] {
-        let last = merged.last_mut().unwrap();
-        if start <= last.1 {
+        if let Some(last) = merged.last_mut()
+            && start <= last.1
+        {
             last.1 = last.1.max(end);
-        } else {
-            merged.push((start, end));
+            continue;
         }
+        merged.push((start, end));
     }
 
     let mut covered = 0.0;

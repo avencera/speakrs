@@ -1,15 +1,11 @@
 use std::fs;
-use std::path::{Path, PathBuf};
 
 use ndarray::{Array2, Array3};
 use ndarray_npy::ReadNpyExt;
 use speakrs::OwnedDiarizationPipeline;
-use speakrs::inference::{
-    DynamicRuntimeError, EmbeddingModel, ModelLoadError, OrtRuntimeError, SegmentationModel,
-};
+use speakrs::inference::{EmbeddingModel, SegmentationModel};
 use speakrs::pipeline::{DiarizationPipeline, FRAME_STEP_SECONDS, SEGMENTATION_STEP_SECONDS};
 
-use speakrs::PipelineError;
 use speakrs::inference::ExecutionMode;
 #[cfg(all(feature = "coreml", feature = "_metrics"))]
 use speakrs::metrics::{compute_der, parse_rttm};
@@ -18,60 +14,9 @@ use speakrs::pipeline::FAST_SEGMENTATION_STEP_SECONDS;
 #[cfg(feature = "coreml")]
 use std::time::{Duration, Instant};
 
-fn fixture_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures")
-        .join(name)
-}
+mod support;
 
-fn load_wav_samples(path: &Path) -> (Vec<f32>, u32) {
-    let data = fs::read(path).unwrap();
-    let sample_rate = u32::from_le_bytes(data[24..28].try_into().unwrap());
-    let bits_per_sample = u16::from_le_bytes(data[34..36].try_into().unwrap());
-    assert_eq!(bits_per_sample, 16);
-
-    let mut pos = 12;
-    while pos + 8 < data.len() {
-        let chunk_id = &data[pos..pos + 4];
-        let chunk_size = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize;
-        if chunk_id == b"data" {
-            let samples = data[pos + 8..pos + 8 + chunk_size]
-                .chunks_exact(2)
-                .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / 32768.0)
-                .collect();
-            return (samples, sample_rate);
-        }
-        pos += 8 + chunk_size;
-    }
-
-    panic!("no data chunk found in WAV");
-}
-
-fn load_model_or_skip<T>(result: Result<T, ModelLoadError>) -> Option<T> {
-    match result {
-        Ok(value) => Some(value),
-        Err(ModelLoadError::Runtime(OrtRuntimeError::Dynamic(DynamicRuntimeError::Missing {
-            ..
-        }))) if cfg!(feature = "load-dynamic") => {
-            eprintln!("skipping model-loading test because ORT_DYLIB_PATH is not configured");
-            None
-        }
-        Err(error) => panic!("failed to load model: {error}"),
-    }
-}
-
-fn build_pipeline_or_skip<T>(result: Result<T, PipelineError>) -> Option<T> {
-    match result {
-        Ok(value) => Some(value),
-        Err(PipelineError::ModelLoad(ModelLoadError::Runtime(OrtRuntimeError::Dynamic(
-            DynamicRuntimeError::Missing { .. },
-        )))) if cfg!(feature = "load-dynamic") => {
-            eprintln!("skipping pipeline test because ORT_DYLIB_PATH is not configured");
-            None
-        }
-        Err(error) => panic!("failed to build pipeline: {error}"),
-    }
-}
+use support::{build_pipeline_or_skip, fixture_path, load_model_or_skip, load_wav_samples};
 
 #[test]
 fn pipeline_fixture_shapes_are_available() {
@@ -103,16 +48,13 @@ fn segmentation_step_matches_pyannote_fixture() {
 fn pipeline_runs_on_main_fixture_audio() {
     let models_dir = fixture_path("models");
     let Some(mut seg_model) = load_model_or_skip(SegmentationModel::new(
-        models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
+        models_dir.join("segmentation-3.0.onnx"),
         SEGMENTATION_STEP_SECONDS as f32,
     )) else {
         return;
     };
     let Some(mut emb_model) = load_model_or_skip(EmbeddingModel::new(
-        models_dir
-            .join("wespeaker-voxceleb-resnet34.onnx")
-            .to_str()
-            .unwrap(),
+        models_dir.join("wespeaker-voxceleb-resnet34.onnx"),
     )) else {
         return;
     };
@@ -150,15 +92,12 @@ const VOXCONVERSE_TEST_FILES: &[&str] = &[
 fn voxconverse_der(mode: ExecutionMode, step: f64) -> Option<(Vec<(String, f64)>, Duration)> {
     let models_dir = fixture_path("models");
     let mut seg_model = load_model_or_skip(SegmentationModel::with_mode(
-        models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
+        models_dir.join("segmentation-3.0.onnx"),
         step as f32,
         mode,
     ))?;
     let mut emb_model = load_model_or_skip(EmbeddingModel::with_mode(
-        models_dir
-            .join("wespeaker-voxceleb-resnet34.onnx")
-            .to_str()
-            .unwrap(),
+        models_dir.join("wespeaker-voxceleb-resnet34.onnx"),
         mode,
     ))?;
     let start = Instant::now();
@@ -257,16 +196,13 @@ fn der_coreml_fast() {
 fn pipeline_handles_short_audio_fixture() {
     let models_dir = fixture_path("models");
     let Some(mut seg_model) = load_model_or_skip(SegmentationModel::new(
-        models_dir.join("segmentation-3.0.onnx").to_str().unwrap(),
+        models_dir.join("segmentation-3.0.onnx"),
         SEGMENTATION_STEP_SECONDS as f32,
     )) else {
         return;
     };
     let Some(mut emb_model) = load_model_or_skip(EmbeddingModel::new(
-        models_dir
-            .join("wespeaker-voxceleb-resnet34.onnx")
-            .to_str()
-            .unwrap(),
+        models_dir.join("wespeaker-voxceleb-resnet34.onnx"),
     )) else {
         return;
     };

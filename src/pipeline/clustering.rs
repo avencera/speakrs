@@ -44,8 +44,13 @@ impl ChunkEmbeddings {
         }
 
         let row_count = chunk_indices.len();
-        let filtered_embeddings =
-            Array2::from_shape_vec((row_count, self.0.shape()[2]), filtered).unwrap();
+        let embedding_dim = self.0.shape()[2];
+        let mut filtered_embeddings = Array2::<f32>::zeros((row_count, embedding_dim));
+        for (row_idx, values) in filtered.chunks_exact(embedding_dim).enumerate() {
+            filtered_embeddings
+                .slice_mut(s![row_idx, ..])
+                .assign(&ndarray::ArrayView1::from(values));
+        }
         TrainingEmbeddings(filtered_embeddings)
     }
 }
@@ -102,9 +107,9 @@ impl TrainingEmbeddings {
             let best_speaker = pi
                 .iter()
                 .enumerate()
-                .max_by(|left, right| left.1.partial_cmp(right.1).unwrap())
+                .max_by(|left, right| left.1.total_cmp(right.1))
                 .map(|(speaker_idx, _)| speaker_idx)
-                .unwrap();
+                .unwrap_or(0);
             kept_speakers.push(best_speaker);
         }
 

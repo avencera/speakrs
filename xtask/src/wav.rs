@@ -3,6 +3,20 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 
 use color_eyre::eyre::{Result, bail, ensure};
 
+fn read_u16(bytes: &[u8], context: &str) -> Result<u16> {
+    let raw: [u8; 2] = bytes
+        .try_into()
+        .map_err(|_| color_eyre::eyre::eyre!("{context}: expected 2 bytes"))?;
+    Ok(u16::from_le_bytes(raw))
+}
+
+fn read_u32(bytes: &[u8], context: &str) -> Result<u32> {
+    let raw: [u8; 4] = bytes
+        .try_into()
+        .map_err(|_| color_eyre::eyre::eyre!("{context}: expected 4 bytes"))?;
+    Ok(u32::from_le_bytes(raw))
+}
+
 /// Load 16-bit PCM mono WAV samples as f32 in [-1.0, 1.0]
 pub fn load_wav_samples(path: &str) -> Result<(Vec<f32>, u32)> {
     let file = File::open(path)?;
@@ -23,16 +37,16 @@ pub fn load_wav_samples(path: &str) -> Result<(Vec<f32>, u32)> {
         }
 
         let chunk_id = &chunk_header[0..4];
-        let chunk_size = u32::from_le_bytes(chunk_header[4..8].try_into().unwrap()) as usize;
+        let chunk_size = read_u32(&chunk_header[4..8], "wav chunk size")? as usize;
 
         match chunk_id {
             b"fmt " => {
                 let mut fmt = vec![0u8; chunk_size];
                 reader.read_exact(&mut fmt)?;
-                let audio_format = u16::from_le_bytes(fmt[0..2].try_into().unwrap());
-                let chunk_channels = u16::from_le_bytes(fmt[2..4].try_into().unwrap());
-                let chunk_sample_rate = u32::from_le_bytes(fmt[4..8].try_into().unwrap());
-                let chunk_bits_per_sample = u16::from_le_bytes(fmt[14..16].try_into().unwrap());
+                let audio_format = read_u16(&fmt[0..2], "wav fmt audio format")?;
+                let chunk_channels = read_u16(&fmt[2..4], "wav fmt channels")?;
+                let chunk_sample_rate = read_u32(&fmt[4..8], "wav fmt sample rate")?;
+                let chunk_bits_per_sample = read_u16(&fmt[14..16], "wav fmt bits per sample")?;
 
                 ensure!(audio_format == 1, "expected PCM WAV");
                 channels = Some(chunk_channels);

@@ -81,7 +81,7 @@ pub fn to_segments(
         }
     }
 
-    segments.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
+    segments.sort_by(|a, b| a.start.total_cmp(&b.start));
     segments
 }
 
@@ -98,13 +98,15 @@ pub fn merge_segments(segments: &[Segment], max_gap: f64) -> Vec<Segment> {
     let mut merged: Vec<Segment> = vec![segments[0].clone()];
 
     for seg in &segments[1..] {
-        let last = merged.last_mut().unwrap();
-
-        if seg.speaker == last.speaker && (seg.start - last.end) < max_gap {
+        if let Some(last) = merged.last_mut()
+            && seg.speaker == last.speaker
+            && (seg.start - last.end) < max_gap
+        {
             last.end = seg.end;
-        } else {
-            merged.push(seg.clone());
+            continue;
         }
+
+        merged.push(seg.clone());
     }
 
     merged

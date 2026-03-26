@@ -36,6 +36,23 @@ pub enum PipelineError {
     /// Queue setup or execution error
     #[error(transparent)]
     Queue(#[from] super::queued::QueueError),
+    /// Internal pipeline invariant was violated
+    #[error("{0}")]
+    Invariant(String),
+    /// Background worker panicked
+    #[error("{worker} thread panicked")]
+    WorkerPanic {
+        /// Worker or thread name
+        worker: String,
+    },
+    /// Backend-specific execution failed with additional context
+    #[error("{context}: {message}")]
+    Backend {
+        /// Which backend step failed
+        context: &'static str,
+        /// Backend error message
+        message: String,
+    },
     /// Catch-all for other pipeline errors
     #[error("{0}")]
     Other(String),
@@ -144,13 +161,13 @@ pub(super) struct RawSegmentationWindows(pub Vec<Array2<f32>>);
 
 impl RawSegmentationWindows {
     pub(super) fn decode(self, powerset: &PowersetMapping) -> DecodedSegmentations {
-        let num_windows = self.0.len();
-        if num_windows == 0 {
-            return DecodedSegmentations(Array3::zeros((0, 0, 0)));
-        }
-
         let mut windows = self.0.into_iter();
-        let first = powerset.hard_decode(&windows.next().unwrap());
+        let Some(first_window) = windows.next() else {
+            return DecodedSegmentations(Array3::zeros((0, 0, 0)));
+        };
+
+        let num_windows = windows.len() + 1;
+        let first = powerset.hard_decode(&first_window);
         let mut stacked = Array3::<f32>::zeros((num_windows, first.nrows(), first.ncols()));
         stacked.slice_mut(s![0, .., ..]).assign(&first);
 
@@ -533,6 +550,21 @@ pub(super) trait EmbeddingStorage {
     fn store(&mut self, chunk_idx: usize, speaker_idx: usize, embedding: &[f32]);
 }
 
+fn store_row<S: EmbeddingStorage>(
+    storage: &mut S,
+    chunk_idx: usize,
+    speaker_idx: usize,
+    row: ndarray::ArrayView1<'_, f32>,
+) {
+    if let Some(values) = row.as_slice() {
+        storage.store(chunk_idx, speaker_idx, values);
+        return;
+    }
+
+    let values = row.to_vec();
+    storage.store(chunk_idx, speaker_idx, &values);
+}
+
 /// Writes embeddings into a pre-allocated Array3 by (chunk, speaker) index
 pub(super) struct Array3Writer<'a>(pub &'a mut Array3<f32>);
 
@@ -562,10 +594,11 @@ pub(super) fn flush_masked<S: EmbeddingStorage>(
     let batch_embeddings = emb_model.embed_batch(&batch_inputs)?;
 
     for (batch_idx, item) in pending.iter().enumerate() {
-        storage.store(
+        store_row(
+            storage,
             item.chunk_idx,
             item.speaker_idx,
-            batch_embeddings.row(batch_idx).as_slice().unwrap(),
+            batch_embeddings.row(batch_idx),
         );
     }
 
@@ -588,10 +621,11 @@ pub(super) fn flush_split<S: EmbeddingStorage>(
     let batch_embeddings = emb_model.embed_tail_batch_inputs(&batch_inputs)?;
 
     for (batch_idx, item) in pending.iter().enumerate() {
-        storage.store(
+        store_row(
+            storage,
             item.chunk_idx,
             item.speaker_idx,
-            batch_embeddings.row(batch_idx).as_slice().unwrap(),
+            batch_embeddings.row(batch_idx),
         );
     }
 
@@ -617,10 +651,11 @@ pub(super) fn flush_multi_mask<S: EmbeddingStorage>(
             if !is_active {
                 continue;
             }
-            storage.store(
+            store_row(
+                storage,
                 chunk_idx,
                 speaker_idx,
-                batch_embeddings.row(mask_idx).as_slice().unwrap(),
+                batch_embeddings.row(mask_idx),
             );
         }
     }

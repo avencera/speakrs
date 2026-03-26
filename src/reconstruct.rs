@@ -178,9 +178,9 @@ pub fn make_exclusive(activations: &mut Array2<f32>) {
         let argmax = row
             .iter()
             .enumerate()
-            .max_by(|(_, lhs), (_, rhs)| lhs.partial_cmp(rhs).unwrap())
+            .max_by(|(_, lhs), (_, rhs)| lhs.total_cmp(rhs))
             .map(|(idx, _)| idx)
-            .unwrap();
+            .unwrap_or(0);
 
         for (column_idx, value) in row.iter_mut().enumerate() {
             if column_idx != argmax {
@@ -212,7 +212,7 @@ fn top_k_indices(matrix: &Array2<f32>, frame_idx: usize, k: usize) -> Vec<usize>
     let mut indexed: Vec<(usize, f32)> = (0..num_columns)
         .map(|column_idx| (column_idx, matrix[[frame_idx, column_idx]]))
         .collect();
-    indexed.sort_by(|left, right| right.1.partial_cmp(&left.1).unwrap());
+    indexed.sort_by(|left, right| right.1.total_cmp(&left.1));
 
     indexed.into_iter().take(k).map(|(idx, _)| idx).collect()
 }
@@ -240,7 +240,7 @@ fn top_k_indices_smoothed(
             let right_was_active = previous_speakers.contains(&right.0);
             right_was_active.cmp(&left_was_active)
         } else {
-            right.1.partial_cmp(&left.1).unwrap()
+            right.1.total_cmp(&left.1)
         }
     });
 

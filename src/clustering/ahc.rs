@@ -105,7 +105,7 @@ fn assign_flat_labels(
         return;
     }
 
-    let (left, right) = children[node_idx].unwrap();
+    let (left, right) = child_pair(children, node_idx);
     assign_flat_labels(
         left,
         observations,
@@ -138,9 +138,13 @@ fn label_subtree(
         return;
     }
 
-    let (left, right) = children[node_idx].unwrap();
+    let (left, right) = child_pair(children, node_idx);
     label_subtree(left, observations, children, labels, label);
     label_subtree(right, observations, children, labels, label);
+}
+
+fn child_pair(children: &[Option<(usize, usize)>], node_idx: usize) -> (usize, usize) {
+    children[node_idx].expect("ahc merge node must have child indices")
 }
 
 #[cfg(test)]

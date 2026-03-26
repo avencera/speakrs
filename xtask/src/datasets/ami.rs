@@ -6,6 +6,7 @@ use color_eyre::eyre::{Result, bail};
 
 use crate::cmd::run_cmd;
 use crate::convert::convert_to_16k_mono;
+use crate::path::file_stem_string;
 
 /// AMI IHM (Individual Headset Mix)
 /// RTTMs from BUTSpeechFIT, audio from Edinburgh DataShare
@@ -96,12 +97,7 @@ fn download_ami_wavs(
     let mut missing = Vec::new();
     for entry in fs::read_dir(rttm_dir)? {
         let entry = entry?;
-        let stem = entry
-            .path()
-            .file_stem()
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+        let stem = file_stem_string(&entry.path())?;
         if !wav_dir.join(format!("{stem}.wav")).exists() {
             missing.push(stem);
         }

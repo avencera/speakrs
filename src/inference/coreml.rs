@@ -473,7 +473,10 @@ impl SharedCoreMlModel {
                 } else {
                     // SAFETY: output is non-null in this branch and retain extends the lifetime so
                     // SAFETY: the returned feature provider survives after the callback returns
-                    let retained = unsafe { Retained::retain(output) }.unwrap();
+                    let Some(retained) = (unsafe { Retained::retain(output) }) else {
+                        let _ = tx.send(Err("failed to retain CoreML output".to_owned()));
+                        return;
+                    };
                     let _ = tx.send(Ok(retained));
                 }
             },
