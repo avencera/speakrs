@@ -187,6 +187,16 @@ impl EmbeddingModel {
 
     /// Reload all ORT sessions from disk, resetting internal state
     pub fn reset_session(&mut self) -> Result<(), ort::Error> {
+        #[cfg(feature = "coreml")]
+        if matches!(
+            self.meta.mode,
+            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast
+        ) && let Err(error) =
+            Self::validate_native_coreml_assets(&self.meta.model_path, self.meta.mode)
+        {
+            return Err(ort::Error::new(error.to_string()));
+        }
+
         self.ort.session = Self::build_session(
             &self.meta.model_path,
             Self::single_execution_mode(self.meta.mode),

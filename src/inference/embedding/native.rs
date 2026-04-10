@@ -17,7 +17,7 @@ macro_rules! ensure_loaded {
     ($self:expr, $field:ident, $load:expr, $msg:literal) => {{
         if $self.coreml.$field.is_none() {
             let start = std::time::Instant::now();
-            $self.coreml.$field = $load;
+            $self.coreml.$field = $load?;
             if $self.coreml.$field.is_some() {
                 tracing::trace!(ms = start.elapsed().as_millis(), $msg);
             }
@@ -26,42 +26,61 @@ macro_rules! ensure_loaded {
 }
 
 impl EmbeddingModel {
-    pub(super) fn ensure_native_fbank_loaded(&mut self) -> Option<&Arc<SharedCoreMlModel>> {
+    pub(super) fn ensure_native_fbank_loaded(
+        &mut self,
+    ) -> Result<Option<&Arc<SharedCoreMlModel>>, ort::Error> {
         ensure_loaded!(
             self,
             native_fbank_session,
-            Self::load_native_fbank(&self.meta.model_path, self.meta.mode, 1).map(Arc::new),
+            Ok::<Option<Arc<SharedCoreMlModel>>, ort::Error>(
+                Self::load_native_fbank(&self.meta.model_path, self.meta.mode, 1)
+                    .map_err(|error| ort::Error::new(error.to_string()))?
+                    .map(Arc::new)
+            ),
             "Lazy loaded native fbank 10s"
         );
-        self.coreml.native_fbank_session.as_ref()
+        Ok(self.coreml.native_fbank_session.as_ref())
     }
 
-    pub(super) fn ensure_native_fbank_batched_loaded(&mut self) -> Option<&SharedCoreMlModel> {
+    pub(super) fn ensure_native_fbank_batched_loaded(
+        &mut self,
+    ) -> Result<Option<&SharedCoreMlModel>, ort::Error> {
         ensure_loaded!(
             self,
             native_fbank_batched_session,
-            Self::load_native_fbank(&self.meta.model_path, self.meta.mode, PRIMARY_BATCH_SIZE),
+            Self::load_native_fbank(&self.meta.model_path, self.meta.mode, PRIMARY_BATCH_SIZE)
+                .map_err(|error| ort::Error::new(error.to_string())),
             "Lazy loaded native fbank b64"
         );
-        self.coreml.native_fbank_batched_session.as_ref()
+        Ok(self.coreml.native_fbank_batched_session.as_ref())
     }
 
-    pub(super) fn ensure_native_fbank_30s_loaded(&mut self) -> Option<&Arc<SharedCoreMlModel>> {
+    pub(super) fn ensure_native_fbank_30s_loaded(
+        &mut self,
+    ) -> Result<Option<&Arc<SharedCoreMlModel>>, ort::Error> {
         ensure_loaded!(
             self,
             native_fbank_30s_session,
-            Self::load_native_fbank_30s(&self.meta.model_path, self.meta.mode).map(Arc::new),
+            Ok::<Option<Arc<SharedCoreMlModel>>, ort::Error>(
+                Self::load_native_fbank_30s(&self.meta.model_path, self.meta.mode)
+                    .map_err(|error| ort::Error::new(error.to_string()))?
+                    .map(Arc::new)
+            ),
             "Lazy loaded native fbank 30s"
         );
-        self.coreml.native_fbank_30s_session.as_ref()
+        Ok(self.coreml.native_fbank_30s_session.as_ref())
     }
 
-    pub(crate) fn prepare_chunk_resources(&mut self) -> Option<ChunkResourceBundle> {
-        let capacity = self.chunk_window_capacity()?;
-        self.ensure_chunk_session_loaded(capacity);
+    pub(crate) fn prepare_chunk_resources(
+        &mut self,
+    ) -> Result<Option<ChunkResourceBundle>, ort::Error> {
+        let Some(capacity) = self.chunk_window_capacity() else {
+            return Ok(None);
+        };
+        self.ensure_chunk_session_loaded(capacity)?;
 
         if self.coreml.native_chunk_sessions.is_empty() {
-            return None;
+            return Ok(None);
         }
 
         let sessions = self
@@ -78,44 +97,52 @@ impl EmbeddingModel {
             })
             .collect();
 
-        let _ = self.ensure_native_fbank_30s_loaded();
+        self.ensure_native_fbank_30s_loaded()?;
         let fbank_30s = self
             .coreml
             .native_fbank_30s_session
             .as_ref()
             .map(Arc::clone);
 
-        let _ = self.ensure_native_fbank_loaded();
+        self.ensure_native_fbank_loaded()?;
         let fbank_10s = self.coreml.native_fbank_session.as_ref().map(Arc::clone);
 
-        Some(ChunkResourceBundle {
+        Ok(Some(ChunkResourceBundle {
             sessions,
             fbank_30s,
             fbank_10s,
-        })
+        }))
     }
 
-    pub(super) fn ensure_native_multi_mask_loaded(&mut self) -> Option<&SharedCoreMlModel> {
+    pub(super) fn ensure_native_multi_mask_loaded(
+        &mut self,
+    ) -> Result<Option<&SharedCoreMlModel>, ort::Error> {
         ensure_loaded!(
             self,
             native_multi_mask_session,
-            Self::load_native_multi_mask(&self.meta.model_path, self.meta.mode),
+            Self::load_native_multi_mask(&self.meta.model_path, self.meta.mode)
+                .map_err(|error| ort::Error::new(error.to_string())),
             "Lazy loaded native multi mask"
         );
-        self.coreml.native_multi_mask_session.as_ref()
+        Ok(self.coreml.native_multi_mask_session.as_ref())
     }
 
-    pub(super) fn ensure_native_tail_loaded(&mut self) -> Option<&mut CoreMlModel> {
+    pub(super) fn ensure_native_tail_loaded(
+        &mut self,
+    ) -> Result<Option<&mut CoreMlModel>, ort::Error> {
         ensure_loaded!(
             self,
             native_tail_session,
-            Self::load_native_tail(&self.meta.model_path, self.meta.mode, 1),
+            Self::load_native_tail(&self.meta.model_path, self.meta.mode, 1)
+                .map_err(|error| ort::Error::new(error.to_string())),
             "Lazy loaded native tail"
         );
-        self.coreml.native_tail_session.as_mut()
+        Ok(self.coreml.native_tail_session.as_mut())
     }
 
-    pub(super) fn ensure_native_tail_batched_loaded(&mut self) -> Option<&mut CoreMlModel> {
+    pub(super) fn ensure_native_tail_batched_loaded(
+        &mut self,
+    ) -> Result<Option<&mut CoreMlModel>, ort::Error> {
         ensure_loaded!(
             self,
             native_tail_batched_session,
@@ -123,20 +150,24 @@ impl EmbeddingModel {
                 &self.meta.model_path,
                 self.meta.mode,
                 CHUNK_SPEAKER_BATCH_SIZE
-            ),
+            )
+            .map_err(|error| ort::Error::new(error.to_string())),
             "Lazy loaded native tail b32"
         );
-        self.coreml.native_tail_batched_session.as_mut()
+        Ok(self.coreml.native_tail_batched_session.as_mut())
     }
 
-    pub(super) fn ensure_native_tail_primary_batched_loaded(&mut self) -> Option<&mut CoreMlModel> {
+    pub(super) fn ensure_native_tail_primary_batched_loaded(
+        &mut self,
+    ) -> Result<Option<&mut CoreMlModel>, ort::Error> {
         ensure_loaded!(
             self,
             native_tail_primary_batched_session,
-            Self::load_native_tail(&self.meta.model_path, self.meta.mode, PRIMARY_BATCH_SIZE),
+            Self::load_native_tail(&self.meta.model_path, self.meta.mode, PRIMARY_BATCH_SIZE)
+                .map_err(|error| ort::Error::new(error.to_string())),
             "Lazy loaded native tail b64"
         );
-        self.coreml.native_tail_primary_batched_session.as_mut()
+        Ok(self.coreml.native_tail_primary_batched_session.as_mut())
     }
 
     pub(crate) fn chunk_window_capacity(&self) -> Option<usize> {
@@ -146,7 +177,7 @@ impl EmbeddingModel {
             .map(|spec| spec.num_windows)
     }
 
-    fn ensure_chunk_session_loaded(&mut self, num_windows: usize) -> bool {
+    fn ensure_chunk_session_loaded(&mut self, num_windows: usize) -> Result<bool, ort::Error> {
         let Some(spec) = self
             .coreml
             .native_chunk_specs
@@ -154,7 +185,7 @@ impl EmbeddingModel {
             .find(|spec| spec.num_windows >= num_windows)
             .cloned()
         else {
-            return false;
+            return Ok(false);
         };
 
         if self
@@ -163,64 +194,60 @@ impl EmbeddingModel {
             .iter()
             .any(|session| session.num_windows == spec.num_windows)
         {
-            return true;
+            return Ok(true);
         }
 
         let start = std::time::Instant::now();
-        match Self::load_chunk_session(&spec, self.coreml.native_chunk_compute_units) {
-            Ok(session) => {
-                tracing::trace!(
-                    num_windows = spec.num_windows,
-                    ms = start.elapsed().as_millis(),
-                    "Lazy loaded chunk embedding",
-                );
-                self.coreml.native_chunk_sessions.push(session);
-                self.coreml
-                    .native_chunk_sessions
-                    .sort_by_key(|session| session.num_windows);
-                true
-            }
-            Err(err) => {
-                tracing::warn!(
-                    num_windows = spec.num_windows,
-                    "Failed to lazy load chunk embedding: {err}",
-                );
-                false
-            }
-        }
+        let session = Self::load_chunk_session(&spec, self.coreml.native_chunk_compute_units)
+            .map_err(|error| ort::Error::new(error.to_string()))?;
+        tracing::trace!(
+            num_windows = spec.num_windows,
+            ms = start.elapsed().as_millis(),
+            "Lazy loaded chunk embedding",
+        );
+        self.coreml.native_chunk_sessions.push(session);
+        self.coreml
+            .native_chunk_sessions
+            .sort_by_key(|session| session.num_windows);
+        Ok(true)
     }
 
     /// Compute fbank for up to 30s of audio in one call
     pub fn compute_chunk_fbank_30s(
         &mut self,
         audio: &[f32],
-    ) -> Option<Result<Array2<f32>, ort::Error>> {
+    ) -> Result<Option<Array2<f32>>, ort::Error> {
         if audio.len() > 480_000 {
-            return None;
+            return Ok(None);
         }
-        let _ = self.ensure_native_fbank_30s_loaded();
-        let native = self.coreml.native_fbank_30s_session.as_ref()?;
+        self.ensure_native_fbank_30s_loaded()?;
+        let Some(native) = self.coreml.native_fbank_30s_session.as_ref() else {
+            return Ok(None);
+        };
         let mut buffer = vec![0.0f32; 480_000];
         buffer[..audio.len()].copy_from_slice(audio);
         let result = native
             .predict_cached(&[(&self.coreml.cached_fbank_30s_shape, &buffer)])
             .map_err(|e| ort::Error::new(e.to_string()));
-        Some(result.and_then(|(data, out_shape)| {
-            array2_from_shape_vec(out_shape[1], out_shape[2], data, "native 30s fbank output")
-        }))
+        result
+            .and_then(|(data, out_shape)| {
+                array2_from_shape_vec(out_shape[1], out_shape[2], data, "native 30s fbank output")
+            })
+            .map(Some)
     }
 
     pub(crate) fn chunk_session_for_windows(
         &mut self,
         num_windows: usize,
-    ) -> Option<&ChunkEmbeddingSession> {
-        if !self.ensure_chunk_session_loaded(num_windows) {
-            return None;
+    ) -> Result<Option<&ChunkEmbeddingSession>, ort::Error> {
+        if !self.ensure_chunk_session_loaded(num_windows)? {
+            return Ok(None);
         }
-        self.coreml
+        Ok(self
+            .coreml
             .native_chunk_sessions
             .iter()
-            .find(|s| s.num_windows >= num_windows)
+            .find(|s| s.num_windows >= num_windows))
     }
 
     pub(crate) fn embed_chunk_session(

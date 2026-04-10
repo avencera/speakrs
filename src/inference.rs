@@ -122,6 +122,24 @@ pub enum ModelLoadError {
     /// ONNX Runtime returned an error after initialization completed
     #[error(transparent)]
     Ort(#[from] ort::Error),
+    /// A required native model asset is missing for the selected execution mode
+    #[error("{mode} requires native asset `{path}`")]
+    MissingNativeAsset {
+        /// The execution mode that requires the asset
+        mode: ExecutionMode,
+        /// The missing compiled CoreML bundle path
+        path: PathBuf,
+    },
+    /// A required native model asset exists but failed to load
+    #[error("{mode} failed to load native asset `{path}`: {message}")]
+    NativeAssetLoad {
+        /// The execution mode that requires the asset
+        mode: ExecutionMode,
+        /// The compiled CoreML bundle path that failed to load
+        path: PathBuf,
+        /// The backend load error
+        message: String,
+    },
 }
 
 /// Errors that can occur while preparing the process-wide ONNX Runtime environment

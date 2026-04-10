@@ -93,6 +93,11 @@ impl SegmentationModel {
         let window_samples = (window_duration * sample_rate as f32) as usize;
         let step_samples = (step_duration * sample_rate as f32) as usize;
 
+        #[cfg(feature = "coreml")]
+        if matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
+            Self::validate_native_coreml_assets(model_path, mode)?;
+        }
+
         macro_rules! timed {
             ($expr:expr) => {{
                 let start = std::time::Instant::now();
@@ -110,13 +115,38 @@ impl SegmentationModel {
         );
         #[cfg(feature = "coreml")]
         let (native_session, native_session_elapsed) =
-            timed!(Self::load_native_coreml(model_path, mode));
+            timed!(Self::load_native_coreml(model_path, mode)?);
         #[cfg(feature = "coreml")]
         let (native_batched_session, native_batched_elapsed) =
-            timed!(Self::load_native_coreml_batched(model_path, mode));
+            timed!(Self::load_native_coreml_batched(model_path, mode)?);
         #[cfg(feature = "coreml")]
         let (native_large_batched_session, native_large_batched_elapsed) =
-            timed!(Self::load_native_coreml_large_batched(model_path, mode));
+            timed!(Self::load_native_coreml_large_batched(model_path, mode)?);
+
+        #[cfg(feature = "coreml")]
+        if matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
+            if native_session.is_none() {
+                return Err(ModelLoadError::MissingNativeAsset {
+                    mode,
+                    path: Self::resolve_coreml_path(model_path, mode)
+                        .unwrap_or_else(|| model_path.to_path_buf()),
+                });
+            }
+            if native_batched_session.is_none() {
+                return Err(ModelLoadError::MissingNativeAsset {
+                    mode,
+                    path: Self::resolve_batched_coreml_path(model_path, mode, PRIMARY_BATCH_SIZE)
+                        .unwrap_or_else(|| model_path.to_path_buf()),
+                });
+            }
+            if native_large_batched_session.is_none() {
+                return Err(ModelLoadError::MissingNativeAsset {
+                    mode,
+                    path: Self::resolve_batched_coreml_path(model_path, mode, LARGE_BATCH_SIZE)
+                        .unwrap_or_else(|| model_path.to_path_buf()),
+                });
+            }
+        }
 
         #[cfg(feature = "coreml")]
         {
@@ -227,11 +257,27 @@ impl SegmentationModel {
             .transpose()?;
         #[cfg(feature = "coreml")]
         {
-            self.native_session = Self::load_native_coreml(&self.model_path, self.mode);
+            if matches!(self.mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
+                Self::validate_native_coreml_assets(&self.model_path, self.mode)
+                    .map_err(|error| ort::Error::new(error.to_string()))?;
+            }
+            self.native_session = Self::load_native_coreml(&self.model_path, self.mode)
+                .map_err(|error| ort::Error::new(error.to_string()))?;
             self.native_batched_session =
-                Self::load_native_coreml_batched(&self.model_path, self.mode);
+                Self::load_native_coreml_batched(&self.model_path, self.mode)
+                    .map_err(|error| ort::Error::new(error.to_string()))?;
             self.native_large_batched_session =
-                Self::load_native_coreml_large_batched(&self.model_path, self.mode);
+                Self::load_native_coreml_large_batched(&self.model_path, self.mode)
+                    .map_err(|error| ort::Error::new(error.to_string()))?;
+            if self.native_session.is_none()
+                || self.native_batched_session.is_none()
+                || self.native_large_batched_session.is_none()
+            {
+                return Err(ort::Error::new(format!(
+                    "{} native CoreML sessions failed to load",
+                    self.mode
+                )));
+            }
         }
         Ok(())
     }

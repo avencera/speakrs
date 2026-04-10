@@ -6,15 +6,50 @@ use ndarray::Array2;
 use objc2_core_ml::MLComputeUnits;
 use tracing::info;
 
-use crate::inference::ExecutionMode;
 use crate::inference::coreml::{
     CachedInputShape, CoreMlModel, GpuPrecision, SharedCoreMlModel, coreml_model_path,
     coreml_w8a16_model_path,
 };
+use crate::inference::{ExecutionMode, ModelLoadError};
 
 use super::{LARGE_BATCH_SIZE, PRIMARY_BATCH_SIZE, SegmentationModel, batched_model_path};
 
 impl SegmentationModel {
+    fn require_native_asset(path: PathBuf, mode: ExecutionMode) -> Result<PathBuf, ModelLoadError> {
+        if path.exists() {
+            Ok(path)
+        } else {
+            Err(ModelLoadError::MissingNativeAsset { mode, path })
+        }
+    }
+
+    pub(super) fn validate_native_coreml_assets(
+        model_path: &Path,
+        mode: ExecutionMode,
+    ) -> Result<(), ModelLoadError> {
+        let Some(single_path) = Self::resolve_coreml_path(model_path, mode) else {
+            return Ok(());
+        };
+        Self::require_native_asset(single_path, mode)?;
+
+        let batched_path = Self::resolve_batched_coreml_path(model_path, mode, PRIMARY_BATCH_SIZE)
+            .ok_or(ModelLoadError::MissingNativeAsset {
+                mode,
+                path: model_path.to_path_buf(),
+            })?;
+        Self::require_native_asset(batched_path, mode)?;
+
+        let large_batched_path =
+            Self::resolve_batched_coreml_path(model_path, mode, LARGE_BATCH_SIZE).ok_or(
+                ModelLoadError::MissingNativeAsset {
+                    mode,
+                    path: model_path.to_path_buf(),
+                },
+            )?;
+        Self::require_native_asset(large_batched_path, mode)?;
+        Ok(())
+    }
+
     pub(super) fn select_parallel_native_model(
         &self,
         total_windows: usize,
@@ -35,7 +70,7 @@ impl SegmentationModel {
             .or_else(|| self.native_session.as_ref().map(|model| (model, 1)))
     }
 
-    fn resolve_coreml_path(model_path: &Path, mode: ExecutionMode) -> Option<PathBuf> {
+    pub(super) fn resolve_coreml_path(model_path: &Path, mode: ExecutionMode) -> Option<PathBuf> {
         match mode {
             ExecutionMode::CoreMlFast => Some(coreml_w8a16_model_path(model_path)),
             ExecutionMode::CoreMl => Some(coreml_model_path(model_path)),
@@ -47,7 +82,7 @@ impl SegmentationModel {
         CoreMlModel::default_compute_units()
     }
 
-    fn resolve_batched_coreml_path(
+    pub(super) fn resolve_batched_coreml_path(
         model_path: &Path,
         mode: ExecutionMode,
         batch_size: usize,
@@ -63,69 +98,68 @@ impl SegmentationModel {
     fn load_native_coreml_model(
         coreml_path: &Path,
         mode: ExecutionMode,
-        missing_message: &str,
         load_error_message: &str,
-    ) -> Option<SharedCoreMlModel> {
-        if !coreml_path.exists() {
-            if !missing_message.is_empty() {
-                tracing::warn!(path = %coreml_path.display(), "{missing_message}");
-            }
-            return None;
-        }
+    ) -> Result<SharedCoreMlModel, ModelLoadError> {
+        Self::require_native_asset(coreml_path.to_path_buf(), mode)?;
 
-        match SharedCoreMlModel::load(
+        SharedCoreMlModel::load(
             coreml_path,
             Self::compute_units_for_mode(mode),
             "output",
             GpuPrecision::Low,
-        ) {
-            Ok(model) => Some(model),
-            Err(err) => {
-                tracing::warn!("{load_error_message}: {err}");
-                None
-            }
-        }
+        )
+        .map_err(|err| ModelLoadError::NativeAssetLoad {
+            mode,
+            path: coreml_path.to_path_buf(),
+            message: format!("{load_error_message}: {err}"),
+        })
     }
 
     pub(super) fn load_native_coreml(
         model_path: &Path,
         mode: ExecutionMode,
-    ) -> Option<SharedCoreMlModel> {
-        let coreml_path = Self::resolve_coreml_path(model_path, mode)?;
+    ) -> Result<Option<SharedCoreMlModel>, ModelLoadError> {
+        let Some(coreml_path) = Self::resolve_coreml_path(model_path, mode) else {
+            return Ok(None);
+        };
         Self::load_native_coreml_model(
             &coreml_path,
             mode,
-            "Native CoreML segmentation model not found, falling back to ORT CPU",
             "Failed to load native CoreML segmentation",
         )
+        .map(Some)
     }
 
     pub(super) fn load_native_coreml_batched(
         model_path: &Path,
         mode: ExecutionMode,
-    ) -> Option<SharedCoreMlModel> {
-        let coreml_path = Self::resolve_batched_coreml_path(model_path, mode, PRIMARY_BATCH_SIZE)?;
+    ) -> Result<Option<SharedCoreMlModel>, ModelLoadError> {
+        let Some(coreml_path) =
+            Self::resolve_batched_coreml_path(model_path, mode, PRIMARY_BATCH_SIZE)
+        else {
+            return Ok(None);
+        };
         Self::load_native_coreml_model(
             &coreml_path,
             mode,
-            "",
             "Failed to load native CoreML batched segmentation",
         )
+        .map(Some)
     }
 
     pub(super) fn load_native_coreml_large_batched(
         model_path: &Path,
         mode: ExecutionMode,
-    ) -> Option<SharedCoreMlModel> {
-        let coreml_path = Self::resolve_batched_coreml_path(model_path, mode, LARGE_BATCH_SIZE)?;
-        let model = Self::load_native_coreml_model(
-            &coreml_path,
-            mode,
-            "",
-            "Failed to load b64 segmentation",
-        )?;
+    ) -> Result<Option<SharedCoreMlModel>, ModelLoadError> {
+        let Some(coreml_path) =
+            Self::resolve_batched_coreml_path(model_path, mode, LARGE_BATCH_SIZE)
+        else {
+            return Ok(None);
+        };
+        let model =
+            Self::load_native_coreml_model(&coreml_path, mode, "Failed to load b64 segmentation")?;
         info!("Loaded b64 segmentation model");
-        Some(model)
+        Ok(Some(model))
     }
 
     pub(super) fn run_native_single(
@@ -188,5 +222,67 @@ impl SegmentationModel {
                 )
             })
             .collect::<Result<Vec<_>, _>>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(prefix: &str) -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!("speakrs-{prefix}-{unique}"));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn load_native_coreml_errors_when_compiled_bundle_is_invalid() {
+        let dir = TestDir::new("seg-coreml-invalid");
+        let model_path = dir.path().join("segmentation-3.0.onnx");
+        fs::write(&model_path, b"placeholder").unwrap();
+
+        let compiled_path = dir.path().join("segmentation-3.0.mlmodelc");
+        fs::create_dir_all(compiled_path.join("weights")).unwrap();
+        fs::create_dir_all(compiled_path.join("analytics")).unwrap();
+        fs::write(compiled_path.join("model.mil"), b"invalid").unwrap();
+        fs::write(compiled_path.join("coremldata.bin"), b"invalid").unwrap();
+        fs::write(compiled_path.join("weights/weight.bin"), b"invalid").unwrap();
+        fs::write(compiled_path.join("analytics/coremldata.bin"), b"invalid").unwrap();
+
+        let error = match SegmentationModel::load_native_coreml(&model_path, ExecutionMode::CoreMl)
+        {
+            Ok(_) => panic!("invalid compiled bundle should error"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            ModelLoadError::NativeAssetLoad {
+                mode: ExecutionMode::CoreMl,
+                ..
+            }
+        ));
     }
 }

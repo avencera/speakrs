@@ -79,7 +79,7 @@ impl EmbeddingModel {
 
         #[cfg(feature = "coreml")]
         {
-            let _ = self.ensure_native_tail_loaded();
+            self.ensure_native_tail_loaded()?;
         }
         #[cfg(feature = "coreml")]
         if let Some(native) = self.coreml.native_tail_session.as_mut() {
@@ -165,7 +165,7 @@ impl EmbeddingModel {
 
         #[cfg(feature = "coreml")]
         {
-            let _ = self.ensure_native_tail_batched_loaded();
+            self.ensure_native_tail_batched_loaded()?;
         }
         #[cfg(feature = "coreml")]
         if let Some(native) = self.coreml.native_tail_batched_session.as_mut() {

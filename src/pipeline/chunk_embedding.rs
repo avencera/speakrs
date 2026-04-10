@@ -56,7 +56,7 @@ fn chunk_session_for_windows(
     emb_model: &mut EmbeddingModel,
     wins: usize,
 ) -> Result<&ChunkEmbeddingSession, PipelineError> {
-    emb_model.chunk_session_for_windows(wins).ok_or_else(|| {
+    emb_model.chunk_session_for_windows(wins)?.ok_or_else(|| {
         invariant_error(format!(
             "missing chunk embedding session for {wins} windows"
         ))
@@ -70,7 +70,7 @@ pub(super) fn try_chunk_embedding(
     audio: &[f32],
 ) -> Result<Option<InferenceArtifacts>, PipelineError> {
     let Some((chunk_win_capacity, total_windows, use_pipelined, chunk_resources)) =
-        setup_chunk_embedding(seg_model, emb_model, audio)
+        setup_chunk_embedding(seg_model, emb_model, audio)?
     else {
         return Ok(None);
     };
@@ -227,7 +227,7 @@ pub(super) fn try_batch_chunk_embedding(
         return Ok(None);
     }
 
-    let Some(resources) = chunk_embedding_resources(emb_model) else {
+    let Some(resources) = chunk_embedding_resources(emb_model)? else {
         return Ok(None);
     };
 

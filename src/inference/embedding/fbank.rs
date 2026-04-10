@@ -24,7 +24,7 @@ impl EmbeddingModel {
 
         #[cfg(feature = "coreml")]
         {
-            let _ = self.ensure_native_fbank_loaded();
+            self.ensure_native_fbank_loaded()?;
         }
         #[cfg(feature = "coreml")]
         if let Some(native) = self.coreml.native_fbank_session.as_ref() {
@@ -162,7 +162,7 @@ impl EmbeddingModel {
         results: &mut Vec<Array2<f32>>,
         count: usize,
     ) -> Result<bool, ort::Error> {
-        let _ = self.ensure_native_fbank_batched_loaded();
+        self.ensure_native_fbank_batched_loaded()?;
         let Some(native) = self.coreml.native_fbank_batched_session.as_ref() else {
             return Ok(false);
         };

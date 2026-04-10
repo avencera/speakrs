@@ -10,6 +10,8 @@ use super::{
     chunk_audio_raw, chunk_session_for_windows, join_scoped_result, write_speaker_mask_to_slice,
 };
 
+type ChunkEmbeddingSetup = (usize, usize, bool, Option<ChunkEmbeddingResources>);
+
 pub(super) fn seg_worker_count() -> usize {
     std::thread::available_parallelism()
         .map(usize::from)
@@ -21,22 +23,30 @@ pub(super) fn setup_chunk_embedding(
     seg_model: &SegmentationModel,
     emb_model: &mut EmbeddingModel,
     audio: &[f32],
-) -> Option<(usize, usize, bool, Option<ChunkEmbeddingResources>)> {
+) -> Result<Option<ChunkEmbeddingSetup>, PipelineError> {
     let window_samples = seg_model.window_samples();
     if audio.len() < window_samples {
-        return None;
+        return Ok(None);
     }
 
-    let chunk_win_capacity = emb_model.chunk_window_capacity()?;
+    let Some(chunk_win_capacity) = emb_model.chunk_window_capacity() else {
+        return Ok(None);
+    };
     let step_samples = seg_model.step_samples();
     let total_windows = audio.len().saturating_sub(window_samples) / step_samples + 1;
     let est_chunks = total_windows.div_ceil(chunk_win_capacity);
     let use_pipelined = est_chunks >= 2;
     let resources = use_pipelined
         .then(|| chunk_embedding_resources(emb_model))
+        .transpose()?
         .flatten();
 
-    Some((chunk_win_capacity, total_windows, use_pipelined, resources))
+    Ok(Some((
+        chunk_win_capacity,
+        total_windows,
+        use_pipelined,
+        resources,
+    )))
 }
 
 pub(super) fn run_pipelined<'scope>(
@@ -228,8 +238,7 @@ pub(super) fn run_sequential_chunks(
         let mut fbank = vec![0.0f32; sess_fbank_frames * 80];
         let fbank_start = std::time::Instant::now();
 
-        if let Some(result) = emb_model.compute_chunk_fbank_30s(chunk_audio) {
-            let full_fbank = result?;
+        if let Some(full_fbank) = emb_model.compute_chunk_fbank_30s(chunk_audio)? {
             let copy_frames = full_fbank.nrows().min(sess_fbank_frames);
             for row_idx in 0..copy_frames {
                 let dst = row_idx * 80;

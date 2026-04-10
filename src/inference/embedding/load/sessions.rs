@@ -71,6 +71,11 @@ impl LoadedSessions {
         let _ = config;
         let use_split_backend = EmbeddingModel::split_backend_available(model_path);
 
+        #[cfg(feature = "coreml")]
+        if matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
+            EmbeddingModel::validate_native_coreml_assets(model_path, mode)?;
+        }
+
         macro_rules! timed {
             ($expr:expr) => {{
                 let start = std::time::Instant::now();

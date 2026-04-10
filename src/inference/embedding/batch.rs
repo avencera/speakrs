@@ -114,7 +114,7 @@ impl EmbeddingModel {
 
         #[cfg(feature = "coreml")]
         {
-            let _ = self.ensure_native_multi_mask_loaded();
+            self.ensure_native_multi_mask_loaded()?;
         }
         #[cfg(feature = "coreml")]
         if let Some(native) = self.coreml.native_multi_mask_session.as_ref() {
@@ -236,7 +236,7 @@ impl EmbeddingModel {
 
         #[cfg(feature = "coreml")]
         {
-            let _ = self.ensure_native_tail_primary_batched_loaded();
+            self.ensure_native_tail_primary_batched_loaded()?;
         }
         #[cfg(feature = "coreml")]
         if let Some(native) = self.coreml.native_tail_primary_batched_session.as_mut() {

@@ -30,8 +30,10 @@ impl ChunkEmbeddingResources {
 
 pub(super) fn chunk_embedding_resources(
     emb_model: &mut EmbeddingModel,
-) -> Option<ChunkEmbeddingResources> {
-    let bundle = emb_model.prepare_chunk_resources()?;
+) -> Result<Option<ChunkEmbeddingResources>, PipelineError> {
+    let Some(bundle) = emb_model.prepare_chunk_resources()? else {
+        return Ok(None);
+    };
 
     let chunk_sessions = bundle
         .sessions
@@ -49,12 +51,12 @@ pub(super) fn chunk_embedding_resources(
         .map(|session| (session.num_windows, session.fbank_frames, session.num_masks))
         .collect();
 
-    Some(ChunkEmbeddingResources {
+    Ok(Some(ChunkEmbeddingResources {
         chunk_sessions,
         chunk_lookup,
         fbank_30s: bundle.fbank_30s,
         fbank_10s: bundle.fbank_10s,
-    })
+    }))
 }
 
 pub(super) struct GpuWorker {
