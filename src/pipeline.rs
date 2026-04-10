@@ -46,7 +46,7 @@ mod tests;
 use std::path::Path;
 
 use ndarray::{Array2, Array3};
-use tracing::{debug, info, trace};
+use tracing::{debug, trace};
 
 use crate::clustering::plda::PldaTransform;
 use crate::inference::ExecutionMode;
@@ -373,7 +373,7 @@ impl<'a> PipelineRunner<'a> {
         audio: &[f32],
     ) -> Result<InferenceArtifacts, PipelineError> {
         let raw_windows = RawSegmentationWindows(self.seg_model.run(audio)?);
-        info!(windows = raw_windows.0.len(), "Segmentation complete");
+        debug!(windows = raw_windows.0.len(), "Segmentation complete");
 
         let segmentations = raw_windows.decode(self.powerset);
         let layout = ChunkLayout::new(
@@ -389,7 +389,7 @@ impl<'a> PipelineRunner<'a> {
             self.embedding_path(),
         )?;
 
-        info!(
+        debug!(
             chunks = segmentations.nchunks(),
             speakers = segmentations.num_speakers(),
             "Embeddings complete"
@@ -483,7 +483,7 @@ impl<'a> PipelineRunner<'a> {
 
         let num_chunks = concurrent_result.num_chunks;
         let layout = layout.with_num_chunks(num_chunks);
-        info!(
+        debug!(
             chunks = concurrent_result.segmentations.shape()[0],
             speakers = concurrent_result.segmentations.shape()[2],
             inference_ms = inference_elapsed.as_millis(),

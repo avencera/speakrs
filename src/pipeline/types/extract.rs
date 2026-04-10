@@ -1,5 +1,5 @@
 use ndarray::{Array2, Array3, s};
-use tracing::info;
+use tracing::debug;
 
 use crate::inference::embedding::{EmbeddingModel, MaskedEmbeddingInput, SplitTailInput};
 use crate::pipeline::{MIN_SPEAKER_ACTIVITY, clean_masks, select_speaker_weights};
@@ -188,7 +188,7 @@ impl DecodedSegmentations {
             tail_batches += 1;
         }
 
-        info!(
+        debug!(
             batches = tail_batches,
             active_items,
             total_items = self.0.shape()[0] * num_speakers,
@@ -267,7 +267,7 @@ impl DecodedSegmentations {
             batches += 1;
         }
 
-        info!(
+        debug!(
             batches,
             total_chunks = num_chunks,
             "Multi-mask embeddings complete"

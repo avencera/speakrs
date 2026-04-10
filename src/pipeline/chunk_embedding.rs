@@ -1,5 +1,5 @@
 use ndarray::{Array2, Array3};
-use tracing::{info, trace};
+use tracing::{debug, trace};
 
 use crate::clustering::plda::PldaTransform;
 use crate::inference::embedding::{ChunkEmbeddingSession, EmbeddingModel};
@@ -170,7 +170,7 @@ pub(super) fn try_chunk_embedding(
 
         let inference_elapsed = inference_start.elapsed();
         let audio_secs = audio.len() as f64 / 16_000.0;
-        info!(
+        debug!(
             chunks = num_chunks,
             chunk_capacity = params.chunk_win_capacity,
             pipelined = use_pipelined,
@@ -388,7 +388,7 @@ pub(super) fn try_batch_chunk_embedding(
             join_scoped_result("batch chunk embedding prep", handle)?;
         }
 
-        info!(
+        debug!(
             files = files.len(),
             files_complete,
             batch_ms = batch_start.elapsed().as_millis(),

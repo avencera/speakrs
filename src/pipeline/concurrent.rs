@@ -1,5 +1,5 @@
 use ndarray::{Array2, Array3, s};
-use tracing::{info, trace};
+use tracing::{debug, trace};
 
 use crate::inference::embedding::EmbeddingModel;
 use crate::powerset::PowersetMapping;
@@ -407,7 +407,7 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
         }
 
         let total_emb = emb_start.elapsed();
-        info!(
+        debug!(
             chunks = chunk_idx,
             total_speakers,
             skipped_speakers,

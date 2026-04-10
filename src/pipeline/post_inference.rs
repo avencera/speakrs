@@ -1,5 +1,5 @@
 use ndarray::Array2;
-use tracing::info;
+use tracing::debug;
 
 use crate::binarize::binarize;
 use crate::clustering::plda::PldaTransform;
@@ -65,7 +65,7 @@ pub fn post_inference(
     let segments = discrete_diarization.to_segments(FRAME_STEP_SECONDS, FRAME_DURATION_SECONDS);
     let segments = merge_segments(&segments, config.merge_gap);
 
-    info!(
+    debug!(
         post_inference_ms = post_start.elapsed().as_millis(),
         "Post-inference complete"
     );
