@@ -191,10 +191,9 @@ impl EmbeddingModel {
         if matches!(
             self.meta.mode,
             ExecutionMode::CoreMl | ExecutionMode::CoreMlFast
-        ) && let Err(error) =
+        ) {
             Self::validate_native_coreml_assets(&self.meta.model_path, self.meta.mode)
-        {
-            return Err(ort::Error::new(error.to_string()));
+                .map_err(|error| ort::Error::new(error.to_string()))?;
         }
 
         self.ort.session = Self::build_session(

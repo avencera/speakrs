@@ -58,37 +58,49 @@ pub enum ExecutionMode {
 }
 
 impl ExecutionMode {
+    /// Returns true when this mode uses native CoreML execution
+    pub const fn is_coreml(self) -> bool {
+        matches!(self, Self::CoreMl | Self::CoreMlFast)
+    }
+
+    /// Returns true when this mode uses CUDA execution
+    pub const fn is_cuda(self) -> bool {
+        matches!(self, Self::Cuda | Self::CudaFast)
+    }
+
     pub(crate) fn validate(self) -> Result<(), ExecutionModeError> {
-        match self {
-            Self::Cpu => Ok(()),
-            Self::CoreMl | Self::CoreMlFast => {
-                #[cfg(feature = "coreml")]
-                {
-                    Ok(())
-                }
+        if self == Self::Cpu {
+            return Ok(());
+        }
 
-                #[cfg(not(feature = "coreml"))]
-                {
-                    Err(ExecutionModeError {
-                        mode: self,
-                        feature: "coreml",
-                    })
-                }
+        if self.is_coreml() {
+            #[cfg(feature = "coreml")]
+            {
+                return Ok(());
             }
-            Self::Cuda | Self::CudaFast => {
-                #[cfg(feature = "cuda")]
-                {
-                    Ok(())
-                }
 
-                #[cfg(not(feature = "cuda"))]
-                {
-                    Err(ExecutionModeError {
-                        mode: self,
-                        feature: "cuda",
-                    })
-                }
+            #[cfg(not(feature = "coreml"))]
+            {
+                return Err(ExecutionModeError {
+                    mode: self,
+                    feature: "coreml",
+                });
             }
+        }
+
+        debug_assert!(self.is_cuda(), "unsupported execution mode: {self:?}");
+
+        #[cfg(feature = "cuda")]
+        {
+            Ok(())
+        }
+
+        #[cfg(not(feature = "cuda"))]
+        {
+            Err(ExecutionModeError {
+                mode: self,
+                feature: "cuda",
+            })
         }
     }
 
