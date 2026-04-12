@@ -145,6 +145,7 @@ const COREML_COMMON_MODEL_STEMS: &[&str] = &[
     "wespeaker-fbank.mlmodelc",
     "wespeaker-fbank-b32.mlmodelc",
     "wespeaker-fbank-30s.mlmodelc",
+    "wespeaker-multimask-tail-b32.mlmodelc",
     "wespeaker-voxceleb-resnet34-tail.mlmodelc",
     "wespeaker-voxceleb-resnet34-tail-b3.mlmodelc",
     "wespeaker-voxceleb-resnet34-tail-b32.mlmodelc",
@@ -240,6 +241,7 @@ mod tests {
         let files = required_files(ExecutionMode::CoreMl);
         assert!(files.contains(&"segmentation-3.0-b64.mlmodelc/model.mil".to_string()));
         assert!(files.contains(&"wespeaker-fbank-30s.mlmodelc/model.mil".to_string()));
+        assert!(files.contains(&"wespeaker-multimask-tail-b32.mlmodelc/model.mil".to_string()));
         assert!(files.contains(&"wespeaker-chunk-emb-s12-w116.mlmodelc/model.mil".to_string()));
     }
 

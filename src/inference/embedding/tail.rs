@@ -33,14 +33,23 @@ impl EmbeddingModel {
         }
 
         let fbank = self.compute_chunk_fbank(audio)?;
-        let has_batched_tail = self.ort.split_tail_batched_session.is_some();
         #[cfg(feature = "coreml")]
-        let has_batched_tail = has_batched_tail
-            || Self::has_native_tail_model(
+        let has_batched_tail = if self.meta.mode.is_coreml() {
+            Self::has_native_tail_model(
                 &self.meta.model_path,
                 self.meta.mode,
                 CHUNK_SPEAKER_BATCH_SIZE,
-            );
+            )
+        } else {
+            self.ort.split_tail_batched_session.is_some()
+                || Self::has_native_tail_model(
+                    &self.meta.model_path,
+                    self.meta.mode,
+                    CHUNK_SPEAKER_BATCH_SIZE,
+                )
+        };
+        #[cfg(not(feature = "coreml"))]
+        let has_batched_tail = self.ort.split_tail_batched_session.is_some();
         if speaker_count == CHUNK_SPEAKER_BATCH_SIZE && has_batched_tail {
             return self.embed_tail_batch(&fbank, &segmentations, clean_masks, audio.len());
         }

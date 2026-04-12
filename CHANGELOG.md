@@ -2,6 +2,9 @@
 
 ## [unreleased]
 
+- Require native CoreML bundles for `CoreMl` and `CoreMlFast` modes instead of silently falling back to ORT CPU, with clearer errors for missing or invalid compiled assets and updated model manifests for segmentation, fbank, tail, and chunk models
+- Reduce default `info` log noise across the diarization pipeline by moving stage-completion logs to `debug`
+
 ## [0.3.1] - 2026-03-26
 
 - Fix docs.rs build: replace removed `doc_auto_cfg` feature with `doc_cfg`

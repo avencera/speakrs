@@ -2,8 +2,6 @@ use ndarray::{Array2, s};
 use ort::value::TensorRef;
 
 #[cfg(feature = "coreml")]
-use super::PRIMARY_BATCH_SIZE;
-#[cfg(feature = "coreml")]
 use super::tensor::array3_slice;
 use super::{EmbeddingModel, FBANK_BATCH_SIZE, array2_from_shape_vec};
 
@@ -59,14 +57,7 @@ impl EmbeddingModel {
         &mut self,
         audios: &[&[f32]],
     ) -> Result<Vec<Array2<f32>>, ort::Error> {
-        let has_batched = self.ort.split_fbank_batched_session.is_some();
-        #[cfg(feature = "coreml")]
-        let has_batched = has_batched
-            || Self::has_native_fbank_model(
-                &self.meta.model_path,
-                self.meta.mode,
-                PRIMARY_BATCH_SIZE,
-            );
+        let has_batched = self.has_batched_fbank();
         if !has_batched {
             tracing::debug!(
                 count = audios.len(),

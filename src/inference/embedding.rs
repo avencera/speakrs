@@ -262,6 +262,12 @@ impl EmbeddingModel {
 
     /// Whether split fbank+tail models are available for chunk embedding
     pub fn prefers_chunk_embedding_path(&self) -> bool {
+        #[cfg(feature = "coreml")]
+        if self.meta.mode.is_coreml() {
+            return Self::has_native_fbank_model(&self.meta.model_path, self.meta.mode, 1)
+                && Self::has_native_tail_model(&self.meta.model_path, self.meta.mode, 1);
+        }
+
         let ort_split =
             self.ort.split_fbank_session.is_some() && self.ort.split_tail_session.is_some();
         #[cfg(feature = "coreml")]
@@ -271,6 +277,15 @@ impl EmbeddingModel {
     }
 
     pub(crate) fn split_primary_batch_size(&self) -> usize {
+        #[cfg(feature = "coreml")]
+        if self.meta.mode.is_coreml() {
+            return usize::from(Self::has_native_tail_model(
+                &self.meta.model_path,
+                self.meta.mode,
+                PRIMARY_BATCH_SIZE,
+            )) * PRIMARY_BATCH_SIZE;
+        }
+
         if self.ort.split_primary_tail_batched_session.is_some() {
             return PRIMARY_BATCH_SIZE;
         }
@@ -283,6 +298,15 @@ impl EmbeddingModel {
 
     /// Whether a batched fbank session is available for parallel chunk processing
     pub fn has_batched_fbank(&self) -> bool {
+        #[cfg(feature = "coreml")]
+        if self.meta.mode.is_coreml() {
+            return Self::has_native_fbank_model(
+                &self.meta.model_path,
+                self.meta.mode,
+                PRIMARY_BATCH_SIZE,
+            );
+        }
+
         let has = self.ort.split_fbank_batched_session.is_some();
         #[cfg(feature = "coreml")]
         let has = has
@@ -296,6 +320,11 @@ impl EmbeddingModel {
 
     /// Whether the multi-mask embedding model is available
     pub fn prefers_multi_mask_path(&self) -> bool {
+        #[cfg(feature = "coreml")]
+        if self.meta.mode.is_coreml() {
+            return Self::has_native_multi_mask_model(&self.meta.model_path, self.meta.mode);
+        }
+
         let has = self.ort.multi_mask_session.is_some();
         #[cfg(feature = "coreml")]
         let has = has || Self::has_native_multi_mask_model(&self.meta.model_path, self.meta.mode);
@@ -304,6 +333,14 @@ impl EmbeddingModel {
 
     /// Maximum batch size for multi-mask embedding, or 0 if unavailable
     pub fn multi_mask_batch_size(&self) -> usize {
+        #[cfg(feature = "coreml")]
+        if self.meta.mode.is_coreml() {
+            return usize::from(Self::has_native_multi_mask_model(
+                &self.meta.model_path,
+                self.meta.mode,
+            )) * MULTI_MASK_BATCH_SIZE;
+        }
+
         let has_batched = self.ort.multi_mask_batched_session.is_some();
         #[cfg(feature = "coreml")]
         let has_batched =

@@ -46,7 +46,7 @@ impl EmbeddingModel {
         model_path: &Path,
         mode: ExecutionMode,
     ) -> Result<(), ModelLoadError> {
-        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
+        if !mode.is_coreml() {
             return Ok(());
         }
 
@@ -65,6 +65,10 @@ impl EmbeddingModel {
         )?;
         Self::require_native_asset(
             fp32_coreml_path(&split_tail_model_path(model_path, CHUNK_SPEAKER_BATCH_SIZE)),
+            mode,
+        )?;
+        Self::require_native_asset(
+            fp32_coreml_path(&model_path.with_file_name("wespeaker-multimask-tail-b32.onnx")),
             mode,
         )?;
 
@@ -119,7 +123,7 @@ impl EmbeddingModel {
         mode: ExecutionMode,
         batch_size: usize,
     ) -> Result<Option<SharedCoreMlModel>, ModelLoadError> {
-        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
+        if !mode.is_coreml() {
             return Ok(None);
         }
         let fbank_onnx = if batch_size == 1 {
@@ -142,7 +146,7 @@ impl EmbeddingModel {
         mode: ExecutionMode,
         batch_size: usize,
     ) -> bool {
-        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
+        if !mode.is_coreml() {
             return false;
         }
         let fbank_onnx = if batch_size == 1 {
@@ -157,7 +161,7 @@ impl EmbeddingModel {
         model_path: &Path,
         mode: ExecutionMode,
     ) -> Result<Option<SharedCoreMlModel>, ModelLoadError> {
-        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
+        if !mode.is_coreml() {
             return Ok(None);
         }
         let coreml_path = model_path.with_file_name("wespeaker-fbank-30s.mlmodelc");
@@ -175,7 +179,7 @@ impl EmbeddingModel {
         model_path: &Path,
         mode: ExecutionMode,
     ) -> Result<Option<SharedCoreMlModel>, ModelLoadError> {
-        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
+        if !mode.is_coreml() {
             return Ok(None);
         }
         let onnx_path = model_path.with_file_name("wespeaker-multimask-tail-b32.onnx");
@@ -193,7 +197,7 @@ impl EmbeddingModel {
         model_path: &Path,
         mode: ExecutionMode,
     ) -> bool {
-        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
+        if !mode.is_coreml() {
             return false;
         }
         let onnx_path = model_path.with_file_name("wespeaker-multimask-tail-b32.onnx");
@@ -225,7 +229,7 @@ impl EmbeddingModel {
         model_path: &Path,
         mode: ExecutionMode,
     ) -> Vec<ChunkSessionSpec> {
-        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
+        if !mode.is_coreml() {
             return Vec::new();
         }
 
