@@ -10,5 +10,5 @@ path = "src/main.rs"
 [dependencies]
 pyannote-rs = "0.3"
 eyre = "0.6"
-ort = { version = "=2.0.0-rc.10", features = ["ndarray"] }
-ndarray = "0.16"
+ort = { version = "=2.0.0-rc.12", features = ["ndarray"] }
+ndarray = "0.17"
