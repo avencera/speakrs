@@ -2,6 +2,12 @@
 
 ## [unreleased]
 
+## [0.4.0] - 2026-04-15
+
+- Default `ndarray-linalg` to Intel MKL on `x86_64` and OpenBLAS elsewhere, reducing OpenBLAS CPU-target issues on `x86_64`
+- Add explicit `intel-mkl`, `openblas-static`, and `openblas-system` feature flags for users who disable default features and want to pick a BLAS backend
+- Route PLDA linear algebra through an internal backend shim, update generated docs for the new backend options, and remove the stale OpenBLAS override from the GPU Docker build
+
 ## [0.3.2] - 2026-04-14
 
 - Require native CoreML bundles for `CoreMl` and `CoreMlFast` modes instead of silently falling back to ORT CPU, with clearer errors for missing or invalid compiled assets and updated model manifests for segmentation, fbank, tail, and chunk models
