@@ -6,6 +6,11 @@ Speaker diarization in Rust. Runs **312-912x realtime** on Apple Silicon (**20-5
 
 On VoxConverse dev (216 files), speakrs CoreML achieves **7.1% DER at 529x realtime** vs pyannote's 7.2% at 24x. On the test set (232 files) speakrs matches pyannote at 11.1% DER while running 27x faster. On CUDA, speakrs matches or beats pyannote DER on all datasets at 2-7x the speed. See [benchmarks/](benchmarks/) for full results across 8 datasets.
 
+An example CLI that uses `speakrs` for diarization is
+[avencera/smrze](https://github.com/avencera/smrze), a local transcription and
+summarization tool that runs `speakrs` and assigns transcript tokens to speaker
+turns.
+
 ## Overview
 
 <!-- cargo-rdme start -->
