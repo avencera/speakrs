@@ -7,8 +7,6 @@
 # =============================================================================
 FROM ghcr.io/avencera/speakrs-gpu-base:latest AS base
 
-ENV OPENBLAS_TARGET=HASWELL
-
 # =============================================================================
 # Download Microsoft's official ORT GPU shared lib (CUDA EP providers)
 # =============================================================================

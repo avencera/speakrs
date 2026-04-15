@@ -33,6 +33,9 @@ speakrs = { version = "0.2", features = ["cuda"] }
 
 # CPU only (default)
 speakrs = "0.2"
+
+# System OpenBLAS
+speakrs = { version = "0.2", default-features = false, features = ["online", "openblas-system"] }
 ```
 
 #### Quick start
@@ -281,12 +284,41 @@ documented in their setup instructions.
 - **`coreml`** — native CoreML backend for Apple Silicon GPU/ANE acceleration
 - **`cuda`** — NVIDIA CUDA backend via ONNX Runtime
 - **`load-dynamic`** — load the CUDA runtime library at startup instead of static linking
+- **`intel-mkl`** — use statically linked Intel MKL on `x86_64`. This is an advanced
+  opt-in and must be used with `default-features = false`
+- **`openblas-static`** — use statically linked OpenBLAS instead of the default backend
+  selection. This is an advanced opt-in and must be used with `default-features = false`
+- **`openblas-system`** — use a system-installed OpenBLAS backend instead of the default
+  static backend selection. This is an advanced opt-in and must be used with
+  `default-features = false`
 
 ### Build requirements
 
-This crate links OpenBLAS statically (via `ndarray-linalg`), which requires a C compiler.
-On most systems this is already available. The ONNX Runtime dependency (`ort` 2.0.0-rc.12)
-is pre-release.
+By default, `x86_64` builds use Intel MKL statically through `ndarray-linalg`. This avoids
+the OpenBLAS CPU-target issues that can show up on some `x86_64` machines, at the cost of
+Intel MKL licensing and distribution considerations.
+
+Non-`x86_64` builds use OpenBLAS statically by default, which requires a C toolchain.
+
+If you disable default features on `x86_64` but still want Intel MKL, opt into `intel-mkl`:
+
+```toml
+speakrs = { version = "0.2", default-features = false, features = ["online", "intel-mkl"] }
+```
+
+If you want to avoid Intel MKL on `x86_64`, disable default features and opt into one of the
+OpenBLAS backends instead:
+
+```toml
+speakrs = { version = "0.2", default-features = false, features = ["online", "openblas-static"] }
+# or
+speakrs = { version = "0.2", default-features = false, features = ["online", "openblas-system"] }
+```
+
+`intel-mkl` is only supported on `x86_64`. `openblas-static` builds OpenBLAS as part of the
+crate build. `openblas-system` expects OpenBLAS to already be installed on the system.
+
+The ONNX Runtime dependency (`ort` 2.0.0-rc.12) is pre-release.
 
 <!-- cargo-rdme end -->
 

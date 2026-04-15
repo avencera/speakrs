@@ -3,7 +3,7 @@ fmt:
     uv run --group dev ruff format scripts fixtures
 
 clippy:
-    cargo clippy --all --all-targets --all-features --workspace -- -D warnings
+    cargo clippy --all --all-targets --workspace --features "coreml cuda load-dynamic _metrics" -- -D warnings
 
 python-lint:
     uv run --group dev ty check --python .venv --exclude 'scripts/pyannote_rs_bench/target' --exclude 'scripts/extract_hf_dataset.py' --exclude 'scripts/speakerkit-bench/Packages' --exclude 'scripts/native_coreml' --exclude 'scripts/pyannote-bench' --exclude 'scripts/convert_fp16.py' scripts fixtures

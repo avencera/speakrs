@@ -2,9 +2,9 @@ use std::fmt::{Display, Formatter};
 use std::path::Path;
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis, s};
-use ndarray_linalg::{Eigh, Inverse, UPLO};
 use ndarray_npy::read_npy;
 
+use crate::linalg::{Eigh, Inverse, LinalgError, UPLO};
 use crate::utils::l2_normalize_rows_f64;
 
 /// PLDA transform computed entirely in f64 to match pyannote's numpy precision
@@ -125,7 +125,7 @@ fn read_array2_f64(path: impl AsRef<Path>) -> Result<Array2<f64>, PldaError> {
 #[derive(Debug)]
 pub enum PldaError {
     Io(ndarray_npy::ReadNpyError),
-    Linalg(ndarray_linalg::error::LinalgError),
+    Linalg(LinalgError),
     InvalidPsi,
 }
 
@@ -147,8 +147,8 @@ impl From<ndarray_npy::ReadNpyError> for PldaError {
     }
 }
 
-impl From<ndarray_linalg::error::LinalgError> for PldaError {
-    fn from(value: ndarray_linalg::error::LinalgError) -> Self {
+impl From<LinalgError> for PldaError {
+    fn from(value: LinalgError) -> Self {
         Self::Linalg(value)
     }
 }
