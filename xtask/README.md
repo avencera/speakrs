@@ -11,7 +11,7 @@ Development CLI for speakrs. Two binaries:
 |---------|-------------|
 | `models` | Export ONNX models, CoreML conversion, deploy to HF |
 | `fixtures` | Regenerate test fixtures via Python |
-| `compare` | Side-by-side diarization comparisons (run, rttm, accuracy) |
+| `compare` | Diarization comparisons (run, rttm, accuracy) |
 | `bench` | Local benchmarks (run, compare, der) |
 | `dstack` | Remote GPU benchmarks via dstack |
 | `dataset` | Download/upload benchmark datasets |
@@ -77,7 +77,7 @@ cargo xtask dstack bench my-run --dataset all -d
 
 ### Multiple datasets in parallel (one GPU each)
 
-Use `bench-parallel` (alias `bp`) to fan out one dstack task per dataset, each on its own GPU:
+Use `bench-parallel` (alias `bp`) to start one dstack task per dataset, each on its own GPU:
 
 ```bash
 # all 9 datasets, each on its own GPU
@@ -93,7 +93,7 @@ cargo xtask dstack bp my-run --dataset vd,ai,e21
 cargo xtask dstack bp my-run -R
 ```
 
-Each task is named `{name}-{dataset}` (e.g. `my-run-voxconverse-dev`) and submitted with `--detach`. Results upload to `s3://speakrs/benchmarks/{name}-{dataset}/`.
+Each task is named `{name}-{dataset}` (for example `my-run-voxconverse-dev`) and submitted with `--detach`. Results upload to `s3://speakrs/benchmarks/{name}-{dataset}/`.
 
 The fleet supports up to 8 concurrent GPU nodes (`nodes: 0..8` in `fleet.yml`).
 

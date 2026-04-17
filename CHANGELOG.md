@@ -4,9 +4,9 @@
 
 ## [0.4.0] - 2026-04-15
 
-- Default `ndarray-linalg` to Intel MKL on `x86_64` and OpenBLAS elsewhere, reducing OpenBLAS CPU-target issues on `x86_64`
-- Add explicit `intel-mkl`, `openblas-static`, and `openblas-system` feature flags for users who disable default features and want to pick a BLAS backend
-- Route PLDA linear algebra through an internal backend shim, update generated docs for the new backend options, and remove the stale OpenBLAS override from the GPU Docker build
+- Default `ndarray-linalg` to Intel MKL on `x86_64` and OpenBLAS elsewhere, which avoids OpenBLAS CPU-target issues on `x86_64`
+- Add explicit `intel-mkl`, `openblas-static`, and `openblas-system` feature flags for users who disable default features and need to choose a BLAS backend
+- Route PLDA linear algebra through an internal backend shim, update the generated docs for the new backend options, and remove the stale OpenBLAS override from the GPU Docker build
 
 ## [0.3.2] - 2026-04-14
 
@@ -25,5 +25,5 @@
 - `QueueReceiver` now joins the worker thread on drain, surfacing panics as `QueueError::WorkerPanicked`
 - Remove `push_batch` and `finish` in favor of drop-based signaling and iterator drain
 - Move `make_exclusive` from a free function to a method on `DiscreteDiarization`
-- Move full documentation (benchmarks, pipeline diagram, comparison tables) into `lib.rs` and generate README via `cargo-rdme`
+- Move the main documentation (benchmarks, pipeline diagram, comparison tables) into `lib.rs` and generate the README with `cargo-rdme`
 - Fix `repository` URL in Cargo.toml pointing to wrong GitHub org

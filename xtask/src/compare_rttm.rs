@@ -45,7 +45,7 @@ fn format_speaker_durations(durations: &HashMap<&str, f64>) -> String {
     format!("{{{}}}", inner.join(", "))
 }
 
-/// Compute how much of segs_a's speech time is covered by segs_b (any speaker)
+/// Compute how much of `segs_a` speech time is covered by `segs_b`, ignoring speaker labels.
 fn timeline_overlap(segs_a: &[Segment], segs_b: &[Segment]) -> f64 {
     let mut intervals: Vec<(f64, f64)> = segs_b
         .iter()

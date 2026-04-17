@@ -7,7 +7,7 @@ use xtask::commands;
 use xtask::commands::diarize::DiarizeMode;
 
 #[derive(Parser)]
-#[command(name = "xtask", about = "Development tasks for speakrs")]
+#[command(name = "xtask", about = "Development commands for speakrs")]
 struct Cli {
     #[command(subcommand)]
     cmd: Command,
@@ -21,12 +21,12 @@ impl Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Model management (download, convert, deploy)
+    /// Model commands
     Models {
         #[command(subcommand)]
         cmd: ModelsCmd,
     },
-    /// Test fixture generation
+    /// Fixture generation
     Fixtures {
         #[command(subcommand)]
         cmd: FixturesCmd,
@@ -36,7 +36,7 @@ enum Command {
         #[command(subcommand)]
         cmd: CompareCmd,
     },
-    /// Local benchmarks (DER evaluation, single-file, multi-tool)
+    /// Local benchmarks
     Bench {
         #[command(subcommand)]
         cmd: BenchCmd,
@@ -46,7 +46,7 @@ enum Command {
         #[command(subcommand)]
         cmd: DstackCmd,
     },
-    /// Download and manage benchmark datasets
+    /// Dataset commands
     Dataset {
         #[command(subcommand)]
         cmd: DatasetCmd,
@@ -58,7 +58,7 @@ enum Command {
         /// Path to models directory
         #[arg(long, env = "SPEAKRS_MODELS_DIR")]
         models_dir: Option<PathBuf>,
-        /// Number of parallel chunk embedding workers (default: 1)
+        /// Number of chunk embedding workers
         #[arg(long, default_value = "1")]
         chunk_emb_workers: usize,
         /// Compute units for chunk embedding: all, ane
@@ -83,7 +83,7 @@ enum Command {
         /// Batch size for stream-batched mode
         #[arg(long)]
         batch_size: Option<usize>,
-        /// Use default ORT session configuration
+        /// Use the default ORT session config
         #[arg(long)]
         ort_defaults: bool,
     },
@@ -156,11 +156,11 @@ impl Command {
 
 #[derive(Subcommand)]
 enum ModelsCmd {
-    /// Export ONNX models and PLDA params, then build native CoreML bundles on macOS
+    /// Export ONNX models and PLDA params, then build CoreML bundles on macOS
     Export,
     /// Run CoreML model conversion only
     ExportCoreml,
-    /// Compare CoreML vs ONNX model outputs
+    /// Compare CoreML and ONNX outputs
     CompareCoreml,
     /// Upload models to HuggingFace Hub
     Deploy,
@@ -193,7 +193,7 @@ impl FixturesCmd {
 
 #[derive(Subcommand)]
 enum CompareCmd {
-    /// Run speakrs and pyannote side-by-side on the same audio
+    /// Run speakrs and pyannote on the same audio
     Run {
         source: String,
         #[arg(long, default_value = "cpu")]
@@ -229,7 +229,7 @@ impl CompareCmd {
 
 #[derive(Subcommand)]
 enum BenchCmd {
-    /// Benchmark speakrs vs pyannote on the same audio
+    /// Benchmark speakrs and pyannote on the same audio
     Run {
         source: String,
         #[arg(long, default_value = "auto")]
@@ -241,7 +241,7 @@ enum BenchCmd {
         #[arg(long, default_value = "cpu")]
         rust_mode: String,
     },
-    /// Multi-tool benchmark (speakrs CoreML, pyannote MPS, pyannote-rs, FluidAudio)
+    /// Multi-tool benchmark
     Compare {
         source: String,
         #[arg(long, default_value_t = 1)]
@@ -251,10 +251,10 @@ enum BenchCmd {
     },
     /// DER evaluation on benchmark datasets or a single file
     Der {
-        /// Dataset to evaluate (use "all" for all datasets, "list" to show available)
+        /// Dataset to evaluate ("all" for all datasets, "list" to show available)
         #[arg(long, default_value = "voxconverse-dev")]
         dataset: String,
-        /// Single WAV file to evaluate (bypasses dataset loading)
+        /// Single WAV file to evaluate
         #[arg(long, requires = "rttm", conflicts_with_all = ["dataset", "max_files", "max_minutes"])]
         file: Option<PathBuf>,
         /// Reference RTTM file (required when --file is used)
@@ -264,13 +264,13 @@ enum BenchCmd {
         max_files: Option<u32>,
         #[arg(long)]
         max_minutes: Option<u32>,
-        /// Description of what this benchmark run is testing
+        /// Short note for this benchmark run
         #[arg(long, short = 'd')]
         description: Option<String>,
         /// Implementations to run (omit for all, use "list" to show available)
         #[arg(long, value_delimiter = ',', value_name = "IMPL")]
         impls: Vec<String>,
-        /// Skip the pre-flight smoke test
+        /// Skip the preflight smoke test
         #[arg(long)]
         no_preflight: bool,
         /// Override pyannote segmentation batch size
@@ -279,7 +279,7 @@ enum BenchCmd {
         /// Override pyannote embedding batch size
         #[arg(long)]
         emb_batch_size: Option<u32>,
-        /// Seconds to sleep between implementations (for thermal cooldown)
+        /// Seconds to sleep between implementations
         #[arg(long, short = 's')]
         sleep_between: Option<u64>,
     },
@@ -333,7 +333,7 @@ impl BenchCmd {
 enum DstackCmd {
     /// Run a GPU benchmark
     Bench {
-        /// Run name (used for S3 path and dstack logs/attach/stop)
+        /// Run name
         name: String,
         #[arg(long, default_value = "voxconverse-dev")]
         dataset: String,
@@ -343,19 +343,19 @@ enum DstackCmd {
         max_files: Option<u32>,
         #[arg(long)]
         max_minutes: Option<u32>,
-        /// Reuse existing fleet pod instead of provisioning a new one
+        /// Reuse an existing fleet pod
         #[arg(long, short = 'R')]
         reuse: bool,
-        /// Submit and exit immediately (default: attach to logs)
+        /// Submit and exit immediately
         #[arg(long, short = 'd')]
         detach: bool,
     },
-    /// Run GPU benchmarks in parallel (one dataset per GPU)
+    /// Run GPU benchmarks in parallel
     #[command(alias = "bp")]
     BenchParallel {
-        /// Run name prefix (tasks named {name}-{dataset})
+        /// Run name prefix
         name: String,
-        /// Datasets to run (comma-separated, or "all")
+        /// Datasets to run (comma-separated or "all")
         #[arg(long, value_delimiter = ',', default_value = "all")]
         dataset: Vec<String>,
         #[arg(long, value_delimiter = ',')]
@@ -364,15 +364,15 @@ enum DstackCmd {
         max_files: Option<u32>,
         #[arg(long)]
         max_minutes: Option<u32>,
-        /// Reuse existing fleet pod instead of provisioning a new one
+        /// Reuse an existing fleet pod
         #[arg(long, short = 'R')]
         reuse: bool,
     },
-    /// Start a reusable GPU fleet (30min idle timeout)
+    /// Start a reusable GPU fleet
     Fleet,
-    /// Reattach to a running task (logs + port forwarding, Ctrl+C safe)
+    /// Reattach to a running task
     Attach { name: String },
-    /// Stream logs from a running task (Ctrl+C safe)
+    /// Stream logs from a running task
     Logs { name: String },
     /// Show status of all dstack runs
     Ps,
@@ -383,9 +383,9 @@ enum DstackCmd {
     Dev,
     /// Download benchmark results from S3
     Download { name: String },
-    /// Delete a path from the S3 bucket (with confirmation)
+    /// Delete a path from the S3 bucket
     Delete {
-        /// S3 path to delete (e.g. "benchmarks/my-run" or "benchmarks/my-run/20260318-1430")
+        /// S3 path to delete
         path: String,
     },
 }
@@ -439,7 +439,7 @@ impl DstackCmd {
 
 #[derive(Subcommand)]
 enum DatasetCmd {
-    /// Download one or all datasets (use "list" as id to show available)
+    /// Download one or all datasets
     Ensure {
         /// Dataset id, or "all"
         #[arg(default_value = "all")]

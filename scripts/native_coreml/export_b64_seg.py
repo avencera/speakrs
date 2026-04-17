@@ -48,7 +48,7 @@ def main():
             example_inputs=example, method="trace"
         )
 
-    # fixed batch=64 (no enumeration — avoids LSTM shape compatibility issues)
+    # Fixed batch=64. Enumerated shapes break LSTM shape compatibility here.
     mlmodel = ct.convert(
         traced,
         convert_to="mlprogram",

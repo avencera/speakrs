@@ -140,7 +140,7 @@ impl CoreMlModel {
         extract_output(&output_array)
     }
 
-    /// Run prediction with pre-cached shape/strides objects (avoids per-call NSNumber allocation)
+    /// Run prediction with cached shape and stride objects.
     pub fn predict_cached(
         &mut self,
         inputs: &[(&CachedInputShape, &[f32])],
@@ -163,17 +163,16 @@ impl CoreMlModel {
         extract_output(&output_array)
     }
 
-    /// Default: All compute units — CoreML decides per-op placement
+    /// Default compute units. CoreML decides placement per operation.
     pub fn default_compute_units() -> MLComputeUnits {
         MLComputeUnits::All
     }
 }
 
-/// Thread-safe CoreML model wrapper that can be shared across threads
+/// Thread-safe CoreML model wrapper that can be shared across threads.
 ///
-/// Unlike CoreMlModel, this allocates a fresh input dictionary per call
-/// So predict can take `&self`
-/// Multiple threads can call predict concurrently on the same model instance
+/// Unlike `CoreMlModel`, this allocates a fresh input dictionary per call, so
+/// prediction can take `&self`.
 pub(crate) struct SharedCoreMlModel {
     model: Retained<MLModel>,
     output_name: String,
@@ -202,9 +201,7 @@ impl SharedCoreMlModel {
         })
     }
 
-    /// Run prediction with pre-cached shape/strides objects
-    ///
-    /// Thread-safe: allocates fresh input dict per call
+    /// Run prediction with cached shape and stride objects.
     pub fn predict_cached(
         &self,
         inputs: &[(&CachedInputShape, &[f32])],

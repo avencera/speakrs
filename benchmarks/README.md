@@ -1,6 +1,6 @@
 # Benchmarks
 
-DER (Diarization Error Rate) evaluation on standard datasets, comparing speakrs against pyannote and other implementations. All results use collar=0ms and pyannote batch size 32.
+DER (Diarization Error Rate) results on standard datasets. These tables compare speakrs against pyannote and a few other implementations. All results use collar=0ms and pyannote batch size 32.
 
 ## macOS (Apple Silicon)
 
@@ -135,7 +135,7 @@ Hardware: NVIDIA RTX 4090, AMD EPYC 7B13
 
 ## Other implementations
 
-[pyannote-rs](https://github.com/thewh1teagle/pyannote-rs) was tested on a 39-file subset and scored 89-92% DER across VoxConverse Dev and Test. See [Why Not pyannote-rs?](../README.md#why-not-pyannote-rs) for details.
+[pyannote-rs](https://github.com/thewh1teagle/pyannote-rs) was tested on a 39-file subset and scored 89-92% DER across VoxConverse Dev and Test. See [Why not pyannote-rs?](../README.md#why-not-pyannote-rs) for details.
 
 ## Raw Data
 

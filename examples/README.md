@@ -1,6 +1,6 @@
 # Examples
 
-These examples are meant to mirror the most common pyannote-style usage patterns:
+These examples cover the basic pyannote-style workflows:
 
 - run diarization on one WAV file
 - iterate speaker turns
@@ -32,7 +32,7 @@ cargo run --example diarize_wav -- fixtures/models fixtures/test.wav meeting-42
 
 ## Print speaker turns
 
-This is the closest equivalent to pyannote's `for turn, speaker in output.speaker_diarization` usage.
+This matches pyannote's `for turn, speaker in output.speaker_diarization` pattern.
 
 ```bash
 cargo run --example print_turns -- fixtures/models fixtures/test.wav
@@ -48,7 +48,7 @@ start   end     speaker
 
 ## Compute speaker airtime
 
-Useful for analytics, meeting summaries, or moderation dashboards.
+Useful if you want per-speaker totals.
 
 ```bash
 cargo run --example speaker_airtime -- fixtures/models fixtures/test.wav
@@ -64,7 +64,7 @@ SPEAKER_00  341.245
 
 ## Assign speakers to transcript chunks
 
-This example uses an exclusive diarization view to assign one dominant speaker to each transcript chunk.
+This example uses exclusive diarization to assign one speaker to each transcript chunk.
 
 Transcript input is a tab-separated file with:
 

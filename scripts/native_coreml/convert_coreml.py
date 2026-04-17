@@ -129,7 +129,7 @@ def export_segmentation(pipeline: Any, output_dir: Path) -> None:
         output_dir / f"{SEGMENTATION_BATCHED_STEM}.mlmodelc",
     ]
 
-    # FP32 — CPU+GPU optimized
+    # FP32 for CPU and GPU.
     mlmodel = ct.convert(
         traced,
         convert_to="mlprogram",
@@ -159,7 +159,7 @@ def export_segmentation(pipeline: Any, output_dir: Path) -> None:
         seg_compiled_paths,
     )
 
-    # FP16 — ANE-eligible
+    # FP16 to allow ANE placement.
     mlmodel_f16 = ct.convert(
         traced,
         convert_to="mlprogram",
@@ -189,7 +189,7 @@ def export_segmentation(pipeline: Any, output_dir: Path) -> None:
         _f16_compiled_paths(seg_compiled_paths),
     )
 
-    # W8A16 — quantized weights for faster CPU inference
+    # W8A16 for faster CPU inference.
     mlmodel_w8a16 = quantize_w8a16(mlmodel)
     print("Saving segmentation CoreML artifacts (W8A16)...")
     save_model_artifacts(
@@ -215,8 +215,8 @@ def export_tail(pipeline: Any, output_dir: Path) -> None:
         output_dir / f"{TAIL_B32_STEM}.mlmodelc",
     ]
 
-    # FP32 — CPU+GPU optimized, EnumeratedShapes for better GPU kernels
-    # (multiple EnumeratedShapes inputs require iOS 18+ / macOS 15+)
+    # FP32 for CPU and GPU. EnumeratedShapes gives better GPU kernels here.
+    # Multiple EnumeratedShapes inputs require iOS 18+ / macOS 15+.
     mlmodel = ct.convert(
         traced,
         convert_to="mlprogram",
@@ -253,7 +253,7 @@ def export_tail(pipeline: Any, output_dir: Path) -> None:
         tail_compiled_paths,
     )
 
-    # FP16 — ANE-eligible
+    # FP16 to allow ANE placement.
     mlmodel_f16 = ct.convert(
         traced,
         convert_to="mlprogram",
@@ -290,7 +290,7 @@ def export_tail(pipeline: Any, output_dir: Path) -> None:
         _f16_compiled_paths(tail_compiled_paths),
     )
 
-    # W8A16 — quantized weights for faster inference
+    # W8A16 for faster inference.
     mlmodel_w8a16 = quantize_w8a16(mlmodel)
     print("Saving embedding tail CoreML artifacts (W8A16)...")
     save_model_artifacts(
@@ -312,7 +312,7 @@ def export_fbank(output_dir: Path) -> None:
         output_dir / f"{FBANK_BATCHED_STEM}.mlmodelc",
     ]
 
-    # FP32 — CPU+GPU
+    # FP32 for CPU and GPU.
     mlmodel = ct.convert(
         traced,
         convert_to="mlprogram",
@@ -381,7 +381,7 @@ def export_fused_embedding(pipeline: Any, output_dir: Path) -> None:
         output_dir / f"{FUSED_B32_STEM}.mlmodelc",
     ]
 
-    # FP32 — CPU+GPU
+    # FP32 for CPU and GPU.
     mlmodel = ct.convert(
         traced,
         convert_to="mlprogram",
@@ -506,7 +506,7 @@ def export_multi_mask_tail(pipeline: Any, output_dir: Path) -> None:
         compiled_paths,
     )
 
-    # W8A16 — quantized weights for faster inference
+    # W8A16 for faster inference.
     mlmodel_w8a16 = quantize_w8a16(mlmodel)
     print("Saving multi-mask tail CoreML artifacts (W8A16)...")
     save_model_artifacts(

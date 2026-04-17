@@ -195,7 +195,7 @@ mod tests {
         };
 
         let result = binarize(&probs, &config);
-        // ON at frames 3,4 → padded to frames 1..6
+        // ON at frames 3,4 gets padded to frames 1..6
         let expected = array![[0.0], [1.0], [1.0], [1.0], [1.0], [1.0], [0.0], [0.0]];
         assert_eq!(result, expected);
     }

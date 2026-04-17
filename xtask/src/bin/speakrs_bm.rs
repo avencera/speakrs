@@ -9,13 +9,13 @@ use xtask::commands::benchmark::{
 use xtask::datasets;
 
 #[derive(Parser)]
-#[command(name = "speakrs-bm", about = "GPU benchmark runner for speakrs")]
+#[command(name = "speakrs-bm", about = "GPU benchmark runner")]
 struct Cli {
-    /// Dataset to evaluate (use "all" for all, "list" to show available)
+    /// Dataset to evaluate ("all" for all, "list" to show available)
     #[arg(long, default_value = "voxconverse-dev")]
     dataset: String,
 
-    /// Implementations to run (use "list" to show available)
+    /// Implementations to run ("list" to show available)
     #[arg(long, value_delimiter = ',', value_name = "IMPL")]
     impls: Vec<String>,
 
@@ -33,7 +33,7 @@ struct Cli {
     #[arg(long)]
     emb_batch_size: Option<u32>,
 
-    /// Description of what this benchmark run is testing
+    /// Short note for this benchmark run
     #[arg(long, short = 'd')]
     description: Option<String>,
 

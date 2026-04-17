@@ -233,7 +233,7 @@ def fused_package_path(output_dir: Path) -> Path:
 
 
 class FusedEmbeddingWrapper(nn.Module):
-    """Fbank + embedding tail in a single model: waveform → embedding"""
+    """Fbank plus embedding tail in one model: waveform -> embedding."""
 
     def __init__(self, fbank: FbankWrapper, tail: EmbeddingTailWrapper) -> None:
         super().__init__()
@@ -338,8 +338,8 @@ class ChunkEmbeddingWrapper(nn.Module):
         self.num_windows = num_windows
         self.step_resnet_frames = step_resnet_frames
 
-        # pre-compute gather indices as buffer — avoids unfold (not in coremltools)
-        # and avoids torch.arange at trace time (int cast issue with torch 2.10)
+        # Precompute gather indices as a buffer. This avoids unfold, which
+        # coremltools does not support, and avoids torch.arange casts at trace time.
         offsets = torch.arange(num_windows) * step_resnet_frames
         # flat indices for all windows: [N * 125]
         indices = offsets.unsqueeze(1) + torch.arange(self.WINDOW_RESNET_FRAMES)
@@ -368,8 +368,8 @@ class ChunkEmbeddingWrapper(nn.Module):
         return torch.where(zero_mask, zero_stats, stats)
 
     def forward(self, fbank: torch.Tensor, masks: torch.Tensor) -> Any:
-        # fbank: [1, T, 80] — full audio fbank features (T aligned so unfold gives N windows)
-        # masks: [N*3, 589] — per-window per-speaker masks (N = unfold window count)
+        # fbank: [1, T, 80] full-audio fbank features.
+        # masks: [N*3, 589] one mask per window/speaker pair.
 
         # ResNet once on full audio
         frames = self.resnet.forward_frames(fbank)  # [1, 256, 10, T_out]

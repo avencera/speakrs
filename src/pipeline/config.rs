@@ -10,7 +10,7 @@ use crate::inference::ExecutionMode;
 pub enum ReconstructMethod {
     /// Standard top-K selection (pyannote-compatible)
     Standard,
-    /// Temporal smoothing — when scores are within epsilon, prefer previous frame's speaker
+    /// Temporal smoothing. If scores are within epsilon, keep the previous speaker.
     Smoothed {
         /// Score difference below which the previous frame's speaker is preferred
         epsilon: f32,
@@ -48,8 +48,8 @@ impl Default for PipelineConfig {
 }
 
 impl PipelineConfig {
-    /// Mode-specific defaults. CoreMLFast uses min-duration filtering to remove
-    /// single-frame speaker flickers caused by the larger step size
+    /// Mode-specific defaults. Fast modes use min-duration filtering to remove
+    /// single-frame speaker flicker from the larger step size.
     pub fn for_mode(mode: ExecutionMode) -> Self {
         match mode {
             ExecutionMode::CoreMlFast | ExecutionMode::CudaFast => Self {
@@ -58,8 +58,8 @@ impl PipelineConfig {
                     min_duration_off: 3,
                     ..BinarizeConfig::default()
                 },
-                // fast modes: 3 VBx iters avoids posterior over-fitting,
-                // improves DER on 2s step embeddings
+                // Fast modes use 3 VBx iterations to avoid posterior overfitting
+                // on 2 second step embeddings.
                 vbx: VbxConfig {
                     max_iters: 3,
                     ..VbxConfig::default()
@@ -73,11 +73,10 @@ impl PipelineConfig {
 
 /// Runtime configuration for the diarization pipeline
 ///
-/// Controls execution parameters that don't affect correctness
-/// But influence performance characteristics
+/// Controls execution parameters that do not affect correctness but do affect performance.
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
-    /// Number of parallel chunk embedding workers (default: 1)
+    /// Number of chunk embedding workers
     pub chunk_emb_workers: usize,
     /// CoreML compute units for chunk embedding (CoreML modes only)
     #[cfg(feature = "coreml")]
@@ -108,12 +107,12 @@ pub const fn segmentation_step_seconds(mode: ExecutionMode) -> f64 {
 pub const SEGMENTATION_WINDOW_SECONDS: f64 = 10.0;
 /// Default sliding window step for segmentation, in seconds
 pub const SEGMENTATION_STEP_SECONDS: f64 = 1.0;
-/// CoreML step aligned to 8-frame ResNet stride (96 fbank frames / 8 = 12 ResNet frames),
-/// Closest aligned step below 1.0s that enables chunk embedding
+/// CoreML step aligned to the 8-frame ResNet stride (96 fbank frames / 8 = 12 ResNet frames).
+/// This is the closest aligned step below 1.0s that still enables chunk embedding.
 pub const COREML_SEGMENTATION_STEP_SECONDS: f64 = 0.96;
 /// CUDA segmentation step, in seconds
 pub const CUDA_SEGMENTATION_STEP_SECONDS: f64 = 1.0;
-/// Larger step for "fast" modes that trade DER accuracy for speed, in seconds
+/// Step size for fast modes, in seconds
 pub const FAST_SEGMENTATION_STEP_SECONDS: f64 = 2.0;
 /// Duration of each output frame from the segmentation model, in seconds
 pub const FRAME_DURATION_SECONDS: f64 = 0.0619375;

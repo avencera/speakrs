@@ -159,7 +159,7 @@ mod tests {
     fn hard_decode_silence() {
         let pm = PowersetMapping::new(3, 2);
 
-        // logits with highest value at class 0 (empty set) → all zeros
+        // logits with the highest value at class 0 (empty set) give all zeros
         let logits = array![[10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
         let result = pm.hard_decode(&logits);
         assert_eq!(result, array![[0.0, 0.0, 0.0]]);
