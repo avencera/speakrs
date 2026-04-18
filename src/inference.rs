@@ -55,6 +55,8 @@ pub enum ExecutionMode {
     Cuda,
     /// NVIDIA GPU with concurrent fused seg+emb and ~2s step
     CudaFast,
+    /// AMD GPU via ONNX Runtime's MIGraphX execution provider
+    MiGraphX,
 }
 
 impl ExecutionMode {
@@ -66,6 +68,11 @@ impl ExecutionMode {
     /// Returns true when this mode uses CUDA execution
     pub const fn is_cuda(self) -> bool {
         matches!(self, Self::Cuda | Self::CudaFast)
+    }
+
+    /// Returns true when this mode uses the MIGraphX execution provider
+    pub const fn is_migraphx(self) -> bool {
+        matches!(self, Self::MiGraphX)
     }
 
     pub(crate) fn validate(self) -> Result<(), ExecutionModeError> {
@@ -84,6 +91,21 @@ impl ExecutionMode {
                 return Err(ExecutionModeError {
                     mode: self,
                     feature: "coreml",
+                });
+            }
+        }
+
+        if self.is_migraphx() {
+            #[cfg(feature = "migraphx")]
+            {
+                return Ok(());
+            }
+
+            #[cfg(not(feature = "migraphx"))]
+            {
+                return Err(ExecutionModeError {
+                    mode: self,
+                    feature: "migraphx",
                 });
             }
         }
@@ -112,6 +134,7 @@ impl ExecutionMode {
             Self::CoreMlFast => "coreml-fast",
             Self::Cuda => "cuda",
             Self::CudaFast => "cuda-fast",
+            Self::MiGraphX => "migraphx",
         }
     }
 }
@@ -259,6 +282,21 @@ pub fn with_execution_mode(
             #[cfg(not(feature = "cuda"))]
             {
                 unreachable!("mode validation rejects CUDA modes without the `cuda` feature")
+            }
+        }
+        ExecutionMode::MiGraphX => {
+            #[cfg(feature = "migraphx")]
+            {
+                Ok(builder.with_execution_providers([ep::MIGraphX::default()
+                    .with_device_id(0)
+                    .with_arena_extend_strategy(ep::ArenaExtendStrategy::SameAsRequested)
+                    .build()
+                    .error_on_failure()])?)
+            }
+
+            #[cfg(not(feature = "migraphx"))]
+            {
+                unreachable!("mode validation rejects MIGraphX mode without the `migraphx` feature")
             }
         }
     }
@@ -432,7 +470,11 @@ fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(not(feature = "coreml"), not(feature = "cuda")))]
+    #[cfg(any(
+        not(feature = "coreml"),
+        not(feature = "cuda"),
+        not(feature = "migraphx")
+    ))]
     use super::ExecutionMode;
     #[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
     use super::{DynamicRuntimeError, OrtRuntimeError, ensure_ort_ready};
@@ -463,6 +505,16 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "cuda-fast requires the `cuda` Cargo feature"
+        );
+    }
+
+    #[cfg(not(feature = "migraphx"))]
+    #[test]
+    fn migraphx_mode_requires_feature() {
+        let error = ExecutionMode::MiGraphX.validate().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "migraphx requires the `migraphx` Cargo feature"
         );
     }
 

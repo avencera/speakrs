@@ -183,7 +183,7 @@ fn required_files(mode: ExecutionMode) -> Vec<String> {
     let mut files: Vec<String> = PLDA_FILES.iter().map(|s| s.to_string()).collect();
 
     match mode {
-        ExecutionMode::Cpu => {
+        ExecutionMode::Cpu | ExecutionMode::MiGraphX => {
             files.extend(ONNX_FILES.iter().map(|s| s.to_string()));
         }
         ExecutionMode::Cuda | ExecutionMode::CudaFast => {

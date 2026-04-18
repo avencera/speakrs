@@ -99,6 +99,7 @@ pub const fn segmentation_step_seconds(mode: ExecutionMode) -> f64 {
         ExecutionMode::CoreMlFast | ExecutionMode::CudaFast => FAST_SEGMENTATION_STEP_SECONDS,
         ExecutionMode::CoreMl => COREML_SEGMENTATION_STEP_SECONDS,
         ExecutionMode::Cuda => CUDA_SEGMENTATION_STEP_SECONDS,
+        ExecutionMode::MiGraphX => CUDA_SEGMENTATION_STEP_SECONDS,
         ExecutionMode::Cpu => SEGMENTATION_STEP_SECONDS,
     }
 }

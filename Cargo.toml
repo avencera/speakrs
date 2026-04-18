@@ -22,6 +22,7 @@ default = ["online", "dep:ndarray-linalg-default"]
 online = ["dep:hf-hub", "hf-hub/ureq", "hf-hub/native-tls"]
 coreml = ["dep:objc2", "dep:objc2-core-ml", "dep:objc2-foundation", "dep:block2"]
 cuda = ["ort/cuda"]
+migraphx = ["ort/migraphx"]
 load-dynamic = ["ort/load-dynamic", "dep:libloading"]
 
 intel-mkl = ["dep:ndarray-linalg-mkl"]
