@@ -296,6 +296,7 @@ impl<'a> PipelineRunner<'a> {
                 | ExecutionMode::CoreMlFast
                 | ExecutionMode::Cuda
                 | ExecutionMode::CudaFast
+                | ExecutionMode::MiGraphX
         ) {
             InferencePath::Concurrent
         } else {
