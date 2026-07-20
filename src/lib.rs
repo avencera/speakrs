@@ -146,19 +146,57 @@
 //!
 //! # Why not pyannote-rs?
 //!
-//! [pyannote-rs](https://github.com/thewh1teagle/pyannote-rs) is the main
-//! Rust-only comparison point, but it targets a different tradeoff.
+//! Despite its name, [pyannote-rs](https://github.com/thewh1teagle/pyannote-rs)
+//! is not a Rust port of the full pyannote diarization pipeline. It provides
+//! useful building blocks for a much simpler, lightweight diarizer.
+//!
+//! In the end-to-end pattern shown by its examples, `pyannote-rs`:
+//!
+//! 1. runs the pyannote segmentation model on non-overlapping 10-second windows;
+//! 2. reduces every frame to speech or non-speech, emitting one segment for each
+//!    uninterrupted region of speech;
+//! 3. computes one speaker embedding for that entire segment; and
+//! 4. assigns the segment online by comparing its embedding with previously seen
+//!    speakers using a fixed cosine-similarity threshold.
+//!
+//! That is closer to voice activity detection followed by online speaker
+//! matching than to pyannote `community-1`.
 //!
 //! | | `speakrs` | `pyannote-rs` |
 //! |-|-----------|---------------|
-//! | Pipeline | Full pyannote `community-1` style pipeline | Simpler window-level pipeline |
-//! | Aggregation | Overlap-add plus binarization | No overlap-add or binarization |
-//! | Clustering | PLDA + VBx | Cosine threshold |
-//! | Goal | Stay close to pyannote behavior on CPU/CUDA | Lightweight Rust diarization |
+//! | Segmentation output | Preserves separate local speaker tracks and overlapping speech | Collapses all non-silence classes into one speech track |
+//! | Windows | Scores every 1s or 2s and reconciles overlapping 10s windows | Scores independent, non-overlapping 10s windows |
+//! | Embeddings | One masked embedding per local speaker and window | One embedding per contiguous speech segment |
+//! | Clustering | Recording-wide AHC initialization, PLDA, and VBx refinement | Immediate cosine-threshold match against stored embeddings |
+//! | Final timeline | Reconstructs speaker count and identities from all windows, then filters short activity | Emits a segment only after a speech-to-silence transition |
 //!
-//! On the VoxConverse dev subset where `pyannote-rs` emits output, `speakrs`
-//! CoreML scores 11.5% DER versus 80.2% for `pyannote-rs`. In that same run,
-//! `pyannote-rs` returned no segments on most files.
+//! These differences explain the accuracy gap. A speech region can contain
+//! several turns with no silence between them. `pyannote-rs` treats that region
+//! as one segment, mixes all voices into one embedding, and gives it one speaker
+//! label. It also discards the segmentation model's separate local speaker
+//! tracks, so it cannot represent overlapping speakers. Its online assignments
+//! are not reconsidered using evidence from the rest of the recording.
+//!
+//! `speakrs` keeps the per-speaker frame activity, extracts speaker-conditioned
+//! embeddings, combines evidence from overlapping windows, and clusters all
+//! usable embeddings together. PLDA makes the embeddings more discriminative
+//! for speaker identity, while VBx uses the recording's temporal and global
+//! evidence to refine speaker assignments. The final reconstruction can
+//! therefore preserve rapid speaker changes and overlapping speech instead of
+//! reducing a whole speech region to one voice.
+//!
+//! The benchmark reflects that architectural difference. With `pyannote-rs`
+//! v0.3 on VoxConverse dev, it returned no RTTM segments for 183 of 216 files.
+//! On the remaining 33 files where it produced at least five segments
+//! (186 minutes, collar=0ms), the result was:
+//!
+//! | | DER | Missed speech | False alarm | Speaker confusion |
+//! |-|-----|---------------|-------------|-------------------|
+//! | `speakrs` CoreML | **11.5%** | 3.8% | 3.6% | 4.1% |
+//! | `pyannote-rs` | 80.2% | 34.9% | 7.4% | 37.9% |
+//!
+//! Lower DER is better. The 80.2% figure is the subset-only comparison; it does
+//! not count the 183 files for which `pyannote-rs` produced no output.
 //!
 //! # Models
 //!
