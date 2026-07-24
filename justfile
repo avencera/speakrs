@@ -15,6 +15,9 @@ lint: clippy python-lint
 test *args:
     cargo test --workspace {{args}}
 
+test-gpuq-workload:
+    tests/gpuq-workload.sh
+
 check: fmt lint test
 
 # Bump version: just bump major|minor|patch
@@ -90,6 +93,17 @@ gpu-image suffix="":
     echo "$TAG" > _local/gpu-image-tag
     sed -i '' "s|image:.*speakrs-gpu:[a-zA-Z0-9._-]*|image: avencera/speakrs-gpu:${TAG}|g" .dstack/*.yml
     echo "Built and pushed: $DOCKERHUB (updated .dstack/*.yml)"
+
+# CUDA 12.4 linux/amd64 image for the gpuq canary
+gpuq-canary-image:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TAG=$(git rev-parse --short HEAD)
+    IMAGE="ghcr.io/avencera/speakrs-gpuq-canary:${TAG}"
+    nsc build -f docker/gpuq-canary.Dockerfile --platform linux/amd64 -t "$IMAGE" --push .
+    DIGEST=$(skopeo inspect "docker://${IMAGE}" | jq -r .Digest)
+    echo "Built and pushed: ${IMAGE}"
+    echo "Set gpuq.toml image to ghcr.io/avencera/speakrs-gpuq-canary@${DIGEST}"
 
 gpu-base-image:
     nsc build -f docker/base.Dockerfile --platform linux/amd64 -t ghcr.io/avencera/speakrs-gpu-base:latest --push .
