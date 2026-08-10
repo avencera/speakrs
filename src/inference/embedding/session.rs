@@ -21,7 +21,16 @@ impl EmbeddingModel {
     ) -> Result<Session, ort::Error> {
         let builder = Session::builder()?
             .with_independent_thread_pool()?
-            .with_intra_threads(1)?
+            // Embedding inference dominates CPU-mode wall time. With
+            // intra_threads(1) the whole pipeline runs at ~1-2x realtime on
+            // Apple Silicon; letting ORT use up to 6 cores brings it to
+            // ~8-9x realtime (measured on M-series, 5.7 min meeting audio)
+            // with identical outputs.
+            .with_intra_threads(
+                std::thread::available_parallelism()
+                    .map(|n| n.get().min(6))
+                    .unwrap_or(1),
+            )?
             .with_inter_threads(1)?
             .with_memory_pattern(true)?;
         let mut builder =
