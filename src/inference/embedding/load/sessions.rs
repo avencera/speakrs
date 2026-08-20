@@ -159,7 +159,11 @@ impl LoadedSessions {
                 .transpose()?
         );
         let (multi_mask_batched_session, multi_mask_batched_elapsed) = timed!(
-            multi_mask_model_path(model_path, PRIMARY_BATCH_SIZE)
+            // The runtime buffers and batching logic are sized MULTI_MASK_BATCH_SIZE (32),
+            // and the exporter only writes `-b32`. Requesting PRIMARY_BATCH_SIZE (64) here
+            // meant the batched session was silently None (batch size fell back to 1), and
+            // a true b64 graph under that name overruns the 32-sized buffers.
+            multi_mask_model_path(model_path, MULTI_MASK_BATCH_SIZE)
                 .filter(|path| path.exists())
                 .map(|path| EmbeddingModel::build_session(&path, mode))
                 .transpose()?
