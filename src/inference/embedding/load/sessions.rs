@@ -26,6 +26,7 @@ pub(super) struct LoadedOrtSessions {
     session: Session,
     primary_batched_session: Option<Session>,
     split_fbank_session: Option<Session>,
+    split_fbank_pool: Vec<Session>,
     split_fbank_batched_session: Option<Session>,
     split_tail_session: Option<Session>,
     split_tail_batched_session: Option<Session>,
@@ -236,10 +237,29 @@ impl LoadedSessions {
             );
         }
 
+        // Pool of extra CPU fbank sessions for parallel per-chunk fbank
+        // (single-session fbank measured at ~76% of CUDA E2E wall on many-core hosts).
+        let split_fbank_pool: Vec<Session> = if use_split_backend {
+            let pool_size = std::env::var("SPEAKRS_FBANK_POOL")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or_else(|| {
+                    std::thread::available_parallelism()
+                        .map(|c| (c.get() / 4).clamp(1, 8))
+                        .unwrap_or(1)
+                });
+            (0..pool_size)
+                .map(|_| EmbeddingModel::build_fbank_session(&split_fbank_path, ExecutionMode::Cpu))
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
+
         let ort = LoadedOrtSessions {
             session,
             primary_batched_session,
             split_fbank_session,
+            split_fbank_pool,
             split_fbank_batched_session,
             split_tail_session,
             split_tail_batched_session,
@@ -288,6 +308,7 @@ impl LoadedSessions {
                 session: self.ort.session,
                 primary_batched_session: self.ort.primary_batched_session,
                 split_fbank_session: self.ort.split_fbank_session,
+                split_fbank_pool: self.ort.split_fbank_pool,
                 split_fbank_batched_session: self.ort.split_fbank_batched_session,
                 split_tail_session: self.ort.split_tail_session,
                 split_tail_batched_session: self.ort.split_tail_batched_session,

@@ -58,6 +58,44 @@ impl EmbeddingModel {
         &mut self,
         audios: &[&[f32]],
     ) -> Result<Vec<Array2<f32>>, ort::Error> {
+        // Fan per-chunk fbank out across a pool of CPU sessions.
+        // fbank is otherwise ~76% of CUDA E2E wall time (intra-op threads don't scale it).
+        if audios.len() > 1 && !self.ort.split_fbank_pool.is_empty() {
+            let window_samples = self.meta.window_samples;
+            let pool = &mut self.ort.split_fbank_pool;
+            let per_worker = audios.len().div_ceil(pool.len());
+            let mut collected: Vec<Option<Vec<Array2<f32>>>> = Vec::new();
+            collected.resize_with(pool.len(), || None);
+            std::thread::scope(|scope| {
+                let mut handles = Vec::new();
+                for (worker_idx, session) in pool.iter_mut().enumerate() {
+                    let start = worker_idx * per_worker;
+                    if start >= audios.len() {
+                        break;
+                    }
+                    let end = (start + per_worker).min(audios.len());
+                    let slice = &audios[start..end];
+                    handles.push((
+                        worker_idx,
+                        scope.spawn(move || -> Result<Vec<Array2<f32>>, ort::Error> {
+                            slice
+                                .iter()
+                                .map(|audio| fbank_via_session(session, audio, window_samples))
+                                .collect()
+                        }),
+                    ));
+                }
+                for (worker_idx, handle) in handles {
+                    let vals = handle
+                        .join()
+                        .map_err(|_| ort::Error::new("fbank pool worker panicked"))??;
+                    collected[worker_idx] = Some(vals);
+                }
+                Ok::<(), ort::Error>(())
+            })?;
+            return Ok(collected.into_iter().flatten().flatten().collect());
+        }
+
         let has_batched = self.has_batched_fbank();
         if !has_batched {
             tracing::debug!(
@@ -170,4 +208,26 @@ impl EmbeddingModel {
         Self::push_fbank_batch_results(results, &data, out_shape[1], out_shape[2], count)?;
         Ok(true)
     }
+}
+
+// Session-local fbank for the parallel pool path (no shared buffers).
+fn fbank_via_session(
+    session: &mut ort::session::Session,
+    audio: &[f32],
+    window_samples: usize,
+) -> Result<Array2<f32>, ort::Error> {
+    let mut buf = ndarray::Array3::<f32>::zeros((1, 1, window_samples));
+    let copy_len = audio.len().min(window_samples);
+    buf.slice_mut(s![0, 0, ..copy_len])
+        .assign(&ndarray::ArrayView1::from(&audio[..copy_len]));
+    let waveform_tensor = TensorRef::from_array_view(buf.view())?;
+    let outputs = session.run(ort::inputs!["waveform" => waveform_tensor])?;
+    let output = first_output(outputs.values(), "pool chunk fbank output")?;
+    let (shape, data) = output.try_extract_tensor::<f32>()?;
+    array2_from_shape_vec(
+        shape[1] as usize,
+        shape[2] as usize,
+        data.to_vec(),
+        "pool chunk fbank output",
+    )
 }
