@@ -26,30 +26,83 @@ pub fn cluster(embeddings: &ArrayView2<f32>, config: AhcConfig) -> Vec<usize> {
     }
 
     let normalized = l2_normalize_rows(embeddings);
+    let t0 = std::time::Instant::now();
     let mut condensed = condensed_euclidean(&normalized);
+    let pdist_ms = t0.elapsed().as_millis();
+    let t1 = std::time::Instant::now();
     let dendrogram = linkage(&mut condensed, observations, Method::Centroid);
-    flat_clusters(observations, dendrogram.steps(), config.threshold)
+    let linkage_ms = t1.elapsed().as_millis();
+    let t2 = std::time::Instant::now();
+    let labels = flat_clusters(observations, dendrogram.steps(), config.threshold);
+    tracing::debug!(
+        observations,
+        pdist_ms,
+        linkage_ms,
+        flat_ms = t2.elapsed().as_millis(),
+        "AHC stage timing"
+    );
+    labels
 }
 
 fn condensed_euclidean(embeddings: &Array2<f32>) -> Vec<f32> {
+    // diar-native patch: blocked Gram-matrix formulation with scoped threads.
+    // The original per-pair scalar loop cost 64.5 s at N=21k; dist^2 = |a|^2 + |b|^2 - 2ab
+    // via matmul blocks is ~20x faster and each block writes a disjoint contiguous
+    // range of the condensed vector, so blocks parallelize without locks.
     let observations = embeddings.nrows();
-    let mut condensed = Vec::with_capacity(observations * (observations - 1) / 2);
-    for row in 0..observations.saturating_sub(1) {
-        for col in row + 1..observations {
-            let lhs = embeddings.row(row);
-            let rhs = embeddings.row(col);
-            let distance = lhs
-                .iter()
-                .zip(rhs.iter())
-                .map(|(left, right)| {
-                    let delta = left - right;
-                    delta * delta
-                })
-                .sum::<f32>()
-                .sqrt();
-            condensed.push(distance);
+    if observations < 2 {
+        return Vec::new();
+    }
+    let total = observations * (observations - 1) / 2;
+    let mut condensed = vec![0f32; total];
+    let sq_norms: Vec<f32> = embeddings
+        .rows()
+        .into_iter()
+        .map(|row| row.dot(&row))
+        .collect();
+
+    const BLOCK: usize = 1024;
+    // start offset of row i's segment in the condensed vector:
+    // sum_{r<i}(n-1-r) = i*(n-1) - i*(i-1)/2
+    let seg_start = |i: usize| i * (observations - 1) - i * i.saturating_sub(1) / 2;
+
+    // hand each block its contiguous slice
+    let mut blocks: Vec<(usize, usize, &mut [f32])> = Vec::new();
+    {
+        let mut rest: &mut [f32] = &mut condensed;
+        let mut consumed = 0usize;
+        let mut bi = 0usize;
+        while bi < observations.saturating_sub(1) {
+            let bi_end = (bi + BLOCK).min(observations - 1);
+            let end_offset = seg_start(bi_end);
+            let (head, tail) = rest.split_at_mut(end_offset - consumed);
+            blocks.push((bi, bi_end, head));
+            consumed = end_offset;
+            rest = tail;
+            bi = bi_end;
         }
     }
+
+    std::thread::scope(|scope| {
+        for (bi, bi_end, slice) in blocks {
+            let emb = &embeddings;
+            let norms = &sq_norms;
+            scope.spawn(move || {
+                let a = emb.slice(ndarray::s![bi..bi_end, ..]);
+                let b = emb.slice(ndarray::s![bi.., ..]);
+                let gram = a.dot(&b.t()); // (bi_end-bi) x (observations-bi)
+                let mut offset = 0usize;
+                for (local, i) in (bi..bi_end).enumerate() {
+                    for j in (i + 1)..observations {
+                        let dot = gram[[local, j - bi]];
+                        let d2 = (norms[i] + norms[j] - 2.0 * dot).max(0.0);
+                        slice[offset] = d2.sqrt();
+                        offset += 1;
+                    }
+                }
+            });
+        }
+    });
     condensed
 }
 
