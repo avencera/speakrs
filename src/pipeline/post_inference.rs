@@ -3,7 +3,7 @@ use tracing::debug;
 
 use crate::binarize::binarize;
 use crate::clustering::plda::PldaTransform;
-use crate::reconstruct::Reconstructor;
+use crate::reconstruct::{Reconstructor, exclusive_from};
 use crate::segment::merge_segments;
 
 use super::config::{PipelineConfig, ReconstructMethod};
@@ -36,6 +36,7 @@ pub fn post_inference(
             hard_clusters: ChunkSpeakerClusters(Array2::zeros((0, 0))),
             discrete_diarization: DiscreteDiarization(Array2::zeros((0, 0))),
             segments: Vec::new(),
+            exclusive_segments: Vec::new(),
         });
     }
 
@@ -44,24 +45,35 @@ pub fn post_inference(
 
     let reconstructor =
         Reconstructor::with_clusters(&segmentations, &hard_clusters, &layout.start_frames, 0);
+    // One activation pass feeds both reconstructions; the exclusive variant needs the
+    // continuous scores, which a reconstruction has already flattened to 1.0.
+    let activations = reconstructor.frame_activations(&speaker_count);
     let discrete_diarization = match config.reconstruct_method {
         ReconstructMethod::Smoothed { epsilon } => {
-            reconstructor.reconstruct_smoothed(&speaker_count, epsilon)
+            reconstructor.reconstruct_smoothed_with(&activations, &speaker_count, epsilon)
         }
-        ReconstructMethod::Standard => reconstructor.reconstruct(&speaker_count),
+        ReconstructMethod::Standard => {
+            reconstructor.reconstruct_with(&activations, &speaker_count)
+        }
     };
+    let exclusive_diarization = exclusive_from(&discrete_diarization, &activations);
 
     // apply min-duration filtering to remove single-frame speaker flickers
     let has_duration_filter =
         config.binarize.min_duration_on > 0 || config.binarize.min_duration_off > 0;
-    let discrete_diarization = if has_duration_filter {
-        DiscreteDiarization(binarize(&discrete_diarization, &config.binarize))
+    let (discrete_diarization, exclusive_diarization) = if has_duration_filter {
+        (
+            DiscreteDiarization(binarize(&discrete_diarization, &config.binarize)),
+            DiscreteDiarization(binarize(&exclusive_diarization, &config.binarize)),
+        )
     } else {
-        discrete_diarization
+        (discrete_diarization, exclusive_diarization)
     };
 
     let segments = discrete_diarization.to_segments();
     let segments = merge_segments(&segments, config.merge_gap);
+    let exclusive_segments = exclusive_diarization.to_segments();
+    let exclusive_segments = merge_segments(&exclusive_segments, config.merge_gap);
 
     debug!(
         post_inference_ms = post_start.elapsed().as_millis(),
@@ -75,5 +87,6 @@ pub fn post_inference(
         hard_clusters,
         discrete_diarization,
         segments,
+        exclusive_segments,
     })
 }

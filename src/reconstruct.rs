@@ -134,29 +134,43 @@ impl<'a> Reconstructor<'a> {
         FrameActivations(activations)
     }
 
+    /// Convenience wrapper over [`reconstruct_with`](Self::reconstruct_with); production code
+    /// computes activations once and shares them with the exclusive pass.
+    #[cfg(test)]
     pub fn reconstruct(&self, speaker_count: &SpeakerCountTrack) -> DiscreteDiarization {
-        let activations = self.frame_activations(speaker_count);
+        self.reconstruct_with(&self.frame_activations(speaker_count), speaker_count)
+    }
+
+    /// [`reconstruct`](Self::reconstruct) over activations the caller already computed —
+    /// so a caller that also needs the exclusive variant pays for one activation pass.
+    pub(crate) fn reconstruct_with(
+        &self,
+        activations: &FrameActivations,
+        speaker_count: &SpeakerCountTrack,
+    ) -> DiscreteDiarization {
         let mut discrete = Array2::<f32>::zeros(activations.raw_dim());
         for (frame_idx, &count) in speaker_count.iter().enumerate() {
-            for speaker_idx in top_k_indices(&activations, frame_idx, count) {
+            for speaker_idx in top_k_indices(activations, frame_idx, count) {
                 discrete[[frame_idx, speaker_idx]] = 1.0;
             }
         }
         DiscreteDiarization(discrete)
     }
 
-    pub fn reconstruct_smoothed(
+    /// Smoothed reconstruction over caller-supplied activations, so a caller that also needs
+    /// the exclusive variant pays for one activation pass.
+    pub(crate) fn reconstruct_smoothed_with(
         &self,
+        activations: &FrameActivations,
         speaker_count: &SpeakerCountTrack,
         epsilon: f32,
     ) -> DiscreteDiarization {
-        let activations = self.frame_activations(speaker_count);
         let mut discrete = Array2::<f32>::zeros(activations.raw_dim());
         let mut previous_speakers: Vec<usize> = Vec::new();
 
         for (frame_idx, &count) in speaker_count.iter().enumerate() {
             let current_speakers =
-                top_k_indices_smoothed(&activations, frame_idx, count, &previous_speakers, epsilon);
+                top_k_indices_smoothed(activations, frame_idx, count, &previous_speakers, epsilon);
             for &speaker_idx in &current_speakers {
                 discrete[[frame_idx, speaker_idx]] = 1.0;
             }
@@ -165,6 +179,42 @@ impl<'a> Reconstructor<'a> {
 
         DiscreteDiarization(discrete)
     }
+}
+
+/// Collapse a reconstruction to one speaker per frame, keeping the speaker whose *activation
+/// score* is highest among those the reconstruction marked active.
+///
+/// This is the `exclusive_speaker_diarization` equivalent, and it has to read the continuous
+/// activations to mean anything: a reconstruction stores 1.0 for every active speaker, so an
+/// argmax taken over it is a tie that resolves to whichever cluster index the comparator
+/// happens to favour — the choice ends up made by cluster numbering rather than by acoustics.
+///
+/// Speech is never invented or lost: a frame with at least one active speaker keeps exactly
+/// one, and a frame with none stays empty.
+pub(crate) fn exclusive_from(
+    full: &DiscreteDiarization,
+    activations: &FrameActivations,
+) -> DiscreteDiarization {
+    let mut discrete = Array2::<f32>::zeros(full.raw_dim());
+    for (frame_idx, row) in full.rows().into_iter().enumerate() {
+        let mut best: Option<(usize, f32)> = None;
+        for (speaker_idx, &value) in row.iter().enumerate() {
+            if value <= 0.0 {
+                continue;
+            }
+            let score = activations
+                .get([frame_idx, speaker_idx])
+                .copied()
+                .unwrap_or(0.0);
+            if best.is_none_or(|(_, best_score)| score > best_score) {
+                best = Some((speaker_idx, score));
+            }
+        }
+        if let Some((speaker_idx, _)) = best {
+            discrete[[frame_idx, speaker_idx]] = 1.0;
+        }
+    }
+    DiscreteDiarization(discrete)
 }
 
 /// Zero out all but the highest-scoring speaker in each frame, making activations exclusive
