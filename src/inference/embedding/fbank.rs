@@ -4,6 +4,7 @@ use ort::value::TensorRef;
 #[cfg(feature = "coreml")]
 use super::tensor::array3_slice;
 use super::{EmbeddingModel, FBANK_BATCH_SIZE, array2_from_shape_vec, first_output};
+use crate::inference::lock_session;
 
 impl EmbeddingModel {
     /// Compute fbank features for a single audio chunk via the split fbank model
@@ -40,12 +41,13 @@ impl EmbeddingModel {
 
         let waveform_tensor =
             TensorRef::from_array_view(self.buffers.split_waveform_buffer.view())?;
-        let outputs = self
-            .ort
-            .split_fbank_session
-            .as_mut()
-            .ok_or_else(|| ort::Error::new("missing split fbank session"))?
-            .run(ort::inputs!["waveform" => waveform_tensor])?;
+        let mut session = lock_session(
+            self.ort
+                .split_fbank_session
+                .as_ref()
+                .ok_or_else(|| ort::Error::new("missing split fbank session"))?,
+        );
+        let outputs = session.run(ort::inputs!["waveform" => waveform_tensor])?;
         let output = first_output(outputs.values(), "chunk fbank output")?;
         let (shape, data) = output.try_extract_tensor::<f32>()?;
         let frames = shape[1] as usize;
@@ -97,12 +99,13 @@ impl EmbeddingModel {
 
             let waveform_tensor =
                 TensorRef::from_array_view(self.buffers.split_fbank_batch_buffer.view())?;
-            let outputs = self
-                .ort
-                .split_fbank_batched_session
-                .as_mut()
-                .ok_or_else(|| ort::Error::new("missing split fbank batched session"))?
-                .run(ort::inputs!["waveform" => waveform_tensor])?;
+            let mut session = lock_session(
+                self.ort
+                    .split_fbank_batched_session
+                    .as_ref()
+                    .ok_or_else(|| ort::Error::new("missing split fbank batched session"))?,
+            );
+            let outputs = session.run(ort::inputs!["waveform" => waveform_tensor])?;
             let output = first_output(outputs.values(), "batched chunk fbank output")?;
             let (shape, data) = output.try_extract_tensor::<f32>()?;
             Self::push_fbank_batch_results(

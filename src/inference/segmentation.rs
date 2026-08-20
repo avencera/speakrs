@@ -5,7 +5,10 @@ use ort::session::Session;
 
 #[cfg(feature = "coreml")]
 use crate::inference::coreml::{CachedInputShape, SharedCoreMlModel};
-use crate::inference::{ExecutionMode, ModelLoadError, ensure_ort_ready, with_execution_mode};
+use crate::inference::{
+    ExecutionMode, ModelLoadError, SharedSession, ensure_ort_ready, share_session,
+    with_execution_mode,
+};
 #[cfg(feature = "coreml")]
 mod native;
 #[cfg(feature = "coreml")]
@@ -55,8 +58,8 @@ const LARGE_BATCH_SIZE: usize = 64;
 /// Sliding-window segmentation model (pyannote segmentation-3.0)
 pub struct SegmentationModel {
     mode: ExecutionMode,
-    session: Session,
-    primary_batched_session: Option<Session>,
+    session: SharedSession,
+    primary_batched_session: Option<SharedSession>,
     #[cfg(feature = "coreml")]
     native_session: Option<SharedCoreMlModel>,
     #[cfg(feature = "coreml")]
@@ -114,11 +117,11 @@ impl SegmentationModel {
             }};
         }
 
-        let (session, session_elapsed) = timed!(Self::build_session(model_path, mode)?);
+        let (session, session_elapsed) = timed!(share_session(Self::build_session(model_path, mode)?));
         let (primary_batched_session, primary_batched_elapsed) = timed!(
             batched_model_path(model_path, PRIMARY_BATCH_SIZE)
                 .filter(|path| path.exists())
-                .map(|path| Self::build_session(&path, mode))
+                .map(|path| Self::build_session(&path, mode).map(share_session))
                 .transpose()?
         );
         #[cfg(feature = "coreml")]
@@ -253,6 +256,31 @@ impl SegmentationModel {
     /// Execution mode this model was loaded with
     pub fn mode(&self) -> ExecutionMode {
         self.mode
+    }
+
+    /// Cheap handle over the same ORT sessions with fresh scratch buffers
+    /// (diar-native patch, T9a).
+    ///
+    /// Weights and per-session arenas are shared through [`SharedSession`]; only the
+    /// input staging buffers are re-allocated, so N handles cost N × scratch, not
+    /// N × model. Handles may run concurrently — each inference call serializes on
+    /// its session's mutex for exactly one `Run`.
+    #[cfg(not(feature = "coreml"))]
+    pub fn clone_shared(&self) -> Self {
+        Self {
+            mode: self.mode,
+            session: std::sync::Arc::clone(&self.session),
+            primary_batched_session: self.primary_batched_session.clone(),
+            input_buffer: ndarray::Array3::zeros((1, 1, self.window_samples)),
+            primary_batch_input_buffer: ndarray::Array3::zeros((
+                PRIMARY_BATCH_SIZE,
+                1,
+                self.window_samples,
+            )),
+            window_samples: self.window_samples,
+            step_samples: self.step_samples,
+            sample_rate: self.sample_rate,
+        }
     }
 }
 
