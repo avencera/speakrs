@@ -75,7 +75,16 @@ impl PipelineConfig {
 /// Controls execution parameters that do not affect correctness but do affect performance.
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
-    /// Number of chunk embedding workers
+    /// Number of chunk embedding workers.
+    ///
+    /// Currently unused: no code path reads this field on either the CUDA or CoreML
+    /// execution mode (verified against the whole crate — see #13). Its sibling field
+    /// below, `chunk_emb_compute_units`, is CoreML-only, and CoreML sessions can only
+    /// run one at a time — so this almost certainly exists to parallelize chunk
+    /// embedding across several single-threaded CoreML workers rather than to control
+    /// CUDA concurrency (CUDA already gets concurrency from shared, mutex-protected
+    /// ORT sessions). It's reserved for that future CoreML worker-pool implementation;
+    /// setting it has no effect today on any mode.
     pub chunk_emb_workers: usize,
     /// CoreML compute units for chunk embedding (CoreML modes only)
     #[cfg(feature = "coreml")]
