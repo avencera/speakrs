@@ -408,6 +408,7 @@ pub(super) fn try_batch_chunk_embedding(
                     hard_clusters: ChunkSpeakerClusters(Array2::zeros((0, 0))),
                     discrete_diarization: DiscreteDiarization(Array2::zeros((0, 0))),
                     segments: Vec::new(),
+                    exclusive_segments: Vec::new(),
                 })
             })
             .collect())

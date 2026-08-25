@@ -172,6 +172,10 @@ pub struct DiarizationResult {
     pub discrete_diarization: DiscreteDiarization,
     /// Merged speaker segments (time-stamped speaker turns)
     pub segments: Vec<crate::segment::Segment>,
+    /// Merged speaker segments with at most one speaker at any instant — the
+    /// `exclusive_speaker_diarization` equivalent. Overlapped frames go to the speaker with
+    /// the highest activation score, so the speech is kept rather than split or dropped.
+    pub exclusive_segments: Vec<crate::segment::Segment>,
 }
 
 impl DiarizationResult {
