@@ -4,6 +4,7 @@ use ort::value::TensorRef;
 use tracing::debug;
 
 use super::{PRIMARY_BATCH_SIZE, SegmentationError, SegmentationModel};
+use crate::inference::lock_session;
 use crate::inference::segmentation::tensor::{SegmentationWindows, first_output, output_shape3};
 
 impl SegmentationModel {
@@ -145,7 +146,8 @@ impl SegmentationModel {
             .assign(&ndarray::ArrayView1::from(window));
         let input_tensor = TensorRef::from_array_view(self.input_buffer.view())?;
 
-        let outputs = self.session.run(ort::inputs![input_tensor])?;
+        let mut session = lock_session(&self.session);
+        let outputs = session.run(ort::inputs![input_tensor])?;
         let output = first_output(outputs.values(), "segmentation window output")?;
         let (shape, data) = output.try_extract_tensor::<f32>()?;
 
@@ -179,11 +181,12 @@ impl SegmentationModel {
         }
         let input_tensor = TensorRef::from_array_view(self.primary_batch_input_buffer.view())?;
 
-        let outputs = self
-            .primary_batched_session
-            .as_mut()
-            .ok_or_else(|| ort::Error::new("missing primary batched segmentation session"))?
-            .run(ort::inputs![input_tensor])?;
+        let mut session = lock_session(
+            self.primary_batched_session
+                .as_ref()
+                .ok_or_else(|| ort::Error::new("missing primary batched segmentation session"))?,
+        );
+        let outputs = session.run(ort::inputs![input_tensor])?;
         let output = first_output(outputs.values(), "segmentation batch output")?;
         let (shape, data) = output.try_extract_tensor::<f32>()?;
 

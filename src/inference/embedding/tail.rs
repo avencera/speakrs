@@ -7,6 +7,7 @@ use super::{
     CHUNK_SPEAKER_BATCH_SIZE, EmbeddingModel, FBANK_FEATURES, FBANK_FRAMES, array1_slice,
     array2_from_shape_vec, array3_slice_mut, first_output, select_mask, should_use_clean_mask,
 };
+use crate::inference::lock_session;
 
 impl EmbeddingModel {
     /// Extract per-speaker embeddings for one audio chunk using segmentation masks
@@ -119,12 +120,14 @@ impl EmbeddingModel {
         let weight_slice = self.buffers.split_weights_batch_buffer.slice(s![0..1, ..]);
         let fbank_tensor = TensorRef::from_array_view(feature_slice.view())?;
         let weights_tensor = TensorRef::from_array_view(weight_slice.view())?;
-        let outputs = self
-            .ort
-            .split_tail_session
-            .as_mut()
-            .ok_or_else(|| ort::Error::new("missing split tail session"))?
-            .run(ort::inputs!["fbank" => fbank_tensor, "weights" => weights_tensor])?;
+        let mut session = lock_session(
+            self.ort
+                .split_tail_session
+                .as_ref()
+                .ok_or_else(|| ort::Error::new("missing split tail session"))?,
+        );
+        let outputs =
+            session.run(ort::inputs!["fbank" => fbank_tensor, "weights" => weights_tensor])?;
         let output = first_output(outputs.values(), "split tail output")?;
         let (_shape, data) = output.try_extract_tensor::<f32>()?;
         Ok(Array1::from_vec(data.to_vec()))
@@ -206,12 +209,14 @@ impl EmbeddingModel {
             TensorRef::from_array_view(self.buffers.split_feature_batch_buffer.view())?;
         let weights_tensor =
             TensorRef::from_array_view(self.buffers.split_weights_batch_buffer.view())?;
-        let outputs = self
-            .ort
-            .split_tail_batched_session
-            .as_mut()
-            .ok_or_else(|| ort::Error::new("missing split tail batched session"))?
-            .run(ort::inputs!["fbank" => fbank_tensor, "weights" => weights_tensor])?;
+        let mut session = lock_session(
+            self.ort
+                .split_tail_batched_session
+                .as_ref()
+                .ok_or_else(|| ort::Error::new("missing split tail batched session"))?,
+        );
+        let outputs =
+            session.run(ort::inputs!["fbank" => fbank_tensor, "weights" => weights_tensor])?;
         let output = first_output(outputs.values(), "tail batch output")?;
         let (_shape, data) = output.try_extract_tensor::<f32>()?;
         array2_from_shape_vec(

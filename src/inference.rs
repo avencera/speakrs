@@ -17,7 +17,28 @@ pub use segmentation::{SegmentationError, SegmentationModel};
 pub(crate) mod coreml;
 
 use ort::ep;
+use ort::session::Session;
 use ort::session::builder::SessionBuilder;
+
+/// One ORT session shared across pipeline handles (diar-native patch, T9a).
+///
+/// `Session::run` takes `&mut self` in ort 2.0.0-rc.12 even though the ORT C API's `Run`
+/// is thread-safe, so cross-handle sharing goes through a mutex held for exactly one
+/// inference call. Weights and the session's arena are loaded once; every handle cloned
+/// via `clone_shared` re-uses them and pays only for its own scratch buffers.
+pub(crate) type SharedSession = std::sync::Arc<std::sync::Mutex<Session>>;
+
+pub(crate) fn share_session(session: Session) -> SharedSession {
+    std::sync::Arc::new(std::sync::Mutex::new(session))
+}
+
+pub(crate) fn lock_session(session: &SharedSession) -> std::sync::MutexGuard<'_, Session> {
+    // A poisoned lock means another handle panicked mid-run; the session itself has no
+    // torn state to protect (ORT `Run` is atomic at the C API level), so keep serving.
+    session
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 #[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
 static ORT_RUNTIME_INIT: OnceLock<Result<(), OrtRuntimeError>> = OnceLock::new();
