@@ -217,6 +217,45 @@ pub(crate) fn exclusive_from(
     DiscreteDiarization(discrete)
 }
 
+/// `exclusive_from` guarantees at most one active speaker per frame, but that guarantee doesn't
+/// survive `binarize`: it runs per-speaker independently, so `min_duration_on`/`pad_onset`/etc.
+/// can extend one speaker's region into a frame another speaker's region was independently
+/// extended into, reintroducing overlap in the "exclusive" output. Re-collapse any such frame to
+/// its highest-activation speaker, using the same scores `exclusive_from` used originally.
+pub(crate) fn resolve_exclusive_conflicts(
+    exclusive: &DiscreteDiarization,
+    activations: &FrameActivations,
+) -> DiscreteDiarization {
+    let mut discrete = exclusive.0.clone();
+    let num_speakers = discrete.ncols();
+    for frame_idx in 0..discrete.nrows() {
+        let mut best: Option<(usize, f32)> = None;
+        let mut active_count = 0usize;
+        for speaker_idx in 0..num_speakers {
+            if discrete[[frame_idx, speaker_idx]] > 0.0 {
+                active_count += 1;
+                let score = activations
+                    .get([frame_idx, speaker_idx])
+                    .copied()
+                    .unwrap_or(0.0);
+                if best.is_none_or(|(_, best_score)| score > best_score) {
+                    best = Some((speaker_idx, score));
+                }
+            }
+        }
+        if active_count > 1
+            && let Some((winner, _)) = best
+        {
+            for speaker_idx in 0..num_speakers {
+                if speaker_idx != winner {
+                    discrete[[frame_idx, speaker_idx]] = 0.0;
+                }
+            }
+        }
+    }
+    DiscreteDiarization(discrete)
+}
+
 /// Zero out all but the highest-scoring speaker in each frame, making activations exclusive
 pub fn make_exclusive(activations: &mut Array2<f32>) {
     for mut row in activations.rows_mut() {

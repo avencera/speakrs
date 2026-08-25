@@ -3,7 +3,7 @@ use tracing::debug;
 
 use crate::binarize::binarize;
 use crate::clustering::plda::PldaTransform;
-use crate::reconstruct::{Reconstructor, exclusive_from};
+use crate::reconstruct::{Reconstructor, exclusive_from, resolve_exclusive_conflicts};
 use crate::segment::merge_segments;
 
 use super::config::{PipelineConfig, ReconstructMethod};
@@ -69,6 +69,9 @@ pub fn post_inference(
     } else {
         (discrete_diarization, exclusive_diarization)
     };
+    // binarize runs per-speaker independently and can pad/extend two speakers' regions into the
+    // same frame, undoing the exclusivity exclusive_from established — re-resolve any conflicts.
+    let exclusive_diarization = resolve_exclusive_conflicts(&exclusive_diarization, &activations);
 
     let segments = discrete_diarization.to_segments();
     let segments = merge_segments(&segments, config.merge_gap);
