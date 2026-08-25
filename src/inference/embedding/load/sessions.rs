@@ -239,7 +239,9 @@ impl LoadedSessions {
 
         // Pool of extra CPU fbank sessions for parallel per-chunk fbank
         // (single-session fbank measured at ~76% of CUDA E2E wall on many-core hosts).
-        let split_fbank_pool: Vec<Session> = if use_split_backend {
+        // CoreML modes have a native batched fbank path that the CPU pool would shadow,
+        // so the pool is skipped entirely there (also avoids loading unused CPU sessions).
+        let split_fbank_pool: Vec<Session> = if use_split_backend && !mode.is_coreml() {
             let pool_size = std::env::var("SPEAKRS_FBANK_POOL")
                 .ok()
                 .and_then(|v| v.parse::<usize>().ok())
