@@ -7,6 +7,27 @@ use crate::inference::coreml::{CachedInputShape, SharedCoreMlModel};
 use super::gpu::{PreparedChunk, TaggedPrepared};
 use super::{PipelineError, backend_error, chunk_audio_raw, write_speaker_mask_to_slice};
 
+/// Which fbank model `compute_chunk_fbank` should drive for a given chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FbankPath {
+    ThirtySecond,
+    TenSecond,
+    None,
+}
+
+/// The 30s model only accepts chunks up to 480_000 samples, but when it is absent a short
+/// chunk must still fall back to the 10s model — otherwise the caller ships an all-zero
+/// fbank downstream. Mirrors the fallback in `orchestrate.rs`.
+pub(super) fn select_fbank_path(chunk_len: usize, has_30s: bool, has_10s: bool) -> FbankPath {
+    if chunk_len <= 480_000 && has_30s {
+        FbankPath::ThirtySecond
+    } else if has_10s {
+        FbankPath::TenSecond
+    } else {
+        FbankPath::None
+    }
+}
+
 impl PrepScratch {
     pub(super) fn new(window_samples: usize) -> Self {
         Self {
@@ -37,20 +58,24 @@ impl ChunkPrep {
 
         let mut fbank = vec![0.0f32; self.largest_fbank_frames * 80];
 
-        if chunk_audio.len() <= 480_000 {
-            if let Some(fbank_model) = &self.fbank_30s {
-                scratch.fbank_30s_buf[..chunk_audio.len()].copy_from_slice(chunk_audio);
-                scratch.fbank_30s_buf[chunk_audio.len()..].fill(0.0);
-                let (data, out_shape) = fbank_model
-                    .predict_cached(&[(&scratch.fbank_30s_shape, &*scratch.fbank_30s_buf)])
-                    .map_err(|error| backend_error("chunk fbank 30s prediction failed", error))?;
-                let copy_frames = out_shape[1].min(self.largest_fbank_frames);
-                for row_idx in 0..copy_frames {
-                    let offset = row_idx * 80;
-                    fbank[offset..offset + 80].copy_from_slice(&data[offset..offset + 80]);
-                }
+        let path = select_fbank_path(
+            chunk_audio.len(),
+            self.fbank_30s.is_some(),
+            self.fbank_10s.is_some(),
+        );
+
+        if let (FbankPath::ThirtySecond, Some(fbank_model)) = (path, &self.fbank_30s) {
+            scratch.fbank_30s_buf[..chunk_audio.len()].copy_from_slice(chunk_audio);
+            scratch.fbank_30s_buf[chunk_audio.len()..].fill(0.0);
+            let (data, out_shape) = fbank_model
+                .predict_cached(&[(&scratch.fbank_30s_shape, &*scratch.fbank_30s_buf)])
+                .map_err(|error| backend_error("chunk fbank 30s prediction failed", error))?;
+            let copy_frames = out_shape[1].min(self.largest_fbank_frames);
+            for row_idx in 0..copy_frames {
+                let offset = row_idx * 80;
+                fbank[offset..offset + 80].copy_from_slice(&data[offset..offset + 80]);
             }
-        } else if let Some(fbank_model) = &self.fbank_10s {
+        } else if let (FbankPath::TenSecond, Some(fbank_model)) = (path, &self.fbank_10s) {
             let mut fbank_offset = 0usize;
             let mut audio_offset = 0usize;
             while fbank_offset < self.largest_fbank_frames && audio_offset < chunk_audio.len() {
@@ -249,4 +274,40 @@ pub(super) struct TaggedDecoded {
     pub(super) file_idx: usize,
     pub(super) local_start: usize,
     pub(super) decoded_chunk: Vec<ndarray::Array2<f32>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FbankPath, select_fbank_path};
+
+    #[test]
+    fn short_chunk_uses_30s_model_when_available() {
+        assert_eq!(
+            select_fbank_path(240_000, true, true),
+            FbankPath::ThirtySecond
+        );
+        assert_eq!(
+            select_fbank_path(480_000, true, true),
+            FbankPath::ThirtySecond
+        );
+    }
+
+    #[test]
+    fn short_chunk_falls_back_to_10s_when_30s_missing() {
+        // Regression: this previously produced an all-zero fbank instead of falling back.
+        assert_eq!(select_fbank_path(240_000, false, true), FbankPath::TenSecond);
+        assert_eq!(select_fbank_path(480_000, false, true), FbankPath::TenSecond);
+    }
+
+    #[test]
+    fn long_chunk_uses_10s_model() {
+        assert_eq!(select_fbank_path(960_000, true, true), FbankPath::TenSecond);
+        assert_eq!(select_fbank_path(960_000, false, true), FbankPath::TenSecond);
+    }
+
+    #[test]
+    fn no_models_available_yields_no_path() {
+        assert_eq!(select_fbank_path(240_000, false, false), FbankPath::None);
+        assert_eq!(select_fbank_path(960_000, false, false), FbankPath::None);
+    }
 }
