@@ -45,6 +45,10 @@ pub fn cluster(embeddings: &ArrayView2<f32>, config: AhcConfig) -> Vec<usize> {
 }
 
 fn condensed_euclidean(embeddings: &Array2<f32>) -> Vec<f32> {
+    condensed_euclidean_with_workers(embeddings, pdist_worker_count())
+}
+
+fn condensed_euclidean_with_workers(embeddings: &Array2<f32>, workers: usize) -> Vec<f32> {
     // diar-native patch: blocked Gram-matrix formulation with scoped threads.
     // The original per-pair scalar loop cost 64.5 s at N=21k; dist^2 = |a|^2 + |b|^2 - 2ab
     // via matmul blocks is ~20x faster and each block writes a disjoint contiguous
@@ -83,27 +87,58 @@ fn condensed_euclidean(embeddings: &Array2<f32>) -> Vec<f32> {
         }
     }
 
+    // Bounded worker pool: one thread per block would scale with meeting length
+    // (n=21k => 21 threads, each driving its own multi-threaded BLAS `dot`), which
+    // oversubscribes small/shared hosts and keeps every block's Gram matrix alive at
+    // once. Workers pull blocks from a shared queue instead, so peak concurrency and
+    // peak scratch memory scale with core count, not with n.
+    let workers = workers.min(blocks.len()).max(1);
+    let queue = std::sync::Mutex::new(blocks);
     std::thread::scope(|scope| {
-        for (bi, bi_end, slice) in blocks {
+        for _ in 0..workers {
+            let queue = &queue;
             let emb = &embeddings;
             let norms = &sq_norms;
             scope.spawn(move || {
-                let a = emb.slice(ndarray::s![bi..bi_end, ..]);
-                let b = emb.slice(ndarray::s![bi.., ..]);
-                let gram = a.dot(&b.t()); // (bi_end-bi) x (observations-bi)
-                let mut offset = 0usize;
-                for (local, i) in (bi..bi_end).enumerate() {
-                    for j in (i + 1)..observations {
-                        let dot = gram[[local, j - bi]];
-                        let d2 = (norms[i] + norms[j] - 2.0 * dot).max(0.0);
-                        slice[offset] = d2.sqrt();
-                        offset += 1;
+                loop {
+                    let next = queue.lock().expect("pdist queue poisoned").pop();
+                    let Some((bi, bi_end, slice)) = next else {
+                        break;
+                    };
+                    let a = emb.slice(ndarray::s![bi..bi_end, ..]);
+                    let b = emb.slice(ndarray::s![bi.., ..]);
+                    let gram = a.dot(&b.t()); // (bi_end-bi) x (observations-bi)
+                    let mut offset = 0usize;
+                    for (local, i) in (bi..bi_end).enumerate() {
+                        for j in (i + 1)..observations {
+                            let dot = gram[[local, j - bi]];
+                            let d2 = (norms[i] + norms[j] - 2.0 * dot).max(0.0);
+                            slice[offset] = d2.sqrt();
+                            offset += 1;
+                        }
                     }
                 }
             });
         }
     });
     condensed
+}
+
+/// Number of concurrent workers used for the blocked pairwise-distance computation.
+///
+/// Defaults to `available_parallelism()` capped at 8 (each worker also drives a
+/// multi-threaded BLAS `dot`, so a higher cap oversubscribes rather than helps).
+/// Override with `SPEAKRS_AHC_THREADS`; values are clamped to at least 1.
+fn pdist_worker_count() -> usize {
+    std::env::var("SPEAKRS_AHC_THREADS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|c| c.get().min(8))
+                .unwrap_or(1)
+        })
 }
 
 fn flat_clusters(observations: usize, steps: &[Step<f32>], threshold: f32) -> Vec<usize> {
@@ -219,6 +254,37 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures")
             .join(name)
+    }
+
+    #[test]
+    fn condensed_euclidean_is_bit_identical_across_worker_counts() {
+        // 2600 rows => 3 blocks at BLOCK=1024, so worker counts below/at/above the
+        // block count all get exercised.
+        let rows = 2600;
+        let cols = 16;
+        let data: Vec<f32> = (0..rows * cols)
+            .map(|i| ((i * 37 % 101) as f32 / 101.0) - 0.5)
+            .collect();
+        let embeddings = Array2::from_shape_vec((rows, cols), data).unwrap();
+
+        let reference = condensed_euclidean_with_workers(&embeddings, 1);
+        for workers in [2, 3, 8, 64] {
+            let got = condensed_euclidean_with_workers(&embeddings, workers);
+            assert_eq!(got.len(), reference.len());
+            assert!(
+                got.iter().zip(reference.iter()).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "worker count {workers} changed pdist output"
+            );
+        }
+    }
+
+    #[test]
+    fn pdist_worker_count_is_bounded() {
+        let workers = pdist_worker_count();
+        assert!(workers >= 1);
+        if std::env::var_os("SPEAKRS_AHC_THREADS").is_none() {
+            assert!(workers <= 8, "default worker count should stay bounded");
+        }
     }
 
     #[test]
