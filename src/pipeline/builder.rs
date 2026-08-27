@@ -9,7 +9,7 @@ use crate::powerset::PowersetMapping;
 
 use super::OwnedDiarizationPipeline;
 use super::config::{PipelineConfig, RuntimeConfig, segmentation_step_seconds};
-use super::queued::{QueueReceiver, QueueSender};
+use super::queued::{QueueConfig, QueueReceiver, QueueSender};
 use super::types::PipelineError;
 
 /// Builder for constructing diarization pipelines
@@ -38,6 +38,7 @@ pub struct PipelineBuilder {
     mode: ExecutionMode,
     runtime: Option<RuntimeConfig>,
     pipeline: Option<PipelineConfig>,
+    queue: Option<QueueConfig>,
 }
 
 impl PipelineBuilder {
@@ -48,6 +49,7 @@ impl PipelineBuilder {
             mode,
             runtime: None,
             pipeline: None,
+            queue: None,
         }
     }
 
@@ -58,6 +60,7 @@ impl PipelineBuilder {
             mode,
             runtime: None,
             pipeline: None,
+            queue: None,
         }
     }
 
@@ -79,6 +82,14 @@ impl PipelineBuilder {
     /// Override pipeline config (thresholds, clustering)
     pub fn pipeline(mut self, config: PipelineConfig) -> Self {
         self.pipeline = Some(config);
+        self
+    }
+
+    /// Override queue construction config
+    ///
+    /// Controls request-channel capacity. The local queue is not durable
+    pub fn queue(mut self, config: QueueConfig) -> Self {
+        self.queue = Some(config);
         self
     }
 
@@ -112,7 +123,9 @@ impl PipelineBuilder {
 
     /// Build and immediately convert to a background-processing queue
     pub fn build_queued(self) -> Result<(QueueSender, QueueReceiver), PipelineError> {
+        let queue = self.queue.unwrap_or_default();
+        queue.validate()?;
         let pipeline = self.build()?;
-        Ok(pipeline.into_queued()?)
+        Ok(pipeline.into_queued_with_queue_config(queue)?)
     }
 }

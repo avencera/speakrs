@@ -2,6 +2,10 @@
 
 ## [unreleased]
 
+- Add `QueueConfig` so queue channel capacity is configurable at construction (default 64; capacity 0 is rejected)
+- Add non-blocking `QueueSender::try_push`, which returns typed `QueueError::Full` with the rejected request when the queue is at capacity
+- Make `QueueSender::push` a non-blocking alias of `try_push` so admission uses one Full-aware submission API
+
 ## [0.5.0] - 2026-07-07
 
 - Clean up the public API for 0.5.0: expose tuning config types, make selected enums non-exhaustive, rename custom segment conversion to `to_segments_with`, and make `Segment` display human-readable text instead of RTTM.

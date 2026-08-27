@@ -62,8 +62,8 @@
 //!
 //! ## Background queue
 //!
-//! [`QueueSender`] and [`QueueReceiver`] run a background worker. Push audio
-//! from any thread and read results as they finish:
+//! [`QueueSender`] and [`QueueReceiver`] run a background worker. Use
+//! [`QueueSender::try_push`] to submit audio without blocking:
 //!
 //! ```no_run
 //! use speakrs::{ExecutionMode, OwnedDiarizationPipeline, QueuedDiarizationRequest};
@@ -74,7 +74,7 @@
 //!
 //! std::thread::spawn(move || {
 //!     for (file_id, audio) in receive_files() {
-//!         tx.push(QueuedDiarizationRequest::new(file_id, audio)).unwrap();
+//!         tx.try_push(QueuedDiarizationRequest::new(file_id, audio)).unwrap();
 //!     }
 //! });
 //!
@@ -233,6 +233,7 @@
 //!
 //! - [`OwnedDiarizationPipeline`]: pipeline entry point
 //! - [`QueueSender`] and [`QueueReceiver`]: background worker interface
+//! - [`QueueConfig`]: in-process queue capacity
 //! - [`DiarizationResult`]: frame-level activations, segments, clusters, embeddings, RTTM
 //! - [`PipelineConfig`] and [`RuntimeConfig`]: tuning knobs
 //! - [`ModelManager`]: model download when `online` is enabled
@@ -267,8 +268,8 @@ pub use models::ModelBundle;
 pub use models::ModelManager;
 pub use pipeline::{
     AhcConfig, BatchInput, BinarizeConfig, DiarizationPipeline, DiarizationResult,
-    OwnedDiarizationPipeline, PipelineBuilder, PipelineConfig, PipelineError, QueueError,
-    QueueReceiver, QueueReceiverIter, QueueSender, QueuedDiarizationJobId,
+    OwnedDiarizationPipeline, PipelineBuilder, PipelineConfig, PipelineError, QueueConfig,
+    QueueError, QueueReceiver, QueueReceiverIter, QueueSender, QueuedDiarizationJobId,
     QueuedDiarizationRequest, QueuedDiarizationResult, RuntimeConfig, VbxConfig,
 };
 pub use segment::Segment;

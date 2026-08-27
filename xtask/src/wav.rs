@@ -71,8 +71,8 @@ pub fn load_wav_samples(path: &str) -> Result<(Vec<f32>, u32)> {
                 while remaining > 0 {
                     let to_read = remaining.min(buffer.len());
                     reader.read_exact(&mut buffer[..to_read])?;
-                    for bytes in buffer[..to_read].chunks_exact(2) {
-                        samples.push(i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / 32768.0);
+                    for &bytes in buffer[..to_read].as_chunks::<2>().0 {
+                        samples.push(i16::from_le_bytes(bytes) as f32 / 32768.0);
                     }
                     remaining -= to_read;
                 }

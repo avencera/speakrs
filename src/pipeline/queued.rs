@@ -1,9 +1,10 @@
 use std::any::Any;
+use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, TrySendError};
 
 use super::{
     BatchInput, DiarizationResult, OwnedDiarizationPipeline, PipelineConfig, PipelineError,
@@ -17,9 +18,54 @@ const _: () = {
     }
 };
 
-/// Monotonically increasing job identifier assigned by the queue on push
+/// Monotonically increasing job identifier assigned by the in-process queue
+///
+/// IDs are local to one sender lineage and are not durable across process restarts
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct QueuedDiarizationJobId(u64);
+
+/// Construction options for a background diarization queue
+///
+/// The local queue is in-process only. Capacity bounds the request channel and
+/// is not durable across process restarts
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueConfig {
+    /// Maximum number of in-flight requests the worker channel will hold
+    pub capacity: usize,
+}
+
+impl QueueConfig {
+    /// Default request-channel capacity used by [`Self::default`]
+    pub const DEFAULT_CAPACITY: usize = 64;
+
+    /// Create a queue config with the given request-channel capacity
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueueError::InvalidCapacity`] when `capacity` is 0
+    pub fn new(capacity: usize) -> Result<Self, QueueError> {
+        let config = Self { capacity };
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Return [`QueueError::InvalidCapacity`] when capacity is 0
+    pub(crate) fn validate(self) -> Result<(), QueueError> {
+        if self.capacity == 0 {
+            Err(QueueError::InvalidCapacity)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Default for QueueConfig {
+    fn default() -> Self {
+        Self {
+            capacity: Self::DEFAULT_CAPACITY,
+        }
+    }
+}
 
 /// A diarization request that owns its audio buffer
 pub struct QueuedDiarizationRequest {
@@ -35,13 +81,27 @@ impl QueuedDiarizationRequest {
             audio,
         }
     }
+
+    /// File identifier carried with this request
+    pub fn file_id(&self) -> &str {
+        &self.file_id
+    }
+}
+
+impl fmt::Debug for QueuedDiarizationRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QueuedDiarizationRequest")
+            .field("file_id", &self.file_id)
+            .field("samples", &self.audio.len())
+            .finish()
+    }
 }
 
 /// Result from a queued diarization job
 ///
 /// Per-job failures are surfaced here without stopping the worker
 pub struct QueuedDiarizationResult {
-    /// The job identifier returned by [`QueueSender::push`]
+    /// The job identifier returned by [`QueueSender::try_push`]
     pub job_id: QueuedDiarizationJobId,
     /// The file identifier from the original request
     pub file_id: String,
@@ -59,6 +119,14 @@ pub enum QueueError {
     /// The background worker has shut down or was never started
     #[error("queue worker has shut down")]
     WorkerGone,
+    /// The request channel is at capacity
+    ///
+    /// Contains the rejected request so the caller can retry
+    #[error("queue is full")]
+    Full(QueuedDiarizationRequest),
+    /// Queue capacity must be greater than zero
+    #[error("queue capacity must be greater than zero")]
+    InvalidCapacity,
     /// The background worker thread could not be started
     #[error("failed to start queue worker: {0}")]
     WorkerStart(#[source] std::io::Error),
@@ -88,6 +156,9 @@ struct WorkerRequest {
 /// `run_batch_with_config`, preserving cross-file batch optimizations within
 /// each worker pass
 ///
+/// Admission should use [`Self::try_push`], which never blocks. [`Self::push`]
+/// is a non-blocking alias kept for existing callers
+///
 /// ```no_run
 /// # use speakrs::pipeline::*;
 /// # use speakrs::inference::ExecutionMode;
@@ -95,8 +166,8 @@ struct WorkerRequest {
 ///
 /// let audio1: Vec<f32> = vec![]; // 16 kHz mono samples
 /// let audio2: Vec<f32> = vec![];
-/// tx.push(QueuedDiarizationRequest::new("file1", audio1))?;
-/// tx.push(QueuedDiarizationRequest::new("file2", audio2))?;
+/// tx.try_push(QueuedDiarizationRequest::new("file1", audio1))?;
+/// tx.try_push(QueuedDiarizationRequest::new("file2", audio2))?;
 /// drop(tx);
 ///
 /// for result in rx {
@@ -110,15 +181,21 @@ struct WorkerRequest {
 pub struct QueueSender {
     request_tx: Sender<WorkerRequest>,
     next_job_id: Arc<AtomicU64>,
+    capacity: usize,
 }
 
 impl QueueSender {
-    pub(super) fn new(
+    /// Start a background worker with the given pipeline and queue config
+    pub(crate) fn new(
         pipeline: OwnedDiarizationPipeline,
         config: PipelineConfig,
+        queue: QueueConfig,
     ) -> Result<(Self, QueueReceiver), QueueError> {
-        let (request_tx, request_rx) = crossbeam_channel::bounded::<WorkerRequest>(64);
-        let (result_tx, result_rx) = crossbeam_channel::bounded::<QueuedDiarizationResult>(64);
+        queue.validate()?;
+
+        let (request_tx, request_rx) = crossbeam_channel::bounded::<WorkerRequest>(queue.capacity);
+        let (result_tx, result_rx) =
+            crossbeam_channel::bounded::<QueuedDiarizationResult>(queue.capacity);
 
         let worker = std::thread::Builder::new()
             .name("speakrs-queue-worker".into())
@@ -129,6 +206,7 @@ impl QueueSender {
             Self {
                 request_tx,
                 next_job_id: Arc::new(AtomicU64::new(0)),
+                capacity: queue.capacity,
             },
             QueueReceiver {
                 result_rx,
@@ -138,22 +216,47 @@ impl QueueSender {
         ))
     }
 
+    /// Maximum number of requests the worker channel will hold
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     /// Submit a single file for background diarization
+    ///
+    /// This is a non-blocking alias of [`Self::try_push`]. It returns
+    /// [`QueueError::Full`] when the request channel is at capacity instead of
+    /// waiting for a slot
     pub fn push(
+        &self,
+        request: QueuedDiarizationRequest,
+    ) -> Result<QueuedDiarizationJobId, QueueError> {
+        self.try_push(request)
+    }
+
+    /// Submit a single file for background diarization without blocking
+    ///
+    /// Returns [`QueueError::Full`] immediately when the request channel is at
+    /// capacity. The rejected request is returned so the caller can retry
+    pub fn try_push(
         &self,
         request: QueuedDiarizationRequest,
     ) -> Result<QueuedDiarizationJobId, QueueError> {
         let job_id = QueuedDiarizationJobId(self.next_job_id.fetch_add(1, Ordering::Relaxed));
 
-        self.request_tx
-            .send(WorkerRequest {
-                job_id,
-                file_id: request.file_id,
-                audio: request.audio,
-            })
-            .map_err(|_| QueueError::WorkerGone)?;
+        match self.request_tx.try_send(WorkerRequest {
+            job_id,
+            file_id: request.file_id,
+            audio: request.audio,
+        }) {
+            Ok(()) => Ok(job_id),
 
-        Ok(job_id)
+            Err(TrySendError::Full(rejected)) => Err(QueueError::Full(QueuedDiarizationRequest {
+                file_id: rejected.file_id,
+                audio: rejected.audio,
+            })),
+
+            Err(TrySendError::Disconnected(_)) => Err(QueueError::WorkerGone),
+        }
     }
 }
 
@@ -359,6 +462,102 @@ fn process_batch(
 mod tests {
     use super::*;
 
+    impl QueueSender {
+        fn from_request_tx(request_tx: Sender<WorkerRequest>) -> Self {
+            let capacity = request_tx
+                .capacity()
+                .expect("test senders use a bounded channel");
+
+            Self {
+                request_tx,
+                next_job_id: Arc::new(AtomicU64::new(0)),
+                capacity,
+            }
+        }
+    }
+
+    #[test]
+    fn queue_config_rejects_zero_capacity() {
+        assert!(matches!(
+            QueueConfig::new(0),
+            Err(QueueError::InvalidCapacity)
+        ));
+        assert!(matches!(
+            QueueConfig { capacity: 0 }.validate(),
+            Err(QueueError::InvalidCapacity)
+        ));
+    }
+
+    #[test]
+    fn queue_config_default_capacity_is_64() {
+        assert_eq!(
+            QueueConfig::default().capacity,
+            QueueConfig::DEFAULT_CAPACITY
+        );
+        assert_eq!(QueueConfig::DEFAULT_CAPACITY, 64);
+        assert_eq!(QueueConfig::new(2).unwrap().capacity, 2);
+    }
+
+    #[test]
+    fn sender_reports_configured_capacity() {
+        let (request_tx, _request_rx) = crossbeam_channel::bounded::<WorkerRequest>(2);
+        let sender = QueueSender::from_request_tx(request_tx);
+        assert_eq!(sender.capacity(), 2);
+    }
+
+    #[test]
+    fn try_push_returns_full_when_channel_has_no_consumer() {
+        let (request_tx, _request_rx) = crossbeam_channel::bounded::<WorkerRequest>(1);
+        let sender = QueueSender::from_request_tx(request_tx);
+
+        sender
+            .try_push(QueuedDiarizationRequest::new("first", Vec::new()))
+            .unwrap();
+
+        let err = sender
+            .try_push(QueuedDiarizationRequest::new("second", vec![1.0]))
+            .unwrap_err();
+
+        match err {
+            QueueError::Full(request) => assert_eq!(request.file_id(), "second"),
+            other => panic!("expected Full, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_push_succeeds_after_a_slot_is_freed() {
+        let (request_tx, request_rx) = crossbeam_channel::bounded::<WorkerRequest>(1);
+        let sender = QueueSender::from_request_tx(request_tx);
+
+        sender
+            .try_push(QueuedDiarizationRequest::new("first", Vec::new()))
+            .unwrap();
+
+        let rejected = match sender.try_push(QueuedDiarizationRequest::new("second", vec![1.0])) {
+            Err(QueueError::Full(request)) => request,
+            other => panic!("expected Full, got {other:?}"),
+        };
+
+        assert_eq!(rejected.file_id(), "second");
+        let _drained = request_rx.recv().unwrap();
+        sender.try_push(rejected).unwrap();
+    }
+
+    #[test]
+    fn push_is_non_blocking_and_returns_full() {
+        let (request_tx, _request_rx) = crossbeam_channel::bounded::<WorkerRequest>(1);
+        let sender = QueueSender::from_request_tx(request_tx);
+
+        sender
+            .push(QueuedDiarizationRequest::new("first", Vec::new()))
+            .unwrap();
+
+        assert!(matches!(
+            sender.push(QueuedDiarizationRequest::new("second", Vec::new())),
+            Err(QueueError::Full(_))
+        ));
+    }
+
     #[test]
     fn receiver_reports_clean_close_after_worker_exit() {
         let (result_tx, result_rx) = crossbeam_channel::bounded(1);
@@ -419,10 +618,7 @@ mod tests {
         let (request_tx, request_rx) = crossbeam_channel::bounded::<WorkerRequest>(1);
         drop(request_rx);
 
-        let sender = QueueSender {
-            request_tx,
-            next_job_id: Arc::new(AtomicU64::new(0)),
-        };
+        let sender = QueueSender::from_request_tx(request_tx);
 
         assert!(matches!(
             sender.push(QueuedDiarizationRequest::new("file", Vec::new())),

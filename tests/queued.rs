@@ -3,7 +3,7 @@ use std::thread;
 
 use speakrs::inference::ExecutionMode;
 use speakrs::pipeline::{
-    OwnedDiarizationPipeline, PipelineBuilder, PipelineConfig, QueueError,
+    OwnedDiarizationPipeline, PipelineBuilder, PipelineConfig, QueueConfig, QueueError,
     QueuedDiarizationRequest, ReconstructMethod,
 };
 
@@ -45,9 +45,9 @@ fn queued_basic_round_trip() {
         return;
     };
 
-    tx.push(QueuedDiarizationRequest::new("file_a", samples.clone()))
+    tx.try_push(QueuedDiarizationRequest::new("file_a", samples.clone()))
         .unwrap();
-    tx.push(QueuedDiarizationRequest::new("file_b", samples))
+    tx.try_push(QueuedDiarizationRequest::new("file_b", samples))
         .unwrap();
     drop(tx);
 
@@ -182,6 +182,56 @@ fn queued_handles_short_and_normal_audio() {
 
     assert!(results["normal"].result.is_ok());
     assert!(results.contains_key("short"));
+}
+
+#[test]
+fn queued_isolates_per_file_failures() {
+    let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
+    let Some((tx, rx)) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
+        return;
+    };
+
+    tx.try_push(QueuedDiarizationRequest::new("bad", Vec::new()))
+        .unwrap();
+    tx.try_push(QueuedDiarizationRequest::new("good", samples))
+        .unwrap();
+    drop(tx);
+
+    let mut results = HashMap::new();
+    for result in rx {
+        let result = result.unwrap();
+        results.insert(result.file_id.clone(), result);
+    }
+
+    assert!(results.contains_key("bad"));
+    assert!(results.contains_key("good"));
+    assert!(results["good"].result.is_ok());
+    assert!(!results["good"].result.as_ref().unwrap().segments.is_empty());
+}
+
+#[test]
+fn queued_rejects_zero_capacity() {
+    let Some(pipeline) = make_pipeline() else {
+        return;
+    };
+
+    assert!(matches!(
+        pipeline.into_queued_with_queue_config(QueueConfig { capacity: 0 }),
+        Err(QueueError::InvalidCapacity)
+    ));
+}
+
+#[test]
+fn queued_exposes_configured_capacity() {
+    let Some((tx, _rx)) = make_pipeline().map(|pipeline| {
+        pipeline
+            .into_queued_with_queue_config(QueueConfig::new(2).unwrap())
+            .unwrap()
+    }) else {
+        return;
+    };
+
+    assert_eq!(tx.capacity(), 2);
 }
 
 #[test]

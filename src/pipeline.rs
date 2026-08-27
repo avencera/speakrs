@@ -39,7 +39,7 @@ pub use builder::PipelineBuilder;
 
 mod queued;
 pub use queued::{
-    QueueError, QueueReceiver, QueueReceiverIter, QueueSender, QueuedDiarizationJobId,
+    QueueConfig, QueueError, QueueReceiver, QueueReceiverIter, QueueSender, QueuedDiarizationJobId,
     QueuedDiarizationRequest, QueuedDiarizationResult,
 };
 
@@ -189,7 +189,25 @@ impl OwnedDiarizationPipeline {
         self,
         config: PipelineConfig,
     ) -> Result<(QueueSender, QueueReceiver), QueueError> {
-        QueueSender::new(self, config)
+        QueueSender::new(self, config, QueueConfig::default())
+    }
+
+    /// Convert into a background-processing queue with custom queue capacity
+    pub fn into_queued_with_queue_config(
+        self,
+        queue: QueueConfig,
+    ) -> Result<(QueueSender, QueueReceiver), QueueError> {
+        let config = self.default_config.clone();
+        self.into_queued_with_configs(config, queue)
+    }
+
+    /// Convert into a background-processing queue with custom pipeline and queue config
+    pub fn into_queued_with_configs(
+        self,
+        config: PipelineConfig,
+        queue: QueueConfig,
+    ) -> Result<(QueueSender, QueueReceiver), QueueError> {
+        QueueSender::new(self, config, queue)
     }
 }
 
