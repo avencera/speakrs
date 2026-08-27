@@ -406,19 +406,31 @@ fn worker_loop(
     result_tx: Sender<QueuedDiarizationResult>,
 ) {
     while let Ok(first) = request_rx.recv() {
-        // drain all currently queued requests into one batch
-        let mut batch = vec![first];
-        while let Ok(req) = request_rx.try_recv() {
-            batch.push(req);
-        }
+        let batch = drain_batch(first, &request_rx);
 
         let results = process_batch(&mut pipeline, &batch, &config);
-        for result in results {
-            if result_tx.send(result).is_err() {
-                return;
-            }
+        if !send_results(&result_tx, results) {
+            return;
         }
     }
+}
+
+fn drain_batch(first: WorkerRequest, request_rx: &Receiver<WorkerRequest>) -> Vec<WorkerRequest> {
+    // drain all currently queued requests into one batch
+    let mut batch = vec![first];
+    while let Ok(req) = request_rx.try_recv() {
+        batch.push(req);
+    }
+    batch
+}
+
+fn send_results(
+    result_tx: &Sender<QueuedDiarizationResult>,
+    results: Vec<QueuedDiarizationResult>,
+) -> bool {
+    results
+        .into_iter()
+        .all(|result| result_tx.send(result).is_ok())
 }
 
 fn process_batch(
@@ -434,27 +446,42 @@ fn process_batch(
         })
         .collect();
 
-    match pipeline.run_batch_with_config(&inputs, config) {
-        Ok(results) => batch
-            .iter()
-            .zip(results)
-            .map(|(req, result)| QueuedDiarizationResult {
-                job_id: req.job_id,
-                file_id: req.file_id.clone(),
-                result: Ok(result),
-            })
-            .collect(),
-        Err(_) => {
-            // the batch failed, so retry each file individually to isolate failures
-            batch
-                .iter()
-                .map(|req| QueuedDiarizationResult {
-                    job_id: req.job_id,
-                    file_id: req.file_id.clone(),
-                    result: pipeline.run_with_config(&req.audio, &req.file_id, config),
-                })
-                .collect()
-        }
+    let Ok(results) = pipeline.run_batch_with_config(&inputs, config) else {
+        return process_individually(pipeline, batch, config);
+    };
+
+    batch
+        .iter()
+        .zip(results)
+        .map(|(req, result)| queued_result(req, Ok(result)))
+        .collect()
+}
+
+fn process_individually(
+    pipeline: &mut OwnedDiarizationPipeline,
+    batch: &[WorkerRequest],
+    config: &PipelineConfig,
+) -> Vec<QueuedDiarizationResult> {
+    // the batch failed, so retry each file individually to isolate failures
+    batch
+        .iter()
+        .map(|req| {
+            queued_result(
+                req,
+                pipeline.run_with_config(&req.audio, &req.file_id, config),
+            )
+        })
+        .collect()
+}
+
+fn queued_result(
+    request: &WorkerRequest,
+    result: Result<DiarizationResult, PipelineError>,
+) -> QueuedDiarizationResult {
+    QueuedDiarizationResult {
+        job_id: request.job_id,
+        file_id: request.file_id.clone(),
+        result,
     }
 }
 
