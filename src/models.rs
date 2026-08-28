@@ -2,6 +2,10 @@ use std::path::{Path, PathBuf};
 
 #[cfg(feature = "online")]
 use crate::inference::ExecutionMode;
+#[cfg(feature = "online")]
+use hf_hub::api::sync::{Api, ApiBuilder, ApiRepo};
+#[cfg(feature = "online")]
+use hf_hub::{Repo, RepoType};
 
 const SEGMENTATION_ONNX: &str = "segmentation-3.0.onnx";
 const EMBEDDING_ONNX: &str = "wespeaker-voxceleb-resnet34.onnx";
@@ -59,29 +63,73 @@ impl ModelBundle {
 
 #[cfg(feature = "online")]
 const HF_REPO: &str = "avencera/speakrs-models";
+#[cfg(feature = "online")]
+const HF_REVISION: &str = "5d24ffee75f13fb061fa6d10944a64e2dc1d5e6f";
+
+#[cfg(feature = "online")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ModelRepositoryId(&'static str);
+
+#[cfg(feature = "online")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ModelRevision(&'static str);
+
+#[cfg(feature = "online")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PinnedModelRepository {
+    id: ModelRepositoryId,
+    revision: ModelRevision,
+}
+
+#[cfg(feature = "online")]
+impl PinnedModelRepository {
+    const fn speakrs_models() -> Self {
+        Self {
+            id: ModelRepositoryId(HF_REPO),
+            revision: ModelRevision(HF_REVISION),
+        }
+    }
+
+    fn into_hf_repo(self) -> Repo {
+        Repo::with_revision(
+            self.id.0.to_owned(),
+            RepoType::Model,
+            self.revision.0.to_owned(),
+        )
+    }
+
+    fn bind(self, api: &Api) -> ApiRepo {
+        api.repo(self.into_hf_repo())
+    }
+}
+
+#[cfg(feature = "online")]
+const PINNED_MODEL_REPOSITORY: PinnedModelRepository = PinnedModelRepository::speakrs_models();
 
 /// Manages downloading and caching speakrs ONNX models from HuggingFace
 #[cfg(feature = "online")]
 #[cfg_attr(docsrs, doc(cfg(feature = "online")))]
 pub struct ModelManager {
-    repo: hf_hub::api::sync::ApiRepo,
+    repo: ApiRepo,
 }
 
 #[cfg(feature = "online")]
 impl ModelManager {
     /// Create a manager using the default HuggingFace cache directory
     pub fn new() -> Result<Self, hf_hub::api::sync::ApiError> {
-        let api = hf_hub::api::sync::Api::new()?;
-        let repo = api.model(HF_REPO.to_string());
-        Ok(Self { repo })
+        let api = Api::new()?;
+        Ok(Self::from_api(api))
     }
 
     /// Create a manager with a custom cache directory
     pub fn with_cache_dir(cache_dir: PathBuf) -> Result<Self, hf_hub::api::sync::ApiError> {
-        let api =
-            hf_hub::api::sync::ApiBuilder::from_cache(hf_hub::Cache::new(cache_dir)).build()?;
-        let repo = api.model(HF_REPO.to_string());
-        Ok(Self { repo })
+        let api = ApiBuilder::from_cache(hf_hub::Cache::new(cache_dir)).build()?;
+        Ok(Self::from_api(api))
+    }
+
+    fn from_api(api: Api) -> Self {
+        let repo = PINNED_MODEL_REPOSITORY.bind(&api);
+        Self { repo }
     }
 
     /// Download a single file, returns path to cached copy
@@ -237,6 +285,33 @@ fn required_files(mode: ExecutionMode) -> Vec<String> {
 #[cfg(all(test, feature = "online"))]
 mod tests {
     use super::*;
+
+    const MODEL_FILENAME: &str = "segmentation-3.0.onnx";
+    const EXPECTED_MODEL_URL: &str = "https://huggingface.co/avencera/speakrs-models/resolve/5d24ffee75f13fb061fa6d10944a64e2dc1d5e6f/segmentation-3.0.onnx";
+
+    #[test]
+    fn pinned_repository_selects_model_card_revision() {
+        let repo = PINNED_MODEL_REPOSITORY.into_hf_repo();
+        assert_eq!(repo.folder_name(), "models--avencera--speakrs-models");
+        assert_eq!(repo.revision(), HF_REVISION);
+
+        let api = ApiBuilder::new().with_progress(false).build().unwrap();
+        let api_repo = api.repo(repo);
+        assert_eq!(api_repo.url(MODEL_FILENAME), EXPECTED_MODEL_URL);
+    }
+
+    #[test]
+    fn default_and_custom_cache_managers_share_pinned_repository() {
+        let default_manager = ModelManager::new().unwrap();
+        let custom_cache = std::env::temp_dir().join(format!(
+            "speakrs-pinned-model-manager-{}",
+            std::process::id()
+        ));
+        let custom_manager = ModelManager::with_cache_dir(custom_cache).unwrap();
+
+        assert_eq!(default_manager.repo.url(MODEL_FILENAME), EXPECTED_MODEL_URL);
+        assert_eq!(custom_manager.repo.url(MODEL_FILENAME), EXPECTED_MODEL_URL);
+    }
 
     #[test]
     fn coreml_required_files_include_chunk_fast_path_assets() {
