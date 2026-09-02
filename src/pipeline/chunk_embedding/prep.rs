@@ -5,7 +5,11 @@ use crossbeam_channel::{Receiver, Sender};
 use crate::inference::coreml::{CachedInputShape, SharedCoreMlModel};
 
 use super::gpu::{PreparedChunk, TaggedPrepared};
-use super::{PipelineError, backend_error, chunk_audio_raw, write_speaker_mask_to_slice};
+use super::{
+    FBANK_SEGMENT_SAMPLES, PipelineError, backend_error, chunk_audio_raw,
+    write_speaker_mask_to_slice,
+};
+use crate::inference::embedding::FBANK_FRAMES;
 
 impl PrepScratch {
     pub(super) fn new(window_samples: usize) -> Self {
@@ -70,8 +74,8 @@ impl ChunkPrep {
                     let dst = (fbank_offset + row_idx) * 80;
                     fbank[dst..dst + 80].copy_from_slice(&data[src..src + 80]);
                 }
-                fbank_offset += 998;
-                audio_offset += self.window_samples;
+                fbank_offset += FBANK_FRAMES;
+                audio_offset += FBANK_SEGMENT_SAMPLES;
             }
         }
 

@@ -6,9 +6,11 @@ use super::collect::batch_embeddings;
 use super::gpu::{ChunkEmbeddingResources, GpuWorker, chunk_embedding_resources};
 use super::prep::{ChunkPrep, DecodedChunk, PrepScratch, PrepWorker};
 use super::{
-    ChunkParams, EmbeddingModel, EmbeddingSummary, PipelineError, SegmentationModel,
-    chunk_audio_raw, chunk_session_for_windows, join_scoped_result, write_speaker_mask_to_slice,
+    ChunkParams, EmbeddingModel, EmbeddingSummary, FBANK_SEGMENT_SAMPLES, PipelineError,
+    SegmentationModel, chunk_audio_raw, chunk_session_for_windows, join_scoped_result,
+    write_speaker_mask_to_slice,
 };
+use crate::inference::embedding::FBANK_FRAMES;
 
 type ChunkEmbeddingSetup = (usize, usize, bool, Option<ChunkEmbeddingResources>);
 
@@ -264,8 +266,8 @@ pub(super) fn run_sequential_chunks(
                     })?;
                     fbank[dst..dst + 80].copy_from_slice(row);
                 }
-                fbank_offset += 998;
-                audio_offset += params.window_samples;
+                fbank_offset += FBANK_FRAMES;
+                audio_offset += FBANK_SEGMENT_SAMPLES;
             }
         }
 
