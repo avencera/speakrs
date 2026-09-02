@@ -272,7 +272,9 @@ mod tests {
             let got = condensed_euclidean_with_workers(&embeddings, workers);
             assert_eq!(got.len(), reference.len());
             assert!(
-                got.iter().zip(reference.iter()).all(|(a, b)| a.to_bits() == b.to_bits()),
+                got.iter()
+                    .zip(reference.iter())
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
                 "worker count {workers} changed pdist output"
             );
         }
