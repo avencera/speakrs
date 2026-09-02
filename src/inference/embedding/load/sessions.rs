@@ -55,6 +55,20 @@ pub(super) struct LoadedSessions {
     coreml: LoadedCoreMlState,
 }
 
+/// Fallback sizing for the CPU fbank pool when `RuntimeConfig::fbank_pool` is `None`:
+/// the `SPEAKRS_FBANK_POOL` override if it parses, else one session per four cores
+/// (clamped to `1..=8`). Callers that set `fbank_pool` explicitly never reach the environment.
+fn auto_fbank_pool_size() -> usize {
+    std::env::var("SPEAKRS_FBANK_POOL")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|c| (c.get() / 4).clamp(1, 8))
+                .unwrap_or(1)
+        })
+}
+
 impl LoadedSessions {
     pub(super) fn load(
         model_path: &Path,
@@ -68,8 +82,6 @@ impl LoadedSessions {
         let split_primary_tail_batched_path = split_tail_model_path(model_path, PRIMARY_BATCH_SIZE);
         #[cfg(feature = "coreml")]
         let native_chunk_compute_units = config.chunk_emb_compute_units.to_ml_compute_units();
-        #[cfg(not(feature = "coreml"))]
-        let _ = config;
         let use_split_backend = EmbeddingModel::split_backend_available(model_path);
 
         #[cfg(feature = "coreml")]
@@ -242,14 +254,8 @@ impl LoadedSessions {
         // CoreML modes have a native batched fbank path that the CPU pool would shadow,
         // so the pool is skipped entirely there (also avoids loading unused CPU sessions).
         let split_fbank_pool: Vec<Session> = if use_split_backend && !mode.is_coreml() {
-            let pool_size = std::env::var("SPEAKRS_FBANK_POOL")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or_else(|| {
-                    std::thread::available_parallelism()
-                        .map(|c| (c.get() / 4).clamp(1, 8))
-                        .unwrap_or(1)
-                });
+            let pool_size = config.fbank_pool.unwrap_or_else(auto_fbank_pool_size);
+            tracing::debug!(fbank_pool = pool_size, "fbank session pool");
             (0..pool_size)
                 .map(|_| EmbeddingModel::build_fbank_session(&split_fbank_path, ExecutionMode::Cpu))
                 .collect::<Result<Vec<_>, _>>()?
