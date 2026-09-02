@@ -30,6 +30,90 @@ fn load_shared_or_warn(
     })
 }
 
+const CHUNK_WINDOW_FBANK_FRAMES: usize = 1000;
+const ONE_SECOND_FBANK_FRAMES: usize = 100;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChunkModelLayout {
+    Aligned { step_resnet_frames: usize },
+    OneSecondPhased,
+}
+
+impl ChunkModelLayout {
+    fn model_suffix(self) -> String {
+        match self {
+            Self::Aligned { step_resnet_frames } => format!("s{step_resnet_frames}"),
+            Self::OneSecondPhased => "p1s".to_owned(),
+        }
+    }
+
+    const fn fbank_frames(self, num_windows: usize) -> usize {
+        let window_steps = num_windows - 1;
+        match self {
+            Self::Aligned { step_resnet_frames } => {
+                window_steps * step_resnet_frames * 8 + CHUNK_WINDOW_FBANK_FRAMES
+            }
+            Self::OneSecondPhased => {
+                window_steps * ONE_SECOND_FBANK_FRAMES + CHUNK_WINDOW_FBANK_FRAMES
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ChunkSessionConfig {
+    layout: ChunkModelLayout,
+    num_windows: usize,
+}
+
+impl ChunkSessionConfig {
+    const fn aligned(num_windows: usize, step_resnet_frames: usize) -> Self {
+        Self {
+            layout: ChunkModelLayout::Aligned { step_resnet_frames },
+            num_windows,
+        }
+    }
+
+    const fn one_second_phased(num_windows: usize) -> Self {
+        Self {
+            layout: ChunkModelLayout::OneSecondPhased,
+            num_windows,
+        }
+    }
+
+    fn model_stem(self) -> String {
+        let suffix = self.layout.model_suffix();
+        let num_windows = self.num_windows;
+        format!("wespeaker-chunk-emb-{suffix}-w{num_windows}")
+    }
+
+    const fn fbank_frames(self) -> usize {
+        self.layout.fbank_frames(self.num_windows)
+    }
+
+    const fn num_masks(self) -> usize {
+        self.num_windows * 3
+    }
+}
+
+const COREML_FAST_CHUNK_CONFIGS: &[ChunkSessionConfig] = &[
+    ChunkSessionConfig::aligned(11, 25),
+    ChunkSessionConfig::aligned(16, 25),
+    ChunkSessionConfig::aligned(21, 25),
+    ChunkSessionConfig::aligned(26, 25),
+    ChunkSessionConfig::aligned(36, 25),
+    ChunkSessionConfig::aligned(46, 25),
+    ChunkSessionConfig::aligned(56, 25),
+];
+
+const COREML_CHUNK_CONFIGS: &[ChunkSessionConfig] = &[
+    ChunkSessionConfig::one_second_phased(21),
+    ChunkSessionConfig::one_second_phased(36),
+    ChunkSessionConfig::one_second_phased(51),
+    ChunkSessionConfig::one_second_phased(81),
+    ChunkSessionConfig::one_second_phased(111),
+];
+
 impl EmbeddingModel {
     fn require_native_asset(
         path: std::path::PathBuf,
@@ -72,8 +156,8 @@ impl EmbeddingModel {
             mode,
         )?;
 
-        for (step_resnet, num_windows, _, _) in Self::chunk_session_config(mode) {
-            let stem = format!("wespeaker-chunk-emb-s{step_resnet}-w{num_windows}.mlmodelc");
+        for config in Self::chunk_session_config(mode) {
+            let stem = format!("{}.mlmodelc", config.model_stem());
             Self::require_native_asset(model_path.with_file_name(stem), mode)?;
         }
 
@@ -204,24 +288,11 @@ impl EmbeddingModel {
         fp32_coreml_path(&onnx_path).exists()
     }
 
-    fn chunk_session_config(mode: ExecutionMode) -> &'static [(usize, usize, usize, usize)] {
+    fn chunk_session_config(mode: ExecutionMode) -> &'static [ChunkSessionConfig] {
         match mode {
-            ExecutionMode::CoreMlFast => &[
-                (25, 11, 3000, 33),
-                (25, 16, 4000, 48),
-                (25, 21, 5000, 63),
-                (25, 26, 6000, 78),
-                (25, 36, 8000, 108),
-                (25, 46, 10000, 138),
-                (25, 56, 12000, 168),
-            ],
-            _ => &[
-                (12, 22, 3016, 66),
-                (12, 37, 4456, 111),
-                (12, 53, 5992, 159),
-                (12, 84, 8968, 252),
-                (12, 116, 12040, 348),
-            ],
+            ExecutionMode::CoreMlFast => COREML_FAST_CHUNK_CONFIGS,
+            ExecutionMode::CoreMl => COREML_CHUNK_CONFIGS,
+            _ => &[],
         }
     }
 
@@ -235,8 +306,8 @@ impl EmbeddingModel {
 
         Self::chunk_session_config(mode)
             .iter()
-            .filter_map(|&(step_resnet, num_windows, fbank_frames, num_masks)| {
-                let stem = format!("wespeaker-chunk-emb-s{step_resnet}-w{num_windows}");
+            .filter_map(|&config| {
+                let stem = config.model_stem();
                 let w8a16_path = model_path.with_file_name(format!("{stem}-w8a16.mlmodelc"));
                 let fp32_path = model_path.with_file_name(format!("{stem}.mlmodelc"));
 
@@ -250,9 +321,9 @@ impl EmbeddingModel {
 
                 Some(ChunkSessionSpec {
                     coreml_path,
-                    num_windows,
-                    fbank_frames,
-                    num_masks,
+                    num_windows: config.num_windows,
+                    fbank_frames: config.fbank_frames(),
+                    num_masks: config.num_masks(),
                 })
             })
             .collect()
@@ -367,5 +438,31 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn one_second_chunk_configs_derive_exact_shapes() {
+        let configs: Vec<_> = COREML_CHUNK_CONFIGS
+            .iter()
+            .copied()
+            .map(|config| {
+                (
+                    config.model_stem(),
+                    config.fbank_frames(),
+                    config.num_masks(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            configs,
+            [
+                ("wespeaker-chunk-emb-p1s-w21".to_owned(), 3000, 63),
+                ("wespeaker-chunk-emb-p1s-w36".to_owned(), 4500, 108),
+                ("wespeaker-chunk-emb-p1s-w51".to_owned(), 6000, 153),
+                ("wespeaker-chunk-emb-p1s-w81".to_owned(), 9000, 243),
+                ("wespeaker-chunk-emb-p1s-w111".to_owned(), 12000, 333),
+            ]
+        );
     }
 }

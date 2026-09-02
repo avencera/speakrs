@@ -36,7 +36,7 @@ Hardware: Apple M4 Pro, macOS 26.3
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
 | pyannote community-1 (MPS) | 17.0% | 8.1% | 4.3% | 4.5% | 3326.2s | 20x |
-| **speakrs CoreML** | **17.2%** | 8.1% | 4.3% | 4.8% | 101.3s | 666x |
+| **speakrs CoreML** | **17.0%** | 8.1% | 4.3% | 4.6% | 149.8s | 450x |
 | speakrs CoreML Fast | 17.6% | 7.8% | 4.7% | 5.1% | 73.9s | **912x** |
 | SpeakerKit | 18.0% | 8.5% | 5.2% | 4.3% | 82.8s | 814x |
 
