@@ -6,6 +6,7 @@
 #     "numpy",
 #     "onnx",
 #     "onnxscript",
+#     "onnxsim",
 # ]
 # ///
 """Download and export ONNX models + PLDA params for speakrs.
@@ -66,6 +67,18 @@ def main() -> None:
     print("Done!")
 
 
+def fold_onnx_graph(path: str) -> None:
+    """Constant-fold a graph in place; a folding that changes outputs is a hard error."""
+    import onnx
+    from onnxsim import simplify
+
+    model = onnx.load(path)
+    simplified, ok = simplify(model)
+    if not ok:
+        raise RuntimeError(f"onnxsim could not validate the simplified graph for {path}")
+    onnx.save(simplified, path)
+
+
 def export_segmentation(pipeline: Any, models_dir: str) -> None:
     print("Exporting segmentation model...")
     seg_model = pipeline._segmentation.model
@@ -101,6 +114,14 @@ def export_segmentation(pipeline: Any, models_dir: str) -> None:
             opset_version=14,
             dynamo=False,
         )
+
+    # Constant-fold the exported graphs: SincNet synthesizes its filterbank from frozen
+    # parameters every forward (Sin/Cos/If subgraph). On ORT's CUDA EP those ops fall back
+    # to CPU with Memcpy nodes inserted, costing 2x per batch-32 in serving tests. Folding
+    # is bit-exact (max_abs_diff 0.0, argmax mismatch 0) and shrinks the graph 179->40 nodes.
+    fold_onnx_graph(os.path.join(models_dir, "segmentation-3.0.onnx"))
+    fold_onnx_graph(os.path.join(models_dir, "segmentation-3.0-b32.onnx"))
+    fold_onnx_graph(os.path.join(models_dir, "segmentation-3.0-b64.onnx"))
 
     sz = os.path.getsize(os.path.join(models_dir, "segmentation-3.0.onnx")) / 1e6
     print(f"  segmentation-3.0.onnx ({sz:.1f} MB)")

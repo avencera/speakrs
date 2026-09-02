@@ -74,6 +74,7 @@ struct OrtEmbeddingState {
     session: Session,
     primary_batched_session: Option<Session>,
     split_fbank_session: Option<Session>,
+    split_fbank_pool: Vec<Session>,
     split_fbank_batched_session: Option<Session>,
     split_tail_session: Option<Session>,
     split_tail_batched_session: Option<Session>,

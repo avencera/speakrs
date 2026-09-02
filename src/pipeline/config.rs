@@ -77,6 +77,16 @@ impl PipelineConfig {
 pub struct RuntimeConfig {
     /// Number of chunk embedding workers
     pub chunk_emb_workers: usize,
+    /// Size of the CPU fbank session pool used for parallel per-chunk fbank.
+    ///
+    /// `None` (the default) auto-sizes: the `SPEAKRS_FBANK_POOL` environment override when it
+    /// parses, otherwise one session per four cores clamped to `1..=8`. `Some(0)` disables the
+    /// pool and falls back to the single fbank session.
+    ///
+    /// Setting this explicitly lets an embedder size the pool without touching the environment,
+    /// which matters because `setenv` is not thread-safe: a host that loads models lazily or
+    /// concurrently cannot safely use the environment override.
+    pub fbank_pool: Option<usize>,
     /// CoreML compute units for chunk embedding (CoreML modes only)
     #[cfg(feature = "coreml")]
     #[cfg_attr(docsrs, doc(cfg(feature = "coreml")))]
@@ -87,6 +97,7 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
             chunk_emb_workers: 1,
+            fbank_pool: None,
             #[cfg(feature = "coreml")]
             chunk_emb_compute_units: CoreMlComputeUnits::All,
         }

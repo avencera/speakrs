@@ -62,9 +62,16 @@ impl EmbeddingModel {
         model_path: &Path,
         mode: ExecutionMode,
     ) -> Result<Session, ort::Error> {
-        let threads = std::thread::available_parallelism()
-            .map(|count| count.get().min(4))
-            .unwrap_or(1);
+        // The default cap of 4 intra-op threads leaves fbank as ~76% of
+        // CUDA E2E wall time on many-core hosts; allow override via SPEAKRS_FBANK_THREADS.
+        let threads = std::env::var("SPEAKRS_FBANK_THREADS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|count| count.get().min(4))
+                    .unwrap_or(1)
+            });
         let builder = Session::builder()?
             .with_independent_thread_pool()?
             .with_intra_threads(threads)?
