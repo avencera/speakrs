@@ -120,8 +120,12 @@ impl EmbeddingModel {
         ensure_loaded!(
             self,
             native_multi_mask_session,
-            Self::load_native_multi_mask(&self.meta.model_path, self.meta.mode)
-                .map_err(|error| ort::Error::new(error.to_string())),
+            Self::load_native_multi_mask(
+                &self.meta.model_path,
+                self.meta.mode,
+                self.coreml.native_embedding_compute_units,
+            )
+            .map_err(|error| ort::Error::new(error.to_string())),
             "Lazy loaded native multi mask"
         );
         Ok(self.coreml.native_multi_mask_session.as_ref())
@@ -133,8 +137,13 @@ impl EmbeddingModel {
         ensure_loaded!(
             self,
             native_tail_session,
-            Self::load_native_tail(&self.meta.model_path, self.meta.mode, 1)
-                .map_err(|error| ort::Error::new(error.to_string())),
+            Self::load_native_tail(
+                &self.meta.model_path,
+                self.meta.mode,
+                1,
+                self.coreml.native_embedding_compute_units,
+            )
+            .map_err(|error| ort::Error::new(error.to_string())),
             "Lazy loaded native tail"
         );
         Ok(self.coreml.native_tail_session.as_mut())
@@ -149,7 +158,8 @@ impl EmbeddingModel {
             Self::load_native_tail(
                 &self.meta.model_path,
                 self.meta.mode,
-                CHUNK_SPEAKER_BATCH_SIZE
+                CHUNK_SPEAKER_BATCH_SIZE,
+                self.coreml.native_embedding_compute_units,
             )
             .map_err(|error| ort::Error::new(error.to_string())),
             "Lazy loaded native tail b32"
@@ -163,8 +173,13 @@ impl EmbeddingModel {
         ensure_loaded!(
             self,
             native_tail_primary_batched_session,
-            Self::load_native_tail(&self.meta.model_path, self.meta.mode, PRIMARY_BATCH_SIZE)
-                .map_err(|error| ort::Error::new(error.to_string())),
+            Self::load_native_tail(
+                &self.meta.model_path,
+                self.meta.mode,
+                PRIMARY_BATCH_SIZE,
+                self.coreml.native_embedding_compute_units,
+            )
+            .map_err(|error| ort::Error::new(error.to_string())),
             "Lazy loaded native tail b64"
         );
         Ok(self.coreml.native_tail_primary_batched_session.as_mut())
@@ -198,7 +213,7 @@ impl EmbeddingModel {
         }
 
         let start = std::time::Instant::now();
-        let session = Self::load_chunk_session(&spec, self.coreml.native_chunk_compute_units)
+        let session = Self::load_chunk_session(&spec, self.coreml.native_embedding_compute_units)
             .map_err(|error| ort::Error::new(error.to_string()))?;
         tracing::trace!(
             num_windows = spec.num_windows,

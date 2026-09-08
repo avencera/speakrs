@@ -8,8 +8,12 @@ use crate::inference::embedding::{
 use crate::inference::segmentation::SegmentationModel;
 use crate::powerset::PowersetMapping;
 
+use super::config::ChunkFbankNormalizationScope;
+use super::config::CoreMlChunkExecutionPolicy;
 use super::config::PipelineConfig;
 use super::post_inference::post_inference;
+#[cfg(feature = "_metrics")]
+use super::types::InternalInferenceStageTimings;
 use super::types::{
     BatchInput, ChunkEmbeddings, ChunkLayout, ChunkSpeakerClusters, DecodedSegmentations,
     DiarizationResult, DiscreteDiarization, InferenceArtifacts, PipelineError, SpeakerCountTrack,
@@ -26,7 +30,7 @@ mod prep;
 use collect::{FileCollector, build_chunk_artifacts};
 use error::{backend_error, invariant_error, worker_panic};
 use gpu::{BatchGpuWorker, TaggedEmbedded, TaggedPrepared, chunk_embedding_resources};
-use orchestrate::{run_pipelined, run_sequential_chunks, seg_worker_count, setup_chunk_embedding};
+use orchestrate::{run_pipelined, run_sequential_chunks, setup_chunk_embedding};
 use prep::{BatchPrepWorker, ChunkPrep, DecodedChunk, PrepScratch, TaggedDecoded};
 
 /// Audio consumed per 10s fbank call when stitching a long fbank from segments.
@@ -42,6 +46,9 @@ struct ChunkParams {
     min_num_samples: usize,
     chunk_win_capacity: usize,
     total_windows: usize,
+    segmentation_workers: usize,
+    fbank_preparation_workers: usize,
+    fbank_normalization_scope: ChunkFbankNormalizationScope,
 }
 
 struct EmbeddingSummary {
@@ -76,6 +83,7 @@ pub(super) fn try_chunk_embedding(
     emb_model: &mut EmbeddingModel,
     powerset: &PowersetMapping,
     audio: &[f32],
+    execution_policy: CoreMlChunkExecutionPolicy,
 ) -> Result<Option<InferenceArtifacts>, PipelineError> {
     let Some((chunk_win_capacity, total_windows, use_pipelined, chunk_resources)) =
         setup_chunk_embedding(seg_model, emb_model, audio)?
@@ -92,6 +100,9 @@ pub(super) fn try_chunk_embedding(
         min_num_samples: emb_model.min_num_samples(),
         chunk_win_capacity,
         total_windows,
+        segmentation_workers: execution_policy.segmentation_workers,
+        fbank_preparation_workers: execution_policy.fbank_preparation_workers,
+        fbank_normalization_scope: execution_policy.fbank_normalization_scope,
     };
 
     let (seg_tx, seg_rx) = crossbeam_channel::bounded::<Array2<f32>>(100);
@@ -104,7 +115,7 @@ pub(super) fn try_chunk_embedding(
             seg_model.run_streaming_parallel(
                 audio,
                 seg_tx,
-                seg_worker_count(),
+                params.segmentation_workers,
                 Some(seg_warm_start_windows),
             )?;
             Ok(seg_start.elapsed())
@@ -167,16 +178,29 @@ pub(super) fn try_chunk_embedding(
         let gpu_predict_us = summary.gpu_predict_us;
         let prep_fbank_us = summary.prep_fbank_us;
         let prep_mask_us = summary.prep_mask_us;
+        let inference_elapsed = inference_start.elapsed();
+        #[cfg(feature = "_metrics")]
+        let stage_timings = InternalInferenceStageTimings {
+            segmentation_seconds: seg_thread_elapsed.as_secs_f64(),
+            embedding_seconds: emb_elapsed.as_secs_f64(),
+            prediction_seconds: gpu_predict_us as f64 / 1_000_000.0,
+            filterbank_preparation_seconds: prep_fbank_us as f64 / 1_000_000.0,
+            mask_preparation_seconds: prep_mask_us as f64 / 1_000_000.0,
+            total_seconds: inference_elapsed.as_secs_f64(),
+            chunk_count: num_chunks,
+            pipelined: use_pipelined,
+        };
         let Some(artifacts) = build_chunk_artifacts(
             step_seconds,
             params.step_samples,
             params.window_samples,
             summary,
+            #[cfg(feature = "_metrics")]
+            stage_timings,
         ) else {
             return Ok(None);
         };
 
-        let inference_elapsed = inference_start.elapsed();
         let audio_secs = audio.len() as f64 / 16_000.0;
         debug!(
             chunks = num_chunks,
@@ -203,6 +227,7 @@ pub(super) fn try_batch_chunk_embedding(
     plda: &PldaTransform,
     files: &[BatchInput<'_>],
     config: &PipelineConfig,
+    execution_policy: CoreMlChunkExecutionPolicy,
 ) -> Result<Option<Vec<DiarizationResult>>, PipelineError> {
     if files.is_empty() {
         return Ok(Some(Vec::new()));
@@ -218,6 +243,8 @@ pub(super) fn try_batch_chunk_embedding(
     let step_seconds = seg_model.step_seconds();
     let num_speakers = 3usize;
     let min_num_samples = emb_model.min_num_samples();
+    let segmentation_workers = execution_policy.segmentation_workers;
+    let fbank_preparation_workers = execution_policy.fbank_preparation_workers;
 
     if files.iter().any(|file| file.audio.len() < window_samples) {
         return Ok(None);
@@ -226,9 +253,13 @@ pub(super) fn try_batch_chunk_embedding(
     let expected_chunks: Vec<usize> = files
         .iter()
         .map(|file| {
-            let total_windows = file.audio.len().saturating_sub(window_samples) / step_samples + 1;
+            let total_windows = seg_model.window_count(file.audio.len());
             total_windows.div_ceil(chunk_win_capacity)
         })
+        .collect();
+    let expected_windows: Vec<usize> = files
+        .iter()
+        .map(|file| seg_model.window_count(file.audio.len()))
         .collect();
 
     if expected_chunks.iter().sum::<usize>() < 2 {
@@ -250,6 +281,7 @@ pub(super) fn try_batch_chunk_embedding(
         max_active: chunk_win_capacity * num_speakers,
         fbank_30s: resources.fbank_30s.clone(),
         fbank_10s: resources.fbank_10s.clone(),
+        fbank_normalization_scope: execution_policy.fbank_normalization_scope,
     };
 
     let audios: Vec<&[f32]> = files.iter().map(|file| file.audio).collect();
@@ -303,7 +335,7 @@ pub(super) fn try_batch_chunk_embedding(
                     seg_model.run_streaming_parallel(
                         file.audio,
                         seg_tx,
-                        seg_worker_count(),
+                        segmentation_workers,
                         Some(chunk_win_capacity),
                     )?;
 
@@ -318,8 +350,8 @@ pub(super) fn try_batch_chunk_embedding(
         });
         drop(decoded_tx);
 
-        let mut prep_handles = Vec::with_capacity(2);
-        for _ in 0..2usize {
+        let mut prep_handles = Vec::with_capacity(fbank_preparation_workers);
+        for _ in 0..fbank_preparation_workers {
             let worker = BatchPrepWorker {
                 prep: prep_config.clone(),
                 scratch: PrepScratch::new(window_samples),
@@ -345,10 +377,6 @@ pub(super) fn try_batch_chunk_embedding(
         });
         drop(embedded_tx);
 
-        let expected_windows: Vec<usize> = files
-            .iter()
-            .map(|file| file.audio.len().saturating_sub(window_samples) / step_samples + 1)
-            .collect();
         let mut collectors: Vec<Option<FileCollector>> =
             std::iter::repeat_with(|| None).take(files.len()).collect();
         let mut results: Vec<Option<DiarizationResult>> =

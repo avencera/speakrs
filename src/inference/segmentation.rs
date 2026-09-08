@@ -216,6 +216,11 @@ impl SegmentationModel {
         })
     }
 
+    #[cfg_attr(not(feature = "coreml"), allow(dead_code))]
+    pub(crate) fn window_count(&self, audio_samples: usize) -> usize {
+        segmentation_window_count(audio_samples, self.window_spec())
+    }
+
     fn build_session(model_path: &Path, mode: ExecutionMode) -> Result<Session, ort::Error> {
         let builder = Session::builder()?
             .with_independent_thread_pool()?

@@ -24,7 +24,8 @@ pub use report::{DerResultsWriter, format_eta, now_stamp};
 pub(crate) use selection::discover_files;
 pub(crate) use types::{BatchCommandRunner, PREFLIGHT_TIMEOUT, PyannoteRsFileRunner};
 pub use types::{
-    BenchmarkMetadata, DerAccumulation, DerImplResult, DerImplStatus, ImplType, PyannoteBatchSizes,
+    BenchmarkMetadata, DerAccumulation, DerImplResult, DerImplStatus, ImplType, PerFileDerResult,
+    PyannoteBatchSizes,
 };
 
 use runner::{CommandSpec, capture_benchmark_cmd};

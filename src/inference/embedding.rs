@@ -105,7 +105,7 @@ struct CoreMlEmbeddingState {
     #[cfg(feature = "coreml")]
     native_multi_mask_session: Option<SharedCoreMlModel>,
     #[cfg(feature = "coreml")]
-    native_chunk_compute_units: MLComputeUnits,
+    native_embedding_compute_units: MLComputeUnits,
     #[cfg(feature = "coreml")]
     native_chunk_specs: Vec<ChunkSessionSpec>,
     #[cfg(feature = "coreml")]

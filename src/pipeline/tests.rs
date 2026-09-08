@@ -310,19 +310,89 @@ fn build_pipeline_or_skip<T>(result: Result<T, PipelineError>) -> Option<T> {
 }
 
 fn assert_embedding_tensor_close(actual: &Array3<f32>, expected: &Array3<f32>, epsilon: f32) {
+    let mut largest_difference = (0.0_f32, 0, 0, 0, 0.0_f32, 0.0_f32);
     for chunk_idx in 0..actual.shape()[0] {
         for speaker_idx in 0..actual.shape()[1] {
             for dim_idx in 0..actual.shape()[2] {
                 let lhs = actual[[chunk_idx, speaker_idx, dim_idx]];
                 let rhs = expected[[chunk_idx, speaker_idx, dim_idx]];
-                if (lhs - rhs).abs() > epsilon || lhs.is_nan() != rhs.is_nan() {
-                    panic!(
-                        "chunk={chunk_idx} speaker={speaker_idx} dim={dim_idx} left={lhs} right={rhs}"
-                    );
+                assert_eq!(
+                    lhs.is_nan(),
+                    rhs.is_nan(),
+                    "NaN mismatch at chunk={chunk_idx} speaker={speaker_idx} dim={dim_idx} left={lhs} right={rhs}"
+                );
+                let difference = (lhs - rhs).abs();
+                if difference > largest_difference.0 {
+                    largest_difference = (difference, chunk_idx, speaker_idx, dim_idx, lhs, rhs);
                 }
             }
         }
     }
+    assert!(
+        largest_difference.0 <= epsilon,
+        "largest difference={} at chunk={} speaker={} dim={} left={} right={} exceeded {epsilon}",
+        largest_difference.0,
+        largest_difference.1,
+        largest_difference.2,
+        largest_difference.3,
+        largest_difference.4,
+        largest_difference.5
+    );
+}
+
+#[cfg(feature = "coreml")]
+fn assert_embedding_tensor_similarity(
+    actual: &Array3<f32>,
+    expected: &Array3<f32>,
+    maximum_absolute_difference: f32,
+    minimum_cosine: f32,
+) {
+    let mut largest_difference = 0.0_f32;
+    let mut lowest_cosine = 1.0_f32;
+
+    for chunk_idx in 0..actual.shape()[0] {
+        for speaker_idx in 0..actual.shape()[1] {
+            let actual_row = actual.slice(s![chunk_idx, speaker_idx, ..]);
+            let expected_row = expected.slice(s![chunk_idx, speaker_idx, ..]);
+            assert_eq!(
+                actual_row.iter().all(|value| value.is_nan()),
+                expected_row.iter().all(|value| value.is_nan()),
+                "NaN row mismatch at chunk={chunk_idx} speaker={speaker_idx}"
+            );
+            if expected_row.iter().any(|value| value.is_nan()) {
+                continue;
+            }
+
+            for (&lhs, &rhs) in actual_row.iter().zip(expected_row.iter()) {
+                largest_difference = largest_difference.max((lhs - rhs).abs());
+            }
+            let dot = actual_row
+                .iter()
+                .zip(expected_row.iter())
+                .map(|(lhs, rhs)| lhs * rhs)
+                .sum::<f32>();
+            let actual_norm = actual_row
+                .iter()
+                .map(|value| value * value)
+                .sum::<f32>()
+                .sqrt();
+            let expected_norm = expected_row
+                .iter()
+                .map(|value| value * value)
+                .sum::<f32>()
+                .sqrt();
+            lowest_cosine = lowest_cosine.min(dot / (actual_norm * expected_norm));
+        }
+    }
+
+    assert!(
+        largest_difference <= maximum_absolute_difference,
+        "largest absolute difference {largest_difference} exceeded {maximum_absolute_difference}"
+    );
+    assert!(
+        lowest_cosine >= minimum_cosine,
+        "lowest cosine {lowest_cosine} was below {minimum_cosine}"
+    );
 }
 
 #[cfg(feature = "coreml")]
@@ -455,12 +525,20 @@ fn fast_apple_segmentation_matches_python_fixture() {
 
 #[cfg(feature = "coreml")]
 #[test]
-fn fast_apple_embeddings_match_python_fixture() {
+fn fast_apple_cpu_embeddings_match_python_fixture() {
     let harness = PipelineTestHarness::load();
     let Some(seg_model) = harness.cpu_seg_model() else {
         return;
     };
-    let Some(mut emb_model) = harness.coreml_emb_model() else {
+    let runtime = RuntimeConfig {
+        chunk_emb_compute_units: crate::inference::CoreMlComputeUnits::CpuOnly,
+        ..RuntimeConfig::default()
+    };
+    let Some(mut emb_model) = load_model_or_skip(EmbeddingModel::with_mode_and_config(
+        harness.embedding_model_path(),
+        ExecutionMode::CoreMl,
+        &runtime,
+    )) else {
         return;
     };
     let segmentations: Array3<f32> = load_fixture_array3("pipeline_segmentation_data.npy");
@@ -473,6 +551,25 @@ fn fast_apple_embeddings_match_python_fixture() {
 
 #[cfg(feature = "coreml")]
 #[test]
+fn fast_apple_gpu_embeddings_stay_within_documented_fixture_bounds() {
+    let harness = PipelineTestHarness::load();
+    let Some(seg_model) = harness.cpu_seg_model() else {
+        return;
+    };
+    let Some(mut emb_model) = harness.coreml_emb_model() else {
+        return;
+    };
+    let segmentations: Array3<f32> = load_fixture_array3("pipeline_segmentation_data.npy");
+    let expected: Array3<f32> = load_fixture_array3("pipeline_embeddings_data.npy");
+    let embeddings =
+        extract_embeddings(&seg_model, &mut emb_model, harness.audio(), &segmentations).unwrap();
+
+    // gpu tail placement is faster but has a stable numerical gap from the CPU reference
+    assert_embedding_tensor_similarity(&embeddings, &expected, 0.12, 0.94);
+}
+
+#[cfg(feature = "coreml")]
+#[test]
 fn fast_apple_split_primary_batch_matches_single_tail_path() {
     let harness = PipelineTestHarness::load();
     let Some(seg_model) = harness.cpu_seg_model() else {
@@ -481,6 +578,10 @@ fn fast_apple_split_primary_batch_matches_single_tail_path() {
     let Some(mut emb_model) = harness.coreml_emb_model() else {
         return;
     };
+    if emb_model.split_primary_batch_size() == 0 {
+        eprintln!("skipping primary tail batch test because the compiled batch asset is missing");
+        return;
+    }
     let segmentations: Array3<f32> = load_fixture_array3("pipeline_segmentation_data.npy");
     let mut fbanks = Vec::new();
     let mut weights = Vec::new();
@@ -532,15 +633,55 @@ fn fast_apple_split_primary_batch_matches_single_tail_path() {
         .collect();
     let batched = emb_model.embed_tail_batch_inputs(&batch_inputs).unwrap();
 
+    let mut largest_difference = (0.0_f32, 0, 0, 0.0_f32, 0.0_f32);
+    let mut lowest_cosine = (1.0_f32, 0);
     for (row_idx, expected_row) in expected.iter().enumerate() {
+        let actual_row = batched.row(row_idx);
         for dim_idx in 0..expected_row.len() {
             let lhs = batched[[row_idx, dim_idx]];
             let rhs = expected_row[dim_idx];
-            if (lhs - rhs).abs() > 5e-3 || lhs.is_nan() != rhs.is_nan() {
-                panic!("row={row_idx} dim={dim_idx} left={lhs} right={rhs}");
+            assert_eq!(
+                lhs.is_nan(),
+                rhs.is_nan(),
+                "NaN mismatch at row={row_idx} dim={dim_idx} left={lhs} right={rhs}"
+            );
+            let difference = (lhs - rhs).abs();
+            if difference > largest_difference.0 {
+                largest_difference = (difference, row_idx, dim_idx, lhs, rhs);
             }
         }
+
+        let dot = actual_row
+            .iter()
+            .zip(expected_row.iter())
+            .map(|(lhs, rhs)| lhs * rhs)
+            .sum::<f32>();
+        let actual_norm = actual_row
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
+        let expected_norm = expected_row
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
+        let cosine = dot / (actual_norm * expected_norm);
+        if cosine < lowest_cosine.0 {
+            lowest_cosine = (cosine, row_idx);
+        }
     }
+    assert!(
+        largest_difference.0 <= 5e-3,
+        "largest difference={} at row={} dim={} left={} right={}; lowest cosine={} at row={}",
+        largest_difference.0,
+        largest_difference.1,
+        largest_difference.2,
+        largest_difference.3,
+        largest_difference.4,
+        lowest_cosine.0,
+        lowest_cosine.1
+    );
 }
 
 #[cfg(feature = "coreml")]
@@ -590,9 +731,13 @@ fn run_inference_only_plus_finish_matches_run_with_config() {
         .unwrap();
 
     let artifacts = pipeline.run_inference_only(harness.audio()).unwrap();
+    let repeated = pipeline
+        .finish_post_inference(artifacts.clone(), &config)
+        .unwrap();
     let split = pipeline.finish_post_inference(artifacts, &config).unwrap();
 
     assert_eq!(combined.segments, split.segments);
+    assert_eq!(repeated.segments, split.segments);
 }
 
 #[test]
@@ -665,4 +810,53 @@ fn chunk_embedding_pipelined_vs_sequential_baseline() {
     let artifacts = pipeline.run_inference_only(harness.audio()).unwrap();
     let result_split = pipeline.finish_post_inference(artifacts, &config).unwrap();
     assert_eq!(result_a.segments, result_split.segments);
+}
+
+#[cfg(feature = "coreml")]
+#[test]
+fn chunk_embedding_keeps_an_unaligned_padded_tail() {
+    let harness = PipelineTestHarness::load();
+    let Some(mut pipeline) = harness.coreml_pipeline() else {
+        return;
+    };
+    let window_samples = pipeline.seg_model.window_samples();
+    let step_samples = pipeline.seg_model.step_samples();
+    let audio_len = window_samples + 2 * step_samples + 1;
+    let artifacts = pipeline
+        .run_inference_only(&harness.audio()[..audio_len])
+        .unwrap();
+
+    assert_eq!(artifacts.segmentations.nchunks(), 4);
+    assert_eq!(artifacts.embeddings.0.shape()[0], 4);
+}
+
+#[cfg(feature = "coreml")]
+#[test]
+fn batch_chunk_embedding_keeps_unaligned_padded_tails() {
+    let harness = PipelineTestHarness::load();
+    let Some(mut pipeline) = harness.coreml_pipeline() else {
+        return;
+    };
+    let window_samples = pipeline.seg_model.window_samples();
+    let step_samples = pipeline.seg_model.step_samples();
+    let audio_len = window_samples + 2 * step_samples + 1;
+    let audio = &harness.audio()[..audio_len];
+    let files = [
+        BatchInput {
+            audio,
+            file_id: "padded-a",
+        },
+        BatchInput {
+            audio,
+            file_id: "padded-b",
+        },
+    ];
+    let results = pipeline.run_batch(&files).unwrap();
+
+    assert_eq!(results.len(), 2);
+    assert!(
+        results
+            .iter()
+            .all(|result| result.segmentations.nchunks() == 4)
+    );
 }

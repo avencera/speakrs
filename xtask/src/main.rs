@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 use color_eyre::eyre::Result;
 use tracing_subscriber::EnvFilter;
 use xtask::commands;
-use xtask::commands::diarize::DiarizeMode;
+use xtask::commands::diarize::{ChunkEmbeddingComputeUnits, DiarizeMode};
 
 #[derive(Parser)]
 #[command(name = "xtask", about = "Development commands for speakrs")]
@@ -41,6 +41,11 @@ enum Command {
         #[command(subcommand)]
         cmd: BenchCmd,
     },
+    /// Reproducible macOS performance and DER experiments
+    MacExperiment {
+        #[command(subcommand)]
+        cmd: commands::mac_experiment::MacExperimentCommand,
+    },
     /// Remote GPU benchmarks via dstack
     Dstack {
         #[command(subcommand)]
@@ -58,12 +63,9 @@ enum Command {
         /// Path to models directory
         #[arg(long, env = "SPEAKRS_MODELS_DIR")]
         models_dir: Option<PathBuf>,
-        /// Number of chunk embedding workers
-        #[arg(long, default_value = "1")]
-        chunk_emb_workers: usize,
-        /// Compute units for chunk embedding: all, ane
-        #[arg(long, default_value = "all")]
-        chunk_emb_compute_units: String,
+        /// Compute units for native embedding: all, cpu-and-neural-engine, cpu-only
+        #[arg(long, default_value = "all", value_enum)]
+        chunk_emb_compute_units: ChunkEmbeddingComputeUnits,
         /// WAV files to diarize
         wav_files: Vec<PathBuf>,
     },
@@ -107,21 +109,15 @@ impl Command {
             Self::Fixtures { cmd } => cmd.run(),
             Self::Compare { cmd } => cmd.run(),
             Self::Bench { cmd } => cmd.run(),
+            Self::MacExperiment { cmd } => cmd.run(),
             Self::Dstack { cmd } => cmd.run(),
             Self::Dataset { cmd } => cmd.run(),
             Self::Diarize {
                 mode,
                 models_dir,
-                chunk_emb_workers,
                 chunk_emb_compute_units,
                 wav_files,
-            } => commands::diarize::run(
-                mode,
-                models_dir,
-                chunk_emb_workers,
-                &chunk_emb_compute_units,
-                wav_files,
-            ),
+            } => commands::diarize::run(mode, models_dir, chunk_emb_compute_units, wav_files),
             Self::ProfileOrtEmbedding {
                 mode,
                 wav_path,
@@ -444,12 +440,18 @@ enum DatasetCmd {
         /// Dataset id, or "all"
         #[arg(default_value = "all")]
         id: String,
+        /// Directory that contains dataset subdirectories
+        #[arg(long, env = "SPEAKRS_DATASETS_DIR")]
+        datasets_dir: Option<PathBuf>,
     },
     /// Upload local datasets to Tigris S3
     Upload {
         /// Dataset id, or "all"
         #[arg(default_value = "all")]
         id: String,
+        /// Directory that contains dataset subdirectories
+        #[arg(long, env = "SPEAKRS_DATASETS_DIR")]
+        datasets_dir: Option<PathBuf>,
     },
 }
 
@@ -458,10 +460,10 @@ impl DatasetCmd {
         use xtask::cmd::project_root;
         use xtask::datasets::{self, S5cmd};
 
-        let base_dir = project_root().join("fixtures/datasets");
-
         match self {
-            Self::Ensure { id } => {
+            Self::Ensure { id, datasets_dir } => {
+                let base_dir =
+                    datasets_dir.unwrap_or_else(|| project_root().join("fixtures/datasets"));
                 if id == "list" {
                     for ds_id in datasets::list_dataset_ids() {
                         println!("  {ds_id}");
@@ -484,7 +486,9 @@ impl DatasetCmd {
                 }
                 Ok(())
             }
-            Self::Upload { id } => {
+            Self::Upload { id, datasets_dir } => {
+                let base_dir =
+                    datasets_dir.unwrap_or_else(|| project_root().join("fixtures/datasets"));
                 if !S5cmd::available() {
                     color_eyre::eyre::bail!("s5cmd not available or AWS_ACCESS_KEY_ID not set");
                 }

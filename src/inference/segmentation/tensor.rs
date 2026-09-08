@@ -224,8 +224,40 @@ mod tests {
         SegmentationWindows, WindowSpec, first_output, output_shape3, segmentation_window_count,
     };
 
+    const WINDOW: usize = 160_000;
+
     fn window_spec(window_samples: usize, step_samples: usize) -> WindowSpec {
         WindowSpec::new(window_samples, step_samples).expect("non-zero window spec")
+    }
+
+    #[test]
+    fn window_count_keeps_the_padded_tail_at_control_lengths() {
+        let spec_16k = window_spec(WINDOW, 16_000);
+        let spec_16640 = window_spec(WINDOW, 16_640);
+        assert_eq!(segmentation_window_count(WINDOW, spec_16k), 1);
+        assert_eq!(segmentation_window_count(30 * 16_000, spec_16k), 22);
+        assert_eq!(segmentation_window_count(120 * 16_000, spec_16k), 112);
+        assert_eq!(segmentation_window_count(30 * 16_000, spec_16640), 21);
+    }
+
+    #[test]
+    fn window_count_matches_collected_full_and_padded_windows() {
+        let spec = window_spec(WINDOW, 16_640);
+        for audio_samples in [
+            WINDOW - 1,
+            WINDOW,
+            WINDOW + 1,
+            30 * 16_000,
+            120 * 16_000 + 731,
+        ] {
+            let audio = vec![0.0; audio_samples];
+            let windows = SegmentationWindows::collect(&audio, spec);
+
+            assert_eq!(
+                segmentation_window_count(audio_samples, spec),
+                windows.total_windows()
+            );
+        }
     }
 
     #[test]

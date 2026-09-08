@@ -22,7 +22,7 @@ use ort::session::builder::SessionBuilder;
 #[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
 static ORT_RUNTIME_INIT: OnceLock<Result<(), OrtRuntimeError>> = OnceLock::new();
 
-/// CoreML compute unit selection for chunk embedding
+/// CoreML compute unit selection for native embedding
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CoreMlComputeUnits {
     /// Use all available compute units: CPU + GPU + Neural Engine (default)
@@ -30,6 +30,8 @@ pub enum CoreMlComputeUnits {
     All,
     /// Use CPU + Neural Engine only (skip GPU)
     CpuAndNeuralEngine,
+    /// Use CPU only for native embedding models
+    CpuOnly,
 }
 
 #[cfg(feature = "coreml")]
@@ -38,6 +40,7 @@ impl CoreMlComputeUnits {
         match self {
             Self::All => crate::inference::coreml::CoreMlModel::default_compute_units(),
             Self::CpuAndNeuralEngine => objc2_core_ml::MLComputeUnits::CPUAndNeuralEngine,
+            Self::CpuOnly => objc2_core_ml::MLComputeUnits::CPUOnly,
         }
     }
 }
@@ -180,6 +183,12 @@ pub enum ModelLoadError {
         /// The compiled CoreML bundle path that failed to load
         path: PathBuf,
         /// The backend load error
+        message: String,
+    },
+    /// A typed model or execution configuration is invalid
+    #[error("invalid model configuration: {message}")]
+    InvalidConfiguration {
+        /// Boundary validation error
         message: String,
     },
 }

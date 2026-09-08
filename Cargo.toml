@@ -21,7 +21,12 @@ include = ["/src/**", "/examples/**", "/README.md", "/LICENSE", "/Cargo.toml"]
 default = ["online", "default-linalg"]
 default-linalg = ["dep:ndarray-linalg-default"]
 online = ["dep:hf-hub", "hf-hub/ureq", "hf-hub/native-tls"]
-coreml = ["dep:objc2", "dep:objc2-core-ml", "dep:objc2-foundation", "dep:block2"]
+coreml = [
+    "dep:block2",
+    "dep:objc2",
+    "dep:objc2-core-ml",
+    "dep:objc2-foundation",
+]
 cuda = ["ort/cuda"]
 migraphx = ["ort/migraphx"]
 load-dynamic = ["ort/load-dynamic", "dep:libloading"]

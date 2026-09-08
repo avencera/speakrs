@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -135,12 +135,70 @@ impl DerImplResult {
     }
 }
 
+/// Per-file DER components, denominator, and speaker counts.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct PerFileDerResult {
+    /// File identifier used by the dataset manifest and RTTM rows.
+    pub file_id: String,
+    /// Reference RTTM file used to calculate this score.
+    pub reference_rttm: PathBuf,
+    /// Total reference speaker-time used as the DER denominator.
+    pub reference_speaker_time: f64,
+    /// Missed reference speaker-time in seconds.
+    pub missed: f64,
+    /// False-alarm speaker-time in seconds.
+    pub false_alarm: f64,
+    /// Confused speaker-time in seconds.
+    pub confusion: f64,
+    /// Total DER percentage, or `None` when reference speaker-time is zero.
+    pub der: Option<f64>,
+    /// Missed-speech percentage, or `None` when reference speaker-time is zero.
+    pub missed_percent: Option<f64>,
+    /// False-alarm percentage, or `None` when reference speaker-time is zero.
+    pub false_alarm_percent: Option<f64>,
+    /// Speaker-confusion percentage, or `None` when reference speaker-time is zero.
+    pub confusion_percent: Option<f64>,
+    /// Number of unique reference speakers.
+    pub reference_speaker_count: usize,
+    /// Number of unique predicted speakers.
+    pub predicted_speaker_count: usize,
+}
+
+impl PerFileDerResult {
+    fn from_segments(
+        file_id: String,
+        reference_rttm: PathBuf,
+        reference: &[speakrs::Segment],
+        hypothesis: &[speakrs::Segment],
+        der_result: speakrs::metrics::DerResult,
+    ) -> Self {
+        let reference_speaker_time = der_result.total;
+        let error_duration = der_result.missed + der_result.false_alarm + der_result.confusion;
+
+        Self {
+            file_id,
+            reference_rttm,
+            reference_speaker_time,
+            missed: der_result.missed,
+            false_alarm: der_result.false_alarm,
+            confusion: der_result.confusion,
+            der: percentage(error_duration, reference_speaker_time),
+            missed_percent: percentage(der_result.missed, reference_speaker_time),
+            false_alarm_percent: percentage(der_result.false_alarm, reference_speaker_time),
+            confusion_percent: percentage(der_result.confusion, reference_speaker_time),
+            reference_speaker_count: count_speakers(reference),
+            predicted_speaker_count: count_speakers(hypothesis),
+        }
+    }
+}
+
 pub struct DerAccumulation {
     pub missed: f64,
     pub false_alarm: f64,
     pub confusion: f64,
     pub total_ref: f64,
     pub file_count: usize,
+    per_file_results: Vec<PerFileDerResult>,
 }
 
 impl DerAccumulation {
@@ -154,6 +212,7 @@ impl DerAccumulation {
             confusion: 0.0,
             total_ref: 0.0,
             file_count: 0,
+            per_file_results: Vec::with_capacity(files.len()),
         };
 
         for (wav_path, rttm_path) in files {
@@ -162,39 +221,55 @@ impl DerAccumulation {
             let stem = file_stem_string(wav_path)?;
 
             let hyp_text = per_file_rttm.get(&stem).cloned().unwrap_or_default();
-
-            if hyp_text.trim().is_empty() {
-                acc.file_count += 1;
-                let ref_duration: f64 = ref_segs.iter().map(|segment| segment.duration()).sum();
-                acc.total_ref += ref_duration;
-                acc.missed += ref_duration;
-                continue;
-            }
-
             let hyp_segs = speakrs::metrics::parse_rttm(&hyp_text);
             let der_result = speakrs::metrics::compute_der(&ref_segs, &hyp_segs);
-            acc.missed += der_result.missed;
-            acc.false_alarm += der_result.false_alarm;
-            acc.confusion += der_result.confusion;
-            acc.total_ref += der_result.total;
+
+            let file_result = PerFileDerResult::from_segments(
+                stem,
+                rttm_path.clone(),
+                &ref_segs,
+                &hyp_segs,
+                der_result,
+            );
+            acc.missed += file_result.missed;
+            acc.false_alarm += file_result.false_alarm;
+            acc.confusion += file_result.confusion;
+            acc.total_ref += file_result.reference_speaker_time;
             acc.file_count += 1;
+            acc.per_file_results.push(file_result);
         }
 
         Ok(acc)
     }
 
-    pub fn der_percentages(&self) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
-        if self.total_ref > 0.0 {
-            (
-                Some((self.missed + self.false_alarm + self.confusion) / self.total_ref * 100.0),
-                Some(self.missed / self.total_ref * 100.0),
-                Some(self.false_alarm / self.total_ref * 100.0),
-                Some(self.confusion / self.total_ref * 100.0),
-            )
-        } else {
-            (None, None, None, None)
-        }
+    /// Return per-file scores in the same order as the input manifest.
+    pub fn per_file(&self) -> &[PerFileDerResult] {
+        &self.per_file_results
     }
+
+    pub fn der_percentages(&self) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
+        (
+            percentage(
+                self.missed + self.false_alarm + self.confusion,
+                self.total_ref,
+            ),
+            percentage(self.missed, self.total_ref),
+            percentage(self.false_alarm, self.total_ref),
+            percentage(self.confusion, self.total_ref),
+        )
+    }
+}
+
+fn count_speakers(segments: &[speakrs::Segment]) -> usize {
+    segments
+        .iter()
+        .map(|segment| &segment.speaker)
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+fn percentage(numerator: f64, denominator: f64) -> Option<f64> {
+    (denominator > 0.0).then_some(numerator / denominator * 100.0)
 }
 
 pub struct BatchCommandRunner {
@@ -405,5 +480,134 @@ fn detect_cpu() -> String {
             .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "unknown".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn per_file_results_serialize_der_components_and_counts() {
+        let directory = tempfile::tempdir().unwrap();
+        let reference_path = directory.path().join("first.rttm");
+        fs::write(
+            &reference_path,
+            "SPEAKER first 1 0.0 2.0 <NA> <NA> ref-a <NA> <NA>\n",
+        )
+        .unwrap();
+
+        let files = vec![(PathBuf::from("first.wav"), reference_path.clone())];
+        let hypotheses = HashMap::from([(
+            "first".to_string(),
+            "SPEAKER first 1 0.0 1.0 <NA> <NA> hyp-a <NA> <NA>\n\
+SPEAKER first 1 1.0 1.0 <NA> <NA> hyp-b <NA> <NA>\n"
+                .to_string(),
+        )]);
+
+        let accumulation = DerAccumulation::compute(&files, &hypotheses).unwrap();
+        let result = &accumulation.per_file_results[0];
+
+        assert_eq!(result.file_id, "first");
+        assert_eq!(result.reference_rttm, reference_path);
+        assert_eq!(result.reference_speaker_time, 2.0);
+        assert_eq!(result.missed, 0.0);
+        assert_eq!(result.false_alarm, 0.0);
+        assert_eq!(result.confusion, 1.0);
+        assert_eq!(result.der, Some(50.0));
+        assert_eq!(result.missed_percent, Some(0.0));
+        assert_eq!(result.false_alarm_percent, Some(0.0));
+        assert_eq!(result.confusion_percent, Some(50.0));
+        assert_eq!(result.reference_speaker_count, 1);
+        assert_eq!(result.predicted_speaker_count, 2);
+
+        let json = serde_json::to_value(result).unwrap();
+        assert_eq!(json["file_id"], "first");
+        assert!(
+            json["reference_rttm"]
+                .as_str()
+                .unwrap()
+                .ends_with("first.rttm")
+        );
+        assert_eq!(json["reference_speaker_time"], 2.0);
+        assert_eq!(json["der"], 50.0);
+        assert_eq!(json["reference_speaker_count"], 1);
+        assert_eq!(json["predicted_speaker_count"], 2);
+    }
+
+    #[test]
+    fn aggregate_totals_equal_per_file_totals_with_empty_hypothesis() {
+        let directory = tempfile::tempdir().unwrap();
+        let first_reference_path = directory.path().join("first.rttm");
+        let second_reference_path = directory.path().join("second.rttm");
+        fs::write(
+            &first_reference_path,
+            "SPEAKER first 1 0.0 2.0 <NA> <NA> ref-a <NA> <NA>\n",
+        )
+        .unwrap();
+        fs::write(
+            &second_reference_path,
+            concat!(
+                "SPEAKER second 1 0.0 1.0 <NA> <NA> ref-a <NA> <NA>\n",
+                "SPEAKER second 1 1.0 1.0 <NA> <NA> ref-b <NA> <NA>\n",
+            ),
+        )
+        .unwrap();
+
+        let files = vec![
+            (PathBuf::from("first.wav"), first_reference_path),
+            (PathBuf::from("second.wav"), second_reference_path),
+        ];
+        let hypotheses = HashMap::from([(
+            "first".to_string(),
+            "SPEAKER first 1 0.0 1.0 <NA> <NA> hyp-a <NA> <NA>\n\
+SPEAKER first 1 1.0 1.0 <NA> <NA> hyp-b <NA> <NA>\n"
+                .to_string(),
+        )]);
+
+        let accumulation = DerAccumulation::compute(&files, &hypotheses).unwrap();
+        let file_results = accumulation.per_file();
+
+        assert_eq!(file_results.len(), 2);
+        assert_eq!(file_results[1].file_id, "second");
+        assert_eq!(file_results[1].missed, 2.0);
+        assert_eq!(file_results[1].false_alarm, 0.0);
+        assert_eq!(file_results[1].confusion, 0.0);
+        assert_eq!(file_results[1].reference_speaker_time, 2.0);
+        assert_eq!(file_results[1].der, Some(100.0));
+        assert_eq!(file_results[1].reference_speaker_count, 2);
+        assert_eq!(file_results[1].predicted_speaker_count, 0);
+
+        let missed: f64 = file_results.iter().map(|result| result.missed).sum();
+        let false_alarm: f64 = file_results.iter().map(|result| result.false_alarm).sum();
+        let confusion: f64 = file_results.iter().map(|result| result.confusion).sum();
+        let reference_speaker_time: f64 = file_results
+            .iter()
+            .map(|result| result.reference_speaker_time)
+            .sum();
+
+        assert!((accumulation.missed - missed).abs() < f64::EPSILON);
+        assert!((accumulation.false_alarm - false_alarm).abs() < f64::EPSILON);
+        assert!((accumulation.confusion - confusion).abs() < f64::EPSILON);
+        assert!((accumulation.total_ref - reference_speaker_time).abs() < f64::EPSILON);
+        assert_eq!(accumulation.file_count, file_results.len());
+    }
+
+    #[test]
+    fn zero_reference_duration_has_no_percentages() {
+        let directory = tempfile::tempdir().unwrap();
+        let reference_path = directory.path().join("empty.rttm");
+        fs::write(&reference_path, "").unwrap();
+
+        let files = vec![(PathBuf::from("empty.wav"), reference_path)];
+        let accumulation = DerAccumulation::compute(&files, &HashMap::new()).unwrap();
+        let result = &accumulation.per_file_results[0];
+
+        assert_eq!(result.reference_speaker_time, 0.0);
+        assert_eq!(result.der, None);
+        assert_eq!(result.missed_percent, None);
+        assert_eq!(result.false_alarm_percent, None);
+        assert_eq!(result.confusion_percent, None);
+        assert_eq!(accumulation.der_percentages(), (None, None, None, None));
     }
 }
