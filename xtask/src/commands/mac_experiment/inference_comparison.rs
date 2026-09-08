@@ -189,10 +189,7 @@ fn run_layout(
 ) -> Result<LayoutRun> {
     let experiment =
         ExperimentInferenceConfig::new(layout).with_fbank_normalization_scope(normalization_scope);
-    let runtime = RuntimeConfig {
-        experiment: Some(experiment),
-        ..RuntimeConfig::default()
-    };
+    let runtime = RuntimeConfig::default().with_experiment(experiment);
     let mut pipeline = PipelineBuilder::from_dir(models_dir, ExecutionMode::CoreMl)
         .runtime(runtime)
         .build()?;

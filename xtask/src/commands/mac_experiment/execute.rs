@@ -438,10 +438,7 @@ impl<'a> ExperimentExecutor<'a> {
         .with_embedding_compute_units(coreml_embedding_compute_units(
             experiment.inference().embedding_compute_units,
         ));
-        let runtime = RuntimeConfig {
-            experiment: Some(inference_config),
-            ..RuntimeConfig::default()
-        };
+        let runtime = RuntimeConfig::default().with_experiment(inference_config);
         let pipeline = PipelineBuilder::from_dir(experiment.models_dir(), mode)
             .runtime(runtime)
             .build()

@@ -2,6 +2,7 @@ use std::fs;
 use std::io::{BufReader, Read};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
 use color_eyre::eyre::{Context, Result, ensure};
@@ -23,6 +24,7 @@ pub(super) struct HostIdentity {
     pub thermal_state: String,
 }
 
+#[cfg(target_os = "macos")]
 impl HostIdentity {
     pub(super) fn collect(root: &Path) -> Result<Self> {
         Ok(Self {
@@ -121,6 +123,7 @@ fn digest_files(root: &Path, files: &[PathBuf]) -> Result<String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
+#[cfg(target_os = "macos")]
 fn dirty_diff_digest(root: &Path) -> Result<String> {
     let diff = Command::new("git")
         .args(["diff", "--binary", "HEAD"])
@@ -169,6 +172,7 @@ fn dirty_diff_digest(root: &Path) -> Result<String> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
+#[cfg(target_os = "macos")]
 fn command_text(root: &Path, program: &str, args: &[&str]) -> Result<String> {
     let output = Command::new(program)
         .args(args)
@@ -183,6 +187,7 @@ fn command_text(root: &Path, program: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(output.stdout)?.trim().to_owned())
 }
 
+#[cfg(target_os = "macos")]
 fn optional_command_text(root: &Path, program: &str, args: &[&str]) -> String {
     command_text(root, program, args).unwrap_or_else(|_| "unknown".to_owned())
 }

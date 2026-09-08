@@ -496,6 +496,7 @@ impl ValidatedExperiment {
         &self.datasets_dir
     }
 
+    #[cfg(target_os = "macos")]
     pub(crate) fn profiled_model_paths(&self) -> Vec<PathBuf> {
         let segmentation_suffix = match self.inference().mode {
             CoreMlMode::CoreMl => "",

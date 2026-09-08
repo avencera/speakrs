@@ -487,7 +487,7 @@ impl std::error::Error for ExperimentInferenceConfigError {}
 /// Runtime configuration for the diarization pipeline
 ///
 /// Controls execution parameters that can affect numerical output and performance.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RuntimeConfig {
     /// CoreML compute units for native embedding models (CoreML modes only)
     #[cfg(feature = "coreml")]
@@ -499,18 +499,15 @@ pub struct RuntimeConfig {
     pub experiment: Option<ExperimentInferenceConfig>,
 }
 
-impl Default for RuntimeConfig {
-    fn default() -> Self {
-        Self {
-            #[cfg(feature = "coreml")]
-            chunk_emb_compute_units: CoreMlComputeUnits::All,
-            #[cfg(feature = "_metrics")]
-            experiment: None,
-        }
-    }
-}
-
 impl RuntimeConfig {
+    /// Set a typed inference layout for metrics experiments
+    #[cfg(feature = "_metrics")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
+    pub fn with_experiment(mut self, experiment: ExperimentInferenceConfig) -> Self {
+        self.experiment = Some(experiment);
+        self
+    }
+
     #[cfg(feature = "coreml")]
     pub(crate) fn coreml_embedding_compute_units(&self) -> CoreMlComputeUnits {
         #[cfg(feature = "_metrics")]
@@ -696,11 +693,9 @@ mod tests {
 
         #[cfg(feature = "coreml")]
         {
-            let resolved = RuntimeConfig {
-                experiment: Some(config),
-                ..RuntimeConfig::default()
-            }
-            .coreml_chunk_execution_policy();
+            let resolved = RuntimeConfig::default()
+                .with_experiment(config)
+                .coreml_chunk_execution_policy();
             assert_eq!(resolved.fbank_preparation_workers, 2);
             assert!(resolved.segmentation_workers > 0);
             assert!(matches!(
