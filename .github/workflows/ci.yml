@@ -15,7 +15,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
-  SPEAKRS_MODEL_FIXTURE_REV: 5d24ffee75f13fb061fa6d10944a64e2dc1d5e6f
+  # Keep in sync with HF_REVISION in src/models.rs
+  SPEAKRS_MODEL_FIXTURE_REV: a785ebdbe6313868088c36c93d9efa71c470bd34
 
 jobs:
   cargo-deny:

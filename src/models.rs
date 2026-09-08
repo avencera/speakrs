@@ -64,6 +64,7 @@ impl ModelBundle {
 #[cfg(feature = "online")]
 const HF_REPO: &str = "avencera/speakrs-models";
 #[cfg(feature = "online")]
+// CI downloads fixtures from this same revision via SPEAKRS_MODEL_FIXTURE_REV
 const HF_REVISION: &str = "a785ebdbe6313868088c36c93d9efa71c470bd34";
 
 #[cfg(feature = "online")]
