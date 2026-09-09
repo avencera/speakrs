@@ -436,41 +436,13 @@ impl ValidatedExperiment {
             .as_ref()
             .map(|path| resolve_path(&root, path))
             .unwrap_or_else(|| root.join("fixtures/models"));
-        ensure!(
-            models_dir.is_dir(),
-            "models_dir does not exist: {}",
-            models_dir.display()
-        );
-        validate_layout_assets(&models_dir, &spec.inference)?;
-
         let datasets_dir = spec
             .datasets_dir
             .as_ref()
             .map(|path| resolve_path(&root, path))
             .unwrap_or_else(|| root.join("fixtures/datasets"));
-        ensure!(
-            datasets_dir.is_dir(),
-            "datasets_dir does not exist: {}",
-            datasets_dir.display()
-        );
-
-        let dataset = crate::datasets::find_dataset(&spec.dataset.id)
+        crate::datasets::find_dataset(&spec.dataset.id)
             .ok_or_else(|| color_eyre::eyre::eyre!("unknown dataset '{}'", spec.dataset.id))?;
-        let dataset_dir = dataset.dataset_dir(&datasets_dir);
-        ensure!(
-            dataset_dir.is_dir(),
-            "dataset '{}' is not available locally at {}",
-            spec.dataset.id,
-            dataset_dir.display()
-        );
-        if let Some(baseline_run) = &spec.baseline_run {
-            let baseline_run = resolve_path(&root, baseline_run);
-            ensure!(
-                baseline_run.join("manifest.json").is_file(),
-                "baseline_run does not contain a manifest: {}",
-                baseline_run.display()
-            );
-        }
 
         Ok(Self {
             spec,
@@ -565,19 +537,48 @@ impl ValidatedExperiment {
             );
         }
 
-        let Some(candidate) = self.post_inference().iter().find(|candidate| {
+        if let Some(candidate) = self.post_inference().iter().find(|candidate| {
             matches!(
                 candidate.ahc_stopping,
                 Some(ArchivedAhcStopping::EstablishedClusters { .. })
             )
-        }) else {
-            return Ok(());
-        };
+        }) {
+            bail!(
+                "post-inference candidate '{}' uses the rejected archived-only ahc_stopping policy; its run can be summarized but not executed",
+                candidate.id
+            );
+        }
 
-        bail!(
-            "post-inference candidate '{}' uses the rejected archived-only ahc_stopping policy; its run can be summarized but not executed",
-            candidate.id
-        )
+        ensure!(
+            self.models_dir.is_dir(),
+            "models_dir does not exist: {}",
+            self.models_dir.display()
+        );
+        validate_layout_assets(&self.models_dir, self.inference())?;
+
+        ensure!(
+            self.datasets_dir.is_dir(),
+            "datasets_dir does not exist: {}",
+            self.datasets_dir.display()
+        );
+        let dataset = crate::datasets::find_dataset(&self.spec.dataset.id)
+            .ok_or_else(|| color_eyre::eyre::eyre!("unknown dataset '{}'", self.spec.dataset.id))?;
+        let dataset_dir = dataset.dataset_dir(&self.datasets_dir);
+        ensure!(
+            dataset_dir.is_dir(),
+            "dataset '{}' is not available locally at {}",
+            self.spec.dataset.id,
+            dataset_dir.display()
+        );
+        if let Some(baseline_run) = &self.spec.baseline_run {
+            let baseline_run = resolve_path(&project_root(), baseline_run);
+            ensure!(
+                baseline_run.join("manifest.json").is_file(),
+                "baseline_run does not contain a manifest: {}",
+                baseline_run.display()
+            );
+        }
+        Ok(())
     }
 
     pub(crate) fn profile(&self) -> ProfileProtocol {

@@ -143,13 +143,13 @@ impl RunStore {
             experiment.id()
         );
         validate_manifest_files(&manifest, &experiment)?;
-        Ok((
-            Self {
-                run_dir: run_dir.to_path_buf(),
-                manifest,
-            },
-            experiment,
-        ))
+        let store = Self {
+            run_dir: run_dir.to_path_buf(),
+            manifest,
+        };
+        // resume and summarize must reject model or dataset drift before mixing records
+        store.assert_input_digests(&experiment)?;
+        Ok((store, experiment))
     }
 
     #[cfg(test)]
@@ -242,11 +242,7 @@ impl RunStore {
     }
 
     pub(super) fn assert_worker(&self, worker: &Path) -> Result<()> {
-        let identity = self
-            .manifest
-            .identity
-            .as_ref()
-            .ok_or_else(|| eyre!("run manifest has no execution identity"))?;
+        let identity = self.require_identity()?;
         ensure!(
             !identity.worker_sha256.is_empty(),
             "run manifest has no worker digest; create a new experiment run"
@@ -255,6 +251,30 @@ impl RunStore {
         ensure!(
             actual == identity.worker_sha256,
             "experiment worker changed after manifest creation"
+        );
+        Ok(())
+    }
+
+    pub(super) fn assert_input_digests(&self, experiment: &ValidatedExperiment) -> Result<()> {
+        let identity = self.require_identity()?;
+        ensure!(
+            !identity.model_sha256.is_empty(),
+            "run manifest has no model digest; create a new experiment run"
+        );
+        ensure!(
+            !identity.dataset_sha256.is_empty(),
+            "run manifest has no dataset digest; create a new experiment run"
+        );
+        let root = project_root();
+        let actual_model = model_digest(experiment, &root)?;
+        ensure!(
+            actual_model == identity.model_sha256,
+            "experiment models changed after manifest creation"
+        );
+        let actual_dataset = dataset_digest(&self.manifest.files, &root)?;
+        ensure!(
+            actual_dataset == identity.dataset_sha256,
+            "experiment dataset changed after manifest creation"
         );
         Ok(())
     }
@@ -305,8 +325,11 @@ impl RunStore {
             manifest.spec.dataset.max_files = manifest.files.len() as u32;
             manifest.spec.dataset.max_minutes = self.manifest.spec.dataset.max_minutes;
             manifest.spec.performance = self.manifest.spec.performance.clone();
-            manifest.identity = self.manifest.identity.clone();
+            // keep baseline asset digests; pin only the candidate seed and comparison run-order
             if let Some(identity) = &mut manifest.identity {
+                if let Some(candidate_identity) = &self.manifest.identity {
+                    identity.seed = candidate_identity.seed;
+                }
                 identity.run_order.repetitions =
                     (0..manifest.spec.performance.repetitions).collect();
                 identity.run_order.files =
@@ -527,6 +550,13 @@ impl RunStore {
         let mut bytes = serde_json::to_vec(&value)?;
         bytes.push(b'\n');
         atomic_write_new(&path, &bytes)
+    }
+
+    fn require_identity(&self) -> Result<&ManifestIdentity> {
+        self.manifest
+            .identity
+            .as_ref()
+            .ok_or_else(|| eyre!("run manifest has no execution identity"))
     }
 
     fn validate_experiment(&self, experiment: &ValidatedExperiment) -> Result<()> {
@@ -1606,23 +1636,31 @@ fn resolve_dataset_files(experiment: &ValidatedExperiment) -> Result<Vec<Manifes
     Ok(files)
 }
 
+fn model_digest(experiment: &ValidatedExperiment, root: &Path) -> Result<String> {
+    digest_paths_cached(
+        root,
+        &[experiment.models_dir().to_path_buf()],
+        &root.join("_benchmarks/macos/digest-cache"),
+    )
+}
+
+fn dataset_digest(files: &[ManifestFile], root: &Path) -> Result<String> {
+    let dataset_paths = files
+        .iter()
+        .flat_map(|file| [file.wav.clone(), file.rttm.clone()])
+        .collect::<Vec<_>>();
+    digest_paths(root, &dataset_paths)
+}
+
 fn build_identity(
     experiment: &ValidatedExperiment,
     files: &[ManifestFile],
     worker: &Path,
     root: &Path,
 ) -> Result<ManifestIdentity> {
-    let model_sha256 = digest_paths_cached(
-        root,
-        &[experiment.models_dir().to_path_buf()],
-        &root.join("_benchmarks/macos/digest-cache"),
-    )?;
+    let model_sha256 = model_digest(experiment, root)?;
     let worker_sha256 = digest_paths(root, &[worker.to_path_buf()])?;
-    let dataset_paths = files
-        .iter()
-        .flat_map(|file| [file.wav.clone(), file.rttm.clone()])
-        .collect::<Vec<_>>();
-    let dataset_sha256 = digest_paths(root, &dataset_paths)?;
+    let dataset_sha256 = dataset_digest(files, root)?;
     let host = collect_host_identity(root)?;
     Ok(ManifestIdentity {
         host,
@@ -2216,6 +2254,25 @@ mod tests {
         }
     }
 
+    fn test_identity(seed: u64) -> ManifestIdentity {
+        ManifestIdentity {
+            host: None,
+            model_sha256: "model".to_owned(),
+            worker_sha256: "worker".to_owned(),
+            dataset_sha256: "dataset".to_owned(),
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+            seed,
+            cache_state: "test".to_owned(),
+            run_order: RunOrder {
+                repetitions: vec![0],
+                files: vec!["second".to_owned(), "first".to_owned()],
+                candidates: vec!["default".to_owned()],
+                comparison_processes: vec!["candidate:r000".to_owned()],
+            },
+            fallback_events: Vec::new(),
+        }
+    }
+
     #[test]
     fn record_path_contains_repetition_file_and_candidate() {
         let temp = tempdir().unwrap();
@@ -2450,6 +2507,96 @@ mod tests {
         assert_eq!(comparison.manifest.files[0].id, "first");
         assert_eq!(comparison.manifest.spec.dataset.files, ["first"]);
         assert_eq!(comparison.manifest.spec.dataset.max_files, 1);
+    }
+
+    #[test]
+    fn comparison_baseline_preserves_source_asset_digests() {
+        let temp = tempdir().unwrap();
+        let mut source = test_store(&temp.path().join("source"));
+        source.manifest.identity = Some(test_identity(7));
+        let mut candidate = test_store(&temp.path().join("candidate"));
+        candidate.manifest.files = vec![source.manifest.files[1].clone()];
+        candidate.manifest.spec.dataset.max_files = 1;
+        candidate.manifest.spec.performance.repetitions = 4;
+        candidate.manifest.spec.performance.seed = 99;
+        candidate.manifest.identity = Some(test_identity(99));
+
+        let (comparison, _experiment) = candidate.comparison_baseline_store(&source).unwrap();
+        let identity = comparison.manifest.identity.as_ref().unwrap();
+
+        assert_eq!(identity.model_sha256, "model");
+        assert_eq!(identity.dataset_sha256, "dataset");
+        assert_eq!(identity.worker_sha256, "worker");
+        assert_eq!(identity.seed, 99);
+        assert_eq!(identity.run_order.repetitions, [0, 1, 2, 3]);
+        assert_eq!(identity.run_order.files, ["first"]);
+        assert_eq!(identity.run_order.candidates, ["default"]);
+        assert!(identity.run_order.comparison_processes.is_empty());
+        assert_ne!(identity.created_at, "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn open_rejects_changed_model_and_dataset_digests() {
+        let temp = tempdir().unwrap();
+        let models = temp.path().join("models");
+        fs::create_dir(&models).unwrap();
+        fs::write(models.join("weights.bin"), b"model-v1").unwrap();
+        let wav = temp.path().join("clip.wav");
+        let rttm = temp.path().join("clip.rttm");
+        fs::write(&wav, b"wav-v1").unwrap();
+        fs::write(&rttm, b"rttm-v1").unwrap();
+
+        let mut spec = valid_spec();
+        spec.models_dir = Some(models.clone());
+        let experiment = ValidatedExperiment::from_spec(spec.clone()).unwrap();
+        let files = vec![ManifestFile {
+            id: "clip".to_owned(),
+            wav: wav.clone(),
+            rttm: rttm.clone(),
+            duration_seconds: 1.0,
+        }];
+        let root = project_root();
+        let run_dir = temp.path().join(experiment.id());
+        fs::create_dir(&run_dir).unwrap();
+        write_manifest(
+            &run_dir,
+            &RunManifest {
+                schema_version: MANIFEST_SCHEMA_VERSION,
+                spec,
+                files: files.clone(),
+                identity: Some(ManifestIdentity {
+                    host: None,
+                    model_sha256: model_digest(&experiment, &root).unwrap(),
+                    worker_sha256: "worker".to_owned(),
+                    dataset_sha256: dataset_digest(&files, &root).unwrap(),
+                    created_at: "2026-01-01T00:00:00Z".to_owned(),
+                    seed: 42,
+                    cache_state: "test".to_owned(),
+                    run_order: RunOrder::default(),
+                    fallback_events: Vec::new(),
+                }),
+            },
+        )
+        .unwrap();
+
+        RunStore::open(&run_dir).map(|_| ()).unwrap();
+
+        fs::write(models.join("weights.bin"), b"model-v2").unwrap();
+        let error = RunStore::open(&run_dir).map(|_| ()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("experiment models changed after manifest creation")
+        );
+
+        fs::write(models.join("weights.bin"), b"model-v1").unwrap();
+        fs::write(&wav, b"wav-v2").unwrap();
+        let error = RunStore::open(&run_dir).map(|_| ()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("experiment dataset changed after manifest creation")
+        );
     }
 
     #[test]

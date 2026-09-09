@@ -146,6 +146,7 @@ pub(super) fn run_managed_with_worker(
 ) -> Result<()> {
     experiment.ensure_runnable()?;
     store.assert_worker(worker)?;
+    store.assert_input_digests(experiment)?;
     let executed = match &experiment.spec().baseline_run {
         Some(baseline_run) => run_abba_comparison(worker, store, experiment, baseline_run)?,
         None => run_isolated_repetitions(worker, store, experiment)?,
