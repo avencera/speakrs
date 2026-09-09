@@ -837,6 +837,7 @@ impl ProjectionSummary {
                     &metrics[index],
                     dataset_noise_margin_der,
                     &candidate.documented_der_outliers,
+                    SpeedClock::ProcessWall,
                 )?
             } else if index == 0 {
                 None
@@ -848,6 +849,7 @@ impl ProjectionSummary {
                     &metrics[index],
                     dataset_noise_margin_der,
                     &candidate.documented_der_outliers,
+                    SpeedClock::PostInference,
                 )?
             };
             let candidate_metrics = &metrics[index];
@@ -998,6 +1000,12 @@ fn comparison_noise_margin(external_baseline_noise_margin: Option<f64>) -> f64 {
     external_baseline_noise_margin.unwrap_or(0.0)
 }
 
+#[derive(Clone, Copy)]
+enum SpeedClock {
+    ProcessWall,
+    PostInference,
+}
+
 struct ComparisonDurations<'a> {
     baseline_by_repetition: &'a BTreeMap<u32, f64>,
     candidate_by_repetition: &'a BTreeMap<u32, f64>,
@@ -1008,21 +1016,21 @@ struct ComparisonDurations<'a> {
 fn comparison_durations<'a>(
     baseline: &'a CandidateMetrics,
     candidate: &'a CandidateMetrics,
+    clock: SpeedClock,
 ) -> ComparisonDurations<'a> {
-    if baseline.repetition_wall_seconds == candidate.repetition_wall_seconds {
-        ComparisonDurations {
+    match clock {
+        SpeedClock::PostInference => ComparisonDurations {
             baseline_by_repetition: &baseline.repetition_post_inference_seconds,
             candidate_by_repetition: &candidate.repetition_post_inference_seconds,
             baseline_median: baseline.median_post_inference_seconds,
             candidate_median: candidate.median_post_inference_seconds,
-        }
-    } else {
-        ComparisonDurations {
+        },
+        SpeedClock::ProcessWall => ComparisonDurations {
             baseline_by_repetition: &baseline.repetition_wall_seconds,
             candidate_by_repetition: &candidate.repetition_wall_seconds,
             baseline_median: baseline.median_workload_seconds,
             candidate_median: candidate.median_workload_seconds,
-        }
+        },
     }
 }
 
@@ -1286,6 +1294,7 @@ fn build_comparison(
     candidate: &CandidateMetrics,
     noise_margin: f64,
     documented_outliers: &[super::domain::DocumentedDerOutlier],
+    speed_clock: SpeedClock,
 ) -> Result<Option<ComparisonProjection>> {
     if baseline.observations.is_empty()
         || baseline.observations.len() != candidate.observations.len()
@@ -1362,7 +1371,7 @@ fn build_comparison(
     });
     let per_file_der_guard_passed = per_file_der_guard_passes(&per_file_der_changes);
 
-    let durations = comparison_durations(baseline, candidate);
+    let durations = comparison_durations(baseline, candidate, speed_clock);
     let speed_improvements = durations
         .baseline_by_repetition
         .iter()
@@ -2619,9 +2628,17 @@ mod tests {
         let baseline = CandidateMetrics::from_records(&manifest, &records, 0, &wall).unwrap();
         let candidate = CandidateMetrics::from_records(&manifest, &records, 1, &wall).unwrap();
 
-        let comparison = build_comparison(&manifest, "default", &baseline, &candidate, 0.0, &[])
-            .unwrap()
-            .unwrap();
+        let comparison = build_comparison(
+            &manifest,
+            "default",
+            &baseline,
+            &candidate,
+            0.0,
+            &[],
+            SpeedClock::PostInference,
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(comparison.speed_improvement_percent, Some(100.0));
         assert!(comparison.material_speed_improvement);
@@ -2638,11 +2655,47 @@ mod tests {
             CandidateMetrics::from_records(&manifest, &records, 0, &BTreeMap::from([(0, 5.0)]))
                 .unwrap();
 
-        let comparison = build_comparison(&manifest, "default", &baseline, &candidate, 0.0, &[])
-            .unwrap()
-            .unwrap();
+        let comparison = build_comparison(
+            &manifest,
+            "default",
+            &baseline,
+            &candidate,
+            0.0,
+            &[],
+            SpeedClock::ProcessWall,
+        )
+        .unwrap()
+        .unwrap();
 
         assert_eq!(comparison.speed_improvement_percent, Some(100.0));
+    }
+
+    #[test]
+    fn external_speed_stays_unavailable_when_process_walls_are_empty() {
+        let manifest = test_manifest();
+        let baseline_records = [complete_record(0, 0, 0, 2.0), complete_record(0, 1, 0, 2.0)];
+        let candidate_records = [complete_record(0, 0, 0, 1.0), complete_record(0, 1, 0, 1.0)];
+        let baseline =
+            CandidateMetrics::from_records(&manifest, &baseline_records, 0, &BTreeMap::new())
+                .unwrap();
+        let candidate =
+            CandidateMetrics::from_records(&manifest, &candidate_records, 0, &BTreeMap::new())
+                .unwrap();
+
+        let comparison = build_comparison(
+            &manifest,
+            "default",
+            &baseline,
+            &candidate,
+            0.0,
+            &[],
+            SpeedClock::ProcessWall,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(comparison.speed_improvement_percent, None);
+        assert!(!comparison.material_speed_improvement);
     }
 
     #[test]
