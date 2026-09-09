@@ -352,13 +352,15 @@ fn build_gamma_init(labels: &[usize], initialization: SphereVbxInitialization) -
     let SphereVbxInitialization::Smoothed(smoothing) = initialization else {
         return gamma;
     };
-    let scale = smoothing.get() as f32;
+    let scale = smoothing.get();
     for mut row in gamma.rows_mut() {
-        row *= scale;
-        let maximum = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        row.mapv_inplace(|value| (value - maximum).exp());
-        let denominator = row.sum();
-        row /= denominator;
+        let mut scaled = row.mapv(|value| f64::from(value) * scale);
+        let maximum = scaled.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        scaled.mapv_inplace(|value| (value - maximum).exp());
+        let denominator = scaled.sum();
+        for (dst, value) in row.iter_mut().zip(scaled.iter()) {
+            *dst = (*value / denominator) as f32;
+        }
     }
     gamma
 }
@@ -454,6 +456,18 @@ mod tests {
         assert!(expected[[0, 1]] > 0.0);
         assert_abs_diff_eq!(expected[[0, 0]], -expected[[1, 0]], epsilon = 1e-12);
         assert_abs_diff_eq!(expected[[0, 1]], -expected[[1, 1]], epsilon = 1e-12);
+    }
+
+    #[test]
+    fn smoothed_initialization_stays_finite_for_huge_scale() {
+        let smoothing = ResponsibilitySmoothing::new(1e40).unwrap();
+        let gamma = build_gamma_init(&[0, 1], SphereVbxInitialization::Smoothed(smoothing));
+
+        assert!(gamma.iter().all(|value| value.is_finite()));
+        assert_abs_diff_eq!(gamma.row(0).sum(), 1.0, epsilon = 1e-6);
+        assert_abs_diff_eq!(gamma.row(1).sum(), 1.0, epsilon = 1e-6);
+        assert!(gamma[[0, 0]] > gamma[[0, 1]]);
+        assert!(gamma[[1, 1]] > gamma[[1, 0]]);
     }
 
     #[test]
