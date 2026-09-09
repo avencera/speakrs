@@ -7,7 +7,7 @@ use std::process::Command;
 
 use color_eyre::eyre::{Context, Result, bail, ensure, eyre};
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::cmd::project_root;
 use crate::commands::benchmark::discover_files;
@@ -408,6 +408,19 @@ impl RunStore {
         atomic_write_new(&path, &bytes)
     }
 
+    pub(super) fn ensure_unmeasured_repetition_record(&self, repetition: u32) -> Result<()> {
+        self.write_repetition_record(
+            repetition,
+            &json!({
+                "status": "complete",
+                "resumed": true,
+                "whole_process_seconds": 0.0,
+                "peak_rss_bytes": Value::Null,
+                "completed_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        )
+    }
+
     pub(super) fn missing_candidate_ids(
         &self,
         repetition: u32,
@@ -725,6 +738,7 @@ struct CandidateMetrics {
     confusion_percent: Option<f64>,
     usable_training_embeddings: Option<CountRangeProjection>,
     repetition_wall_seconds: BTreeMap<u32, f64>,
+    repetition_post_inference_seconds: BTreeMap<u32, f64>,
     median_workload_seconds: Option<f64>,
     workload_mad_seconds: Option<f64>,
     median_post_inference_seconds: Option<f64>,
@@ -984,6 +998,34 @@ fn comparison_noise_margin(external_baseline_noise_margin: Option<f64>) -> f64 {
     external_baseline_noise_margin.unwrap_or(0.0)
 }
 
+struct ComparisonDurations<'a> {
+    baseline_by_repetition: &'a BTreeMap<u32, f64>,
+    candidate_by_repetition: &'a BTreeMap<u32, f64>,
+    baseline_median: Option<f64>,
+    candidate_median: Option<f64>,
+}
+
+fn comparison_durations<'a>(
+    baseline: &'a CandidateMetrics,
+    candidate: &'a CandidateMetrics,
+) -> ComparisonDurations<'a> {
+    if baseline.repetition_wall_seconds == candidate.repetition_wall_seconds {
+        ComparisonDurations {
+            baseline_by_repetition: &baseline.repetition_post_inference_seconds,
+            candidate_by_repetition: &candidate.repetition_post_inference_seconds,
+            baseline_median: baseline.median_post_inference_seconds,
+            candidate_median: candidate.median_post_inference_seconds,
+        }
+    } else {
+        ComparisonDurations {
+            baseline_by_repetition: &baseline.repetition_wall_seconds,
+            candidate_by_repetition: &candidate.repetition_wall_seconds,
+            baseline_median: baseline.median_workload_seconds,
+            candidate_median: candidate.median_workload_seconds,
+        }
+    }
+}
+
 impl CandidateMetrics {
     fn from_records(
         manifest: &RunManifest,
@@ -1144,6 +1186,7 @@ impl CandidateMetrics {
             confusion_percent: percentage(total_confusion),
             usable_training_embeddings,
             repetition_wall_seconds,
+            repetition_post_inference_seconds,
             median_workload_seconds,
             workload_mad_seconds,
             median_post_inference_seconds,
@@ -1319,22 +1362,20 @@ fn build_comparison(
     });
     let per_file_der_guard_passed = per_file_der_guard_passes(&per_file_der_changes);
 
-    let speed_improvements = baseline
-        .repetition_wall_seconds
+    let durations = comparison_durations(baseline, candidate);
+    let speed_improvements = durations
+        .baseline_by_repetition
         .iter()
         .filter_map(|(repetition, baseline_seconds)| {
-            candidate
-                .repetition_wall_seconds
+            durations
+                .candidate_by_repetition
                 .get(repetition)
                 .map(|candidate_seconds| {
                     speed_improvement_percent(*baseline_seconds, *candidate_seconds)
                 })
         })
         .collect::<Result<Vec<_>>>()?;
-    let speed_improvement = match (
-        baseline.median_workload_seconds,
-        candidate.median_workload_seconds,
-    ) {
+    let speed_improvement = match (durations.baseline_median, durations.candidate_median) {
         (Some(baseline_seconds), Some(candidate_seconds)) => Some(speed_improvement_percent(
             baseline_seconds,
             candidate_seconds,
@@ -2529,6 +2570,106 @@ mod tests {
 
         assert!(metrics.repetition_wall_seconds.is_empty());
         assert_eq!(metrics.median_workload_seconds, None);
+    }
+
+    fn complete_record(
+        repetition: u32,
+        file_index: usize,
+        candidate_index: usize,
+        post_inference_seconds: f64,
+    ) -> StoredRecord {
+        StoredRecord {
+            value: json!({
+                "status": "complete",
+                "stage_timings": { "post_inference_seconds": post_inference_seconds },
+                "der": {
+                    "reference_speaker_time": 10.0,
+                    "missed": 1.0,
+                    "false_alarm": 0.0,
+                    "confusion": 0.0,
+                    "reference_speaker_count": 2,
+                    "predicted_speaker_count": 2
+                }
+            }),
+            repetition,
+            file_index,
+            candidate_index,
+        }
+    }
+
+    #[test]
+    fn within_run_speed_uses_post_inference_when_process_wall_is_shared() {
+        let mut manifest = test_manifest();
+        manifest.spec.post_inference.push(PostInferenceVariant {
+            id: "fast".to_owned(),
+            vbx_max_iters: Some(5),
+            vbx_fb: None,
+            clean_frame_seconds: None,
+            ahc_stopping: None,
+            clustering_backend: None,
+            documented_der_outliers: Vec::new(),
+        });
+        let records = [
+            complete_record(0, 0, 0, 2.0),
+            complete_record(0, 1, 0, 2.0),
+            complete_record(0, 0, 1, 1.0),
+            complete_record(0, 1, 1, 1.0),
+        ];
+        let wall = BTreeMap::from([(0, 10.0)]);
+        let baseline = CandidateMetrics::from_records(&manifest, &records, 0, &wall).unwrap();
+        let candidate = CandidateMetrics::from_records(&manifest, &records, 1, &wall).unwrap();
+
+        let comparison = build_comparison(&manifest, "default", &baseline, &candidate, 0.0, &[])
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(comparison.speed_improvement_percent, Some(100.0));
+        assert!(comparison.material_speed_improvement);
+    }
+
+    #[test]
+    fn external_speed_uses_process_wall_when_clocks_differ() {
+        let manifest = test_manifest();
+        let records = [complete_record(0, 0, 0, 1.0), complete_record(0, 1, 0, 1.0)];
+        let baseline =
+            CandidateMetrics::from_records(&manifest, &records, 0, &BTreeMap::from([(0, 10.0)]))
+                .unwrap();
+        let candidate =
+            CandidateMetrics::from_records(&manifest, &records, 0, &BTreeMap::from([(0, 5.0)]))
+                .unwrap();
+
+        let comparison = build_comparison(&manifest, "default", &baseline, &candidate, 0.0, &[])
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(comparison.speed_improvement_percent, Some(100.0));
+    }
+
+    #[test]
+    fn missing_repetition_record_is_written_as_unmeasured() {
+        let temp = tempdir().unwrap();
+        let store = test_store(temp.path());
+        let experiment = ValidatedExperiment::from_spec(store.manifest.spec.clone()).unwrap();
+        store
+            .write_record(0, 0, "default", &json!({"status": "complete"}))
+            .unwrap();
+        store
+            .write_record(0, 1, "default", &json!({"status": "complete"}))
+            .unwrap();
+
+        assert!(store.repetition_complete(0, &experiment).unwrap());
+        store.ensure_unmeasured_repetition_record(0).unwrap();
+
+        let record: Value = serde_json::from_reader(BufReader::new(
+            File::open(temp.path().join("repetitions/r000.json")).unwrap(),
+        ))
+        .unwrap();
+        assert_eq!(record["resumed"], true);
+        assert!(
+            read_repetition_wall_seconds(temp.path())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

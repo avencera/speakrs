@@ -167,6 +167,7 @@ fn run_isolated_repetitions(
     let mut executed = false;
     for repetition in 0..experiment.performance().repetitions() {
         if store.repetition_complete(repetition, experiment)? {
+            store.ensure_unmeasured_repetition_record(repetition)?;
             continue;
         }
         executed = true;
@@ -223,6 +224,12 @@ fn run_abba_comparison(
                 store.repetition_complete(repetition, experiment)?
             };
             if complete {
+                let complete_store = if is_baseline {
+                    &comparison_store
+                } else {
+                    store
+                };
+                complete_store.ensure_unmeasured_repetition_record(repetition)?;
                 continue;
             }
             executed = true;
@@ -331,6 +338,7 @@ fn execute_store_repetition(
     worker_start: Instant,
 ) -> Result<()> {
     if store.repetition_complete(repetition, experiment)? {
+        store.ensure_unmeasured_repetition_record(repetition)?;
         return Ok(());
     }
     let resumed = store.repetition_started(repetition, experiment)?;
