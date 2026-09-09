@@ -16,6 +16,7 @@ use super::{
     identity::{HostIdentity, digest_paths, digest_paths_cached},
     store::atomic_write,
 };
+use crate::cmd::project_root;
 use crate::wav::load_wav_samples;
 
 const SAMPLE_RATE: u32 = 16_000;
@@ -76,7 +77,7 @@ pub(super) fn run(
     step: InferenceComparisonStep,
     output: &Path,
 ) -> Result<()> {
-    let root = std::env::current_dir().context("failed to find the repository directory")?;
+    let root = project_root();
     let models_dir = models_dir
         .canonicalize()
         .wrap_err_with(|| format!("failed to resolve {}", models_dir.display()))?;

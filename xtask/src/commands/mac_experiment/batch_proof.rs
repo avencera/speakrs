@@ -11,6 +11,7 @@ use super::{
     statistics::{median, median_absolute_deviation, speed_improvement_percent},
     store::atomic_write,
 };
+use crate::cmd::project_root;
 use crate::wav::load_wav_samples;
 
 const SAMPLE_RATE: u32 = 16_000;
@@ -101,7 +102,7 @@ pub(super) fn run(
         "repetitions must be even and between 6 and {MAX_REPETITIONS}"
     );
 
-    let root = std::env::current_dir().context("failed to find the repository directory")?;
+    let root = project_root();
     let models_dir = models_dir
         .canonicalize()
         .wrap_err_with(|| format!("failed to resolve {}", models_dir.display()))?;
