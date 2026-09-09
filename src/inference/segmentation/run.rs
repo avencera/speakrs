@@ -16,7 +16,7 @@ impl SegmentationModel {
         audio: &[f32],
         tx: Sender<Array2<f32>>,
     ) -> Result<usize, SegmentationError> {
-        let windows = SegmentationWindows::collect(audio, self.window_samples, self.step_samples);
+        let windows = SegmentationWindows::collect(audio, self.window_spec());
         let total_windows = windows.total_windows();
         if windows.is_empty() {
             return Ok(0);
@@ -94,7 +94,7 @@ impl SegmentationModel {
     ///
     /// Returns `Vec<Array2<f32>>` where each element is [frames, 7] logits
     pub fn run(&mut self, audio: &[f32]) -> Result<Vec<Array2<f32>>, ort::Error> {
-        let windows = SegmentationWindows::collect(audio, self.window_samples, self.step_samples);
+        let windows = SegmentationWindows::collect(audio, self.window_spec());
         let total_windows = windows.total_windows();
         let mut results = Vec::with_capacity(total_windows);
         let mut next_idx = 0;

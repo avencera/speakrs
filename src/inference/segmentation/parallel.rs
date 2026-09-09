@@ -217,7 +217,7 @@ impl SegmentationModel {
         num_workers: usize,
         warm_start_target_windows: Option<usize>,
     ) -> Result<usize, SegmentationError> {
-        let windows = SegmentationWindows::collect(audio, self.window_samples, self.step_samples);
+        let windows = SegmentationWindows::collect(audio, self.window_spec());
         let total_windows = windows.total_windows();
         if windows.is_empty() {
             return Ok(0);

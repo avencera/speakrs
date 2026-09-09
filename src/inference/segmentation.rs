@@ -13,7 +13,7 @@ mod parallel;
 mod run;
 mod tensor;
 
-pub(crate) use tensor::segmentation_window_count;
+pub(crate) use tensor::{WindowSpec, segmentation_window_count};
 
 /// Errors that can occur during segmentation inference
 #[derive(Debug, thiserror::Error)]
@@ -245,6 +245,11 @@ impl SegmentationModel {
     /// Number of audio samples the window advances each step
     pub fn step_samples(&self) -> usize {
         self.step_samples
+    }
+
+    pub(super) fn window_spec(&self) -> WindowSpec {
+        WindowSpec::new(self.window_samples, self.step_samples)
+            .expect("window and step samples must be non-zero")
     }
 
     /// Step size in seconds

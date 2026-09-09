@@ -2,7 +2,7 @@ use ndarray::{Array2, Array3, s};
 use tracing::{debug, trace};
 
 use crate::inference::embedding::EmbeddingModel;
-use crate::inference::segmentation::segmentation_window_count;
+use crate::inference::segmentation::{WindowSpec, segmentation_window_count};
 use crate::powerset::PowersetMapping;
 
 use super::config::MIN_SPEAKER_ACTIVITY;
@@ -42,7 +42,9 @@ pub(super) struct ConcurrentEmbeddingRunner<'a> {
 
 impl<'a> ConcurrentEmbeddingRunner<'a> {
     fn total_windows(&self) -> usize {
-        segmentation_window_count(self.audio.len(), self.window_samples, self.step_samples)
+        let spec = WindowSpec::new(self.window_samples, self.step_samples)
+            .expect("window and step samples must be non-zero");
+        segmentation_window_count(self.audio.len(), spec)
     }
 
     pub fn run_split(

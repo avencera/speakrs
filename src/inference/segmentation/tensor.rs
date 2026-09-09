@@ -1,9 +1,35 @@
+use std::num::NonZeroUsize;
+
 #[cfg(feature = "coreml")]
 use ndarray::{Array2, Array3};
 
 use super::SegmentationError;
 
 pub(super) type OutputShape3 = (usize, usize, usize);
+
+/// Non-zero sliding-window length and step used by segmentation
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct WindowSpec {
+    window_samples: NonZeroUsize,
+    step_samples: NonZeroUsize,
+}
+
+impl WindowSpec {
+    pub(crate) fn new(window_samples: usize, step_samples: usize) -> Option<Self> {
+        Some(Self {
+            window_samples: NonZeroUsize::new(window_samples)?,
+            step_samples: NonZeroUsize::new(step_samples)?,
+        })
+    }
+
+    pub(crate) fn window_samples(self) -> usize {
+        self.window_samples.get()
+    }
+
+    pub(crate) fn step_samples(self) -> usize {
+        self.step_samples.get()
+    }
+}
 
 pub(super) struct SegmentationWindows<'a> {
     audio: &'a [f32],
@@ -13,18 +39,17 @@ pub(super) struct SegmentationWindows<'a> {
 }
 
 /// Count sliding windows the same way [`SegmentationWindows::collect`] emits them
-pub(crate) fn segmentation_window_count(
-    audio_len: usize,
-    window_samples: usize,
-    step_samples: usize,
-) -> usize {
+pub(crate) fn segmentation_window_count(audio_len: usize, spec: WindowSpec) -> usize {
     if audio_len == 0 {
         return 0;
     }
+
+    let window_samples = spec.window_samples();
     if audio_len <= window_samples {
         return 1;
     }
 
+    let step_samples = spec.step_samples();
     let full_windows = (audio_len - window_samples) / step_samples + 1;
     let offset_after_full = full_windows * step_samples;
     let has_tail = offset_after_full < audio_len;
@@ -32,7 +57,9 @@ pub(crate) fn segmentation_window_count(
 }
 
 impl<'a> SegmentationWindows<'a> {
-    pub(super) fn collect(audio: &'a [f32], window_samples: usize, step_samples: usize) -> Self {
+    pub(super) fn collect(audio: &'a [f32], spec: WindowSpec) -> Self {
+        let window_samples = spec.window_samples();
+        let step_samples = spec.step_samples();
         if !audio.is_empty() && audio.len() < window_samples {
             let mut padded = vec![0.0f32; window_samples];
             padded[..audio.len()].copy_from_slice(audio);
@@ -193,7 +220,13 @@ pub(super) fn worker_panic(worker: &'static str) -> SegmentationError {
 
 #[cfg(test)]
 mod tests {
-    use super::{SegmentationWindows, first_output, output_shape3, segmentation_window_count};
+    use super::{
+        SegmentationWindows, WindowSpec, first_output, output_shape3, segmentation_window_count,
+    };
+
+    fn window_spec(window_samples: usize, step_samples: usize) -> WindowSpec {
+        WindowSpec::new(window_samples, step_samples).expect("non-zero window spec")
+    }
 
     #[test]
     fn first_output_reports_missing_tensor() {
@@ -219,9 +252,10 @@ mod tests {
     #[test]
     fn nonempty_recording_shorter_than_one_window_emits_one_padded_window() {
         let audio = vec![0.5_f32; 8];
-        let windows = SegmentationWindows::collect(&audio, 16, 8);
+        let spec = window_spec(16, 8);
+        let windows = SegmentationWindows::collect(&audio, spec);
         assert_eq!(windows.total_windows(), 1);
-        assert_eq!(segmentation_window_count(audio.len(), 16, 8), 1);
+        assert_eq!(segmentation_window_count(audio.len(), spec), 1);
         let window = windows.window(0, "short recording").expect("window");
         assert_eq!(window.len(), 16);
         assert_eq!(&window[..8], audio.as_slice());
@@ -230,20 +264,20 @@ mod tests {
 
     #[test]
     fn empty_recording_emits_no_window() {
-        let windows = SegmentationWindows::collect(&[], 16, 8);
+        let spec = window_spec(16, 8);
+        let windows = SegmentationWindows::collect(&[], spec);
         assert!(windows.is_empty());
-        assert_eq!(segmentation_window_count(0, 16, 8), 0);
+        assert_eq!(segmentation_window_count(0, spec), 0);
     }
 
     #[test]
     fn window_count_matches_collected_windows() {
-        const WINDOW: usize = 16;
-        const STEP: usize = 8;
+        let spec = window_spec(16, 8);
         for audio_len in [0, 1, 8, 15, 16, 17, 23, 24, 31, 32, 40] {
             let audio = vec![1.0_f32; audio_len];
-            let windows = SegmentationWindows::collect(&audio, WINDOW, STEP);
+            let windows = SegmentationWindows::collect(&audio, spec);
             assert_eq!(
-                segmentation_window_count(audio_len, WINDOW, STEP),
+                segmentation_window_count(audio_len, spec),
                 windows.total_windows(),
                 "window count drifted from collect at audio_len={audio_len}"
             );
