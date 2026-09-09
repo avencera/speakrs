@@ -284,72 +284,19 @@ impl RunStore {
         source: &RunStore,
     ) -> Result<(RunStore, ValidatedExperiment)> {
         let run_dir = self.run_dir.join("comparison-baseline");
-        let manifest = if run_dir.is_dir() {
-            let manifest_path = run_dir.join("manifest.json");
-            let stored: RunManifest = serde_json::from_reader(BufReader::new(
-                File::open(&manifest_path).wrap_err_with(|| {
-                    format!(
-                        "failed to open comparison manifest {}",
-                        manifest_path.display()
-                    )
-                })?,
-            ))?;
-            stored
-        } else {
-            fs::create_dir_all(&run_dir)?;
-            let mut manifest = source.manifest.clone();
-            let source_files: HashMap<_, _> = manifest
-                .files
-                .iter()
-                .cloned()
-                .map(|file| (file.id.clone(), file))
-                .collect();
-            manifest.files = self
-                .manifest
-                .files
-                .iter()
-                .map(|candidate_file| {
-                    source_files
-                        .get(&candidate_file.id)
-                        .cloned()
-                        .ok_or_else(|| {
-                            eyre!(
-                                "baseline run has no file '{}' required by the candidate",
-                                candidate_file.id
-                            )
-                        })
-                })
-                .collect::<Result<Vec<_>>>()?;
-            manifest.spec.dataset.files =
-                manifest.files.iter().map(|file| file.id.clone()).collect();
-            manifest.spec.dataset.max_files = manifest.files.len() as u32;
-            manifest.spec.dataset.max_minutes = self.manifest.spec.dataset.max_minutes;
-            manifest.spec.performance = self.manifest.spec.performance.clone();
-            // keep baseline asset digests; pin only the candidate seed and comparison run-order
-            if let Some(identity) = &mut manifest.identity {
-                if let Some(candidate_identity) = &self.manifest.identity {
-                    identity.seed = candidate_identity.seed;
-                }
-                identity.run_order.repetitions =
-                    (0..manifest.spec.performance.repetitions).collect();
-                identity.run_order.files =
-                    manifest.files.iter().map(|file| file.id.clone()).collect();
-                identity.run_order.candidates = manifest
-                    .spec
-                    .post_inference
-                    .iter()
-                    .map(|candidate| candidate.id.clone())
-                    .collect();
-                identity.run_order.comparison_processes.clear();
-                identity.created_at = chrono::Utc::now().to_rfc3339();
+        let expected_files = remapped_source_files(source, &self.manifest.files)?;
+        let manifest = match load_existing_comparison_manifest(&run_dir)? {
+            Some(stored) => {
+                validate_comparison_clone(&stored, source, self, &expected_files)?;
+                stored
             }
-            write_manifest(&run_dir, &manifest)?;
-            manifest
+            None => {
+                fs::create_dir_all(&run_dir)?;
+                let manifest = build_comparison_manifest(source, self, expected_files);
+                write_manifest(&run_dir, &manifest)?;
+                manifest
+            }
         };
-        ensure!(
-            manifest.spec.performance.repetitions == self.manifest.spec.performance.repetitions,
-            "comparison baseline repetition count does not match the candidate"
-        );
         let experiment = ValidatedExperiment::from_spec(manifest.spec.clone())?;
 
         Ok((RunStore { run_dir, manifest }, experiment))
@@ -1037,8 +984,7 @@ impl ProjectionSummary {
 }
 
 fn comparison_noise_margin(external_baseline_noise_margin: Option<f64>) -> f64 {
-    // Post-inference candidates share one set of inference artifacts, so inference noise does not
-    // apply to comparisons within the run
+    // within-run comparisons use noise_margin 0
     external_baseline_noise_margin.unwrap_or(0.0)
 }
 
@@ -1724,6 +1670,133 @@ fn create_run_dir(run_dir: &Path) -> Result<()> {
         Err(error) => Err(error)
             .wrap_err_with(|| format!("failed to create experiment run {}", run_dir.display())),
     }
+}
+
+fn remapped_source_files(
+    source: &RunStore,
+    candidate_files: &[ManifestFile],
+) -> Result<Vec<ManifestFile>> {
+    let source_files: HashMap<&str, &ManifestFile> = source
+        .manifest
+        .files
+        .iter()
+        .map(|file| (file.id.as_str(), file))
+        .collect();
+    candidate_files
+        .iter()
+        .map(|candidate_file| {
+            source_files
+                .get(candidate_file.id.as_str())
+                .copied()
+                .cloned()
+                .ok_or_else(|| {
+                    eyre!(
+                        "baseline run has no file '{}' required by the candidate",
+                        candidate_file.id
+                    )
+                })
+        })
+        .collect()
+}
+
+fn load_existing_comparison_manifest(run_dir: &Path) -> Result<Option<RunManifest>> {
+    if !run_dir.exists() {
+        return Ok(None);
+    }
+    ensure!(
+        run_dir.is_dir(),
+        "comparison baseline path is not a directory: {}",
+        run_dir.display()
+    );
+    let manifest_path = run_dir.join("manifest.json");
+    if manifest_path.is_file() {
+        let stored: RunManifest = serde_json::from_reader(BufReader::new(
+            File::open(&manifest_path).wrap_err_with(|| {
+                format!(
+                    "failed to open comparison manifest {}",
+                    manifest_path.display()
+                )
+            })?,
+        ))?;
+        return Ok(Some(stored));
+    }
+    ensure!(
+        fs::read_dir(run_dir)?.next().is_none(),
+        "comparison baseline directory exists without a valid matching manifest: {}",
+        run_dir.display()
+    );
+    Ok(None)
+}
+
+fn validate_comparison_clone(
+    stored: &RunManifest,
+    source: &RunStore,
+    candidate: &RunStore,
+    expected_files: &[ManifestFile],
+) -> Result<()> {
+    ensure!(
+        stored.spec.experiment_id == source.manifest.spec.experiment_id,
+        "comparison baseline experiment_id '{}' does not match opened source '{}'",
+        stored.spec.experiment_id,
+        source.manifest.spec.experiment_id
+    );
+    ensure!(
+        stored.files == expected_files,
+        "comparison baseline file slice does not match the opened source"
+    );
+    match (&stored.identity, &source.manifest.identity) {
+        (Some(stored_identity), Some(source_identity)) => {
+            ensure!(
+                stored_identity.model_sha256 == source_identity.model_sha256,
+                "comparison baseline model digest does not match the opened source"
+            );
+            ensure!(
+                stored_identity.dataset_sha256 == source_identity.dataset_sha256,
+                "comparison baseline dataset digest does not match the opened source"
+            );
+            ensure!(
+                stored_identity.worker_sha256 == source_identity.worker_sha256,
+                "comparison baseline worker digest does not match the opened source"
+            );
+        }
+        (None, None) => {}
+        _ => bail!("comparison baseline identity does not match the opened source"),
+    }
+    ensure!(
+        stored.spec.performance.repetitions == candidate.manifest.spec.performance.repetitions,
+        "comparison baseline repetition count does not match the candidate"
+    );
+    Ok(())
+}
+
+fn build_comparison_manifest(
+    source: &RunStore,
+    candidate: &RunStore,
+    files: Vec<ManifestFile>,
+) -> RunManifest {
+    let mut manifest = source.manifest.clone();
+    manifest.files = files;
+    manifest.spec.dataset.files = manifest.files.iter().map(|file| file.id.clone()).collect();
+    manifest.spec.dataset.max_files = manifest.files.len() as u32;
+    manifest.spec.dataset.max_minutes = candidate.manifest.spec.dataset.max_minutes;
+    manifest.spec.performance = candidate.manifest.spec.performance.clone();
+    // keep baseline asset digests; pin only the candidate seed and comparison run-order
+    if let Some(identity) = &mut manifest.identity {
+        if let Some(candidate_identity) = &candidate.manifest.identity {
+            identity.seed = candidate_identity.seed;
+        }
+        identity.run_order.repetitions = (0..manifest.spec.performance.repetitions).collect();
+        identity.run_order.files = manifest.files.iter().map(|file| file.id.clone()).collect();
+        identity.run_order.candidates = manifest
+            .spec
+            .post_inference
+            .iter()
+            .map(|variant| variant.id.clone())
+            .collect();
+        identity.run_order.comparison_processes.clear();
+        identity.created_at = chrono::Utc::now().to_rfc3339();
+    }
+    manifest
 }
 
 fn write_manifest(run_dir: &Path, manifest: &RunManifest) -> Result<()> {
@@ -2533,6 +2606,106 @@ mod tests {
         assert_eq!(identity.run_order.candidates, ["default"]);
         assert!(identity.run_order.comparison_processes.is_empty());
         assert_ne!(identity.created_at, "2026-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn comparison_baseline_reuses_matching_clone() {
+        let temp = tempdir().unwrap();
+        let mut source = test_store(&temp.path().join("source"));
+        source.manifest.identity = Some(test_identity(7));
+        let mut candidate = test_store(&temp.path().join("candidate"));
+        candidate.manifest.files = vec![source.manifest.files[1].clone()];
+        candidate.manifest.spec.dataset.max_files = 1;
+        candidate.manifest.identity = Some(test_identity(99));
+
+        let (first, _) = candidate.comparison_baseline_store(&source).unwrap();
+        let created_at = first.manifest.identity.as_ref().unwrap().created_at.clone();
+        let (second, _) = candidate.comparison_baseline_store(&source).unwrap();
+
+        assert_eq!(
+            second.manifest.identity.as_ref().unwrap().created_at,
+            created_at
+        );
+    }
+
+    #[test]
+    fn comparison_baseline_recreates_empty_dir_without_manifest() {
+        let temp = tempdir().unwrap();
+        let source = test_store(&temp.path().join("source"));
+        let mut candidate = test_store(&temp.path().join("candidate"));
+        candidate.manifest.files = vec![source.manifest.files[1].clone()];
+        candidate.manifest.spec.dataset.max_files = 1;
+        fs::create_dir_all(candidate.run_dir.join("comparison-baseline")).unwrap();
+
+        let (comparison, _) = candidate.comparison_baseline_store(&source).unwrap();
+
+        assert!(comparison.run_dir.join("manifest.json").is_file());
+        assert_eq!(comparison.manifest.files[0].id, "first");
+    }
+
+    #[test]
+    fn comparison_baseline_rejects_dir_without_matching_manifest() {
+        let temp = tempdir().unwrap();
+        let source = test_store(&temp.path().join("source"));
+        let mut candidate = test_store(&temp.path().join("candidate"));
+        candidate.manifest.files = vec![source.manifest.files[1].clone()];
+        candidate.manifest.spec.dataset.max_files = 1;
+        let clone_dir = candidate.run_dir.join("comparison-baseline");
+        fs::create_dir_all(&clone_dir).unwrap();
+        fs::write(clone_dir.join("leftover.txt"), b"partial").unwrap();
+
+        let error = candidate
+            .comparison_baseline_store(&source)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("without a valid matching manifest")
+        );
+    }
+
+    #[test]
+    fn comparison_baseline_rejects_clone_from_a_different_source() {
+        let temp = tempdir().unwrap();
+        let mut source = test_store(&temp.path().join("source"));
+        source.manifest.identity = Some(test_identity(7));
+        let mut other = test_store(&temp.path().join("other"));
+        other.manifest.spec.experiment_id = "other-run".to_owned();
+        other.manifest.identity = Some(test_identity(7));
+        let mut candidate = test_store(&temp.path().join("candidate"));
+        candidate.manifest.files = vec![source.manifest.files[1].clone()];
+        candidate.manifest.spec.dataset.max_files = 1;
+        candidate.manifest.identity = Some(test_identity(99));
+
+        candidate.comparison_baseline_store(&source).unwrap();
+        let error = candidate
+            .comparison_baseline_store(&other)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(error.to_string().contains("experiment_id"));
+    }
+
+    #[test]
+    fn comparison_baseline_rejects_clone_with_different_source_digests() {
+        let temp = tempdir().unwrap();
+        let mut source = test_store(&temp.path().join("source"));
+        source.manifest.identity = Some(test_identity(7));
+        let mut other = test_store(&temp.path().join("other"));
+        let mut other_identity = test_identity(7);
+        other_identity.model_sha256 = "other-model".to_owned();
+        other.manifest.identity = Some(other_identity);
+        let mut candidate = test_store(&temp.path().join("candidate"));
+        candidate.manifest.files = vec![source.manifest.files[1].clone()];
+        candidate.manifest.spec.dataset.max_files = 1;
+        candidate.manifest.identity = Some(test_identity(99));
+
+        candidate.comparison_baseline_store(&source).unwrap();
+        let error = candidate
+            .comparison_baseline_store(&other)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(error.to_string().contains("model digest"));
     }
 
     #[test]
