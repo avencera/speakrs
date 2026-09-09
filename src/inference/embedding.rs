@@ -44,7 +44,10 @@ const MULTI_MASK_BATCH_SIZE: usize = 32;
 const FBANK_BATCH_SIZE: usize = 32;
 const CHUNK_SPEAKER_BATCH_SIZE: usize = 3;
 const NUM_SPEAKERS: usize = 3;
-const FBANK_FRAMES: usize = 998;
+pub(crate) const FBANK_FRAMES: usize = 998;
+/// Hop between consecutive fbank frames, in samples (10ms at 16kHz)
+#[cfg(feature = "coreml")]
+pub(crate) const FBANK_HOP_SAMPLES: usize = 160;
 const FBANK_FEATURES: usize = 80;
 const MASK_FRAMES: usize = 589;
 

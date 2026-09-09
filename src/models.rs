@@ -64,7 +64,8 @@ impl ModelBundle {
 #[cfg(feature = "online")]
 const HF_REPO: &str = "avencera/speakrs-models";
 #[cfg(feature = "online")]
-const HF_REVISION: &str = "5d24ffee75f13fb061fa6d10944a64e2dc1d5e6f";
+// CI downloads fixtures from this same revision via SPEAKRS_MODEL_FIXTURE_REV
+const HF_REVISION: &str = "a785ebdbe6313868088c36c93d9efa71c470bd34";
 
 #[cfg(feature = "online")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -203,11 +204,11 @@ const COREML_COMMON_MODEL_STEMS: &[&str] = &[
 
 #[cfg(feature = "online")]
 const COREML_CHUNK_MODEL_STEMS: &[&str] = &[
-    "wespeaker-chunk-emb-s12-w22.mlmodelc",
-    "wespeaker-chunk-emb-s12-w37.mlmodelc",
-    "wespeaker-chunk-emb-s12-w53.mlmodelc",
-    "wespeaker-chunk-emb-s12-w84.mlmodelc",
-    "wespeaker-chunk-emb-s12-w116.mlmodelc",
+    "wespeaker-chunk-emb-p1s-w21.mlmodelc",
+    "wespeaker-chunk-emb-p1s-w36.mlmodelc",
+    "wespeaker-chunk-emb-p1s-w51.mlmodelc",
+    "wespeaker-chunk-emb-p1s-w81.mlmodelc",
+    "wespeaker-chunk-emb-p1s-w111.mlmodelc",
 ];
 
 #[cfg(feature = "online")]
@@ -287,7 +288,7 @@ mod tests {
     use super::*;
 
     const MODEL_FILENAME: &str = "segmentation-3.0.onnx";
-    const EXPECTED_MODEL_URL: &str = "https://huggingface.co/avencera/speakrs-models/resolve/5d24ffee75f13fb061fa6d10944a64e2dc1d5e6f/segmentation-3.0.onnx";
+    const EXPECTED_MODEL_URL: &str = "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/segmentation-3.0.onnx";
 
     #[test]
     fn pinned_repository_selects_model_card_revision() {
@@ -319,7 +320,7 @@ mod tests {
         assert!(files.contains(&"segmentation-3.0-b64.mlmodelc/model.mil".to_string()));
         assert!(files.contains(&"wespeaker-fbank-30s.mlmodelc/model.mil".to_string()));
         assert!(files.contains(&"wespeaker-multimask-tail-b32.mlmodelc/model.mil".to_string()));
-        assert!(files.contains(&"wespeaker-chunk-emb-s12-w116.mlmodelc/model.mil".to_string()));
+        assert!(files.contains(&"wespeaker-chunk-emb-p1s-w111.mlmodelc/model.mil".to_string()));
     }
 
     #[test]

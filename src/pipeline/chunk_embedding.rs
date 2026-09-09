@@ -2,7 +2,9 @@ use ndarray::{Array2, Array3};
 use tracing::{debug, trace};
 
 use crate::clustering::plda::PldaTransform;
-use crate::inference::embedding::{ChunkEmbeddingSession, EmbeddingModel};
+use crate::inference::embedding::{
+    ChunkEmbeddingSession, EmbeddingModel, FBANK_FRAMES, FBANK_HOP_SAMPLES,
+};
 use crate::inference::segmentation::SegmentationModel;
 use crate::powerset::PowersetMapping;
 
@@ -26,6 +28,12 @@ use error::{backend_error, invariant_error, worker_panic};
 use gpu::{BatchGpuWorker, TaggedEmbedded, TaggedPrepared, chunk_embedding_resources};
 use orchestrate::{run_pipelined, run_sequential_chunks, seg_worker_count, setup_chunk_embedding};
 use prep::{BatchPrepWorker, ChunkPrep, DecodedChunk, PrepScratch, TaggedDecoded};
+
+/// Audio consumed per 10s fbank call when stitching a long fbank from segments.
+/// Each call yields FBANK_FRAMES frames, which covers fewer samples than the 10s
+/// window itself. Advancing by the full window would slip the stitched fbank by two
+/// frames per segment relative to the speaker masks
+pub(super) const FBANK_SEGMENT_SAMPLES: usize = FBANK_FRAMES * FBANK_HOP_SAMPLES;
 
 struct ChunkParams {
     step_samples: usize,

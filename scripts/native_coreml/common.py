@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -315,35 +316,21 @@ class MultiMaskTailWrapper(nn.Module):
         return embed_a
 
 
-class ChunkEmbeddingWrapper(nn.Module):
-    """Full-audio embedding: fbank [1, T, 80] + masks [N*3, 589] -> embeddings [N*3, 256]
+# ResNet downsamples fbank frames by 8x, so one 10 s window is 125 * 8 frames
+CHUNK_WINDOW_FBANK_FRAMES = 1000
 
-    ResNet runs ONCE on the full audio's fbank features. Output frames are gathered
-    per-window using pre-computed indices (stride = 25 resnet frames = 2s step).
-    Pool+classify runs on all N*3 pairs. Avoids running ResNet N times for overlapping windows.
 
-    num_windows is baked in at construction time (pre-computed gather indices).
-    Export separate models per chunk size via EnumeratedShapes.
-    """
+class ChunkEmbeddingBase(nn.Module):
+    """Shared pooling and classification for full-audio chunk embedding models."""
 
-    # resnet output frames per 10s window (998 fbank frames -> 125 resnet frames)
-    WINDOW_RESNET_FRAMES = 125
+    # resnet output frames per 10s window
+    WINDOW_RESNET_FRAMES = CHUNK_WINDOW_FBANK_FRAMES // 8
 
-    def __init__(
-        self, model: Any, num_windows: int, step_resnet_frames: int = 25
-    ) -> None:
+    def __init__(self, model: Any, num_windows: int) -> None:
         super().__init__()
         self.resnet = model.resnet
         self.num_speakers = NUM_SPEAKERS
         self.num_windows = num_windows
-        self.step_resnet_frames = step_resnet_frames
-
-        # Precompute gather indices as a buffer. This avoids unfold, which
-        # coremltools does not support, and avoids torch.arange casts at trace time.
-        offsets = torch.arange(num_windows) * step_resnet_frames
-        # flat indices for all windows: [N * 125]
-        indices = offsets.unsqueeze(1) + torch.arange(self.WINDOW_RESNET_FRAMES)
-        self.register_buffer("gather_indices", indices.reshape(-1).long())
 
     def pool(self, sequences: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
         weights = weights.unsqueeze(1)
@@ -367,25 +354,8 @@ class ChunkEmbeddingWrapper(nn.Module):
         zero_mask = (weight_sum <= 0.0).repeat(1, stats.size(1))
         return torch.where(zero_mask, zero_stats, stats)
 
-    def forward(self, fbank: torch.Tensor, masks: torch.Tensor) -> Any:
-        # fbank: [1, T, 80] full-audio fbank features.
-        # masks: [N*3, 589] one mask per window/speaker pair.
-
-        # ResNet once on full audio
-        frames = self.resnet.forward_frames(fbank)  # [1, 256, 10, T_out]
-        # hardcoded: 256 channels * 10 freq bins = 2560 (avoids dynamic size() calls)
-        frames = frames.reshape(1, 2560, -1)  # [1, 2560, T_out]
-
-        # gather per-window features using pre-computed indices
-        frames_flat = frames.squeeze(0)  # [2560, T_out]
-        gather_indices = cast(torch.Tensor, self.gather_indices)
-        gathered = torch.index_select(frames_flat, 1, gather_indices)  # [2560, N*125]
-        window_features = gathered.reshape(
-            2560, self.num_windows, self.WINDOW_RESNET_FRAMES
-        )  # [2560, N, 125]
-        window_features = window_features.permute(1, 0, 2)  # [N, 2560, 125]
-
-        # expand for speakers: [N*3, 2560, 125]
+    def embed(self, window_features: torch.Tensor, masks: torch.Tensor) -> Any:
+        # expand each window for its three speaker masks
         window_features = torch.repeat_interleave(
             window_features, self.num_speakers, dim=0
         )
@@ -400,49 +370,292 @@ class ChunkEmbeddingWrapper(nn.Module):
         return embed_a
 
 
-# chunk sizes for ChunkEmbeddingWrapper
-# ResNet downsamples by exactly 8x. For N windows at step S resnet frames:
-# resnet_t = (N-1)*S + 125, fbank_frames = resnet_t * 8
+class AlignedChunkEmbeddingWrapper(ChunkEmbeddingBase):
+    """Chunk embedding for a step aligned to the eight-frame ResNet stride."""
 
-# CoreMlFast: 2.0s step = 25 resnet frames/step
+    def __init__(self, model: Any, num_windows: int, step_resnet_frames: int) -> None:
+        super().__init__(model, num_windows)
+
+        offsets = torch.arange(num_windows) * step_resnet_frames
+        indices = offsets.unsqueeze(1) + torch.arange(self.WINDOW_RESNET_FRAMES)
+        self.register_buffer("gather_indices", indices.reshape(-1).long())
+
+    def forward(self, fbank: torch.Tensor, masks: torch.Tensor) -> Any:
+        frames = self.resnet.forward_frames(fbank).reshape(1, 2560, -1)
+        gather_indices = cast(torch.Tensor, self.gather_indices)
+        gathered = torch.index_select(frames.squeeze(0), 1, gather_indices)
+        window_features = gathered.reshape(
+            2560, self.num_windows, self.WINDOW_RESNET_FRAMES
+        ).permute(1, 0, 2)
+
+        return self.embed(window_features, masks)
+
+
+class OneSecondPhasedChunkEmbeddingWrapper(ChunkEmbeddingBase):
+    """Chunk embedding for exact 1 s windows using two aligned ResNet phases."""
+
+    STEP_FBANK_FRAMES = 100
+    PHASE_STEP_RESNET_FRAMES = 25
+
+    def __init__(self, model: Any, num_windows: int) -> None:
+        super().__init__(model, num_windows)
+        even_windows = (num_windows + 1) // 2
+        odd_windows = num_windows // 2
+
+        even_offsets = torch.arange(even_windows) * self.PHASE_STEP_RESNET_FRAMES
+        even_indices = even_offsets.unsqueeze(1) + torch.arange(
+            self.WINDOW_RESNET_FRAMES
+        )
+        odd_offsets = torch.arange(odd_windows) * self.PHASE_STEP_RESNET_FRAMES
+        odd_indices = odd_offsets.unsqueeze(1) + torch.arange(self.WINDOW_RESNET_FRAMES)
+        window_order = torch.empty(num_windows, dtype=torch.long)
+        window_order[0::2] = torch.arange(even_windows)
+        window_order[1::2] = even_windows + torch.arange(odd_windows)
+
+        self.register_buffer("even_gather_indices", even_indices.reshape(-1).long())
+        self.register_buffer("odd_gather_indices", odd_indices.reshape(-1).long())
+        self.register_buffer("window_order", window_order)
+
+    def phase_windows(
+        self,
+        fbank: torch.Tensor,
+        gather_indices: torch.Tensor,
+        num_windows: int,
+    ) -> torch.Tensor:
+        frames = self.resnet.forward_frames(fbank).reshape(1, 2560, -1)
+        gathered = torch.index_select(frames.squeeze(0), 1, gather_indices)
+        return gathered.reshape(2560, num_windows, self.WINDOW_RESNET_FRAMES).permute(
+            1, 0, 2
+        )
+
+    def forward(self, fbank: torch.Tensor, masks: torch.Tensor) -> Any:
+        even_windows = (self.num_windows + 1) // 2
+        odd_windows = self.num_windows // 2
+        even_features = self.phase_windows(
+            fbank,
+            cast(torch.Tensor, self.even_gather_indices),
+            even_windows,
+        )
+        odd_features = self.phase_windows(
+            fbank[:, self.STEP_FBANK_FRAMES :, :],
+            cast(torch.Tensor, self.odd_gather_indices),
+            odd_windows,
+        )
+        phase_features = torch.cat([even_features, odd_features], dim=0)
+        window_features = torch.index_select(
+            phase_features,
+            0,
+            cast(torch.Tensor, self.window_order),
+        )
+
+        return self.embed(window_features, masks)
+
+
+@dataclass(frozen=True)
+class AlignedChunkConfig:
+    num_windows: int
+    step_resnet_frames: int
+
+    @property
+    def fbank_frames(self) -> int:
+        return (
+            self.num_windows - 1
+        ) * self.step_resnet_frames * 8 + CHUNK_WINDOW_FBANK_FRAMES
+
+    @property
+    def model_suffix(self) -> str:
+        return f"s{self.step_resnet_frames}"
+
+
+@dataclass(frozen=True)
+class OneSecondPhasedChunkConfig:
+    num_windows: int
+
+    @property
+    def fbank_frames(self) -> int:
+        return (
+            (self.num_windows - 1)
+            * OneSecondPhasedChunkEmbeddingWrapper.STEP_FBANK_FRAMES
+            + CHUNK_WINDOW_FBANK_FRAMES
+        )
+
+    @property
+    def model_suffix(self) -> str:
+        return "p1s"
+
+
+ChunkConfig = AlignedChunkConfig | OneSecondPhasedChunkConfig
+
+# CoreMlFast uses one aligned ResNet pass at a 2 s step
 CHUNK_CONFIGS_FAST = [
-    # (num_windows, fbank_frames, num_masks, step_resnet_frames)
-    (11, 3000, 33, 25),  # ~22s
-    (16, 4000, 48, 25),  # ~32s
-    (21, 5000, 63, 25),  # ~42s
-    (26, 6000, 78, 25),  # ~52s
-    (36, 8000, 108, 25),  # ~72s
-    (46, 10000, 138, 25),  # ~92s
-    (56, 12000, 168, 25),  # ~112s
-    (86, 18000, 258, 25),  # ~172s
-    (112, 23200, 336, 25),  # ~224s
+    AlignedChunkConfig(11, 25),
+    AlignedChunkConfig(16, 25),
+    AlignedChunkConfig(21, 25),
+    AlignedChunkConfig(26, 25),
+    AlignedChunkConfig(36, 25),
+    AlignedChunkConfig(46, 25),
+    AlignedChunkConfig(56, 25),
+    AlignedChunkConfig(86, 25),
+    AlignedChunkConfig(112, 25),
 ]
 
-# CoreMl: 0.96s step = 12 resnet frames/step
+# CoreMl uses two aligned 2 s phases to preserve exact 1 s window starts
 CHUNK_CONFIGS_DEFAULT = [
-    # (num_windows, fbank_frames, num_masks, step_resnet_frames)
-    (22, 3016, 66, 12),  # ~30s
-    (37, 4456, 111, 12),  # ~45s
-    (53, 5992, 159, 12),  # ~60s
-    (84, 8968, 252, 12),  # ~90s
-    (116, 12040, 348, 12),  # ~120s
+    OneSecondPhasedChunkConfig(21),
+    OneSecondPhasedChunkConfig(36),
+    OneSecondPhasedChunkConfig(51),
+    OneSecondPhasedChunkConfig(81),
+    OneSecondPhasedChunkConfig(111),
 ]
 
 CHUNK_STEM = "wespeaker-chunk-emb"
 
 
 def build_chunk_embedding_wrapper(
-    pipeline: Any, num_windows: int, step_resnet_frames: int = 25
-) -> ChunkEmbeddingWrapper:
-    wrapper = ChunkEmbeddingWrapper(
-        pipeline._embedding.model_, num_windows, step_resnet_frames
-    )
+    pipeline: Any, config: ChunkConfig
+) -> ChunkEmbeddingBase:
+    if isinstance(config, AlignedChunkConfig):
+        wrapper = AlignedChunkEmbeddingWrapper(
+            pipeline._embedding.model_,
+            config.num_windows,
+            config.step_resnet_frames,
+        )
+    else:
+        wrapper = OneSecondPhasedChunkEmbeddingWrapper(
+            pipeline._embedding.model_, config.num_windows
+        )
     wrapper.eval()
     return wrapper
 
 
-def chunk_embedding_package_path(output_dir: Path) -> Path:
-    return coreml_packages_dir(output_dir) / f"{CHUNK_STEM}.mlpackage"
+def chunk_embedding_stem(config: ChunkConfig) -> str:
+    return f"{CHUNK_STEM}-{config.model_suffix}-w{config.num_windows}"
+
+
+def chunk_embedding_package_path(output_dir: Path, config: ChunkConfig) -> Path:
+    return coreml_packages_dir(output_dir) / f"{chunk_embedding_stem(config)}.mlpackage"
+
+
+def chunk_embedding_compiled_path(output_dir: Path, config: ChunkConfig) -> Path:
+    return output_dir / f"{chunk_embedding_stem(config)}.mlmodelc"
+
+
+def check_phased_chunk_layout(num_windows: int = 5) -> None:
+    """Check even/odd phase gather indices and restored window order."""
+    if num_windows < 2:
+        raise ValueError("phased layout check needs even and odd windows")
+
+    class _UnusedModel:
+        resnet = None
+
+    wrapper = OneSecondPhasedChunkEmbeddingWrapper(_UnusedModel(), num_windows)
+    even_windows = (num_windows + 1) // 2
+    odd_windows = num_windows // 2
+    expected_order = [0] * num_windows
+    expected_order[0::2] = list(range(even_windows))
+    expected_order[1::2] = [even_windows + index for index in range(odd_windows)]
+    actual_order = cast(torch.Tensor, wrapper.window_order).tolist()
+    if actual_order != expected_order:
+        raise SystemExit(
+            "phased chunk window order mismatch: "
+            f"expected {expected_order}, got {actual_order}"
+        )
+
+    even_indices = cast(torch.Tensor, wrapper.even_gather_indices).reshape(
+        even_windows, wrapper.WINDOW_RESNET_FRAMES
+    )
+    odd_indices = cast(torch.Tensor, wrapper.odd_gather_indices).reshape(
+        odd_windows, wrapper.WINDOW_RESNET_FRAMES
+    )
+    for window, row in enumerate(even_indices):
+        start = window * wrapper.PHASE_STEP_RESNET_FRAMES
+        expected = list(range(start, start + wrapper.WINDOW_RESNET_FRAMES))
+        if row.tolist() != expected:
+            raise SystemExit(
+                f"phased chunk even-window {window} gather mismatch: "
+                f"expected {expected[:3]}..., got {row.tolist()[:3]}..."
+            )
+    for window, row in enumerate(odd_indices):
+        start = window * wrapper.PHASE_STEP_RESNET_FRAMES
+        expected = list(range(start, start + wrapper.WINDOW_RESNET_FRAMES))
+        if row.tolist() != expected:
+            raise SystemExit(
+                f"phased chunk odd-window {window} gather mismatch: "
+                f"expected {expected[:3]}..., got {row.tolist()[:3]}..."
+            )
+
+
+def check_phased_chunk_parity(
+    pipeline: Any,
+    *,
+    num_windows: int = 5,
+    atol: float = 1e-5,
+) -> None:
+    """Compare the 1 s phased wrapper to two aligned 2 s reference phases."""
+    check_phased_chunk_layout(num_windows)
+    even_windows = (num_windows + 1) // 2
+    odd_windows = num_windows // 2
+    step = OneSecondPhasedChunkEmbeddingWrapper.PHASE_STEP_RESNET_FRAMES
+    model = pipeline._embedding.model_
+    phased = OneSecondPhasedChunkEmbeddingWrapper(model, num_windows)
+    even_ref = AlignedChunkEmbeddingWrapper(model, even_windows, step)
+    odd_ref = AlignedChunkEmbeddingWrapper(model, odd_windows, step)
+    phased.eval()
+    even_ref.eval()
+    odd_ref.eval()
+
+    fbank = torch.randn(
+        1, OneSecondPhasedChunkConfig(num_windows).fbank_frames, FBANK_FEATURES
+    )
+    masks = torch.rand(num_windows * NUM_SPEAKERS, SEGMENTATION_FRAMES)
+    even_masks = torch.cat(
+        [
+            masks[window * NUM_SPEAKERS : (window + 1) * NUM_SPEAKERS]
+            for window in range(0, num_windows, 2)
+        ],
+        dim=0,
+    )
+    odd_masks = torch.cat(
+        [
+            masks[window * NUM_SPEAKERS : (window + 1) * NUM_SPEAKERS]
+            for window in range(1, num_windows, 2)
+        ],
+        dim=0,
+    )
+    even_max = 0.0
+    odd_max = 0.0
+    with torch.inference_mode():
+        phased_out = phased(fbank, masks)
+        even_out = even_ref(fbank, even_masks)
+        odd_out = odd_ref(
+            fbank[:, OneSecondPhasedChunkEmbeddingWrapper.STEP_FBANK_FRAMES :, :],
+            odd_masks,
+        )
+        for window in range(num_windows):
+            speaker_slice = slice(window * NUM_SPEAKERS, (window + 1) * NUM_SPEAKERS)
+            phase_index = window // 2
+            phase_slice = slice(
+                phase_index * NUM_SPEAKERS, (phase_index + 1) * NUM_SPEAKERS
+            )
+            window_ref = (
+                even_out[phase_slice] if window % 2 == 0 else odd_out[phase_slice]
+            )
+            diff = float((phased_out[speaker_slice] - window_ref).abs().max())
+            if window % 2 == 0:
+                even_max = max(even_max, diff)
+            else:
+                odd_max = max(odd_max, diff)
+
+    print(f"phased chunk even-window max_abs={even_max:.6e}")
+    print(f"phased chunk odd-window max_abs={odd_max:.6e}")
+    if even_max > atol:
+        raise SystemExit(
+            f"phased chunk even-window parity failed: {even_max:.6e} > {atol:.6e}"
+        )
+    if odd_max > atol:
+        raise SystemExit(
+            f"phased chunk odd-window parity failed: {odd_max:.6e} > {atol:.6e}"
+        )
 
 
 def build_multi_mask_wrapper(pipeline: Any) -> MultiMaskTailWrapper:

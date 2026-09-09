@@ -8,6 +8,15 @@ use super::*;
 use crate::inference::ExecutionMode;
 use crate::inference::{DynamicRuntimeError, ModelLoadError, OrtRuntimeError};
 
+#[cfg(feature = "coreml")]
+#[test]
+fn coreml_uses_cuda_parity_segmentation_step() {
+    assert_eq!(
+        segmentation_step_seconds(ExecutionMode::CoreMl),
+        segmentation_step_seconds(ExecutionMode::Cuda)
+    );
+}
+
 // --- test helpers ---
 
 #[allow(dead_code)]

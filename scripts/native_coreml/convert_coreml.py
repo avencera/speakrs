@@ -8,40 +8,40 @@ from typing import Any
 import coremltools as ct
 import numpy as np
 import torch
-
 from common import (
+    CHUNK_CONFIGS_DEFAULT,
+    CHUNK_CONFIGS_FAST,
     FBANK_BATCH_SIZES,
     FBANK_BATCHED_STEM,
     FBANK_FEATURES,
     FBANK_FRAMES,
     FBANK_STEM,
-    FUSED_B32_STEM,
     FUSED_B3_STEM,
+    FUSED_B32_STEM,
     FUSED_BATCH_SIZES,
     FUSED_STEM,
     MULTI_MASK_B32_STEM,
     MULTI_MASK_BATCH_SIZES,
     MULTI_MASK_STEM,
     NUM_SPEAKERS,
-    SEGMENTATION_BATCHED_STEM,
     SEGMENTATION_BATCH_SIZES,
+    SEGMENTATION_BATCHED_STEM,
     SEGMENTATION_FRAMES,
     SEGMENTATION_SAMPLES,
     SEGMENTATION_STEM,
-    TAIL_B32_STEM,
     TAIL_B3_STEM,
+    TAIL_B32_STEM,
     TAIL_BATCH_SIZES,
     TAIL_STEM,
-    CHUNK_CONFIGS_DEFAULT,
-    CHUNK_CONFIGS_FAST,
-    CHUNK_STEM,
     build_chunk_embedding_wrapper,
     build_fbank_wrapper,
-    coreml_packages_dir,
     build_fused_wrapper,
     build_multi_mask_wrapper,
     build_tail_wrapper,
+    check_phased_chunk_parity,
+    chunk_embedding_compiled_path,
     chunk_embedding_package_path,
+    chunk_embedding_stem,
     fbank_package_path,
     fused_package_path,
     load_pipeline,
@@ -519,8 +519,11 @@ def export_multi_mask_tail(pipeline: Any, output_dir: Path) -> None:
 def export_chunk_embedding(pipeline: Any, output_dir: Path) -> None:
     all_configs = CHUNK_CONFIGS_FAST + CHUNK_CONFIGS_DEFAULT
 
-    for num_windows, fbank_frames, num_masks, step_resnet in all_configs:
-        wrapper = build_chunk_embedding_wrapper(pipeline, num_windows, step_resnet)
+    for config in all_configs:
+        num_windows = config.num_windows
+        fbank_frames = config.fbank_frames
+        num_masks = num_windows * NUM_SPEAKERS
+        wrapper = build_chunk_embedding_wrapper(pipeline, config)
 
         dummy_fbank = torch.zeros(1, fbank_frames, FBANK_FEATURES)
         dummy_masks = torch.zeros(num_masks, SEGMENTATION_FRAMES)
@@ -530,8 +533,8 @@ def export_chunk_embedding(pipeline: Any, output_dir: Path) -> None:
         )
         exported = exported.run_decompositions({})
 
-        stem = f"{CHUNK_STEM}-s{step_resnet}-w{num_windows}"
-        compiled_paths = [output_dir / f"{stem}.mlmodelc"]
+        stem = chunk_embedding_stem(config)
+        compiled_paths = [chunk_embedding_compiled_path(output_dir, config)]
 
         mlmodel = ct.convert(
             exported,
@@ -554,21 +557,26 @@ def export_chunk_embedding(pipeline: Any, output_dir: Path) -> None:
             compute_precision=ct.precision.FLOAT32,
         )
 
-        print(f"Saving chunk embedding s{step_resnet}-w{num_windows} (FP32)...")
-        pkg_path = coreml_packages_dir(output_dir) / f"{stem}.mlpackage"
+        print(f"Saving chunk embedding {config.model_suffix}-w{num_windows} (FP32)...")
+        pkg_path = chunk_embedding_package_path(output_dir, config)
         save_model_artifacts(mlmodel, pkg_path, compiled_paths)
 
         # W8A16 variant
         mlmodel_w8a16 = quantize_w8a16(mlmodel)
-        print(f"Saving chunk embedding s{step_resnet}-w{num_windows} (W8A16)...")
-        w8a16_compiled = [output_dir / f"{stem}-w8a16.mlmodelc"]
-        w8a16_pkg = coreml_packages_dir(output_dir) / f"{stem}-w8a16.mlpackage"
+        print(f"Saving chunk embedding {config.model_suffix}-w{num_windows} (W8A16)...")
+        w8a16_compiled = [
+            chunk_embedding_compiled_path(output_dir, config).with_name(
+                f"{stem}-w8a16.mlmodelc"
+            )
+        ]
+        w8a16_pkg = pkg_path.with_name(f"{stem}-w8a16.mlpackage")
         save_model_artifacts(mlmodel_w8a16, w8a16_pkg, w8a16_compiled)
 
 
 def main() -> None:
     args = parse_args()
     pipeline = load_pipeline()
+    check_phased_chunk_parity(pipeline)
     export_segmentation(pipeline, args.output_dir)
     export_tail(pipeline, args.output_dir)
     export_fbank(args.output_dir)

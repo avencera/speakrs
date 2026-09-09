@@ -108,9 +108,10 @@ pub const fn segmentation_step_seconds(mode: ExecutionMode) -> f64 {
 pub const SEGMENTATION_WINDOW_SECONDS: f64 = 10.0;
 /// Default sliding window step for segmentation, in seconds
 pub const SEGMENTATION_STEP_SECONDS: f64 = 1.0;
-/// CoreML step aligned to the 8-frame ResNet stride (96 fbank frames / 8 = 12 ResNet frames).
-/// This is the closest aligned step below 1.0s that still enables chunk embedding.
-pub const COREML_SEGMENTATION_STEP_SECONDS: f64 = 0.96;
+/// CoreML step in seconds
+///
+/// The chunk embedding model uses two aligned phases to support this exact step
+pub const COREML_SEGMENTATION_STEP_SECONDS: f64 = 1.0;
 /// CUDA segmentation step, in seconds
 pub const CUDA_SEGMENTATION_STEP_SECONDS: f64 = 1.0;
 /// Step size for fast modes, in seconds
