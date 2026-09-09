@@ -14,6 +14,17 @@ pub(super) struct SegmentationWindows<'a> {
 
 impl<'a> SegmentationWindows<'a> {
     pub(super) fn collect(audio: &'a [f32], window_samples: usize, step_samples: usize) -> Self {
+        if !audio.is_empty() && audio.len() < window_samples {
+            let mut padded = vec![0.0f32; window_samples];
+            padded[..audio.len()].copy_from_slice(audio);
+            return Self {
+                audio,
+                offsets: Vec::new(),
+                padded: Some(padded),
+                window_samples,
+            };
+        }
+
         let mut offsets = Vec::new();
         let mut offset = 0;
         while offset + window_samples <= audio.len() {
@@ -184,5 +195,22 @@ mod tests {
             error.to_string(),
             "segmentation test: expected rank 3 output, got shape [10, 3]"
         );
+    }
+
+    #[test]
+    fn nonempty_recording_shorter_than_one_window_emits_one_padded_window() {
+        let audio = vec![0.5_f32; 8];
+        let windows = super::SegmentationWindows::collect(&audio, 16, 8);
+        assert_eq!(windows.total_windows(), 1);
+        let window = windows.window(0, "short recording").expect("window");
+        assert_eq!(window.len(), 16);
+        assert_eq!(&window[..8], audio.as_slice());
+        assert_eq!(&window[8..], &[0.0_f32; 8]);
+    }
+
+    #[test]
+    fn empty_recording_emits_no_window() {
+        let windows = super::SegmentationWindows::collect(&[], 16, 8);
+        assert!(windows.is_empty());
     }
 }
