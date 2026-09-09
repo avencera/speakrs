@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{Context, Result, bail, ensure};
@@ -233,7 +234,7 @@ pub(crate) enum ExperimentSphereAhcInitialization {
 }
 
 impl ExperimentClusteringBackend {
-    pub(crate) fn into_pipeline(self) -> Result<speakrs::pipeline::ClusteringBackend> {
+    fn to_config(self) -> Result<speakrs::pipeline::SphereVbxPfConfig> {
         match self {
             Self::SphereVbxPf {
                 fa,
@@ -261,18 +262,348 @@ impl ExperimentClusteringBackend {
                         speakrs::pipeline::SphereVbxAhcInitialization::PldaTransformed
                     }
                 };
-                let config = speakrs::pipeline::SphereVbxPfConfig::new(
-                    fa,
-                    fb,
+                let max_iters = NonZeroUsize::new(max_iters).ok_or_else(|| {
+                    color_eyre::eyre::eyre!("SphereVBx-PF max_iters must be greater than zero")
+                })?;
+                Ok(speakrs::pipeline::SphereVbxPfConfig::new(
+                    speakrs::pipeline::SufficientStatisticsScale::new(fa)?,
+                    speakrs::pipeline::SpeakerRegularizationScale::new(fb)?,
                     max_iters,
-                    responsibility_tolerance,
+                    speakrs::pipeline::SphereVbxResponsibilityTolerance::new(
+                        responsibility_tolerance,
+                    )?,
                     initialization,
                     ahc_initialization,
-                )?;
-
-                Ok(speakrs::pipeline::ClusteringBackend::SphereVbxPf(config))
+                ))
             }
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum CandidateClustering {
+    Gaussian(GaussianOverrides),
+    Sphere(speakrs::pipeline::SphereVbxPfConfig),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GaussianOverrides {
+    pub max_iters: Option<NonZeroUsize>,
+    pub fb: Option<f64>,
+}
+
+impl GaussianOverrides {
+    fn parse(candidate: &PostInferenceVariant) -> Result<Self> {
+        let max_iters = candidate
+            .vbx_max_iters
+            .map(|max_iters| {
+                NonZeroUsize::new(max_iters).ok_or_else(|| {
+                    color_eyre::eyre::eyre!(
+                        "post_inference '{}' vbx_max_iters must be greater than zero",
+                        candidate.id
+                    )
+                })
+            })
+            .transpose()?;
+        let fb = match candidate.vbx_fb {
+            None => None,
+            Some(fb) => {
+                ensure!(
+                    fb.is_finite() && fb > 0.0,
+                    "post_inference '{}' vbx_fb must be finite and greater than zero",
+                    candidate.id
+                );
+                Some(fb)
+            }
+        };
+        Ok(Self { max_iters, fb })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CheckedCandidate {
+    pub id: String,
+    pub clustering: CandidateClustering,
+    pub clean_frame_duration: Option<speakrs::pipeline::CleanFrameDuration>,
+}
+
+fn parse_clustering(candidate: &PostInferenceVariant) -> Result<CandidateClustering> {
+    match candidate.clustering_backend {
+        Some(backend) => {
+            ensure!(
+                candidate.vbx_fb.is_none() && candidate.vbx_max_iters.is_none(),
+                "post_inference '{}' cannot combine SphereVBx-PF with Gaussian VBx controls",
+                candidate.id
+            );
+            backend
+                .to_config()
+                .map(CandidateClustering::Sphere)
+                .map_err(|error| {
+                    color_eyre::eyre::eyre!(
+                        "post_inference '{}' has invalid SphereVBx-PF configuration: {error}",
+                        candidate.id
+                    )
+                })
+        }
+        None => GaussianOverrides::parse(candidate).map(CandidateClustering::Gaussian),
+    }
+}
+
+pub(crate) fn parse_checked_candidate(
+    candidate: &PostInferenceVariant,
+) -> Result<CheckedCandidate> {
+    let clustering = parse_clustering(candidate)?;
+    let clean_frame_duration = candidate
+        .clean_frame_seconds
+        .map(|seconds| {
+            speakrs::pipeline::CleanFrameDuration::new(seconds).map_err(|error| {
+                color_eyre::eyre::eyre!(
+                    "post_inference '{}' has invalid clean_frame_seconds: {error}",
+                    candidate.id
+                )
+            })
+        })
+        .transpose()?;
+    Ok(CheckedCandidate {
+        id: candidate.id.clone(),
+        clustering,
+        clean_frame_duration,
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct InferenceWorkers {
+    pub segmentation_workers: SegmentationWorkers,
+    pub filterbank_preparation_workers: FbankPreparationWorkers,
+    pub filterbank_normalization_scope: FbankNormalizationScope,
+    pub embedding_compute_units: EmbeddingComputeUnits,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ExecutableInference {
+    OneSecondPhased {
+        ladder: ShapeLadder,
+        workers: InferenceWorkers,
+    },
+    PerWindowOneSecond {
+        workers: InferenceWorkers,
+    },
+    FastTwoSecond {
+        workers: InferenceWorkers,
+    },
+}
+
+impl ExecutableInference {
+    pub(crate) const fn mode(self) -> CoreMlMode {
+        match self {
+            Self::FastTwoSecond { .. } => CoreMlMode::CoreMlFast,
+            Self::OneSecondPhased { .. } | Self::PerWindowOneSecond { .. } => CoreMlMode::CoreMl,
+        }
+    }
+
+    pub(crate) const fn layout(self) -> InferenceLayout {
+        match self {
+            Self::OneSecondPhased { .. } => InferenceLayout::OneSecondPhased,
+            Self::PerWindowOneSecond { .. } => InferenceLayout::PerWindow1s,
+            Self::FastTwoSecond { .. } => InferenceLayout::FastS25,
+        }
+    }
+
+    pub(crate) const fn shape_ladder(self) -> ShapeLadder {
+        match self {
+            Self::OneSecondPhased { ladder, .. } => ladder,
+            Self::PerWindowOneSecond { .. } | Self::FastTwoSecond { .. } => ShapeLadder::Full,
+        }
+    }
+
+    pub(crate) const fn step_seconds(self) -> f64 {
+        self.layout().step_seconds()
+    }
+
+    pub(crate) const fn workers(self) -> InferenceWorkers {
+        match self {
+            Self::OneSecondPhased { workers, .. }
+            | Self::PerWindowOneSecond { workers }
+            | Self::FastTwoSecond { workers } => workers,
+        }
+    }
+
+    pub(crate) fn to_pipeline(self) -> Result<speakrs::pipeline::ExperimentInferenceConfig> {
+        use speakrs::inference::CoreMlComputeUnits;
+        use speakrs::pipeline::{
+            CoreMlChunkLayout, CoreMlFbankNormalizationScope, CoreMlFbankPreparationWorkers,
+            CoreMlSegmentationWorkers, CoreMlShapeLadder, ExperimentInferenceConfig,
+        };
+
+        let workers = self.workers();
+        let layout = match self {
+            Self::OneSecondPhased { .. } => CoreMlChunkLayout::OneSecondPhased,
+            Self::PerWindowOneSecond { .. } => CoreMlChunkLayout::PerWindow,
+            Self::FastTwoSecond { .. } => CoreMlChunkLayout::FastS25,
+        };
+        let ladder = match self.shape_ladder() {
+            ShapeLadder::Full => CoreMlShapeLadder::Full,
+            ShapeLadder::Reduced => CoreMlShapeLadder::Reduced,
+        };
+        let segmentation_workers = match workers.segmentation_workers {
+            SegmentationWorkers::Automatic => CoreMlSegmentationWorkers::Automatic,
+            SegmentationWorkers::Four => CoreMlSegmentationWorkers::Four,
+            SegmentationWorkers::Six => CoreMlSegmentationWorkers::Six,
+            SegmentationWorkers::Eight => CoreMlSegmentationWorkers::Eight,
+        };
+        let fbank_workers = match workers.filterbank_preparation_workers {
+            FbankPreparationWorkers::One => CoreMlFbankPreparationWorkers::One,
+            FbankPreparationWorkers::Two => CoreMlFbankPreparationWorkers::Two,
+            FbankPreparationWorkers::Four => CoreMlFbankPreparationWorkers::Four,
+        };
+        let config = ExperimentInferenceConfig::with_execution_policy(
+            layout,
+            ladder,
+            segmentation_workers,
+            fbank_workers,
+        )?;
+        let normalization = match workers.filterbank_normalization_scope {
+            FbankNormalizationScope::Chunk => CoreMlFbankNormalizationScope::Chunk,
+            FbankNormalizationScope::TenSecondSegments => {
+                CoreMlFbankNormalizationScope::TenSecondSegments
+            }
+        };
+        let units = match workers.embedding_compute_units {
+            EmbeddingComputeUnits::All => CoreMlComputeUnits::All,
+            EmbeddingComputeUnits::CpuOnly => CoreMlComputeUnits::CpuOnly,
+        };
+        Ok(config
+            .with_fbank_normalization_scope(normalization)
+            .with_embedding_compute_units(units))
+    }
+}
+
+fn workers_from_inference(inference: &InferenceVariant) -> InferenceWorkers {
+    InferenceWorkers {
+        segmentation_workers: inference.segmentation_workers,
+        filterbank_preparation_workers: inference.filterbank_preparation_workers,
+        filterbank_normalization_scope: inference.filterbank_normalization_scope,
+        embedding_compute_units: inference.embedding_compute_units,
+    }
+}
+
+fn parse_executable_inference(
+    inference: &InferenceVariant,
+    acceptance: AcceptancePolicy,
+) -> Result<ExecutableInference> {
+    if inference.layout.is_archived_stride() {
+        bail!(
+            "inference layout {:?} uses a historical stride; archived runs can be summarized but new runs are restricted to 1.0-second Standard and 2.0-second Fast strides",
+            inference.layout
+        );
+    }
+    validate_inference(inference, acceptance)?;
+    let workers = workers_from_inference(inference);
+    match inference.layout {
+        InferenceLayout::OneSecondPhased => Ok(ExecutableInference::OneSecondPhased {
+            ladder: inference.shape_ladder,
+            workers,
+        }),
+        InferenceLayout::PerWindow1s => Ok(ExecutableInference::PerWindowOneSecond { workers }),
+        InferenceLayout::FastS25 => Ok(ExecutableInference::FastTwoSecond { workers }),
+        InferenceLayout::AlignedS12
+        | InferenceLayout::AlignedS13
+        | InferenceLayout::PerWindow104 => unreachable!("archived layouts are rejected above"),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ComparisonSide {
+    Baseline,
+    Candidate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ScheduledRun {
+    pub side: ComparisonSide,
+    pub repetition: u32,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ComparisonProtocol {
+    runs: Vec<ScheduledRun>,
+}
+
+impl ComparisonProtocol {
+    fn isolated(repetitions: u32) -> Result<Self> {
+        ensure!(
+            repetitions > 0,
+            "performance.repetitions must be greater than zero"
+        );
+        Ok(Self {
+            runs: (0..repetitions)
+                .map(|repetition| ScheduledRun {
+                    side: ComparisonSide::Candidate,
+                    repetition,
+                })
+                .collect(),
+        })
+    }
+
+    fn abba(repetitions: u32) -> Result<Self> {
+        ensure!(
+            repetitions >= 4 && repetitions.is_multiple_of(2),
+            "baseline_run comparisons require an even repetition count of at least four"
+        );
+        let mut runs = Vec::with_capacity(repetitions as usize * 2);
+        for first in (0..repetitions).step_by(2) {
+            let second = first + 1;
+            runs.extend([
+                ScheduledRun {
+                    side: ComparisonSide::Baseline,
+                    repetition: first,
+                },
+                ScheduledRun {
+                    side: ComparisonSide::Candidate,
+                    repetition: first,
+                },
+                ScheduledRun {
+                    side: ComparisonSide::Candidate,
+                    repetition: second,
+                },
+                ScheduledRun {
+                    side: ComparisonSide::Baseline,
+                    repetition: second,
+                },
+            ]);
+        }
+        Ok(Self { runs })
+    }
+
+    pub(crate) fn runs(&self) -> &[ScheduledRun] {
+        &self.runs
+    }
+
+    pub(crate) fn process_labels(&self) -> Vec<String> {
+        self.runs
+            .iter()
+            .map(|run| match run.side {
+                ComparisonSide::Baseline => format!("baseline:r{:03}", run.repetition),
+                ComparisonSide::Candidate => format!("candidate:r{:03}", run.repetition),
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct FileId(String);
+
+impl FileId {
+    fn parse(field: &str, value: &str) -> Result<Self> {
+        ensure!(
+            !value.is_empty()
+                && value != "."
+                && value != ".."
+                && !value.contains('/')
+                && !value.contains('\\'),
+            "{field} contains unsafe file id '{value}'"
+        );
+        Ok(Self(value.to_owned()))
     }
 }
 
@@ -392,6 +723,40 @@ pub(crate) struct ValidatedExperiment {
     id: ExperimentId,
     models_dir: PathBuf,
     datasets_dir: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ExecutableExperiment {
+    inner: ValidatedExperiment,
+    inference: ExecutableInference,
+    candidates: Vec<CheckedCandidate>,
+    schedule: ComparisonProtocol,
+}
+
+impl ExecutableExperiment {
+    pub(crate) const fn spec(&self) -> &MacExperimentSpec {
+        self.inner.spec()
+    }
+
+    pub(crate) fn models_dir(&self) -> &Path {
+        self.inner.models_dir()
+    }
+
+    pub(crate) const fn inference(&self) -> ExecutableInference {
+        self.inference
+    }
+
+    pub(crate) fn candidates(&self) -> &[CheckedCandidate] {
+        &self.candidates
+    }
+
+    pub(crate) const fn performance(&self) -> &PerformanceProtocol {
+        self.inner.performance()
+    }
+
+    pub(crate) fn schedule(&self) -> &ComparisonProtocol {
+        &self.schedule
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -529,24 +894,20 @@ impl ValidatedExperiment {
         &self.spec.performance
     }
 
-    pub(crate) fn ensure_runnable(&self) -> Result<()> {
-        if self.inference().layout.is_archived_stride() {
-            bail!(
-                "inference layout {:?} uses a historical stride; archived runs can be summarized but new runs are restricted to 1.0-second Standard and 2.0-second Fast strides",
-                self.inference().layout
-            );
-        }
-
-        if let Some(candidate) = self.post_inference().iter().find(|candidate| {
-            matches!(
+    pub(crate) fn to_executable(&self) -> Result<ExecutableExperiment> {
+        let inference = parse_executable_inference(self.inference(), self.spec.acceptance)?;
+        let mut candidates = Vec::with_capacity(self.post_inference().len());
+        for candidate in self.post_inference() {
+            if matches!(
                 candidate.ahc_stopping,
                 Some(ArchivedAhcStopping::EstablishedClusters { .. })
-            )
-        }) {
-            bail!(
-                "post-inference candidate '{}' uses the rejected archived-only ahc_stopping policy; its run can be summarized but not executed",
-                candidate.id
-            );
+            ) {
+                bail!(
+                    "post-inference candidate '{}' uses the rejected archived-only ahc_stopping policy; its run can be summarized but not executed",
+                    candidate.id
+                );
+            }
+            candidates.push(parse_checked_candidate(candidate)?);
         }
 
         ensure!(
@@ -578,7 +939,27 @@ impl ValidatedExperiment {
                 baseline_run.display()
             );
         }
-        Ok(())
+
+        let schedule = if self.spec.baseline_run.is_some() {
+            ComparisonProtocol::abba(self.performance().repetitions())?
+        } else {
+            ComparisonProtocol::isolated(self.performance().repetitions())?
+        };
+
+        Ok(ExecutableExperiment {
+            inner: self.clone(),
+            inference,
+            candidates,
+            schedule,
+        })
+    }
+
+    pub(crate) fn schedule(&self) -> Result<ComparisonProtocol> {
+        if self.spec.baseline_run.is_some() {
+            ComparisonProtocol::abba(self.performance().repetitions())
+        } else {
+            ComparisonProtocol::isolated(self.performance().repetitions())
+        }
     }
 
     pub(crate) fn profile(&self) -> ProfileProtocol {
@@ -604,14 +985,7 @@ fn validate_domain(spec: &MacExperimentSpec) -> Result<ExperimentId> {
     );
     validate_unique_ids("dataset.files", &spec.dataset.files)?;
     for file_id in &spec.dataset.files {
-        ensure!(
-            !file_id.is_empty()
-                && file_id != "."
-                && file_id != ".."
-                && !file_id.contains('/')
-                && !file_id.contains('\\'),
-            "dataset.files contains unsafe file id '{file_id}'"
-        );
+        FileId::parse("dataset.files", file_id)?;
     }
     ensure!(
         !spec.post_inference.is_empty(),
@@ -625,28 +999,7 @@ fn validate_domain(spec: &MacExperimentSpec) -> Result<ExperimentId> {
     validate_unique_ids("post_inference.id", &candidate_ids)?;
     for candidate in &spec.post_inference {
         ExperimentId::parse("post_inference.id", &candidate.id)?;
-        if let Some(max_iters) = candidate.vbx_max_iters {
-            ensure!(
-                max_iters > 0,
-                "post_inference '{}' vbx_max_iters must be greater than zero",
-                candidate.id
-            );
-        }
-        if let Some(fb) = candidate.vbx_fb {
-            ensure!(
-                fb.is_finite() && fb > 0.0,
-                "post_inference '{}' vbx_fb must be finite and greater than zero",
-                candidate.id
-            );
-        }
-        if let Some(seconds) = candidate.clean_frame_seconds {
-            speakrs::pipeline::CleanFrameDuration::new(seconds).map_err(|error| {
-                color_eyre::eyre::eyre!(
-                    "post_inference '{}' has invalid clean_frame_seconds: {error}",
-                    candidate.id
-                )
-            })?;
-        }
+        parse_checked_candidate(candidate)?;
         if let Some(ArchivedAhcStopping::EstablishedClusters {
             minimum_cluster_size,
         }) = candidate.ahc_stopping
@@ -656,24 +1009,6 @@ fn validate_domain(spec: &MacExperimentSpec) -> Result<ExperimentId> {
                 "post_inference '{}' ahc_stopping minimum_cluster_size must be greater than zero",
                 candidate.id
             );
-        }
-        if let Some(ExperimentClusteringBackend::SphereVbxPf { .. }) = candidate.clustering_backend
-        {
-            ensure!(
-                candidate.vbx_fb.is_none() && candidate.vbx_max_iters.is_none(),
-                "post_inference '{}' cannot combine SphereVBx-PF with Gaussian VBx controls",
-                candidate.id
-            );
-            candidate
-                .clustering_backend
-                .unwrap()
-                .into_pipeline()
-                .map_err(|error| {
-                    color_eyre::eyre::eyre!(
-                        "post_inference '{}' has invalid SphereVBx-PF configuration: {error}",
-                        candidate.id
-                    )
-                })?;
         }
         let outlier_ids = candidate
             .documented_der_outliers
@@ -685,16 +1020,20 @@ fn validate_domain(spec: &MacExperimentSpec) -> Result<ExperimentId> {
             &outlier_ids,
         )?;
         for outlier in &candidate.documented_der_outliers {
-            ensure!(
-                !outlier.file_id.is_empty()
-                    && outlier.file_id != "."
-                    && outlier.file_id != ".."
-                    && !outlier.file_id.contains('/')
-                    && !outlier.file_id.contains('\\'),
-                "post_inference '{}' has unsafe documented outlier file id '{}'",
-                candidate.id,
-                outlier.file_id
-            );
+            FileId::parse(
+                &format!(
+                    "post_inference '{}' documented outlier file id",
+                    candidate.id
+                ),
+                &outlier.file_id,
+            )
+            .map_err(|_| {
+                color_eyre::eyre::eyre!(
+                    "post_inference '{}' has unsafe documented outlier file id '{}'",
+                    candidate.id,
+                    outlier.file_id
+                )
+            })?;
             ensure!(
                 !outlier.cause.trim().is_empty(),
                 "post_inference '{}' has an empty documented outlier cause for '{}'",
@@ -703,20 +1042,15 @@ fn validate_domain(spec: &MacExperimentSpec) -> Result<ExperimentId> {
             );
         }
     }
-    ensure!(
-        spec.performance.repetitions > 0,
-        "performance.repetitions must be greater than zero"
-    );
+    if spec.baseline_run.is_some() {
+        ComparisonProtocol::abba(spec.performance.repetitions)?;
+    } else {
+        ComparisonProtocol::isolated(spec.performance.repetitions)?;
+    }
     if let Some(profile) = &spec.profile {
         ensure!(
             profile.time_limit_seconds > 0,
             "profile.time_limit_seconds must be greater than zero"
-        );
-    }
-    if spec.baseline_run.is_some() {
-        ensure!(
-            spec.performance.repetitions >= 4 && spec.performance.repetitions.is_multiple_of(2),
-            "baseline_run comparisons require an even repetition count of at least four"
         );
     }
     validate_inference(&spec.inference, spec.acceptance)?;
@@ -976,7 +1310,7 @@ mod tests {
         validate_domain(&spec).unwrap();
 
         let experiment = ValidatedExperiment::from_spec(spec).unwrap();
-        let error = experiment.ensure_runnable().unwrap_err();
+        let error = experiment.to_executable().unwrap_err();
         assert!(error.to_string().contains("archived-only ahc_stopping"));
     }
 
@@ -987,7 +1321,7 @@ mod tests {
         validate_domain(&spec).unwrap();
 
         let experiment = ValidatedExperiment::from_spec(spec).unwrap();
-        let error = experiment.ensure_runnable().unwrap_err();
+        let error = experiment.to_executable().unwrap_err();
         assert!(error.to_string().contains("historical stride"));
     }
 

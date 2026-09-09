@@ -297,15 +297,68 @@ impl CoreMlChunkLayout {
     }
 }
 
+/// Layout and shape ladder that can execute together
+#[cfg(feature = "_metrics")]
+#[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExperimentInferenceLayout {
+    OneSecondPhased { shape_ladder: CoreMlShapeLadder },
+    PerWindow,
+    FastS25,
+}
+
+impl ExperimentInferenceLayout {
+    const fn from_full_layout(layout: CoreMlChunkLayout) -> Self {
+        match layout {
+            CoreMlChunkLayout::OneSecondPhased => Self::OneSecondPhased {
+                shape_ladder: CoreMlShapeLadder::Full,
+            },
+            CoreMlChunkLayout::PerWindow => Self::PerWindow,
+            CoreMlChunkLayout::FastS25 => Self::FastS25,
+        }
+    }
+
+    fn try_from_parts(
+        layout: CoreMlChunkLayout,
+        shape_ladder: CoreMlShapeLadder,
+    ) -> Result<Self, ExperimentInferenceConfigError> {
+        match (layout, shape_ladder) {
+            (CoreMlChunkLayout::OneSecondPhased, shape_ladder) => {
+                Ok(Self::OneSecondPhased { shape_ladder })
+            }
+            (CoreMlChunkLayout::PerWindow, CoreMlShapeLadder::Full) => Ok(Self::PerWindow),
+            (CoreMlChunkLayout::FastS25, CoreMlShapeLadder::Full) => Ok(Self::FastS25),
+            (layout, shape_ladder) => {
+                Err(ExperimentInferenceConfigError::IncompatibleShapeLadder {
+                    layout,
+                    shape_ladder,
+                })
+            }
+        }
+    }
+
+    const fn chunk_layout(self) -> CoreMlChunkLayout {
+        match self {
+            Self::OneSecondPhased { .. } => CoreMlChunkLayout::OneSecondPhased,
+            Self::PerWindow => CoreMlChunkLayout::PerWindow,
+            Self::FastS25 => CoreMlChunkLayout::FastS25,
+        }
+    }
+
+    const fn shape_ladder(self) -> CoreMlShapeLadder {
+        match self {
+            Self::OneSecondPhased { shape_ladder } => shape_ladder,
+            Self::PerWindow | Self::FastS25 => CoreMlShapeLadder::Full,
+        }
+    }
+}
+
 /// Typed inference configuration for metrics experiments
 #[cfg(feature = "_metrics")]
 #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExperimentInferenceConfig {
-    /// CoreML chunk or per-window layout and its fixed step
-    pub coreml_chunk_layout: CoreMlChunkLayout,
-    /// Fixed-shape chunk-model ladder
-    pub shape_ladder: CoreMlShapeLadder,
+    layout: ExperimentInferenceLayout,
     /// Parallel segmentation worker policy
     pub segmentation_workers: CoreMlSegmentationWorkers,
     /// Parallel filterbank preparation worker policy
@@ -321,8 +374,7 @@ impl ExperimentInferenceConfig {
     /// Create an experiment configuration for a fixed CoreML layout
     pub const fn new(coreml_chunk_layout: CoreMlChunkLayout) -> Self {
         Self {
-            coreml_chunk_layout,
-            shape_ladder: CoreMlShapeLadder::Full,
+            layout: ExperimentInferenceLayout::from_full_layout(coreml_chunk_layout),
             segmentation_workers: CoreMlSegmentationWorkers::Automatic,
             fbank_preparation_workers: CoreMlFbankPreparationWorkers::Two,
             fbank_normalization_scope: CoreMlFbankNormalizationScope::Chunk,
@@ -331,20 +383,29 @@ impl ExperimentInferenceConfig {
     }
 
     /// Create an experiment configuration with an explicit execution policy
-    pub const fn with_execution_policy(
+    pub fn with_execution_policy(
         coreml_chunk_layout: CoreMlChunkLayout,
         shape_ladder: CoreMlShapeLadder,
         segmentation_workers: CoreMlSegmentationWorkers,
         fbank_preparation_workers: CoreMlFbankPreparationWorkers,
-    ) -> Self {
-        Self {
-            coreml_chunk_layout,
-            shape_ladder,
+    ) -> Result<Self, ExperimentInferenceConfigError> {
+        Ok(Self {
+            layout: ExperimentInferenceLayout::try_from_parts(coreml_chunk_layout, shape_ladder)?,
             segmentation_workers,
             fbank_preparation_workers,
             fbank_normalization_scope: CoreMlFbankNormalizationScope::Chunk,
             embedding_compute_units: CoreMlComputeUnits::All,
-        }
+        })
+    }
+
+    /// Return the CoreML chunk or per-window layout
+    pub const fn coreml_chunk_layout(self) -> CoreMlChunkLayout {
+        self.layout.chunk_layout()
+    }
+
+    /// Return the fixed-shape chunk-model ladder
+    pub const fn shape_ladder(self) -> CoreMlShapeLadder {
+        self.layout.shape_ladder()
     }
 
     /// Select the filterbank normalization scope for a controlled comparison
@@ -364,7 +425,7 @@ impl ExperimentInferenceConfig {
 
     /// Return the fixed segmentation step required by this layout
     pub const fn step_seconds(self) -> f64 {
-        self.coreml_chunk_layout.step_seconds()
+        self.coreml_chunk_layout().step_seconds()
     }
 
     /// Return the fixed segmentation step required by this layout
@@ -374,20 +435,9 @@ impl ExperimentInferenceConfig {
 
     /// Validate this configuration for an execution mode
     pub const fn validate(self, mode: ExecutionMode) -> Result<(), ExperimentInferenceConfigError> {
-        if !self.coreml_chunk_layout.supports_mode(mode) {
-            return Err(ExperimentInferenceConfigError::IncompatibleMode {
-                mode,
-                layout: self.coreml_chunk_layout,
-            });
-        }
-
-        if matches!(self.shape_ladder, CoreMlShapeLadder::Reduced)
-            && !matches!(self.coreml_chunk_layout, CoreMlChunkLayout::OneSecondPhased)
-        {
-            return Err(ExperimentInferenceConfigError::IncompatibleShapeLadder {
-                layout: self.coreml_chunk_layout,
-                shape_ladder: self.shape_ladder,
-            });
+        let layout = self.coreml_chunk_layout();
+        if !layout.supports_mode(mode) {
+            return Err(ExperimentInferenceConfigError::IncompatibleMode { mode, layout });
         }
 
         Ok(())
@@ -404,7 +454,7 @@ impl ExperimentInferenceConfig {
         let expected = self.step_seconds();
         if !step_seconds.is_finite() || (step_seconds - expected).abs() > 1e-9 {
             return Err(ExperimentInferenceConfigError::IncompatibleStep {
-                layout: self.coreml_chunk_layout,
+                layout: self.coreml_chunk_layout(),
                 expected,
                 actual: step_seconds,
             });
@@ -676,7 +726,7 @@ mod tests {
     fn experiment_execution_policy_preserves_production_defaults() {
         let config = ExperimentInferenceConfig::new(CoreMlChunkLayout::OneSecondPhased);
 
-        assert_eq!(config.shape_ladder, CoreMlShapeLadder::Full);
+        assert_eq!(config.shape_ladder(), CoreMlShapeLadder::Full);
         assert_eq!(
             config.segmentation_workers,
             CoreMlSegmentationWorkers::Automatic
@@ -740,7 +790,7 @@ mod tests {
         );
 
         assert!(matches!(
-            config.validate(ExecutionMode::CoreMlFast),
+            config,
             Err(ExperimentInferenceConfigError::IncompatibleShapeLadder { .. })
         ));
     }

@@ -4,9 +4,10 @@ pub use crate::clustering::ahc::AhcConfig;
 #[cfg(feature = "_metrics")]
 #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
 pub use crate::clustering::sphere_vbx::{
-    ResponsibilitySmoothing, ResponsibilitySmoothingError, SphereVbxAhcInitialization,
-    SphereVbxInitialization, SphereVbxPfConfig, SphereVbxPfConfigError,
-    SphereVbxResponsibilityTolerance,
+    ResponsibilitySmoothing, ResponsibilitySmoothingError, SpeakerRegularizationScale,
+    SpeakerRegularizationScaleError, SphereVbxAhcInitialization, SphereVbxInitialization,
+    SphereVbxPfConfig, SphereVbxResponsibilityTolerance, SphereVbxResponsibilityToleranceError,
+    SufficientStatisticsScale, SufficientStatisticsScaleError,
 };
 pub use crate::clustering::vbx::VbxConfig;
 pub(crate) use config::MIN_SPEAKER_ACTIVITY;

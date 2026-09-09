@@ -1,6 +1,12 @@
+use std::num::NonZeroUsize;
+
 use ndarray::{Array1, Array2, ArrayView2, Axis};
 
 use crate::utils::logsumexp_f64;
+
+fn parse_positive_finite(value: f64) -> Option<f64> {
+    (value.is_finite() && value > 0.0).then_some(value)
+}
 
 /// Positive responsibility smoothing used to initialize SphereVBx-PF
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
@@ -9,11 +15,9 @@ pub struct ResponsibilitySmoothing(f64);
 impl ResponsibilitySmoothing {
     /// Create a positive, finite smoothing scale
     pub fn new(scale: f64) -> Result<Self, ResponsibilitySmoothingError> {
-        if scale.is_finite() && scale > 0.0 {
-            Ok(Self(scale))
-        } else {
-            Err(ResponsibilitySmoothingError(scale))
-        }
+        parse_positive_finite(scale)
+            .map(Self)
+            .ok_or(ResponsibilitySmoothingError(scale))
     }
 
     /// Return the smoothing scale
@@ -27,20 +31,62 @@ impl ResponsibilitySmoothing {
 #[error("responsibility smoothing must be finite and greater than zero, got {0}")]
 pub struct ResponsibilitySmoothingError(f64);
 
+/// SphereVBx-PF sufficient-statistics scale (`FA` in the update equations)
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct SufficientStatisticsScale(f64);
+
+impl SufficientStatisticsScale {
+    /// Create a positive, finite sufficient-statistics scale
+    pub fn new(scale: f64) -> Result<Self, SufficientStatisticsScaleError> {
+        parse_positive_finite(scale)
+            .map(Self)
+            .ok_or(SufficientStatisticsScaleError(scale))
+    }
+
+    /// Return the sufficient-statistics scale
+    pub const fn get(self) -> f64 {
+        self.0
+    }
+}
+
+/// Error returned for an invalid SphereVBx-PF sufficient-statistics scale
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+#[error("SphereVBx-PF FA must be finite and greater than zero, got {0}")]
+pub struct SufficientStatisticsScaleError(f64);
+
+/// SphereVBx-PF speaker regularization scale (`FB` in the update equations)
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+pub struct SpeakerRegularizationScale(f64);
+
+impl SpeakerRegularizationScale {
+    /// Create a positive, finite speaker regularization scale
+    pub fn new(scale: f64) -> Result<Self, SpeakerRegularizationScaleError> {
+        parse_positive_finite(scale)
+            .map(Self)
+            .ok_or(SpeakerRegularizationScaleError(scale))
+    }
+
+    /// Return the speaker regularization scale
+    pub const fn get(self) -> f64 {
+        self.0
+    }
+}
+
+/// Error returned for an invalid SphereVBx-PF speaker regularization scale
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+#[error("SphereVBx-PF FB must be finite and greater than zero, got {0}")]
+pub struct SpeakerRegularizationScaleError(f64);
+
 /// Positive convergence tolerance for SphereVBx-PF responsibilities
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct SphereVbxResponsibilityTolerance(f64);
 
 impl SphereVbxResponsibilityTolerance {
     /// Create a positive, finite responsibility tolerance
-    pub fn new(tolerance: f64) -> Result<Self, SphereVbxPfConfigError> {
-        if tolerance.is_finite() && tolerance > 0.0 {
-            Ok(Self(tolerance))
-        } else {
-            Err(SphereVbxPfConfigError::InvalidResponsibilityTolerance(
-                tolerance,
-            ))
-        }
+    pub fn new(tolerance: f64) -> Result<Self, SphereVbxResponsibilityToleranceError> {
+        parse_positive_finite(tolerance)
+            .map(Self)
+            .ok_or(SphereVbxResponsibilityToleranceError(tolerance))
     }
 
     /// Return the responsibility tolerance
@@ -48,6 +94,11 @@ impl SphereVbxResponsibilityTolerance {
         self.0
     }
 }
+
+/// Error returned for an invalid SphereVBx-PF responsibility tolerance
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+#[error("SphereVBx-PF responsibility tolerance must be finite and greater than zero, got {0}")]
+pub struct SphereVbxResponsibilityToleranceError(f64);
 
 /// Responsibility initialization for SphereVBx-PF
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -72,54 +123,42 @@ pub enum SphereVbxAhcInitialization {
 /// Valid parameter-free SphereVBx configuration
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SphereVbxPfConfig {
-    fa: f64,
-    fb: f64,
-    max_iters: std::num::NonZeroUsize,
+    sufficient_statistics_scale: SufficientStatisticsScale,
+    speaker_regularization_scale: SpeakerRegularizationScale,
+    max_iters: NonZeroUsize,
     responsibility_tolerance: SphereVbxResponsibilityTolerance,
     initialization: SphereVbxInitialization,
     ahc_initialization: SphereVbxAhcInitialization,
 }
 
 impl SphereVbxPfConfig {
-    /// Create a validated parameter-free SphereVBx configuration
-    pub fn new(
-        fa: f64,
-        fb: f64,
-        max_iters: usize,
-        responsibility_tolerance: f64,
+    /// Create a parameter-free SphereVBx configuration from checked values
+    pub const fn new(
+        sufficient_statistics_scale: SufficientStatisticsScale,
+        speaker_regularization_scale: SpeakerRegularizationScale,
+        max_iters: NonZeroUsize,
+        responsibility_tolerance: SphereVbxResponsibilityTolerance,
         initialization: SphereVbxInitialization,
         ahc_initialization: SphereVbxAhcInitialization,
-    ) -> Result<Self, SphereVbxPfConfigError> {
-        if !fa.is_finite() || fa <= 0.0 {
-            return Err(SphereVbxPfConfigError::InvalidFa(fa));
-        }
-        if !fb.is_finite() || fb <= 0.0 {
-            return Err(SphereVbxPfConfigError::InvalidFb(fb));
-        }
-        let Some(max_iters) = std::num::NonZeroUsize::new(max_iters) else {
-            return Err(SphereVbxPfConfigError::ZeroIterations);
-        };
-        let responsibility_tolerance =
-            SphereVbxResponsibilityTolerance::new(responsibility_tolerance)?;
-
-        Ok(Self {
-            fa,
-            fb,
+    ) -> Self {
+        Self {
+            sufficient_statistics_scale,
+            speaker_regularization_scale,
             max_iters,
             responsibility_tolerance,
             initialization,
             ahc_initialization,
-        })
+        }
     }
 
-    /// Return the sufficient-statistics scale
+    /// Return the sufficient-statistics scale (`FA`)
     pub const fn fa(self) -> f64 {
-        self.fa
+        self.sufficient_statistics_scale.get()
     }
 
-    /// Return the speaker regularization scale
+    /// Return the speaker regularization scale (`FB`)
     pub const fn fb(self) -> f64 {
-        self.fb
+        self.speaker_regularization_scale.get()
     }
 
     /// Return the maximum number of update iterations
@@ -141,24 +180,6 @@ impl SphereVbxPfConfig {
     pub const fn ahc_initialization(self) -> SphereVbxAhcInitialization {
         self.ahc_initialization
     }
-}
-
-/// Error returned for an invalid SphereVBx-PF configuration
-#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum SphereVbxPfConfigError {
-    /// `FA` is not positive and finite
-    #[error("SphereVBx-PF FA must be finite and greater than zero, got {0}")]
-    InvalidFa(f64),
-    /// `FB` is not positive and finite
-    #[error("SphereVBx-PF FB must be finite and greater than zero, got {0}")]
-    InvalidFb(f64),
-    /// No update iteration was requested
-    #[error("SphereVBx-PF max_iters must be greater than zero")]
-    ZeroIterations,
-    /// The convergence tolerance is not positive and finite
-    #[error("SphereVBx-PF responsibility tolerance must be finite and greater than zero, got {0}")]
-    InvalidResponsibilityTolerance(f64),
 }
 
 /// Error returned when SphereVBx-PF receives invalid numerical input
@@ -389,6 +410,7 @@ fn vmf_mean_length_ratio(dimension: usize, kappa: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use std::fs::File;
+    use std::num::NonZeroUsize;
     use std::path::PathBuf;
 
     use approx::assert_abs_diff_eq;
@@ -398,15 +420,24 @@ mod tests {
     use super::*;
 
     fn config(initialization: SphereVbxInitialization) -> SphereVbxPfConfig {
+        sphere_config(12.0, 0.3, 10, 1e-8, initialization)
+    }
+
+    fn sphere_config(
+        fa: f64,
+        fb: f64,
+        max_iters: usize,
+        tolerance: f64,
+        initialization: SphereVbxInitialization,
+    ) -> SphereVbxPfConfig {
         SphereVbxPfConfig::new(
-            12.0,
-            0.3,
-            10,
-            1e-8,
+            SufficientStatisticsScale::new(fa).unwrap(),
+            SpeakerRegularizationScale::new(fb).unwrap(),
+            NonZeroUsize::new(max_iters).unwrap(),
+            SphereVbxResponsibilityTolerance::new(tolerance).unwrap(),
             initialization,
             SphereVbxAhcInitialization::Cosine,
         )
-        .unwrap()
     }
 
     fn fixture_path(name: &str) -> PathBuf {
@@ -493,39 +524,10 @@ mod tests {
 
     #[test]
     fn invalid_config_values_are_rejected() {
-        assert!(
-            SphereVbxPfConfig::new(
-                0.0,
-                0.3,
-                10,
-                1e-8,
-                SphereVbxInitialization::Hard,
-                SphereVbxAhcInitialization::Cosine,
-            )
-            .is_err()
-        );
-        assert!(
-            SphereVbxPfConfig::new(
-                12.0,
-                f64::NAN,
-                10,
-                1e-8,
-                SphereVbxInitialization::Hard,
-                SphereVbxAhcInitialization::Cosine,
-            )
-            .is_err()
-        );
-        assert!(
-            SphereVbxPfConfig::new(
-                12.0,
-                0.3,
-                0,
-                1e-8,
-                SphereVbxInitialization::Hard,
-                SphereVbxAhcInitialization::Cosine,
-            )
-            .is_err()
-        );
+        assert!(SufficientStatisticsScale::new(0.0).is_err());
+        assert!(SpeakerRegularizationScale::new(f64::NAN).is_err());
+        assert!(NonZeroUsize::new(0).is_none());
+        assert!(SphereVbxResponsibilityTolerance::new(0.0).is_err());
     }
 
     #[test]
@@ -542,15 +544,7 @@ mod tests {
             Array1::read_npy(File::open(fixture_path("sphere_vbx_pf_pi.npy")).unwrap()).unwrap();
         let features = features.mapv(|value| value as f32);
         let gamma_init = gamma_init.mapv(|value| value as f32);
-        let fixture_config = SphereVbxPfConfig::new(
-            1.5,
-            6.0,
-            4,
-            1e-12,
-            SphereVbxInitialization::Hard,
-            SphereVbxAhcInitialization::Cosine,
-        )
-        .unwrap();
+        let fixture_config = sphere_config(1.5, 6.0, 4, 1e-12, SphereVbxInitialization::Hard);
 
         let (gamma, pi) = sphere_vbx_pf(&features.view(), &gamma_init, &fixture_config).unwrap();
 

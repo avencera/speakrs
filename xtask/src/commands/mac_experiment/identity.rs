@@ -6,8 +6,43 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use color_eyre::eyre::{Context, Result, ensure};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(super) struct Sha256Digest(String);
+
+impl Sha256Digest {
+    pub(super) fn parse(value: &str) -> Result<Self> {
+        ensure!(!value.is_empty(), "digest must not be empty");
+        Ok(Self(value.to_owned()))
+    }
+
+    pub(super) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for Sha256Digest {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+pub(super) fn deserialize_optional_digest<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Sha256Digest>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value.as_deref() {
+        None | Some("") => Ok(None),
+        Some(text) => Sha256Digest::parse(text)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(super) struct HostIdentity {

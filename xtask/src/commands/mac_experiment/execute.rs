@@ -7,123 +7,26 @@ use std::time::{Duration, Instant};
 
 use color_eyre::eyre::{Context, Result, ensure, eyre};
 use serde::Serialize;
-use speakrs::inference::{CoreMlComputeUnits, ExecutionMode};
+use speakrs::inference::ExecutionMode;
 use speakrs::pipeline::{
-    CleanFrameDuration, ClusteringBackend, CoreMlChunkLayout, CoreMlFbankNormalizationScope,
-    CoreMlFbankPreparationWorkers, CoreMlSegmentationWorkers, CoreMlShapeLadder,
-    ExperimentInferenceConfig, OwnedDiarizationPipeline, PipelineBuilder, RuntimeConfig,
+    ClusteringBackend, OwnedDiarizationPipeline, PipelineBuilder, RuntimeConfig,
 };
 
 use crate::cmd::project_root;
 use crate::commands::benchmark::{DerAccumulation, PerFileDerResult};
 use crate::wav::load_wav_samples;
 
-use super::ValidatedExperiment;
 use super::domain::{
-    CoreMlMode, FbankNormalizationScope, FbankPreparationWorkers, InferenceLayout,
-    PostInferenceVariant, SegmentationWorkers, ShapeLadder,
+    CandidateClustering, CheckedCandidate, ComparisonSide, CoreMlMode, ExecutableExperiment,
+};
+use super::record::{
+    ChunkInferenceStageTimings, ClusteringBackendDiagnostics, ClusteringDiagnostics,
+    ExperimentRecord, SphereAhcInitializationDiagnostics, SphereInitializationDiagnostics,
+    StageTimings,
 };
 use super::store::{ManifestFile, RunStore};
 
 const REQUIRED_SAMPLE_RATE: u32 = 16_000;
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-enum ExperimentRecord {
-    Complete {
-        audio_seconds: f64,
-        wall_seconds: f64,
-        rtfx: f64,
-        worker_elapsed_seconds: f64,
-        stage_timings: StageTimings,
-        clustering: ClusteringDiagnostics,
-        peak_rss_bytes: Option<u64>,
-        der: Box<PerFileDerResult>,
-        hypothesis_rttm: String,
-        fallback_events: Vec<String>,
-    },
-    Failed {
-        error: String,
-        audio_seconds: f64,
-        worker_elapsed_seconds: f64,
-        inference_seconds: Option<f64>,
-        peak_rss_bytes: Option<u64>,
-    },
-}
-
-#[derive(Debug, Serialize)]
-struct ClusteringDiagnostics {
-    usable_training_embeddings: usize,
-    clean_frame_seconds: f64,
-    #[serde(flatten)]
-    backend: ClusteringBackendDiagnostics,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "backend", rename_all = "snake_case")]
-enum ClusteringBackendDiagnostics {
-    GaussianVbx {
-        fa: f64,
-        fb: f64,
-        max_iters: usize,
-    },
-    SphereVbxPf {
-        fa: f64,
-        fb: f64,
-        max_iters: usize,
-        responsibility_tolerance: f64,
-        initialization: SphereInitializationDiagnostics,
-        ahc_initialization: SphereAhcInitializationDiagnostics,
-    },
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum SphereInitializationDiagnostics {
-    Hard,
-    Smoothed { scale: f64 },
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum SphereAhcInitializationDiagnostics {
-    Cosine,
-    PldaTransformed,
-}
-
-#[derive(Debug, Serialize)]
-struct StageTimings {
-    inference_seconds: f64,
-    post_inference_seconds: f64,
-    chunk_inference: Option<ChunkInferenceStageTimings>,
-}
-
-#[derive(Clone, Copy, Debug, Serialize)]
-struct ChunkInferenceStageTimings {
-    segmentation_seconds: f64,
-    embedding_seconds: f64,
-    prediction_seconds: f64,
-    filterbank_preparation_seconds: f64,
-    mask_preparation_seconds: f64,
-    total_seconds: f64,
-    chunk_count: usize,
-    pipelined: bool,
-}
-
-impl From<speakrs::pipeline::InferenceStageTimings> for ChunkInferenceStageTimings {
-    fn from(value: speakrs::pipeline::InferenceStageTimings) -> Self {
-        Self {
-            segmentation_seconds: value.segmentation_seconds,
-            embedding_seconds: value.embedding_seconds,
-            prediction_seconds: value.prediction_seconds,
-            filterbank_preparation_seconds: value.filterbank_preparation_seconds,
-            mask_preparation_seconds: value.mask_preparation_seconds,
-            total_seconds: value.total_seconds,
-            chunk_count: value.chunk_count,
-            pipelined: value.pipelined,
-        }
-    }
-}
 
 #[derive(Debug, Serialize)]
 struct RepetitionRecord {
@@ -134,25 +37,21 @@ struct RepetitionRecord {
     completed_at: String,
 }
 
-pub(super) fn run_managed(store: &RunStore, experiment: &ValidatedExperiment) -> Result<()> {
+pub(super) fn run_managed(store: &RunStore) -> Result<()> {
     let worker = build_worker_binary()?;
-    run_managed_with_worker(&worker, store, experiment)
+    run_managed_with_worker(&worker, store)
 }
 
-pub(super) fn run_managed_with_worker(
-    worker: &Path,
-    store: &RunStore,
-    experiment: &ValidatedExperiment,
-) -> Result<()> {
-    experiment.ensure_runnable()?;
+pub(super) fn run_managed_with_worker(worker: &Path, store: &RunStore) -> Result<()> {
+    let executable = store.experiment().to_executable()?;
     store.assert_worker(worker)?;
-    store.assert_input_digests(experiment)?;
-    let executed = match &experiment.spec().baseline_run {
-        Some(baseline_run) => run_abba_comparison(worker, store, experiment, baseline_run)?,
-        None => run_isolated_repetitions(worker, store, experiment)?,
+    store.assert_input_digests()?;
+    let executed = match &executable.spec().baseline_run {
+        Some(baseline_run) => run_abba_comparison(worker, store, &executable, baseline_run)?,
+        None => run_isolated_repetitions(worker, store, &executable)?,
     };
 
-    store.rebuild_projections(experiment)?;
+    store.rebuild_projections()?;
     if !executed {
         println!("all experiment records are already complete");
     }
@@ -162,12 +61,12 @@ pub(super) fn run_managed_with_worker(
 fn run_isolated_repetitions(
     worker: &Path,
     store: &RunStore,
-    experiment: &ValidatedExperiment,
+    experiment: &ExecutableExperiment,
 ) -> Result<bool> {
     let mut executed = false;
-    for repetition in 0..experiment.performance().repetitions() {
-        if store.repetition_complete(repetition, experiment)? {
-            store.ensure_unmeasured_repetition_record(repetition)?;
+    for run in experiment.schedule().runs() {
+        if store.repetition_complete(run.repetition)? {
+            store.ensure_unmeasured_repetition_record(run.repetition)?;
             continue;
         }
         executed = true;
@@ -179,10 +78,10 @@ fn run_isolated_repetitions(
                 "worker",
                 &store.run_dir().to_string_lossy(),
                 "--repetition",
-                &repetition.to_string(),
+                &run.repetition.to_string(),
             ],
-            &format!("experiment repetition {repetition}"),
-            &store.process_log_path(repetition),
+            &format!("experiment repetition {}", run.repetition),
+            &store.process_log_path(run.repetition),
         )?;
         sleep_between_processes(experiment);
     }
@@ -192,49 +91,31 @@ fn run_isolated_repetitions(
 fn run_abba_comparison(
     worker: &Path,
     store: &RunStore,
-    experiment: &ValidatedExperiment,
+    experiment: &ExecutableExperiment,
     baseline_run: &Path,
 ) -> Result<bool> {
-    let repetitions = experiment.performance().repetitions();
-    ensure!(
-        repetitions >= 4 && repetitions.is_multiple_of(2),
-        "A-B-B-A comparison requires an even repetition count of at least four"
-    );
     let baseline_run = if baseline_run.is_absolute() {
         baseline_run.to_path_buf()
     } else {
         project_root().join(baseline_run)
     };
-    let (baseline_store, _baseline_experiment) = RunStore::open(&baseline_run)?;
-    let (comparison_store, comparison_experiment) =
-        store.comparison_baseline_store(&baseline_store)?;
+    let baseline_store = RunStore::open(&baseline_run)?;
+    let comparison_store = store.comparison_baseline_store(&baseline_store)?;
     let mut executed = false;
 
-    for first in (0..repetitions).step_by(2) {
-        let second = first + 1;
-        for (is_baseline, repetition) in [
-            (true, first),
-            (false, first),
-            (false, second),
-            (true, second),
-        ] {
-            let complete = if is_baseline {
-                comparison_store.repetition_complete(repetition, &comparison_experiment)?
-            } else {
-                store.repetition_complete(repetition, experiment)?
-            };
-            if complete {
-                let complete_store = if is_baseline {
-                    &comparison_store
-                } else {
-                    store
-                };
-                complete_store.ensure_unmeasured_repetition_record(repetition)?;
-                continue;
-            }
-            executed = true;
-            store.assert_worker(worker)?;
-            if is_baseline {
+    for run in experiment.schedule().runs() {
+        let complete_store = match run.side {
+            ComparisonSide::Baseline => &comparison_store,
+            ComparisonSide::Candidate => store,
+        };
+        if complete_store.repetition_complete(run.repetition)? {
+            complete_store.ensure_unmeasured_repetition_record(run.repetition)?;
+            continue;
+        }
+        executed = true;
+        store.assert_worker(worker)?;
+        match run.side {
+            ComparisonSide::Baseline => {
                 run_worker_command(
                     worker,
                     &[
@@ -243,12 +124,13 @@ fn run_abba_comparison(
                         &baseline_run.to_string_lossy(),
                         store.run_dir().to_string_lossy().as_ref(),
                         "--repetition",
-                        &repetition.to_string(),
+                        &run.repetition.to_string(),
                     ],
-                    &format!("baseline repetition {repetition}"),
-                    &comparison_store.process_log_path(repetition),
+                    &format!("baseline repetition {}", run.repetition),
+                    &comparison_store.process_log_path(run.repetition),
                 )?;
-            } else {
+            }
+            ComparisonSide::Candidate => {
                 run_worker_command(
                     worker,
                     &[
@@ -256,14 +138,14 @@ fn run_abba_comparison(
                         "worker",
                         store.run_dir().to_string_lossy().as_ref(),
                         "--repetition",
-                        &repetition.to_string(),
+                        &run.repetition.to_string(),
                     ],
-                    &format!("candidate repetition {repetition}"),
-                    &store.process_log_path(repetition),
+                    &format!("candidate repetition {}", run.repetition),
+                    &store.process_log_path(run.repetition),
                 )?;
             }
-            sleep_between_processes(experiment);
         }
+        sleep_between_processes(experiment);
     }
     Ok(executed)
 }
@@ -295,7 +177,7 @@ fn run_worker_command(worker: &Path, args: &[&str], label: &str, log_path: &Path
     Ok(())
 }
 
-fn sleep_between_processes(experiment: &ValidatedExperiment) {
+fn sleep_between_processes(experiment: &ExecutableExperiment) {
     if experiment.performance().sleep_seconds() > 0 {
         std::thread::sleep(Duration::from_secs(
             experiment.performance().sleep_seconds(),
@@ -309,8 +191,8 @@ pub(super) fn run_worker(run_dir: &Path, repetition: u32) -> Result<()> {
         "the macOS experiment worker must be built with the xtask coreml feature"
     );
     let worker_start = Instant::now();
-    let (store, experiment) = RunStore::open(run_dir)?;
-    experiment.ensure_runnable()?;
+    let store = RunStore::open(run_dir)?;
+    let experiment = store.experiment().to_executable()?;
     execute_store_repetition(&store, &experiment, repetition, worker_start)
 }
 
@@ -324,32 +206,32 @@ pub(super) fn run_comparison_worker(
         "the comparison worker must be built with the xtask coreml feature"
     );
     let worker_start = Instant::now();
-    let (baseline_store, _baseline_experiment) = RunStore::open(baseline_run_dir)?;
-    let (candidate_store, _candidate_experiment) = RunStore::open(candidate_run_dir)?;
-    let (store, experiment) = candidate_store.comparison_baseline_store(&baseline_store)?;
-    experiment.ensure_runnable()?;
+    let baseline_store = RunStore::open(baseline_run_dir)?;
+    let candidate_store = RunStore::open(candidate_run_dir)?;
+    let store = candidate_store.comparison_baseline_store(&baseline_store)?;
+    let experiment = store.experiment().to_executable()?;
     execute_store_repetition(&store, &experiment, repetition, worker_start)
 }
 
 fn execute_store_repetition(
     store: &RunStore,
-    experiment: &ValidatedExperiment,
+    experiment: &ExecutableExperiment,
     repetition: u32,
     worker_start: Instant,
 ) -> Result<()> {
-    if store.repetition_complete(repetition, experiment)? {
+    if store.repetition_complete(repetition)? {
         store.ensure_unmeasured_repetition_record(repetition)?;
         return Ok(());
     }
-    let resumed = store.repetition_started(repetition, experiment)?;
+    let resumed = store.repetition_started(repetition)?;
 
     let mut executor = ExperimentExecutor::new(experiment, worker_start)?;
     executor.warm_up(store.manifest_files().first())?;
-    store.execute_repetition(experiment, repetition, |_, file, candidates| {
+    store.execute_repetition(repetition, |_, file, candidates| {
         executor.execute_file(file, candidates)
     })?;
     ensure!(
-        store.repetition_complete(repetition, experiment)?,
+        store.repetition_complete(repetition)?,
         "repetition {repetition} ended with missing durable records"
     );
     store.write_repetition_record(
@@ -375,8 +257,8 @@ pub(super) fn run_profile_worker(
         "the macOS profile worker must be built with the xtask coreml feature"
     );
     let worker_start = Instant::now();
-    let (store, experiment) = RunStore::open(run_dir)?;
-    experiment.ensure_runnable()?;
+    let store = RunStore::open(run_dir)?;
+    let experiment = store.experiment().to_executable()?;
     let file = store
         .manifest_files()
         .get(file_index)
@@ -384,7 +266,7 @@ pub(super) fn run_profile_worker(
     let mut executor = ExperimentExecutor::new(&experiment, worker_start)?;
     executor.warm_up(Some(file))?;
     let candidate_ids = experiment
-        .post_inference()
+        .candidates()
         .iter()
         .map(|candidate| candidate.id.clone())
         .collect::<Vec<_>>();
@@ -426,27 +308,16 @@ struct ProfileCandidateOutput {
 }
 
 struct ExperimentExecutor<'a> {
-    experiment: &'a ValidatedExperiment,
+    experiment: &'a ExecutableExperiment,
     pipeline: OwnedDiarizationPipeline,
     worker_start: Instant,
 }
 
 impl<'a> ExperimentExecutor<'a> {
-    fn new(experiment: &'a ValidatedExperiment, worker_start: Instant) -> Result<Self> {
-        let mode = execution_mode(experiment.inference().mode);
-        let layout = coreml_layout(experiment.inference().layout)?;
-        let inference_config = ExperimentInferenceConfig::with_execution_policy(
-            layout,
-            coreml_shape_ladder(experiment.inference().shape_ladder),
-            coreml_segmentation_workers(experiment.inference().segmentation_workers),
-            coreml_fbank_preparation_workers(experiment.inference().filterbank_preparation_workers),
-        )
-        .with_fbank_normalization_scope(coreml_fbank_normalization_scope(
-            experiment.inference().filterbank_normalization_scope,
-        ))
-        .with_embedding_compute_units(coreml_embedding_compute_units(
-            experiment.inference().embedding_compute_units,
-        ));
+    fn new(experiment: &'a ExecutableExperiment, worker_start: Instant) -> Result<Self> {
+        let inference = experiment.inference();
+        let mode = execution_mode(inference.mode());
+        let inference_config = inference.to_pipeline()?;
         let runtime = RuntimeConfig::default().with_experiment(inference_config);
         let pipeline = PipelineBuilder::from_dir(experiment.models_dir(), mode)
             .runtime(runtime)
@@ -454,11 +325,10 @@ impl<'a> ExperimentExecutor<'a> {
             .map_err(|error| eyre!("failed to build experiment pipeline: {error}"))?;
 
         ensure!(
-            (pipeline.segmentation_step() - experiment.inference().layout.step_seconds()).abs()
-                <= 1e-9,
+            (pipeline.segmentation_step() - inference.step_seconds()).abs() <= 1e-9,
             "pipeline step {} does not match experiment layout step {}",
             pipeline.segmentation_step(),
-            experiment.inference().layout.step_seconds()
+            inference.step_seconds()
         );
 
         Ok(Self {
@@ -480,7 +350,7 @@ impl<'a> ExperimentExecutor<'a> {
         ensure_sample_rate(file, sample_rate)?;
         let candidate = self
             .experiment
-            .post_inference()
+            .candidates()
             .first()
             .ok_or_else(|| eyre!("experiment has no post-inference candidate"))?;
         let config = candidate_config(&self.pipeline, candidate)?;
@@ -554,7 +424,7 @@ impl<'a> ExperimentExecutor<'a> {
         let result = (|| -> Result<ExperimentRecord> {
             let candidate = self
                 .experiment
-                .post_inference()
+                .candidates()
                 .iter()
                 .find(|candidate| candidate.id == candidate_id)
                 .ok_or_else(|| eyre!("unknown post-inference candidate '{candidate_id}'"))?;
@@ -618,11 +488,11 @@ impl<'a> ExperimentExecutor<'a> {
                     post_inference_seconds,
                     chunk_inference,
                 },
-                clustering: ClusteringDiagnostics {
+                clustering: Some(ClusteringDiagnostics {
                     usable_training_embeddings,
                     clean_frame_seconds: config.clean_frame_duration.seconds(),
-                    backend,
-                },
+                    backend: Some(backend),
+                }),
                 peak_rss_bytes: peak_rss_bytes(),
                 der: Box::new(der),
                 hypothesis_rttm,
@@ -667,30 +537,30 @@ impl<'a> ExperimentExecutor<'a> {
 
 fn candidate_config(
     pipeline: &OwnedDiarizationPipeline,
-    candidate: &PostInferenceVariant,
+    candidate: &CheckedCandidate,
 ) -> Result<speakrs::pipeline::PipelineConfig> {
     apply_candidate_config(pipeline.pipeline_config(), candidate)
 }
 
 fn apply_candidate_config(
     mut config: speakrs::pipeline::PipelineConfig,
-    candidate: &PostInferenceVariant,
+    candidate: &CheckedCandidate,
 ) -> Result<speakrs::pipeline::PipelineConfig> {
-    match candidate.clustering_backend {
-        None => {
-            if let Some(max_iters) = candidate.vbx_max_iters {
-                config.vbx.max_iters = max_iters;
+    match candidate.clustering {
+        CandidateClustering::Gaussian(overrides) => {
+            if let Some(max_iters) = overrides.max_iters {
+                config.vbx.max_iters = max_iters.get();
             }
-            if let Some(fb) = candidate.vbx_fb {
+            if let Some(fb) = overrides.fb {
                 config.vbx.fb = fb;
             }
         }
-        Some(backend) => {
-            config = config.with_experimental_clustering(backend.into_pipeline()?);
+        CandidateClustering::Sphere(sphere) => {
+            config = config.with_experimental_clustering(ClusteringBackend::SphereVbxPf(sphere));
         }
     }
-    if let Some(seconds) = candidate.clean_frame_seconds {
-        config.clean_frame_duration = CleanFrameDuration::new(seconds)?;
+    if let Some(duration) = candidate.clean_frame_duration {
+        config.clean_frame_duration = duration;
     }
     Ok(config)
 }
@@ -724,65 +594,6 @@ const fn execution_mode(mode: CoreMlMode) -> ExecutionMode {
     match mode {
         CoreMlMode::CoreMl => ExecutionMode::CoreMl,
         CoreMlMode::CoreMlFast => ExecutionMode::CoreMlFast,
-    }
-}
-
-fn coreml_layout(layout: InferenceLayout) -> Result<CoreMlChunkLayout> {
-    match layout {
-        InferenceLayout::OneSecondPhased => Ok(CoreMlChunkLayout::OneSecondPhased),
-        InferenceLayout::FastS25 => Ok(CoreMlChunkLayout::FastS25),
-        InferenceLayout::PerWindow1s => Ok(CoreMlChunkLayout::PerWindow),
-        InferenceLayout::AlignedS12
-        | InferenceLayout::AlignedS13
-        | InferenceLayout::PerWindow104 => Err(eyre!(
-            "historical inference layout {layout:?} is not executable; use a 1.0-second Standard or 2.0-second Fast layout"
-        )),
-    }
-}
-
-const fn coreml_shape_ladder(shape_ladder: ShapeLadder) -> CoreMlShapeLadder {
-    match shape_ladder {
-        ShapeLadder::Full => CoreMlShapeLadder::Full,
-        ShapeLadder::Reduced => CoreMlShapeLadder::Reduced,
-    }
-}
-
-const fn coreml_segmentation_workers(workers: SegmentationWorkers) -> CoreMlSegmentationWorkers {
-    match workers {
-        SegmentationWorkers::Automatic => CoreMlSegmentationWorkers::Automatic,
-        SegmentationWorkers::Four => CoreMlSegmentationWorkers::Four,
-        SegmentationWorkers::Six => CoreMlSegmentationWorkers::Six,
-        SegmentationWorkers::Eight => CoreMlSegmentationWorkers::Eight,
-    }
-}
-
-const fn coreml_fbank_preparation_workers(
-    workers: FbankPreparationWorkers,
-) -> CoreMlFbankPreparationWorkers {
-    match workers {
-        FbankPreparationWorkers::One => CoreMlFbankPreparationWorkers::One,
-        FbankPreparationWorkers::Two => CoreMlFbankPreparationWorkers::Two,
-        FbankPreparationWorkers::Four => CoreMlFbankPreparationWorkers::Four,
-    }
-}
-
-const fn coreml_fbank_normalization_scope(
-    scope: FbankNormalizationScope,
-) -> CoreMlFbankNormalizationScope {
-    match scope {
-        FbankNormalizationScope::Chunk => CoreMlFbankNormalizationScope::Chunk,
-        FbankNormalizationScope::TenSecondSegments => {
-            CoreMlFbankNormalizationScope::TenSecondSegments
-        }
-    }
-}
-
-const fn coreml_embedding_compute_units(
-    units: super::domain::EmbeddingComputeUnits,
-) -> CoreMlComputeUnits {
-    match units {
-        super::domain::EmbeddingComputeUnits::All => CoreMlComputeUnits::All,
-        super::domain::EmbeddingComputeUnits::CpuOnly => CoreMlComputeUnits::CpuOnly,
     }
 }
 
@@ -838,10 +649,16 @@ fn peak_rss_bytes() -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::domain::PostInferenceVariant;
+    use super::super::domain::{
+        CandidateClustering, EmbeddingComputeUnits, ExecutableInference, FbankNormalizationScope,
+        FbankPreparationWorkers, GaussianOverrides, InferenceWorkers, SegmentationWorkers,
+        parse_checked_candidate,
+    };
     use super::*;
 
-    fn default_candidate() -> PostInferenceVariant {
-        PostInferenceVariant {
+    fn default_candidate() -> CheckedCandidate {
+        parse_checked_candidate(&PostInferenceVariant {
             id: "default".to_owned(),
             vbx_max_iters: None,
             vbx_fb: None,
@@ -849,7 +666,8 @@ mod tests {
             ahc_stopping: None,
             clustering_backend: None,
             documented_der_outliers: Vec::new(),
-        }
+        })
+        .unwrap()
     }
 
     #[test]
@@ -858,13 +676,28 @@ mod tests {
         let config = apply_candidate_config(product, &default_candidate()).unwrap();
 
         assert_eq!(config.vbx.max_iters, 3);
+        assert!(matches!(
+            default_candidate().clustering,
+            CandidateClustering::Gaussian(GaussianOverrides {
+                max_iters: None,
+                fb: None
+            })
+        ));
     }
 
     #[test]
     fn cpu_only_experiment_value_reaches_runtime_config() {
+        let inference = ExecutableInference::PerWindowOneSecond {
+            workers: InferenceWorkers {
+                segmentation_workers: SegmentationWorkers::Automatic,
+                filterbank_preparation_workers: FbankPreparationWorkers::Two,
+                filterbank_normalization_scope: FbankNormalizationScope::Chunk,
+                embedding_compute_units: EmbeddingComputeUnits::CpuOnly,
+            },
+        };
         assert_eq!(
-            coreml_embedding_compute_units(super::super::domain::EmbeddingComputeUnits::CpuOnly),
-            CoreMlComputeUnits::CpuOnly
+            inference.to_pipeline().unwrap().embedding_compute_units,
+            speakrs::inference::CoreMlComputeUnits::CpuOnly
         );
     }
 }

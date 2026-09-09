@@ -307,7 +307,7 @@ impl EmbeddingModel {
     ) -> &'static [ChunkSessionConfig] {
         #[cfg(feature = "_metrics")]
         if let Some(experiment) = _runtime.experiment {
-            return match (experiment.coreml_chunk_layout, experiment.shape_ladder) {
+            return match (experiment.coreml_chunk_layout(), experiment.shape_ladder()) {
                 (CoreMlChunkLayout::OneSecondPhased, CoreMlShapeLadder::Full) => {
                     COREML_CHUNK_CONFIGS
                 }
@@ -381,7 +381,9 @@ impl EmbeddingModel {
 fn runtime_uses_native_chunk_sessions(mode: ExecutionMode, _runtime: &RuntimeConfig) -> bool {
     #[cfg(feature = "_metrics")]
     if let Some(experiment) = _runtime.experiment {
-        return experiment.coreml_chunk_layout.uses_native_chunk_sessions();
+        return experiment
+            .coreml_chunk_layout()
+            .uses_native_chunk_sessions();
     }
 
     mode.is_coreml()
