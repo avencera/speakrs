@@ -194,6 +194,7 @@ fn run_layout(
     let mut pipeline = PipelineBuilder::from_dir(models_dir, ExecutionMode::CoreMl)
         .runtime(runtime)
         .build()?;
+    pipeline.run_inference_only(samples)?;
     let start = Instant::now();
     let artifacts = pipeline.run_inference_only(samples)?;
     let inference_seconds = start.elapsed().as_secs_f64();
