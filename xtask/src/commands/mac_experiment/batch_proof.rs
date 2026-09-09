@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::{path::Path, time::Instant};
 
 use chrono::{SecondsFormat, Utc};
@@ -108,6 +109,7 @@ pub(super) fn run(
         .wrap_err_with(|| format!("failed to resolve {}", models_dir.display()))?;
     let sample_count = seconds_to_samples(duration_seconds)?;
     let inputs = load_inputs(audio_paths, sample_count)?;
+    ensure_unique_ids(&inputs)?;
     let identities = inputs
         .iter()
         .map(|input| {
@@ -295,6 +297,18 @@ fn abba_order(repetitions: usize) -> Vec<Condition> {
         .collect()
 }
 
+fn ensure_unique_ids(inputs: &[InputAudio]) -> Result<()> {
+    let mut seen = HashSet::with_capacity(inputs.len());
+    for input in inputs {
+        ensure!(
+            seen.insert(input.id.as_str()),
+            "duplicate batch proof file id '{}'",
+            input.id
+        );
+    }
+    Ok(())
+}
+
 fn load_inputs(paths: &[std::path::PathBuf], sample_count: usize) -> Result<Vec<InputAudio>> {
     paths
         .iter()
@@ -366,5 +380,28 @@ mod tests {
     fn seconds_to_samples_rejects_subsample_duration() {
         assert!(seconds_to_samples(10.000_01).is_err());
         assert_eq!(seconds_to_samples(10.0).unwrap(), 160_000);
+    }
+
+    #[test]
+    fn unique_ids_reject_duplicate_file_stems() {
+        let inputs = [
+            InputAudio {
+                id: "meeting".to_owned(),
+                path: Path::new("/tmp/a/meeting.wav").to_path_buf(),
+                samples: Vec::new(),
+            },
+            InputAudio {
+                id: "meeting".to_owned(),
+                path: Path::new("/tmp/b/meeting.wav").to_path_buf(),
+                samples: Vec::new(),
+            },
+        ];
+
+        let error = ensure_unique_ids(&inputs).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate batch proof file id 'meeting'")
+        );
     }
 }
