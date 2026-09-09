@@ -110,15 +110,24 @@ fn digest_files(root: &Path, files: &[PathBuf]) -> Result<String> {
         update_length_prefixed(&mut digest, relative.to_string_lossy().as_bytes());
         let file =
             fs::File::open(path).wrap_err_with(|| format!("failed to hash {}", path.display()))?;
+        let expected_len = file.metadata()?.len();
+        digest.update(expected_len.to_le_bytes());
         let mut reader = BufReader::new(file);
         let mut buffer = [0u8; 128 * 1024];
+        let mut hashed = 0u64;
         loop {
             let read = reader.read(&mut buffer)?;
             if read == 0 {
                 break;
             }
+            hashed += read as u64;
             digest.update(&buffer[..read]);
         }
+        ensure!(
+            hashed == expected_len,
+            "file size changed while hashing {}",
+            path.display()
+        );
     }
     Ok(format!("{:x}", digest.finalize()))
 }
@@ -232,6 +241,27 @@ mod tests {
         let left = digest_paths(temp.path(), &[a.clone(), b.clone()]).unwrap();
         let right = digest_paths(temp.path(), &[b, a]).unwrap();
         assert_eq!(left, right);
+    }
+
+    #[test]
+    fn digest_paths_separates_concatenated_file_boundaries() {
+        let temp = tempfile::tempdir().unwrap();
+        let left_dir = temp.path().join("left");
+        let right_dir = temp.path().join("right");
+        fs::create_dir(&left_dir).unwrap();
+        fs::create_dir(&right_dir).unwrap();
+
+        let mut encoded_b = Vec::new();
+        encoded_b.extend((1u64).to_le_bytes());
+        encoded_b.extend(b"b");
+        encoded_b.extend(b"xy");
+        fs::write(left_dir.join("a"), encoded_b).unwrap();
+        fs::write(right_dir.join("a"), b"").unwrap();
+        fs::write(right_dir.join("b"), b"xy").unwrap();
+
+        let left = digest_paths(&left_dir, std::slice::from_ref(&left_dir)).unwrap();
+        let right = digest_paths(&right_dir, std::slice::from_ref(&right_dir)).unwrap();
+        assert_ne!(left, right);
     }
 
     #[test]
