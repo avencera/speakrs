@@ -540,6 +540,8 @@ mod tests {
 
         let (gamma, pi) = sphere_vbx_pf(&features.view(), &gamma_init, &fixture_config).unwrap();
 
+        assert_eq!(gamma.dim(), expected_gamma.dim());
+        assert_eq!(pi.len(), expected_pi.len());
         for (actual, expected) in gamma.iter().zip(expected_gamma.iter()) {
             assert_abs_diff_eq!(f64::from(*actual), *expected, epsilon = 5e-8);
         }
@@ -548,9 +550,9 @@ mod tests {
         }
 
         assert!(
-            expected_gamma
+            gamma
                 .iter()
-                .all(|value| (0.05..0.95).contains(value))
+                .all(|value| (0.05..0.95).contains(&f64::from(*value)))
         );
     }
 }

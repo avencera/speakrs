@@ -364,6 +364,11 @@ fn assert_embedding_tensor_similarity(
             }
 
             for (&lhs, &rhs) in actual_row.iter().zip(expected_row.iter()) {
+                assert_eq!(
+                    lhs.is_nan(),
+                    rhs.is_nan(),
+                    "NaN mismatch at chunk={chunk_idx} speaker={speaker_idx} left={lhs} right={rhs}"
+                );
                 largest_difference = largest_difference.max((lhs - rhs).abs());
             }
             let dot = actual_row
@@ -413,6 +418,17 @@ fn assert_segmentation_tensor_matches(actual: &Array3<f32>, expected: &Array3<f3
 }
 
 // --- tests ---
+
+#[cfg(feature = "coreml")]
+#[test]
+fn embedding_similarity_rejects_nan_in_actual_when_expected_is_finite() {
+    let actual = Array3::from_shape_vec((1, 1, 2), vec![f32::NAN, 0.0]).unwrap();
+    let expected = Array3::from_elem((1, 1, 2), 0.0);
+    let panicked = std::panic::catch_unwind(|| {
+        assert_embedding_tensor_similarity(&actual, &expected, 1.0, 0.0);
+    });
+    assert!(panicked.is_err());
+}
 
 #[test]
 fn chunk_start_frames_match_pyannote_rounding() {
