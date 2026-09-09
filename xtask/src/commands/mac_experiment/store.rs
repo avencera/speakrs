@@ -124,11 +124,7 @@ impl RunStore {
             .wrap_err_with(|| format!("failed to read manifest {}", manifest_path.display()))?;
         let manifest: RunManifest = serde_json::from_str(&text)
             .wrap_err_with(|| format!("invalid run manifest {}", manifest_path.display()))?;
-        ensure!(
-            manifest.schema_version == MANIFEST_SCHEMA_VERSION,
-            "manifest schema_version {} is not supported; expected {MANIFEST_SCHEMA_VERSION}",
-            manifest.schema_version
-        );
+        validate_manifest_schema(&manifest)?;
         let experiment = ValidatedExperiment::from_spec(manifest.spec.clone())?;
         let directory_id = run_dir.file_name().and_then(OsStr::to_str).ok_or_else(|| {
             eyre!(
@@ -1206,6 +1202,7 @@ fn load_external_baseline(candidate_store: &RunStore) -> Result<Option<ExternalB
         let nested_manifest: RunManifest = serde_json::from_reader(BufReader::new(File::open(
             comparison_dir.join("manifest.json"),
         )?))?;
+        validate_manifest_schema(&nested_manifest)?;
         RunStore {
             run_dir: comparison_dir,
             manifest: nested_manifest,
@@ -1718,6 +1715,7 @@ fn load_existing_comparison_manifest(run_dir: &Path) -> Result<Option<RunManifes
                 )
             })?,
         ))?;
+        validate_manifest_schema(&stored)?;
         return Ok(Some(stored));
     }
     ensure!(
@@ -1726,6 +1724,15 @@ fn load_existing_comparison_manifest(run_dir: &Path) -> Result<Option<RunManifes
         run_dir.display()
     );
     Ok(None)
+}
+
+fn validate_manifest_schema(manifest: &RunManifest) -> Result<()> {
+    ensure!(
+        manifest.schema_version == MANIFEST_SCHEMA_VERSION,
+        "manifest schema_version {} is not supported; expected {MANIFEST_SCHEMA_VERSION}",
+        manifest.schema_version
+    );
+    Ok(())
 }
 
 fn validate_comparison_clone(
@@ -2625,6 +2632,97 @@ mod tests {
         assert_eq!(
             second.manifest.identity.as_ref().unwrap().created_at,
             created_at
+        );
+    }
+
+    #[test]
+    fn comparison_baseline_rejects_unsupported_manifest_schema() {
+        let temp = tempdir().unwrap();
+        let source = test_store(&temp.path().join("source"));
+        let mut candidate = test_store(&temp.path().join("candidate"));
+        candidate.manifest.files = vec![source.manifest.files[1].clone()];
+        candidate.manifest.spec.dataset.max_files = 1;
+
+        let comparison = candidate.comparison_baseline_store(&source).unwrap().0;
+        let mut stored = comparison.manifest;
+        stored.schema_version = MANIFEST_SCHEMA_VERSION + 1;
+        let manifest_path = comparison.run_dir.join("manifest.json");
+        fs::write(&manifest_path, serde_json::to_vec_pretty(&stored).unwrap()).unwrap();
+
+        let error = candidate
+            .comparison_baseline_store(&source)
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "manifest schema_version {} is not supported; expected {MANIFEST_SCHEMA_VERSION}",
+                MANIFEST_SCHEMA_VERSION + 1
+            )
+        );
+    }
+
+    #[test]
+    fn comparison_baseline_external_rejects_unsupported_nested_manifest_schema() {
+        let temp = tempdir().unwrap();
+        let models_dir = temp.path().join("models");
+        fs::create_dir(&models_dir).unwrap();
+        fs::write(models_dir.join("weights.bin"), b"model").unwrap();
+        let wav = temp.path().join("first.wav");
+        let rttm = temp.path().join("first.rttm");
+        fs::write(&wav, b"wav").unwrap();
+        fs::write(&rttm, b"rttm").unwrap();
+
+        let mut source_spec = valid_spec();
+        source_spec.experiment_id = "source-run".to_owned();
+        source_spec.dataset.max_files = 1;
+        source_spec.models_dir = Some(models_dir.clone());
+        let files = vec![ManifestFile {
+            id: "first".to_owned(),
+            wav,
+            rttm,
+            duration_seconds: 1.0,
+        }];
+        let root = project_root();
+        let mut identity = test_identity(42);
+        identity.model_sha256 = digest_paths(&root, std::slice::from_ref(&models_dir)).unwrap();
+        identity.dataset_sha256 = dataset_digest(&files, &root).unwrap();
+        let mut source_manifest = RunManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            spec: source_spec,
+            files: files.clone(),
+            identity: Some(identity),
+        };
+        let source_dir = temp.path().join("source-run");
+        fs::create_dir(&source_dir).unwrap();
+        write_manifest(&source_dir, &source_manifest).unwrap();
+
+        let comparison_dir = temp.path().join("candidate-run/comparison-baseline");
+        fs::create_dir_all(&comparison_dir).unwrap();
+        source_manifest.schema_version = MANIFEST_SCHEMA_VERSION + 1;
+        write_manifest(&comparison_dir, &source_manifest).unwrap();
+
+        let mut candidate_spec = valid_spec();
+        candidate_spec.experiment_id = "candidate-run".to_owned();
+        candidate_spec.performance.repetitions = 4;
+        candidate_spec.baseline_run = Some(source_dir);
+        let candidate = RunStore {
+            run_dir: temp.path().join("candidate-run"),
+            manifest: RunManifest {
+                schema_version: MANIFEST_SCHEMA_VERSION,
+                spec: candidate_spec,
+                files,
+                identity: None,
+            },
+        };
+
+        let error = load_external_baseline(&candidate).map(|_| ()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "manifest schema_version {} is not supported; expected {MANIFEST_SCHEMA_VERSION}",
+                MANIFEST_SCHEMA_VERSION + 1
+            )
         );
     }
 
