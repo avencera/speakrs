@@ -13,6 +13,8 @@ mod parallel;
 mod run;
 mod tensor;
 
+pub(crate) use tensor::segmentation_window_count;
+
 /// Errors that can occur during segmentation inference
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
