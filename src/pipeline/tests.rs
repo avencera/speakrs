@@ -359,7 +359,7 @@ fn assert_embedding_tensor_similarity(
                 expected_row.iter().all(|value| value.is_nan()),
                 "NaN row mismatch at chunk={chunk_idx} speaker={speaker_idx}"
             );
-            if expected_row.iter().any(|value| value.is_nan()) {
+            if expected_row.iter().all(|value| value.is_nan()) {
                 continue;
             }
 
@@ -426,6 +426,17 @@ fn embedding_similarity_rejects_nan_in_actual_when_expected_is_finite() {
     let expected = Array3::from_elem((1, 1, 2), 0.0);
     let panicked = std::panic::catch_unwind(|| {
         assert_embedding_tensor_similarity(&actual, &expected, 1.0, 0.0);
+    });
+    assert!(panicked.is_err());
+}
+
+#[cfg(feature = "coreml")]
+#[test]
+fn embedding_similarity_rejects_divergent_value_in_mixed_nan_row() {
+    let actual = Array3::from_shape_vec((1, 1, 2), vec![f32::NAN, 1.0]).unwrap();
+    let expected = Array3::from_shape_vec((1, 1, 2), vec![f32::NAN, 0.0]).unwrap();
+    let panicked = std::panic::catch_unwind(|| {
+        assert_embedding_tensor_similarity(&actual, &expected, 0.1, 0.0);
     });
     assert!(panicked.is_err());
 }
