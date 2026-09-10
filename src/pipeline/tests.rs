@@ -21,7 +21,10 @@ fn coreml_uses_cuda_parity_segmentation_step() {
 
 #[allow(dead_code)]
 fn decode_windows(raw_windows: Vec<Array2<f32>>, powerset: &PowersetMapping) -> Array3<f32> {
-    RawSegmentationWindows(raw_windows).decode(powerset).0
+    RawSegmentationWindows(raw_windows)
+        .decode(powerset)
+        .unwrap()
+        .0
 }
 
 fn extract_embeddings(
@@ -49,44 +52,6 @@ fn extract_embeddings(
     decoded_segmentations
         .extract_embeddings(audio, emb_model, &layout, embedding_path)
         .map(|chunk_embeddings| chunk_embeddings.0)
-}
-
-fn filter_embeddings(
-    segmentations: &Array3<f32>,
-    embeddings: &Array3<f32>,
-) -> (Array2<f32>, Vec<usize>, Vec<usize>) {
-    let num_frames = segmentations.shape()[1] as f32;
-    let mut filtered = Vec::new();
-    let mut chunk_indices = Vec::new();
-    let mut speaker_indices = Vec::new();
-
-    for chunk_idx in 0..segmentations.shape()[0] {
-        let single_active: Vec<bool> = segmentations
-            .slice(s![chunk_idx, .., ..])
-            .rows()
-            .into_iter()
-            .map(|row| (row.iter().copied().sum::<f32>() - 1.0).abs() < 1e-6)
-            .collect();
-        for speaker_idx in 0..segmentations.shape()[2] {
-            let clean_frames = segmentations
-                .slice(s![chunk_idx, .., speaker_idx])
-                .iter()
-                .zip(single_active.iter())
-                .filter_map(|(value, is_single_active)| is_single_active.then_some(*value))
-                .sum::<f32>();
-            let embedding = embeddings.slice(s![chunk_idx, speaker_idx, ..]);
-            let valid_embedding = embedding.iter().all(|value| value.is_finite());
-            if valid_embedding && clean_frames >= 0.2 * num_frames {
-                filtered.extend(embedding.iter());
-                chunk_indices.push(chunk_idx);
-                speaker_indices.push(speaker_idx);
-            }
-        }
-    }
-
-    let filtered_embeddings =
-        Array2::from_shape_vec((chunk_indices.len(), embeddings.shape()[2]), filtered).unwrap();
-    (filtered_embeddings, chunk_indices, speaker_indices)
 }
 
 #[allow(dead_code)]
@@ -252,7 +217,9 @@ impl PipelineTestHarness {
 fn custom_pipeline_config() -> PipelineConfig {
     PipelineConfig {
         merge_gap: 0.75,
-        speaker_keep_threshold: 0.25,
+        clustering: super::ClusteringConfig::default()
+            .with_speaker_keep_threshold(0.25)
+            .unwrap(),
         reconstruct_method: ReconstructMethod::Standard,
         ..PipelineConfig::default()
     }
@@ -469,25 +436,27 @@ fn filter_embeddings_matches_python_fixture() {
     let embeddings: Array3<f32> = load_fixture_array3("pipeline_embeddings_data.npy");
     let expected_train_embeddings: Array2<f32> =
         load_fixture_array2("pipeline_train_embeddings.npy");
-    let expected_chunk_idx: Array1<i64> = load_fixture_array1("pipeline_train_chunk_idx.npy");
-    let expected_speaker_idx: Array1<i64> = load_fixture_array1("pipeline_train_speaker_idx.npy");
 
-    let (train_embeddings, chunk_idx, speaker_idx) = filter_embeddings(&segmentations, &embeddings);
+    let train = ChunkEmbeddings(embeddings).training_set(
+        &DecodedSegmentations(segmentations),
+        CleanFrameDuration::default(),
+    );
 
-    assert_eq!(chunk_idx.len(), expected_chunk_idx.len());
-    assert_eq!(speaker_idx.len(), expected_speaker_idx.len());
-    for (lhs, rhs) in chunk_idx.iter().zip(expected_chunk_idx.iter()) {
-        assert_eq!(*lhs as i64, *rhs);
-    }
-    for (lhs, rhs) in speaker_idx.iter().zip(expected_speaker_idx.iter()) {
-        assert_eq!(*lhs as i64, *rhs);
-    }
-    for (lhs, rhs) in train_embeddings
-        .iter()
-        .zip(expected_train_embeddings.iter())
-    {
+    assert_eq!(train.0.nrows(), expected_train_embeddings.nrows());
+    assert_eq!(train.0.ncols(), expected_train_embeddings.ncols());
+    for (lhs, rhs) in train.0.iter().zip(expected_train_embeddings.iter()) {
         approx::assert_abs_diff_eq!(*lhs, *rhs, epsilon = 1e-5);
     }
+}
+
+#[test]
+fn training_set_honors_non_default_clean_frame_duration() {
+    let segmentations = DecodedSegmentations(array![[[1.0], [1.0], [1.0], [0.0]]]);
+    let embeddings = ChunkEmbeddings(array![[[1.0, 0.0]]]);
+    let short = CleanFrameDuration::new(FRAME_STEP_SECONDS * 2.0).unwrap();
+    let long = CleanFrameDuration::new(FRAME_STEP_SECONDS * 4.0).unwrap();
+    assert_eq!(embeddings.training_set(&segmentations, short).0.nrows(), 1);
+    assert_eq!(embeddings.training_set(&segmentations, long).0.nrows(), 0);
 }
 
 #[test]
@@ -597,18 +566,20 @@ fn fast_apple_gpu_embeddings_stay_within_documented_fixture_bounds() {
 
 #[cfg(feature = "coreml")]
 #[test]
+#[ignore = "pinned revision has no batch-64 CoreML tail (DEC-04); absence is not a pass"]
 fn fast_apple_split_primary_batch_matches_single_tail_path() {
     let harness = PipelineTestHarness::load();
     let Some(seg_model) = harness.cpu_seg_model() else {
-        return;
+        panic!("CPU segmentation model is required for the batch-64 tail comparison");
     };
     let Some(mut emb_model) = harness.coreml_emb_model() else {
-        return;
+        panic!("CoreML embedding model is required for the batch-64 tail comparison");
     };
-    if emb_model.split_primary_batch_size() == 0 {
-        eprintln!("skipping primary tail batch test because the compiled batch asset is missing");
-        return;
-    }
+    assert_ne!(
+        emb_model.split_primary_batch_size(),
+        0,
+        "batch-64 CoreML tail is required to run this comparison"
+    );
     let segmentations: Array3<f32> = load_fixture_array3("pipeline_segmentation_data.npy");
     let mut fbanks = Vec::new();
     let mut weights = Vec::new();
@@ -782,8 +753,8 @@ fn pipeline_builder_applies_custom_default_config_to_build() {
     let actual = pipeline.pipeline_config();
     assert_eq!(actual.merge_gap, expected.merge_gap);
     assert_eq!(
-        actual.speaker_keep_threshold,
-        expected.speaker_keep_threshold
+        actual.clustering.speaker_keep_threshold(),
+        expected.clustering.speaker_keep_threshold()
     );
     assert_eq!(actual.reconstruct_method, expected.reconstruct_method);
 }
@@ -809,8 +780,8 @@ fn borrowed_pipeline_new_with_config_stores_custom_default_config() {
     let actual = pipeline.pipeline_config();
     assert_eq!(actual.merge_gap, expected.merge_gap);
     assert_eq!(
-        actual.speaker_keep_threshold,
-        expected.speaker_keep_threshold
+        actual.clustering.speaker_keep_threshold(),
+        expected.clustering.speaker_keep_threshold()
     );
     assert_eq!(actual.reconstruct_method, expected.reconstruct_method);
 }

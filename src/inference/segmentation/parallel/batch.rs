@@ -173,15 +173,22 @@ impl<'ctx, 'a> BatchWorker<'ctx, 'a> {
     ) -> Result<(Vec<f32>, usize, usize), SegmentationError> {
         let actual_batch = task.end - task.start;
         let batch_start = std::time::Instant::now();
-        let (data, out_shape) = task
+        let tensor = task
             .model
             .predict_cached(&[(cached_batch, batch_buf)])
             .map_err(|error| SegmentationError::Ort(ort::Error::new(error.to_string())))?;
         let batch_us = batch_start.elapsed().as_micros() as u64;
         self.profile
             .record_batch(task.batch_idx, task.batch_capacity, actual_batch, batch_us);
+        let (data, frames, classes) =
+            tensor
+                .rank3_hw("parallel segmentation batch")
+                .map_err(|error| SegmentationError::MalformedOutput {
+                    context: "parallel segmentation batch",
+                    message: error.to_string(),
+                })?;
 
-        Ok((data, out_shape[1], out_shape[2]))
+        Ok((data, frames, classes))
     }
 
     fn decode_results(

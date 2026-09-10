@@ -442,9 +442,9 @@ impl<'a> ExperimentExecutor<'a> {
             let wall_seconds = inference_seconds + post_inference_seconds;
             let backend = match config.clustering_backend() {
                 ClusteringBackend::GaussianVbx(vbx) => ClusteringBackendDiagnostics::GaussianVbx {
-                    fa: vbx.fa,
-                    fb: vbx.fb,
-                    max_iters: vbx.max_iters,
+                    fa: vbx.fa(),
+                    fb: vbx.fb(),
+                    max_iters: vbx.max_iters(),
                 },
                 ClusteringBackend::SphereVbxPf(sphere) => {
                     let initialization = match sphere.initialization() {
@@ -548,15 +548,22 @@ fn apply_candidate_config(
 ) -> Result<speakrs::pipeline::PipelineConfig> {
     match candidate.clustering {
         CandidateClustering::Gaussian(overrides) => {
+            let mut vbx = match config.clustering_backend() {
+                ClusteringBackend::GaussianVbx(vbx) => vbx,
+                _ => speakrs::VbxConfig::default(),
+            };
             if let Some(max_iters) = overrides.max_iters {
-                config.vbx.max_iters = max_iters.get();
+                vbx = vbx
+                    .with_max_iters(max_iters.get())
+                    .map_err(|error| eyre!(error))?;
             }
             if let Some(fb) = overrides.fb {
-                config.vbx.fb = fb;
+                vbx = vbx.with_fb(fb).map_err(|error| eyre!(error))?;
             }
+            config = config.with_clustering(ClusteringBackend::GaussianVbx(vbx));
         }
         CandidateClustering::Sphere(sphere) => {
-            config = config.with_experimental_clustering(ClusteringBackend::SphereVbxPf(sphere));
+            config = config.with_clustering(ClusteringBackend::SphereVbxPf(sphere));
         }
     }
     if let Some(duration) = candidate.clean_frame_duration {
@@ -675,7 +682,10 @@ mod tests {
         let product = speakrs::pipeline::PipelineConfig::for_mode(ExecutionMode::CoreMlFast);
         let config = apply_candidate_config(product, &default_candidate()).unwrap();
 
-        assert_eq!(config.vbx.max_iters, 3);
+        match config.clustering_backend() {
+            ClusteringBackend::GaussianVbx(vbx) => assert_eq!(vbx.max_iters(), 3),
+            _ => panic!("expected gaussian backend"),
+        }
         assert!(matches!(
             default_candidate().clustering,
             CandidateClustering::Gaussian(GaussianOverrides {

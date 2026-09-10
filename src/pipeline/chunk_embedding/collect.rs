@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use ndarray::{Array2, Array3, s};
 
 use super::gpu::EmbeddedChunk;
@@ -30,26 +32,27 @@ pub(super) fn build_chunk_artifacts(
     if summary.num_chunks == 0 {
         return None;
     }
-    Some(InferenceArtifacts {
-        layout: ChunkLayout::new(
+    InferenceArtifacts::try_new(
+        ChunkLayout::new(
             step_seconds,
             step_samples,
             window_samples,
             summary.num_chunks,
         ),
-        segmentations: DecodedSegmentations(summary.segmentations),
-        embeddings: ChunkEmbeddings(summary.embeddings),
+        DecodedSegmentations(summary.segmentations),
+        ChunkEmbeddings(summary.embeddings),
         #[cfg(feature = "_metrics")]
-        stage_timings: Some(stage_timings),
-    })
+        Some(stage_timings),
+    )
+    .ok()
 }
 
 pub(super) struct FileCollector {
     seg_array: Array3<f32>,
     emb_array: Array3<f32>,
     max_slot_used: usize,
-    chunks_received: usize,
     expected_chunks: usize,
+    received_groups: BTreeSet<usize>,
 }
 
 impl FileCollector {
@@ -63,45 +66,64 @@ impl FileCollector {
             seg_array: Array3::zeros((max_slots, num_frames, num_speakers)),
             emb_array: Array3::from_elem((max_slots, num_speakers, 256), f32::NAN),
             max_slot_used: 0,
-            chunks_received: 0,
             expected_chunks,
+            received_groups: BTreeSet::new(),
         }
     }
 
     pub(super) fn add(
         &mut self,
-        local_start: usize,
         chunk_win_capacity: usize,
         num_speakers: usize,
         embedded: EmbeddedChunk,
     ) -> Result<(), PipelineError> {
+        let group = embedded.window_start / chunk_win_capacity;
+        if !self.received_groups.insert(embedded.window_start) {
+            return Err(invariant_error(format!(
+                "duplicate chunk group {}",
+                embedded.window_start
+            )));
+        }
+        if group >= self.expected_chunks {
+            return Err(invariant_error(format!(
+                "chunk group {} is outside expected range {}",
+                embedded.window_start, self.expected_chunks
+            )));
+        }
         let batch_emb =
             batch_embeddings(embedded.num_masks, embedded.data, "batch chunk embedding")?;
 
         for &(local, speaker_idx) in &embedded.active {
-            let slot = local_start * chunk_win_capacity + local;
-            if slot < self.emb_array.shape()[0] {
-                let mask_idx = local * num_speakers + speaker_idx;
-                self.emb_array
-                    .slice_mut(s![slot, speaker_idx, ..])
-                    .assign(&batch_emb.row(mask_idx));
+            let slot = embedded.window_start + local;
+            if slot >= self.emb_array.shape()[0] {
+                return Err(invariant_error(format!(
+                    "chunk slot {slot} is outside collector capacity {}",
+                    self.emb_array.shape()[0]
+                )));
             }
+            let mask_idx = local * num_speakers + speaker_idx;
+            self.emb_array
+                .slice_mut(s![slot, speaker_idx, ..])
+                .assign(&batch_emb.row(mask_idx));
         }
 
-        for (local, decoded) in embedded.decoded_chunk.into_iter().enumerate() {
-            let slot = local_start * chunk_win_capacity + local;
-            if slot < self.seg_array.shape()[0] {
-                self.seg_array.slice_mut(s![slot, .., ..]).assign(&decoded);
-                self.max_slot_used = self.max_slot_used.max(slot + 1);
+        for (local, decoded) in embedded.decoded.into_iter().enumerate() {
+            let slot = embedded.window_start + local;
+            if slot >= self.seg_array.shape()[0] {
+                return Err(invariant_error(format!(
+                    "chunk slot {slot} is outside collector capacity {}",
+                    self.seg_array.shape()[0]
+                )));
             }
+            self.seg_array.slice_mut(s![slot, .., ..]).assign(&decoded);
+            self.max_slot_used = self.max_slot_used.max(slot + 1);
         }
 
-        self.chunks_received += 1;
         Ok(())
     }
 
     pub(super) fn is_complete(&self) -> bool {
-        self.chunks_received >= self.expected_chunks
+        self.received_groups.len() >= self.expected_chunks
     }
 
     pub(super) fn into_artifacts(
@@ -110,16 +132,64 @@ impl FileCollector {
         step_samples: usize,
         window_samples: usize,
     ) -> Option<InferenceArtifacts> {
-        if self.max_slot_used == 0 {
+        if self.max_slot_used == 0 || !self.is_complete() {
             return None;
         }
         let n = self.max_slot_used;
-        Some(InferenceArtifacts {
-            layout: ChunkLayout::new(step_seconds, step_samples, window_samples, n),
-            segmentations: DecodedSegmentations(self.seg_array.slice_move(s![..n, .., ..])),
-            embeddings: ChunkEmbeddings(self.emb_array.slice_move(s![..n, .., ..])),
+        InferenceArtifacts::try_new(
+            ChunkLayout::new(step_seconds, step_samples, window_samples, n),
+            DecodedSegmentations(self.seg_array.slice_move(s![..n, .., ..])),
+            ChunkEmbeddings(self.emb_array.slice_move(s![..n, .., ..])),
             #[cfg(feature = "_metrics")]
-            stage_timings: None,
-        })
+            None,
+        )
+        .ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::inference::embedding::EMBEDDING_WIDTH;
+    use ndarray::Array2;
+
+    fn silent_group(
+        window_start: usize,
+        windows: usize,
+        frames: usize,
+        speakers: usize,
+    ) -> EmbeddedChunk {
+        EmbeddedChunk {
+            file_index: 0,
+            window_start,
+            decoded: vec![Array2::zeros((frames, speakers)); windows],
+            data: vec![0.0; windows * speakers * EMBEDDING_WIDTH],
+            active: Vec::new(),
+            num_masks: windows * speakers,
+            predict_us: 0,
+        }
+    }
+
+    #[test]
+    fn collector_rejects_duplicate_groups() {
+        let mut collector = FileCollector::new(4, 2, 3, 1);
+        collector.add(2, 3, silent_group(0, 2, 2, 3)).unwrap();
+        assert!(collector.add(2, 3, silent_group(0, 2, 2, 3)).is_err());
+    }
+
+    #[test]
+    fn collector_rejects_out_of_range_groups() {
+        let mut collector = FileCollector::new(4, 2, 3, 1);
+        assert!(collector.add(2, 3, silent_group(2, 2, 2, 3)).is_err());
+    }
+
+    #[test]
+    fn collector_is_complete_only_after_expected_groups() {
+        let mut collector = FileCollector::new(4, 2, 3, 2);
+        collector.add(2, 3, silent_group(0, 2, 2, 3)).unwrap();
+        assert!(!collector.is_complete());
+        collector.add(2, 3, silent_group(2, 2, 2, 3)).unwrap();
+        assert!(collector.is_complete());
+        assert!(collector.into_artifacts(1.0, 16_000, 160_000).is_some());
     }
 }

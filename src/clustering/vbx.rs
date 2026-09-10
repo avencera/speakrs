@@ -1,20 +1,64 @@
+use std::num::NonZeroUsize;
+
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 
 use crate::utils::logsumexp_f64;
 
+/// How AHC labels initialize Gaussian VBx responsibilities.
+///
+/// Negative smoothing maps to [`Hard`], zero to [`Uniform`], and a positive
+/// finite value to [`Smoothed`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ResponsibilityInitialization {
+    /// One-hot responsibilities from AHC labels
+    Hard,
+    /// Uniform responsibilities after converting the one-hot rows
+    Uniform,
+    /// Softmax-smoothed responsibilities with the given positive scale
+    Smoothed(f64),
+}
+
+impl ResponsibilityInitialization {
+    /// Map the historical smoothing number onto a checked initialization
+    pub fn from_smoothing(value: f64) -> Result<Self, VbxConfigError> {
+        if !value.is_finite() {
+            return Err(VbxConfigError::NonFiniteSmoothing(value));
+        }
+        if value < 0.0 {
+            Ok(Self::Hard)
+        } else if value == 0.0 {
+            Ok(Self::Uniform)
+        } else {
+            Ok(Self::Smoothed(value))
+        }
+    }
+}
+
+/// Invalid Gaussian VBx configuration
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+pub enum VbxConfigError {
+    /// FA or FB was not finite and greater than zero
+    #[error("VBx scale must be finite and greater than zero, got {0}")]
+    InvalidScale(f64),
+    /// Iteration count was zero
+    #[error("VBx max_iters must be greater than zero")]
+    ZeroIterations,
+    /// Convergence epsilon was negative or non-finite
+    #[error("VBx epsilon must be finite and non-negative, got {0}")]
+    InvalidEpsilon(f64),
+    /// Historical smoothing number was non-finite
+    #[error("VBx smoothing must be finite, got {0}")]
+    NonFiniteSmoothing(f64),
+}
+
 /// Variational Bayes HMM clustering settings.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VbxConfig {
-    /// Speaker model scale used by the VBx update equations.
-    pub fa: f64,
-    /// Speaker regularization scale used by the VBx update equations.
-    pub fb: f64,
-    /// Maximum number of VBx iterations.
-    pub max_iters: usize,
-    /// Minimum ELBO improvement required to continue iterating.
-    pub epsilon: f64,
-    /// Smoothing factor applied to AHC labels before VBx refinement.
-    pub init_smoothing: f64,
+    fa: f64,
+    fb: f64,
+    max_iters: NonZeroUsize,
+    epsilon: f64,
+    initialization: ResponsibilityInitialization,
 }
 
 impl Default for VbxConfig {
@@ -22,10 +66,91 @@ impl Default for VbxConfig {
         Self {
             fa: 0.07,
             fb: 0.8,
-            max_iters: 20,
+            max_iters: NonZeroUsize::new(20).expect("20 is non-zero"),
             epsilon: 1e-4,
-            init_smoothing: 7.0,
+            initialization: ResponsibilityInitialization::Smoothed(7.0),
         }
+    }
+}
+
+impl VbxConfig {
+    /// Create a checked Gaussian VBx configuration
+    pub fn new(
+        fa: f64,
+        fb: f64,
+        max_iters: usize,
+        epsilon: f64,
+        initialization: ResponsibilityInitialization,
+    ) -> Result<Self, VbxConfigError> {
+        if !(fa.is_finite() && fa > 0.0) {
+            return Err(VbxConfigError::InvalidScale(fa));
+        }
+        if !(fb.is_finite() && fb > 0.0) {
+            return Err(VbxConfigError::InvalidScale(fb));
+        }
+        let max_iters = NonZeroUsize::new(max_iters).ok_or(VbxConfigError::ZeroIterations)?;
+        if !(epsilon.is_finite() && epsilon >= 0.0) {
+            return Err(VbxConfigError::InvalidEpsilon(epsilon));
+        }
+        if let ResponsibilityInitialization::Smoothed(scale) = initialization
+            && !(scale.is_finite() && scale > 0.0)
+        {
+            return Err(VbxConfigError::NonFiniteSmoothing(scale));
+        }
+        Ok(Self {
+            fa,
+            fb,
+            max_iters,
+            epsilon,
+            initialization,
+        })
+    }
+
+    /// Speaker model scale
+    pub const fn fa(self) -> f64 {
+        self.fa
+    }
+
+    /// Speaker regularization scale
+    pub const fn fb(self) -> f64 {
+        self.fb
+    }
+
+    /// Maximum VBx iterations
+    pub const fn max_iters(self) -> usize {
+        self.max_iters.get()
+    }
+
+    /// ELBO improvement threshold
+    pub const fn epsilon(self) -> f64 {
+        self.epsilon
+    }
+
+    /// Responsibility initialization
+    pub const fn initialization(self) -> ResponsibilityInitialization {
+        self.initialization
+    }
+
+    /// Replace the iteration limit
+    pub fn with_max_iters(self, max_iters: usize) -> Result<Self, VbxConfigError> {
+        Self::new(
+            self.fa,
+            self.fb,
+            max_iters,
+            self.epsilon,
+            self.initialization,
+        )
+    }
+
+    /// Replace the FB scale
+    pub fn with_fb(self, fb: f64) -> Result<Self, VbxConfigError> {
+        Self::new(
+            self.fa,
+            fb,
+            self.max_iters.get(),
+            self.epsilon,
+            self.initialization,
+        )
     }
 }
 
@@ -42,8 +167,8 @@ pub fn vbx(
 ) -> (Array2<f32>, Array1<f32>) {
     let (n_samples, dim) = features.dim();
     let n_speakers = gamma_init.ncols();
-    let fa = config.fa;
-    let fb = config.fb;
+    let fa = config.fa();
+    let fb = config.fb();
     let fa_over_fb = fa / fb;
 
     // promote all working arrays to f64 to match pyannote precision
@@ -72,7 +197,7 @@ pub fn vbx(
     let mut prev_elbo = f64::NEG_INFINITY;
     let mut scratch = Array1::<f64>::zeros(n_speakers);
 
-    for iter in 0..config.max_iters {
+    for iter in 0..config.max_iters() {
         // m-step: compute speaker models
         // invL[k,d] = 1.0 / (1 + Fa/Fb * N_k * Phi[d])
         // alpha[k,d] = Fa/Fb * invL[k,d] * sum_t(gamma[t,k] * rho[t,d])
@@ -151,7 +276,7 @@ pub fn vbx(
             .sum();
         let elbo = log_px_sum + fb * 0.5 * reg;
 
-        if iter > 0 && elbo - prev_elbo < config.epsilon {
+        if iter > 0 && elbo - prev_elbo < config.epsilon() {
             break;
         }
         prev_elbo = elbo;
@@ -169,11 +294,11 @@ pub fn cluster_vbx(
     phi: &ArrayView1<f32>,
     config: &VbxConfig,
 ) -> (Array2<f32>, Array1<f32>) {
-    let gamma_init = build_gamma_init(ahc_labels, config.init_smoothing);
+    let gamma_init = build_gamma_init(ahc_labels, config.initialization());
     vbx(features, phi, &gamma_init, config)
 }
 
-fn build_gamma_init(labels: &[usize], smoothing: f64) -> Array2<f32> {
+fn build_gamma_init(labels: &[usize], initialization: ResponsibilityInitialization) -> Array2<f32> {
     let num_samples = labels.len();
     let num_speakers = labels.iter().copied().max().unwrap_or(0) + 1;
     let mut gamma = Array2::<f32>::zeros((num_samples, num_speakers));
@@ -182,17 +307,23 @@ fn build_gamma_init(labels: &[usize], smoothing: f64) -> Array2<f32> {
         gamma[[row, label]] = 1.0;
     }
 
-    if smoothing < 0.0 {
-        return gamma;
-    }
+    let smoothing = match initialization {
+        ResponsibilityInitialization::Hard => return gamma,
+        ResponsibilityInitialization::Uniform => 0.0,
+        ResponsibilityInitialization::Smoothed(scale) => scale as f32,
+    };
 
-    let smoothing_f32 = smoothing as f32;
     for mut row in gamma.rows_mut() {
-        row *= smoothing_f32;
+        row *= smoothing;
         let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
         row.mapv_inplace(|v| (v - max).exp());
         let denom = row.sum();
-        row /= denom;
+        if denom > 0.0 {
+            row /= denom;
+        } else {
+            let uniform = 1.0 / num_speakers as f32;
+            row.fill(uniform);
+        }
     }
 
     gamma
@@ -267,10 +398,50 @@ mod tests {
 
     #[test]
     fn gamma_init_is_smoothed_one_hot() {
-        let gamma = build_gamma_init(&[0, 0, 1], 7.0);
+        let gamma = build_gamma_init(&[0, 0, 1], ResponsibilityInitialization::Smoothed(7.0));
         assert_eq!(gamma.dim(), (3, 2));
         assert!(gamma[[0, 0]] > gamma[[0, 1]]);
         assert!(gamma[[2, 1]] > gamma[[2, 0]]);
+    }
+
+    #[test]
+    fn from_smoothing_maps_negative_zero_and_positive() {
+        assert_eq!(
+            ResponsibilityInitialization::from_smoothing(-1.0).unwrap(),
+            ResponsibilityInitialization::Hard
+        );
+        assert_eq!(
+            ResponsibilityInitialization::from_smoothing(0.0).unwrap(),
+            ResponsibilityInitialization::Uniform
+        );
+        assert_eq!(
+            ResponsibilityInitialization::from_smoothing(7.0).unwrap(),
+            ResponsibilityInitialization::Smoothed(7.0)
+        );
+        assert!(ResponsibilityInitialization::from_smoothing(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn vbx_config_rejects_invalid_values() {
+        assert!(VbxConfig::new(0.0, 0.8, 20, 1e-4, ResponsibilityInitialization::Hard).is_err());
+        assert!(VbxConfig::new(0.07, -1.0, 20, 1e-4, ResponsibilityInitialization::Hard).is_err());
+        assert!(VbxConfig::new(0.07, 0.8, 0, 1e-4, ResponsibilityInitialization::Hard).is_err());
+        assert!(VbxConfig::new(0.07, 0.8, 20, -1.0, ResponsibilityInitialization::Hard).is_err());
+        assert!(
+            VbxConfig::new(
+                0.07,
+                0.8,
+                20,
+                1e-4,
+                ResponsibilityInitialization::Smoothed(0.0)
+            )
+            .is_err()
+        );
+        assert_eq!(VbxConfig::default().max_iters(), 20);
+        assert_eq!(
+            VbxConfig::default().with_max_iters(3).unwrap().max_iters(),
+            3
+        );
     }
 
     #[test]

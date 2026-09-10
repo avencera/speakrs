@@ -40,6 +40,7 @@ impl<'a> ReportJsonBuilder<'a> {
 
         let metadata = self.0.metadata;
         let mut payload = serde_json::json!({
+            "schema_version": super::run_store::SCHEMA_VERSION,
             "dataset": self.0.dataset_name,
             "run_id": self.run_id()?,
             "timestamp": chrono::Utc::now().to_rfc3339(),

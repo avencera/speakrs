@@ -14,11 +14,36 @@ pub(crate) struct WindowSpec {
     step_samples: NonZeroUsize,
 }
 
+/// Invalid window or step duration before a model is loaded
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InvalidWindowGeometry {
+    pub message: String,
+}
+
 impl WindowSpec {
     pub(crate) fn new(window_samples: usize, step_samples: usize) -> Option<Self> {
         Some(Self {
             window_samples: NonZeroUsize::new(window_samples)?,
             step_samples: NonZeroUsize::new(step_samples)?,
+        })
+    }
+
+    /// Convert durations in seconds to a checked window spec before session load
+    pub(crate) fn from_seconds(
+        window_duration: f32,
+        step_duration: f32,
+        sample_rate: usize,
+    ) -> Result<Self, InvalidWindowGeometry> {
+        if sample_rate == 0 {
+            return Err(InvalidWindowGeometry {
+                message: "sample rate must be greater than zero".to_owned(),
+            });
+        }
+        let window_samples = duration_to_samples(window_duration, sample_rate, "window")?;
+        let step_samples = duration_to_samples(step_duration, sample_rate, "step")?;
+        Ok(Self {
+            window_samples,
+            step_samples,
         })
     }
 
@@ -29,6 +54,31 @@ impl WindowSpec {
     pub(crate) fn step_samples(self) -> usize {
         self.step_samples.get()
     }
+}
+
+fn duration_to_samples(
+    duration: f32,
+    sample_rate: usize,
+    name: &str,
+) -> Result<NonZeroUsize, InvalidWindowGeometry> {
+    if !duration.is_finite() || duration <= 0.0 {
+        return Err(InvalidWindowGeometry {
+            message: format!(
+                "{name} duration must be finite and greater than zero, got {duration}"
+            ),
+        });
+    }
+    let samples = duration * sample_rate as f32;
+    if !samples.is_finite() || samples < 1.0 {
+        return Err(InvalidWindowGeometry {
+            message: format!(
+                "{name} duration {duration} rounds below one sample at {sample_rate} Hz"
+            ),
+        });
+    }
+    NonZeroUsize::new(samples as usize).ok_or_else(|| InvalidWindowGeometry {
+        message: format!("{name} duration {duration} produced zero samples"),
+    })
 }
 
 pub(super) struct SegmentationWindows<'a> {
@@ -223,6 +273,23 @@ mod tests {
     use super::{
         SegmentationWindows, WindowSpec, first_output, output_shape3, segmentation_window_count,
     };
+
+    #[test]
+    fn from_seconds_rejects_non_positive_and_non_finite_steps() {
+        for step in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let error = WindowSpec::from_seconds(10.0, step, 16_000).unwrap_err();
+            assert!(
+                error.message.contains("step duration"),
+                "unexpected message for step={step}: {}",
+                error.message
+            );
+        }
+        let too_small = WindowSpec::from_seconds(10.0, 1.0 / 32_000.0, 16_000).unwrap_err();
+        assert!(too_small.message.contains("rounds below one sample"));
+        let spec = WindowSpec::from_seconds(10.0, 1.0, 16_000).unwrap();
+        assert_eq!(spec.window_samples(), 160_000);
+        assert_eq!(spec.step_samples(), 16_000);
+    }
 
     const WINDOW: usize = 160_000;
 

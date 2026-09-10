@@ -19,7 +19,9 @@ fn make_pipeline() -> Option<OwnedDiarizationPipeline> {
 
 fn single_speaker_config() -> PipelineConfig {
     PipelineConfig {
-        speaker_keep_threshold: f64::MAX,
+        clustering: speakrs::ClusteringConfig::default()
+            .with_speaker_keep_threshold(f64::MAX)
+            .unwrap(),
         ..PipelineConfig::default()
     }
 }
@@ -74,7 +76,7 @@ fn queued_shared_senders_across_threads() {
             let tx = tx.clone();
             let samples = samples.clone();
             thread::spawn(move || {
-                tx.push(QueuedDiarizationRequest::new(file_id, samples))
+                tx.try_push(QueuedDiarizationRequest::new(file_id, samples))
                     .unwrap();
             })
         })
@@ -107,13 +109,13 @@ fn queued_job_ids_are_monotonic_across_sender_clones() {
     let tx_clone = tx.clone();
 
     let id0 = tx
-        .push(QueuedDiarizationRequest::new("f0", samples.clone()))
+        .try_push(QueuedDiarizationRequest::new("f0", samples.clone()))
         .unwrap();
     let id1 = tx_clone
-        .push(QueuedDiarizationRequest::new("f1", samples.clone()))
+        .try_push(QueuedDiarizationRequest::new("f1", samples.clone()))
         .unwrap();
     let id2 = tx
-        .push(QueuedDiarizationRequest::new("f2", samples))
+        .try_push(QueuedDiarizationRequest::new("f2", samples))
         .unwrap();
 
     assert_ne!(id0, id1);
@@ -136,7 +138,7 @@ fn queued_clean_shutdown() {
         return;
     };
 
-    tx.push(QueuedDiarizationRequest::new("only", samples))
+    tx.try_push(QueuedDiarizationRequest::new("only", samples))
         .unwrap();
     drop(tx);
 
@@ -152,7 +154,7 @@ fn queued_drop_sender_unblocks_iteration() {
         return;
     };
 
-    tx.push(QueuedDiarizationRequest::new("iter", samples))
+    tx.try_push(QueuedDiarizationRequest::new("iter", samples))
         .unwrap();
     drop(tx);
 
@@ -168,9 +170,9 @@ fn queued_handles_short_and_normal_audio() {
         return;
     };
 
-    tx.push(QueuedDiarizationRequest::new("normal", samples))
+    tx.try_push(QueuedDiarizationRequest::new("normal", samples))
         .unwrap();
-    tx.push(QueuedDiarizationRequest::new("short", vec![0.0; 100]))
+    tx.try_push(QueuedDiarizationRequest::new("short", vec![0.0; 100]))
         .unwrap();
     drop(tx);
 
@@ -246,7 +248,7 @@ fn queued_results_match_sync() {
     let Some((tx, mut rx)) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
         return;
     };
-    tx.push(QueuedDiarizationRequest::new("compare", samples))
+    tx.try_push(QueuedDiarizationRequest::new("compare", samples))
         .unwrap();
     drop(tx);
 
@@ -287,7 +289,7 @@ fn build_queued_preserves_custom_pipeline_config() {
     ) else {
         return;
     };
-    tx.push(QueuedDiarizationRequest::new("compare", samples))
+    tx.try_push(QueuedDiarizationRequest::new("compare", samples))
         .unwrap();
     drop(tx);
 

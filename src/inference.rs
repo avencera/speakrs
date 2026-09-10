@@ -1,4 +1,5 @@
 pub(crate) mod embedding;
+pub(crate) mod geometry;
 pub(crate) mod segmentation;
 
 #[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]

@@ -126,6 +126,14 @@ impl RunStore {
     }
 
     pub(super) fn open(run_dir: &Path) -> Result<Self> {
+        Self::open_validated(run_dir, true)
+    }
+
+    fn open_nested(run_dir: &Path) -> Result<Self> {
+        Self::open_validated(run_dir, false)
+    }
+
+    fn open_validated(run_dir: &Path, require_directory_id: bool) -> Result<Self> {
         ensure!(
             run_dir.is_dir(),
             "run directory does not exist: {}",
@@ -138,18 +146,20 @@ impl RunStore {
             .wrap_err_with(|| format!("invalid run manifest {}", manifest_path.display()))?;
         validate_manifest_schema(&manifest)?;
         let experiment = ValidatedExperiment::from_spec(manifest.spec.clone())?;
-        let directory_id = run_dir.file_name().and_then(OsStr::to_str).ok_or_else(|| {
-            eyre!(
-                "run directory has no valid experiment id: {}",
-                run_dir.display()
-            )
-        })?;
-        ensure!(
-            experiment.id() == directory_id,
-            "run directory identity '{}' does not match manifest experiment_id '{}'",
-            directory_id,
-            experiment.id()
-        );
+        if require_directory_id {
+            let directory_id = run_dir.file_name().and_then(OsStr::to_str).ok_or_else(|| {
+                eyre!(
+                    "run directory has no valid experiment id: {}",
+                    run_dir.display()
+                )
+            })?;
+            ensure!(
+                experiment.id() == directory_id,
+                "run directory identity '{}' does not match manifest experiment_id '{}'",
+                directory_id,
+                experiment.id()
+            );
+        }
         validate_manifest_files(&manifest, &experiment)?;
         let store = Self {
             run_dir: run_dir.to_path_buf(),
@@ -650,6 +660,17 @@ struct CandidateProjection {
     median_post_inference_seconds: Option<f64>,
     post_inference_mad_seconds: Option<f64>,
     comparison: Option<ComparisonProjection>,
+    decision: ComparisonDecision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ComparisonDecision {
+    Baseline,
+    Pending,
+    Failed,
+    Pass,
+    Stop,
 }
 
 #[derive(Debug, Serialize)]
@@ -851,6 +872,12 @@ impl ProjectionSummary {
                 )?
             };
             let candidate_metrics = &metrics[index];
+            let decision = comparison_decision(
+                index,
+                external_baseline.is_some(),
+                comparison.as_ref(),
+                candidate_metrics,
+            );
             candidates.push(CandidateProjection {
                 index,
                 id: candidate.id.clone(),
@@ -874,6 +901,7 @@ impl ProjectionSummary {
                 median_post_inference_seconds: candidate_metrics.median_post_inference_seconds,
                 post_inference_mad_seconds: candidate_metrics.post_inference_mad_seconds,
                 comparison,
+                decision,
             });
         }
 
@@ -938,11 +966,13 @@ impl ProjectionSummary {
                 .as_ref()
                 .map(|range| format!("{}/{:.1}/{}", range.minimum, range.median, range.maximum))
                 .unwrap_or_else(|| "n/a".to_owned());
-            let decision = candidate
-                .comparison
-                .as_ref()
-                .map(|comparison| if comparison.accepted { "pass" } else { "stop" })
-                .unwrap_or("baseline");
+            let decision = match candidate.decision {
+                ComparisonDecision::Baseline => "baseline",
+                ComparisonDecision::Pending => "pending",
+                ComparisonDecision::Failed => "failed",
+                ComparisonDecision::Pass => "pass",
+                ComparisonDecision::Stop => "stop",
+            };
             report.push_str(&format!(
                 "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
                 candidate.index,
@@ -1245,16 +1275,7 @@ fn load_external_baseline(candidate_store: &RunStore) -> Result<Option<ExternalB
     );
     let comparison_dir = candidate_store.run_dir.join("comparison-baseline");
     let store = if comparison_dir.is_dir() {
-        let nested_manifest: RunManifest = serde_json::from_reader(BufReader::new(File::open(
-            comparison_dir.join("manifest.json"),
-        )?))?;
-        validate_manifest_schema(&nested_manifest)?;
-        let experiment = ValidatedExperiment::from_spec(nested_manifest.spec.clone())?;
-        RunStore {
-            run_dir: comparison_dir,
-            manifest: nested_manifest,
-            experiment,
-        }
+        RunStore::open_nested(&comparison_dir)?
     } else {
         source_store
     };
@@ -1281,6 +1302,27 @@ fn load_external_baseline(candidate_store: &RunStore) -> Result<Option<ExternalB
         )?,
         noise_margin: baseline_noise_margin(&records)?,
     }))
+}
+
+fn comparison_decision(
+    index: usize,
+    has_external_baseline: bool,
+    comparison: Option<&ComparisonProjection>,
+    metrics: &CandidateMetrics,
+) -> ComparisonDecision {
+    if let Some(comparison) = comparison {
+        if comparison.accepted {
+            ComparisonDecision::Pass
+        } else {
+            ComparisonDecision::Stop
+        }
+    } else if !has_external_baseline && index == 0 {
+        ComparisonDecision::Baseline
+    } else if metrics.failed_records > 0 && metrics.successful_records == 0 {
+        ComparisonDecision::Failed
+    } else {
+        ComparisonDecision::Pending
+    }
 }
 
 fn build_comparison(
@@ -1781,8 +1823,12 @@ fn validate_comparison_clone(
         stored.files == expected_files,
         "comparison baseline file slice does not match the opened source"
     );
-    match (&stored.identity, &source.manifest.identity) {
-        (Some(stored_identity), Some(source_identity)) => {
+    match (
+        &stored.identity,
+        &source.manifest.identity,
+        &candidate.manifest.identity,
+    ) {
+        (Some(stored_identity), Some(source_identity), Some(candidate_identity)) => {
             ensure!(
                 stored_identity.model_sha256 == source_identity.model_sha256,
                 "comparison baseline model digest does not match the opened source"
@@ -1792,12 +1838,16 @@ fn validate_comparison_clone(
                 "comparison baseline dataset digest does not match the opened source"
             );
             ensure!(
-                stored_identity.worker_sha256 == source_identity.worker_sha256,
-                "comparison baseline worker digest does not match the opened source"
+                stored_identity.worker_sha256 == candidate_identity.worker_sha256,
+                "comparison baseline worker digest does not match the current execution identity"
+            );
+            ensure!(
+                stored_identity.host == candidate_identity.host,
+                "comparison baseline host identity does not match the current execution identity"
             );
         }
-        (None, None) => {}
-        _ => bail!("comparison baseline identity does not match the opened source"),
+        (None, None, None) => {}
+        _ => bail!("comparison baseline identity does not match the opened source and candidate"),
     }
     ensure!(
         stored.spec.performance.repetitions == candidate.manifest.spec.performance.repetitions,
@@ -1817,10 +1867,12 @@ fn build_comparison_manifest(
     manifest.spec.dataset.max_files = manifest.files.len() as u32;
     manifest.spec.dataset.max_minutes = candidate.manifest.spec.dataset.max_minutes;
     manifest.spec.performance = candidate.manifest.spec.performance.clone();
-    // keep baseline asset digests; pin only the candidate seed and comparison run-order
+    // keep source asset provenance; record the worker and host that actually re-ran the baseline
     if let Some(identity) = &mut manifest.identity {
         if let Some(candidate_identity) = &candidate.manifest.identity {
             identity.seed = candidate_identity.seed;
+            identity.host = candidate_identity.host.clone();
+            identity.worker_sha256 = candidate_identity.worker_sha256.clone();
         }
         identity.run_order.repetitions = (0..manifest.spec.performance.repetitions).collect();
         identity.run_order.files = manifest.files.iter().map(|file| file.id.clone()).collect();
@@ -2285,6 +2337,10 @@ mod tests {
     }
 
     fn complete_record(file_id: &str) -> ExperimentRecord {
+        complete_record_with_timing(file_id, 0.25)
+    }
+
+    fn complete_record_with_timing(file_id: &str, post_inference_seconds: f64) -> ExperimentRecord {
         ExperimentRecord::Complete {
             audio_seconds: 1.0,
             wall_seconds: 1.0,
@@ -2292,7 +2348,7 @@ mod tests {
             worker_elapsed_seconds: 1.0,
             stage_timings: StageTimings {
                 inference_seconds: 0.5,
-                post_inference_seconds: 0.25,
+                post_inference_seconds,
                 chunk_inference: None,
             },
             clustering: None,
@@ -2313,6 +2369,31 @@ mod tests {
             }),
             hypothesis_rttm: String::new(),
             fallback_events: Vec::new(),
+        }
+    }
+
+    fn stored_complete_record(
+        repetition: u32,
+        file_index: usize,
+        candidate_index: usize,
+        post_inference_seconds: f64,
+    ) -> StoredRecord {
+        let file_id = test_manifest().files[file_index].id.clone();
+        let candidate_id = if candidate_index == 0 {
+            "default"
+        } else {
+            "fast"
+        };
+        StoredRecord {
+            document: RecordDocument {
+                schema_version: RECORD_SCHEMA_VERSION,
+                repetition,
+                file_index,
+                file_id: file_id.clone(),
+                candidate_id: candidate_id.to_owned(),
+                outcome: complete_record_with_timing(&file_id, post_inference_seconds),
+            },
+            candidate_index,
         }
     }
 
@@ -2594,31 +2675,6 @@ mod tests {
         assert_eq!(metrics.median_workload_seconds, None);
     }
 
-    fn complete_record(
-        repetition: u32,
-        file_index: usize,
-        candidate_index: usize,
-        post_inference_seconds: f64,
-    ) -> StoredRecord {
-        StoredRecord {
-            value: json!({
-                "status": "complete",
-                "stage_timings": { "post_inference_seconds": post_inference_seconds },
-                "der": {
-                    "reference_speaker_time": 10.0,
-                    "missed": 1.0,
-                    "false_alarm": 0.0,
-                    "confusion": 0.0,
-                    "reference_speaker_count": 2,
-                    "predicted_speaker_count": 2
-                }
-            }),
-            repetition,
-            file_index,
-            candidate_index,
-        }
-    }
-
     #[test]
     fn within_run_speed_uses_post_inference_when_process_wall_is_shared() {
         let mut manifest = test_manifest();
@@ -2632,10 +2688,10 @@ mod tests {
             documented_der_outliers: Vec::new(),
         });
         let records = [
-            complete_record(0, 0, 0, 2.0),
-            complete_record(0, 1, 0, 2.0),
-            complete_record(0, 0, 1, 1.0),
-            complete_record(0, 1, 1, 1.0),
+            stored_complete_record(0, 0, 0, 2.0),
+            stored_complete_record(0, 1, 0, 2.0),
+            stored_complete_record(0, 0, 1, 1.0),
+            stored_complete_record(0, 1, 1, 1.0),
         ];
         let wall = BTreeMap::from([(0, 10.0)]);
         let baseline = CandidateMetrics::from_records(&manifest, &records, 0, &wall).unwrap();
@@ -2660,7 +2716,10 @@ mod tests {
     #[test]
     fn external_speed_uses_process_wall_when_clocks_differ() {
         let manifest = test_manifest();
-        let records = [complete_record(0, 0, 0, 1.0), complete_record(0, 1, 0, 1.0)];
+        let records = [
+            stored_complete_record(0, 0, 0, 1.0),
+            stored_complete_record(0, 1, 0, 1.0),
+        ];
         let baseline =
             CandidateMetrics::from_records(&manifest, &records, 0, &BTreeMap::from([(0, 10.0)]))
                 .unwrap();
@@ -2686,8 +2745,14 @@ mod tests {
     #[test]
     fn external_speed_stays_unavailable_when_process_walls_are_empty() {
         let manifest = test_manifest();
-        let baseline_records = [complete_record(0, 0, 0, 2.0), complete_record(0, 1, 0, 2.0)];
-        let candidate_records = [complete_record(0, 0, 0, 1.0), complete_record(0, 1, 0, 1.0)];
+        let baseline_records = [
+            stored_complete_record(0, 0, 0, 2.0),
+            stored_complete_record(0, 1, 0, 2.0),
+        ];
+        let candidate_records = [
+            stored_complete_record(0, 0, 0, 1.0),
+            stored_complete_record(0, 1, 0, 1.0),
+        ];
         let baseline =
             CandidateMetrics::from_records(&manifest, &baseline_records, 0, &BTreeMap::new())
                 .unwrap();
@@ -2716,10 +2781,10 @@ mod tests {
         let temp = tempdir().unwrap();
         let store = test_store(temp.path());
         store
-            .write_record(0, 0, "default", &json!({"status": "complete"}))
+            .write_record(0, 0, "default", &complete_record("second"))
             .unwrap();
         store
-            .write_record(0, 1, "default", &json!({"status": "complete"}))
+            .write_record(0, 1, "default", &complete_record("first"))
             .unwrap();
 
         assert!(store.repetition_complete(0).unwrap());
@@ -2849,7 +2914,7 @@ mod tests {
         candidate.manifest.files = vec![source.manifest.files[1].clone()];
         candidate.manifest.spec.dataset.max_files = 1;
 
-        let comparison = candidate.comparison_baseline_store(&source).unwrap().0;
+        let comparison = candidate.comparison_baseline_store(&source).unwrap();
         let mut stored = comparison.manifest;
         stored.schema_version = MANIFEST_SCHEMA_VERSION + 1;
         let manifest_path = comparison.run_dir.join("manifest.json");
@@ -2891,8 +2956,12 @@ mod tests {
         }];
         let root = project_root();
         let mut identity = test_identity(42);
-        identity.model_sha256 = digest_paths(&root, std::slice::from_ref(&models_dir)).unwrap();
-        identity.dataset_sha256 = dataset_digest(&files, &root).unwrap();
+        identity.model_sha256 = Some(
+            Sha256Digest::parse(&digest_paths(&root, std::slice::from_ref(&models_dir)).unwrap())
+                .unwrap(),
+        );
+        identity.dataset_sha256 =
+            Some(Sha256Digest::parse(&dataset_digest(&files, &root).unwrap()).unwrap());
         let mut source_manifest = RunManifest {
             schema_version: MANIFEST_SCHEMA_VERSION,
             spec: source_spec,
@@ -2912,6 +2981,7 @@ mod tests {
         candidate_spec.experiment_id = "candidate-run".to_owned();
         candidate_spec.performance.repetitions = 4;
         candidate_spec.baseline_run = Some(source_dir);
+        let experiment = ValidatedExperiment::from_spec(candidate_spec.clone()).unwrap();
         let candidate = RunStore {
             run_dir: temp.path().join("candidate-run"),
             manifest: RunManifest {
@@ -2920,6 +2990,7 @@ mod tests {
                 files,
                 identity: None,
             },
+            experiment,
         };
 
         let error = load_external_baseline(&candidate).map(|_| ()).unwrap_err();
@@ -3084,5 +3155,86 @@ mod tests {
     fn post_inference_comparison_has_no_inference_noise_margin() {
         assert_eq!(comparison_noise_margin(None), 0.0);
         assert_eq!(comparison_noise_margin(Some(0.23)), 0.23);
+    }
+
+    fn empty_metrics(successful_records: usize, failed_records: usize) -> CandidateMetrics {
+        CandidateMetrics {
+            observations: Vec::new(),
+            successful_records,
+            failed_records,
+            duration_weighted_der: None,
+            missed_percent: None,
+            false_alarm_percent: None,
+            confusion_percent: None,
+            usable_training_embeddings: None,
+            repetition_wall_seconds: BTreeMap::new(),
+            repetition_post_inference_seconds: BTreeMap::new(),
+            median_workload_seconds: None,
+            workload_mad_seconds: None,
+            median_post_inference_seconds: None,
+            post_inference_mad_seconds: None,
+            speaker_counts: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn pending_and_failed_candidates_are_not_labeled_baseline() {
+        let pending = empty_metrics(0, 0);
+        let failed = empty_metrics(0, 2);
+        assert_eq!(
+            comparison_decision(0, false, None, &pending),
+            ComparisonDecision::Baseline
+        );
+        assert_eq!(
+            comparison_decision(1, false, None, &pending),
+            ComparisonDecision::Pending
+        );
+        assert_eq!(
+            comparison_decision(1, false, None, &failed),
+            ComparisonDecision::Failed
+        );
+        assert_eq!(
+            comparison_decision(0, true, None, &pending),
+            ComparisonDecision::Pending
+        );
+    }
+
+    #[test]
+    fn comparison_manifest_records_current_execution_identity() {
+        let source_temp = tempfile::tempdir().unwrap();
+        let candidate_temp = tempfile::tempdir().unwrap();
+        let mut source = test_store(source_temp.path());
+        let mut candidate = test_store(candidate_temp.path());
+        source.manifest.identity = Some(test_identity(1));
+        let mut candidate_identity = test_identity(99);
+        candidate_identity.worker_sha256 = Some(test_digest("candidate-worker"));
+        candidate.manifest.identity = Some(candidate_identity);
+        let files = source.manifest.files.clone();
+        let manifest = build_comparison_manifest(&source, &candidate, files);
+        let identity = manifest.identity.expect("comparison identity");
+        assert_eq!(identity.model_sha256, Some(test_digest("model")));
+        assert_eq!(identity.dataset_sha256, Some(test_digest("dataset")));
+        assert_eq!(
+            identity.worker_sha256,
+            Some(test_digest("candidate-worker"))
+        );
+        assert_eq!(identity.seed, 99);
+    }
+
+    #[test]
+    fn nested_store_open_validates_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let nested = temp.path().join("comparison-baseline");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("manifest.json"), b"{\"schema_version\":99}").unwrap();
+        let error = match RunStore::open_nested(&nested) {
+            Ok(_) => panic!("expected nested store validation to fail"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("schema_version") || message.contains("invalid run manifest"),
+            "unexpected nested-store error: {message}"
+        );
     }
 }

@@ -1,68 +1,83 @@
 use ndarray::Array2;
 
-/// Hysteresis and duration-filtering settings for frame-level speaker activity.
-#[derive(Debug, Clone)]
-pub struct BinarizeConfig {
-    /// Activation threshold for starting an active speaker region.
-    pub onset: f32,
-    /// Deactivation threshold for ending an active speaker region.
-    pub offset: f32,
-    /// Minimum active-region length, in frames, before the region is kept.
-    pub min_duration_on: usize,
-    /// Maximum inactive gap length, in frames, that should be filled between active regions.
-    pub min_duration_off: usize,
-    /// Number of frames to extend an active region before its detected onset.
-    pub pad_onset: usize,
-    /// Number of frames to extend an active region after its detected offset.
-    pub pad_offset: usize,
+/// Frame-count activity cleanup applied after discrete reconstruction
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ActivityCleanup {
+    min_active_frames: usize,
+    max_inactive_gap_frames: usize,
+    pad_before_frames: usize,
+    pad_after_frames: usize,
 }
 
-impl Default for BinarizeConfig {
-    fn default() -> Self {
+impl ActivityCleanup {
+    /// Create cleanup values from frame counts
+    pub const fn new(
+        min_active_frames: usize,
+        max_inactive_gap_frames: usize,
+        pad_before_frames: usize,
+        pad_after_frames: usize,
+    ) -> Self {
         Self {
-            onset: 0.5,
-            offset: 0.5,
-            min_duration_on: 0,
-            min_duration_off: 0,
-            pad_onset: 0,
-            pad_offset: 0,
-        }
-    }
-}
-
-pub fn binarize(probs: &Array2<f32>, config: &BinarizeConfig) -> Array2<f32> {
-    let (num_frames, num_speakers) = probs.dim();
-    let mut output = Array2::<f32>::zeros((num_frames, num_speakers));
-
-    for speaker in 0..num_speakers {
-        let scores: Vec<f32> = (0..num_frames).map(|f| probs[[f, speaker]]).collect();
-        let mut active = hysteresis(&scores, config.onset, config.offset);
-
-        remove_short_on(&mut active, config.min_duration_on);
-        fill_short_off(&mut active, config.min_duration_off);
-        pad_regions(&mut active, config.pad_onset, config.pad_offset);
-
-        for (f, &val) in active.iter().enumerate() {
-            output[[f, speaker]] = if val { 1.0 } else { 0.0 };
+            min_active_frames,
+            max_inactive_gap_frames,
+            pad_before_frames,
+            pad_after_frames,
         }
     }
 
-    output
-}
+    /// Minimum active run length kept after cleanup
+    pub const fn min_active_frames(self) -> usize {
+        self.min_active_frames
+    }
 
-fn hysteresis(scores: &[f32], onset: f32, offset: f32) -> Vec<bool> {
-    let mut state = false;
-    scores
-        .iter()
-        .map(|&s| {
-            if !state && s >= onset {
-                state = true;
-            } else if state && s < offset {
-                state = false;
+    /// Maximum inactive interior gap filled between active runs
+    pub const fn max_inactive_gap_frames(self) -> usize {
+        self.max_inactive_gap_frames
+    }
+
+    /// Frames added before each remaining active run
+    pub const fn pad_before_frames(self) -> usize {
+        self.pad_before_frames
+    }
+
+    /// Frames added after each remaining active run
+    pub const fn pad_after_frames(self) -> usize {
+        self.pad_after_frames
+    }
+
+    /// True when cleanup leaves binary activity unchanged
+    pub const fn is_identity(self) -> bool {
+        self.min_active_frames == 0
+            && self.max_inactive_gap_frames == 0
+            && self.pad_before_frames == 0
+            && self.pad_after_frames == 0
+    }
+
+    /// Apply remove-short, fill-gap, then pad order to binary activity
+    pub fn apply(&self, discrete: &Array2<f32>) -> Array2<f32> {
+        if self.is_identity() {
+            return discrete.clone();
+        }
+
+        let (num_frames, num_speakers) = discrete.dim();
+        let mut output = Array2::<f32>::zeros((num_frames, num_speakers));
+
+        for speaker in 0..num_speakers {
+            let mut active: Vec<bool> = (0..num_frames)
+                .map(|frame| discrete[[frame, speaker]] > 0.5)
+                .collect();
+
+            remove_short_on(&mut active, self.min_active_frames);
+            fill_short_off(&mut active, self.max_inactive_gap_frames);
+            pad_regions(&mut active, self.pad_before_frames, self.pad_after_frames);
+
+            for (frame, &value) in active.iter().enumerate() {
+                output[[frame, speaker]] = if value { 1.0 } else { 0.0 };
             }
-            state
-        })
-        .collect()
+        }
+
+        output
+    }
 }
 
 fn remove_short_on(active: &mut [bool], min_duration: usize) {
@@ -131,61 +146,19 @@ mod tests {
     use ndarray::array;
 
     #[test]
-    fn chattering_prevention() {
-        let probs = array![[0.45], [0.55], [0.45], [0.55], [0.45]];
-        let config = BinarizeConfig {
-            onset: 0.6,
-            offset: 0.4,
-            ..Default::default()
-        };
-
-        let result = binarize(&probs, &config);
-        let expected = array![[0.0], [0.0], [0.0], [0.0], [0.0]];
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn state_holding() {
-        let probs = array![[0.0], [0.7], [0.5], [0.5], [0.3], [0.0]];
-        let config = BinarizeConfig {
-            onset: 0.6,
-            offset: 0.4,
-            ..Default::default()
-        };
-
-        let result = binarize(&probs, &config);
-        let expected = array![[0.0], [1.0], [1.0], [1.0], [0.0], [0.0]];
-        assert_eq!(result, expected);
-    }
-
-    #[test]
     fn min_duration_on_removal() {
-        // short ON blip of 1 frame gets removed with min_duration_on=3
         let probs = array![[0.0], [0.8], [0.0], [0.8], [0.8], [0.8], [0.0]];
-        let config = BinarizeConfig {
-            onset: 0.5,
-            offset: 0.5,
-            min_duration_on: 3,
-            ..Default::default()
-        };
-
-        let result = binarize(&probs, &config);
+        let config = ActivityCleanup::new(3, 0, 0, 0);
+        let result = config.apply(&probs);
         let expected = array![[0.0], [0.0], [0.0], [1.0], [1.0], [1.0], [0.0]];
         assert_eq!(result, expected);
     }
 
     #[test]
     fn min_duration_off_fill() {
-        // short OFF gap of 1 frame gets filled with min_duration_off=2
         let probs = array![[0.8], [0.8], [0.0], [0.8], [0.8]];
-        let config = BinarizeConfig {
-            onset: 0.5,
-            offset: 0.5,
-            min_duration_off: 2,
-            ..Default::default()
-        };
-
-        let result = binarize(&probs, &config);
+        let config = ActivityCleanup::new(0, 2, 0, 0);
+        let result = config.apply(&probs);
         let expected = array![[1.0], [1.0], [1.0], [1.0], [1.0]];
         assert_eq!(result, expected);
     }
@@ -193,58 +166,25 @@ mod tests {
     #[test]
     fn pad_onset_offset() {
         let probs = array![[0.0], [0.0], [0.0], [0.8], [0.8], [0.0], [0.0], [0.0]];
-        let config = BinarizeConfig {
-            onset: 0.5,
-            offset: 0.5,
-            pad_onset: 2,
-            pad_offset: 1,
-            ..Default::default()
-        };
-
-        let result = binarize(&probs, &config);
-        // active frames 3,4 get padded to frames 1..6
+        let config = ActivityCleanup::new(0, 0, 2, 1);
+        let result = config.apply(&probs);
         let expected = array![[0.0], [1.0], [1.0], [1.0], [1.0], [1.0], [0.0], [0.0]];
         assert_eq!(result, expected);
     }
 
     #[test]
     fn multi_speaker_independence() {
-        let probs = array![[0.8, 0.0], [0.8, 0.0], [0.0, 0.8], [0.0, 0.8]];
-        let config = BinarizeConfig::default();
-
-        let result = binarize(&probs, &config);
+        let probs = array![[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]];
+        let result = ActivityCleanup::default().apply(&probs);
         let expected = array![[1.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 1.0]];
         assert_eq!(result, expected);
     }
 
     #[test]
-    fn all_on() {
-        let probs = array![[0.9], [0.8], [0.7]];
-        let config = BinarizeConfig::default();
-
-        let result = binarize(&probs, &config);
-        let expected = array![[1.0], [1.0], [1.0]];
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn all_off() {
-        let probs = array![[0.1], [0.2], [0.3]];
-        let config = BinarizeConfig::default();
-
-        let result = binarize(&probs, &config);
-        let expected = array![[0.0], [0.0], [0.0]];
-        assert_eq!(result, expected);
-    }
-
-    #[test]
-    fn default_config_works() {
-        let config = BinarizeConfig::default();
-        assert_eq!(config.onset, 0.5);
-        assert_eq!(config.offset, 0.5);
-        assert_eq!(config.min_duration_on, 0);
-        assert_eq!(config.min_duration_off, 0);
-        assert_eq!(config.pad_onset, 0);
-        assert_eq!(config.pad_offset, 0);
+    fn default_cleanup_is_identity() {
+        let config = ActivityCleanup::default();
+        assert!(config.is_identity());
+        let probs = array![[1.0], [0.0], [1.0]];
+        assert_eq!(config.apply(&probs), probs);
     }
 }

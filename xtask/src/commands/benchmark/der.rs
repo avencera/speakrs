@@ -6,6 +6,9 @@ use std::time::Duration;
 
 use color_eyre::eyre::{Result, bail};
 
+use crate::cargo::cargo_build_xtask;
+use crate::cmd::{project_root, run_cmd, wav_duration_seconds};
+
 use super::*;
 use preflight::preflight_check;
 use run::{DerRunContext, run_der_implementations};
@@ -17,50 +20,6 @@ use validate::{
 mod preflight;
 pub(super) mod run;
 mod validate;
-
-pub(super) const IMPL_REGISTRY: &[(&str, &str, &str, ImplType)] = &[
-    (
-        "pyannote",
-        "pmps",
-        "pyannote MPS",
-        ImplType::Pyannote("mps"),
-    ),
-    (
-        "pyannote-cpu",
-        "pcpu",
-        "pyannote CPU",
-        ImplType::Pyannote("cpu"),
-    ),
-    (
-        "pyannote-cuda",
-        "pg",
-        "pyannote CUDA",
-        ImplType::Pyannote("cuda"),
-    ),
-    (
-        "coreml",
-        "scm",
-        "speakrs CoreML",
-        ImplType::Speakrs("coreml"),
-    ),
-    (
-        "coreml-fast",
-        "scmf",
-        "speakrs CoreML Fast",
-        ImplType::Speakrs("coreml-fast"),
-    ),
-    ("cuda", "sg", "speakrs CUDA", ImplType::Speakrs("cuda")),
-    (
-        "cuda-fast",
-        "sgf",
-        "speakrs CUDA Fast",
-        ImplType::Speakrs("cuda-fast"),
-    ),
-    ("cpu", "scpu", "speakrs CPU", ImplType::Speakrs("cpu")),
-    ("fluidaudio", "fa", "FluidAudio", ImplType::FluidAudioBench),
-    ("speakerkit", "sk", "SpeakerKit", ImplType::SpeakerKitBench),
-    ("pyannote-rs", "prs", "pyannote-rs", ImplType::PyannoteRs),
-];
 
 pub struct DerArgs {
     pub dataset_id: String,
@@ -143,6 +102,19 @@ pub fn der(args: DerArgs) -> Result<()> {
     }
 
     let metadata = BenchmarkMetadata::collect();
+    let selected_impls = crate::catalog::ImplementationCatalog::resolve_many(impls)?;
+    let selected_datasets: Vec<crate::datasets::DatasetId> = datasets
+        .iter()
+        .filter_map(|dataset| dataset.catalog_id().ok())
+        .collect();
+    let suite = super::BenchmarkRun::create(
+        &root.join("_benchmarks"),
+        selected_impls.iter().map(|spec| spec.id).collect(),
+        selected_datasets,
+        description.clone(),
+        chrono::Local::now(),
+        metadata.cpu.clone(),
+    )?;
 
     let eval_sets: Vec<(String, Vec<(PathBuf, PathBuf)>)> = if single_file_mode {
         let (wav_path, rttm_path) = match (file.clone(), rttm.clone()) {
@@ -159,14 +131,22 @@ pub fn der(args: DerArgs) -> Result<()> {
         let mut sets = Vec::new();
         for dataset in &datasets {
             dataset.ensure(&fixtures_dir)?;
-            let dataset_dir = dataset.dataset_dir(&fixtures_dir);
-            let files = discover_files(&dataset_dir, max_files, max_minutes as f64)?;
+            let snapshot = dataset.snapshot(&fixtures_dir)?;
+            let pairs = snapshot
+                .files
+                .into_iter()
+                .map(|file| {
+                    let duration = file.duration_seconds();
+                    (file.wav, file.rttm, duration)
+                })
+                .collect();
+            let files =
+                super::selection::select_pairs_for_benchmark(pairs, max_files, max_minutes as f64);
             if files.is_empty() {
-                eprintln!(
-                    "No paired wav+rttm files found in {}",
-                    dataset_dir.display()
+                bail!(
+                    "dataset {} snapshot produced no files after selection caps",
+                    dataset.id
                 );
-                continue;
             }
             sets.push((dataset.display_name.clone(), files));
         }
@@ -220,15 +200,15 @@ pub fn der(args: DerArgs) -> Result<()> {
             .sum();
         let total_audio_minutes = total_audio_seconds / 60.0;
 
-        let run_id = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+        let run_id = suite.identity.run_id.as_str().to_owned();
         let run_dir = if eval_sets.len() > 1 {
-            root.join("_benchmarks")
-                .join(&run_id)
-                .join(dataset_name.to_lowercase().replace(' ', "-"))
+            let slug = dataset_name.to_lowercase().replace(' ', "-");
+            let dir = suite.root.join(slug);
+            fs::create_dir_all(&dir)?;
+            dir
         } else {
-            root.join("_benchmarks").join(&run_id)
+            suite.root.clone()
         };
-        fs::create_dir_all(&run_dir)?;
 
         if let Some(desc) = description.as_deref() {
             fs::write(run_dir.join("README.md"), format!("{desc}\n"))?;

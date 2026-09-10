@@ -28,7 +28,7 @@ impl SegmentationModel {
         let mut seg_single = 0u32;
 
         let has_batched = self.primary_batched_session.is_some();
-        let zeros = vec![0.0f32; self.window_samples];
+        let zeros = vec![0.0f32; self.window_samples()];
 
         let mut next_idx = 0;
         while next_idx < total_windows {

@@ -1,8 +1,14 @@
 mod aishell4;
 mod alimeeting;
 mod ami;
+mod catalog;
 mod earnings21;
 mod voxconverse;
+
+pub use catalog::{
+    DatasetCatalog, DatasetFile, DatasetId, DatasetSnapshot, DatasetSpec,
+    select_alimeeting_far_field,
+};
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -64,7 +70,7 @@ impl Dataset {
     pub fn ensure(&self, base_dir: &Path) -> Result<()> {
         let dir = self.dataset_dir(base_dir);
 
-        if dataset_has_expected_files(&dir) {
+        if self.snapshot(base_dir).is_ok() {
             return Ok(());
         }
 
@@ -117,26 +123,15 @@ pub fn all_datasets() -> Vec<Dataset> {
 }
 
 pub fn find_dataset(id: &str) -> Option<Dataset> {
-    let id = resolve_alias(id);
-    all_datasets().into_iter().find(|d| d.id == id)
-}
-
-fn resolve_alias(id: &str) -> &str {
-    match id {
-        "vd" | "vox-dev" => "voxconverse-dev",
-        "vt" | "vox-test" => "voxconverse-test",
-        "ai" | "ami-i" => "ami-ihm",
-        "as" | "ami-s" => "ami-sdm",
-        "a4" | "aishell" => "aishell4",
-        "e21" | "earnings" => "earnings21",
-        "ali" | "alimeet" => "alimeeting",
-        "ava" => "ava-avd",
-        other => other,
-    }
+    let canonical = DatasetCatalog::parse_cli(id)?.id.as_str();
+    all_datasets().into_iter().find(|d| d.id == canonical)
 }
 
 pub fn list_dataset_ids() -> Vec<String> {
-    all_datasets().into_iter().map(|d| d.id).collect()
+    DatasetCatalog::all()
+        .iter()
+        .map(|spec| spec.id.as_str().to_owned())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

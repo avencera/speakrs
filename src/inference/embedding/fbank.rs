@@ -2,8 +2,12 @@ use ndarray::{Array2, s};
 use ort::value::TensorRef;
 
 #[cfg(feature = "coreml")]
+use super::fbank_hw_from_shape;
+#[cfg(feature = "coreml")]
 use super::tensor::array3_slice;
-use super::{EmbeddingModel, FBANK_BATCH_SIZE, array2_from_shape_vec, first_output};
+use super::{
+    EmbeddingModel, FBANK_BATCH_SIZE, array2_from_shape_vec, fbank_hw_from_i64, first_output,
+};
 
 impl EmbeddingModel {
     /// Compute fbank features for a single audio chunk via the split fbank model
@@ -30,12 +34,17 @@ impl EmbeddingModel {
                 &self.buffers.split_waveform_buffer,
                 "native chunk fbank input",
             )?;
-            let (data, out_shape) = native
+            let tensor = native
                 .predict_cached(&[(&self.coreml.cached_fbank_single_shape, input_data)])
                 .map_err(|e| ort::Error::new(e.to_string()))?;
-            let frames = out_shape[1];
-            let features = out_shape[2];
-            return array2_from_shape_vec(frames, features, data, "native chunk fbank output");
+            let (frames, features) =
+                fbank_hw_from_shape(tensor.layout().dims(), "native chunk fbank output")?;
+            return array2_from_shape_vec(
+                frames,
+                features,
+                tensor.into_data(),
+                "native chunk fbank output",
+            );
         }
 
         let waveform_tensor =
@@ -48,8 +57,7 @@ impl EmbeddingModel {
             .run(ort::inputs!["waveform" => waveform_tensor])?;
         let output = first_output(outputs.values(), "chunk fbank output")?;
         let (shape, data) = output.try_extract_tensor::<f32>()?;
-        let frames = shape[1] as usize;
-        let features = shape[2] as usize;
+        let (frames, features) = fbank_hw_from_i64(shape, "chunk fbank output")?;
         array2_from_shape_vec(frames, features, data.to_vec(), "chunk fbank output")
     }
 
@@ -105,13 +113,8 @@ impl EmbeddingModel {
                 .run(ort::inputs!["waveform" => waveform_tensor])?;
             let output = first_output(outputs.values(), "batched chunk fbank output")?;
             let (shape, data) = output.try_extract_tensor::<f32>()?;
-            Self::push_fbank_batch_results(
-                &mut results,
-                data,
-                shape[1] as usize,
-                shape[2] as usize,
-                batch.len(),
-            )?;
+            let (frames, features) = fbank_hw_from_i64(shape, "batched chunk fbank output")?;
+            Self::push_fbank_batch_results(&mut results, data, frames, features, batch.len())?;
         }
 
         Ok(results)
@@ -164,10 +167,12 @@ impl EmbeddingModel {
             &self.buffers.split_fbank_batch_buffer,
             "native batched fbank input",
         )?;
-        let (data, out_shape) = native
+        let tensor = native
             .predict_cached(&[(&self.coreml.cached_fbank_batch_shape, input_data)])
             .map_err(|e| ort::Error::new(e.to_string()))?;
-        Self::push_fbank_batch_results(results, &data, out_shape[1], out_shape[2], count)?;
+        let (frames, features) =
+            fbank_hw_from_shape(tensor.layout().dims(), "native batched fbank output")?;
+        Self::push_fbank_batch_results(results, &tensor.into_data(), frames, features, count)?;
         Ok(true)
     }
 }

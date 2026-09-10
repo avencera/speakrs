@@ -11,8 +11,9 @@ Development CLI for speakrs. Two binaries:
 |---------|-------------|
 | `models` | Export ONNX models, CoreML conversion, deploy to HF |
 | `fixtures` | Regenerate test fixtures via Python |
-| `compare` | Diarization comparisons (run, rttm, accuracy) |
-| `bench` | Local benchmarks (run, compare, der) |
+| `compare rttm` | Informal RTTM timeline comparison |
+| `benchmark run` | Measure implementations and write schema version 2 results |
+| `benchmark score` | Score a stored schema version 2 run |
 | `dstack` | Remote GPU benchmarks via dstack |
 | `dataset` | Download/upload benchmark datasets |
 | `diarize` | Run speaker diarization on WAV files |
@@ -22,17 +23,14 @@ Development CLI for speakrs. Two binaries:
 ## Local benchmarks
 
 ```bash
-# single-file timing: speakrs vs pyannote
-cargo xtask bench run path/to/file.wav
-
-# multi-tool comparison on one file
-cargo xtask bench compare path/to/file.wav
-
 # DER evaluation on a dataset
-cargo xtask bench der --dataset voxconverse-dev --impls speakrs,pyannote
+cargo xtask benchmark run --dataset voxconverse-dev --impls cpu,pyannote-cpu
 
 # single-file benchmark
-cargo xtask bench der --file path/to/audio.wav --rttm path/to/ref.rttm --impls scm,sk
+cargo xtask benchmark run --file path/to/audio.wav --rttm path/to/ref.rttm --impls scm,sk
+
+# score a stored schema version 2 run
+cargo xtask benchmark score _benchmarks/20240101-010203
 ```
 
 ### DER implementation aliases

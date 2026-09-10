@@ -96,20 +96,40 @@ pub fn merge_segments(segments: &[Segment], max_gap: f64) -> Vec<Segment> {
         return Vec::new();
     }
 
-    let mut merged: Vec<Segment> = vec![segments[0].clone()];
-
-    for seg in &segments[1..] {
-        if let Some(last) = merged.last_mut()
-            && seg.speaker == last.speaker
-            && (seg.start - last.end) < max_gap
-        {
-            last.end = seg.end;
-            continue;
+    let mut speakers = Vec::new();
+    for segment in segments {
+        if !speakers.iter().any(|speaker| speaker == &segment.speaker) {
+            speakers.push(segment.speaker.clone());
         }
-
-        merged.push(seg.clone());
     }
 
+    let mut merged = Vec::new();
+    for speaker in speakers {
+        let mut speaker_segments: Vec<Segment> = segments
+            .iter()
+            .filter(|segment| segment.speaker == speaker)
+            .cloned()
+            .collect();
+        speaker_segments.sort_by(|left, right| left.start.total_cmp(&right.start));
+        let mut speaker_merged = vec![speaker_segments[0].clone()];
+        for segment in speaker_segments.into_iter().skip(1) {
+            let last = speaker_merged
+                .last_mut()
+                .expect("speaker merge is non-empty");
+            if (segment.start - last.end) < max_gap {
+                last.end = last.end.max(segment.end);
+            } else {
+                speaker_merged.push(segment);
+            }
+        }
+        merged.extend(speaker_merged);
+    }
+
+    merged.sort_by(|left, right| {
+        left.start
+            .total_cmp(&right.start)
+            .then(left.speaker.cmp(&right.speaker))
+    });
     merged
 }
 
@@ -167,6 +187,31 @@ mod tests {
 
         assert_eq!(merged.len(), 1);
         assert!((merged[0].end - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn merge_same_speaker_across_interleaved_other_speaker() {
+        let segments = vec![
+            Segment::new(0.0, 1.0, "SPEAKER_00"),
+            Segment::new(0.5, 0.8, "SPEAKER_01"),
+            Segment::new(1.05, 2.0, "SPEAKER_00"),
+        ];
+        let merged = merge_segments(&segments, 0.1);
+
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].speaker, "SPEAKER_00");
+        assert!((merged[0].start - 0.0).abs() < 1e-9);
+        assert!((merged[0].end - 2.0).abs() < 1e-9);
+        assert_eq!(merged[1].speaker, "SPEAKER_01");
+    }
+
+    #[test]
+    fn trailing_active_run_ends_at_last_frame_midpoint() {
+        let activations = array![[1.0], [1.0], [1.0]];
+        let segments = to_segments(&activations, 0.1, 0.2);
+        assert_eq!(segments.len(), 1);
+        assert!((segments[0].start - 0.1).abs() < 1e-9);
+        assert!((segments[0].end - 0.3).abs() < 1e-9);
     }
 
     #[test]

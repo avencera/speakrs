@@ -41,6 +41,10 @@ pub fn load_wav_samples(path: &str) -> Result<(Vec<f32>, u32)> {
 
         match chunk_id {
             b"fmt " => {
+                ensure!(
+                    chunk_size >= 16,
+                    "wav fmt chunk is {chunk_size} bytes; expected at least 16"
+                );
                 let mut fmt = vec![0u8; chunk_size];
                 reader.read_exact(&mut fmt)?;
                 let audio_format = read_u16(&fmt[0..2], "wav fmt audio format")?;
@@ -94,4 +98,63 @@ pub fn load_wav_samples(path: &str) -> Result<(Vec<f32>, u32)> {
     }
 
     bail!("no data chunk found in WAV")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_wav_samples;
+    use std::io::Write;
+
+    #[test]
+    fn short_fmt_chunk_returns_typed_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("short-fmt.wav");
+        let mut bytes = Vec::new();
+        bytes.extend(b"RIFF");
+        bytes.extend(36u32.to_le_bytes());
+        bytes.extend(b"WAVE");
+        bytes.extend(b"fmt ");
+        bytes.extend(8u32.to_le_bytes());
+        bytes.extend([0u8; 8]);
+        bytes.extend(b"data");
+        bytes.extend(0u32.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+
+        let error = load_wav_samples(path.to_str().unwrap()).unwrap_err();
+        assert!(
+            error.to_string().contains("fmt chunk"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn valid_pcm_wav_loads_samples() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ok.wav");
+        let mut file = std::fs::File::create(&path).unwrap();
+        let samples = [0i16, 16384, -16384];
+        let data_bytes = samples.len() * 2;
+        let riff_size = 36 + data_bytes;
+        file.write_all(b"RIFF").unwrap();
+        file.write_all(&(riff_size as u32).to_le_bytes()).unwrap();
+        file.write_all(b"WAVE").unwrap();
+        file.write_all(b"fmt ").unwrap();
+        file.write_all(&16u32.to_le_bytes()).unwrap();
+        file.write_all(&1u16.to_le_bytes()).unwrap();
+        file.write_all(&1u16.to_le_bytes()).unwrap();
+        file.write_all(&16_000u32.to_le_bytes()).unwrap();
+        file.write_all(&32_000u32.to_le_bytes()).unwrap();
+        file.write_all(&2u16.to_le_bytes()).unwrap();
+        file.write_all(&16u16.to_le_bytes()).unwrap();
+        file.write_all(b"data").unwrap();
+        file.write_all(&(data_bytes as u32).to_le_bytes()).unwrap();
+        for sample in samples {
+            file.write_all(&sample.to_le_bytes()).unwrap();
+        }
+        drop(file);
+
+        let (loaded, sample_rate) = load_wav_samples(path.to_str().unwrap()).unwrap();
+        assert_eq!(sample_rate, 16_000);
+        assert_eq!(loaded.len(), 3);
+    }
 }

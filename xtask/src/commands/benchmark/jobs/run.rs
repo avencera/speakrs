@@ -146,7 +146,7 @@ pub fn run_benchmark_job(
                     impl_name,
                     &result,
                     total_audio_seconds,
-                );
+                )?;
                 all_results.insert(impl_name.to_string(), result);
                 continue;
             }
@@ -163,7 +163,7 @@ pub fn run_benchmark_job(
                     impl_name,
                     &result,
                     total_audio_seconds,
-                );
+                )?;
                 all_results.insert(impl_name.to_string(), result);
                 continue;
             }
@@ -197,7 +197,7 @@ pub fn run_benchmark_job(
             benchmark_output.total_seconds,
             acc.file_count,
         );
-        super::der::run::write_impl_result(&run_dir, impl_name, &result, total_audio_seconds);
+        super::der::run::write_impl_result(&run_dir, impl_name, &result, total_audio_seconds)?;
         all_results.insert(impl_name.to_string(), result);
     }
 

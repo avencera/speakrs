@@ -15,11 +15,10 @@ use super::post_inference::post_inference;
 #[cfg(feature = "_metrics")]
 use super::types::InternalInferenceStageTimings;
 use super::types::{
-    BatchInput, ChunkEmbeddings, ChunkLayout, ChunkSpeakerClusters, DecodedSegmentations,
-    DiarizationResult, DiscreteDiarization, InferenceArtifacts, PipelineError, SpeakerCountTrack,
-    chunk_audio_raw,
+    BatchInput, DecodedSegmentations, DiarizationResult, InferenceArtifacts, PipelineError,
 };
-use super::write_speaker_mask_to_slice;
+pub(super) use super::types::{ChunkEmbeddings, ChunkLayout, chunk_audio_raw};
+pub(super) use super::write_speaker_mask_to_slice;
 
 mod collect;
 mod error;
@@ -29,9 +28,9 @@ mod prep;
 
 use collect::{FileCollector, build_chunk_artifacts};
 use error::{backend_error, invariant_error, worker_panic};
-use gpu::{BatchGpuWorker, TaggedEmbedded, TaggedPrepared, chunk_embedding_resources};
-use orchestrate::{run_pipelined, run_sequential_chunks, setup_chunk_embedding};
-use prep::{BatchPrepWorker, ChunkPrep, DecodedChunk, PrepScratch, TaggedDecoded};
+use gpu::{GpuWorker, chunk_embedding_resources};
+use orchestrate::{ChunkExecution, ChunkExecutionPlan, run_pipelined, run_sequential_chunks};
+use prep::{ChunkJob, ChunkPrep, PrepScratch, PrepWorker};
 
 /// Audio consumed per 10s fbank call when stitching a long fbank from segments.
 /// Each call yields FBANK_FRAMES frames, which covers fewer samples than the 10s
@@ -85,28 +84,28 @@ pub(super) fn try_chunk_embedding(
     audio: &[f32],
     execution_policy: CoreMlChunkExecutionPolicy,
 ) -> Result<Option<InferenceArtifacts>, PipelineError> {
-    let Some((chunk_win_capacity, total_windows, use_pipelined, chunk_resources)) =
-        setup_chunk_embedding(seg_model, emb_model, audio)?
-    else {
+    let Some(plan) = ChunkExecutionPlan::resolve(seg_model, emb_model, audio)? else {
         return Ok(None);
     };
+    let use_pipelined = plan.is_pipelined();
+    let chunk_win_capacity = plan.chunk_win_capacity;
 
     let inference_start = std::time::Instant::now();
     let step_seconds = seg_model.step_seconds();
     let params = ChunkParams {
-        step_samples: seg_model.step_samples(),
-        window_samples: seg_model.window_samples(),
+        step_samples: plan.layout.step_samples,
+        window_samples: plan.layout.window_samples,
         num_speakers: 3,
         min_num_samples: emb_model.min_num_samples(),
         chunk_win_capacity,
-        total_windows,
+        total_windows: plan.total_windows,
         segmentation_workers: execution_policy.segmentation_workers,
         fbank_preparation_workers: execution_policy.fbank_preparation_workers,
         fbank_normalization_scope: execution_policy.fbank_normalization_scope,
     };
 
     let (seg_tx, seg_rx) = crossbeam_channel::bounded::<Array2<f32>>(100);
-    let (chunk_tx, chunk_rx) = crossbeam_channel::bounded::<DecodedChunk>(100);
+    let (chunk_tx, chunk_rx) = crossbeam_channel::bounded::<ChunkJob>(100);
 
     std::thread::scope(|scope| {
         let seg_start = std::time::Instant::now();
@@ -121,19 +120,16 @@ pub(super) fn try_chunk_embedding(
             Ok(seg_start.elapsed())
         });
 
-        let bridge_handle = scope.spawn(move || {
+        let bridge_handle = scope.spawn(move || -> Result<(), PipelineError> {
             let mut group = Vec::with_capacity(chunk_win_capacity);
             let mut global_start = 0usize;
 
             for raw_window in &seg_rx {
-                group.push(powerset.hard_decode(&raw_window));
+                group.push(powerset.hard_decode(&raw_window)?);
 
                 if group.len() == chunk_win_capacity {
                     if chunk_tx
-                        .send(DecodedChunk {
-                            global_start,
-                            decoded_chunk: std::mem::take(&mut group),
-                        })
+                        .send(ChunkJob::new(0, global_start, std::mem::take(&mut group))?)
                         .is_err()
                     {
                         break;
@@ -144,21 +140,19 @@ pub(super) fn try_chunk_embedding(
             }
 
             if !group.is_empty() {
-                let _ = chunk_tx.send(DecodedChunk {
-                    global_start,
-                    decoded_chunk: group,
-                });
+                let _ = chunk_tx.send(ChunkJob::new(0, global_start, group)?);
             }
+            Ok(())
         });
 
         let emb_start = std::time::Instant::now();
-        let summary = if use_pipelined {
-            let Some(resources) = chunk_resources else {
-                return Ok(None);
-            };
-            run_pipelined(scope, emb_start, resources, &chunk_rx, audio, &params)?
-        } else {
-            run_sequential_chunks(emb_model, &chunk_rx, audio, &params, emb_start)?
+        let summary = match plan.execution {
+            ChunkExecution::Pipelined { resources } => {
+                run_pipelined(scope, emb_start, resources, chunk_rx, audio, &params)?
+            }
+            ChunkExecution::Sequential => {
+                run_sequential_chunks(emb_model, &chunk_rx, audio, &params, emb_start)?
+            }
         };
         let emb_elapsed = emb_start.elapsed();
 
@@ -167,7 +161,7 @@ pub(super) fn try_chunk_embedding(
             .map_err(|_| worker_panic("segmentation"))??;
         bridge_handle
             .join()
-            .map_err(|_| worker_panic("segmentation bridge"))?;
+            .map_err(|_| worker_panic("segmentation bridge"))??;
         trace!(
             seg_thread_ms = seg_thread_elapsed.as_millis(),
             seg_wall_ms = seg_start.elapsed().as_millis(),
@@ -270,7 +264,7 @@ pub(super) fn try_batch_chunk_embedding(
         return Ok(None);
     };
 
-    let largest = resources.largest_session()?;
+    let largest = resources.largest_session()?.clone();
     let prep_config = ChunkPrep {
         step_samples,
         window_samples,
@@ -278,7 +272,7 @@ pub(super) fn try_batch_chunk_embedding(
         min_num_samples,
         largest_fbank_frames: largest.fbank_frames,
         largest_num_masks: largest.num_masks,
-        max_active: chunk_win_capacity * num_speakers,
+        max_active: largest.num_windows * num_speakers,
         fbank_30s: resources.fbank_30s.clone(),
         fbank_10s: resources.fbank_10s.clone(),
         fbank_normalization_scope: execution_policy.fbank_normalization_scope,
@@ -287,9 +281,9 @@ pub(super) fn try_batch_chunk_embedding(
     let audios: Vec<&[f32]> = files.iter().map(|file| file.audio).collect();
     let batch_start = std::time::Instant::now();
 
-    let (decoded_tx, decoded_rx) = crossbeam_channel::bounded::<TaggedDecoded>(100);
-    let (prepared_tx, prepared_rx) = crossbeam_channel::bounded::<TaggedPrepared>(48);
-    let (embedded_tx, embedded_rx) = crossbeam_channel::bounded::<TaggedEmbedded>(16);
+    let (decoded_tx, decoded_rx) = crossbeam_channel::bounded::<ChunkJob>(100);
+    let (prepared_tx, prepared_rx) = crossbeam_channel::bounded(48);
+    let (embedded_tx, embedded_rx) = crossbeam_channel::bounded(16);
 
     std::thread::scope(|scope| {
         let audios_ref = &audios;
@@ -301,35 +295,36 @@ pub(super) fn try_batch_chunk_embedding(
 
                 std::thread::scope(|inner| {
                     let decoded_tx_bridge = &decoded_tx_seg;
-                    let bridge_handle = inner.spawn(move || {
+                    let bridge_handle = inner.spawn(move || -> Result<(), PipelineError> {
                         let mut group = Vec::with_capacity(chunk_win_capacity);
-                        let mut local_start = 0usize;
+                        let mut window_start = 0usize;
 
                         for raw_window in &seg_rx {
-                            group.push(powerset.hard_decode(&raw_window));
+                            group.push(powerset.hard_decode(&raw_window)?);
                             if group.len() == chunk_win_capacity {
                                 if decoded_tx_bridge
-                                    .send(TaggedDecoded {
+                                    .send(ChunkJob::new(
                                         file_idx,
-                                        local_start,
-                                        decoded_chunk: std::mem::take(&mut group),
-                                    })
+                                        window_start,
+                                        std::mem::take(&mut group),
+                                    )?)
                                     .is_err()
                                 {
-                                    return;
+                                    return Ok(());
                                 }
-                                local_start += 1;
+                                window_start += chunk_win_capacity;
                                 group = Vec::with_capacity(chunk_win_capacity);
                             }
                         }
 
                         if !group.is_empty() {
-                            let _ = decoded_tx_bridge.send(TaggedDecoded {
+                            let _ = decoded_tx_bridge.send(ChunkJob::new(
                                 file_idx,
-                                local_start,
-                                decoded_chunk: group,
-                            });
+                                window_start,
+                                group,
+                            )?);
                         }
+                        Ok(())
                     });
 
                     seg_model.run_streaming_parallel(
@@ -341,7 +336,7 @@ pub(super) fn try_batch_chunk_embedding(
 
                     bridge_handle
                         .join()
-                        .map_err(|_| worker_panic("batch segmentation bridge"))?;
+                        .map_err(|_| worker_panic("batch segmentation bridge"))??;
                     Ok::<(), PipelineError>(())
                 })?;
             }
@@ -352,21 +347,20 @@ pub(super) fn try_batch_chunk_embedding(
 
         let mut prep_handles = Vec::with_capacity(fbank_preparation_workers);
         for _ in 0..fbank_preparation_workers {
-            let worker = BatchPrepWorker {
+            let worker = PrepWorker {
                 prep: prep_config.clone(),
                 scratch: PrepScratch::new(window_samples),
             };
             let prepared_tx = prepared_tx.clone();
             let decoded_rx = decoded_rx.clone();
-            prep_handles
-                .push(scope.spawn(move || worker.run(audios_ref, &decoded_rx, prepared_tx)));
+            prep_handles.push(scope.spawn(move || worker.run(audios_ref, decoded_rx, prepared_tx)));
         }
         drop(prepared_tx);
 
-        let gpu_worker = BatchGpuWorker {
-            model: largest.session.model,
-            fbank_shape: largest.session.cached_fbank_shape,
-            masks_shape: largest.session.cached_masks_shape,
+        let gpu_worker = GpuWorker {
+            model: largest.handle.model,
+            fbank_shape: largest.handle.cached_fbank_shape,
+            masks_shape: largest.handle.cached_masks_shape,
             prep: prep_config,
             scratch: PrepScratch::new(window_samples),
         };
@@ -375,6 +369,7 @@ pub(super) fn try_batch_chunk_embedding(
         let gpu_handle = scope.spawn(move || {
             gpu_worker.run(audios_ref, prepared_rx, gpu_decoded_rx, gpu_embedded_tx)
         });
+        drop(decoded_rx);
         drop(embedded_tx);
 
         let mut collectors: Vec<Option<FileCollector>> =
@@ -382,46 +377,59 @@ pub(super) fn try_batch_chunk_embedding(
         let mut results: Vec<Option<DiarizationResult>> =
             std::iter::repeat_with(|| None).take(files.len()).collect();
         let mut files_complete = 0usize;
+        let mut collect_error = None;
 
-        for tagged in std::iter::from_fn(|| embedded_rx.recv().ok()) {
-            let collector = collectors[tagged.file_idx].get_or_insert_with(|| {
-                let num_frames = tagged.embedded.decoded_chunk[0].nrows();
-                let max_slots = expected_windows[tagged.file_idx] + chunk_win_capacity;
+        for embedded in std::iter::from_fn(|| embedded_rx.recv().ok()) {
+            let file_idx = embedded.file_index;
+            let collector = collectors[file_idx].get_or_insert_with(|| {
+                let num_frames = embedded.decoded[0].nrows();
+                let max_slots = expected_windows[file_idx] + chunk_win_capacity;
                 FileCollector::new(
                     max_slots,
                     num_frames,
                     num_speakers,
-                    expected_chunks[tagged.file_idx],
+                    expected_chunks[file_idx],
                 )
             });
 
-            collector.add(
-                tagged.local_start,
-                chunk_win_capacity,
-                num_speakers,
-                tagged.embedded,
-            )?;
+            if let Err(error) = collector.add(chunk_win_capacity, num_speakers, embedded) {
+                collect_error = Some(error);
+                break;
+            }
 
             if collector.is_complete() {
-                let collector = collectors[tagged.file_idx].take().ok_or_else(|| {
-                    invariant_error(format!(
-                        "collector for file {} completed without state",
-                        tagged.file_idx
-                    ))
-                })?;
+                let collector = match collectors[file_idx].take() {
+                    Some(collector) => collector,
+                    None => {
+                        collect_error = Some(invariant_error(format!(
+                            "collector for file {file_idx} completed without state"
+                        )));
+                        break;
+                    }
+                };
                 if let Some(artifacts) =
                     collector.into_artifacts(step_seconds, step_samples, window_samples)
                 {
-                    results[tagged.file_idx] = Some(post_inference(artifacts, config, plda)?);
+                    match post_inference(artifacts, config, plda) {
+                        Ok(result) => results[file_idx] = Some(result),
+                        Err(error) => {
+                            collect_error = Some(error);
+                            break;
+                        }
+                    }
                 }
                 files_complete += 1;
             }
         }
+        drop(embedded_rx);
 
         join_scoped_result("batch segmentation", seg_handle)?;
         let _gpu_stats = join_scoped_result("batch chunk embedding gpu", gpu_handle)?;
         for handle in prep_handles {
             join_scoped_result("batch chunk embedding prep", handle)?;
+        }
+        if let Some(error) = collect_error {
+            return Err(error);
         }
 
         debug!(
@@ -431,22 +439,33 @@ pub(super) fn try_batch_chunk_embedding(
             "Batch chunk embedding complete"
         );
 
-        Ok(results
-            .into_iter()
-            .map(|result| {
-                result.unwrap_or_else(|| DiarizationResult {
-                    segmentations: DecodedSegmentations(Array3::zeros((0, 0, num_speakers))),
-                    embeddings: ChunkEmbeddings(Array3::from_elem(
-                        (0, num_speakers, 256),
-                        f32::NAN,
-                    )),
-                    speaker_count: SpeakerCountTrack(Vec::new()),
-                    hard_clusters: ChunkSpeakerClusters(Array2::zeros((0, 0))),
-                    discrete_diarization: DiscreteDiarization(Array2::zeros((0, 0))),
-                    segments: Vec::new(),
-                })
-            })
-            .collect())
+        completed_file_results(results)
     })
     .map(Some)
+}
+
+fn completed_file_results(
+    results: Vec<Option<DiarizationResult>>,
+) -> Result<Vec<DiarizationResult>, PipelineError> {
+    let mut completed = Vec::with_capacity(results.len());
+    for (file_idx, result) in results.into_iter().enumerate() {
+        let Some(result) = result else {
+            return Err(invariant_error(format!(
+                "missing batch chunk result for file {file_idx}"
+            )));
+        };
+        completed.push(result);
+    }
+    Ok(completed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::completed_file_results;
+
+    #[test]
+    fn missing_batch_file_result_is_an_error() {
+        assert!(completed_file_results(vec![None]).is_err());
+        assert!(completed_file_results(Vec::new()).is_ok());
+    }
 }

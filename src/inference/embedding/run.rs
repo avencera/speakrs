@@ -1,7 +1,7 @@
 use ndarray::{Array1, s};
 use ort::value::TensorRef;
 
-use super::{EmbeddingModel, first_output, select_mask};
+use super::{EmbeddingModel, embedding_vector, first_output, select_mask};
 
 impl EmbeddingModel {
     /// Extract a speaker embedding from raw audio with a uniform mask
@@ -43,6 +43,6 @@ impl EmbeddingModel {
             .run(ort::inputs!["waveform" => waveform_tensor, "weights" => weights_tensor])?;
         let output = first_output(outputs.values(), "masked embedding output")?;
         let (_shape, data) = output.try_extract_tensor::<f32>()?;
-        Ok(Array1::from_vec(data.to_vec()))
+        embedding_vector(data.to_vec(), "masked embedding output")
     }
 }

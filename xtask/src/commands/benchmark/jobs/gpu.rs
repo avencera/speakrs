@@ -1,56 +1,63 @@
 use color_eyre::eyre::{Result, bail};
 
 use super::super::ImplType;
-
-const GPU_IMPLS: &[(&str, &str, &str, ImplType)] = &[
-    ("speakrs", "sg", "speakrs CUDA", ImplType::Speakrs("cuda")),
-    (
-        "speakrs-fast",
-        "sgf",
-        "speakrs CUDA Fast",
-        ImplType::Speakrs("cuda-fast"),
-    ),
-    (
-        "pyannote",
-        "pg",
-        "pyannote CUDA",
-        ImplType::Pyannote("cuda"),
-    ),
-];
+use crate::catalog::{ImplementationCatalog, PyannoteDevice, RunnerKind, SpeakrsMode};
 
 pub(super) fn resolve_gpu_impls(impls: &[String]) -> Vec<(&'static str, ImplType)> {
-    if impls.is_empty() {
-        GPU_IMPLS
-            .iter()
-            .map(|(_, _, display_name, impl_type)| (*display_name, *impl_type))
-            .collect()
+    let selected = if impls.is_empty() {
+        ImplementationCatalog::gpu().collect::<Vec<_>>()
     } else {
-        GPU_IMPLS
-            .iter()
-            .filter(|(cli_id, alias, _, _)| {
-                impls.iter().any(|value| value == cli_id || value == alias)
-            })
-            .map(|(_, _, display_name, impl_type)| (*display_name, *impl_type))
+        ImplementationCatalog::resolve_many(impls)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|spec| ImplementationCatalog::gpu().any(|gpu| gpu.id == spec.id))
             .collect()
-    }
+    };
+    selected
+        .into_iter()
+        .map(|spec| {
+            let impl_type = match spec.runner {
+                RunnerKind::Speakrs(SpeakrsMode::Cuda) => ImplType::Speakrs("cuda"),
+                RunnerKind::Speakrs(SpeakrsMode::CudaFast) => ImplType::Speakrs("cuda-fast"),
+                RunnerKind::Pyannote(PyannoteDevice::Cuda) => ImplType::Pyannote("cuda"),
+                other => unreachable!("gpu catalog entry {other:?}"),
+            };
+            (spec.display_name, impl_type)
+        })
+        .collect()
 }
 
-fn resolve_gpu_impl(name: &str) -> Option<usize> {
-    GPU_IMPLS
-        .iter()
-        .position(|(cli_id, alias, _, _)| *cli_id == name || *alias == name)
-}
-
-pub fn gpu_impls() -> &'static [(&'static str, &'static str, &'static str, ImplType)] {
-    GPU_IMPLS
+pub fn gpu_impls() -> Vec<(&'static str, &'static str, &'static str)> {
+    ImplementationCatalog::gpu()
+        .map(|spec| {
+            (
+                spec.cli_name(),
+                spec.aliases.first().copied().unwrap_or(""),
+                spec.display_name,
+            )
+        })
+        .collect()
 }
 
 pub fn validate_gpu_impls(impls: &[String]) -> Result<()> {
+    if impls.is_empty() {
+        return Ok(());
+    }
+    let gpu: Vec<_> = ImplementationCatalog::gpu().collect();
     for id in impls {
-        if resolve_gpu_impl(id).is_none() {
-            let available: Vec<String> = GPU_IMPLS
+        if !gpu
+            .iter()
+            .any(|spec| spec.cli_name() == id || spec.aliases.contains(&id.as_str()))
+        {
+            let available: Vec<String> = gpu
                 .iter()
-                .map(|(cli_id, alias, _, _)| format!("{cli_id} ({alias})"))
+                .map(|spec| {
+                    format!(
+                        "{} ({})",
+                        spec.cli_name(),
+                        spec.aliases.first().copied().unwrap_or("")
+                    )
+                })
                 .collect();
             bail!(
                 "unknown implementation: {id}. Available: {}",

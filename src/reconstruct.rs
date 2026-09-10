@@ -7,98 +7,57 @@ use crate::pipeline::{
 
 pub struct Reconstructor<'a> {
     segmentations: &'a DecodedSegmentations,
-    hard_clusters: Option<&'a ChunkSpeakerClusters>,
+    hard_clusters: &'a ChunkSpeakerClusters,
     start_frames: &'a [usize],
-    warmup_frames: usize,
 }
 
 impl<'a> Reconstructor<'a> {
     pub fn new(
         segmentations: &'a DecodedSegmentations,
-        start_frames: &'a [usize],
-        warmup_frames: usize,
-    ) -> Self {
-        Self {
-            segmentations,
-            hard_clusters: None,
-            start_frames,
-            warmup_frames,
-        }
-    }
-
-    pub fn with_clusters(
-        segmentations: &'a DecodedSegmentations,
         hard_clusters: &'a ChunkSpeakerClusters,
         start_frames: &'a [usize],
-        warmup_frames: usize,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        let num_chunks = segmentations.shape()[0];
+        if hard_clusters.nrows() != num_chunks {
+            return Err(format!(
+                "cluster rows {} do not match segmentation chunks {num_chunks}",
+                hard_clusters.nrows()
+            ));
+        }
+        if hard_clusters.ncols() != segmentations.shape()[2] {
+            return Err(format!(
+                "cluster columns {} do not match local speakers {}",
+                hard_clusters.ncols(),
+                segmentations.shape()[2]
+            ));
+        }
+        if start_frames.len() != num_chunks {
+            return Err(format!(
+                "start-frame count {} does not match segmentation chunks {num_chunks}",
+                start_frames.len()
+            ));
+        }
+        Ok(Self {
             segmentations,
-            hard_clusters: Some(hard_clusters),
+            hard_clusters,
             start_frames,
-            warmup_frames,
-        }
-    }
-
-    pub fn speaker_count(&self, output_frames: usize) -> SpeakerCountTrack {
-        let num_chunks = self.segmentations.shape()[0];
-        if num_chunks == 0 {
-            return SpeakerCountTrack(Vec::new());
-        }
-
-        let num_frames = self.segmentations.shape()[1];
-        let warmup_end = num_frames.saturating_sub(self.warmup_frames);
-        let mut numerator = vec![0.0f32; output_frames];
-        let mut denominator = vec![0.0f32; output_frames];
-
-        for (chunk_idx, &start_frame) in self.start_frames.iter().enumerate().take(num_chunks) {
-            for frame_idx in self.warmup_frames..warmup_end {
-                let out_frame = start_frame + frame_idx;
-                if out_frame >= output_frames {
-                    continue;
-                }
-
-                numerator[out_frame] += self
-                    .segmentations
-                    .slice(s![chunk_idx, frame_idx, ..])
-                    .iter()
-                    .sum::<f32>();
-                denominator[out_frame] += 1.0;
-            }
-        }
-
-        SpeakerCountTrack(
-            numerator
-                .into_iter()
-                .zip(denominator)
-                .map(|(sum, weight)| {
-                    if weight == 0.0 {
-                        0
-                    } else {
-                        round_ties_even(sum / weight).max(0.0) as usize
-                    }
-                })
-                .collect(),
-        )
+        })
     }
 
     pub(crate) fn frame_activations(&self, speaker_count: &SpeakerCountTrack) -> FrameActivations {
-        let Some(hard_clusters) = self.hard_clusters else {
-            return FrameActivations(Array2::zeros((speaker_count.len(), 0)));
-        };
         let num_chunks = self.segmentations.shape()[0];
         let num_frames = self.segmentations.shape()[1];
-        let num_clusters = hard_clusters
+        let num_clusters = self
+            .hard_clusters
             .iter()
             .copied()
             .filter(|cluster| *cluster >= 0)
             .max()
             .map_or(0, |cluster| cluster as usize + 1);
-        let warmup_end = num_frames.saturating_sub(self.warmup_frames);
         let mut activations = Array2::<f32>::zeros((speaker_count.len(), num_clusters));
 
         for (chunk_idx, &start_frame) in self.start_frames.iter().enumerate().take(num_chunks) {
-            let chunk_labels = hard_clusters.row(chunk_idx);
+            let chunk_labels = self.hard_clusters.row(chunk_idx);
             let chunk_segmentations = self.segmentations.slice(s![chunk_idx, .., ..]);
             let local_cluster_mapping = build_cluster_mapping(&chunk_labels, num_clusters);
 
@@ -107,7 +66,7 @@ impl<'a> Reconstructor<'a> {
                     continue;
                 }
 
-                for frame_idx in self.warmup_frames..warmup_end {
+                for frame_idx in 0..num_frames {
                     let out_frame = start_frame + frame_idx;
                     if out_frame >= speaker_count.len() {
                         continue;
@@ -225,26 +184,92 @@ fn top_k_indices_smoothed(
     epsilon: f32,
 ) -> Vec<usize> {
     let num_columns = matrix.ncols();
+    if k == 0 {
+        return Vec::new();
+    }
     if k >= num_columns {
         return (0..num_columns).collect();
     }
 
-    let mut indexed: Vec<(usize, f32)> = (0..num_columns)
+    let mut ranked: Vec<(usize, f32)> = (0..num_columns)
         .map(|column_idx| (column_idx, matrix[[frame_idx, column_idx]]))
         .collect();
+    ranked.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
 
-    indexed.sort_by(|left, right| {
-        let score_diff = right.1 - left.1;
-        if score_diff.abs() < epsilon {
-            let left_was_active = previous_speakers.contains(&left.0);
-            let right_was_active = previous_speakers.contains(&right.0);
-            right_was_active.cmp(&left_was_active)
-        } else {
-            right.1.total_cmp(&left.1)
+    let mut selected: Vec<(usize, f32)> = ranked.iter().copied().take(k).collect();
+    let unselected_priors: Vec<(usize, f32)> = ranked
+        .iter()
+        .copied()
+        .filter(|(speaker, _)| {
+            previous_speakers.contains(speaker)
+                && selected
+                    .iter()
+                    .all(|(selected_speaker, _)| selected_speaker != speaker)
+        })
+        .collect();
+
+    for prior in unselected_priors {
+        let Some(weakest_pos) = selected
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, (speaker, _))| !previous_speakers.contains(speaker))
+            .map(|(pos, _)| pos)
+        else {
+            break;
+        };
+        let weak_score = selected[weakest_pos].1;
+        if (weak_score - prior.1).abs() < epsilon {
+            selected[weakest_pos] = prior;
         }
-    });
+    }
 
-    indexed.into_iter().take(k).map(|(idx, _)| idx).collect()
+    selected.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
+    selected.into_iter().map(|(speaker, _)| speaker).collect()
+}
+
+pub(crate) fn aggregate_speaker_count(
+    segmentations: &DecodedSegmentations,
+    start_frames: &[usize],
+    output_frames: usize,
+) -> SpeakerCountTrack {
+    let num_chunks = segmentations.shape()[0];
+    if num_chunks == 0 {
+        return SpeakerCountTrack(Vec::new());
+    }
+
+    let num_frames = segmentations.shape()[1];
+    let mut numerator = vec![0.0f32; output_frames];
+    let mut denominator = vec![0.0f32; output_frames];
+
+    for (chunk_idx, &start_frame) in start_frames.iter().enumerate().take(num_chunks) {
+        for frame_idx in 0..num_frames {
+            let out_frame = start_frame + frame_idx;
+            if out_frame >= output_frames {
+                continue;
+            }
+
+            numerator[out_frame] += segmentations
+                .slice(s![chunk_idx, frame_idx, ..])
+                .iter()
+                .sum::<f32>();
+            denominator[out_frame] += 1.0;
+        }
+    }
+
+    SpeakerCountTrack(
+        numerator
+            .into_iter()
+            .zip(denominator)
+            .map(|(sum, weight)| {
+                if weight == 0.0 {
+                    0
+                } else {
+                    round_ties_even(sum / weight).max(0.0) as usize
+                }
+            })
+            .collect(),
+    )
 }
 
 fn round_ties_even(value: f32) -> f32 {
@@ -280,9 +305,7 @@ mod tests {
             [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
             [[0.0, 1.0], [0.0, 1.0], [1.0, 0.0]],
         ]);
-        let reconstructor = Reconstructor::new(&segmentations, &[0, 1], 0);
-
-        let count = reconstructor.speaker_count(4);
+        let count = aggregate_speaker_count(&segmentations, &[0, 1], 4);
 
         assert_eq!(&*count, &[1, 1, 1, 1]);
     }
@@ -292,13 +315,61 @@ mod tests {
         let segmentations =
             DecodedSegmentations(array![[[1.0, 0.0], [0.5, 0.5]], [[0.0, 1.0], [0.2, 0.8]]]);
         let hard_clusters = ChunkSpeakerClusters(array![[0, 1], [0, 1]]);
-        let reconstructor =
-            Reconstructor::with_clusters(&segmentations, &hard_clusters, &[0, 1], 0);
+        let reconstructor = Reconstructor::new(&segmentations, &hard_clusters, &[0, 1]).unwrap();
         let speaker_count = SpeakerCountTrack(vec![1, 1, 1]);
 
         let result = reconstructor.reconstruct(&speaker_count);
 
         let expected: Array2<f32> = array![[1.0, 0.0], [0.0, 1.0], [0.0, 1.0]];
         assert_eq!(&*result, &expected);
+    }
+
+    #[test]
+    fn reconstructor_rejects_incomplete_inputs() {
+        let segmentations =
+            DecodedSegmentations(array![[[1.0, 0.0], [0.5, 0.5]], [[0.0, 1.0], [0.2, 0.8]]]);
+        let hard_clusters = ChunkSpeakerClusters(array![[0, 1]]);
+        let error = match Reconstructor::new(&segmentations, &hard_clusters, &[0, 1]) {
+            Ok(_) => panic!("expected incomplete reconstruction inputs to fail"),
+            Err(error) => error,
+        };
+        assert!(error.contains("cluster rows"));
+    }
+
+    #[test]
+    fn chained_near_tie_smoothing_is_permutation_invariant() {
+        let scores = [0.00_f32, 0.09, 0.18];
+        let epsilon = 0.1;
+        let k = 2;
+        let previous = [0usize];
+        let mut selected_sets = Vec::new();
+
+        for permutation in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let mut matrix = Array2::<f32>::zeros((1, 3));
+            for (column, &source) in permutation.iter().enumerate() {
+                matrix[[0, column]] = scores[source];
+            }
+            let previous_columns: Vec<usize> = permutation
+                .iter()
+                .enumerate()
+                .filter_map(|(column, &source)| (source == previous[0]).then_some(column))
+                .collect();
+            let selected = top_k_indices_smoothed(&matrix, 0, k, &previous_columns, epsilon);
+            let mut original: Vec<usize> =
+                selected.iter().map(|&column| permutation[column]).collect();
+            original.sort_unstable();
+            selected_sets.push(original);
+        }
+
+        for selected in &selected_sets {
+            assert_eq!(selected, &selected_sets[0]);
+        }
     }
 }

@@ -13,6 +13,7 @@ mod array;
 mod path;
 mod runtime;
 
+use crate::inference::geometry::{CoreMlTensor, GeometryError, TensorLayout};
 use array::{
     contiguous_strides, create_multi_array_cached_with_deallocator,
     create_multi_array_with_deallocator, extract_output, ns_number_array,
@@ -41,6 +42,7 @@ pub(crate) enum CoreMlError {
     PredictionFailed(String),
     OutputNotFound(String),
     ArrayCreationFailed(String),
+    InvalidGeometry(GeometryError),
 }
 
 impl fmt::Display for CoreMlError {
@@ -50,11 +52,18 @@ impl fmt::Display for CoreMlError {
             Self::PredictionFailed(msg) => write!(f, "CoreML prediction failed: {msg}"),
             Self::OutputNotFound(name) => write!(f, "CoreML output '{name}' not found"),
             Self::ArrayCreationFailed(msg) => write!(f, "CoreML array creation failed: {msg}"),
+            Self::InvalidGeometry(error) => write!(f, "{error}"),
         }
     }
 }
 
 impl std::error::Error for CoreMlError {}
+
+impl From<GeometryError> for CoreMlError {
+    fn from(error: GeometryError) -> Self {
+        Self::InvalidGeometry(error)
+    }
+}
 
 /// Pre-computed NSArray<NSNumber> for shape and strides, avoiding per-call allocation
 pub(crate) struct CachedInputShape {
@@ -66,18 +75,37 @@ pub(crate) struct CachedInputShape {
 
 impl CachedInputShape {
     pub fn new(name: &str, shape: &[usize]) -> Self {
+        Self::try_new(name, shape).expect("CoreML input shape product must fit in usize")
+    }
+
+    pub fn try_new(name: &str, shape: &[usize]) -> Result<Self, CoreMlError> {
+        let layout = TensorLayout::from_dims(shape, "coreml input")?;
         let ns_shape = ns_number_array(shape);
         let ns_strides = ns_number_array(&contiguous_strides(shape));
 
-        let total_elements = shape.iter().product();
-
-        Self {
+        Ok(Self {
             name: NSString::from_str(name),
             ns_shape,
             ns_strides,
-            total_elements,
-        }
+            total_elements: layout.element_count(),
+        })
     }
+
+    /// Bind a flat buffer to this cached shape before native array construction
+    pub fn bind<'a>(&'a self, data: &'a [f32]) -> Result<BoundCoreMlInput<'a>, CoreMlError> {
+        crate::inference::geometry::require_exact_len(
+            data.len(),
+            self.total_elements,
+            "coreml input",
+        )?;
+        Ok(BoundCoreMlInput { cached: self, data })
+    }
+}
+
+/// Checked CoreML input slice paired with its cached shape
+pub(crate) struct BoundCoreMlInput<'a> {
+    pub cached: &'a CachedInputShape,
+    pub data: &'a [f32],
 }
 
 // SAFETY: CachedInputShape fields are immutable after construction and only accessed via &self
@@ -121,12 +149,14 @@ impl CoreMlModel {
     pub fn predict(
         &mut self,
         inputs: &[(&str, &[usize], &[f32])],
-    ) -> Result<(Vec<f32>, Vec<usize>), CoreMlError> {
+    ) -> Result<CoreMlTensor, CoreMlError> {
         self.input_dict.removeAllObjects();
 
         for &(name, shape, data) in inputs {
+            let layout = TensorLayout::from_dims(shape, "coreml input")?;
+            let bound = layout.bind(data)?;
             let multi_array =
-                create_multi_array_with_deallocator(data, shape, &self.noop_deallocator)?;
+                create_multi_array_with_deallocator(bound, shape, &self.noop_deallocator)?;
             let key = NSString::from_str(name);
             let key_copy: &ProtocolObject<dyn NSCopying> = ProtocolObject::from_ref(&*key);
             insert_input_feature(&self.input_dict, key_copy, &multi_array);
@@ -144,13 +174,16 @@ impl CoreMlModel {
     pub fn predict_cached(
         &mut self,
         inputs: &[(&CachedInputShape, &[f32])],
-    ) -> Result<(Vec<f32>, Vec<usize>), CoreMlError> {
+    ) -> Result<CoreMlTensor, CoreMlError> {
         self.input_dict.removeAllObjects();
 
         for &(cached, data) in inputs {
-            debug_assert_eq!(data.len(), cached.total_elements);
-            let multi_array =
-                create_multi_array_cached_with_deallocator(data, cached, &self.noop_deallocator)?;
+            let bound = cached.bind(data)?;
+            let multi_array = create_multi_array_cached_with_deallocator(
+                bound.data,
+                bound.cached,
+                &self.noop_deallocator,
+            )?;
             let key_copy: &ProtocolObject<dyn NSCopying> = ProtocolObject::from_ref(&*cached.name);
             insert_input_feature(&self.input_dict, key_copy, &multi_array);
         }
@@ -205,15 +238,15 @@ impl SharedCoreMlModel {
     pub fn predict_cached(
         &self,
         inputs: &[(&CachedInputShape, &[f32])],
-    ) -> Result<(Vec<f32>, Vec<usize>), CoreMlError> {
+    ) -> Result<CoreMlTensor, CoreMlError> {
         let deallocator = noop_deallocator();
         let input_dict: Retained<NSMutableDictionary<NSString, AnyObject>> =
             NSMutableDictionary::new();
 
         for &(cached, data) in inputs {
-            debug_assert_eq!(data.len(), cached.total_elements);
+            let bound = cached.bind(data)?;
             let multi_array =
-                create_multi_array_cached_with_deallocator(data, cached, &deallocator)?;
+                create_multi_array_cached_with_deallocator(bound.data, bound.cached, &deallocator)?;
             let key_copy: &ProtocolObject<dyn NSCopying> = ProtocolObject::from_ref(&*cached.name);
             insert_input_feature(&input_dict, key_copy, &multi_array);
         }
@@ -236,15 +269,15 @@ impl SharedCoreMlModel {
     pub fn predict_async(
         &self,
         inputs: &[(&CachedInputShape, &[f32])],
-    ) -> Result<(Vec<f32>, Vec<usize>), CoreMlError> {
+    ) -> Result<CoreMlTensor, CoreMlError> {
         let deallocator = noop_deallocator();
         let input_dict: Retained<NSMutableDictionary<NSString, AnyObject>> =
             NSMutableDictionary::new();
 
         for &(cached, data) in inputs {
-            debug_assert_eq!(data.len(), cached.total_elements);
+            let bound = cached.bind(data)?;
             let multi_array =
-                create_multi_array_cached_with_deallocator(data, cached, &deallocator)?;
+                create_multi_array_cached_with_deallocator(bound.data, bound.cached, &deallocator)?;
             let key_copy: &ProtocolObject<dyn NSCopying> = ProtocolObject::from_ref(&*cached.name);
             insert_input_feature(&input_dict, key_copy, &multi_array);
         }
@@ -303,6 +336,50 @@ mod tests {
     use std::sync::Arc;
 
     use super::{CachedInputShape, CoreMlModel, GpuPrecision, SharedCoreMlModel};
+    use crate::inference::geometry::GeometryError;
+
+    #[test]
+    fn bind_rejects_short_and_long_input_without_calling_coreml() {
+        let cached = CachedInputShape::new("input", &[2, 2]);
+        let short = match cached.bind(&[1.0, 2.0, 3.0]) {
+            Ok(_) => panic!("expected short input to fail"),
+            Err(error) => error,
+        };
+        let long = match cached.bind(&[1.0, 2.0, 3.0, 4.0, 5.0]) {
+            Ok(_) => panic!("expected long input to fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            short,
+            super::CoreMlError::InvalidGeometry(GeometryError::LengthMismatch {
+                expected: 4,
+                actual: 3,
+                ..
+            })
+        ));
+        assert!(matches!(
+            long,
+            super::CoreMlError::InvalidGeometry(GeometryError::LengthMismatch {
+                expected: 4,
+                actual: 5,
+                ..
+            })
+        ));
+        let exact = [1.0, 2.0, 3.0, 4.0];
+        assert_eq!(cached.bind(&exact).unwrap().data, &exact);
+    }
+
+    #[test]
+    fn try_new_rejects_shape_product_overflow() {
+        let error = match CachedInputShape::try_new("input", &[usize::MAX, 2]) {
+            Ok(_) => panic!("expected overflow to fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            super::CoreMlError::InvalidGeometry(GeometryError::Overflow { .. })
+        ));
+    }
 
     fn fixture_model_path(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -314,13 +391,11 @@ mod tests {
     #[test]
     fn shared_cached_prediction_handles_concurrent_calls_when_bundle_available() {
         let model_path = fixture_model_path("segmentation-3.0.mlmodelc");
-        if !model_path.exists() {
-            eprintln!(
-                "skipping CoreML cached prediction stress test; missing {}",
-                model_path.display()
-            );
-            return;
-        }
+        assert!(
+            model_path.exists(),
+            "pinned CoreML fixture missing: {}",
+            model_path.display()
+        );
 
         let model = Arc::new(
             SharedCoreMlModel::load(
@@ -341,11 +416,11 @@ mod tests {
                 let input = Arc::clone(&input);
                 std::thread::spawn(move || {
                     for _ in 0..4 {
-                        let (data, output_shape) = model
+                        let tensor = model
                             .predict_cached(&[(&*cached_shape, input.as_slice())])
                             .unwrap();
-                        assert!(!data.is_empty());
-                        assert_eq!(output_shape.len(), 3);
+                        assert_eq!(tensor.layout().dims().len(), 3);
+                        assert!(!tensor.into_data().is_empty());
                     }
                 })
             })

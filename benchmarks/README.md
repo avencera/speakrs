@@ -154,12 +154,12 @@ Requires models (`just export-models`) and datasets (auto-downloaded on first ru
 
 ```bash
 # macOS (CoreML)
-cargo xtask benchmark der --dataset voxconverse-dev --impls pmps,scm,scmf,sk
+cargo xtask benchmark run --dataset voxconverse-dev --impls pmps,scm,scmf,sk
 
 # Linux (CUDA) -- via dstack
 cargo xtask dstack bp my-bench --dataset voxconverse-dev,ami-ihm --impls sg,sgf,pg
 
 # list available implementations and datasets
-cargo xtask benchmark der --impls list
-cargo xtask benchmark der --dataset list
+cargo xtask benchmark run --impls list
+cargo xtask benchmark run --dataset list
 ```

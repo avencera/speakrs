@@ -58,22 +58,16 @@ compare-models-coreml:
 generate-fixtures:
     cargo xtask fixtures generate
 
-# Compare
-compare source python_device="cpu" rust_mode="cpu":
-    cargo xtask compare run {{source}} --python-device {{python_device}} --rust-mode {{rust_mode}}
-
-compare-apple-accuracy source rust_mode="pyannote-mps":
-    cargo xtask compare accuracy {{source}} --rust-mode {{rust_mode}}
+# Informal RTTM timeline comparison
+compare-rttm a b:
+    cargo xtask compare rttm {{a}} {{b}}
 
 # Benchmark (local)
-bench-run source python_device="auto" runs="1" warmups="1" rust_mode="cpu":
-    cargo xtask bench run {{source}} --python-device {{python_device}} --runs {{runs}} --warmups {{warmups}} --rust-mode {{rust_mode}}
-
-bench-compare source runs="1" warmups="1":
-    cargo xtask bench compare {{source}} --runs {{runs}} --warmups {{warmups}}
-
 bench-der max_files="10" max_minutes="30" *args="":
-    cargo xtask bench der --max-files {{max_files}} --max-minutes {{max_minutes}} {{args}}
+    cargo xtask benchmark run --max-files {{max_files}} --max-minutes {{max_minutes}} {{args}}
+
+bench-score run_dir:
+    cargo xtask benchmark score {{run_dir}}
 
 # GPU image: build via nsc to GHCR, then copy to Docker Hub via skopeo
 gpu-image suffix="":

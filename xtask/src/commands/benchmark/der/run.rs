@@ -180,7 +180,7 @@ pub(crate) fn write_impl_result(
     impl_name: &str,
     result: &DerImplResult,
     total_audio_seconds: f64,
-) {
+) -> Result<()> {
     let slug = impl_name.to_lowercase().replace(' ', "-");
     let payload = serde_json::json!({
         "implementation": impl_name,
@@ -194,10 +194,9 @@ pub(crate) fn write_impl_result(
         "files": result.files,
         "total_audio_seconds": total_audio_seconds,
     });
-    let _ = fs::write(
-        run_dir.join(format!("{slug}.json")),
-        serde_json::to_string_pretty(&payload).unwrap_or_default() + "\n",
-    );
+    let body = serde_json::to_string_pretty(&payload)?;
+    fs::write(run_dir.join(format!("{slug}.json")), body + "\n")?;
+    Ok(())
 }
 
 pub(super) fn run_der_implementations(ctx: &DerRunContext<'_>) -> Result<DerResults> {
@@ -220,7 +219,7 @@ pub(super) fn run_der_implementations(ctx: &DerRunContext<'_>) -> Result<DerResu
             println!("  → skipped (preflight failed): {reason}");
             println!();
             let result = DerImplResult::failed(format!("preflight failed: {reason}"));
-            write_impl_result(ctx.run_dir, impl_name, &result, ctx.total_audio_seconds);
+            write_impl_result(ctx.run_dir, impl_name, &result, ctx.total_audio_seconds)?;
             all_results.insert(impl_name.to_string(), result);
             continue;
         }
@@ -229,7 +228,7 @@ pub(super) fn run_der_implementations(ctx: &DerRunContext<'_>) -> Result<DerResu
             println!("  → skipped: {reason}");
             println!();
             let result = DerImplResult::skipped(reason);
-            write_impl_result(ctx.run_dir, impl_name, &result, ctx.total_audio_seconds);
+            write_impl_result(ctx.run_dir, impl_name, &result, ctx.total_audio_seconds)?;
             all_results.insert(impl_name.to_string(), result);
             continue;
         }
@@ -240,7 +239,7 @@ pub(super) fn run_der_implementations(ctx: &DerRunContext<'_>) -> Result<DerResu
                 println!("  → failed: {err}");
                 println!();
                 let result = DerImplResult::failed(err.to_string());
-                write_impl_result(ctx.run_dir, impl_name, &result, ctx.total_audio_seconds);
+                write_impl_result(ctx.run_dir, impl_name, &result, ctx.total_audio_seconds)?;
                 all_results.insert(impl_name.to_string(), result);
                 continue;
             }
@@ -273,7 +272,7 @@ pub(super) fn run_der_implementations(ctx: &DerRunContext<'_>) -> Result<DerResu
             benchmark_output.total_seconds,
             acc.file_count,
         );
-        write_impl_result(ctx.run_dir, impl_name, &result, ctx.total_audio_seconds);
+        write_impl_result(ctx.run_dir, impl_name, &result, ctx.total_audio_seconds)?;
         all_results.insert(impl_name.to_string(), result);
 
         if let Some(delay) = ctx.sleep_between {

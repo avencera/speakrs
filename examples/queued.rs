@@ -25,7 +25,7 @@ fn main() -> ExampleResult<()> {
         let file_id = file_id_from_path(&audio_path);
         let audio = load_wav_samples(&audio_path)?;
         handles.push(thread::spawn(move || {
-            tx.push(QueuedDiarizationRequest::new(file_id, audio))
+            tx.try_push(QueuedDiarizationRequest::new(file_id, audio))
                 .map(|_| ())
         }));
     }

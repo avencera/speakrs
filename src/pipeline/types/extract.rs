@@ -3,7 +3,7 @@ use tracing::debug;
 
 use crate::inference::embedding::{EmbeddingModel, MaskedEmbeddingInput, SplitTailInput};
 use crate::pipeline::{MIN_SPEAKER_ACTIVITY, clean_masks, select_speaker_weights};
-use crate::reconstruct::Reconstructor;
+use crate::reconstruct::aggregate_speaker_count;
 
 use super::{
     ChunkEmbeddings, ChunkLayout, DecodedSegmentations, EmbeddingPath, PendingEmbedding,
@@ -23,8 +23,7 @@ impl DecodedSegmentations {
     }
 
     pub(in crate::pipeline) fn speaker_count(&self, layout: &ChunkLayout) -> SpeakerCountTrack {
-        let reconstructor = Reconstructor::new(self, &layout.start_frames, 0);
-        reconstructor.speaker_count(layout.output_frames)
+        aggregate_speaker_count(self, &layout.start_frames, layout.output_frames)
     }
 
     pub(in crate::pipeline) fn extract_embeddings(

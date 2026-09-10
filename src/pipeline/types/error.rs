@@ -16,6 +16,9 @@ pub enum PipelineError {
     /// Segmentation inference error
     #[error(transparent)]
     Segmentation(#[from] crate::inference::segmentation::SegmentationError),
+    /// Powerset class decode error
+    #[error(transparent)]
+    Powerset(#[from] crate::powerset::PowersetDecodeError),
     /// PLDA scoring/training error
     #[error(transparent)]
     Plda(#[from] crate::clustering::plda::PldaError),

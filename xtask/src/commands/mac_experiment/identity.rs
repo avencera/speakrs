@@ -44,7 +44,7 @@ where
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(super) struct HostIdentity {
     pub git_sha: String,
     pub dirty_diff_sha256: String,
