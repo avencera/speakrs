@@ -1,4 +1,6 @@
-use ndarray::{Array1, Array2, Array3, array, s};
+#[cfg(feature = "coreml")]
+use ndarray::s;
+use ndarray::{Array1, Array2, Array3, array};
 use ndarray_npy::ReadNpyExt;
 use std::fs::File;
 use std::path::{Path, PathBuf};

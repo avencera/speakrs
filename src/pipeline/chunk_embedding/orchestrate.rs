@@ -1,8 +1,7 @@
 use crossbeam_channel::Receiver;
-use ndarray::{Array3, s};
 use tracing::{debug, trace};
 
-use super::collect::batch_embeddings;
+use super::collect::{CollectionPlan, FileCollector};
 use super::gpu::{ChunkEmbeddingResources, GpuWorker, chunk_embedding_resources};
 use super::prep::{ChunkJob, ChunkPrep, PrepScratch, PrepWorker, SpeakerMaskLayout};
 use super::{
@@ -18,8 +17,7 @@ pub(super) enum ChunkExecution {
 
 pub(super) struct ChunkExecutionPlan {
     pub layout: crate::pipeline::types::ChunkLayout,
-    pub chunk_win_capacity: usize,
-    pub total_windows: usize,
+    pub collection: CollectionPlan,
     pub execution: ChunkExecution,
 }
 
@@ -42,6 +40,7 @@ impl ChunkExecutionPlan {
             return Ok(None);
         }
         let est_chunks = total_windows.div_ceil(chunk_win_capacity);
+        let collection = CollectionPlan::new(0, total_windows, chunk_win_capacity, 3)?;
         let execution = if chunk_schedule_is_pipelined(est_chunks) {
             match chunk_embedding_resources(emb_model)? {
                 Some(resources) => ChunkExecution::Pipelined { resources },
@@ -57,8 +56,7 @@ impl ChunkExecutionPlan {
                 seg_model.step_seconds(),
                 0,
             ),
-            chunk_win_capacity,
-            total_windows,
+            collection,
             execution,
         }))
     }
@@ -86,6 +84,7 @@ pub(super) fn run_pipelined<'scope>(
     chunk_rx: Receiver<ChunkJob>,
     audio: &'scope [f32],
     params: &'scope ChunkParams,
+    collection_plan: CollectionPlan,
 ) -> Result<EmbeddingSummary, PipelineError> {
     let largest = resources.largest_session()?.clone();
     let max_active = largest.num_windows * params.num_speakers;
@@ -133,59 +132,17 @@ pub(super) fn run_pipelined<'scope>(
     drop(chunk_rx);
     drop(emb_tx);
 
-    let max_slots = params.total_windows + params.chunk_win_capacity;
+    let mut collector = FileCollector::new(collection_plan);
     let mut collect_error = None;
-    let mut summary_parts = None;
-    if let Ok(first) = emb_rx.recv() {
-        let num_frames = first.decoded[0].nrows();
-        let mut seg_array = Array3::<f32>::zeros((max_slots, num_frames, params.num_speakers));
-        let mut emb_array =
-            Array3::<f32>::from_elem((max_slots, params.num_speakers, 256), f32::NAN);
-        let mut max_slot_used = 0usize;
-        let mut total_predict_us = 0u64;
-        let mut total_chunks = 0u32;
-
-        for embedded in std::iter::once(first).chain(std::iter::from_fn(|| emb_rx.recv().ok())) {
-            total_predict_us += embedded.predict_us;
-            match batch_embeddings(
-                embedded.num_masks,
-                embedded.data,
-                "pipelined chunk embedding",
-            ) {
-                Ok(batch_emb) => {
-                    for &(local, speaker_idx) in &embedded.active {
-                        let slot = embedded.window_start + local;
-                        if slot < max_slots {
-                            let mask_idx = local * params.num_speakers + speaker_idx;
-                            emb_array
-                                .slice_mut(s![slot, speaker_idx, ..])
-                                .assign(&batch_emb.row(mask_idx));
-                        }
-                    }
-
-                    for (local, decoded) in embedded.decoded.into_iter().enumerate() {
-                        let slot = embedded.window_start + local;
-                        if slot < max_slots {
-                            seg_array.slice_mut(s![slot, .., ..]).assign(&decoded);
-                            max_slot_used = max_slot_used.max(slot + 1);
-                        }
-                    }
-
-                    total_chunks += 1;
-                }
-                Err(error) => {
-                    collect_error = Some(error);
-                    break;
-                }
-            }
+    let mut total_predict_us = 0u64;
+    let mut total_chunks = 0u32;
+    while let Ok(embedded) = emb_rx.recv() {
+        total_predict_us += embedded.predict_us;
+        total_chunks += 1;
+        if let Err(error) = collector.add(embedded) {
+            collect_error = Some(error);
+            break;
         }
-        summary_parts = Some((
-            seg_array,
-            emb_array,
-            max_slot_used,
-            total_predict_us,
-            total_chunks,
-        ));
     }
     drop(emb_rx);
 
@@ -197,21 +154,8 @@ pub(super) fn run_pipelined<'scope>(
     if let Some(error) = collect_error {
         return Err(error);
     }
-    let Some((seg_array, emb_array, max_slot_used, total_predict_us, total_chunks)) = summary_parts
-    else {
-        return Ok(EmbeddingSummary {
-            segmentations: Array3::zeros((0, 0, params.num_speakers)),
-            embeddings: Array3::from_elem((0, params.num_speakers, 256), f32::NAN),
-            num_chunks: 0,
-            gpu_predict_us: 0,
-            prep_fbank_us: total_prep_fbank_us + gpu_stats.self_prep_us,
-            prep_mask_us: 0,
-        });
-    };
-
-    let num_chunks = max_slot_used;
-    let seg_array = seg_array.slice_move(s![..num_chunks, .., ..]);
-    let emb_array = emb_array.slice_move(s![..num_chunks, .., ..]);
+    let collected = collector.finish()?;
+    let num_chunks = collected.num_windows;
 
     debug!(
         total_chunks,
@@ -226,8 +170,8 @@ pub(super) fn run_pipelined<'scope>(
     );
 
     Ok(EmbeddingSummary {
-        segmentations: seg_array,
-        embeddings: emb_array,
+        segmentations: collected.segmentations,
+        embeddings: collected.embeddings,
         num_chunks,
         gpu_predict_us: total_predict_us,
         prep_fbank_us: total_prep_fbank_us + gpu_stats.self_prep_us,
@@ -241,11 +185,9 @@ pub(super) fn run_sequential_chunks(
     audio: &[f32],
     params: &ChunkParams,
     emb_start: std::time::Instant,
+    collection_plan: CollectionPlan,
 ) -> Result<EmbeddingSummary, PipelineError> {
-    let max_slots = params.total_windows + params.chunk_win_capacity;
-    let mut seg_array: Option<Array3<f32>> = None;
-    let mut emb_array: Option<Array3<f32>> = None;
-    let mut seq_idx = 0usize;
+    let mut collector = FileCollector::new(collection_plan);
     let mut seq_fbank_us = 0u64;
     let mut seq_mask_us = 0u64;
     let mut seq_predict_us = 0u64;
@@ -264,13 +206,6 @@ pub(super) fn run_sequential_chunks(
         let chunk_audio_len = params.window_samples + (wins - 1) * params.step_samples;
         let chunk_audio_end = (chunk_audio_start + chunk_audio_len).min(audio.len());
         let chunk_audio = &audio[chunk_audio_start..chunk_audio_end];
-
-        let num_frames = decoded_chunk[0].nrows();
-        let seg = seg_array
-            .get_or_insert_with(|| Array3::zeros((max_slots, num_frames, params.num_speakers)));
-        let emb = emb_array.get_or_insert_with(|| {
-            Array3::from_elem((max_slots, params.num_speakers, 256), f32::NAN)
-        });
 
         let mut fbank = vec![0.0f32; sess_fbank_frames * 80];
         let fbank_start = std::time::Instant::now();
@@ -330,27 +265,21 @@ pub(super) fn run_sequential_chunks(
         seq_predict_us += predict_start.elapsed().as_micros() as u64;
         seq_chunks += 1;
 
-        for &(local_idx, speaker_idx) in &active {
-            let mask_idx = local_idx * params.num_speakers + speaker_idx;
-            emb.slice_mut(s![seq_idx + local_idx, speaker_idx, ..])
-                .assign(&batch_emb.row(mask_idx));
-        }
-        for (local_idx, decoded) in decoded_chunk.into_iter().enumerate() {
-            seg.slice_mut(s![seq_idx + local_idx, .., ..])
-                .assign(&decoded);
-        }
-        seq_idx += wins;
+        let num_masks = batch_emb.nrows();
+        let data = batch_emb.iter().copied().collect();
+        collector.add(super::gpu::EmbeddedChunk {
+            file_index: 0,
+            window_start,
+            decoded: decoded_chunk,
+            data,
+            active,
+            num_masks,
+            predict_us: 0,
+        })?;
     }
 
-    let num_chunks = seq_idx;
-    let seg_array = match seg_array {
-        Some(array) => array.slice_move(s![..num_chunks, .., ..]),
-        None => Array3::zeros((0, 0, params.num_speakers)),
-    };
-    let emb_array = match emb_array {
-        Some(array) => array.slice_move(s![..num_chunks, .., ..]),
-        None => Array3::from_elem((0, params.num_speakers, 256), f32::NAN),
-    };
+    let collected = collector.finish()?;
+    let num_chunks = collected.num_windows;
 
     trace!(
         seq_chunks,
@@ -363,8 +292,8 @@ pub(super) fn run_sequential_chunks(
     );
 
     Ok(EmbeddingSummary {
-        segmentations: seg_array,
-        embeddings: emb_array,
+        segmentations: collected.segmentations,
+        embeddings: collected.embeddings,
         num_chunks,
         gpu_predict_us: seq_predict_us,
         prep_fbank_us: seq_fbank_us,

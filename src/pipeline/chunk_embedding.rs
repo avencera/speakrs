@@ -26,7 +26,7 @@ mod gpu;
 mod orchestrate;
 mod prep;
 
-use collect::{FileCollector, build_chunk_artifacts};
+use collect::{CollectionPlan, FileCollector, build_chunk_artifacts};
 use error::{backend_error, invariant_error, worker_panic};
 use gpu::{GpuWorker, chunk_embedding_resources};
 use orchestrate::{ChunkExecution, ChunkExecutionPlan, run_pipelined, run_sequential_chunks};
@@ -43,8 +43,6 @@ struct ChunkParams {
     window_samples: usize,
     num_speakers: usize,
     min_num_samples: usize,
-    chunk_win_capacity: usize,
-    total_windows: usize,
     segmentation_workers: usize,
     fbank_preparation_workers: usize,
     fbank_normalization_scope: ChunkFbankNormalizationScope,
@@ -88,7 +86,8 @@ pub(super) fn try_chunk_embedding(
         return Ok(None);
     };
     let use_pipelined = plan.is_pipelined();
-    let chunk_win_capacity = plan.chunk_win_capacity;
+    let collection_plan = plan.collection;
+    let chunk_win_capacity = collection_plan.group_capacity();
 
     let inference_start = std::time::Instant::now();
     let step_seconds = seg_model.step_seconds();
@@ -97,8 +96,6 @@ pub(super) fn try_chunk_embedding(
         window_samples: plan.layout.window_samples,
         num_speakers: 3,
         min_num_samples: emb_model.min_num_samples(),
-        chunk_win_capacity,
-        total_windows: plan.total_windows,
         segmentation_workers: execution_policy.segmentation_workers,
         fbank_preparation_workers: execution_policy.fbank_preparation_workers,
         fbank_normalization_scope: execution_policy.fbank_normalization_scope,
@@ -147,12 +144,23 @@ pub(super) fn try_chunk_embedding(
 
         let emb_start = std::time::Instant::now();
         let summary = match plan.execution {
-            ChunkExecution::Pipelined { resources } => {
-                run_pipelined(scope, emb_start, resources, chunk_rx, audio, &params)?
-            }
-            ChunkExecution::Sequential => {
-                run_sequential_chunks(emb_model, &chunk_rx, audio, &params, emb_start)?
-            }
+            ChunkExecution::Pipelined { resources } => run_pipelined(
+                scope,
+                emb_start,
+                resources,
+                chunk_rx,
+                audio,
+                &params,
+                collection_plan,
+            )?,
+            ChunkExecution::Sequential => run_sequential_chunks(
+                emb_model,
+                &chunk_rx,
+                audio,
+                &params,
+                emb_start,
+                collection_plan,
+            )?,
         };
         let emb_elapsed = emb_start.elapsed();
 
@@ -184,21 +192,19 @@ pub(super) fn try_chunk_embedding(
             chunk_count: num_chunks,
             pipelined: use_pipelined,
         };
-        let Some(artifacts) = build_chunk_artifacts(
+        let artifacts = build_chunk_artifacts(
             step_seconds,
             params.step_samples,
             params.window_samples,
             summary,
             #[cfg(feature = "_metrics")]
             stage_timings,
-        ) else {
-            return Ok(None);
-        };
+        )?;
 
         let audio_secs = audio.len() as f64 / 16_000.0;
         debug!(
             chunks = num_chunks,
-            chunk_capacity = params.chunk_win_capacity,
+            chunk_capacity = chunk_win_capacity,
             pipelined = use_pipelined,
             seg_ms = seg_thread_elapsed.as_millis(),
             emb_ms = emb_elapsed.as_millis(),
@@ -244,19 +250,25 @@ pub(super) fn try_batch_chunk_embedding(
         return Ok(None);
     }
 
-    let expected_chunks: Vec<usize> = files
+    let collection_plans: Vec<CollectionPlan> = files
         .iter()
-        .map(|file| {
-            let total_windows = seg_model.window_count(file.audio.len());
-            total_windows.div_ceil(chunk_win_capacity)
+        .enumerate()
+        .map(|(file_index, file)| {
+            CollectionPlan::new(
+                file_index,
+                seg_model.window_count(file.audio.len()),
+                chunk_win_capacity,
+                num_speakers,
+            )
         })
-        .collect();
-    let expected_windows: Vec<usize> = files
-        .iter()
-        .map(|file| seg_model.window_count(file.audio.len()))
-        .collect();
+        .collect::<Result<_, _>>()?;
 
-    if expected_chunks.iter().sum::<usize>() < 2 {
+    let total_groups = collection_plans
+        .iter()
+        .map(|plan| plan.group_count())
+        .try_fold(0usize, usize::checked_add)
+        .ok_or_else(|| invariant_error("batch chunk group count overflowed"))?;
+    if total_groups < 2 {
         return Ok(None);
     }
 
@@ -372,8 +384,12 @@ pub(super) fn try_batch_chunk_embedding(
         drop(decoded_rx);
         drop(embedded_tx);
 
-        let mut collectors: Vec<Option<FileCollector>> =
-            std::iter::repeat_with(|| None).take(files.len()).collect();
+        let mut collectors: Vec<Option<FileCollector>> = collection_plans
+            .iter()
+            .copied()
+            .map(FileCollector::new)
+            .map(Some)
+            .collect();
         let mut results: Vec<Option<DiarizationResult>> =
             std::iter::repeat_with(|| None).take(files.len()).collect();
         let mut files_complete = 0usize;
@@ -381,18 +397,14 @@ pub(super) fn try_batch_chunk_embedding(
 
         for embedded in std::iter::from_fn(|| embedded_rx.recv().ok()) {
             let file_idx = embedded.file_index;
-            let collector = collectors[file_idx].get_or_insert_with(|| {
-                let num_frames = embedded.decoded[0].nrows();
-                let max_slots = expected_windows[file_idx] + chunk_win_capacity;
-                FileCollector::new(
-                    max_slots,
-                    num_frames,
-                    num_speakers,
-                    expected_chunks[file_idx],
-                )
-            });
+            let Some(collector) = collectors.get_mut(file_idx).and_then(Option::as_mut) else {
+                collect_error = Some(invariant_error(format!(
+                    "chunk payload file index {file_idx} has no active collector"
+                )));
+                break;
+            };
 
-            if let Err(error) = collector.add(chunk_win_capacity, num_speakers, embedded) {
+            if let Err(error) = collector.add(embedded) {
                 collect_error = Some(error);
                 break;
             }
@@ -407,15 +419,14 @@ pub(super) fn try_batch_chunk_embedding(
                         break;
                     }
                 };
-                if let Some(artifacts) =
-                    collector.into_artifacts(step_seconds, step_samples, window_samples)
+                match collector
+                    .into_artifacts(step_seconds, step_samples, window_samples)
+                    .and_then(|artifacts| post_inference(artifacts, config, plda))
                 {
-                    match post_inference(artifacts, config, plda) {
-                        Ok(result) => results[file_idx] = Some(result),
-                        Err(error) => {
-                            collect_error = Some(error);
-                            break;
-                        }
+                    Ok(result) => results[file_idx] = Some(result),
+                    Err(error) => {
+                        collect_error = Some(error);
+                        break;
                     }
                 }
                 files_complete += 1;
@@ -430,6 +441,22 @@ pub(super) fn try_batch_chunk_embedding(
         }
         if let Some(error) = collect_error {
             return Err(error);
+        }
+
+        for (file_idx, collector) in collectors.into_iter().enumerate() {
+            if results[file_idx].is_some() {
+                continue;
+            }
+            let collector = collector.ok_or_else(|| {
+                invariant_error(format!(
+                    "file {file_idx} has neither a collector nor a completed result"
+                ))
+            })?;
+            collector.finish()?;
+
+            return Err(invariant_error(format!(
+                "file {file_idx} completed collection without a diarization result"
+            )));
         }
 
         debug!(
