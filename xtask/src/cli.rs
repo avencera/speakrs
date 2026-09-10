@@ -460,14 +460,13 @@ impl DatasetCmd {
                 };
 
                 for ds in &targets {
-                    let ds_dir = ds.dataset_dir(&base_dir);
-                    if !ds_dir.join("wav").is_dir() || !ds_dir.join("rttm").is_dir() {
-                        println!("Skipping {} (not downloaded yet)", ds.id);
+                    if let Err(error) = ds.snapshot(&base_dir) {
+                        println!("Skipping {} (not a completed installation: {error})", ds.id);
                         continue;
                     }
 
                     println!("Uploading {}...", ds.id);
-                    S5cmd::upload(&ds.id, &ds_dir)?;
+                    S5cmd::upload(&ds.id, &ds.dataset_dir(&base_dir))?;
                 }
                 Ok(())
             }

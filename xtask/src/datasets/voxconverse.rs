@@ -5,17 +5,23 @@ use std::process::Command;
 use color_eyre::eyre::{Result, ensure};
 
 use crate::cmd::run_cmd;
+use crate::datasets::{DatasetId, DatasetSnapshot};
 
 pub fn ensure_dev(dir: &Path, base_dir: &Path) -> Result<()> {
-    // migrate from old fixtures/voxconverse/ location
     let old_dir = base_dir.join("voxconverse");
-    if old_dir.is_dir() && !dir.exists() {
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&old_dir, dir)?;
-        #[cfg(not(unix))]
-        fs::rename(&old_dir, dir)?;
+    if !dir.join("wav").exists() && !dir.join("rttm").exists() {
+        migrate_verified_legacy_directory(&old_dir, dir)?;
     }
     ensure_split(dir, "voxconverse_dev_wav.zip", "dev")
+}
+
+pub(super) fn migrate_verified_legacy_directory(source: &Path, destination: &Path) -> Result<bool> {
+    if DatasetSnapshot::from_paired_directory(DatasetId::VoxconverseDev, source).is_err() {
+        return Ok(false);
+    }
+
+    copy_directory(source, destination)?;
+    Ok(true)
 }
 
 pub fn ensure_test(dir: &Path) -> Result<()> {
@@ -60,7 +66,7 @@ fn ensure_split(dir: &Path, zip_name: &str, rttm_subdir: &str) -> Result<()> {
 
     if !rttm_dir.is_dir() {
         println!("=== Downloading VoxConverse ground truth RTTMs ===");
-        let tmp_clone = std::env::temp_dir().join("voxconverse-clone");
+        let tmp_clone = dir.join(".voxconverse-clone");
         let _ = fs::remove_dir_all(&tmp_clone);
         run_cmd(
             Command::new("git")
@@ -88,5 +94,20 @@ fn ensure_split(dir: &Path, zip_name: &str, rttm_subdir: &str) -> Result<()> {
         "VoxConverse {rttm_subdir} extraction did not create wav and rttm directories"
     );
 
+    Ok(())
+}
+
+fn copy_directory(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_directory(&source_path, &destination_path)?;
+        } else {
+            fs::copy(source_path, destination_path)?;
+        }
+    }
     Ok(())
 }

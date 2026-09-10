@@ -10,14 +10,20 @@ use std::time::Duration;
 use color_eyre::eyre::ensure;
 use color_eyre::eyre::{Result, bail};
 
+use super::super::BenchmarkMetadata;
 #[cfg(feature = "cuda")]
 use super::super::{
-    BatchCommandRunner, BenchmarkMetadata, DerAccumulation, DerImplResult, DerResultsWriter,
-    ImplType, discover_files, format_eta, now_stamp,
+    BatchCommandRunner, DerAccumulation, DerImplResult, DerResultsWriter, ImplType, format_eta,
+    now_stamp,
 };
 use super::gpu::resolve_gpu_impls;
 use super::preflight::preflight;
 use super::{BenchmarkJobConfig, BenchmarkJobResult, GpuBenchmarkSuiteConfig, ProgressUpdate};
+#[cfg(feature = "cuda")]
+use crate::catalog::ImplementationId;
+#[cfg(feature = "cuda")]
+use crate::commands::benchmark::run_store::DatasetIdentity;
+use crate::commands::benchmark::run_store::{BenchmarkRun, RunIdentity};
 use crate::commands::benchmark::runner::BatchRunOutput;
 #[cfg(feature = "cuda")]
 use crate::path::file_stem_string;
@@ -38,6 +44,18 @@ pub fn run_gpu_benchmark_suite(config: &GpuBenchmarkSuiteConfig) -> Result<()> {
 
     let implementations = resolve_gpu_impls(&config.impls);
     let multi_dataset = datasets_list.len() > 1;
+
+    let suite = BenchmarkRun::create(
+        &config.results_dir,
+        implementations.iter().map(|(id, _)| *id).collect(),
+        datasets_list
+            .iter()
+            .map(|dataset| dataset.catalog_id())
+            .collect::<Result<Vec<_>>>()?,
+        config.description.clone(),
+        chrono::Local::now(),
+        BenchmarkMetadata::collect().cpu,
+    )?;
 
     if !config.no_preflight {
         preflight(
@@ -65,7 +83,7 @@ pub fn run_gpu_benchmark_suite(config: &GpuBenchmarkSuiteConfig) -> Result<()> {
             pyannote_batch_sizes: config.pyannote_batch_sizes,
         };
 
-        run_benchmark_job(&job_config, None)?;
+        run_benchmark_job(&job_config, None, Some(&suite.identity))?;
     }
 
     Ok(())
@@ -75,6 +93,7 @@ pub fn run_gpu_benchmark_suite(config: &GpuBenchmarkSuiteConfig) -> Result<()> {
 pub fn run_benchmark_job(
     config: &BenchmarkJobConfig,
     progress_cb: Option<&(dyn Fn(&ProgressUpdate) + Send + Sync)>,
+    run_identity: Option<&RunIdentity>,
 ) -> Result<BenchmarkJobResult> {
     use crate::cmd::wav_duration_seconds;
 
@@ -84,13 +103,27 @@ pub fn run_benchmark_job(
     println!("========== {} ==========", config.dataset.display_name);
 
     config.dataset.ensure(&config.datasets_dir)?;
-    let dataset_dir = config.dataset.dataset_dir(&config.datasets_dir);
-
-    let files = discover_files(&dataset_dir, config.max_files, config.max_minutes as f64)?;
+    let snapshot = config.dataset.snapshot(&config.datasets_dir)?;
+    let pairs = snapshot
+        .files()
+        .iter()
+        .map(|file| {
+            (
+                file.wav().to_owned(),
+                file.rttm().to_owned(),
+                file.duration_seconds(),
+            )
+        })
+        .collect();
+    let files = super::super::selection::select_pairs_for_benchmark(
+        pairs,
+        config.max_files,
+        config.max_minutes as f64,
+    );
     if files.is_empty() {
         bail!(
-            "No paired wav+rttm files found in {}",
-            dataset_dir.display()
+            "dataset {} snapshot produced no files after selection caps",
+            config.dataset.id
         );
     }
 
@@ -100,13 +133,31 @@ pub fn run_benchmark_job(
         .sum();
     let total_audio_minutes = total_audio_seconds / 60.0;
 
-    let run_id = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-    let run_dir = if config.multi_dataset {
-        config.results_dir.join(&run_id).join(&config.dataset.id)
+    let owned_suite;
+    let suite = if let Some(run_identity) = run_identity {
+        run_identity
     } else {
-        config.results_dir.join(&run_id)
+        owned_suite = BenchmarkRun::create(
+            &config.results_dir,
+            config.implementations.iter().map(|(id, _)| *id).collect(),
+            vec![config.dataset.catalog_id()?],
+            config.description.clone(),
+            chrono::Local::now(),
+            metadata.cpu.clone(),
+        )?;
+        &owned_suite.identity
     };
-    fs::create_dir_all(&run_dir)?;
+    let run_id = suite.run_id.as_str().to_owned();
+    let run_dir = if config.multi_dataset || suite.datasets.len() > 1 {
+        let dir = suite.run_id.as_str();
+        let run_dir = config.results_dir.join(dir).join(&config.dataset.id);
+        fs::create_dir_all(&run_dir)?;
+        run_dir
+    } else {
+        let run_dir = config.results_dir.join(&run_id);
+        fs::create_dir_all(&run_dir)?;
+        run_dir
+    };
 
     if let Some(ref description) = config.description {
         fs::write(run_dir.join("README.md"), format!("{description}\n"))?;
@@ -121,9 +172,14 @@ pub fn run_benchmark_job(
 
     let batch_timeout = Duration::from_secs_f64((total_audio_seconds * 5.0).max(120.0));
     let wav_paths: Vec<&Path> = files.iter().map(|(wav, _)| wav.as_path()).collect();
-    let mut all_results: HashMap<String, DerImplResult> = HashMap::new();
+    let mut all_results: HashMap<ImplementationId, DerImplResult> = HashMap::new();
 
-    for (impl_name, impl_type) in &config.implementations {
+    for (implementation_id, impl_type) in &config.implementations {
+        let impl_name = crate::catalog::ImplementationCatalog::all()
+            .iter()
+            .find(|spec| spec.id == *implementation_id)
+            .map(|spec| spec.display_name)
+            .unwrap_or(implementation_id.as_str());
         println!("Running {impl_name}...");
 
         let benchmark_result = match impl_type {
@@ -141,13 +197,7 @@ pub fn run_benchmark_job(
                 println!("  → skipped: not a GPU implementation");
                 println!();
                 let result = DerImplResult::skipped("not a GPU implementation".to_string());
-                super::der::run::write_impl_result(
-                    &run_dir,
-                    impl_name,
-                    &result,
-                    total_audio_seconds,
-                )?;
-                all_results.insert(impl_name.to_string(), result);
+                all_results.insert(*implementation_id, result);
                 continue;
             }
         };
@@ -158,13 +208,7 @@ pub fn run_benchmark_job(
                 println!("  → failed: {err}");
                 println!();
                 let result = DerImplResult::failed(err.to_string());
-                super::der::run::write_impl_result(
-                    &run_dir,
-                    impl_name,
-                    &result,
-                    total_audio_seconds,
-                )?;
-                all_results.insert(impl_name.to_string(), result);
+                all_results.insert(*implementation_id, result);
                 continue;
             }
         };
@@ -197,13 +241,16 @@ pub fn run_benchmark_job(
             benchmark_output.total_seconds,
             acc.file_count,
         );
-        super::der::run::write_impl_result(&run_dir, impl_name, &result, total_audio_seconds)?;
-        all_results.insert(impl_name.to_string(), result);
+        let mut result = result;
+        result.per_file = acc.per_file().to_vec();
+        result.hypotheses = benchmark_output.per_file_rttm;
+        all_results.insert(*implementation_id, result);
     }
 
     DerResultsWriter {
         run_dir: &run_dir,
-        dataset_name: &config.dataset.display_name,
+        run_identity: suite,
+        dataset: DatasetIdentity::catalog(config.dataset.catalog_id()?),
         implementations: &config.implementations,
         results: &all_results,
         files: &files,
@@ -229,6 +276,7 @@ pub fn run_benchmark_job(
 pub fn run_benchmark_job(
     _config: &BenchmarkJobConfig,
     _progress_cb: Option<&(dyn Fn(&ProgressUpdate) + Send + Sync)>,
+    _run_identity: Option<&RunIdentity>,
 ) -> Result<BenchmarkJobResult> {
     bail!("xtask benchmark jobs require the `cuda` feature")
 }

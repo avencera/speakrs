@@ -6,6 +6,7 @@ use color_eyre::eyre::Result;
 use super::run::DerBenchEnv;
 use super::validate::selected_preflight_implementations;
 use super::{DerArgs, PREFLIGHT_TIMEOUT, PyannoteBatchSizes};
+use crate::catalog::ImplementationId;
 use crate::cmd::wav_duration_seconds;
 use crate::path::file_stem_string;
 
@@ -17,7 +18,7 @@ pub(super) fn preflight_check(
     emb_model: &Path,
     args: &DerArgs,
     pyannote_batch_sizes: PyannoteBatchSizes,
-) -> Result<HashMap<String, String>> {
+) -> Result<HashMap<ImplementationId, String>> {
     let (wav_path, _) = file;
     let stem = file_stem_string(wav_path)?;
     let duration = wav_duration_seconds(wav_path).unwrap_or(0.0);
@@ -29,7 +30,7 @@ pub(super) fn preflight_check(
     let wav_paths = [wav_path.as_path()];
     let mut failures = HashMap::new();
 
-    for (_cli_id, display_name, impl_type) in implementations {
+    for (implementation_id, display_name, impl_type) in implementations {
         if let Some(reason) = env.skip_reason(&impl_type) {
             println!("  {display_name:<22} skipped ({reason})");
             continue;
@@ -55,18 +56,26 @@ pub(super) fn preflight_check(
             Ok(_) => {
                 let reason = "empty RTTM output".to_string();
                 println!("  {display_name:<22} FAILED: {reason}");
-                failures.insert(display_name.to_string(), reason);
+                failures.insert(implementation_id, reason);
             }
             Err(err) => {
                 let reason = err.to_string();
                 println!("  {display_name:<22} FAILED: {reason}");
-                failures.insert(display_name.to_string(), reason);
+                failures.insert(implementation_id, reason);
             }
         }
     }
 
     if !failures.is_empty() {
-        let names: Vec<&str> = failures.keys().map(String::as_str).collect();
+        let names: Vec<&str> = failures
+            .keys()
+            .filter_map(|id| {
+                crate::catalog::ImplementationCatalog::all()
+                    .iter()
+                    .find(|spec| spec.id == *id)
+                    .map(|spec| spec.display_name)
+            })
+            .collect();
         println!();
         println!(
             "Skipping failed implementations for remaining datasets: {}",

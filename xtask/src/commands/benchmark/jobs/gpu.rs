@@ -3,7 +3,9 @@ use color_eyre::eyre::{Result, bail};
 use super::super::ImplType;
 use crate::catalog::{ImplementationCatalog, PyannoteDevice, RunnerKind, SpeakrsMode};
 
-pub(super) fn resolve_gpu_impls(impls: &[String]) -> Vec<(&'static str, ImplType)> {
+pub(super) fn resolve_gpu_impls(
+    impls: &[String],
+) -> Vec<(crate::catalog::ImplementationId, ImplType)> {
     let selected = if impls.is_empty() {
         ImplementationCatalog::gpu().collect::<Vec<_>>()
     } else {
@@ -22,7 +24,7 @@ pub(super) fn resolve_gpu_impls(impls: &[String]) -> Vec<(&'static str, ImplType
                 RunnerKind::Pyannote(PyannoteDevice::Cuda) => ImplType::Pyannote("cuda"),
                 other => unreachable!("gpu catalog entry {other:?}"),
             };
-            (spec.display_name, impl_type)
+            (spec.id, impl_type)
         })
         .collect()
 }

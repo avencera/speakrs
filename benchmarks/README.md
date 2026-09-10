@@ -163,3 +163,14 @@ cargo xtask dstack bp my-bench --dataset voxconverse-dev,ami-ihm --impls sg,sgf,
 cargo xtask benchmark run --impls list
 cargo xtask benchmark run --dataset list
 ```
+
+To recalculate a completed run from its recorded reference and hypothesis
+RTTM files, run `cargo xtask benchmark score <run-directory>`. This does not
+run inference. It atomically replaces `<run-directory>/score.json` on each
+repeat and keeps the recorded results and RTTM files unchanged. Stored scoring
+uses collar `0ms` and includes overlap; other scoring options are rejected.
+
+Stored benchmark records use schema version 3. The schema version 2 flat
+`results.json` writer format remains readable through explicit conversion to a
+version 3 record because the typed record shape is not wire-compatible with
+the old flat shape. New benchmark runs and score reports use version 3.

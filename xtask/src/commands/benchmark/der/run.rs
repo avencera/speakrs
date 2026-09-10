@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -11,23 +10,23 @@ use super::{
     BatchCommandRunner, DerAccumulation, DerImplResult, ImplType, PyannoteBatchSizes,
     PyannoteRsFileRunner,
 };
+use crate::catalog::ImplementationId;
 use crate::cmd::run_cmd;
 
 pub(super) type DerResults = (
-    Vec<(&'static str, ImplType)>,
-    HashMap<String, DerImplResult>,
+    Vec<(ImplementationId, ImplType)>,
+    HashMap<ImplementationId, DerImplResult>,
 );
 
 pub(super) struct DerRunContext<'a> {
     pub root: &'a Path,
-    pub run_dir: &'a Path,
     pub files: &'a [(PathBuf, PathBuf)],
     pub models_dir: &'a Path,
     pub seg_model: &'a Path,
     pub emb_model: &'a Path,
     pub impls: &'a [String],
     pub total_audio_seconds: f64,
-    pub preflight_failures: &'a HashMap<String, String>,
+    pub preflight_failures: &'a HashMap<ImplementationId, String>,
     pub sleep_between: Option<Duration>,
     pub pyannote_batch_sizes: PyannoteBatchSizes,
 }
@@ -175,30 +174,6 @@ impl<'a> DerBenchEnv<'a> {
     }
 }
 
-pub(crate) fn write_impl_result(
-    run_dir: &Path,
-    impl_name: &str,
-    result: &DerImplResult,
-    total_audio_seconds: f64,
-) -> Result<()> {
-    let slug = impl_name.to_lowercase().replace(' ', "-");
-    let payload = serde_json::json!({
-        "implementation": impl_name,
-        "status": result.status,
-        "reason": result.reason,
-        "der": result.der,
-        "missed": result.missed,
-        "false_alarm": result.false_alarm,
-        "confusion": result.confusion,
-        "time": result.time,
-        "files": result.files,
-        "total_audio_seconds": total_audio_seconds,
-    });
-    let body = serde_json::to_string_pretty(&payload)?;
-    fs::write(run_dir.join(format!("{slug}.json")), body + "\n")?;
-    Ok(())
-}
-
 pub(super) fn run_der_implementations(ctx: &DerRunContext<'_>) -> Result<DerResults> {
     let env = DerBenchEnv::new(
         ctx.root,
@@ -212,15 +187,19 @@ pub(super) fn run_der_implementations(ctx: &DerRunContext<'_>) -> Result<DerResu
     let mut all_results = HashMap::new();
     let batch_timeout = Duration::from_secs_f64((ctx.total_audio_seconds * 5.0).max(120.0));
 
-    for (impl_name, impl_type) in &implementations {
+    for (implementation_id, impl_type) in &implementations {
+        let impl_name = crate::catalog::ImplementationCatalog::all()
+            .iter()
+            .find(|spec| spec.id == *implementation_id)
+            .map(|spec| spec.display_name)
+            .unwrap_or(implementation_id.as_str());
         println!("Running {impl_name}...");
 
-        if let Some(reason) = ctx.preflight_failures.get(*impl_name) {
+        if let Some(reason) = ctx.preflight_failures.get(implementation_id) {
             println!("  → skipped (preflight failed): {reason}");
             println!();
             let result = DerImplResult::failed(format!("preflight failed: {reason}"));
-            write_impl_result(ctx.run_dir, impl_name, &result, ctx.total_audio_seconds)?;
-            all_results.insert(impl_name.to_string(), result);
+            all_results.insert(*implementation_id, result);
             continue;
         }
 
@@ -228,8 +207,7 @@ pub(super) fn run_der_implementations(ctx: &DerRunContext<'_>) -> Result<DerResu
             println!("  → skipped: {reason}");
             println!();
             let result = DerImplResult::skipped(reason);
-            write_impl_result(ctx.run_dir, impl_name, &result, ctx.total_audio_seconds)?;
-            all_results.insert(impl_name.to_string(), result);
+            all_results.insert(*implementation_id, result);
             continue;
         }
 
@@ -239,8 +217,7 @@ pub(super) fn run_der_implementations(ctx: &DerRunContext<'_>) -> Result<DerResu
                 println!("  → failed: {err}");
                 println!();
                 let result = DerImplResult::failed(err.to_string());
-                write_impl_result(ctx.run_dir, impl_name, &result, ctx.total_audio_seconds)?;
-                all_results.insert(impl_name.to_string(), result);
+                all_results.insert(*implementation_id, result);
                 continue;
             }
         };
@@ -272,8 +249,10 @@ pub(super) fn run_der_implementations(ctx: &DerRunContext<'_>) -> Result<DerResu
             benchmark_output.total_seconds,
             acc.file_count,
         );
-        write_impl_result(ctx.run_dir, impl_name, &result, ctx.total_audio_seconds)?;
-        all_results.insert(impl_name.to_string(), result);
+        let mut result = result;
+        result.per_file = acc.per_file().to_vec();
+        result.hypotheses = benchmark_output.per_file_rttm;
+        all_results.insert(*implementation_id, result);
 
         if let Some(delay) = ctx.sleep_between {
             println!(

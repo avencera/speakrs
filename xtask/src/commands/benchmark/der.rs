@@ -21,6 +21,12 @@ mod preflight;
 pub(super) mod run;
 mod validate;
 
+type EvalSet = (
+    super::run_store::DatasetIdentity,
+    String,
+    Vec<(PathBuf, PathBuf)>,
+);
+
 pub struct DerArgs {
     pub dataset_id: String,
     pub file: Option<PathBuf>,
@@ -103,20 +109,41 @@ pub fn der(args: DerArgs) -> Result<()> {
 
     let metadata = BenchmarkMetadata::collect();
     let selected_impls = crate::catalog::ImplementationCatalog::resolve_many(impls)?;
-    let selected_datasets: Vec<crate::datasets::DatasetId> = datasets
-        .iter()
-        .filter_map(|dataset| dataset.catalog_id().ok())
-        .collect();
-    let suite = super::BenchmarkRun::create(
+    let single_file_identity = if single_file_mode {
+        let wav_path = file
+            .as_ref()
+            .ok_or_else(|| color_eyre::eyre::eyre!("single-file mode requires --file"))?;
+        Some(super::run_store::DatasetIdentity::single_file(
+            wav_path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+                .unwrap_or_else(|| "single-file".to_owned()),
+        )?)
+    } else {
+        None
+    };
+    let suite_datasets = if let Some(identity) = single_file_identity.clone() {
+        vec![identity]
+    } else {
+        datasets
+            .iter()
+            .map(|dataset| {
+                dataset
+                    .catalog_id()
+                    .map(super::run_store::DatasetIdentity::catalog)
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
+    let suite = super::BenchmarkRun::create_with_dataset_identities(
         &root.join("_benchmarks"),
         selected_impls.iter().map(|spec| spec.id).collect(),
-        selected_datasets,
+        suite_datasets,
         description.clone(),
         chrono::Local::now(),
         metadata.cpu.clone(),
     )?;
 
-    let eval_sets: Vec<(String, Vec<(PathBuf, PathBuf)>)> = if single_file_mode {
+    let eval_sets: Vec<EvalSet> = if single_file_mode {
         let (wav_path, rttm_path) = match (file.clone(), rttm.clone()) {
             (Some(wav_path), Some(rttm_path)) => (wav_path, rttm_path),
             _ => bail!("single-file mode requires both --file and --rttm"),
@@ -125,7 +152,11 @@ pub fn der(args: DerArgs) -> Result<()> {
             .file_stem()
             .map(|stem| stem.to_string_lossy().to_string())
             .unwrap_or_else(|| "single-file".to_string());
-        vec![(display_name, vec![(wav_path, rttm_path)])]
+        vec![(
+            single_file_identity.expect("single-file identity"),
+            display_name,
+            vec![(wav_path, rttm_path)],
+        )]
     } else {
         let fixtures_dir = root.join("fixtures/datasets");
         let mut sets = Vec::new();
@@ -133,11 +164,11 @@ pub fn der(args: DerArgs) -> Result<()> {
             dataset.ensure(&fixtures_dir)?;
             let snapshot = dataset.snapshot(&fixtures_dir)?;
             let pairs = snapshot
-                .files
-                .into_iter()
+                .files()
+                .iter()
                 .map(|file| {
                     let duration = file.duration_seconds();
-                    (file.wav, file.rttm, duration)
+                    (file.wav().to_owned(), file.rttm().to_owned(), duration)
                 })
                 .collect();
             let files =
@@ -148,16 +179,20 @@ pub fn der(args: DerArgs) -> Result<()> {
                     dataset.id
                 );
             }
-            sets.push((dataset.display_name.clone(), files));
+            sets.push((
+                super::run_store::DatasetIdentity::catalog(dataset.catalog_id()?),
+                dataset.display_name.clone(),
+                files,
+            ));
         }
         sets
     };
 
-    let preflight_failures: HashMap<String, String> = if no_preflight || eval_sets.is_empty() {
+    let preflight_failures = if no_preflight || eval_sets.is_empty() {
         HashMap::new()
     } else {
         let first_file = eval_sets[0]
-            .1
+            .2
             .iter()
             .min_by(|a, b| {
                 wav_duration_seconds(&a.0)
@@ -190,7 +225,7 @@ pub fn der(args: DerArgs) -> Result<()> {
         )?
     };
 
-    for (dataset_name, files) in &eval_sets {
+    for (dataset, dataset_name, files) in &eval_sets {
         println!();
         println!("========== {dataset_name} ==========");
 
@@ -202,8 +237,7 @@ pub fn der(args: DerArgs) -> Result<()> {
 
         let run_id = suite.identity.run_id.as_str().to_owned();
         let run_dir = if eval_sets.len() > 1 {
-            let slug = dataset_name.to_lowercase().replace(' ', "-");
-            let dir = suite.root.join(slug);
+            let dir = suite.root.join(dataset.id_string());
             fs::create_dir_all(&dir)?;
             dir
         } else {
@@ -223,7 +257,6 @@ pub fn der(args: DerArgs) -> Result<()> {
 
         let (implementations, all_results) = run_der_implementations(&DerRunContext {
             root: &root,
-            run_dir: &run_dir,
             files,
             models_dir: &models_dir,
             seg_model: &seg_model,
@@ -237,7 +270,8 @@ pub fn der(args: DerArgs) -> Result<()> {
 
         DerResultsWriter {
             run_dir: &run_dir,
-            dataset_name,
+            run_identity: &suite.identity,
+            dataset: dataset.clone(),
             implementations: &implementations,
             results: &all_results,
             files,

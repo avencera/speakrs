@@ -1573,6 +1573,7 @@ struct RecordPathKey {
 fn resolve_dataset_files(experiment: &ValidatedExperiment) -> Result<Vec<ManifestFile>> {
     let dataset = crate::datasets::find_dataset(&experiment.spec().dataset.id)
         .ok_or_else(|| eyre!("unknown dataset '{}'", experiment.spec().dataset.id))?;
+    dataset.snapshot(experiment.datasets_dir())?;
     let dataset_dir = dataset.dataset_dir(experiment.datasets_dir());
     let requested = &experiment.spec().dataset.files;
     let pairs = if requested.is_empty() {

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use color_eyre::eyre::{Result, bail};
 
 use super::DerArgs;
-use crate::catalog::{ImplementationCatalog, ImplementationSpec, RunnerKind};
+use crate::catalog::{ImplementationCatalog, ImplementationId, ImplementationSpec, RunnerKind};
 use crate::commands::benchmark::ImplType;
 
 fn to_impl_type(spec: &ImplementationSpec) -> ImplType {
@@ -84,21 +84,21 @@ pub(super) fn resolve_eval_datasets(
     )?])
 }
 
-pub(super) fn selected_implementations(impls: &[String]) -> Vec<(&'static str, ImplType)> {
+pub(super) fn selected_implementations(impls: &[String]) -> Vec<(ImplementationId, ImplType)> {
     ImplementationCatalog::resolve_many(impls)
         .unwrap_or_default()
         .into_iter()
-        .map(|spec| (spec.display_name, to_impl_type(spec)))
+        .map(|spec| (spec.id, to_impl_type(spec)))
         .collect()
 }
 
 pub(super) fn selected_preflight_implementations(
     impls: &[String],
-) -> Vec<(&'static str, &'static str, ImplType)> {
+) -> Vec<(ImplementationId, &'static str, ImplType)> {
     ImplementationCatalog::resolve_many(impls)
         .unwrap_or_default()
         .into_iter()
-        .map(|spec| (spec.cli_name(), spec.display_name, to_impl_type(spec)))
+        .map(|spec| (spec.id, spec.display_name, to_impl_type(spec)))
         .collect()
 }
 

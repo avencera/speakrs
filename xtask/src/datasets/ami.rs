@@ -16,7 +16,7 @@ pub fn ensure_ihm(dir: &Path) -> Result<()> {
 
     if !rttm_dir.is_dir() {
         println!("=== Downloading AMI IHM RTTMs (BUTSpeechFIT) ===");
-        let tmp_clone = std::env::temp_dir().join("ami-diarization-setup");
+        let tmp_clone = dir.join(".ami-diarization-setup");
         let _ = fs::remove_dir_all(&tmp_clone);
         run_cmd(
             Command::new("git")
@@ -55,7 +55,7 @@ pub fn ensure_ihm(dir: &Path) -> Result<()> {
         fs::create_dir_all(&wav_dir)?;
     }
 
-    download_ami_wavs(&rttm_dir, &wav_dir, "Mix-Headset", "ami-wav-download")?;
+    download_ami_wavs(&rttm_dir, &wav_dir, "Mix-Headset")?;
     Ok(())
 }
 
@@ -65,11 +65,11 @@ pub fn ensure_sdm(dir: &Path, base_dir: &Path) -> Result<()> {
     let wav_dir = dir.join("wav");
     let rttm_dir = dir.join("rttm");
 
-    // RTTMs are the same as IHM
+    // rttms are the same as IHM
     let ihm_rttm_dir = base_dir.join("ami-ihm").join("rttm");
     if !rttm_dir.is_dir() {
         if !ihm_rttm_dir.is_dir() {
-            ensure_ihm(&base_dir.join("ami-ihm"))?;
+            bail!("AMI IHM RTTMs are required before staging AMI SDM; install ami-ihm first");
         }
         fs::create_dir_all(&rttm_dir)?;
         for entry in fs::read_dir(&ihm_rttm_dir)? {
@@ -84,16 +84,11 @@ pub fn ensure_sdm(dir: &Path, base_dir: &Path) -> Result<()> {
         fs::create_dir_all(&wav_dir)?;
     }
 
-    download_ami_wavs(&rttm_dir, &wav_dir, "Array1-01", "ami-sdm-download")?;
+    download_ami_wavs(&rttm_dir, &wav_dir, "Array1-01")?;
     Ok(())
 }
 
-fn download_ami_wavs(
-    rttm_dir: &Path,
-    wav_dir: &Path,
-    mic_name: &str,
-    tmp_name: &str,
-) -> Result<()> {
+fn download_ami_wavs(rttm_dir: &Path, wav_dir: &Path, mic_name: &str) -> Result<()> {
     let mut missing = Vec::new();
     for entry in fs::read_dir(rttm_dir)? {
         let entry = entry?;
@@ -112,7 +107,10 @@ fn download_ami_wavs(
         missing.len()
     );
     let base_url = "https://groups.inf.ed.ac.uk/ami/AMICorpusMirror/amicorpus";
-    let tmp_dir = std::env::temp_dir().join(tmp_name);
+    let tmp_dir = wav_dir
+        .parent()
+        .unwrap_or(wav_dir)
+        .join(format!(".ami-{mic_name}-download"));
     fs::create_dir_all(&tmp_dir)?;
 
     let mut failed = Vec::new();

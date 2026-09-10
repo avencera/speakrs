@@ -19,7 +19,7 @@ pub fn ensure(dir: &Path) -> Result<()> {
     }
 
     println!("=== Downloading Earnings-21 ===");
-    let tmp_clone = std::env::temp_dir().join("earnings21-clone");
+    let tmp_clone = dir.join(".earnings21-clone");
     let _ = fs::remove_dir_all(&tmp_clone);
 
     run_cmd(

@@ -19,7 +19,7 @@ pub fn ensure(dir: &Path) -> Result<()> {
     }
 
     println!("=== Downloading AISHELL-4 test set (5.2 GB) ===");
-    let raw_dir = std::env::temp_dir().join("aishell4-raw");
+    let raw_dir = dir.join(".aishell4-raw");
     let tar_path = raw_dir.join("test.tar.gz");
 
     fs::create_dir_all(&raw_dir)?;

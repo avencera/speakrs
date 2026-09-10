@@ -19,7 +19,7 @@ pub fn ensure(dir: &Path) -> Result<()> {
     }
 
     println!("=== Downloading AliMeeting eval set (3.4 GB) ===");
-    let raw_dir = std::env::temp_dir().join("alimeeting-raw");
+    let raw_dir = dir.join(".alimeeting-raw");
     let tar_path = raw_dir.join("Eval_Ali.tar.gz");
 
     fs::create_dir_all(&raw_dir)?;

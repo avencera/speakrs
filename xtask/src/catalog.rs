@@ -1,9 +1,10 @@
 //! Typed implementation catalog for benchmark selection.
 
 use color_eyre::eyre::{Result, bail};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Canonical implementation identity used inside the tool domain
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ImplementationId {
     PyannoteMps,
     PyannoteCpu,
@@ -34,6 +35,33 @@ impl ImplementationId {
             Self::SpeakerKit => "speakerkit",
             Self::PyannoteRs => "pyannote-rs",
         }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        CATALOG
+            .iter()
+            .find(|spec| spec.id.as_str() == value)
+            .map(|spec| spec.id)
+    }
+}
+
+impl Serialize for ImplementationId {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ImplementationId {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown implementation id {value}")))
     }
 }
 

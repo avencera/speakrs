@@ -4,12 +4,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Result, eyre};
 
 use crate::cmd::wav_duration_seconds;
 use crate::path::file_stem_string;
 
 use super::report::{format_eta, now_stamp};
+use super::run_store::ScoringOptions;
 use super::runner::{
     BatchRunOutput, BenchmarkError, CommandSpec, SingleRunOutput, capture_benchmark_cmd,
 };
@@ -85,6 +86,10 @@ pub struct DerImplResult {
     pub confusion: Option<f64>,
     pub time: Option<f64>,
     pub files: usize,
+    #[serde(skip)]
+    pub per_file: Vec<PerFileDerResult>,
+    #[serde(skip)]
+    pub hypotheses: HashMap<String, String>,
 }
 
 impl DerImplResult {
@@ -105,6 +110,8 @@ impl DerImplResult {
             confusion,
             time: Some(time),
             files,
+            per_file: Vec::new(),
+            hypotheses: HashMap::new(),
         }
     }
 
@@ -118,6 +125,8 @@ impl DerImplResult {
             confusion: None,
             time: None,
             files: 0,
+            per_file: Vec::new(),
+            hypotheses: HashMap::new(),
         }
     }
 
@@ -131,6 +140,8 @@ impl DerImplResult {
             confusion: None,
             time: None,
             files: 0,
+            per_file: Vec::new(),
+            hypotheses: HashMap::new(),
         }
     }
 }
@@ -206,6 +217,15 @@ impl DerAccumulation {
         files: &[(PathBuf, PathBuf)],
         per_file_rttm: &HashMap<String, String>,
     ) -> Result<Self> {
+        Self::compute_with_options(files, per_file_rttm, &ScoringOptions::default())
+    }
+
+    pub fn compute_with_options(
+        files: &[(PathBuf, PathBuf)],
+        per_file_rttm: &HashMap<String, String>,
+        scoring: &ScoringOptions,
+    ) -> Result<Self> {
+        scoring.validate_supported()?;
         let mut acc = Self {
             missed: 0.0,
             false_alarm: 0.0,
@@ -220,8 +240,10 @@ impl DerAccumulation {
             let ref_segs = speakrs::metrics::parse_rttm(&ref_text);
             let stem = file_stem_string(wav_path)?;
 
-            let hyp_text = per_file_rttm.get(&stem).cloned().unwrap_or_default();
-            let hyp_segs = speakrs::metrics::parse_rttm(&hyp_text);
+            let hyp_text = per_file_rttm
+                .get(&stem)
+                .ok_or_else(|| eyre!("missing hypothesis RTTM for benchmark file {stem}"))?;
+            let hyp_segs = speakrs::metrics::parse_rttm(hyp_text);
             let der_result = speakrs::metrics::compute_der(&ref_segs, &hyp_segs);
 
             let file_result = PerFileDerResult::from_segments(
@@ -558,12 +580,15 @@ SPEAKER first 1 1.0 1.0 <NA> <NA> hyp-b <NA> <NA>\n"
             (PathBuf::from("first.wav"), first_reference_path),
             (PathBuf::from("second.wav"), second_reference_path),
         ];
-        let hypotheses = HashMap::from([(
-            "first".to_string(),
-            "SPEAKER first 1 0.0 1.0 <NA> <NA> hyp-a <NA> <NA>\n\
+        let hypotheses = HashMap::from([
+            (
+                "first".to_string(),
+                "SPEAKER first 1 0.0 1.0 <NA> <NA> hyp-a <NA> <NA>\n\
 SPEAKER first 1 1.0 1.0 <NA> <NA> hyp-b <NA> <NA>\n"
-                .to_string(),
-        )]);
+                    .to_string(),
+            ),
+            ("second".to_string(), String::new()),
+        ]);
 
         let accumulation = DerAccumulation::compute(&files, &hypotheses).unwrap();
         let file_results = accumulation.per_file();
@@ -600,7 +625,8 @@ SPEAKER first 1 1.0 1.0 <NA> <NA> hyp-b <NA> <NA>\n"
         fs::write(&reference_path, "").unwrap();
 
         let files = vec![(PathBuf::from("empty.wav"), reference_path)];
-        let accumulation = DerAccumulation::compute(&files, &HashMap::new()).unwrap();
+        let hypotheses = HashMap::from([(String::from("empty"), String::new())]);
+        let accumulation = DerAccumulation::compute(&files, &hypotheses).unwrap();
         let result = &accumulation.per_file_results[0];
 
         assert_eq!(result.reference_speaker_time, 0.0);
@@ -609,5 +635,24 @@ SPEAKER first 1 1.0 1.0 <NA> <NA> hyp-b <NA> <NA>\n"
         assert_eq!(result.false_alarm_percent, None);
         assert_eq!(result.confusion_percent, None);
         assert_eq!(accumulation.der_percentages(), (None, None, None, None));
+    }
+
+    #[test]
+    fn missing_hypothesis_is_an_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let reference_path = directory.path().join("missing.rttm");
+        fs::write(&reference_path, "").unwrap();
+
+        let files = vec![(PathBuf::from("missing.wav"), reference_path)];
+        let error = match DerAccumulation::compute(&files, &HashMap::new()) {
+            Ok(_) => panic!("missing hypothesis should fail scoring"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("missing hypothesis RTTM for benchmark file missing")
+        );
     }
 }
