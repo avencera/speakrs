@@ -41,9 +41,11 @@ use plan::LazySession;
 #[cfg(feature = "coreml")]
 use tensor::fbank_hw_from_shape;
 use tensor::{
-    array1_slice, array2_from_shape_vec, array3_slice_mut, embedding_batch, embedding_vector,
-    fbank_hw_from_i64, first_output, preallocated_run_options,
+    array1_slice, array2_from_shape_vec, array3_slice_mut, embedding_batch_from_ort,
+    embedding_vector_from_ort, fbank_hw_from_i64, first_output, preallocated_run_options,
 };
+#[cfg(feature = "coreml")]
+use tensor::{embedding_batch_from_coreml, embedding_vector_from_coreml};
 
 const PRIMARY_BATCH_SIZE: usize = 64;
 pub(crate) const EMBEDDING_WIDTH: usize = 256;

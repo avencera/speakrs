@@ -2,11 +2,13 @@ use ndarray::{Array2, s};
 use ort::value::TensorRef;
 
 #[cfg(feature = "coreml")]
+use super::embedding_batch_from_coreml;
+#[cfg(feature = "coreml")]
 use super::tensor::{array2_slice, array3_slice};
 use super::{
     EMBEDDING_WIDTH, EmbeddingModel, FBANK_FEATURES, FBANK_FRAMES, MULTI_MASK_BATCH_SIZE,
     MaskedEmbeddingInput, NUM_SPEAKERS, PRIMARY_BATCH_SIZE, SplitTailInput, array3_slice_mut,
-    embedding_batch, first_output, select_mask,
+    embedding_batch_from_ort, first_output, select_mask,
 };
 
 impl EmbeddingModel {
@@ -54,8 +56,14 @@ impl EmbeddingModel {
                 sess.run(ort_inputs)?
             };
             let output = first_output(outputs.values(), "primary embedding batch output")?;
-            let (_shape, data) = output.try_extract_tensor::<f32>()?;
-            return embedding_batch(data, inputs.len(), "primary embedding batch output");
+            let (shape, data) = output.try_extract_tensor::<f32>()?;
+            return embedding_batch_from_ort(
+                shape,
+                data,
+                PRIMARY_BATCH_SIZE,
+                inputs.len(),
+                "primary embedding batch output",
+            );
         }
 
         let mut stacked = Array2::<f32>::zeros((inputs.len(), EMBEDDING_WIDTH));
@@ -73,8 +81,20 @@ impl EmbeddingModel {
     ) -> Result<Array2<f32>, ort::Error> {
         let num_fbanks = fbanks.len();
         let num_masks = masks.len();
-        debug_assert_eq!(num_masks, num_fbanks * NUM_SPEAKERS);
-        debug_assert!(num_fbanks <= MULTI_MASK_BATCH_SIZE);
+        let full_mask_batch = MULTI_MASK_BATCH_SIZE * NUM_SPEAKERS;
+        if num_fbanks > MULTI_MASK_BATCH_SIZE {
+            return Err(ort::Error::new(format!(
+                "multi-mask batch: useful fbank rows {num_fbanks} exceed model capacity {MULTI_MASK_BATCH_SIZE}"
+            )));
+        }
+        let expected_masks = num_fbanks
+            .checked_mul(NUM_SPEAKERS)
+            .ok_or_else(|| ort::Error::new("multi-mask batch: mask row count overflowed"))?;
+        if num_masks != expected_masks {
+            return Err(ort::Error::new(format!(
+                "multi-mask batch: expected {expected_masks} mask rows for {num_fbanks} fbank rows, got {num_masks}"
+            )));
+        }
 
         let fbank_row_stride = FBANK_FRAMES * FBANK_FEATURES;
         for (idx, fbank) in fbanks.iter().enumerate() {
@@ -107,8 +127,6 @@ impl EmbeddingModel {
                 .fill(0.0);
         }
 
-        let full_mask_batch = MULTI_MASK_BATCH_SIZE * NUM_SPEAKERS;
-
         #[cfg(feature = "coreml")]
         {
             self.ensure_native_multi_mask_loaded()?;
@@ -129,12 +147,13 @@ impl EmbeddingModel {
                     (&self.coreml.cached_multi_mask_masks_shape, masks_data),
                 ])
                 .map_err(|e| ort::Error::new(e.to_string()))?;
-            let batch = embedding_batch(
-                &tensor.into_data(),
+            let batch = embedding_batch_from_coreml(
+                tensor,
                 full_mask_batch,
+                num_masks,
                 "native multi-mask output",
             )?;
-            return Ok(batch.slice(s![0..num_masks, ..]).to_owned());
+            return Ok(batch);
         }
 
         let use_batched =
@@ -152,9 +171,14 @@ impl EmbeddingModel {
                 .ok_or_else(|| ort::Error::new("missing multi-mask batched session"))?
                 .run(ort::inputs!["fbank" => fbank_tensor, "masks" => masks_tensor])?;
             let output = first_output(outputs.values(), "multi-mask batched output")?;
-            let (_shape, data) = output.try_extract_tensor::<f32>()?;
-            let batch = embedding_batch(data, full_mask_batch, "multi-mask batched output")?;
-            Ok(batch.slice(s![0..num_masks, ..]).to_owned())
+            let (shape, data) = output.try_extract_tensor::<f32>()?;
+            embedding_batch_from_ort(
+                shape,
+                data,
+                full_mask_batch,
+                num_masks,
+                "multi-mask batched output",
+            )
         } else {
             let mut all_embeddings = Array2::<f32>::zeros((num_masks, EMBEDDING_WIDTH));
             for fbank_idx in 0..num_fbanks {
@@ -178,8 +202,14 @@ impl EmbeddingModel {
                     .ok_or_else(|| ort::Error::new("missing multi-mask session"))?
                     .run(ort::inputs!["fbank" => fbank_tensor, "masks" => masks_tensor])?;
                 let output = first_output(outputs.values(), "multi-mask output")?;
-                let (_shape, data) = output.try_extract_tensor::<f32>()?;
-                let decoded = embedding_batch(data, NUM_SPEAKERS, "multi-mask output")?;
+                let (shape, data) = output.try_extract_tensor::<f32>()?;
+                let decoded = embedding_batch_from_ort(
+                    shape,
+                    data,
+                    NUM_SPEAKERS,
+                    NUM_SPEAKERS,
+                    "multi-mask output",
+                )?;
                 for (local_idx, row_idx) in (mask_start..mask_end).enumerate() {
                     all_embeddings
                         .row_mut(row_idx)
@@ -194,7 +224,12 @@ impl EmbeddingModel {
         &mut self,
         inputs: &[SplitTailInput<'_>],
     ) -> Result<Array2<f32>, ort::Error> {
-        debug_assert!(inputs.len() <= PRIMARY_BATCH_SIZE);
+        if inputs.len() > PRIMARY_BATCH_SIZE {
+            return Err(ort::Error::new(format!(
+                "primary tail batch: useful rows {} exceed model capacity {PRIMARY_BATCH_SIZE}",
+                inputs.len()
+            )));
+        }
 
         let row_stride = FBANK_FRAMES * FBANK_FEATURES;
         for (batch_idx, input) in inputs.iter().enumerate() {
@@ -251,12 +286,12 @@ impl EmbeddingModel {
                     (&self.coreml.cached_tail_weights_shape, weights_data),
                 ])
                 .map_err(|e| ort::Error::new(e.to_string()))?;
-            let batch = embedding_batch(
-                &tensor.into_data(),
+            return embedding_batch_from_coreml(
+                tensor,
                 PRIMARY_BATCH_SIZE,
+                inputs.len(),
                 "native primary tail output",
-            )?;
-            return Ok(batch.slice(s![0..inputs.len(), ..]).to_owned());
+            );
         }
 
         let fbank_tensor =
@@ -270,8 +305,13 @@ impl EmbeddingModel {
             .ok_or_else(|| ort::Error::new("missing primary tail batched session"))?
             .run(ort::inputs!["fbank" => fbank_tensor, "weights" => weights_tensor])?;
         let output = first_output(outputs.values(), "primary tail batched output")?;
-        let (_shape, data) = output.try_extract_tensor::<f32>()?;
-        let batch = embedding_batch(data, PRIMARY_BATCH_SIZE, "primary tail batched output")?;
-        Ok(batch.slice(s![0..inputs.len(), ..]).to_owned())
+        let (shape, data) = output.try_extract_tensor::<f32>()?;
+        embedding_batch_from_ort(
+            shape,
+            data,
+            PRIMARY_BATCH_SIZE,
+            inputs.len(),
+            "primary tail batched output",
+        )
     }
 }

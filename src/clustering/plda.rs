@@ -73,8 +73,9 @@ impl PldaTransform {
         let precision_matrix = raw_transform.t().dot(&raw_transform).inv()?;
 
         let mut tr_over_psi = raw_transform.t().to_owned();
-        for (mut column, &psi_value) in tr_over_psi.columns_mut().into_iter().zip(psi.iter()) {
-            column /= psi_value;
+        for column_idx in 0..raw_transform.nrows() {
+            let mut column = tr_over_psi.column_mut(column_idx);
+            column /= psi[column_idx];
         }
         let between_class_covariance = tr_over_psi.dot(&raw_transform).inv()?;
 
@@ -144,6 +145,18 @@ fn validate_plda_parameters(
     if lda.nrows() == 0 || lda.ncols() == 0 {
         return Err(PldaError::Shape("LDA matrix must be non-empty".to_owned()));
     }
+    if raw_transform.nrows() == 0 || raw_transform.ncols() == 0 {
+        return Err(PldaError::Shape(
+            "PLDA transform must be non-empty".to_owned(),
+        ));
+    }
+    if raw_transform.nrows() < raw_transform.ncols() {
+        return Err(PldaError::Shape(format!(
+            "transform rows {} are fewer than columns {}; TᵀT cannot be invertible",
+            raw_transform.nrows(),
+            raw_transform.ncols()
+        )));
+    }
     if mean1.len() != lda.nrows() {
         return Err(PldaError::Shape(format!(
             "mean1 length {} does not match LDA rows {}",
@@ -165,10 +178,17 @@ fn validate_plda_parameters(
             lda.ncols()
         )));
     }
-    if raw_transform.ncols() != psi.len() {
+    if raw_transform.ncols() != lda.ncols() {
         return Err(PldaError::Shape(format!(
-            "transform columns {} do not match psi length {}",
+            "transform columns {} do not match LDA columns {}",
             raw_transform.ncols(),
+            lda.ncols()
+        )));
+    }
+    if raw_transform.nrows() != psi.len() {
+        return Err(PldaError::Shape(format!(
+            "transform rows {} do not match psi length {}",
+            raw_transform.nrows(),
             psi.len()
         )));
     }
@@ -236,6 +256,7 @@ pub enum PldaError {
 #[cfg(test)]
 mod tests {
     use approx::assert_abs_diff_eq;
+    use ndarray::array;
     use ndarray_npy::ReadNpyExt;
     use std::fs::File;
 
@@ -245,6 +266,23 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures")
             .join(name)
+    }
+
+    fn parameters_for(
+        lda: Array2<f64>,
+        raw_transform: Array2<f64>,
+        psi: Array1<f64>,
+    ) -> PldaParameters {
+        let input_dim = lda.nrows();
+        let output_dim = lda.ncols();
+        PldaParameters {
+            mean1: Array1::zeros(input_dim),
+            mean2: Array1::zeros(output_dim),
+            lda,
+            mu: Array1::zeros(output_dim),
+            raw_transform,
+            psi,
+        }
     }
 
     #[test]
@@ -321,6 +359,56 @@ mod tests {
                 assert_abs_diff_eq!(*lhs * sign, *rhs as f32, epsilon = 5e-4);
             }
         }
+    }
+
+    #[test]
+    fn tall_transform_requires_one_psi_value_per_transform_row() {
+        let result = PldaTransform::from_parameters(parameters_for(
+            Array2::eye(2),
+            array![[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+            array![2.0, 3.0],
+        ));
+
+        assert!(matches!(result, Err(PldaError::Shape(_))));
+    }
+
+    #[test]
+    fn tall_full_rank_transform_is_valid_when_psi_matches_rows() {
+        let result = PldaTransform::from_parameters(parameters_for(
+            Array2::eye(2),
+            array![[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+            array![2.0, 3.0, 5.0],
+        ));
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn rejects_wide_and_empty_transforms() {
+        let wide = PldaTransform::from_parameters(parameters_for(
+            Array2::eye(3),
+            array![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            array![2.0, 3.0],
+        ));
+        assert!(matches!(wide, Err(PldaError::Shape(_))));
+
+        let empty = PldaTransform::from_parameters(parameters_for(
+            Array2::eye(2),
+            Array2::zeros((0, 2)),
+            Array1::zeros(0),
+        ));
+        assert!(matches!(empty, Err(PldaError::Shape(_))));
+    }
+
+    #[test]
+    fn rejects_transform_with_lda_incompatible_output_width() {
+        let result = PldaTransform::from_parameters(parameters_for(
+            Array2::zeros((2, 3)),
+            Array2::eye(2),
+            array![2.0, 3.0],
+        ));
+
+        assert!(matches!(result, Err(PldaError::Shape(_))));
     }
 
     #[test]

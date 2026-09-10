@@ -10,8 +10,14 @@ pub(crate) enum GeometryError {
         /// Which bind or decode step failed
         context: &'static str,
     },
+    /// A tensor dimension was negative or could not fit in `usize`
+    InvalidDimension {
+        /// Which bind or decode step failed
+        context: &'static str,
+        /// Observed dimension
+        dimension: i64,
+    },
     /// Flat buffer length did not match the shape product
-    #[cfg(any(test, feature = "coreml"))]
     LengthMismatch {
         /// Which bind or decode step failed
         context: &'static str,
@@ -31,6 +37,15 @@ pub(crate) enum GeometryError {
         /// Observed dimensions
         shape: Vec<usize>,
     },
+    /// Tensor dimensions did not match the model contract
+    ShapeMismatch {
+        /// Which decode step failed
+        context: &'static str,
+        /// Required dimensions
+        expected: Vec<usize>,
+        /// Observed dimensions
+        actual: Vec<usize>,
+    },
     /// CoreML output was not Float16 or Float32
     #[cfg(any(test, feature = "coreml"))]
     UnsupportedDType {
@@ -47,7 +62,14 @@ impl fmt::Display for GeometryError {
             Self::Overflow { context } => {
                 write!(formatter, "{context}: tensor shape product overflowed")
             }
-            #[cfg(any(test, feature = "coreml"))]
+            Self::InvalidDimension { context, dimension } if *dimension < 0 => write!(
+                formatter,
+                "{context}: expected non-negative tensor dimensions, got {dimension}"
+            ),
+            Self::InvalidDimension { context, dimension } => write!(
+                formatter,
+                "{context}: tensor dimension {dimension} does not fit in usize"
+            ),
             Self::LengthMismatch {
                 context,
                 expected,
@@ -64,6 +86,14 @@ impl fmt::Display for GeometryError {
             } => write!(
                 formatter,
                 "{context}: expected rank {expected}, got rank {actual} shape {shape:?}"
+            ),
+            Self::ShapeMismatch {
+                context,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "{context}: expected shape {expected:?}, got {actual:?}"
             ),
             #[cfg(any(test, feature = "coreml"))]
             Self::UnsupportedDType { context, dtype } => write!(
@@ -107,6 +137,7 @@ pub(crate) enum CoreMlDTypeTag {
     /// Signed 8-bit integer
     Int8,
     /// Any other CoreML type
+    #[cfg(feature = "coreml")]
     Other,
 }
 
@@ -132,6 +163,7 @@ impl CoreMlOutputDType {
                 context,
                 dtype: "Int8",
             }),
+            #[cfg(feature = "coreml")]
             CoreMlDTypeTag::Other => Err(GeometryError::UnsupportedDType {
                 context,
                 dtype: "unsupported",
@@ -156,12 +188,27 @@ impl TensorLayout {
         })
     }
 
-    #[cfg(any(test, feature = "coreml"))]
+    /// Build a layout from an ORT shape after checking signed dimensions
+    pub(crate) fn from_ort_shape(
+        shape: &[i64],
+        context: &'static str,
+    ) -> Result<Self, GeometryError> {
+        let dims = shape
+            .iter()
+            .copied()
+            .map(|dimension| {
+                usize::try_from(dimension)
+                    .map_err(|_| GeometryError::InvalidDimension { context, dimension })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::from_dims(&dims, context)
+    }
+
     pub(crate) fn element_count(&self) -> usize {
         self.element_count
     }
 
-    #[cfg(any(test, feature = "coreml"))]
+    #[cfg(feature = "coreml")]
     pub(crate) fn dims(&self) -> &[usize] {
         &self.dims
     }
@@ -197,6 +244,23 @@ impl TensorLayout {
         let dims = self.try_rank(3, context)?;
         Ok((dims[0], dims[1], dims[2]))
     }
+
+    /// Require dimensions to match a model's exact output contract
+    pub(crate) fn try_exact_dims(
+        &self,
+        expected: &[usize],
+        context: &'static str,
+    ) -> Result<(), GeometryError> {
+        if self.dims == expected {
+            Ok(())
+        } else {
+            Err(GeometryError::ShapeMismatch {
+                context,
+                expected: expected.to_vec(),
+                actual: self.dims.clone(),
+            })
+        }
+    }
 }
 
 /// Decoded CoreML tensor with checked layout
@@ -220,6 +284,7 @@ impl CoreMlTensor {
         Ok(Self { data, layout })
     }
 
+    #[cfg(feature = "coreml")]
     pub(crate) fn layout(&self) -> &TensorLayout {
         &self.layout
     }
@@ -231,10 +296,17 @@ impl CoreMlTensor {
         self.layout.try_rank3(context)
     }
 
+    #[cfg(feature = "coreml")]
     pub(crate) fn into_data(self) -> Vec<f32> {
         self.data
     }
 
+    #[cfg(any(test, feature = "coreml"))]
+    pub(crate) fn into_parts(self) -> (TensorLayout, Vec<f32>) {
+        (self.layout, self.data)
+    }
+
+    #[cfg(feature = "coreml")]
     pub(crate) fn rank3_hw(
         self,
         context: &'static str,
@@ -257,7 +329,6 @@ pub(crate) fn checked_element_count(
     Ok(count)
 }
 
-#[cfg(any(test, feature = "coreml"))]
 pub(crate) fn require_exact_len(
     actual: usize,
     expected: usize,

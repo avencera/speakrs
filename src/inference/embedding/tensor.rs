@@ -1,6 +1,8 @@
-use ndarray::{Array1, Array2, Array3};
+use ndarray::{Array1, Array2, Array3, s};
 
 use super::{EMBEDDING_WIDTH, FBANK_FEATURES};
+#[cfg(any(test, feature = "coreml"))]
+use crate::inference::geometry::CoreMlTensor;
 use crate::inference::geometry::{GeometryError, TensorLayout};
 use ort::memory::Allocator;
 use ort::session::{HasSelectedOutputs, OutputSelector, RunOptions};
@@ -54,34 +56,114 @@ pub(super) fn array3_slice_mut<'a>(
         .ok_or_else(|| ort::Error::new(format!("{context}: array buffer was not contiguous")))
 }
 
-pub(super) fn embedding_vector(
-    data: Vec<f32>,
+fn embedding_vector(
+    layout: &TensorLayout,
+    data: &[f32],
     context: &'static str,
 ) -> Result<Array1<f32>, ort::Error> {
-    if data.len() != EMBEDDING_WIDTH {
-        return Err(ort::Error::new(format!(
-            "{context}: expected embedding width {EMBEDDING_WIDTH}, got {}",
-            data.len()
-        )));
+    layout
+        .try_rank(2, context)
+        .map_err(GeometryError::into_ort)?;
+    layout
+        .try_exact_dims(&[1, EMBEDDING_WIDTH], context)
+        .map_err(GeometryError::into_ort)?;
+    crate::inference::geometry::require_exact_len(data.len(), layout.element_count(), context)
+        .map_err(GeometryError::into_ort)?;
+
+    Ok(Array1::from_vec(data.to_vec()))
+}
+
+pub(super) fn embedding_vector_from_ort(
+    shape: &ort::value::Shape,
+    data: &[f32],
+    context: &'static str,
+) -> Result<Array1<f32>, ort::Error> {
+    let layout = TensorLayout::from_ort_shape(shape, context).map_err(GeometryError::into_ort)?;
+    embedding_vector(&layout, data, context)
+}
+
+#[cfg(any(test, feature = "coreml"))]
+pub(super) fn embedding_vector_from_coreml(
+    tensor: CoreMlTensor,
+    context: &'static str,
+) -> Result<Array1<f32>, ort::Error> {
+    let (layout, data) = tensor.into_parts();
+    embedding_vector(&layout, &data, context)
+}
+
+/// Model output rows and useful rows selected by the caller
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EmbeddingBatchGeometry {
+    model_rows: usize,
+    useful_rows: usize,
+}
+
+impl EmbeddingBatchGeometry {
+    fn new(
+        model_rows: usize,
+        useful_rows: usize,
+        context: &'static str,
+    ) -> Result<Self, ort::Error> {
+        if useful_rows > model_rows {
+            return Err(ort::Error::new(format!(
+                "{context}: useful rows {useful_rows} exceed model capacity {model_rows}"
+            )));
+        }
+        model_rows.checked_mul(EMBEDDING_WIDTH).ok_or_else(|| {
+            ort::Error::new(format!("{context}: embedding batch size overflowed"))
+        })?;
+        useful_rows.checked_mul(EMBEDDING_WIDTH).ok_or_else(|| {
+            ort::Error::new(format!("{context}: useful embedding size overflowed"))
+        })?;
+        Ok(Self {
+            model_rows,
+            useful_rows,
+        })
     }
-    Ok(Array1::from_vec(data))
 }
 
 pub(super) fn embedding_batch(
+    layout: &TensorLayout,
     data: &[f32],
-    rows: usize,
+    model_rows: usize,
+    useful_rows: usize,
     context: &'static str,
 ) -> Result<Array2<f32>, ort::Error> {
-    let expected = rows
-        .checked_mul(EMBEDDING_WIDTH)
-        .ok_or_else(|| ort::Error::new(format!("{context}: embedding batch size overflowed")))?;
-    if data.len() < expected {
-        return Err(ort::Error::new(format!(
-            "{context}: expected at least {expected} values for {rows} embeddings of width {EMBEDDING_WIDTH}, got {}",
-            data.len()
-        )));
-    }
-    array2_from_shape_vec(rows, EMBEDDING_WIDTH, data[..expected].to_vec(), context)
+    let geometry = EmbeddingBatchGeometry::new(model_rows, useful_rows, context)?;
+    layout
+        .try_rank(2, context)
+        .map_err(GeometryError::into_ort)?;
+    layout
+        .try_exact_dims(&[geometry.model_rows, EMBEDDING_WIDTH], context)
+        .map_err(GeometryError::into_ort)?;
+    crate::inference::geometry::require_exact_len(data.len(), layout.element_count(), context)
+        .map_err(GeometryError::into_ort)?;
+
+    let batch =
+        array2_from_shape_vec(geometry.model_rows, EMBEDDING_WIDTH, data.to_vec(), context)?;
+    Ok(batch.slice(s![0..geometry.useful_rows, ..]).to_owned())
+}
+
+pub(super) fn embedding_batch_from_ort(
+    shape: &ort::value::Shape,
+    data: &[f32],
+    model_rows: usize,
+    useful_rows: usize,
+    context: &'static str,
+) -> Result<Array2<f32>, ort::Error> {
+    let layout = TensorLayout::from_ort_shape(shape, context).map_err(GeometryError::into_ort)?;
+    embedding_batch(&layout, data, model_rows, useful_rows, context)
+}
+
+#[cfg(feature = "coreml")]
+pub(super) fn embedding_batch_from_coreml(
+    tensor: CoreMlTensor,
+    model_rows: usize,
+    useful_rows: usize,
+    context: &'static str,
+) -> Result<Array2<f32>, ort::Error> {
+    let (layout, data) = tensor.into_parts();
+    embedding_batch(&layout, &data, model_rows, useful_rows, context)
 }
 
 pub(super) fn fbank_hw_from_shape(
@@ -143,9 +225,10 @@ pub(super) fn preallocated_run_options(
 #[cfg(test)]
 mod tests {
     use super::{
-        EMBEDDING_WIDTH, FBANK_FEATURES, embedding_batch, embedding_vector, fbank_hw_from_i64,
-        fbank_hw_from_shape, first_output,
+        EMBEDDING_WIDTH, FBANK_FEATURES, embedding_batch_from_ort, embedding_vector_from_coreml,
+        embedding_vector_from_ort, fbank_hw_from_i64, fbank_hw_from_shape, first_output,
     };
+    use crate::inference::geometry::CoreMlTensor;
 
     #[test]
     fn first_output_reports_missing_tensor() {
@@ -155,31 +238,173 @@ mod tests {
     }
 
     #[test]
-    fn embedding_vector_rejects_short_and_long_output() {
-        let short = embedding_vector(vec![0.0; EMBEDDING_WIDTH - 1], "masked embedding output")
-            .unwrap_err();
-        let long = embedding_vector(vec![0.0; EMBEDDING_WIDTH + 1], "masked embedding output")
-            .unwrap_err();
-        assert!(short.to_string().contains("expected embedding width 256"));
-        assert!(long.to_string().contains("got 257"));
+    fn embedding_vector_from_ort_rejects_wrong_rank_and_width_with_matching_element_count() {
+        let rank = ort::value::Shape::from([EMBEDDING_WIDTH as i64]);
+        let rank_error = embedding_vector_from_ort(
+            &rank,
+            &vec![0.0; EMBEDDING_WIDTH],
+            "single embedding output",
+        )
+        .unwrap_err();
+        assert!(rank_error.to_string().contains("expected rank 2"));
+
+        let width = ort::value::Shape::from([2_i64, (EMBEDDING_WIDTH / 2) as i64]);
+        let width_error = embedding_vector_from_ort(
+            &width,
+            &vec![0.0; EMBEDDING_WIDTH],
+            "single embedding output",
+        )
+        .unwrap_err();
+        assert!(width_error.to_string().contains("expected shape [1, 256]"));
+        assert!(width_error.to_string().contains("got [2, 128]"));
+    }
+
+    #[test]
+    fn embedding_vector_from_ort_rejects_short_and_excess_output() {
+        let shape = ort::value::Shape::from([1_i64, EMBEDDING_WIDTH as i64]);
+        let short = embedding_vector_from_ort(
+            &shape,
+            &vec![0.0; EMBEDDING_WIDTH - 1],
+            "single embedding output",
+        )
+        .unwrap_err();
+        assert!(short.to_string().contains("expected 256 values, got 255"));
+
+        let excess = embedding_vector_from_ort(
+            &shape,
+            &vec![0.0; EMBEDDING_WIDTH + 1],
+            "single embedding output",
+        )
+        .unwrap_err();
+        assert!(excess.to_string().contains("expected 256 values, got 257"));
+    }
+
+    #[test]
+    fn embedding_vector_from_ort_accepts_the_model_output_shape() {
+        let shape = ort::value::Shape::from([1_i64, EMBEDDING_WIDTH as i64]);
+        let data: Vec<f32> = (0..EMBEDDING_WIDTH).map(|value| value as f32).collect();
+
+        let vector = embedding_vector_from_ort(&shape, &data, "single embedding output").unwrap();
+
+        assert_eq!(vector.len(), EMBEDDING_WIDTH);
+        assert_eq!(vector[0], 0.0);
+        assert_eq!(vector[EMBEDDING_WIDTH - 1], (EMBEDDING_WIDTH - 1) as f32);
+    }
+
+    #[test]
+    fn embedding_vector_from_coreml_validates_retained_output_shape() {
+        let valid = CoreMlTensor::try_from_decoded(
+            vec![0.0; EMBEDDING_WIDTH],
+            vec![1, EMBEDDING_WIDTH],
+            "native tail output",
+        )
+        .unwrap();
         assert_eq!(
-            embedding_vector(vec![0.0; EMBEDDING_WIDTH], "masked embedding output")
+            embedding_vector_from_coreml(valid, "native tail output")
                 .unwrap()
                 .len(),
             EMBEDDING_WIDTH
         );
+
+        let rank = CoreMlTensor::try_from_decoded(
+            vec![0.0; EMBEDDING_WIDTH],
+            vec![EMBEDDING_WIDTH],
+            "native tail output",
+        )
+        .unwrap();
+        assert!(
+            embedding_vector_from_coreml(rank, "native tail output")
+                .unwrap_err()
+                .to_string()
+                .contains("expected rank 2")
+        );
+
+        let width = CoreMlTensor::try_from_decoded(
+            vec![0.0; EMBEDDING_WIDTH],
+            vec![2, EMBEDDING_WIDTH / 2],
+            "native tail output",
+        )
+        .unwrap();
+        let width_error = embedding_vector_from_coreml(width, "native tail output").unwrap_err();
+        assert!(width_error.to_string().contains("expected shape [1, 256]"));
+        assert!(width_error.to_string().contains("got [2, 128]"));
+
+        let short = CoreMlTensor::try_from_decoded(
+            vec![0.0; EMBEDDING_WIDTH - 1],
+            vec![1, EMBEDDING_WIDTH - 1],
+            "native tail output",
+        )
+        .unwrap();
+        let short_error = embedding_vector_from_coreml(short, "native tail output").unwrap_err();
+        assert!(short_error.to_string().contains("expected shape [1, 256]"));
     }
 
     #[test]
-    fn embedding_batch_rejects_short_output() {
-        let error = embedding_batch(&[0.0; 10], 2, "batched embedding output").unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("expected at least 512 values for 2 embeddings")
+    fn embedding_batch_rejects_short_and_excess_output() {
+        let shape = ort::value::Shape::from([2_i64, EMBEDDING_WIDTH as i64]);
+        let short =
+            embedding_batch_from_ort(&shape, &vec![0.0; 511], 2, 2, "batched embedding output")
+                .unwrap_err();
+        assert!(short.to_string().contains("expected 512 values, got 511"));
+
+        let excess =
+            embedding_batch_from_ort(&shape, &vec![0.0; 513], 2, 2, "batched embedding output")
+                .unwrap_err();
+        assert!(excess.to_string().contains("expected 512 values, got 513"));
+    }
+
+    #[test]
+    fn embedding_batch_rejects_wrong_rank_and_width_with_matching_element_count() {
+        let rank = ort::value::Shape::from([1_i64, 2, EMBEDDING_WIDTH as i64]);
+        let rank_error =
+            embedding_batch_from_ort(&rank, &vec![0.0; 512], 2, 2, "batched embedding output")
+                .unwrap_err();
+        assert!(rank_error.to_string().contains("expected rank 2"));
+
+        let width = ort::value::Shape::from([4_i64, 128]);
+        let width_error =
+            embedding_batch_from_ort(&width, &vec![0.0; 512], 2, 2, "batched embedding output")
+                .unwrap_err();
+        assert!(width_error.to_string().contains("expected shape [2, 256]"));
+        assert!(width_error.to_string().contains("got [4, 128]"));
+    }
+
+    #[test]
+    fn embedding_batch_selects_useful_rows_from_a_padded_model_output() {
+        let shape = ort::value::Shape::from([4_i64, EMBEDDING_WIDTH as i64]);
+        let data: Vec<f32> = (0..4 * EMBEDDING_WIDTH).map(|value| value as f32).collect();
+
+        let batch =
+            embedding_batch_from_ort(&shape, &data, 4, 2, "padded embedding output").unwrap();
+
+        assert_eq!(batch.dim(), (2, EMBEDDING_WIDTH));
+        assert_eq!(batch[[0, 0]], 0.0);
+        assert_eq!(
+            batch[[1, EMBEDDING_WIDTH - 1]],
+            (2 * EMBEDDING_WIDTH - 1) as f32
         );
-        let batch = embedding_batch(&vec![1.0; 512], 2, "batched embedding output").unwrap();
-        assert_eq!(batch.dim(), (2, 256));
+    }
+
+    #[test]
+    fn embedding_batch_rejects_useful_rows_above_capacity_and_overflow() {
+        let shape = ort::value::Shape::from([2_i64, EMBEDDING_WIDTH as i64]);
+        let too_many =
+            embedding_batch_from_ort(&shape, &vec![0.0; 512], 2, 3, "padded embedding output")
+                .unwrap_err();
+        assert!(
+            too_many
+                .to_string()
+                .contains("useful rows 3 exceed model capacity 2")
+        );
+
+        let overflow =
+            embedding_batch_from_ort(&shape, &[], usize::MAX, 0, "padded embedding output")
+                .unwrap_err();
+        assert!(
+            overflow
+                .to_string()
+                .contains("embedding batch size overflowed")
+        );
     }
 
     #[test]
