@@ -22,6 +22,8 @@ pub fn post_inference(
         layout,
         segmentations,
         embeddings,
+        #[cfg(feature = "_metrics")]
+            stage_timings: _,
     } = inference_artifacts;
     let speaker_count = segmentations.speaker_count(&layout);
 
@@ -39,8 +41,9 @@ pub fn post_inference(
         });
     }
 
-    let training_embeddings = embeddings.training_set(&segmentations);
-    let hard_clusters = training_embeddings.cluster(&segmentations, &embeddings, plda, config);
+    let training_embeddings =
+        embeddings.training_set(&segmentations, config.effective_clean_frame_duration());
+    let hard_clusters = training_embeddings.cluster(&segmentations, &embeddings, plda, config)?;
 
     let reconstructor =
         Reconstructor::with_clusters(&segmentations, &hard_clusters, &layout.start_frames, 0);

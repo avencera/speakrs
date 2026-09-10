@@ -43,7 +43,7 @@ pub(super) struct LoadedCoreMlState {
     native_fbank_batched_session: Option<SharedCoreMlModel>,
     native_fbank_30s_session: Option<Arc<SharedCoreMlModel>>,
     native_multi_mask_session: Option<SharedCoreMlModel>,
-    native_chunk_compute_units: MLComputeUnits,
+    native_embedding_compute_units: MLComputeUnits,
     native_chunk_specs: Vec<ChunkSessionSpec>,
     native_chunk_sessions: Vec<ChunkEmbeddingSession>,
 }
@@ -66,14 +66,26 @@ impl LoadedSessions {
         let split_tail_batched_path = split_tail_model_path(model_path, CHUNK_SPEAKER_BATCH_SIZE);
         let split_primary_tail_batched_path = split_tail_model_path(model_path, PRIMARY_BATCH_SIZE);
         #[cfg(feature = "coreml")]
-        let native_chunk_compute_units = config.chunk_emb_compute_units.to_ml_compute_units();
+        let native_embedding_compute_units = config
+            .coreml_embedding_compute_units()
+            .to_ml_compute_units();
         #[cfg(not(feature = "coreml"))]
         let _ = config;
+
+        #[cfg(feature = "_metrics")]
+        if let Some(experiment) = config.experiment {
+            experiment
+                .validate(mode)
+                .map_err(|error| ModelLoadError::InvalidConfiguration {
+                    message: error.to_string(),
+                })?;
+        }
+
         let use_split_backend = EmbeddingModel::split_backend_available(model_path);
 
         #[cfg(feature = "coreml")]
         if matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
-            EmbeddingModel::validate_native_coreml_assets(model_path, mode)?;
+            EmbeddingModel::validate_native_coreml_assets(model_path, mode, config)?;
         }
 
         macro_rules! timed {
@@ -147,8 +159,9 @@ impl LoadedSessions {
         let (native_multi_mask_session, native_multi_mask_elapsed) =
             (None, std::time::Duration::ZERO);
         #[cfg(feature = "coreml")]
-        let (native_chunk_specs, native_chunk_specs_elapsed) =
-            timed!(EmbeddingModel::chunk_session_specs(model_path, mode));
+        let (native_chunk_specs, native_chunk_specs_elapsed) = timed!(
+            EmbeddingModel::chunk_session_specs(model_path, mode, config)
+        );
         #[cfg(feature = "coreml")]
         let (native_chunk_sessions, native_chunk_sessions_elapsed) =
             (Vec::new(), std::time::Duration::ZERO);
@@ -192,10 +205,10 @@ impl LoadedSessions {
                 split_fbank_ms = split_fbank_elapsed.as_millis(),
                 split_fbank_b64_ms = split_fbank_batched_elapsed.as_millis(),
                 split_tail_ms = split_tail_elapsed.as_millis(),
-                split_tail_b32_ms = split_tail_batched_elapsed.as_millis(),
+                split_tail_b3_ms = split_tail_batched_elapsed.as_millis(),
                 split_tail_b64_ms = split_primary_tail_batched_elapsed.as_millis(),
                 native_tail_ms = native_tail_elapsed.as_millis(),
-                native_tail_b32_ms = native_tail_batched_elapsed.as_millis(),
+                native_tail_b3_ms = native_tail_batched_elapsed.as_millis(),
                 native_tail_b64_ms = native_tail_primary_batched_elapsed.as_millis(),
                 native_fbank_ms = native_fbank_elapsed.as_millis(),
                 native_fbank_b64_ms = native_fbank_batched_elapsed.as_millis(),
@@ -227,7 +240,7 @@ impl LoadedSessions {
                 split_fbank_ms = split_fbank_elapsed.as_millis(),
                 split_fbank_b64_ms = split_fbank_batched_elapsed.as_millis(),
                 split_tail_ms = split_tail_elapsed.as_millis(),
-                split_tail_b32_ms = split_tail_batched_elapsed.as_millis(),
+                split_tail_b3_ms = split_tail_batched_elapsed.as_millis(),
                 split_tail_b64_ms = split_primary_tail_batched_elapsed.as_millis(),
                 ort_multi_mask_ms = multi_mask_elapsed.as_millis(),
                 ort_multi_mask_b64_ms = multi_mask_batched_elapsed.as_millis(),
@@ -256,7 +269,7 @@ impl LoadedSessions {
             native_fbank_batched_session,
             native_fbank_30s_session,
             native_multi_mask_session,
-            native_chunk_compute_units,
+            native_embedding_compute_units,
             native_chunk_specs,
             native_chunk_sessions,
         };
@@ -319,7 +332,7 @@ impl LoadedSessions {
                 native_fbank_30s_session: self.coreml.native_fbank_30s_session,
                 cached_fbank_30s_shape: CachedInputShape::new("waveform", &[1, 1, 480_000]),
                 native_multi_mask_session: self.coreml.native_multi_mask_session,
-                native_chunk_compute_units: self.coreml.native_chunk_compute_units,
+                native_embedding_compute_units: self.coreml.native_embedding_compute_units,
                 native_chunk_specs: self.coreml.native_chunk_specs,
                 native_chunk_sessions: self.coreml.native_chunk_sessions,
                 cached_tail_fbank_shape: CachedInputShape::new(

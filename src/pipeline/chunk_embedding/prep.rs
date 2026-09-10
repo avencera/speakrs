@@ -41,7 +41,7 @@ impl ChunkPrep {
 
         let mut fbank = vec![0.0f32; self.largest_fbank_frames * 80];
 
-        if chunk_audio.len() <= 480_000 {
+        if chunk_audio.len() <= 480_000 && self.fbank_normalization_scope.uses_chunk_scope() {
             if let Some(fbank_model) = &self.fbank_30s {
                 scratch.fbank_30s_buf[..chunk_audio.len()].copy_from_slice(chunk_audio);
                 scratch.fbank_30s_buf[chunk_audio.len()..].fill(0.0);
@@ -151,18 +151,14 @@ impl PrepWorker {
     pub(super) fn run(
         mut self,
         audio: &[f32],
-        step_samples: usize,
-        window_samples: usize,
         chunk_rx: &Receiver<DecodedChunk>,
         prep_tx: Sender<PreparedChunk>,
     ) -> Result<PrepStats, PipelineError> {
         let mut stats = PrepStats::default();
 
         while let Ok(decoded) = chunk_rx.recv() {
-            let chunk_audio_start = decoded.global_start * step_samples;
-            if chunk_audio_start + window_samples > audio.len() {
-                continue;
-            }
+            let chunk_audio_start = decoded.global_start * self.prep.step_samples;
+            debug_assert!(chunk_audio_start < audio.len());
             let prep_start = std::time::Instant::now();
             let prepared = self.prep.prep(decoded, audio, &mut self.scratch)?;
             stats.fbank_us += prep_start.elapsed().as_micros() as u64;
@@ -196,9 +192,7 @@ impl BatchPrepWorker {
                 decoded_chunk: tagged.decoded_chunk,
             };
             let chunk_audio_start = decoded.global_start * self.prep.step_samples;
-            if chunk_audio_start + self.prep.window_samples > audio.len() {
-                continue;
-            }
+            debug_assert!(chunk_audio_start < audio.len());
             let prep_start = std::time::Instant::now();
             let prepared = self.prep.prep(decoded, audio, &mut self.scratch)?;
             stats.fbank_us += prep_start.elapsed().as_micros() as u64;
@@ -229,6 +223,7 @@ pub(super) struct ChunkPrep {
     pub(super) max_active: usize,
     pub(super) fbank_30s: Option<Arc<SharedCoreMlModel>>,
     pub(super) fbank_10s: Option<Arc<SharedCoreMlModel>>,
+    pub(super) fbank_normalization_scope: crate::pipeline::config::ChunkFbankNormalizationScope,
 }
 
 pub(super) struct PrepScratch {

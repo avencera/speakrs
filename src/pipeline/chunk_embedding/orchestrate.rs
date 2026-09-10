@@ -14,13 +14,6 @@ use crate::inference::embedding::FBANK_FRAMES;
 
 type ChunkEmbeddingSetup = (usize, usize, bool, Option<ChunkEmbeddingResources>);
 
-pub(super) fn seg_worker_count() -> usize {
-    std::thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(4)
-        .min(8)
-}
-
 pub(super) fn setup_chunk_embedding(
     seg_model: &SegmentationModel,
     emb_model: &mut EmbeddingModel,
@@ -34,8 +27,7 @@ pub(super) fn setup_chunk_embedding(
     let Some(chunk_win_capacity) = emb_model.chunk_window_capacity() else {
         return Ok(None);
     };
-    let step_samples = seg_model.step_samples();
-    let total_windows = audio.len().saturating_sub(window_samples) / step_samples + 1;
+    let total_windows = seg_model.window_count(audio.len());
     let est_chunks = total_windows.div_ceil(chunk_win_capacity);
     let use_pipelined = est_chunks >= 2;
     let resources = use_pipelined
@@ -71,27 +63,20 @@ pub(super) fn run_pipelined<'scope>(
         max_active,
         fbank_30s: resources.fbank_30s.clone(),
         fbank_10s: resources.fbank_10s.clone(),
+        fbank_normalization_scope: params.fbank_normalization_scope,
     };
 
     let (prep_tx, prep_rx) = crossbeam_channel::bounded(48);
     let (emb_tx, emb_rx) = crossbeam_channel::bounded(8);
 
-    let mut prep_handles = Vec::with_capacity(2);
-    for _ in 0..2usize {
+    let mut prep_handles = Vec::with_capacity(params.fbank_preparation_workers);
+    for _ in 0..params.fbank_preparation_workers {
         let worker = PrepWorker {
             prep: prep_config.clone(),
             scratch: PrepScratch::new(params.window_samples),
         };
         let prep_tx = prep_tx.clone();
-        prep_handles.push(scope.spawn(move || {
-            worker.run(
-                audio,
-                params.step_samples,
-                params.window_samples,
-                chunk_rx,
-                prep_tx,
-            )
-        }));
+        prep_handles.push(scope.spawn(move || worker.run(audio, chunk_rx, prep_tx)));
     }
     drop(prep_tx);
 
@@ -223,9 +208,7 @@ pub(super) fn run_sequential_chunks(
         let sess_num_masks = session.num_masks;
 
         let chunk_audio_start = global_start * params.step_samples;
-        if chunk_audio_start + params.window_samples > audio.len() {
-            continue;
-        }
+        debug_assert!(chunk_audio_start < audio.len());
         let chunk_audio_len = params.window_samples + (wins - 1) * params.step_samples;
         let chunk_audio_end = (chunk_audio_start + chunk_audio_len).min(audio.len());
         let chunk_audio = &audio[chunk_audio_start..chunk_audio_end];
@@ -240,7 +223,12 @@ pub(super) fn run_sequential_chunks(
         let mut fbank = vec![0.0f32; sess_fbank_frames * 80];
         let fbank_start = std::time::Instant::now();
 
-        if let Some(full_fbank) = emb_model.compute_chunk_fbank_30s(chunk_audio)? {
+        let full_fbank = if params.fbank_normalization_scope.uses_chunk_scope() {
+            emb_model.compute_chunk_fbank_30s(chunk_audio)?
+        } else {
+            None
+        };
+        if let Some(full_fbank) = full_fbank {
             let copy_frames = full_fbank.nrows().min(sess_fbank_frames);
             for row_idx in 0..copy_frames {
                 let dst = row_idx * 80;

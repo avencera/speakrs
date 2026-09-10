@@ -1,5 +1,6 @@
 use crate::pipeline::{FRAME_DURATION_SECONDS, FRAME_STEP_SECONDS, SEGMENTATION_WINDOW_SECONDS};
 
+#[derive(Clone)]
 pub(in crate::pipeline) struct ChunkLayout {
     pub step_seconds: f64,
     pub step_samples: usize,

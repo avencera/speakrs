@@ -22,12 +22,6 @@ use super::types::PipelineError;
 /// // minimal
 /// let mut pipeline = PipelineBuilder::from_pretrained(ExecutionMode::Cpu)?.build()?;
 ///
-/// // with custom runtime config
-/// # use speakrs::RuntimeConfig;
-/// let mut pipeline = PipelineBuilder::from_pretrained(ExecutionMode::Cpu)?
-///     .runtime(RuntimeConfig { chunk_emb_workers: 4, ..Default::default() })
-///     .build()?;
-///
 /// // from local directory
 /// let mut pipeline = PipelineBuilder::from_dir("./models", ExecutionMode::Cpu)
 ///     .build()?;
@@ -73,7 +67,7 @@ impl PipelineBuilder {
         Ok(Self::from_bundle(bundle, mode))
     }
 
-    /// Override runtime config (workers, compute units)
+    /// Override runtime config
     pub fn runtime(mut self, config: RuntimeConfig) -> Self {
         self.runtime = Some(config);
         self
@@ -101,6 +95,20 @@ impl PipelineBuilder {
             .pipeline
             .unwrap_or_else(|| PipelineConfig::for_mode(self.mode));
         let runtime = self.runtime.unwrap_or_default();
+        #[cfg(feature = "coreml")]
+        let coreml_chunk_execution_policy = runtime.coreml_chunk_execution_policy();
+
+        #[cfg(feature = "_metrics")]
+        let step = match runtime.experiment {
+            Some(experiment) => {
+                experiment
+                    .validate(self.mode)
+                    .map_err(|error| PipelineError::Other(error.to_string()))?;
+                experiment.segmentation_step_seconds()
+            }
+            None => segmentation_step_seconds(self.mode),
+        };
+        #[cfg(not(feature = "_metrics"))]
         let step = segmentation_step_seconds(self.mode);
 
         let seg_model =
@@ -118,6 +126,8 @@ impl PipelineBuilder {
             plda,
             powerset: PowersetMapping::new(3, 2),
             default_config: pipeline,
+            #[cfg(feature = "coreml")]
+            coreml_chunk_execution_policy,
         })
     }
 

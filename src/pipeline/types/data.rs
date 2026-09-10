@@ -152,10 +152,72 @@ pub struct BatchInput<'a> {
 }
 
 /// Intermediate results from segmentation and embedding inference
+#[derive(Clone)]
 pub struct InferenceArtifacts {
     pub(in crate::pipeline) layout: ChunkLayout,
     pub(in crate::pipeline) segmentations: DecodedSegmentations,
     pub(in crate::pipeline) embeddings: ChunkEmbeddings,
+    #[cfg(feature = "_metrics")]
+    pub(in crate::pipeline) stage_timings: Option<InferenceStageTimings>,
+}
+
+impl InferenceArtifacts {
+    /// Return detailed chunk-inference timings when metrics are enabled and available
+    #[cfg(feature = "_metrics")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
+    pub const fn stage_timings(&self) -> Option<InferenceStageTimings> {
+        self.stage_timings
+    }
+
+    /// Return decoded segmentation windows for metrics experiments
+    #[cfg(feature = "_metrics")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
+    pub const fn segmentations(&self) -> &DecodedSegmentations {
+        &self.segmentations
+    }
+
+    /// Return speaker embeddings for metrics experiments
+    #[cfg(feature = "_metrics")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
+    pub const fn embeddings(&self) -> &ChunkEmbeddings {
+        &self.embeddings
+    }
+
+    /// Count embeddings that satisfy the requested clean-frame duration
+    #[cfg(feature = "_metrics")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
+    pub fn usable_training_embedding_count(
+        &self,
+        clean_frame_duration: super::super::CleanFrameDuration,
+    ) -> usize {
+        self.embeddings
+            .training_set(&self.segmentations, clean_frame_duration)
+            .0
+            .nrows()
+    }
+}
+
+/// Detailed timings from the native chunk inference path
+#[cfg(feature = "_metrics")]
+#[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
+#[derive(Clone, Copy, Debug)]
+pub struct InferenceStageTimings {
+    /// Time spent by the segmentation worker, which can overlap embedding work
+    pub segmentation_seconds: f64,
+    /// Time from embedding orchestration start to completion
+    pub embedding_seconds: f64,
+    /// Sum of Core ML chunk-embedding prediction call durations
+    pub prediction_seconds: f64,
+    /// Sum of filterbank preparation durations across preparation workers
+    pub filterbank_preparation_seconds: f64,
+    /// Sum of speaker-mask preparation durations
+    pub mask_preparation_seconds: f64,
+    /// Complete concurrent inference wall time
+    pub total_seconds: f64,
+    /// Number of embedding chunks submitted
+    pub chunk_count: usize,
+    /// Whether preparation and prediction used the pipelined path
+    pub pipelined: bool,
 }
 
 /// Complete output from a diarization run

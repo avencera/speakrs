@@ -2170,6 +2170,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "roxmltree"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "rustc-demangle"
 version = "0.1.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3448,15 +3457,22 @@ checksum = "32ac00cd3f8ec9c1d33fb3e7958a82df6989c42d747bd326c822b1d625283547"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "block2",
  "chrono",
  "clap",
  "color-eyre",
  "hound",
+ "libc",
  "mimalloc",
  "ndarray",
+ "objc2",
+ "objc2-core-ml",
+ "objc2-foundation",
  "ort",
+ "roxmltree",
  "serde",
  "serde_json",
+ "sha2",
  "speakrs",
  "tempfile",
  "tracing",

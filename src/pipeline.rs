@@ -1,17 +1,34 @@
 mod config;
 pub use crate::binarize::BinarizeConfig;
 pub use crate::clustering::ahc::AhcConfig;
+#[cfg(feature = "_metrics")]
+#[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
+pub use crate::clustering::sphere_vbx::{
+    ResponsibilitySmoothing, ResponsibilitySmoothingError, SphereVbxAhcInitialization,
+    SphereVbxInitialization, SphereVbxPfConfig, SphereVbxPfConfigError,
+    SphereVbxResponsibilityTolerance,
+};
 pub use crate::clustering::vbx::VbxConfig;
 pub(crate) use config::MIN_SPEAKER_ACTIVITY;
 pub use config::{
-    COREML_SEGMENTATION_STEP_SECONDS, CUDA_SEGMENTATION_STEP_SECONDS,
-    FAST_SEGMENTATION_STEP_SECONDS, FRAME_DURATION_SECONDS, FRAME_STEP_SECONDS, PipelineConfig,
-    ReconstructMethod, RuntimeConfig, SEGMENTATION_STEP_SECONDS, SEGMENTATION_WINDOW_SECONDS,
-    segmentation_step_seconds,
+    COREML_SEGMENTATION_STEP_SECONDS, CUDA_SEGMENTATION_STEP_SECONDS, CleanFrameDuration,
+    CleanFrameDurationError, FAST_SEGMENTATION_STEP_SECONDS, FRAME_DURATION_SECONDS,
+    FRAME_STEP_SECONDS, PipelineConfig, ReconstructMethod, RuntimeConfig,
+    SEGMENTATION_STEP_SECONDS, SEGMENTATION_WINDOW_SECONDS, segmentation_step_seconds,
+};
+#[cfg(feature = "_metrics")]
+#[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
+pub use config::{
+    ClusteringBackend, CoreMlChunkLayout, CoreMlFbankNormalizationScope,
+    CoreMlFbankPreparationWorkers, CoreMlSegmentationWorkers, CoreMlShapeLadder,
+    ExperimentInferenceConfig, ExperimentInferenceConfigError,
 };
 
 mod types;
 pub(crate) use types::FrameActivations;
+#[cfg(feature = "_metrics")]
+#[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
+pub use types::InferenceStageTimings;
 pub use types::{
     BatchInput, ChunkEmbeddings, ChunkSpeakerClusters, DecodedSegmentations, DiarizationResult,
     DiscreteDiarization, InferenceArtifacts, PipelineError, SpeakerCountTrack,
@@ -139,6 +156,8 @@ pub struct OwnedDiarizationPipeline {
     pub(crate) plda: PldaTransform,
     pub(crate) powerset: PowersetMapping,
     pub(crate) default_config: PipelineConfig,
+    #[cfg(feature = "coreml")]
+    coreml_chunk_execution_policy: config::CoreMlChunkExecutionPolicy,
 }
 
 impl OwnedDiarizationPipeline {
@@ -218,6 +237,8 @@ pub struct DiarizationPipeline<'a> {
     plda: PldaTransform,
     powerset: PowersetMapping,
     default_config: PipelineConfig,
+    #[cfg(feature = "coreml")]
+    coreml_chunk_execution_policy: config::CoreMlChunkExecutionPolicy,
 }
 
 impl<'a> DiarizationPipeline<'a> {
@@ -244,6 +265,8 @@ impl<'a> DiarizationPipeline<'a> {
             plda: PldaTransform::from_dir(models_dir)?,
             powerset: PowersetMapping::new(3, 2),
             default_config,
+            #[cfg(feature = "coreml")]
+            coreml_chunk_execution_policy: config::CoreMlChunkExecutionPolicy::default(),
         })
     }
 
@@ -262,6 +285,8 @@ impl OwnedDiarizationPipeline {
             emb_model: &mut self.emb_model,
             plda: &self.plda,
             powerset: &self.powerset,
+            #[cfg(feature = "coreml")]
+            coreml_chunk_execution_policy: self.coreml_chunk_execution_policy,
         }
     }
 }
@@ -273,6 +298,8 @@ impl<'a> DiarizationPipeline<'a> {
             emb_model: self.emb_model,
             plda: &self.plda,
             powerset: &self.powerset,
+            #[cfg(feature = "coreml")]
+            coreml_chunk_execution_policy: self.coreml_chunk_execution_policy,
         }
     }
 }
@@ -282,6 +309,8 @@ struct PipelineRunner<'a> {
     emb_model: &'a mut EmbeddingModel,
     plda: &'a PldaTransform,
     powerset: &'a PowersetMapping,
+    #[cfg(feature = "coreml")]
+    coreml_chunk_execution_policy: config::CoreMlChunkExecutionPolicy,
 }
 
 impl<'a> PipelineRunner<'a> {
@@ -360,6 +389,7 @@ impl<'a> PipelineRunner<'a> {
                 self.plda,
                 files,
                 config,
+                self.coreml_chunk_execution_policy,
             )?
         {
             return Ok(results);
@@ -382,6 +412,7 @@ impl<'a> PipelineRunner<'a> {
                     self.emb_model,
                     self.powerset,
                     audio,
+                    self.coreml_chunk_execution_policy,
                 )? {
                     return Ok(result);
                 }
@@ -421,6 +452,8 @@ impl<'a> PipelineRunner<'a> {
             layout,
             segmentations,
             embeddings,
+            #[cfg(feature = "_metrics")]
+            stage_timings: None,
         })
     }
 
@@ -517,6 +550,8 @@ impl<'a> PipelineRunner<'a> {
             layout,
             segmentations: DecodedSegmentations(concurrent_result.segmentations),
             embeddings: ChunkEmbeddings(concurrent_result.embeddings),
+            #[cfg(feature = "_metrics")]
+            stage_timings: None,
         })
     }
 
@@ -533,6 +568,8 @@ impl<'a> PipelineRunner<'a> {
             layout: layout.with_num_chunks(0),
             segmentations: DecodedSegmentations(Array3::zeros((0, 0, 0))),
             embeddings: ChunkEmbeddings(Array3::zeros((0, 0, 0))),
+            #[cfg(feature = "_metrics")]
+            stage_timings: None,
         }
     }
 }

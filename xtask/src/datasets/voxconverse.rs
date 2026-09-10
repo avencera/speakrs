@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Result, ensure};
 
 use crate::cmd::run_cmd;
 
@@ -45,9 +45,16 @@ fn ensure_split(dir: &Path, zip_name: &str, rttm_subdir: &str) -> Result<()> {
                 .arg(dir),
         )?;
         let audio_dir = dir.join("audio");
-        if audio_dir.is_dir() && !wav_dir.is_dir() {
-            fs::rename(&audio_dir, &wav_dir)?;
+        let split_audio_dir = dir.join(zip_name.trim_end_matches(".zip"));
+        let extracted_audio_dir = [audio_dir, split_audio_dir]
+            .into_iter()
+            .find(|path| path.is_dir());
+        if let Some(extracted_audio_dir) = extracted_audio_dir
+            && !wav_dir.is_dir()
+        {
+            fs::rename(extracted_audio_dir, &wav_dir)?;
         }
+        let _ = fs::remove_dir_all(dir.join("__MACOSX"));
         let _ = fs::remove_file(&zip_path);
     }
 
@@ -75,6 +82,11 @@ fn ensure_split(dir: &Path, zip_name: &str, rttm_subdir: &str) -> Result<()> {
         }
         let _ = fs::remove_dir_all(&tmp_clone);
     }
+
+    ensure!(
+        wav_dir.is_dir() && rttm_dir.is_dir(),
+        "VoxConverse {rttm_subdir} extraction did not create wav and rttm directories"
+    );
 
     Ok(())
 }

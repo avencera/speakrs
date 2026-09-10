@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "experiment_id": "mac-normalization-smoke",
+  "dataset": {
+    "id": "ami-ihm",
+    "max_files": 1,
+    "max_minutes": 30
+  },
+  "models_dir": "fixtures/models",
+  "inference": {
+    "mode": "coreml",
+    "layout": "one_second_phased",
+    "filterbank_normalization_scope": "ten_second_segments"
+  },
+  "post_inference": [
+    {
+      "id": "default",
+      "vbx_max_iters": 20
+    }
+  ],
+  "performance": {
+    "warmups": 0,
+    "repetitions": 1,
+    "sleep_seconds": 0
+  },
+  "acceptance": "standard_performance"
+}

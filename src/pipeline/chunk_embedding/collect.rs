@@ -5,6 +5,8 @@ use super::{
     ChunkEmbeddings, ChunkLayout, DecodedSegmentations, InferenceArtifacts, PipelineError,
     invariant_error,
 };
+#[cfg(feature = "_metrics")]
+use crate::pipeline::types::InternalInferenceStageTimings;
 
 pub(super) fn batch_embeddings(
     num_masks: usize,
@@ -23,6 +25,7 @@ pub(super) fn build_chunk_artifacts(
     step_samples: usize,
     window_samples: usize,
     summary: super::EmbeddingSummary,
+    #[cfg(feature = "_metrics")] stage_timings: InternalInferenceStageTimings,
 ) -> Option<InferenceArtifacts> {
     if summary.num_chunks == 0 {
         return None;
@@ -36,6 +39,8 @@ pub(super) fn build_chunk_artifacts(
         ),
         segmentations: DecodedSegmentations(summary.segmentations),
         embeddings: ChunkEmbeddings(summary.embeddings),
+        #[cfg(feature = "_metrics")]
+        stage_timings: Some(stage_timings),
     })
 }
 
@@ -113,6 +118,8 @@ impl FileCollector {
             layout: ChunkLayout::new(step_seconds, step_samples, window_samples, n),
             segmentations: DecodedSegmentations(self.seg_array.slice_move(s![..n, .., ..])),
             embeddings: ChunkEmbeddings(self.emb_array.slice_move(s![..n, .., ..])),
+            #[cfg(feature = "_metrics")]
+            stage_timings: None,
         })
     }
 }

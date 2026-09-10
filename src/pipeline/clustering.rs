@@ -3,18 +3,26 @@ use tracing::{debug, trace};
 
 use crate::clustering::ahc::cluster as cluster_ahc;
 use crate::clustering::plda::PldaTransform;
+#[cfg(feature = "_metrics")]
+use crate::clustering::sphere_vbx::cluster_sphere_vbx_pf;
 use crate::clustering::vbx::cluster_vbx;
 use crate::inference::embedding::should_use_clean_mask;
 use crate::utils::cosine_similarity;
 
-use super::config::{MIN_SPEAKER_ACTIVITY, PipelineConfig};
-use super::types::{ChunkEmbeddings, ChunkSpeakerClusters, DecodedSegmentations};
+#[cfg(feature = "_metrics")]
+use super::config::ClusteringBackend;
+use super::config::{CleanFrameDuration, MIN_SPEAKER_ACTIVITY, PipelineConfig};
+use super::types::{ChunkEmbeddings, ChunkSpeakerClusters, DecodedSegmentations, PipelineError};
 
 pub(super) struct TrainingEmbeddings(pub Array2<f32>);
 
 impl ChunkEmbeddings {
-    pub(super) fn training_set(&self, segmentations: &DecodedSegmentations) -> TrainingEmbeddings {
-        let num_frames = segmentations.0.shape()[1] as f32;
+    pub(super) fn training_set(
+        &self,
+        segmentations: &DecodedSegmentations,
+        clean_frame_duration: CleanFrameDuration,
+    ) -> TrainingEmbeddings {
+        let minimum_clean_frames = clean_frame_duration.minimum_frames();
         let mut filtered = Vec::new();
         let mut chunk_indices = Vec::new();
 
@@ -36,7 +44,7 @@ impl ChunkEmbeddings {
                     .sum::<f32>();
                 let embedding = self.0.slice(s![chunk_idx, speaker_idx, ..]);
                 let valid_embedding = embedding.iter().all(|value| value.is_finite());
-                if valid_embedding && clean_frames >= 0.2 * num_frames {
+                if valid_embedding && clean_frames >= minimum_clean_frames {
                     filtered.extend(embedding.iter());
                     chunk_indices.push(chunk_idx);
                 }
@@ -62,15 +70,15 @@ impl TrainingEmbeddings {
         embeddings: &ChunkEmbeddings,
         plda: &PldaTransform,
         config: &PipelineConfig,
-    ) -> ChunkSpeakerClusters {
+    ) -> Result<ChunkSpeakerClusters, PipelineError> {
         if self.0.nrows() < 2 {
             let mut clusters =
                 Array2::<i32>::zeros((segmentations.0.shape()[0], segmentations.0.shape()[2]));
             mark_inactive_speakers(&segmentations.0, &mut clusters);
-            return ChunkSpeakerClusters(clusters);
+            return Ok(ChunkSpeakerClusters(clusters));
         }
 
-        let ahc_labels = cluster_ahc(&self.0.view(), config.ahc);
+        let ahc_labels = initial_ahc_labels(&self.0, plda, config);
         debug!(
             rows = self.0.nrows(),
             cols = self.0.ncols(),
@@ -85,14 +93,7 @@ impl TrainingEmbeddings {
             }
         }
 
-        let plda_features = plda.transform(&self.0.view(), 128);
-        let phi = plda.phi();
-        let (gamma, pi): (Array2<f32>, ndarray::Array1<f32>) = cluster_vbx(
-            &ahc_labels,
-            &plda_features.view(),
-            &phi.slice(s![..128]),
-            &config.vbx,
-        );
+        let (gamma, pi) = cluster_probabilities(&ahc_labels, &self.0, plda, config)?;
 
         debug!(?pi, "VBx speaker priors");
 
@@ -131,8 +132,52 @@ impl TrainingEmbeddings {
             "hard_clusters shape"
         );
 
-        ChunkSpeakerClusters(clusters)
+        Ok(ChunkSpeakerClusters(clusters))
     }
+}
+
+fn initial_ahc_labels(
+    embeddings: &Array2<f32>,
+    _plda: &PldaTransform,
+    config: &PipelineConfig,
+) -> Vec<usize> {
+    #[cfg(feature = "_metrics")]
+    if let ClusteringBackend::SphereVbxPf(sphere) = config.clustering_backend()
+        && matches!(
+            sphere.ahc_initialization(),
+            crate::clustering::sphere_vbx::SphereVbxAhcInitialization::PldaTransformed
+        )
+    {
+        let plda_features = _plda.transform(&embeddings.view(), 128);
+        return cluster_ahc(&plda_features.view(), config.ahc);
+    }
+
+    cluster_ahc(&embeddings.view(), config.ahc)
+}
+
+fn cluster_probabilities(
+    ahc_labels: &[usize],
+    embeddings: &Array2<f32>,
+    plda: &PldaTransform,
+    config: &PipelineConfig,
+) -> Result<(Array2<f32>, ndarray::Array1<f32>), PipelineError> {
+    #[cfg(feature = "_metrics")]
+    if let ClusteringBackend::SphereVbxPf(sphere) = config.clustering_backend() {
+        return Ok(cluster_sphere_vbx_pf(
+            ahc_labels,
+            &embeddings.view(),
+            &sphere,
+        )?);
+    }
+
+    let plda_features = plda.transform(&embeddings.view(), 128);
+    let phi = plda.phi();
+    Ok(cluster_vbx(
+        ahc_labels,
+        &plda_features.view(),
+        &phi.slice(s![..128]),
+        &config.vbx,
+    ))
 }
 
 pub(super) fn weighted_centroids(

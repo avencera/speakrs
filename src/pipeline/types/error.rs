@@ -19,6 +19,10 @@ pub enum PipelineError {
     /// PLDA scoring/training error
     #[error(transparent)]
     Plda(#[from] crate::clustering::plda::PldaError),
+    /// SphereVBx-PF clustering input error
+    #[cfg(feature = "_metrics")]
+    #[error(transparent)]
+    SphereVbx(#[from] crate::clustering::sphere_vbx::SphereVbxError),
     /// Hugging Face Hub download error
     #[cfg(feature = "online")]
     #[error(transparent)]
