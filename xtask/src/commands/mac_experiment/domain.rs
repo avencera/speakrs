@@ -940,11 +940,7 @@ impl ValidatedExperiment {
             );
         }
 
-        let schedule = if self.spec.baseline_run.is_some() {
-            ComparisonProtocol::abba(self.performance().repetitions())?
-        } else {
-            ComparisonProtocol::isolated(self.performance().repetitions())?
-        };
+        let schedule = self.schedule()?;
 
         Ok(ExecutableExperiment {
             inner: self.clone(),
@@ -955,15 +951,19 @@ impl ValidatedExperiment {
     }
 
     pub(crate) fn schedule(&self) -> Result<ComparisonProtocol> {
-        if self.spec.baseline_run.is_some() {
-            ComparisonProtocol::abba(self.performance().repetitions())
-        } else {
-            ComparisonProtocol::isolated(self.performance().repetitions())
-        }
+        schedule_for_spec(&self.spec)
     }
 
     pub(crate) fn profile(&self) -> ProfileProtocol {
         self.spec.profile.clone().unwrap_or_default()
+    }
+}
+
+fn schedule_for_spec(spec: &MacExperimentSpec) -> Result<ComparisonProtocol> {
+    if spec.baseline_run.is_some() {
+        ComparisonProtocol::abba(spec.performance.repetitions)
+    } else {
+        ComparisonProtocol::isolated(spec.performance.repetitions)
     }
 }
 
@@ -1042,11 +1042,7 @@ fn validate_domain(spec: &MacExperimentSpec) -> Result<ExperimentId> {
             );
         }
     }
-    if spec.baseline_run.is_some() {
-        ComparisonProtocol::abba(spec.performance.repetitions)?;
-    } else {
-        ComparisonProtocol::isolated(spec.performance.repetitions)?;
-    }
+    schedule_for_spec(spec)?;
     if let Some(profile) = &spec.profile {
         ensure!(
             profile.time_limit_seconds > 0,

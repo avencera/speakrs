@@ -287,13 +287,22 @@ impl RunStore {
         let run_dir = self.run_dir.join("comparison-baseline");
         let expected_files = remapped_source_files(source, &self.manifest.files)?;
         let manifest = match load_existing_comparison_manifest(&run_dir)? {
-            Some(stored) => {
-                validate_comparison_clone(&stored, source, self, &expected_files)?;
+            Some(mut stored) => {
+                if let Some(dataset_sha256) =
+                    validate_comparison_clone(&stored, source, self, &expected_files)?
+                {
+                    stored
+                        .identity
+                        .as_mut()
+                        .expect("comparison identity was validated")
+                        .dataset_sha256 = Some(dataset_sha256);
+                    replace_manifest(&run_dir, &stored)?;
+                }
                 stored
             }
             None => {
                 fs::create_dir_all(&run_dir)?;
-                let manifest = build_comparison_manifest(source, self, expected_files);
+                let manifest = build_comparison_manifest(source, self, expected_files)?;
                 write_manifest(&run_dir, &manifest)?;
                 manifest
             }
@@ -1573,7 +1582,7 @@ struct RecordPathKey {
 fn resolve_dataset_files(experiment: &ValidatedExperiment) -> Result<Vec<ManifestFile>> {
     let dataset = crate::datasets::find_dataset(&experiment.spec().dataset.id)
         .ok_or_else(|| eyre!("unknown dataset '{}'", experiment.spec().dataset.id))?;
-    dataset.snapshot(experiment.datasets_dir())?;
+    dataset.verified_snapshot(experiment.datasets_dir())?;
     let dataset_dir = dataset.dataset_dir(experiment.datasets_dir());
     let requested = &experiment.spec().dataset.files;
     let pairs = if requested.is_empty() {
@@ -1813,30 +1822,41 @@ fn validate_comparison_clone(
     source: &RunStore,
     candidate: &RunStore,
     expected_files: &[ManifestFile],
-) -> Result<()> {
+) -> Result<Option<Sha256Digest>> {
     ensure!(
         stored.spec.experiment_id == source.manifest.spec.experiment_id,
         "comparison baseline experiment_id '{}' does not match opened source '{}'",
         stored.spec.experiment_id,
         source.manifest.spec.experiment_id
     );
+    let expected_spec = build_comparison_spec(source, candidate, expected_files);
+    ensure!(
+        serde_json::to_value(&stored.spec)? == serde_json::to_value(&expected_spec)?,
+        "comparison baseline experiment specification does not match the current source and candidate"
+    );
     ensure!(
         stored.files == expected_files,
         "comparison baseline file slice does not match the opened source"
     );
-    match (
+    let migrated_dataset_sha256 = match (
         &stored.identity,
         &source.manifest.identity,
         &candidate.manifest.identity,
     ) {
         (Some(stored_identity), Some(source_identity), Some(candidate_identity)) => {
+            let expected_dataset_sha256 =
+                Sha256Digest::parse(&dataset_digest(expected_files, &project_root())?)?;
+            let dataset_digest_is_current =
+                stored_identity.dataset_sha256.as_ref() == Some(&expected_dataset_sha256);
+            let dataset_digest_is_legacy = stored_identity.dataset_sha256.is_some()
+                && stored_identity.dataset_sha256 == source_identity.dataset_sha256;
             ensure!(
                 stored_identity.model_sha256 == source_identity.model_sha256,
                 "comparison baseline model digest does not match the opened source"
             );
             ensure!(
-                stored_identity.dataset_sha256 == source_identity.dataset_sha256,
-                "comparison baseline dataset digest does not match the opened source"
+                dataset_digest_is_current || dataset_digest_is_legacy,
+                "comparison baseline dataset digest does not match the expected file slice"
             );
             ensure!(
                 stored_identity.worker_sha256 == candidate_identity.worker_sha256,
@@ -1846,30 +1866,32 @@ fn validate_comparison_clone(
                 stored_identity.host == candidate_identity.host,
                 "comparison baseline host identity does not match the current execution identity"
             );
+            (!dataset_digest_is_current).then_some(expected_dataset_sha256)
         }
-        (None, None, None) => {}
+        (None, None, None) => None,
         _ => bail!("comparison baseline identity does not match the opened source and candidate"),
-    }
+    };
     ensure!(
         stored.spec.performance.repetitions == candidate.manifest.spec.performance.repetitions,
         "comparison baseline repetition count does not match the candidate"
     );
-    Ok(())
+    Ok(migrated_dataset_sha256)
 }
 
 fn build_comparison_manifest(
     source: &RunStore,
     candidate: &RunStore,
     files: Vec<ManifestFile>,
-) -> RunManifest {
+) -> Result<RunManifest> {
     let mut manifest = source.manifest.clone();
     manifest.files = files;
-    manifest.spec.dataset.files = manifest.files.iter().map(|file| file.id.clone()).collect();
-    manifest.spec.dataset.max_files = manifest.files.len() as u32;
-    manifest.spec.dataset.max_minutes = candidate.manifest.spec.dataset.max_minutes;
-    manifest.spec.performance = candidate.manifest.spec.performance.clone();
-    // keep source asset provenance; record the worker and host that actually re-ran the baseline
+    manifest.spec = build_comparison_spec(source, candidate, &manifest.files);
+    // record the worker and host that actually re-ran the baseline
     if let Some(identity) = &mut manifest.identity {
+        identity.dataset_sha256 = Some(Sha256Digest::parse(&dataset_digest(
+            &manifest.files,
+            &project_root(),
+        )?)?);
         if let Some(candidate_identity) = &candidate.manifest.identity {
             identity.seed = candidate_identity.seed;
             identity.host = candidate_identity.host.clone();
@@ -1886,13 +1908,32 @@ fn build_comparison_manifest(
         identity.run_order.comparison_processes.clear();
         identity.created_at = chrono::Utc::now().to_rfc3339();
     }
-    manifest
+    Ok(manifest)
+}
+
+fn build_comparison_spec(
+    source: &RunStore,
+    candidate: &RunStore,
+    files: &[ManifestFile],
+) -> super::MacExperimentSpec {
+    let mut spec = source.manifest.spec.clone();
+    spec.dataset.files = files.iter().map(|file| file.id.clone()).collect();
+    spec.dataset.max_files = files.len() as u32;
+    spec.dataset.max_minutes = candidate.manifest.spec.dataset.max_minutes;
+    spec.performance = candidate.manifest.spec.performance.clone();
+    spec
 }
 
 fn write_manifest(run_dir: &Path, manifest: &RunManifest) -> Result<()> {
     let mut bytes = serde_json::to_vec_pretty(manifest)?;
     bytes.push(b'\n');
     atomic_write_new(&run_dir.join("manifest.json"), &bytes)
+}
+
+fn replace_manifest(run_dir: &Path, manifest: &RunManifest) -> Result<()> {
+    let mut bytes = serde_json::to_vec_pretty(manifest)?;
+    bytes.push(b'\n');
+    atomic_write(&run_dir.join("manifest.json"), &bytes)
 }
 
 fn validate_manifest_files(manifest: &RunManifest, experiment: &ValidatedExperiment) -> Result<()> {
@@ -2141,6 +2182,7 @@ pub(super) fn profile(experiment: ValidatedExperiment, worker: &Path) -> Result<
     };
     super::execute::run_managed_with_worker(worker, &store)?;
 
+    let experiment = store.experiment();
     let profile = experiment.profile();
     ensure!(
         profile.file_index < store.manifest.files.len(),
@@ -2232,7 +2274,7 @@ pub(super) fn profile(experiment: ValidatedExperiment, worker: &Path) -> Result<
     #[cfg(target_os = "macos")]
     let compute_plan = {
         let path = traces_dir.join(format!("{artifact_stem}-compute-plan.json"));
-        super::compute_plan::write_report(&experiment, &path)?;
+        super::compute_plan::write_report(experiment, &path)?;
         Some(path)
     };
     #[cfg(not(target_os = "macos"))]
@@ -2463,7 +2505,14 @@ mod tests {
     }
 
     fn test_store(temp: &Path) -> RunStore {
-        let manifest = test_manifest();
+        fs::create_dir_all(temp).unwrap();
+        let mut manifest = test_manifest();
+        for file in &mut manifest.files {
+            file.wav = temp.join(format!("{}.wav", file.id));
+            file.rttm = temp.join(format!("{}.rttm", file.id));
+            fs::write(&file.wav, format!("{} wav", file.id)).unwrap();
+            fs::write(&file.rttm, format!("{} rttm", file.id)).unwrap();
+        }
         let experiment = ValidatedExperiment::from_spec(manifest.spec.clone()).unwrap();
         RunStore {
             run_dir: temp.to_owned(),
@@ -2862,7 +2911,7 @@ mod tests {
     }
 
     #[test]
-    fn comparison_baseline_preserves_source_asset_digests() {
+    fn comparison_baseline_uses_remapped_dataset_digest() {
         let temp = tempdir().unwrap();
         let mut source = test_store(&temp.path().join("source"));
         source.manifest.identity = Some(test_identity(7));
@@ -2877,7 +2926,24 @@ mod tests {
         let identity = comparison.manifest.identity.as_ref().unwrap();
 
         assert_eq!(identity.model_sha256, Some(test_digest("model")));
-        assert_eq!(identity.dataset_sha256, Some(test_digest("dataset")));
+        assert_eq!(
+            identity.dataset_sha256,
+            Some(
+                Sha256Digest::parse(
+                    &dataset_digest(&comparison.manifest.files, &project_root()).unwrap(),
+                )
+                .unwrap(),
+            )
+        );
+        assert_ne!(
+            identity.dataset_sha256,
+            Some(
+                Sha256Digest::parse(
+                    &dataset_digest(&source.manifest.files, &project_root()).unwrap(),
+                )
+                .unwrap(),
+            )
+        );
         assert_eq!(identity.worker_sha256, Some(test_digest("worker")));
         assert_eq!(identity.seed, 99);
         assert_eq!(identity.run_order.repetitions, [0, 1, 2, 3]);
@@ -2905,6 +2971,71 @@ mod tests {
             second.manifest.identity.as_ref().unwrap().created_at,
             created_at
         );
+    }
+
+    #[test]
+    fn comparison_baseline_migrates_legacy_full_dataset_digest() {
+        let temp = tempdir().unwrap();
+        let mut source = test_store(&temp.path().join("source"));
+        source.manifest.identity = Some(test_identity(7));
+        let mut candidate = test_store(&temp.path().join("candidate"));
+        candidate.manifest.files = vec![source.manifest.files[1].clone()];
+        candidate.manifest.spec.dataset.max_files = 1;
+        candidate.manifest.identity = Some(test_identity(99));
+
+        let comparison = candidate.comparison_baseline_store(&source).unwrap();
+        let mut legacy = comparison.manifest;
+        legacy.identity.as_mut().unwrap().dataset_sha256 = source
+            .manifest
+            .identity
+            .as_ref()
+            .unwrap()
+            .dataset_sha256
+            .clone();
+        replace_manifest(&comparison.run_dir, &legacy).unwrap();
+
+        let migrated = candidate.comparison_baseline_store(&source).unwrap();
+        let expected = Sha256Digest::parse(
+            &dataset_digest(&migrated.manifest.files, &project_root()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            migrated
+                .manifest
+                .identity
+                .as_ref()
+                .unwrap()
+                .dataset_sha256
+                .as_ref(),
+            Some(&expected)
+        );
+        let persisted: RunManifest =
+            serde_json::from_reader(File::open(migrated.run_dir.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            persisted.identity.as_ref().unwrap().dataset_sha256.as_ref(),
+            Some(&expected)
+        );
+    }
+
+    #[test]
+    fn comparison_baseline_rejects_changed_execution_specification() {
+        let temp = tempdir().unwrap();
+        let mut source = test_store(&temp.path().join("source"));
+        source.manifest.identity = Some(test_identity(7));
+        let mut candidate = test_store(&temp.path().join("candidate"));
+        candidate.manifest.files = vec![source.manifest.files[1].clone()];
+        candidate.manifest.spec.dataset.max_files = 1;
+        candidate.manifest.identity = Some(test_identity(99));
+
+        candidate.comparison_baseline_store(&source).unwrap();
+        candidate.manifest.spec.performance.warmups += 1;
+        let error = candidate
+            .comparison_baseline_store(&source)
+            .map(|_| ())
+            .unwrap_err();
+
+        assert!(error.to_string().contains("experiment specification"));
     }
 
     #[test]
@@ -3068,6 +3199,7 @@ mod tests {
         let mut source = test_store(&temp.path().join("source"));
         source.manifest.identity = Some(test_identity(7));
         let mut other = test_store(&temp.path().join("other"));
+        other.manifest.files = source.manifest.files.clone();
         let mut other_identity = test_identity(7);
         other_identity.model_sha256 = Some(test_digest("other-model"));
         other.manifest.identity = Some(other_identity);
@@ -3211,10 +3343,16 @@ mod tests {
         candidate_identity.worker_sha256 = Some(test_digest("candidate-worker"));
         candidate.manifest.identity = Some(candidate_identity);
         let files = source.manifest.files.clone();
-        let manifest = build_comparison_manifest(&source, &candidate, files);
+        let manifest = build_comparison_manifest(&source, &candidate, files).unwrap();
         let identity = manifest.identity.expect("comparison identity");
         assert_eq!(identity.model_sha256, Some(test_digest("model")));
-        assert_eq!(identity.dataset_sha256, Some(test_digest("dataset")));
+        assert_eq!(
+            identity.dataset_sha256,
+            Some(
+                Sha256Digest::parse(&dataset_digest(&manifest.files, &project_root()).unwrap())
+                    .unwrap(),
+            )
+        );
         assert_eq!(
             identity.worker_sha256,
             Some(test_digest("candidate-worker"))
