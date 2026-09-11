@@ -757,10 +757,12 @@ mod clean_frame_duration_tests {
     fn pipeline_defaults_keep_gaussian_vbx_and_fixed_mode_steps() {
         let standard = match PipelineConfig::default().clustering_backend() {
             ClusteringBackend::GaussianVbx(vbx) => vbx,
+            #[cfg(feature = "_metrics")]
             _ => panic!("default clustering must be gaussian"),
         };
         let fast = match PipelineConfig::for_mode(ExecutionMode::CoreMlFast).clustering_backend() {
             ClusteringBackend::GaussianVbx(vbx) => vbx,
+            #[cfg(feature = "_metrics")]
             _ => panic!("fast clustering must be gaussian"),
         };
 

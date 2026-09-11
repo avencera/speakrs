@@ -451,6 +451,7 @@ pub(crate) fn write_speaker_mask_to_slice(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "_metrics")]
     use super::super::config::ClusteringConfig;
     use super::*;
 
