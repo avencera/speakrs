@@ -9,6 +9,7 @@ use hf_hub::{Repo, RepoType};
 
 const SEGMENTATION_ONNX: &str = "segmentation-3.0.onnx";
 const EMBEDDING_ONNX: &str = "wespeaker-voxceleb-resnet34.onnx";
+const EMBEDDING_MIN_SAMPLES: &str = "wespeaker-voxceleb-resnet34.min_num_samples.txt";
 
 /// Resolved model paths for the speakrs pipeline
 ///
@@ -26,23 +27,27 @@ pub struct ModelBundle {
 }
 
 impl ModelBundle {
-    /// Resolve paths from a local directory containing all model files
-    pub fn from_dir(models_dir: impl Into<PathBuf>) -> Self {
+    /// Resolve and validate paths from a local directory containing all model files
+    pub fn from_dir(
+        models_dir: impl Into<PathBuf>,
+    ) -> Result<Self, crate::inference::ModelLoadError> {
         let dir = models_dir.into();
-        Self {
+        crate::inference::embedding::read_min_num_samples(&dir.join(EMBEDDING_MIN_SAMPLES))?;
+
+        Ok(Self {
             segmentation_onnx: dir.join(SEGMENTATION_ONNX),
             embedding_onnx: dir.join(EMBEDDING_ONNX),
             plda_dir: dir,
-        }
+        })
     }
 
     /// Download models from HuggingFace and resolve paths
     #[cfg(feature = "online")]
     #[cfg_attr(docsrs, doc(cfg(feature = "online")))]
-    pub fn from_pretrained(mode: ExecutionMode) -> Result<Self, hf_hub::api::sync::ApiError> {
+    pub fn from_pretrained(mode: ExecutionMode) -> Result<Self, crate::inference::ModelLoadError> {
         let manager = ModelManager::new()?;
         let dir = manager.ensure(mode)?;
-        Ok(Self::from_dir(dir))
+        Self::from_dir(dir)
     }
 
     /// Base ONNX path for the segmentation model
@@ -161,7 +166,7 @@ const PLDA_FILES: &[&str] = &[
     "plda_psi.npy",
     "plda_mean1.npy",
     "plda_mean2.npy",
-    "wespeaker-voxceleb-resnet34.min_num_samples.txt",
+    EMBEDDING_MIN_SAMPLES,
 ];
 
 #[cfg(feature = "online")]
@@ -543,6 +548,48 @@ fn required_files(mode: ExecutionMode) -> Vec<String> {
         .filter(|asset| asset.requirement() == AssetRequirement::Required)
         .flat_map(ModelAsset::remote_paths)
         .collect()
+}
+
+#[cfg(test)]
+mod local_tests {
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::{EMBEDDING_MIN_SAMPLES, ModelBundle};
+
+    static NEXT_DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn scratch_directory(test_name: &str) -> std::path::PathBuf {
+        let id = NEXT_DIRECTORY_ID.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "speakrs-model-bundle-{}-{test_name}-{id}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    #[test]
+    fn local_bundle_requires_embedding_metadata() {
+        let directory = scratch_directory("missing-metadata");
+        let error = ModelBundle::from_dir(&directory).unwrap_err();
+
+        assert!(error.to_string().contains("missing embedding metadata"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn local_bundle_validates_embedding_metadata_before_construction() {
+        let directory = scratch_directory("metadata-validation");
+        let metadata = directory.join(EMBEDDING_MIN_SAMPLES);
+        fs::write(&metadata, "0\n").unwrap();
+        let error = ModelBundle::from_dir(&directory).unwrap_err();
+        assert!(error.to_string().contains("must be greater than zero"));
+
+        fs::write(metadata, "400\n").unwrap();
+        ModelBundle::from_dir(&directory).unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
 }
 
 #[cfg(all(test, feature = "online"))]

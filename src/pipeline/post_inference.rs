@@ -45,8 +45,7 @@ pub fn post_inference(
         embeddings.training_set(&segmentations, config.effective_clean_frame_duration());
     let hard_clusters = training_embeddings.cluster(&segmentations, &embeddings, plda, config)?;
 
-    let reconstructor = Reconstructor::new(&segmentations, &hard_clusters, &layout.start_frames)
-        .map_err(PipelineError::Invariant)?;
+    let reconstructor = Reconstructor::new(&segmentations, &hard_clusters, &layout.start_frames)?;
     let discrete_diarization = match config.reconstruct_method {
         ReconstructMethod::Smoothed { epsilon } => {
             reconstructor.reconstruct_smoothed(&speaker_count, epsilon)

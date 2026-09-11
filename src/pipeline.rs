@@ -10,6 +10,7 @@ pub use crate::clustering::sphere_vbx::{
     SufficientStatisticsScale, SufficientStatisticsScaleError,
 };
 pub use crate::clustering::vbx::{ResponsibilityInitialization, VbxConfig, VbxConfigError};
+pub use crate::reconstruct::ReconstructError;
 pub(crate) use config::MIN_SPEAKER_ACTIVITY;
 pub use config::{
     COREML_SEGMENTATION_STEP_SECONDS, CUDA_SEGMENTATION_STEP_SECONDS, CleanFrameDuration,
@@ -170,7 +171,7 @@ impl OwnedDiarizationPipeline {
         models_dir: impl Into<std::path::PathBuf>,
         mode: ExecutionMode,
     ) -> Result<Self, PipelineError> {
-        PipelineBuilder::from_dir(models_dir, mode).build()
+        PipelineBuilder::from_dir(models_dir, mode)?.build()
     }
 
     /// Build from a resolved [`ModelBundle`](crate::models::ModelBundle) using default config

@@ -5,6 +5,35 @@ use crate::pipeline::{
     SpeakerCountTrack,
 };
 
+/// Invalid reconstruction inputs
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ReconstructError {
+    /// Cluster rows do not match the number of segmentation chunks
+    #[error("cluster rows {actual} do not match segmentation chunks {expected}")]
+    ClusterRowsMismatch {
+        /// Observed cluster row count
+        actual: usize,
+        /// Required cluster row count
+        expected: usize,
+    },
+    /// Cluster columns do not match the number of local speakers
+    #[error("cluster columns {actual} do not match local speakers {expected}")]
+    ClusterColumnsMismatch {
+        /// Observed cluster column count
+        actual: usize,
+        /// Required cluster column count
+        expected: usize,
+    },
+    /// Start-frame count does not match the number of segmentation chunks
+    #[error("start-frame count {actual} does not match segmentation chunks {expected}")]
+    StartFramesMismatch {
+        /// Observed start-frame count
+        actual: usize,
+        /// Required start-frame count
+        expected: usize,
+    },
+}
+
 pub struct Reconstructor<'a> {
     segmentations: &'a DecodedSegmentations,
     hard_clusters: &'a ChunkSpeakerClusters,
@@ -16,26 +45,25 @@ impl<'a> Reconstructor<'a> {
         segmentations: &'a DecodedSegmentations,
         hard_clusters: &'a ChunkSpeakerClusters,
         start_frames: &'a [usize],
-    ) -> Result<Self, String> {
+    ) -> Result<Self, ReconstructError> {
         let num_chunks = segmentations.shape()[0];
         if hard_clusters.nrows() != num_chunks {
-            return Err(format!(
-                "cluster rows {} do not match segmentation chunks {num_chunks}",
-                hard_clusters.nrows()
-            ));
+            return Err(ReconstructError::ClusterRowsMismatch {
+                actual: hard_clusters.nrows(),
+                expected: num_chunks,
+            });
         }
         if hard_clusters.ncols() != segmentations.shape()[2] {
-            return Err(format!(
-                "cluster columns {} do not match local speakers {}",
-                hard_clusters.ncols(),
-                segmentations.shape()[2]
-            ));
+            return Err(ReconstructError::ClusterColumnsMismatch {
+                actual: hard_clusters.ncols(),
+                expected: segmentations.shape()[2],
+            });
         }
         if start_frames.len() != num_chunks {
-            return Err(format!(
-                "start-frame count {} does not match segmentation chunks {num_chunks}",
-                start_frames.len()
-            ));
+            return Err(ReconstructError::StartFramesMismatch {
+                actual: start_frames.len(),
+                expected: num_chunks,
+            });
         }
         Ok(Self {
             segmentations,
@@ -333,7 +361,53 @@ mod tests {
             Ok(_) => panic!("expected incomplete reconstruction inputs to fail"),
             Err(error) => error,
         };
-        assert!(error.contains("cluster rows"));
+        assert_eq!(
+            error,
+            ReconstructError::ClusterRowsMismatch {
+                actual: 1,
+                expected: 2,
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "cluster rows 1 do not match segmentation chunks 2"
+        );
+    }
+
+    #[test]
+    fn reconstructor_rejects_mismatched_cluster_columns() {
+        let segmentations = DecodedSegmentations(array![[[1.0, 0.0], [0.5, 0.5]]]);
+        let hard_clusters = ChunkSpeakerClusters(array![[0]]);
+        let error = match Reconstructor::new(&segmentations, &hard_clusters, &[0]) {
+            Ok(_) => panic!("expected mismatched cluster columns to fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            ReconstructError::ClusterColumnsMismatch {
+                actual: 1,
+                expected: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn reconstructor_rejects_mismatched_start_frames() {
+        let segmentations = DecodedSegmentations(array![[[1.0, 0.0], [0.5, 0.5]]]);
+        let hard_clusters = ChunkSpeakerClusters(array![[0, 1]]);
+        let error = match Reconstructor::new(&segmentations, &hard_clusters, &[]) {
+            Ok(_) => panic!("expected mismatched start frames to fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            ReconstructError::StartFramesMismatch {
+                actual: 0,
+                expected: 1,
+            }
+        );
     }
 
     #[test]

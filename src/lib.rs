@@ -271,8 +271,8 @@ pub use pipeline::{
     ClusteringConfigError, DiarizationPipeline, DiarizationResult, OwnedDiarizationPipeline,
     PipelineBuilder, PipelineConfig, PipelineError, QueueConfig, QueueError, QueueReceiver,
     QueueReceiverIter, QueueSender, QueuedDiarizationJobId, QueuedDiarizationRequest,
-    QueuedDiarizationResult, ResponsibilityInitialization, RuntimeConfig, VbxConfig,
-    VbxConfigError,
+    QueuedDiarizationResult, ReconstructError, ResponsibilityInitialization, RuntimeConfig,
+    VbxConfig, VbxConfigError,
 };
 pub use segment::Segment;
 

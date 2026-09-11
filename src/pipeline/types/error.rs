@@ -22,14 +22,13 @@ pub enum PipelineError {
     /// PLDA scoring/training error
     #[error(transparent)]
     Plda(#[from] crate::clustering::plda::PldaError),
+    /// Reconstruction inputs are inconsistent
+    #[error(transparent)]
+    Reconstruct(#[from] crate::reconstruct::ReconstructError),
     /// SphereVBx-PF clustering input error
     #[cfg(feature = "_metrics")]
     #[error(transparent)]
     SphereVbx(#[from] crate::clustering::sphere_vbx::SphereVbxError),
-    /// Hugging Face Hub download error
-    #[cfg(feature = "online")]
-    #[error(transparent)]
-    HfHub(#[from] hf_hub::api::sync::ApiError),
     /// Queue setup or execution error
     #[error(transparent)]
     Queue(#[from] super::super::queued::QueueError),

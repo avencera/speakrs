@@ -13,7 +13,8 @@ use support::{build_pipeline_or_skip, fixture_path, load_wav_samples};
 
 fn make_pipeline() -> Option<OwnedDiarizationPipeline> {
     build_pipeline_or_skip(
-        PipelineBuilder::from_dir(fixture_path("models"), ExecutionMode::Cpu).build(),
+        PipelineBuilder::from_dir(fixture_path("models"), ExecutionMode::Cpu)
+            .and_then(PipelineBuilder::build),
     )
 }
 
@@ -274,8 +275,8 @@ fn build_queued_preserves_custom_pipeline_config() {
         .find_map(|config| {
             let mut pipeline = build_pipeline_or_skip(
                 PipelineBuilder::from_dir(fixture_path("models"), ExecutionMode::Cpu)
-                    .pipeline(config.clone())
-                    .build(),
+                    .map(|builder| builder.pipeline(config.clone()))
+                    .and_then(PipelineBuilder::build),
             )?;
             let result = pipeline.run_with_file_id(&samples, "compare").unwrap();
             (result.segments != default_result.segments).then_some((config, result))
@@ -284,8 +285,8 @@ fn build_queued_preserves_custom_pipeline_config() {
 
     let Some((tx, mut rx)) = build_pipeline_or_skip(
         PipelineBuilder::from_dir(fixture_path("models"), ExecutionMode::Cpu)
-            .pipeline(custom_config)
-            .build_queued(),
+            .map(|builder| builder.pipeline(custom_config))
+            .and_then(PipelineBuilder::build_queued),
     ) else {
         return;
     };

@@ -17,7 +17,7 @@ fn main() -> ExampleResult<()> {
 
     let models_dir = Path::new(&args[1]);
     let audio_paths: Vec<PathBuf> = args[2..].iter().map(PathBuf::from).collect();
-    let (tx, rx) = PipelineBuilder::from_dir(models_dir, ExecutionMode::Cpu).build_queued()?;
+    let (tx, rx) = PipelineBuilder::from_dir(models_dir, ExecutionMode::Cpu)?.build_queued()?;
 
     let mut handles = Vec::with_capacity(audio_paths.len());
     for audio_path in audio_paths {

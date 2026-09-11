@@ -23,7 +23,7 @@ use super::types::PipelineError;
 /// let mut pipeline = PipelineBuilder::from_pretrained(ExecutionMode::Cpu)?.build()?;
 ///
 /// // from local directory
-/// let mut pipeline = PipelineBuilder::from_dir("./models", ExecutionMode::Cpu)
+/// let mut pipeline = PipelineBuilder::from_dir("./models", ExecutionMode::Cpu)?
 ///     .build()?;
 /// # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 /// ```
@@ -37,14 +37,17 @@ pub struct PipelineBuilder {
 
 impl PipelineBuilder {
     /// Start from a local models directory
-    pub fn from_dir(models_dir: impl Into<PathBuf>, mode: ExecutionMode) -> Self {
-        Self {
-            bundle: ModelBundle::from_dir(models_dir),
+    pub fn from_dir(
+        models_dir: impl Into<PathBuf>,
+        mode: ExecutionMode,
+    ) -> Result<Self, PipelineError> {
+        Ok(Self {
+            bundle: ModelBundle::from_dir(models_dir)?,
             mode,
             runtime: None,
             pipeline: None,
             queue: None,
-        }
+        })
     }
 
     /// Start from a pre-resolved [`ModelBundle`](ModelBundle)

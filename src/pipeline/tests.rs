@@ -187,7 +187,8 @@ impl PipelineTestHarness {
 
     fn cpu_pipeline(&self) -> Option<OwnedDiarizationPipeline> {
         build_pipeline_or_skip(
-            PipelineBuilder::from_dir(self.models_dir(), ExecutionMode::Cpu).build(),
+            PipelineBuilder::from_dir(self.models_dir(), ExecutionMode::Cpu)
+                .and_then(PipelineBuilder::build),
         )
     }
 
@@ -211,7 +212,8 @@ impl PipelineTestHarness {
     #[cfg(feature = "coreml")]
     fn coreml_pipeline(&self) -> Option<OwnedDiarizationPipeline> {
         build_pipeline_or_skip(
-            PipelineBuilder::from_dir(self.models_dir(), ExecutionMode::CoreMl).build(),
+            PipelineBuilder::from_dir(self.models_dir(), ExecutionMode::CoreMl)
+                .and_then(PipelineBuilder::build),
         )
     }
 }
@@ -746,8 +748,8 @@ fn pipeline_builder_applies_custom_default_config_to_build() {
     let expected = custom_pipeline_config();
     let Some(pipeline) = build_pipeline_or_skip(
         PipelineBuilder::from_dir(harness.models_dir(), ExecutionMode::Cpu)
-            .pipeline(expected.clone())
-            .build(),
+            .map(|builder| builder.pipeline(expected.clone()))
+            .and_then(PipelineBuilder::build),
     ) else {
         return;
     };
