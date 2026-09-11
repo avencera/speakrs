@@ -1,27 +1,30 @@
 mod config;
-pub use crate::binarize::BinarizeConfig;
-pub use crate::clustering::ahc::AhcConfig;
+pub use crate::binarize::ActivityCleanup;
+pub use crate::clustering::ahc::{AhcConfig, AhcConfigError};
 #[cfg(feature = "_metrics")]
 #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
 pub use crate::clustering::sphere_vbx::{
-    ResponsibilitySmoothing, ResponsibilitySmoothingError, SphereVbxAhcInitialization,
-    SphereVbxInitialization, SphereVbxPfConfig, SphereVbxPfConfigError,
-    SphereVbxResponsibilityTolerance,
+    ResponsibilitySmoothing, ResponsibilitySmoothingError, SpeakerRegularizationScale,
+    SpeakerRegularizationScaleError, SphereVbxAhcInitialization, SphereVbxInitialization,
+    SphereVbxPfConfig, SphereVbxResponsibilityTolerance, SphereVbxResponsibilityToleranceError,
+    SufficientStatisticsScale, SufficientStatisticsScaleError,
 };
-pub use crate::clustering::vbx::VbxConfig;
+pub use crate::clustering::vbx::{ResponsibilityInitialization, VbxConfig, VbxConfigError};
+pub use crate::reconstruct::ReconstructError;
 pub(crate) use config::MIN_SPEAKER_ACTIVITY;
 pub use config::{
     COREML_SEGMENTATION_STEP_SECONDS, CUDA_SEGMENTATION_STEP_SECONDS, CleanFrameDuration,
-    CleanFrameDurationError, FAST_SEGMENTATION_STEP_SECONDS, FRAME_DURATION_SECONDS,
-    FRAME_STEP_SECONDS, PipelineConfig, ReconstructMethod, RuntimeConfig,
-    SEGMENTATION_STEP_SECONDS, SEGMENTATION_WINDOW_SECONDS, segmentation_step_seconds,
+    CleanFrameDurationError, ClusteringBackend, ClusteringConfig, ClusteringConfigError,
+    FAST_SEGMENTATION_STEP_SECONDS, FRAME_DURATION_SECONDS, FRAME_STEP_SECONDS, PipelineConfig,
+    ReconstructMethod, RuntimeConfig, SEGMENTATION_STEP_SECONDS, SEGMENTATION_WINDOW_SECONDS,
+    segmentation_step_seconds,
 };
 #[cfg(feature = "_metrics")]
 #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
 pub use config::{
-    ClusteringBackend, CoreMlChunkLayout, CoreMlFbankNormalizationScope,
-    CoreMlFbankPreparationWorkers, CoreMlSegmentationWorkers, CoreMlShapeLadder,
-    ExperimentInferenceConfig, ExperimentInferenceConfigError,
+    CoreMlChunkLayout, CoreMlFbankNormalizationScope, CoreMlFbankPreparationWorkers,
+    CoreMlSegmentationWorkers, CoreMlShapeLadder, ExperimentInferenceConfig,
+    ExperimentInferenceConfigError,
 };
 
 mod types;
@@ -61,11 +64,13 @@ pub use queued::{
 };
 
 #[cfg(test)]
+mod test_support;
+#[cfg(test)]
 mod tests;
 
 use std::path::Path;
 
-use ndarray::{Array2, Array3};
+use ndarray::Array2;
 use tracing::{debug, trace};
 
 use crate::clustering::plda::PldaTransform;
@@ -166,7 +171,7 @@ impl OwnedDiarizationPipeline {
         models_dir: impl Into<std::path::PathBuf>,
         mode: ExecutionMode,
     ) -> Result<Self, PipelineError> {
-        PipelineBuilder::from_dir(models_dir, mode).build()
+        PipelineBuilder::from_dir(models_dir, mode)?.build()
     }
 
     /// Build from a resolved [`ModelBundle`](crate::models::ModelBundle) using default config
@@ -428,7 +433,7 @@ impl<'a> PipelineRunner<'a> {
         let raw_windows = RawSegmentationWindows(self.seg_model.run(audio)?);
         debug!(windows = raw_windows.0.len(), "Segmentation complete");
 
-        let segmentations = raw_windows.decode(self.powerset);
+        let segmentations = raw_windows.decode(self.powerset)?;
         let layout = ChunkLayout::new(
             self.seg_model.step_seconds(),
             self.seg_model.step_samples(),
@@ -448,13 +453,13 @@ impl<'a> PipelineRunner<'a> {
             "Embeddings complete"
         );
 
-        Ok(InferenceArtifacts {
+        InferenceArtifacts::try_new(
             layout,
             segmentations,
             embeddings,
             #[cfg(feature = "_metrics")]
-            stage_timings: None,
-        })
+            None,
+        )
     }
 
     fn run_concurrent_inference(
@@ -546,13 +551,13 @@ impl<'a> PipelineRunner<'a> {
             "Concurrent seg+emb complete"
         );
 
-        Ok(InferenceArtifacts {
+        InferenceArtifacts::try_new(
             layout,
-            segmentations: DecodedSegmentations(concurrent_result.segmentations),
-            embeddings: ChunkEmbeddings(concurrent_result.embeddings),
+            DecodedSegmentations(concurrent_result.segmentations),
+            ChunkEmbeddings(concurrent_result.embeddings),
             #[cfg(feature = "_metrics")]
-            stage_timings: None,
-        })
+            None,
+        )
     }
 
     fn run_post_inference(
@@ -564,12 +569,6 @@ impl<'a> PipelineRunner<'a> {
     }
 
     fn empty_inference_artifacts(layout: ChunkLayout) -> InferenceArtifacts {
-        InferenceArtifacts {
-            layout: layout.with_num_chunks(0),
-            segmentations: DecodedSegmentations(Array3::zeros((0, 0, 0))),
-            embeddings: ChunkEmbeddings(Array3::zeros((0, 0, 0))),
-            #[cfg(feature = "_metrics")]
-            stage_timings: None,
-        }
+        InferenceArtifacts::empty_with_layout(layout)
     }
 }

@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use objc2_core_ml::MLComputeUnits;
 
-use crate::inference::coreml::{CachedInputShape, CoreMlModel, GpuPrecision, SharedCoreMlModel};
+#[cfg(test)]
+use crate::inference::coreml::CoreMlModel;
+use crate::inference::coreml::{CachedInputShape, GpuPrecision, SharedCoreMlModel};
 use crate::inference::{ExecutionMode, ModelLoadError};
 use crate::pipeline::RuntimeConfig;
 #[cfg(feature = "_metrics")]
@@ -17,6 +19,7 @@ use super::super::{
     split_fbank_model_path, split_tail_model_path,
 };
 
+#[cfg(test)]
 fn load_shared_or_warn(
     path: &Path,
     mode: ExecutionMode,
@@ -177,6 +180,7 @@ impl EmbeddingModel {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(in crate::inference::embedding) fn load_native_tail(
         model_path: &Path,
         mode: ExecutionMode,
@@ -201,19 +205,7 @@ impl EmbeddingModel {
         Ok(Some(model))
     }
 
-    pub(in crate::inference::embedding) fn has_native_tail_model(
-        model_path: &Path,
-        mode: ExecutionMode,
-        batch_size: usize,
-    ) -> bool {
-        match mode {
-            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => {}
-            _ => return false,
-        }
-        let tail_onnx = split_tail_model_path(model_path, batch_size);
-        fp32_coreml_path(&tail_onnx).exists()
-    }
-
+    #[cfg(test)]
     pub(in crate::inference::embedding) fn load_native_fbank(
         model_path: &Path,
         mode: ExecutionMode,
@@ -237,77 +229,13 @@ impl EmbeddingModel {
         .map(Some)
     }
 
-    pub(in crate::inference::embedding) fn has_native_fbank_model(
-        model_path: &Path,
-        mode: ExecutionMode,
-        batch_size: usize,
-    ) -> bool {
-        if !mode.is_coreml() {
-            return false;
-        }
-        let fbank_onnx = if batch_size == 1 {
-            split_fbank_model_path(model_path)
-        } else {
-            split_fbank_batched_model_path(model_path)
-        };
-        fp32_coreml_path(&fbank_onnx).exists()
-    }
-
-    pub(in crate::inference::embedding) fn load_native_fbank_30s(
-        model_path: &Path,
-        mode: ExecutionMode,
-    ) -> Result<Option<SharedCoreMlModel>, ModelLoadError> {
-        if !mode.is_coreml() {
-            return Ok(None);
-        }
-        let coreml_path = model_path.with_file_name("wespeaker-fbank-30s.mlmodelc");
-        let model = load_shared_or_warn(
-            &coreml_path,
-            mode,
-            MLComputeUnits::CPUAndNeuralEngine,
-            "Failed to load 30s fbank model",
-        )?;
-        tracing::info!("Loaded 30s fbank model (CPUAndNeuralEngine)");
-        Ok(Some(model))
-    }
-
-    pub(in crate::inference::embedding) fn load_native_multi_mask(
-        model_path: &Path,
-        mode: ExecutionMode,
-        compute_units: MLComputeUnits,
-    ) -> Result<Option<SharedCoreMlModel>, ModelLoadError> {
-        if !mode.is_coreml() {
-            return Ok(None);
-        }
-        let onnx_path = model_path.with_file_name("wespeaker-multimask-tail-b32.onnx");
-        let coreml_path = fp32_coreml_path(&onnx_path);
-        load_shared_or_warn(
-            &coreml_path,
-            mode,
-            compute_units,
-            "Failed to load native CoreML multi-mask",
-        )
-        .map(Some)
-    }
-
-    pub(in crate::inference::embedding) fn has_native_multi_mask_model(
-        model_path: &Path,
-        mode: ExecutionMode,
-    ) -> bool {
-        if !mode.is_coreml() {
-            return false;
-        }
-        let onnx_path = model_path.with_file_name("wespeaker-multimask-tail-b32.onnx");
-        fp32_coreml_path(&onnx_path).exists()
-    }
-
     fn chunk_session_config(
         mode: ExecutionMode,
         _runtime: &RuntimeConfig,
     ) -> &'static [ChunkSessionConfig] {
         #[cfg(feature = "_metrics")]
         if let Some(experiment) = _runtime.experiment {
-            return match (experiment.coreml_chunk_layout, experiment.shape_ladder) {
+            return match (experiment.coreml_chunk_layout(), experiment.shape_ladder()) {
                 (CoreMlChunkLayout::OneSecondPhased, CoreMlShapeLadder::Full) => {
                     COREML_CHUNK_CONFIGS
                 }
@@ -381,7 +309,9 @@ impl EmbeddingModel {
 fn runtime_uses_native_chunk_sessions(mode: ExecutionMode, _runtime: &RuntimeConfig) -> bool {
     #[cfg(feature = "_metrics")]
     if let Some(experiment) = _runtime.experiment {
-        return experiment.coreml_chunk_layout.uses_native_chunk_sessions();
+        return experiment
+            .coreml_chunk_layout()
+            .uses_native_chunk_sessions();
     }
 
     mode.is_coreml()

@@ -38,7 +38,7 @@ pub struct BenchmarkJobConfig {
     pub root: PathBuf,
     pub results_dir: PathBuf,
     pub dataset: crate::datasets::Dataset,
-    pub implementations: Vec<(&'static str, ImplType)>,
+    pub implementations: Vec<(crate::catalog::ImplementationId, ImplType)>,
     pub max_files: u32,
     pub max_minutes: u32,
     pub description: Option<String>,
@@ -50,5 +50,5 @@ pub struct BenchmarkJobResult {
     pub run_id: String,
     pub run_dir: PathBuf,
     pub total_audio_minutes: f64,
-    pub results: HashMap<String, DerImplResult>,
+    pub results: HashMap<crate::catalog::ImplementationId, DerImplResult>,
 }

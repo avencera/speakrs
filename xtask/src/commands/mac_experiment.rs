@@ -12,6 +12,7 @@ mod execute;
 mod identity;
 #[cfg(all(target_os = "macos", feature = "coreml"))]
 mod inference_comparison;
+mod record;
 mod statistics;
 mod store;
 mod trace_analysis;
@@ -180,26 +181,26 @@ fn validate(spec_path: &std::path::Path) -> Result<()> {
 
 fn run_new(spec_path: &std::path::Path) -> Result<()> {
     let experiment = ValidatedExperiment::load(spec_path)?;
-    experiment.ensure_runnable()?;
+    experiment.to_executable()?;
     let worker = execute::build_worker_binary()?;
     let store = store::RunStore::create(&experiment, &worker)?;
-    execute::run_managed_with_worker(&worker, &store, &experiment)
+    execute::run_managed_with_worker(&worker, &store)
 }
 
 fn resume(run_dir: &std::path::Path) -> Result<()> {
-    let (store, experiment) = store::RunStore::open(run_dir)?;
-    experiment.ensure_runnable()?;
-    execute::run_managed(&store, &experiment)
+    let store = store::RunStore::open(run_dir)?;
+    store.experiment().to_executable()?;
+    execute::run_managed(&store)
 }
 
 fn summarize(run_dir: &std::path::Path) -> Result<()> {
-    let (store, experiment) = store::RunStore::open(run_dir)?;
-    store.rebuild_projections(&experiment)
+    let store = store::RunStore::open(run_dir)?;
+    store.rebuild_projections()
 }
 
 fn profile(spec_path: &std::path::Path) -> Result<()> {
     let experiment = ValidatedExperiment::load(spec_path)?;
-    experiment.ensure_runnable()?;
+    experiment.to_executable()?;
     let worker = execute::build_worker_binary()?;
     store::profile(experiment, &worker)
 }

@@ -8,6 +8,7 @@ use objc2_core_ml::{MLMultiArray, MLMultiArrayDataType};
 use objc2_foundation::{NSArray, NSNumber};
 
 use super::{CachedInputShape, CoreMlError};
+use crate::inference::geometry::{CoreMlDTypeTag, CoreMlOutputDType, CoreMlTensor};
 
 pub(super) fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
     let mut strides = vec![1usize; shape.len()];
@@ -79,10 +80,10 @@ pub(super) fn create_multi_array_cached_with_deallocator(
     .map_err(|e| CoreMlError::ArrayCreationFailed(format!("{e}")))
 }
 
-/// Copy output MLMultiArray data into a Vec<f32> and return the shape.
+/// Copy output MLMultiArray data into a checked tensor.
 /// Handles both FP32 and FP16 output data types (FP16 is auto-converted to FP32)
 #[allow(deprecated)]
-pub(super) fn extract_output(array: &MLMultiArray) -> Result<(Vec<f32>, Vec<usize>), CoreMlError> {
+pub(super) fn extract_output(array: &MLMultiArray) -> Result<CoreMlTensor, CoreMlError> {
     // SAFETY: CoreML guarantees these metadata accessors describe the same live MLMultiArray
     let (count, ptr, dtype, ns_shape) = unsafe {
         (
@@ -95,18 +96,41 @@ pub(super) fn extract_output(array: &MLMultiArray) -> Result<(Vec<f32>, Vec<usiz
     let shape: Vec<usize> = (0..ns_shape.len())
         .map(|i| ns_shape.objectAtIndex(i).as_isize() as usize)
         .collect();
+    let tag = coreml_dtype_tag(dtype);
+    let kind = CoreMlOutputDType::try_from_tag(tag, "coreml output")?;
 
-    let data = if dtype == MLMultiArrayDataType::Float16 {
-        // SAFETY: CoreML reports count Float16 scalars backed by dataPointer for this array
-        let fp16_data = unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const u16, count) };
-        fp16_data.iter().copied().map(f16_to_f32).collect()
-    } else {
-        // SAFETY: CoreML reports count Float32 scalars backed by dataPointer for this array
-        let fp32_data = unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const f32, count) };
-        fp32_data.to_vec()
+    let data = match kind {
+        CoreMlOutputDType::Float16 => {
+            // SAFETY: CoreML reports count Float16 scalars backed by dataPointer for this array
+            let fp16_data =
+                unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const u16, count) };
+            fp16_data.iter().copied().map(f16_to_f32).collect()
+        }
+        CoreMlOutputDType::Float32 => {
+            // SAFETY: CoreML reports count Float32 scalars backed by dataPointer for this array
+            let fp32_data =
+                unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const f32, count) };
+            fp32_data.to_vec()
+        }
     };
 
-    Ok((data, shape))
+    CoreMlTensor::try_from_decoded(data, shape, "coreml output").map_err(CoreMlError::from)
+}
+
+fn coreml_dtype_tag(dtype: MLMultiArrayDataType) -> CoreMlDTypeTag {
+    if dtype == MLMultiArrayDataType::Float16 {
+        CoreMlDTypeTag::Float16
+    } else if dtype == MLMultiArrayDataType::Float32 {
+        CoreMlDTypeTag::Float32
+    } else if dtype == MLMultiArrayDataType::Double {
+        CoreMlDTypeTag::Float64
+    } else if dtype == MLMultiArrayDataType::Int32 {
+        CoreMlDTypeTag::Int32
+    } else if dtype == MLMultiArrayDataType::Int8 {
+        CoreMlDTypeTag::Int8
+    } else {
+        CoreMlDTypeTag::Other
+    }
 }
 
 fn f16_to_f32(bits: u16) -> f32 {

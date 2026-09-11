@@ -176,12 +176,12 @@ impl SegmentationModel {
             ort::Error::new("native segmentation single input was not contiguous")
         })?;
 
-        let (data, out_shape) = native
+        let tensor = native
             .predict_cached(&[(cached_shape, input_data)])
             .map_err(|e| ort::Error::new(e.to_string()))?;
-
-        let frames = out_shape[1];
-        let classes = out_shape[2];
+        let (data, frames, classes) = tensor
+            .rank3_hw("native segmentation single output")
+            .map_err(|error| ort::Error::new(error.to_string()))?;
         Array2::from_shape_vec((frames, classes), data).map_err(|error| {
             ort::Error::new(format!("native segmentation single output shape: {error}"))
         })
@@ -203,13 +203,13 @@ impl SegmentationModel {
             .as_slice()
             .ok_or_else(|| ort::Error::new("native segmentation batch input was not contiguous"))?;
 
-        let (data, out_shape) = native
+        let tensor = native
             .predict_cached(&[(cached_shape, input_data)])
             .map_err(|e| ort::Error::new(e.to_string()))?;
-
-        let batch = out_shape[0];
-        let frames = out_shape[1];
-        let classes = out_shape[2];
+        let (batch, frames, classes) = tensor
+            .try_rank3("native segmentation batch output")
+            .map_err(|error| ort::Error::new(error.to_string()))?;
+        let data = tensor.into_data();
 
         (0..batch)
             .map(|batch_idx| {

@@ -145,14 +145,21 @@ impl<'ctx, 'a> SingleWorker<'ctx, 'a> {
         scratch: &SingleScratch,
     ) -> Result<(Vec<f32>, usize, usize), SegmentationError> {
         let predict_start = std::time::Instant::now();
-        let (data, out_shape) = self
+        let tensor = self
             .model
             .predict_cached(&[(&scratch.cached_shape, scratch.input_data()?)])
             .map_err(|error| SegmentationError::Ort(ort::Error::new(error.to_string())))?;
         let predict_us = predict_start.elapsed().as_micros() as u64;
         self.profile.record_single(self.worker_idx, predict_us);
+        let (data, frames, classes) =
+            tensor
+                .rank3_hw("parallel segmentation worker")
+                .map_err(|error| SegmentationError::MalformedOutput {
+                    context: "parallel segmentation worker",
+                    message: error.to_string(),
+                })?;
 
-        Ok((data, out_shape[1], out_shape[2]))
+        Ok((data, frames, classes))
     }
 
     fn decode_result(

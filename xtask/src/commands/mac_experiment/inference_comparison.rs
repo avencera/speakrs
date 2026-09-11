@@ -89,21 +89,19 @@ pub(super) fn run(
         sample_rate == SAMPLE_RATE,
         "audio sample rate must be {SAMPLE_RATE} Hz, got {sample_rate} Hz"
     );
-    let (
-        chunk_layout,
-        chunk_normalization,
-        per_window_layout,
-        per_window_normalization,
-        chunk_name,
-        per_window_name,
-    ) = layouts(step);
+    let plan = ComparisonPlan::for_step(step);
 
-    let chunk = run_layout(&models_dir, &samples, chunk_layout, chunk_normalization)?;
+    let chunk = run_layout(
+        &models_dir,
+        &samples,
+        plan.reference.layout,
+        plan.reference.normalization,
+    )?;
     let per_window = run_layout(
         &models_dir,
         &samples,
-        per_window_layout,
-        per_window_normalization,
+        plan.candidate.layout,
+        plan.candidate.normalization,
     )?;
     let (cosines, availability_mismatches) =
         matching_cosines(&chunk.artifacts, &per_window.artifacts)?;
@@ -124,8 +122,8 @@ pub(super) fn run(
             )?,
         },
         host: HostIdentity::collect(&root)?,
-        chunk_layout: chunk_name,
-        per_window_layout: per_window_name,
+        chunk_layout: plan.reference.name,
+        per_window_layout: plan.candidate.name,
         chunk_inference_seconds: chunk.inference_seconds,
         per_window_inference_seconds: per_window.inference_seconds,
         chunk_count: chunk.artifacts.embeddings().shape()[0],
@@ -152,33 +150,45 @@ pub(super) fn run(
     Ok(())
 }
 
-fn layouts(
-    step: InferenceComparisonStep,
-) -> (
-    CoreMlChunkLayout,
-    CoreMlFbankNormalizationScope,
-    CoreMlChunkLayout,
-    CoreMlFbankNormalizationScope,
-    &'static str,
-    &'static str,
-) {
-    match step {
-        InferenceComparisonStep::OneSecond => (
-            CoreMlChunkLayout::OneSecondPhased,
-            CoreMlFbankNormalizationScope::Chunk,
-            CoreMlChunkLayout::PerWindow,
-            CoreMlFbankNormalizationScope::Chunk,
-            "one_second_phased",
-            "per_window_1s",
-        ),
-        InferenceComparisonStep::NormalizationScope => (
-            CoreMlChunkLayout::OneSecondPhased,
-            CoreMlFbankNormalizationScope::Chunk,
-            CoreMlChunkLayout::OneSecondPhased,
-            CoreMlFbankNormalizationScope::TenSecondSegments,
-            "chunk_normalized",
-            "ten_second_segment_normalized",
-        ),
+struct ComparisonSide {
+    name: &'static str,
+    layout: CoreMlChunkLayout,
+    normalization: CoreMlFbankNormalizationScope,
+}
+
+struct ComparisonPlan {
+    reference: ComparisonSide,
+    candidate: ComparisonSide,
+}
+
+impl ComparisonPlan {
+    fn for_step(step: InferenceComparisonStep) -> Self {
+        match step {
+            InferenceComparisonStep::OneSecond => Self {
+                reference: ComparisonSide {
+                    name: "one_second_phased",
+                    layout: CoreMlChunkLayout::OneSecondPhased,
+                    normalization: CoreMlFbankNormalizationScope::Chunk,
+                },
+                candidate: ComparisonSide {
+                    name: "per_window_1s",
+                    layout: CoreMlChunkLayout::PerWindow,
+                    normalization: CoreMlFbankNormalizationScope::Chunk,
+                },
+            },
+            InferenceComparisonStep::NormalizationScope => Self {
+                reference: ComparisonSide {
+                    name: "chunk_normalized",
+                    layout: CoreMlChunkLayout::OneSecondPhased,
+                    normalization: CoreMlFbankNormalizationScope::Chunk,
+                },
+                candidate: ComparisonSide {
+                    name: "ten_second_segment_normalized",
+                    layout: CoreMlChunkLayout::OneSecondPhased,
+                    normalization: CoreMlFbankNormalizationScope::TenSecondSegments,
+                },
+            },
+        }
     }
 }
 
@@ -191,7 +201,7 @@ fn run_layout(
     let experiment =
         ExperimentInferenceConfig::new(layout).with_fbank_normalization_scope(normalization_scope);
     let runtime = RuntimeConfig::default().with_experiment(experiment);
-    let mut pipeline = PipelineBuilder::from_dir(models_dir, ExecutionMode::CoreMl)
+    let mut pipeline = PipelineBuilder::from_dir(models_dir, ExecutionMode::CoreMl)?
         .runtime(runtime)
         .build()?;
     pipeline.run_inference_only(samples)?;

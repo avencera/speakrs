@@ -6,61 +6,24 @@ use std::time::Duration;
 
 use color_eyre::eyre::{Result, bail};
 
+use crate::cargo::cargo_build_xtask;
+use crate::catalog::{ImplementationCatalog, RunnerKind};
+use crate::cmd::{project_root, run_cmd, wav_duration_seconds};
+
 use super::*;
 use preflight::preflight_check;
 use run::{DerRunContext, run_der_implementations};
-use validate::{
-    der_build_features, handle_list_requests, resolve_eval_datasets, validate_impls,
-    validate_single_file_mode,
-};
+use validate::{handle_list_requests, resolve_eval_datasets, validate_single_file_mode};
 
 mod preflight;
 pub(super) mod run;
 mod validate;
 
-pub(super) const IMPL_REGISTRY: &[(&str, &str, &str, ImplType)] = &[
-    (
-        "pyannote",
-        "pmps",
-        "pyannote MPS",
-        ImplType::Pyannote("mps"),
-    ),
-    (
-        "pyannote-cpu",
-        "pcpu",
-        "pyannote CPU",
-        ImplType::Pyannote("cpu"),
-    ),
-    (
-        "pyannote-cuda",
-        "pg",
-        "pyannote CUDA",
-        ImplType::Pyannote("cuda"),
-    ),
-    (
-        "coreml",
-        "scm",
-        "speakrs CoreML",
-        ImplType::Speakrs("coreml"),
-    ),
-    (
-        "coreml-fast",
-        "scmf",
-        "speakrs CoreML Fast",
-        ImplType::Speakrs("coreml-fast"),
-    ),
-    ("cuda", "sg", "speakrs CUDA", ImplType::Speakrs("cuda")),
-    (
-        "cuda-fast",
-        "sgf",
-        "speakrs CUDA Fast",
-        ImplType::Speakrs("cuda-fast"),
-    ),
-    ("cpu", "scpu", "speakrs CPU", ImplType::Speakrs("cpu")),
-    ("fluidaudio", "fa", "FluidAudio", ImplType::FluidAudioBench),
-    ("speakerkit", "sk", "SpeakerKit", ImplType::SpeakerKitBench),
-    ("pyannote-rs", "prs", "pyannote-rs", ImplType::PyannoteRs),
-];
+type EvalSet = (
+    super::run_store::DatasetIdentity,
+    String,
+    Vec<(PathBuf, PathBuf)>,
+);
 
 pub struct DerArgs {
     pub dataset_id: String,
@@ -112,19 +75,78 @@ pub fn der(args: DerArgs) -> Result<()> {
         return Ok(());
     }
 
-    validate_impls(impls)?;
+    let selected_impls = ImplementationCatalog::resolve_many(impls)?;
 
     let single_file_mode = validate_single_file_mode(file, rttm)?;
     let datasets = resolve_eval_datasets(dataset_id, single_file_mode)?;
 
     let root = project_root();
 
+    let single_file_pair = if single_file_mode {
+        Some((
+            file.clone()
+                .ok_or_else(|| color_eyre::eyre::eyre!("single-file mode requires --file"))?,
+            rttm.clone()
+                .ok_or_else(|| color_eyre::eyre::eyre!("single-file mode requires --rttm"))?,
+        ))
+    } else {
+        None
+    };
+
+    let eval_sets: Vec<EvalSet> = if let Some((wav_path, rttm_path)) = &single_file_pair {
+        let file_stem = wav_path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_string())
+            .unwrap_or_else(|| "single-file".to_owned());
+        let identity = super::run_store::DatasetIdentity::single_file(file_stem.clone())?;
+        vec![(
+            identity,
+            file_stem,
+            vec![(wav_path.clone(), rttm_path.clone())],
+        )]
+    } else {
+        let fixtures_dir = root.join("fixtures/datasets");
+        let mut sets = Vec::new();
+        for dataset in &datasets {
+            dataset.ensure(&fixtures_dir)?;
+            let snapshot = dataset.verified_snapshot(&fixtures_dir)?;
+            let pairs = snapshot
+                .files()
+                .iter()
+                .map(|file| {
+                    let duration = file.duration_seconds();
+                    (file.wav().to_owned(), file.rttm().to_owned(), duration)
+                })
+                .collect();
+            let files =
+                super::selection::select_pairs_for_benchmark(pairs, max_files, max_minutes as f64);
+            if files.is_empty() {
+                bail!(
+                    "dataset {} snapshot produced no files after selection caps",
+                    dataset.id
+                );
+            }
+            sets.push((
+                super::run_store::DatasetIdentity::catalog(dataset.catalog_id()?),
+                dataset.display_name.clone(),
+                files,
+            ));
+        }
+        sets
+    };
+
+    ensure!(
+        !eval_sets.is_empty(),
+        "benchmark evaluation set contains no datasets"
+    );
+
     println!("=== Building binaries ===");
-    let build_features = der_build_features(impls);
+    let build_features = ImplementationCatalog::cargo_features(&selected_impls);
     cargo_build_xtask(&build_features)?;
 
-    let needs_pyannote_rs =
-        impls.is_empty() || impls.iter().any(|impl_id| impl_id == "pyannote-rs");
+    let needs_pyannote_rs = selected_impls
+        .iter()
+        .any(|spec| matches!(spec.runner, RunnerKind::PyannoteRs));
     if needs_pyannote_rs
         && let Err(err) = run_cmd(
             Command::new("cargo")
@@ -143,41 +165,24 @@ pub fn der(args: DerArgs) -> Result<()> {
     }
 
     let metadata = BenchmarkMetadata::collect();
+    let suite_datasets = eval_sets
+        .iter()
+        .map(|(identity, _, _)| identity.clone())
+        .collect();
+    let suite = super::BenchmarkRun::create_with_dataset_identities(
+        &root.join("_benchmarks"),
+        selected_impls.iter().map(|spec| spec.id).collect(),
+        suite_datasets,
+        description.clone(),
+        chrono::Local::now(),
+        metadata.cpu.clone(),
+    )?;
 
-    let eval_sets: Vec<(String, Vec<(PathBuf, PathBuf)>)> = if single_file_mode {
-        let (wav_path, rttm_path) = match (file.clone(), rttm.clone()) {
-            (Some(wav_path), Some(rttm_path)) => (wav_path, rttm_path),
-            _ => bail!("single-file mode requires both --file and --rttm"),
-        };
-        let display_name = wav_path
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().to_string())
-            .unwrap_or_else(|| "single-file".to_string());
-        vec![(display_name, vec![(wav_path, rttm_path)])]
-    } else {
-        let fixtures_dir = root.join("fixtures/datasets");
-        let mut sets = Vec::new();
-        for dataset in &datasets {
-            dataset.ensure(&fixtures_dir)?;
-            let dataset_dir = dataset.dataset_dir(&fixtures_dir);
-            let files = discover_files(&dataset_dir, max_files, max_minutes as f64)?;
-            if files.is_empty() {
-                eprintln!(
-                    "No paired wav+rttm files found in {}",
-                    dataset_dir.display()
-                );
-                continue;
-            }
-            sets.push((dataset.display_name.clone(), files));
-        }
-        sets
-    };
-
-    let preflight_failures: HashMap<String, String> = if no_preflight || eval_sets.is_empty() {
+    let preflight_failures = if no_preflight || eval_sets.is_empty() {
         HashMap::new()
     } else {
         let first_file = eval_sets[0]
-            .1
+            .2
             .iter()
             .min_by(|a, b| {
                 wav_duration_seconds(&a.0)
@@ -193,24 +198,12 @@ pub fn der(args: DerArgs) -> Result<()> {
             &models_dir,
             &seg_model,
             &emb_model,
-            &DerArgs {
-                dataset_id: dataset_id.clone(),
-                file: file.clone(),
-                rttm: rttm.clone(),
-                max_files,
-                max_minutes,
-                description: description.clone(),
-                impls: impls.clone(),
-                no_preflight,
-                seg_batch_size,
-                emb_batch_size,
-                sleep_between,
-            },
+            &selected_impls,
             pyannote_batch_sizes,
         )?
     };
 
-    for (dataset_name, files) in &eval_sets {
+    for (dataset, dataset_name, files) in &eval_sets {
         println!();
         println!("========== {dataset_name} ==========");
 
@@ -220,15 +213,14 @@ pub fn der(args: DerArgs) -> Result<()> {
             .sum();
         let total_audio_minutes = total_audio_seconds / 60.0;
 
-        let run_id = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+        let run_id = suite.identity.run_id.as_str().to_owned();
         let run_dir = if eval_sets.len() > 1 {
-            root.join("_benchmarks")
-                .join(&run_id)
-                .join(dataset_name.to_lowercase().replace(' ', "-"))
+            let dir = suite.root.join(dataset.id_string());
+            fs::create_dir_all(&dir)?;
+            dir
         } else {
-            root.join("_benchmarks").join(&run_id)
+            suite.root.clone()
         };
-        fs::create_dir_all(&run_dir)?;
 
         if let Some(desc) = description.as_deref() {
             fs::write(run_dir.join("README.md"), format!("{desc}\n"))?;
@@ -243,12 +235,11 @@ pub fn der(args: DerArgs) -> Result<()> {
 
         let (implementations, all_results) = run_der_implementations(&DerRunContext {
             root: &root,
-            run_dir: &run_dir,
             files,
             models_dir: &models_dir,
             seg_model: &seg_model,
             emb_model: &emb_model,
-            impls,
+            implementations: &selected_impls,
             total_audio_seconds,
             preflight_failures: &preflight_failures,
             sleep_between: sleep_between.map(Duration::from_secs),
@@ -257,7 +248,8 @@ pub fn der(args: DerArgs) -> Result<()> {
 
         DerResultsWriter {
             run_dir: &run_dir,
-            dataset_name,
+            run_identity: &suite.identity,
+            dataset: dataset.clone(),
             implementations: &implementations,
             results: &all_results,
             files,

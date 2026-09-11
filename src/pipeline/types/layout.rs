@@ -1,3 +1,5 @@
+#[cfg(feature = "coreml")]
+use crate::inference::segmentation::WindowSpec;
 use crate::pipeline::{FRAME_DURATION_SECONDS, FRAME_STEP_SECONDS, SEGMENTATION_WINDOW_SECONDS};
 
 #[derive(Clone)]
@@ -10,6 +12,20 @@ pub(in crate::pipeline) struct ChunkLayout {
 }
 
 impl ChunkLayout {
+    #[cfg(feature = "coreml")]
+    pub(in crate::pipeline) fn from_spec(
+        spec: WindowSpec,
+        step_seconds: f64,
+        num_chunks: usize,
+    ) -> Self {
+        Self::new(
+            step_seconds,
+            spec.step_samples(),
+            spec.window_samples(),
+            num_chunks,
+        )
+    }
+
     pub(in crate::pipeline) fn new(
         step_seconds: f64,
         step_samples: usize,

@@ -121,25 +121,28 @@ impl Deref for FrameActivations {
 pub(in crate::pipeline) struct RawSegmentationWindows(pub Vec<Array2<f32>>);
 
 impl RawSegmentationWindows {
-    pub(in crate::pipeline) fn decode(self, powerset: &PowersetMapping) -> DecodedSegmentations {
+    pub(in crate::pipeline) fn decode(
+        self,
+        powerset: &PowersetMapping,
+    ) -> Result<DecodedSegmentations, crate::powerset::PowersetDecodeError> {
         let mut windows = self.0.into_iter();
         let Some(first_window) = windows.next() else {
-            return DecodedSegmentations(Array3::zeros((0, 0, 0)));
+            return Ok(DecodedSegmentations(Array3::zeros((0, 0, 0))));
         };
 
         let num_windows = windows.len() + 1;
-        let first = powerset.hard_decode(&first_window);
+        let first = powerset.hard_decode(&first_window)?;
         let mut stacked = Array3::<f32>::zeros((num_windows, first.nrows(), first.ncols()));
         stacked.slice_mut(s![0, .., ..]).assign(&first);
 
         for (window_idx, window) in windows.enumerate() {
-            let decoded = powerset.hard_decode(&window);
+            let decoded = powerset.hard_decode(&window)?;
             stacked
                 .slice_mut(s![window_idx + 1, .., ..])
                 .assign(&decoded);
         }
 
-        DecodedSegmentations(stacked)
+        Ok(DecodedSegmentations(stacked))
     }
 }
 
@@ -162,6 +165,58 @@ pub struct InferenceArtifacts {
 }
 
 impl InferenceArtifacts {
+    /// Checked artifacts with matching chunk, speaker, embedding, and layout extents
+    pub(in crate::pipeline) fn try_new(
+        layout: ChunkLayout,
+        segmentations: DecodedSegmentations,
+        embeddings: ChunkEmbeddings,
+        #[cfg(feature = "_metrics")] stage_timings: Option<InferenceStageTimings>,
+    ) -> Result<Self, super::PipelineError> {
+        let chunks = segmentations.0.shape()[0];
+        let speakers = segmentations.0.shape()[2];
+        if embeddings.0.shape()[0] != chunks {
+            return Err(super::PipelineError::Invariant(format!(
+                "embedding chunks {} do not match segmentation chunks {chunks}",
+                embeddings.0.shape()[0]
+            )));
+        }
+        if layout.start_frames.len() != chunks {
+            return Err(super::PipelineError::Invariant(format!(
+                "layout chunks {} do not match segmentation chunks {chunks}",
+                layout.start_frames.len()
+            )));
+        }
+        if embeddings.0.shape()[1] != speakers {
+            return Err(super::PipelineError::Invariant(format!(
+                "embedding speakers {} do not match segmentation speakers {speakers}",
+                embeddings.0.shape()[1]
+            )));
+        }
+        if embeddings.0.shape()[2] != crate::inference::embedding::EMBEDDING_WIDTH {
+            return Err(super::PipelineError::Invariant(format!(
+                "embedding width {} is invalid",
+                embeddings.0.shape()[2]
+            )));
+        }
+        Ok(Self {
+            layout,
+            segmentations,
+            embeddings,
+            #[cfg(feature = "_metrics")]
+            stage_timings,
+        })
+    }
+
+    pub(in crate::pipeline) fn empty_with_layout(layout: ChunkLayout) -> Self {
+        Self {
+            layout: layout.with_num_chunks(0),
+            segmentations: DecodedSegmentations(ndarray::Array3::zeros((0, 0, 0))),
+            embeddings: ChunkEmbeddings(ndarray::Array3::zeros((0, 0, 0))),
+            #[cfg(feature = "_metrics")]
+            stage_timings: None,
+        }
+    }
+
     /// Return detailed chunk-inference timings when metrics are enabled and available
     #[cfg(feature = "_metrics")]
     #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
@@ -253,4 +308,72 @@ pub(in crate::pipeline) enum EmbeddingPath {
     Masked,
     Split,
     MultiMask,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::layout::ChunkLayout;
+    use super::*;
+    use crate::inference::embedding::EMBEDDING_WIDTH;
+    use ndarray::Array3;
+
+    #[test]
+    fn try_new_rejects_mismatched_chunk_counts() {
+        let layout = ChunkLayout::new(1.0, 16_000, 160_000, 2);
+        let segmentations = DecodedSegmentations(Array3::zeros((2, 4, 3)));
+        let embeddings = ChunkEmbeddings(Array3::zeros((1, 3, EMBEDDING_WIDTH)));
+        assert!(
+            InferenceArtifacts::try_new(
+                layout,
+                segmentations,
+                embeddings,
+                #[cfg(feature = "_metrics")]
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn try_new_rejects_invalid_embedding_width() {
+        let layout = ChunkLayout::new(1.0, 16_000, 160_000, 1);
+        let segmentations = DecodedSegmentations(Array3::zeros((1, 4, 3)));
+        let embeddings = ChunkEmbeddings(Array3::zeros((1, 3, 8)));
+        assert!(
+            InferenceArtifacts::try_new(
+                layout,
+                segmentations,
+                embeddings,
+                #[cfg(feature = "_metrics")]
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn try_new_accepts_matching_extents() {
+        let layout = ChunkLayout::new(1.0, 16_000, 160_000, 1);
+        let segmentations = DecodedSegmentations(Array3::zeros((1, 4, 3)));
+        let embeddings = ChunkEmbeddings(Array3::zeros((1, 3, EMBEDDING_WIDTH)));
+        assert!(
+            InferenceArtifacts::try_new(
+                layout,
+                segmentations,
+                embeddings,
+                #[cfg(feature = "_metrics")]
+                None,
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn empty_artifacts_have_zero_chunks() {
+        let artifacts =
+            InferenceArtifacts::empty_with_layout(ChunkLayout::new(1.0, 16_000, 160_000, 4));
+        assert_eq!(artifacts.segmentations.0.shape()[0], 0);
+        assert_eq!(artifacts.embeddings.0.shape()[0], 0);
+        assert!(artifacts.layout.start_frames.is_empty());
+    }
 }

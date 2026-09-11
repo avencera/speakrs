@@ -11,7 +11,7 @@ use crate::path::file_stem_string;
 pub(super) fn preflight(
     datasets: &[crate::datasets::Dataset],
     datasets_dir: &Path,
-    implementations: &[(&str, ImplType)],
+    implementations: &[(crate::catalog::ImplementationId, ImplType)],
     models_dir: &Path,
     root: &Path,
     pyannote_batch_sizes: PyannoteBatchSizes,
@@ -32,7 +32,8 @@ pub(super) fn preflight(
     println!();
     println!("=== Pre-flight check ({stem}, {duration:.0}s) ===");
 
-    for (impl_name, impl_type) in implementations {
+    for (implementation_id, impl_type) in implementations {
+        let impl_name = crate::catalog::ImplementationCatalog::display_name(*implementation_id);
         let result = match impl_type {
             ImplType::Speakrs(mode) => run_speakrs_gpu(models_dir, &preflight_files, mode, None),
             ImplType::Pyannote(device) => BatchCommandRunner::pyannote(

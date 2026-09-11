@@ -9,6 +9,7 @@ use hf_hub::{Repo, RepoType};
 
 const SEGMENTATION_ONNX: &str = "segmentation-3.0.onnx";
 const EMBEDDING_ONNX: &str = "wespeaker-voxceleb-resnet34.onnx";
+const EMBEDDING_MIN_SAMPLES: &str = "wespeaker-voxceleb-resnet34.min_num_samples.txt";
 
 /// Resolved model paths for the speakrs pipeline
 ///
@@ -26,23 +27,27 @@ pub struct ModelBundle {
 }
 
 impl ModelBundle {
-    /// Resolve paths from a local directory containing all model files
-    pub fn from_dir(models_dir: impl Into<PathBuf>) -> Self {
+    /// Resolve and validate paths from a local directory containing all model files
+    pub fn from_dir(
+        models_dir: impl Into<PathBuf>,
+    ) -> Result<Self, crate::inference::ModelLoadError> {
         let dir = models_dir.into();
-        Self {
+        crate::inference::embedding::read_min_num_samples(&dir.join(EMBEDDING_MIN_SAMPLES))?;
+
+        Ok(Self {
             segmentation_onnx: dir.join(SEGMENTATION_ONNX),
             embedding_onnx: dir.join(EMBEDDING_ONNX),
             plda_dir: dir,
-        }
+        })
     }
 
     /// Download models from HuggingFace and resolve paths
     #[cfg(feature = "online")]
     #[cfg_attr(docsrs, doc(cfg(feature = "online")))]
-    pub fn from_pretrained(mode: ExecutionMode) -> Result<Self, hf_hub::api::sync::ApiError> {
+    pub fn from_pretrained(mode: ExecutionMode) -> Result<Self, crate::inference::ModelLoadError> {
         let manager = ModelManager::new()?;
         let dir = manager.ensure(mode)?;
-        Ok(Self::from_dir(dir))
+        Self::from_dir(dir)
     }
 
     /// Base ONNX path for the segmentation model
@@ -161,7 +166,7 @@ const PLDA_FILES: &[&str] = &[
     "plda_psi.npy",
     "plda_mean1.npy",
     "plda_mean2.npy",
-    "wespeaker-voxceleb-resnet34.min_num_samples.txt",
+    EMBEDDING_MIN_SAMPLES,
 ];
 
 #[cfg(feature = "online")]
@@ -179,13 +184,6 @@ fn mlmodelc_files(name: &str) -> Vec<String> {
         format!("{name}/weights/weight.bin"),
         format!("{name}/analytics/coremldata.bin"),
     ]
-}
-
-#[cfg(feature = "online")]
-fn extend_mlmodelc_files(files: &mut Vec<String>, names: &[&str]) {
-    for name in names {
-        files.extend(mlmodelc_files(name));
-    }
 }
 
 #[cfg(feature = "online")]
@@ -229,58 +227,369 @@ const COREML_FAST_CHUNK_MODEL_STEMS: &[&str] = &[
     "wespeaker-chunk-emb-s25-w56.mlmodelc",
 ];
 
+/// Model family owned by the asset catalog
 #[cfg(feature = "online")]
-fn required_files(mode: ExecutionMode) -> Vec<String> {
-    let mut files: Vec<String> = PLDA_FILES.iter().map(|s| s.to_string()).collect();
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ModelFamily {
+    Segmentation,
+    Embedding,
+    Filterbank,
+    EmbeddingTail,
+    MultiMaskTail,
+    ChunkEmbedding,
+    Plda,
+    Metadata,
+}
 
-    match mode {
-        ExecutionMode::Cpu => {
-            files.extend(ONNX_FILES.iter().map(|s| s.to_string()));
-        }
-        ExecutionMode::Cuda | ExecutionMode::CudaFast | ExecutionMode::MiGraphX => {
-            files.extend(ONNX_FILES.iter().map(|s| s.to_string()));
-            // split models for multi-mask embedding (CPU fbank + GPU multi-mask)
-            files.push("wespeaker-fbank.onnx".to_string());
-            files.push("wespeaker-fbank-b32.onnx".to_string());
-            files.push("wespeaker-multimask-tail.onnx".to_string());
-            files.push("wespeaker-multimask-tail-b32.onnx".to_string());
-            // batched seg/emb models
-            files.push("segmentation-3.0-b32.onnx".to_string());
-            files.push("wespeaker-voxceleb-resnet34-b64.onnx".to_string());
-        }
-        ExecutionMode::CoreMl => {
-            // native CoreML modes still need the ONNX segmentation model for the constructor
-            files.push("segmentation-3.0.onnx".to_string());
-            files.push("wespeaker-voxceleb-resnet34.onnx".to_string());
-            files.push("wespeaker-voxceleb-resnet34.onnx.data".to_string());
-            // b32 batched ONNX for segmentation
-            files.push("segmentation-3.0-b32.onnx".to_string());
-            // split ONNX models for embedding
-            files.push("wespeaker-fbank.onnx".to_string());
-            files.push("wespeaker-fbank-b32.onnx".to_string());
-            files.push("wespeaker-voxceleb-resnet34-tail.onnx".to_string());
-            files.push("wespeaker-voxceleb-resnet34-tail-b3.onnx".to_string());
-            files.push("wespeaker-voxceleb-resnet34-tail-b32.onnx".to_string());
-            extend_mlmodelc_files(&mut files, COREML_COMMON_MODEL_STEMS);
-            extend_mlmodelc_files(&mut files, COREML_CHUNK_MODEL_STEMS);
-        }
-        ExecutionMode::CoreMlFast => {
-            files.push("segmentation-3.0.onnx".to_string());
-            files.push("wespeaker-voxceleb-resnet34.onnx".to_string());
-            files.push("wespeaker-voxceleb-resnet34.onnx.data".to_string());
-            files.push("segmentation-3.0-b32.onnx".to_string());
-            files.push("wespeaker-fbank.onnx".to_string());
-            files.push("wespeaker-fbank-b32.onnx".to_string());
-            files.push("wespeaker-voxceleb-resnet34-tail.onnx".to_string());
-            files.push("wespeaker-voxceleb-resnet34-tail-b3.onnx".to_string());
-            files.push("wespeaker-voxceleb-resnet34-tail-b32.onnx".to_string());
-            extend_mlmodelc_files(&mut files, COREML_COMMON_MODEL_STEMS);
-            extend_mlmodelc_files(&mut files, COREML_FAST_SEGMENTATION_MODEL_STEMS);
-            extend_mlmodelc_files(&mut files, COREML_FAST_CHUNK_MODEL_STEMS);
+/// Backend that consumes a catalog asset
+#[cfg(feature = "online")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ModelBackend {
+    Onnx,
+    CoreMl,
+}
+
+/// Weight precision recorded for a catalog asset
+#[cfg(feature = "online")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ModelPrecision {
+    Fp32,
+    W8A16,
+}
+
+/// Whether a catalog asset must be downloaded for a mode
+#[cfg(feature = "online")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AssetRequirement {
+    Required,
+    Optional,
+}
+
+/// One remote model file or compiled CoreML bundle stem
+#[cfg(feature = "online")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ModelAsset {
+    file_name: &'static str,
+    family: ModelFamily,
+    backend: ModelBackend,
+    precision: ModelPrecision,
+    batch: Option<u32>,
+    requirement: AssetRequirement,
+}
+
+#[cfg(feature = "online")]
+impl ModelAsset {
+    const fn new(
+        file_name: &'static str,
+        family: ModelFamily,
+        backend: ModelBackend,
+        precision: ModelPrecision,
+        batch: Option<u32>,
+        requirement: AssetRequirement,
+    ) -> Self {
+        Self {
+            file_name,
+            family,
+            backend,
+            precision,
+            batch,
+            requirement,
         }
     }
 
-    files
+    /// Remote file name or compiled-bundle directory
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn file_name(self) -> &'static str {
+        self.file_name
+    }
+
+    /// Model family this asset belongs to
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn family(self) -> ModelFamily {
+        self.family
+    }
+
+    /// Backend that loads this asset
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn backend(self) -> ModelBackend {
+        self.backend
+    }
+
+    /// Recorded weight precision
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn precision(self) -> ModelPrecision {
+        self.precision
+    }
+
+    /// Batch dimension when the asset is a fixed-shape model
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn batch(self) -> Option<u32> {
+        self.batch
+    }
+
+    /// Whether this asset must be present for the selected mode
+    pub(crate) fn requirement(self) -> AssetRequirement {
+        self.requirement
+    }
+
+    fn remote_paths(self) -> Vec<String> {
+        if self.file_name.ends_with(".mlmodelc") {
+            mlmodelc_files(self.file_name)
+        } else {
+            vec![self.file_name.to_string()]
+        }
+    }
+}
+
+#[cfg(feature = "online")]
+fn family_for_stem(name: &str) -> ModelFamily {
+    if name.starts_with("segmentation") {
+        ModelFamily::Segmentation
+    } else if name.contains("chunk-emb") {
+        ModelFamily::ChunkEmbedding
+    } else if name.contains("fbank") {
+        ModelFamily::Filterbank
+    } else if name.contains("multimask") {
+        ModelFamily::MultiMaskTail
+    } else if name.contains("tail") {
+        ModelFamily::EmbeddingTail
+    } else {
+        ModelFamily::Embedding
+    }
+}
+
+#[cfg(feature = "online")]
+fn batch_from_name(name: &str) -> Option<u32> {
+    let stem = name
+        .trim_end_matches(".mlmodelc")
+        .trim_end_matches(".onnx")
+        .trim_end_matches(".onnx.data");
+    stem.rsplit_once("-b")
+        .and_then(|(_, batch)| batch.parse().ok())
+}
+
+#[cfg(feature = "online")]
+fn onnx_asset(name: &'static str, family: ModelFamily) -> ModelAsset {
+    ModelAsset::new(
+        name,
+        family,
+        ModelBackend::Onnx,
+        ModelPrecision::Fp32,
+        batch_from_name(name),
+        AssetRequirement::Required,
+    )
+}
+
+#[cfg(feature = "online")]
+fn catalog_assets(mode: ExecutionMode) -> Vec<ModelAsset> {
+    let mut assets: Vec<ModelAsset> = PLDA_FILES
+        .iter()
+        .map(|name| {
+            let family = if name.ends_with(".txt") {
+                ModelFamily::Metadata
+            } else {
+                ModelFamily::Plda
+            };
+            ModelAsset::new(
+                name,
+                family,
+                ModelBackend::Onnx,
+                ModelPrecision::Fp32,
+                None,
+                AssetRequirement::Required,
+            )
+        })
+        .collect();
+
+    match mode {
+        ExecutionMode::Cpu => {
+            assets.extend(ONNX_FILES.iter().copied().map(|name| {
+                onnx_asset(
+                    name,
+                    if name.starts_with("segmentation") {
+                        ModelFamily::Segmentation
+                    } else {
+                        ModelFamily::Embedding
+                    },
+                )
+            }));
+        }
+        ExecutionMode::Cuda | ExecutionMode::CudaFast | ExecutionMode::MiGraphX => {
+            assets.push(onnx_asset(
+                "segmentation-3.0.onnx",
+                ModelFamily::Segmentation,
+            ));
+            assets.push(onnx_asset(
+                "wespeaker-voxceleb-resnet34.onnx",
+                ModelFamily::Embedding,
+            ));
+            assets.push(onnx_asset(
+                "wespeaker-voxceleb-resnet34.onnx.data",
+                ModelFamily::Embedding,
+            ));
+            assets.push(onnx_asset("wespeaker-fbank.onnx", ModelFamily::Filterbank));
+            assets.push(onnx_asset(
+                "wespeaker-fbank-b32.onnx",
+                ModelFamily::Filterbank,
+            ));
+            assets.push(onnx_asset(
+                "wespeaker-multimask-tail.onnx",
+                ModelFamily::MultiMaskTail,
+            ));
+            assets.push(onnx_asset(
+                "wespeaker-multimask-tail-b32.onnx",
+                ModelFamily::MultiMaskTail,
+            ));
+            assets.push(onnx_asset(
+                "segmentation-3.0-b32.onnx",
+                ModelFamily::Segmentation,
+            ));
+            assets.push(onnx_asset(
+                "wespeaker-voxceleb-resnet34-b64.onnx",
+                ModelFamily::Embedding,
+            ));
+        }
+        ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => {
+            assets.push(onnx_asset(
+                "segmentation-3.0.onnx",
+                ModelFamily::Segmentation,
+            ));
+            assets.push(onnx_asset(
+                "wespeaker-voxceleb-resnet34.onnx",
+                ModelFamily::Embedding,
+            ));
+            assets.push(onnx_asset(
+                "wespeaker-voxceleb-resnet34.onnx.data",
+                ModelFamily::Embedding,
+            ));
+            assets.push(onnx_asset(
+                "segmentation-3.0-b32.onnx",
+                ModelFamily::Segmentation,
+            ));
+            assets.push(onnx_asset("wespeaker-fbank.onnx", ModelFamily::Filterbank));
+            assets.push(onnx_asset(
+                "wespeaker-fbank-b32.onnx",
+                ModelFamily::Filterbank,
+            ));
+            assets.push(onnx_asset(
+                "wespeaker-voxceleb-resnet34-tail.onnx",
+                ModelFamily::EmbeddingTail,
+            ));
+            assets.push(onnx_asset(
+                "wespeaker-voxceleb-resnet34-tail-b3.onnx",
+                ModelFamily::EmbeddingTail,
+            ));
+            assets.push(onnx_asset(
+                "wespeaker-voxceleb-resnet34-tail-b32.onnx",
+                ModelFamily::EmbeddingTail,
+            ));
+            assets.extend(COREML_COMMON_MODEL_STEMS.iter().map(|&name| {
+                ModelAsset::new(
+                    name,
+                    family_for_stem(name),
+                    ModelBackend::CoreMl,
+                    ModelPrecision::Fp32,
+                    batch_from_name(name),
+                    AssetRequirement::Required,
+                )
+            }));
+            if matches!(mode, ExecutionMode::CoreMl) {
+                assets.extend(COREML_CHUNK_MODEL_STEMS.iter().map(|&name| {
+                    ModelAsset::new(
+                        name,
+                        ModelFamily::ChunkEmbedding,
+                        ModelBackend::CoreMl,
+                        ModelPrecision::Fp32,
+                        batch_from_name(name),
+                        AssetRequirement::Required,
+                    )
+                }));
+            }
+            if matches!(mode, ExecutionMode::CoreMlFast) {
+                assets.extend(COREML_FAST_SEGMENTATION_MODEL_STEMS.iter().map(|&name| {
+                    ModelAsset::new(
+                        name,
+                        ModelFamily::Segmentation,
+                        ModelBackend::CoreMl,
+                        ModelPrecision::W8A16,
+                        batch_from_name(name),
+                        AssetRequirement::Required,
+                    )
+                }));
+                assets.extend(COREML_FAST_CHUNK_MODEL_STEMS.iter().map(|&name| {
+                    ModelAsset::new(
+                        name,
+                        ModelFamily::ChunkEmbedding,
+                        ModelBackend::CoreMl,
+                        ModelPrecision::Fp32,
+                        batch_from_name(name),
+                        AssetRequirement::Required,
+                    )
+                }));
+            }
+            assets.push(ModelAsset::new(
+                "wespeaker-voxceleb-resnet34-tail-b64.mlmodelc",
+                ModelFamily::EmbeddingTail,
+                ModelBackend::CoreMl,
+                ModelPrecision::Fp32,
+                Some(64),
+                AssetRequirement::Optional,
+            ));
+        }
+    }
+
+    assets
+}
+
+#[cfg(feature = "online")]
+fn required_files(mode: ExecutionMode) -> Vec<String> {
+    catalog_assets(mode)
+        .into_iter()
+        .filter(|asset| asset.requirement() == AssetRequirement::Required)
+        .flat_map(ModelAsset::remote_paths)
+        .collect()
+}
+
+#[cfg(test)]
+mod local_tests {
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::{EMBEDDING_MIN_SAMPLES, ModelBundle};
+
+    static NEXT_DIRECTORY_ID: AtomicU64 = AtomicU64::new(0);
+
+    fn scratch_directory(test_name: &str) -> std::path::PathBuf {
+        let id = NEXT_DIRECTORY_ID.fetch_add(1, Ordering::Relaxed);
+        let directory = std::env::temp_dir().join(format!(
+            "speakrs-model-bundle-{}-{test_name}-{id}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    #[test]
+    fn local_bundle_requires_embedding_metadata() {
+        let directory = scratch_directory("missing-metadata");
+        let error = ModelBundle::from_dir(&directory).unwrap_err();
+
+        assert!(error.to_string().contains("missing embedding metadata"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn local_bundle_validates_embedding_metadata_before_construction() {
+        let directory = scratch_directory("metadata-validation");
+        let metadata = directory.join(EMBEDDING_MIN_SAMPLES);
+        fs::write(&metadata, "0\n").unwrap();
+        let error = ModelBundle::from_dir(&directory).unwrap_err();
+        assert!(error.to_string().contains("must be greater than zero"));
+
+        fs::write(metadata, "400\n").unwrap();
+        ModelBundle::from_dir(&directory).unwrap();
+        fs::remove_dir_all(directory).unwrap();
+    }
 }
 
 #[cfg(all(test, feature = "online"))]
@@ -329,6 +638,52 @@ mod tests {
         assert!(files.contains(&"segmentation-3.0-w8a16.mlmodelc/model.mil".to_string()));
         assert!(files.contains(&"segmentation-3.0-b64-w8a16.mlmodelc/model.mil".to_string()));
         assert!(files.contains(&"wespeaker-chunk-emb-s25-w56.mlmodelc/model.mil".to_string()));
+    }
+
+    #[test]
+    fn catalog_records_batch_32_coreml_tail() {
+        let tail = ModelAsset::new(
+            "wespeaker-voxceleb-resnet34-tail-b32.mlmodelc",
+            ModelFamily::EmbeddingTail,
+            ModelBackend::CoreMl,
+            ModelPrecision::Fp32,
+            Some(32),
+            AssetRequirement::Required,
+        );
+        assert_eq!(
+            tail.file_name(),
+            "wespeaker-voxceleb-resnet34-tail-b32.mlmodelc"
+        );
+        assert_eq!(tail.family(), ModelFamily::EmbeddingTail);
+        assert_eq!(tail.backend(), ModelBackend::CoreMl);
+        assert_eq!(tail.precision(), ModelPrecision::Fp32);
+        assert_eq!(tail.batch(), Some(32));
+        assert_eq!(
+            tail.remote_paths()[0],
+            "wespeaker-voxceleb-resnet34-tail-b32.mlmodelc/model.mil"
+        );
+    }
+
+    #[test]
+    fn cpu_required_files_include_plda_metadata_and_onnx() {
+        let files = required_files(ExecutionMode::Cpu);
+        for name in PLDA_FILES.iter().chain(ONNX_FILES) {
+            assert!(
+                files.contains(&name.to_string()),
+                "cpu catalog missing {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn coreml_catalog_records_optional_batch_64_tail() {
+        let optional = catalog_assets(ExecutionMode::CoreMl)
+            .into_iter()
+            .find(|asset| asset.batch() == Some(64) && asset.family() == ModelFamily::EmbeddingTail)
+            .expect("optional batch-64 CoreML tail");
+        assert_eq!(optional.requirement(), AssetRequirement::Optional);
+        let files = required_files(ExecutionMode::CoreMl);
+        assert!(!files.iter().any(|path| path.contains("tail-b64")));
     }
 
     #[test]

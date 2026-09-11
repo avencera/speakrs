@@ -9,24 +9,28 @@ use speakrs::pipeline::SEGMENTATION_STEP_SECONDS;
 pub(crate) fn decode_windows(
     raw_windows: Vec<Array2<f32>>,
     powerset: &PowersetMapping,
-) -> Array3<f32> {
+) -> Result<Array3<f32>> {
     let mut windows = raw_windows.into_iter();
     let Some(first_window) = windows.next() else {
-        return Array3::zeros((0, 0, 0));
+        return Ok(Array3::zeros((0, 0, 0)));
     };
 
-    let first = powerset.hard_decode(&first_window);
+    let first = powerset
+        .hard_decode(&first_window)
+        .map_err(|error| eyre!("{error}"))?;
     let mut stacked = Array3::<f32>::zeros((windows.len() + 1, first.nrows(), first.ncols()));
     stacked.slice_mut(s![0, .., ..]).assign(&first);
 
     for (window_idx, window) in windows.enumerate() {
-        let decoded = powerset.hard_decode(&window);
+        let decoded = powerset
+            .hard_decode(&window)
+            .map_err(|error| eyre!("{error}"))?;
         stacked
             .slice_mut(s![window_idx + 1, .., ..])
             .assign(&decoded);
     }
 
-    stacked
+    Ok(stacked)
 }
 
 pub(crate) fn clean_masks(segmentations: &ArrayView2<f32>) -> Array2<f32> {

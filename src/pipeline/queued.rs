@@ -133,15 +133,6 @@ pub enum QueueError {
     /// The background worker thread panicked
     #[error("worker thread panicked: {0}")]
     WorkerPanicked(String),
-    /// The receiver reached an unexpected terminal queue error
-    #[error("queue reached terminal error: {0}")]
-    Terminal(String),
-}
-
-impl QueueError {
-    fn format_worker_panic(err: Box<dyn Any + Send + 'static>) -> Self {
-        Self::WorkerPanicked(panic_payload_message(err))
-    }
 }
 
 struct WorkerRequest {
@@ -156,8 +147,7 @@ struct WorkerRequest {
 /// `run_batch_with_config`, preserving cross-file batch optimizations within
 /// each worker pass
 ///
-/// Admission should use [`Self::try_push`], which never blocks. [`Self::push`]
-/// is a non-blocking alias kept for existing callers
+/// Admission uses [`Self::try_push`], which never blocks
 ///
 /// ```no_run
 /// # use speakrs::pipeline::*;
@@ -221,18 +211,6 @@ impl QueueSender {
         self.capacity
     }
 
-    /// Submit a single file for background diarization
-    ///
-    /// This is a non-blocking alias of [`Self::try_push`]. It returns
-    /// [`QueueError::Full`] when the request channel is at capacity instead of
-    /// waiting for a slot
-    pub fn push(
-        &self,
-        request: QueuedDiarizationRequest,
-    ) -> Result<QueuedDiarizationJobId, QueueError> {
-        self.try_push(request)
-    }
-
     /// Submit a single file for background diarization without blocking
     ///
     /// Returns [`QueueError::Full`] immediately when the request channel is at
@@ -265,7 +243,6 @@ enum QueueReceiverState {
     Running,
     Closed,
     WorkerPanicked(String),
-    Terminal(String),
 }
 
 /// Background queue receiver for diarization results
@@ -316,14 +293,9 @@ impl QueueReceiver {
                 self.state = QueueReceiverState::Closed;
                 QueueError::Closed
             }
-            Err(QueueError::WorkerPanicked(message)) => {
+            Err(message) => {
                 self.state = QueueReceiverState::WorkerPanicked(message.clone());
                 QueueError::WorkerPanicked(message)
-            }
-            Err(err) => {
-                let message = err.to_string();
-                self.state = QueueReceiverState::Terminal(message);
-                err
             }
         }
     }
@@ -335,7 +307,6 @@ impl QueueReceiver {
             QueueReceiverState::WorkerPanicked(message) => {
                 QueueError::WorkerPanicked(message.clone())
             }
-            QueueReceiverState::Terminal(message) => QueueError::Terminal(message.clone()),
         }
     }
 }
@@ -381,9 +352,9 @@ impl IntoIterator for QueueReceiver {
     }
 }
 
-fn join_worker(worker: Option<JoinHandle<()>>) -> Result<(), QueueError> {
+fn join_worker(worker: Option<JoinHandle<()>>) -> Result<(), String> {
     if let Some(handle) = worker {
-        handle.join().map_err(QueueError::format_worker_panic)?;
+        handle.join().map_err(panic_payload_message)?;
     }
 
     Ok(())
@@ -571,21 +542,6 @@ mod tests {
     }
 
     #[test]
-    fn push_is_non_blocking_and_returns_full() {
-        let (request_tx, _request_rx) = crossbeam_channel::bounded::<WorkerRequest>(1);
-        let sender = QueueSender::from_request_tx(request_tx);
-
-        sender
-            .push(QueuedDiarizationRequest::new("first", Vec::new()))
-            .unwrap();
-
-        assert!(matches!(
-            sender.push(QueuedDiarizationRequest::new("second", Vec::new())),
-            Err(QueueError::Full(_))
-        ));
-    }
-
-    #[test]
     fn receiver_reports_clean_close_after_worker_exit() {
         let (result_tx, result_rx) = crossbeam_channel::bounded(1);
         drop(result_tx);
@@ -648,25 +604,8 @@ mod tests {
         let sender = QueueSender::from_request_tx(request_tx);
 
         assert!(matches!(
-            sender.push(QueuedDiarizationRequest::new("file", Vec::new())),
+            sender.try_push(QueuedDiarizationRequest::new("file", Vec::new())),
             Err(QueueError::WorkerGone)
         ));
-    }
-
-    #[test]
-    fn receiver_repeats_unexpected_terminal_error_without_panicking() {
-        let (_result_tx, result_rx) = crossbeam_channel::bounded(1);
-        let mut receiver = QueueReceiver {
-            result_rx,
-            worker: None,
-            state: QueueReceiverState::Terminal("future terminal error".to_owned()),
-        };
-
-        assert!(
-            matches!(receiver.recv(), Err(QueueError::Terminal(message)) if message == "future terminal error")
-        );
-        assert!(
-            matches!(receiver.try_recv(), Err(QueueError::Terminal(message)) if message == "future terminal error")
-        );
     }
 }

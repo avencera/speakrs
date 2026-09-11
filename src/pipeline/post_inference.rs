@@ -1,7 +1,7 @@
 use ndarray::Array2;
 use tracing::debug;
 
-use crate::binarize::binarize;
+use crate::binarize::ActivityCleanup;
 use crate::clustering::plda::PldaTransform;
 use crate::reconstruct::Reconstructor;
 use crate::segment::merge_segments;
@@ -45,8 +45,7 @@ pub fn post_inference(
         embeddings.training_set(&segmentations, config.effective_clean_frame_duration());
     let hard_clusters = training_embeddings.cluster(&segmentations, &embeddings, plda, config)?;
 
-    let reconstructor =
-        Reconstructor::with_clusters(&segmentations, &hard_clusters, &layout.start_frames, 0);
+    let reconstructor = Reconstructor::new(&segmentations, &hard_clusters, &layout.start_frames)?;
     let discrete_diarization = match config.reconstruct_method {
         ReconstructMethod::Smoothed { epsilon } => {
             reconstructor.reconstruct_smoothed(&speaker_count, epsilon)
@@ -54,14 +53,7 @@ pub fn post_inference(
         ReconstructMethod::Standard => reconstructor.reconstruct(&speaker_count),
     };
 
-    // apply min-duration filtering to remove single-frame speaker flickers
-    let has_duration_filter =
-        config.binarize.min_duration_on > 0 || config.binarize.min_duration_off > 0;
-    let discrete_diarization = if has_duration_filter {
-        DiscreteDiarization(binarize(&discrete_diarization, &config.binarize))
-    } else {
-        discrete_diarization
-    };
+    let discrete_diarization = apply_activity_cleanup(discrete_diarization, config.activity);
 
     let segments = discrete_diarization.to_segments();
     let segments = merge_segments(&segments, config.merge_gap);
@@ -79,4 +71,41 @@ pub fn post_inference(
         discrete_diarization,
         segments,
     })
+}
+
+pub(super) fn apply_activity_cleanup(
+    discrete: DiscreteDiarization,
+    config: ActivityCleanup,
+) -> DiscreteDiarization {
+    if config.is_identity() {
+        discrete
+    } else {
+        DiscreteDiarization(config.apply(&discrete))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ndarray::array;
+
+    use super::apply_activity_cleanup;
+    use crate::binarize::ActivityCleanup;
+    use crate::pipeline::DiscreteDiarization;
+
+    #[test]
+    fn default_cleanup_is_identity() {
+        assert!(ActivityCleanup::default().is_identity());
+        let discrete = DiscreteDiarization(array![[0.0], [1.0], [0.0]]);
+        let cleaned = apply_activity_cleanup(discrete.clone(), ActivityCleanup::default());
+        assert_eq!(&*cleaned, &*discrete);
+    }
+
+    #[test]
+    fn padding_only_cleanup_is_applied() {
+        let config = ActivityCleanup::new(0, 0, 1, 1);
+        assert!(!config.is_identity());
+        let discrete = DiscreteDiarization(array![[0.0], [0.0], [1.0], [0.0], [0.0]]);
+        let cleaned = apply_activity_cleanup(discrete, config);
+        assert_eq!(&*cleaned, &array![[0.0], [1.0], [1.0], [1.0], [0.0]]);
+    }
 }

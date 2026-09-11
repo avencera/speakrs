@@ -14,7 +14,10 @@ use crate::commands::benchmark::discover_files;
 use crate::path::file_stem_string;
 
 use super::ValidatedExperiment;
-use super::identity::{HostIdentity, digest_paths, digest_paths_cached};
+use super::identity::{
+    HostIdentity, Sha256Digest, deserialize_optional_digest, digest_paths, digest_paths_cached,
+};
+use super::record::{ExperimentRecord, RecordDocument};
 use super::statistics::{
     FileDerObservation, dataset_noise_margin, material_speed_rule, median,
     median_absolute_deviation, pair_file_observations, paired_file_bootstrap,
@@ -47,12 +50,12 @@ impl ManifestFile {
 struct ManifestIdentity {
     #[serde(default)]
     host: Option<HostIdentity>,
-    #[serde(default)]
-    model_sha256: String,
-    #[serde(default)]
-    worker_sha256: String,
-    #[serde(default)]
-    dataset_sha256: String,
+    #[serde(default, deserialize_with = "deserialize_optional_digest")]
+    model_sha256: Option<Sha256Digest>,
+    #[serde(default, deserialize_with = "deserialize_optional_digest")]
+    worker_sha256: Option<Sha256Digest>,
+    #[serde(default, deserialize_with = "deserialize_optional_digest")]
+    dataset_sha256: Option<Sha256Digest>,
     #[serde(default)]
     created_at: String,
     #[serde(default)]
@@ -88,6 +91,7 @@ struct RunManifest {
 pub(super) struct RunStore {
     run_dir: PathBuf,
     manifest: RunManifest,
+    experiment: ValidatedExperiment,
 }
 
 impl RunStore {
@@ -110,10 +114,26 @@ impl RunStore {
         })?;
         create_run_dir(&run_dir)?;
         write_manifest(&run_dir, &manifest)?;
-        Ok(Self { run_dir, manifest })
+        Ok(Self {
+            run_dir,
+            manifest,
+            experiment: experiment.clone(),
+        })
     }
 
-    pub(super) fn open(run_dir: &Path) -> Result<(Self, ValidatedExperiment)> {
+    pub(super) fn experiment(&self) -> &ValidatedExperiment {
+        &self.experiment
+    }
+
+    pub(super) fn open(run_dir: &Path) -> Result<Self> {
+        Self::open_validated(run_dir, true)
+    }
+
+    fn open_nested(run_dir: &Path) -> Result<Self> {
+        Self::open_validated(run_dir, false)
+    }
+
+    fn open_validated(run_dir: &Path, require_directory_id: bool) -> Result<Self> {
         ensure!(
             run_dir.is_dir(),
             "run directory does not exist: {}",
@@ -126,63 +146,55 @@ impl RunStore {
             .wrap_err_with(|| format!("invalid run manifest {}", manifest_path.display()))?;
         validate_manifest_schema(&manifest)?;
         let experiment = ValidatedExperiment::from_spec(manifest.spec.clone())?;
-        let directory_id = run_dir.file_name().and_then(OsStr::to_str).ok_or_else(|| {
-            eyre!(
-                "run directory has no valid experiment id: {}",
-                run_dir.display()
-            )
-        })?;
-        ensure!(
-            experiment.id() == directory_id,
-            "run directory identity '{}' does not match manifest experiment_id '{}'",
-            directory_id,
-            experiment.id()
-        );
+        if require_directory_id {
+            let directory_id = run_dir.file_name().and_then(OsStr::to_str).ok_or_else(|| {
+                eyre!(
+                    "run directory has no valid experiment id: {}",
+                    run_dir.display()
+                )
+            })?;
+            ensure!(
+                experiment.id() == directory_id,
+                "run directory identity '{}' does not match manifest experiment_id '{}'",
+                directory_id,
+                experiment.id()
+            );
+        }
         validate_manifest_files(&manifest, &experiment)?;
         let store = Self {
             run_dir: run_dir.to_path_buf(),
             manifest,
+            experiment,
         };
         // resume and summarize must reject model or dataset drift before mixing records
-        store.assert_input_digests(&experiment)?;
-        Ok((store, experiment))
+        store.assert_input_digests()?;
+        Ok(store)
     }
 
     #[cfg(test)]
-    pub(super) fn execute<F, T>(
-        &self,
-        experiment: ValidatedExperiment,
-        mut executor: F,
-    ) -> Result<()>
+    pub(super) fn execute<F, T>(&self, mut executor: F) -> Result<()>
     where
         F: FnMut(u32, &ManifestFile, &[String]) -> Result<Vec<(String, T)>>,
         T: Serialize,
     {
-        self.validate_experiment(&experiment)?;
-        for repetition in 0..experiment.performance().repetitions() {
-            self.execute_repetition(&experiment, repetition, &mut executor)?;
+        for repetition in 0..self.experiment.performance().repetitions() {
+            self.execute_repetition(repetition, &mut executor)?;
         }
-        self.rebuild_projections(&experiment)
+        self.rebuild_projections()
     }
 
-    pub(super) fn execute_repetition<F, T>(
-        &self,
-        experiment: &ValidatedExperiment,
-        repetition: u32,
-        mut executor: F,
-    ) -> Result<()>
+    pub(super) fn execute_repetition<F, T>(&self, repetition: u32, mut executor: F) -> Result<()>
     where
         F: FnMut(u32, &ManifestFile, &[String]) -> Result<Vec<(String, T)>>,
         T: Serialize,
     {
-        self.validate_experiment(experiment)?;
         ensure!(
-            repetition < experiment.performance().repetitions(),
+            repetition < self.experiment.performance().repetitions(),
             "repetition {repetition} is outside the manifest protocol"
         );
 
         for (file_index, file) in self.manifest.files.iter().enumerate() {
-            let missing = self.missing_candidate_ids(repetition, file_index, experiment)?;
+            let missing = self.missing_candidate_ids(repetition, file_index)?;
             if missing.is_empty() {
                 continue;
             }
@@ -201,13 +213,12 @@ impl RunStore {
         Ok(())
     }
 
-    pub(super) fn rebuild_projections(&self, experiment: &ValidatedExperiment) -> Result<()> {
-        self.validate_experiment(experiment)?;
-        let records = self.read_records(experiment)?;
+    pub(super) fn rebuild_projections(&self) -> Result<()> {
+        let records = self.read_records()?;
         let projections = ProjectionSummary::from_records(self, &records)?;
         let files_jsonl = records
             .iter()
-            .map(|record| serde_json::to_string(&record.value))
+            .map(|record| serde_json::to_string(&record.document))
             .collect::<serde_json::Result<Vec<_>>>();
         let files_jsonl = files_jsonl?.join("\n");
         let files_jsonl = if files_jsonl.is_empty() {
@@ -239,63 +250,70 @@ impl RunStore {
 
     pub(super) fn assert_worker(&self, worker: &Path) -> Result<()> {
         let identity = self.require_identity()?;
-        ensure!(
-            !identity.worker_sha256.is_empty(),
-            "run manifest has no worker digest; create a new experiment run"
-        );
+        let expected = identity.worker_sha256.as_ref().ok_or_else(|| {
+            eyre!("run manifest has no worker digest; create a new experiment run")
+        })?;
         let actual = digest_paths(&project_root(), &[worker.to_path_buf()])?;
         ensure!(
-            actual == identity.worker_sha256,
+            actual == expected.as_str(),
             "experiment worker changed after manifest creation"
         );
         Ok(())
     }
 
-    pub(super) fn assert_input_digests(&self, experiment: &ValidatedExperiment) -> Result<()> {
+    pub(super) fn assert_input_digests(&self) -> Result<()> {
         let identity = self.require_identity()?;
-        ensure!(
-            !identity.model_sha256.is_empty(),
-            "run manifest has no model digest; create a new experiment run"
-        );
-        ensure!(
-            !identity.dataset_sha256.is_empty(),
-            "run manifest has no dataset digest; create a new experiment run"
-        );
+        let expected_model = identity.model_sha256.as_ref().ok_or_else(|| {
+            eyre!("run manifest has no model digest; create a new experiment run")
+        })?;
+        let expected_dataset = identity.dataset_sha256.as_ref().ok_or_else(|| {
+            eyre!("run manifest has no dataset digest; create a new experiment run")
+        })?;
         let root = project_root();
-        let actual_model = model_digest(experiment, &root)?;
+        let actual_model = model_digest(&self.experiment, &root)?;
         ensure!(
-            actual_model == identity.model_sha256,
+            actual_model == expected_model.as_str(),
             "experiment models changed after manifest creation"
         );
         let actual_dataset = dataset_digest(&self.manifest.files, &root)?;
         ensure!(
-            actual_dataset == identity.dataset_sha256,
+            actual_dataset == expected_dataset.as_str(),
             "experiment dataset changed after manifest creation"
         );
         Ok(())
     }
 
-    pub(super) fn comparison_baseline_store(
-        &self,
-        source: &RunStore,
-    ) -> Result<(RunStore, ValidatedExperiment)> {
+    pub(super) fn comparison_baseline_store(&self, source: &RunStore) -> Result<RunStore> {
         let run_dir = self.run_dir.join("comparison-baseline");
         let expected_files = remapped_source_files(source, &self.manifest.files)?;
         let manifest = match load_existing_comparison_manifest(&run_dir)? {
-            Some(stored) => {
-                validate_comparison_clone(&stored, source, self, &expected_files)?;
+            Some(mut stored) => {
+                if let Some(dataset_sha256) =
+                    validate_comparison_clone(&stored, source, self, &expected_files)?
+                {
+                    stored
+                        .identity
+                        .as_mut()
+                        .expect("comparison identity was validated")
+                        .dataset_sha256 = Some(dataset_sha256);
+                    replace_manifest(&run_dir, &stored)?;
+                }
                 stored
             }
             None => {
                 fs::create_dir_all(&run_dir)?;
-                let manifest = build_comparison_manifest(source, self, expected_files);
+                let manifest = build_comparison_manifest(source, self, expected_files)?;
                 write_manifest(&run_dir, &manifest)?;
                 manifest
             }
         };
         let experiment = ValidatedExperiment::from_spec(manifest.spec.clone())?;
 
-        Ok((RunStore { run_dir, manifest }, experiment))
+        Ok(RunStore {
+            run_dir,
+            manifest,
+            experiment,
+        })
     }
 
     pub(super) fn record_path(
@@ -322,14 +340,9 @@ impl RunStore {
             .is_file()
     }
 
-    pub(super) fn repetition_complete(
-        &self,
-        repetition: u32,
-        experiment: &ValidatedExperiment,
-    ) -> Result<bool> {
-        self.validate_experiment(experiment)?;
+    pub(super) fn repetition_complete(&self, repetition: u32) -> Result<bool> {
         ensure!(
-            repetition < experiment.performance().repetitions(),
+            repetition < self.experiment.performance().repetitions(),
             "repetition {repetition} is outside the manifest protocol"
         );
 
@@ -339,21 +352,16 @@ impl RunStore {
             .iter()
             .enumerate()
             .all(|(file_index, _)| {
-                experiment
+                self.experiment
                     .post_inference()
                     .iter()
                     .all(|candidate| self.record_exists(repetition, file_index, &candidate.id))
             }))
     }
 
-    pub(super) fn repetition_started(
-        &self,
-        repetition: u32,
-        experiment: &ValidatedExperiment,
-    ) -> Result<bool> {
-        self.validate_experiment(experiment)?;
+    pub(super) fn repetition_started(&self, repetition: u32) -> Result<bool> {
         ensure!(
-            repetition < experiment.performance().repetitions(),
+            repetition < self.experiment.performance().repetitions(),
             "repetition {repetition} is outside the manifest protocol"
         );
 
@@ -363,7 +371,7 @@ impl RunStore {
             .iter()
             .enumerate()
             .any(|(file_index, _)| {
-                experiment
+                self.experiment
                     .post_inference()
                     .iter()
                     .any(|candidate| self.record_exists(repetition, file_index, &candidate.id))
@@ -425,18 +433,17 @@ impl RunStore {
         &self,
         repetition: u32,
         file_index: usize,
-        experiment: &ValidatedExperiment,
     ) -> Result<Vec<String>> {
-        self.validate_experiment(experiment)?;
         ensure!(
-            repetition < experiment.performance().repetitions(),
+            repetition < self.experiment.performance().repetitions(),
             "repetition {repetition} is outside the manifest protocol"
         );
         ensure!(
             file_index < self.manifest.files.len(),
             "file index {file_index} is outside the manifest"
         );
-        Ok(experiment
+        Ok(self
+            .experiment
             .post_inference()
             .iter()
             .filter(|candidate| !self.record_exists(repetition, file_index, &candidate.id))
@@ -515,23 +522,7 @@ impl RunStore {
             .ok_or_else(|| eyre!("run manifest has no execution identity"))
     }
 
-    fn validate_experiment(&self, experiment: &ValidatedExperiment) -> Result<()> {
-        ensure!(
-            experiment.id() == self.manifest.spec.experiment_id,
-            "experiment identity '{}' does not match manifest experiment_id '{}'",
-            experiment.id(),
-            self.manifest.spec.experiment_id
-        );
-        let expected = serde_json::to_value(&self.manifest.spec)?;
-        let actual = serde_json::to_value(experiment.spec())?;
-        ensure!(
-            expected == actual,
-            "experiment specification does not match immutable run manifest"
-        );
-        Ok(())
-    }
-
-    fn read_records(&self, experiment: &ValidatedExperiment) -> Result<Vec<StoredRecord>> {
+    fn read_records(&self) -> Result<Vec<StoredRecord>> {
         let records_dir = self.run_dir.join(RECORDS_DIR);
         if !records_dir.exists() {
             return Ok(Vec::new());
@@ -539,7 +530,8 @@ impl RunStore {
         let mut paths = Vec::new();
         collect_json_paths(&records_dir, &mut paths)?;
         paths.sort();
-        let candidate_order: HashMap<_, _> = experiment
+        let candidate_order: HashMap<_, _> = self
+            .experiment
             .post_inference()
             .iter()
             .enumerate()
@@ -555,89 +547,88 @@ impl RunStore {
         let mut seen_targets = HashSet::new();
         let mut records = Vec::with_capacity(paths.len());
         for path in paths {
-            let value: Value = serde_json::from_reader(BufReader::new(
+            let document: RecordDocument = serde_json::from_reader(BufReader::new(
                 File::open(&path)
                     .wrap_err_with(|| format!("failed to read record {}", path.display()))?,
             ))
             .wrap_err_with(|| format!("invalid record {}", path.display()))?;
-            let object = value
-                .as_object()
-                .ok_or_else(|| eyre!("record {} must contain a JSON object", path.display()))?;
-            let schema_version = json_u32(object, "schema_version", &path)?;
             ensure!(
-                schema_version == RECORD_SCHEMA_VERSION,
+                document.schema_version == RECORD_SCHEMA_VERSION,
                 "record {} schema_version {} is not supported; expected {RECORD_SCHEMA_VERSION}",
                 path.display(),
-                schema_version
+                document.schema_version
             );
-            let repetition = json_u32(object, "repetition", &path)?;
-            let file_index = json_usize(object, "file_index", &path)?;
-            let file_id = json_string(object, "file_id", &path)?;
-            let candidate_id = json_string(object, "candidate_id", &path)?;
             ensure!(
-                repetition < experiment.performance().repetitions(),
+                document.repetition < self.experiment.performance().repetitions(),
                 "record {} repetition {} is outside the manifest",
                 path.display(),
-                repetition
+                document.repetition
             );
-            let expected_file = self.manifest.files.get(file_index).ok_or_else(|| {
-                eyre!(
-                    "record {} file index {} is outside the manifest",
-                    path.display(),
-                    file_index
-                )
-            })?;
+            let expected_file = self
+                .manifest
+                .files
+                .get(document.file_index)
+                .ok_or_else(|| {
+                    eyre!(
+                        "record {} file index {} is outside the manifest",
+                        path.display(),
+                        document.file_index
+                    )
+                })?;
             ensure!(
-                expected_file.id == file_id,
+                expected_file.id == document.file_id,
                 "record {} file identity '{}' does not match manifest file '{}'",
                 path.display(),
-                file_id,
+                document.file_id,
                 expected_file.id
             );
-            let candidate_index = *candidate_order.get(candidate_id.as_str()).ok_or_else(|| {
-                eyre!(
-                    "record {} candidate '{}' is not part of the manifest",
-                    path.display(),
-                    candidate_id
-                )
-            })?;
+            let candidate_index = *candidate_order
+                .get(document.candidate_id.as_str())
+                .ok_or_else(|| {
+                    eyre!(
+                        "record {} candidate '{}' is not part of the manifest",
+                        path.display(),
+                        document.candidate_id
+                    )
+                })?;
             let path_key = parse_record_path(&path, &self.run_dir)?;
             ensure!(
-                path_key.repetition == repetition
+                path_key.repetition == document.repetition
                     && path_key.file_component == expected_file.record_component()
-                    && path_key.candidate_id == candidate_id,
+                    && path_key.candidate_id == document.candidate_id,
                 "record path {} does not match its identity fields",
                 path.display()
             );
             ensure!(
-                file_order.get(file_id.as_str()) == Some(&file_index),
+                file_order.get(document.file_id.as_str()) == Some(&document.file_index),
                 "record {} has an unknown file identity",
                 path.display()
             );
-            let key = (repetition, file_index, candidate_index);
+            let key = (document.repetition, document.file_index, candidate_index);
             ensure!(
                 seen_targets.insert(key),
                 "duplicate record target in {}",
                 path.display()
             );
             records.push(StoredRecord {
-                value,
-                repetition,
-                file_index,
+                document,
                 candidate_index,
             });
         }
-        records
-            .sort_by_key(|record| (record.repetition, record.file_index, record.candidate_index));
+        records.sort_by_key(|record| {
+            (
+                record.document.repetition,
+                record.document.file_index,
+                record.candidate_index,
+            )
+        });
         Ok(records)
     }
 }
 
 #[derive(Clone, Debug)]
 struct StoredRecord {
-    value: Value,
-    repetition: u32,
-    file_index: usize,
+    document: RecordDocument,
     candidate_index: usize,
 }
 
@@ -678,6 +669,17 @@ struct CandidateProjection {
     median_post_inference_seconds: Option<f64>,
     post_inference_mad_seconds: Option<f64>,
     comparison: Option<ComparisonProjection>,
+    decision: ComparisonDecision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ComparisonDecision {
+    Baseline,
+    Pending,
+    Failed,
+    Pass,
+    Stop,
 }
 
 #[derive(Debug, Serialize)]
@@ -746,25 +748,51 @@ struct CandidateMetrics {
     speaker_counts: BTreeMap<String, SpeakerCountMeasurement>,
 }
 
-#[derive(Deserialize)]
 struct CompleteRecordMeasurement {
     stage_timings: RecordStageTimings,
-    #[serde(default)]
     clustering: Option<RecordClusteringDiagnostics>,
     der: DerMeasurement,
 }
 
-#[derive(Deserialize)]
+impl CompleteRecordMeasurement {
+    fn from_outcome(outcome: &ExperimentRecord) -> Option<Self> {
+        match outcome {
+            ExperimentRecord::Failed { .. } => None,
+            ExperimentRecord::Complete {
+                stage_timings,
+                clustering,
+                der,
+                ..
+            } => Some(Self {
+                stage_timings: RecordStageTimings {
+                    post_inference_seconds: stage_timings.post_inference_seconds,
+                },
+                clustering: clustering
+                    .as_ref()
+                    .map(|clustering| RecordClusteringDiagnostics {
+                        usable_training_embeddings: clustering.usable_training_embeddings,
+                    }),
+                der: DerMeasurement {
+                    reference_speaker_time: der.reference_speaker_time,
+                    missed: der.missed,
+                    false_alarm: der.false_alarm,
+                    confusion: der.confusion,
+                    reference_speaker_count: der.reference_speaker_count,
+                    predicted_speaker_count: der.predicted_speaker_count,
+                },
+            }),
+        }
+    }
+}
+
 struct RecordClusteringDiagnostics {
     usable_training_embeddings: usize,
 }
 
-#[derive(Deserialize)]
 struct RecordStageTimings {
     post_inference_seconds: f64,
 }
 
-#[derive(Deserialize)]
 struct DerMeasurement {
     reference_speaker_time: f64,
     missed: f64,
@@ -787,7 +815,7 @@ impl ProjectionSummary {
         let mut file_counts = vec![0; manifest.files.len()];
         let mut candidate_counts = vec![0; manifest.spec.post_inference.len()];
         for record in records {
-            file_counts[record.file_index] += 1;
+            file_counts[record.document.file_index] += 1;
             candidate_counts[record.candidate_index] += 1;
         }
         let expected_records = manifest.spec.performance.repetitions as usize
@@ -853,6 +881,12 @@ impl ProjectionSummary {
                 )?
             };
             let candidate_metrics = &metrics[index];
+            let decision = comparison_decision(
+                index,
+                external_baseline.is_some(),
+                comparison.as_ref(),
+                candidate_metrics,
+            );
             candidates.push(CandidateProjection {
                 index,
                 id: candidate.id.clone(),
@@ -876,6 +910,7 @@ impl ProjectionSummary {
                 median_post_inference_seconds: candidate_metrics.median_post_inference_seconds,
                 post_inference_mad_seconds: candidate_metrics.post_inference_mad_seconds,
                 comparison,
+                decision,
             });
         }
 
@@ -940,11 +975,13 @@ impl ProjectionSummary {
                 .as_ref()
                 .map(|range| format!("{}/{:.1}/{}", range.minimum, range.median, range.maximum))
                 .unwrap_or_else(|| "n/a".to_owned());
-            let decision = candidate
-                .comparison
-                .as_ref()
-                .map(|comparison| if comparison.accepted { "pass" } else { "stop" })
-                .unwrap_or("baseline");
+            let decision = match candidate.decision {
+                ComparisonDecision::Baseline => "baseline",
+                ComparisonDecision::Pending => "pending",
+                ComparisonDecision::Failed => "failed",
+                ComparisonDecision::Pass => "pass",
+                ComparisonDecision::Stop => "stop",
+            };
             report.push_str(&format!(
                 "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
                 candidate.index,
@@ -1047,23 +1084,20 @@ impl CandidateMetrics {
             .collect();
         let failed_records = candidate_records
             .iter()
-            .filter(|record| record.value["status"] == "failed")
+            .filter(|record| matches!(record.document.outcome, ExperimentRecord::Failed { .. }))
             .count();
         let mut complete = Vec::new();
         for record in &candidate_records {
-            if record.value["status"] != "complete" {
+            let Some(measurement) =
+                CompleteRecordMeasurement::from_outcome(&record.document.outcome)
+            else {
                 continue;
-            }
-            let measurement: CompleteRecordMeasurement = serde_json::from_value(
-                record.value.clone(),
-            )
-            .wrap_err_with(|| {
-                format!(
-                    "invalid complete record for candidate index {candidate_index}, file index {}",
-                    record.file_index
-                )
-            })?;
-            complete.push((record.repetition, record.file_index, measurement));
+            };
+            complete.push((
+                record.document.repetition,
+                record.document.file_index,
+                measurement,
+            ));
         }
 
         let mut by_file: BTreeMap<usize, Vec<&CompleteRecordMeasurement>> = BTreeMap::new();
@@ -1241,7 +1275,7 @@ fn load_external_baseline(candidate_store: &RunStore) -> Result<Option<ExternalB
     } else {
         project_root().join(path)
     };
-    let (source_store, _source_experiment) = RunStore::open(&path)?;
+    let source_store = RunStore::open(&path)?;
     ensure!(
         source_store.manifest.spec.dataset.id == manifest.spec.dataset.id,
         "baseline dataset '{}' does not match candidate dataset '{}'",
@@ -1250,19 +1284,11 @@ fn load_external_baseline(candidate_store: &RunStore) -> Result<Option<ExternalB
     );
     let comparison_dir = candidate_store.run_dir.join("comparison-baseline");
     let store = if comparison_dir.is_dir() {
-        let nested_manifest: RunManifest = serde_json::from_reader(BufReader::new(File::open(
-            comparison_dir.join("manifest.json"),
-        )?))?;
-        validate_manifest_schema(&nested_manifest)?;
-        RunStore {
-            run_dir: comparison_dir,
-            manifest: nested_manifest,
-        }
+        RunStore::open_nested(&comparison_dir)?
     } else {
         source_store
     };
-    let experiment = ValidatedExperiment::from_spec(store.manifest.spec.clone())?;
-    let records = store.read_records(&experiment)?;
+    let records = store.read_records()?;
     ensure!(
         !records.is_empty(),
         "baseline run contains no durable records: {}",
@@ -1285,6 +1311,27 @@ fn load_external_baseline(candidate_store: &RunStore) -> Result<Option<ExternalB
         )?,
         noise_margin: baseline_noise_margin(&records)?,
     }))
+}
+
+fn comparison_decision(
+    index: usize,
+    has_external_baseline: bool,
+    comparison: Option<&ComparisonProjection>,
+    metrics: &CandidateMetrics,
+) -> ComparisonDecision {
+    if let Some(comparison) = comparison {
+        if comparison.accepted {
+            ComparisonDecision::Pass
+        } else {
+            ComparisonDecision::Stop
+        }
+    } else if !has_external_baseline && index == 0 {
+        ComparisonDecision::Baseline
+    } else if metrics.failed_records > 0 && metrics.successful_records == 0 {
+        ComparisonDecision::Failed
+    } else {
+        ComparisonDecision::Pending
+    }
 }
 
 fn build_comparison(
@@ -1469,11 +1516,11 @@ fn per_file_der_guard_passes(changes: &[FileDerChangeProjection]) -> bool {
 fn baseline_noise_margin(records: &[StoredRecord]) -> Result<f64> {
     let mut by_repetition: BTreeMap<u32, (f64, f64)> = BTreeMap::new();
     for record in records.iter().filter(|record| record.candidate_index == 0) {
-        if record.value["status"] != "complete" {
+        let Some(measurement) = CompleteRecordMeasurement::from_outcome(&record.document.outcome)
+        else {
             continue;
-        }
-        let measurement: CompleteRecordMeasurement = serde_json::from_value(record.value.clone())?;
-        let entry = by_repetition.entry(record.repetition).or_default();
+        };
+        let entry = by_repetition.entry(record.document.repetition).or_default();
         entry.0 += measurement.der.missed + measurement.der.false_alarm + measurement.der.confusion;
         entry.1 += measurement.der.reference_speaker_time;
     }
@@ -1535,6 +1582,7 @@ struct RecordPathKey {
 fn resolve_dataset_files(experiment: &ValidatedExperiment) -> Result<Vec<ManifestFile>> {
     let dataset = crate::datasets::find_dataset(&experiment.spec().dataset.id)
         .ok_or_else(|| eyre!("unknown dataset '{}'", experiment.spec().dataset.id))?;
+    dataset.verified_snapshot(experiment.datasets_dir())?;
     let dataset_dir = dataset.dataset_dir(experiment.datasets_dir());
     let requested = &experiment.spec().dataset.files;
     let pairs = if requested.is_empty() {
@@ -1651,9 +1699,12 @@ fn build_identity(
     worker: &Path,
     root: &Path,
 ) -> Result<ManifestIdentity> {
-    let model_sha256 = model_digest(experiment, root)?;
-    let worker_sha256 = digest_paths(root, &[worker.to_path_buf()])?;
-    let dataset_sha256 = dataset_digest(files, root)?;
+    let model_sha256 = Some(Sha256Digest::parse(&model_digest(experiment, root)?)?);
+    let worker_sha256 = Some(Sha256Digest::parse(&digest_paths(
+        root,
+        &[worker.to_path_buf()],
+    )?)?);
+    let dataset_sha256 = Some(Sha256Digest::parse(&dataset_digest(files, root)?)?);
     let host = collect_host_identity(root)?;
     Ok(ManifestIdentity {
         host,
@@ -1671,29 +1722,10 @@ fn build_identity(
                 .iter()
                 .map(|candidate| candidate.id.clone())
                 .collect(),
-            comparison_processes: comparison_process_order(experiment),
+            comparison_processes: experiment.schedule()?.process_labels(),
         },
         fallback_events: Vec::new(),
     })
-}
-
-fn comparison_process_order(experiment: &ValidatedExperiment) -> Vec<String> {
-    if experiment.spec().baseline_run.is_none() {
-        return (0..experiment.performance().repetitions())
-            .map(|repetition| format!("candidate:r{repetition:03}"))
-            .collect();
-    }
-    let mut order = Vec::new();
-    for first in (0..experiment.performance().repetitions()).step_by(2) {
-        let second = first + 1;
-        order.extend([
-            format!("baseline:r{first:03}"),
-            format!("candidate:r{first:03}"),
-            format!("candidate:r{second:03}"),
-            format!("baseline:r{second:03}"),
-        ]);
-    }
-    order
 }
 
 fn collect_host_identity(root: &Path) -> Result<Option<HostIdentity>> {
@@ -1790,57 +1822,80 @@ fn validate_comparison_clone(
     source: &RunStore,
     candidate: &RunStore,
     expected_files: &[ManifestFile],
-) -> Result<()> {
+) -> Result<Option<Sha256Digest>> {
     ensure!(
         stored.spec.experiment_id == source.manifest.spec.experiment_id,
         "comparison baseline experiment_id '{}' does not match opened source '{}'",
         stored.spec.experiment_id,
         source.manifest.spec.experiment_id
     );
+    let expected_spec = build_comparison_spec(source, candidate, expected_files);
+    ensure!(
+        serde_json::to_value(&stored.spec)? == serde_json::to_value(&expected_spec)?,
+        "comparison baseline experiment specification does not match the current source and candidate"
+    );
     ensure!(
         stored.files == expected_files,
         "comparison baseline file slice does not match the opened source"
     );
-    match (&stored.identity, &source.manifest.identity) {
-        (Some(stored_identity), Some(source_identity)) => {
+    let migrated_dataset_sha256 = match (
+        &stored.identity,
+        &source.manifest.identity,
+        &candidate.manifest.identity,
+    ) {
+        (Some(stored_identity), Some(source_identity), Some(candidate_identity)) => {
+            let expected_dataset_sha256 =
+                Sha256Digest::parse(&dataset_digest(expected_files, &project_root())?)?;
+            let dataset_digest_is_current =
+                stored_identity.dataset_sha256.as_ref() == Some(&expected_dataset_sha256);
+            let dataset_digest_is_legacy = stored_identity.dataset_sha256.is_some()
+                && stored_identity.dataset_sha256 == source_identity.dataset_sha256;
             ensure!(
                 stored_identity.model_sha256 == source_identity.model_sha256,
                 "comparison baseline model digest does not match the opened source"
             );
             ensure!(
-                stored_identity.dataset_sha256 == source_identity.dataset_sha256,
-                "comparison baseline dataset digest does not match the opened source"
+                dataset_digest_is_current || dataset_digest_is_legacy,
+                "comparison baseline dataset digest does not match the expected file slice"
             );
             ensure!(
-                stored_identity.worker_sha256 == source_identity.worker_sha256,
-                "comparison baseline worker digest does not match the opened source"
+                stored_identity.worker_sha256 == candidate_identity.worker_sha256,
+                "comparison baseline worker digest does not match the current execution identity"
             );
+            ensure!(
+                stored_identity.host == candidate_identity.host,
+                "comparison baseline host identity does not match the current execution identity"
+            );
+            (!dataset_digest_is_current).then_some(expected_dataset_sha256)
         }
-        (None, None) => {}
-        _ => bail!("comparison baseline identity does not match the opened source"),
-    }
+        (None, None, None) => None,
+        _ => bail!("comparison baseline identity does not match the opened source and candidate"),
+    };
     ensure!(
         stored.spec.performance.repetitions == candidate.manifest.spec.performance.repetitions,
         "comparison baseline repetition count does not match the candidate"
     );
-    Ok(())
+    Ok(migrated_dataset_sha256)
 }
 
 fn build_comparison_manifest(
     source: &RunStore,
     candidate: &RunStore,
     files: Vec<ManifestFile>,
-) -> RunManifest {
+) -> Result<RunManifest> {
     let mut manifest = source.manifest.clone();
     manifest.files = files;
-    manifest.spec.dataset.files = manifest.files.iter().map(|file| file.id.clone()).collect();
-    manifest.spec.dataset.max_files = manifest.files.len() as u32;
-    manifest.spec.dataset.max_minutes = candidate.manifest.spec.dataset.max_minutes;
-    manifest.spec.performance = candidate.manifest.spec.performance.clone();
-    // keep baseline asset digests; pin only the candidate seed and comparison run-order
+    manifest.spec = build_comparison_spec(source, candidate, &manifest.files);
+    // record the worker and host that actually re-ran the baseline
     if let Some(identity) = &mut manifest.identity {
+        identity.dataset_sha256 = Some(Sha256Digest::parse(&dataset_digest(
+            &manifest.files,
+            &project_root(),
+        )?)?);
         if let Some(candidate_identity) = &candidate.manifest.identity {
             identity.seed = candidate_identity.seed;
+            identity.host = candidate_identity.host.clone();
+            identity.worker_sha256 = candidate_identity.worker_sha256.clone();
         }
         identity.run_order.repetitions = (0..manifest.spec.performance.repetitions).collect();
         identity.run_order.files = manifest.files.iter().map(|file| file.id.clone()).collect();
@@ -1853,13 +1908,32 @@ fn build_comparison_manifest(
         identity.run_order.comparison_processes.clear();
         identity.created_at = chrono::Utc::now().to_rfc3339();
     }
-    manifest
+    Ok(manifest)
+}
+
+fn build_comparison_spec(
+    source: &RunStore,
+    candidate: &RunStore,
+    files: &[ManifestFile],
+) -> super::MacExperimentSpec {
+    let mut spec = source.manifest.spec.clone();
+    spec.dataset.files = files.iter().map(|file| file.id.clone()).collect();
+    spec.dataset.max_files = files.len() as u32;
+    spec.dataset.max_minutes = candidate.manifest.spec.dataset.max_minutes;
+    spec.performance = candidate.manifest.spec.performance.clone();
+    spec
 }
 
 fn write_manifest(run_dir: &Path, manifest: &RunManifest) -> Result<()> {
     let mut bytes = serde_json::to_vec_pretty(manifest)?;
     bytes.push(b'\n');
     atomic_write_new(&run_dir.join("manifest.json"), &bytes)
+}
+
+fn replace_manifest(run_dir: &Path, manifest: &RunManifest) -> Result<()> {
+    let mut bytes = serde_json::to_vec_pretty(manifest)?;
+    bytes.push(b'\n');
+    atomic_write(&run_dir.join("manifest.json"), &bytes)
 }
 
 fn validate_manifest_files(manifest: &RunManifest, experiment: &ValidatedExperiment) -> Result<()> {
@@ -2012,30 +2086,6 @@ fn parse_record_path(path: &Path, run_dir: &Path) -> Result<RecordPathKey> {
     })
 }
 
-fn json_u32(object: &Map<String, Value>, key: &str, path: &Path) -> Result<u32> {
-    object
-        .get(key)
-        .and_then(Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| eyre!("record {} field '{key}' must be a uint32", path.display()))
-}
-
-fn json_usize(object: &Map<String, Value>, key: &str, path: &Path) -> Result<usize> {
-    object
-        .get(key)
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .ok_or_else(|| eyre!("record {} field '{key}' must be a usize", path.display()))
-}
-
-fn json_string(object: &Map<String, Value>, key: &str, path: &Path) -> Result<String> {
-    object
-        .get(key)
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| eyre!("record {} field '{key}' must be a string", path.display()))
-}
-
 pub(super) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -2121,18 +2171,18 @@ pub(super) fn profile(experiment: ValidatedExperiment, worker: &Path) -> Result<
     let root = project_root();
     let run_dir = root.join("_benchmarks").join("macos").join(experiment.id());
     let store = if run_dir.is_dir() {
-        let (store, stored_experiment) = RunStore::open(&run_dir)?;
-        store.validate_experiment(&experiment)?;
+        let store = RunStore::open(&run_dir)?;
         ensure!(
-            stored_experiment.id() == experiment.id(),
+            store.experiment().id() == experiment.id(),
             "profile experiment does not match the existing run"
         );
         store
     } else {
         RunStore::create(&experiment, worker)?
     };
-    super::execute::run_managed_with_worker(worker, &store, &experiment)?;
+    super::execute::run_managed_with_worker(worker, &store)?;
 
+    let experiment = store.experiment();
     let profile = experiment.profile();
     ensure!(
         profile.file_index < store.manifest.files.len(),
@@ -2224,7 +2274,7 @@ pub(super) fn profile(experiment: ValidatedExperiment, worker: &Path) -> Result<
     #[cfg(target_os = "macos")]
     let compute_plan = {
         let path = traces_dir.join(format!("{artifact_stem}-compute-plan.json"));
-        super::compute_plan::write_report(&experiment, &path)?;
+        super::compute_plan::write_report(experiment, &path)?;
         Some(path)
     };
     #[cfg(not(target_os = "macos"))]
@@ -2307,11 +2357,88 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::commands::benchmark::PerFileDerResult;
     use crate::commands::mac_experiment::domain::{
         AcceptancePolicy, CoreMlMode, DatasetSlice, EmbeddingComputeUnits, FbankNormalizationScope,
         FbankPreparationWorkers, InferenceLayout, InferenceVariant, MacExperimentSpec,
         PerformanceProtocol, PostInferenceVariant, SegmentationWorkers, ShapeLadder,
     };
+    use crate::commands::mac_experiment::record::StageTimings;
+
+    fn test_digest(token: &str) -> Sha256Digest {
+        Sha256Digest::parse(token).unwrap()
+    }
+
+    fn stub_record(error: &str) -> ExperimentRecord {
+        ExperimentRecord::Failed {
+            error: error.to_owned(),
+            audio_seconds: 1.0,
+            worker_elapsed_seconds: 1.0,
+            inference_seconds: None,
+            peak_rss_bytes: None,
+        }
+    }
+
+    fn complete_record(file_id: &str) -> ExperimentRecord {
+        complete_record_with_timing(file_id, 0.25)
+    }
+
+    fn complete_record_with_timing(file_id: &str, post_inference_seconds: f64) -> ExperimentRecord {
+        ExperimentRecord::Complete {
+            audio_seconds: 1.0,
+            wall_seconds: 1.0,
+            rtfx: 1.0,
+            worker_elapsed_seconds: 1.0,
+            stage_timings: StageTimings {
+                inference_seconds: 0.5,
+                post_inference_seconds,
+                chunk_inference: None,
+            },
+            clustering: None,
+            peak_rss_bytes: None,
+            der: Box::new(PerFileDerResult {
+                file_id: file_id.to_owned(),
+                reference_rttm: PathBuf::from("/tmp/ref.rttm"),
+                reference_speaker_time: 10.0,
+                missed: 1.0,
+                false_alarm: 0.0,
+                confusion: 0.0,
+                der: Some(10.0),
+                missed_percent: Some(10.0),
+                false_alarm_percent: Some(0.0),
+                confusion_percent: Some(0.0),
+                reference_speaker_count: 2,
+                predicted_speaker_count: 2,
+            }),
+            hypothesis_rttm: String::new(),
+            fallback_events: Vec::new(),
+        }
+    }
+
+    fn stored_complete_record(
+        repetition: u32,
+        file_index: usize,
+        candidate_index: usize,
+        post_inference_seconds: f64,
+    ) -> StoredRecord {
+        let file_id = test_manifest().files[file_index].id.clone();
+        let candidate_id = if candidate_index == 0 {
+            "default"
+        } else {
+            "fast"
+        };
+        StoredRecord {
+            document: RecordDocument {
+                schema_version: RECORD_SCHEMA_VERSION,
+                repetition,
+                file_index,
+                file_id: file_id.clone(),
+                candidate_id: candidate_id.to_owned(),
+                outcome: complete_record_with_timing(&file_id, post_inference_seconds),
+            },
+            candidate_index,
+        }
+    }
 
     fn valid_spec() -> MacExperimentSpec {
         MacExperimentSpec {
@@ -2378,18 +2505,28 @@ mod tests {
     }
 
     fn test_store(temp: &Path) -> RunStore {
+        fs::create_dir_all(temp).unwrap();
+        let mut manifest = test_manifest();
+        for file in &mut manifest.files {
+            file.wav = temp.join(format!("{}.wav", file.id));
+            file.rttm = temp.join(format!("{}.rttm", file.id));
+            fs::write(&file.wav, format!("{} wav", file.id)).unwrap();
+            fs::write(&file.rttm, format!("{} rttm", file.id)).unwrap();
+        }
+        let experiment = ValidatedExperiment::from_spec(manifest.spec.clone()).unwrap();
         RunStore {
             run_dir: temp.to_owned(),
-            manifest: test_manifest(),
+            manifest,
+            experiment,
         }
     }
 
     fn test_identity(seed: u64) -> ManifestIdentity {
         ManifestIdentity {
             host: None,
-            model_sha256: "model".to_owned(),
-            worker_sha256: "worker".to_owned(),
-            dataset_sha256: "dataset".to_owned(),
+            model_sha256: Some(test_digest("model")),
+            worker_sha256: Some(test_digest("worker")),
+            dataset_sha256: Some(test_digest("dataset")),
             created_at: "2026-01-01T00:00:00Z".to_owned(),
             seed,
             cache_state: "test".to_owned(),
@@ -2420,26 +2557,43 @@ mod tests {
         let path = store.record_path(0, 0, "default");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path.with_file_name("default.json.tmp"), b"not complete").unwrap();
-        let experiment = ValidatedExperiment::from_spec(store.manifest.spec.clone()).unwrap();
-        let records = store.read_records(&experiment).unwrap();
+        let records = store.read_records().unwrap();
         assert!(records.is_empty());
+    }
+
+    #[test]
+    fn read_records_rejects_unknown_status() {
+        let temp = tempdir().unwrap();
+        let store = test_store(temp.path());
+        let path = store.record_path(0, 0, "default");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            br#"{"status":"unknown","schema_version":1,"repetition":0,"file_index":0,"file_id":"second","candidate_id":"default"}"#,
+        )
+        .unwrap();
+
+        let error = store.read_records().unwrap_err();
+        assert!(
+            error.to_string().contains("invalid record")
+                || error.to_string().contains("unknown variant")
+        );
     }
 
     #[test]
     fn projections_are_stable_in_manifest_order() {
         let temp = tempdir().unwrap();
         let store = test_store(temp.path());
-        let experiment = ValidatedExperiment::from_spec(store.manifest.spec.clone()).unwrap();
         store
-            .write_record(0, 1, "default", &json!({"value": "first"}))
+            .write_record(0, 1, "default", &stub_record("first"))
             .unwrap();
         store
-            .write_record(0, 0, "default", &json!({"value": "second"}))
+            .write_record(0, 0, "default", &stub_record("second"))
             .unwrap();
-        store.rebuild_projections(&experiment).unwrap();
+        store.rebuild_projections().unwrap();
         let first = fs::read(temp.path().join("files.jsonl")).unwrap();
         let first_summary = fs::read(temp.path().join("summary.json")).unwrap();
-        store.rebuild_projections(&experiment).unwrap();
+        store.rebuild_projections().unwrap();
         let second = fs::read(temp.path().join("files.jsonl")).unwrap();
         let second_summary = fs::read(temp.path().join("summary.json")).unwrap();
         assert_eq!(first, second);
@@ -2457,17 +2611,16 @@ mod tests {
     fn executor_receives_only_missing_candidates() {
         let temp = tempdir().unwrap();
         let store = test_store(temp.path());
-        let experiment = ValidatedExperiment::from_spec(store.manifest.spec.clone()).unwrap();
         store
-            .write_record(0, 0, "default", &json!({"value": "existing"}))
+            .write_record(0, 0, "default", &stub_record("existing"))
             .unwrap();
         let mut calls = 0;
         store
-            .execute(experiment, |_repetition, file, candidates| {
+            .execute(|_repetition, file, candidates| {
                 calls += 1;
                 assert_eq!(file.id, "first");
                 assert_eq!(candidates, &["default".to_owned()]);
-                Ok(vec![("default".to_owned(), json!({"value": "new"}))])
+                Ok(vec![("default".to_owned(), stub_record("new"))])
             })
             .unwrap();
         assert_eq!(calls, 1);
@@ -2478,15 +2631,13 @@ mod tests {
     fn repetition_started_distinguishes_partial_runs() {
         let temp = tempdir().unwrap();
         let store = test_store(temp.path());
-        let experiment = ValidatedExperiment::from_spec(store.manifest.spec.clone()).unwrap();
-
-        assert!(!store.repetition_started(0, &experiment).unwrap());
+        assert!(!store.repetition_started(0).unwrap());
         store
-            .write_record(0, 0, "default", &json!({"value": "existing"}))
+            .write_record(0, 0, "default", &stub_record("existing"))
             .unwrap();
 
-        assert!(store.repetition_started(0, &experiment).unwrap());
-        assert!(!store.repetition_complete(0, &experiment).unwrap());
+        assert!(store.repetition_started(0).unwrap());
+        assert!(!store.repetition_complete(0).unwrap());
     }
 
     #[test]
@@ -2552,21 +2703,14 @@ mod tests {
     fn missing_process_record_keeps_speed_unavailable() {
         let manifest = test_manifest();
         let complete = |file_index| StoredRecord {
-            value: json!({
-                "status": "complete",
-                "wall_seconds": 1.0,
-                "stage_timings": { "post_inference_seconds": 0.25 },
-                "der": {
-                    "reference_speaker_time": 10.0,
-                    "missed": 1.0,
-                    "false_alarm": 0.0,
-                    "confusion": 0.0,
-                    "reference_speaker_count": 2,
-                    "predicted_speaker_count": 2
-                }
-            }),
-            repetition: 0,
-            file_index,
+            document: RecordDocument {
+                schema_version: RECORD_SCHEMA_VERSION,
+                repetition: 0,
+                file_index,
+                file_id: format!("file-{file_index}"),
+                candidate_id: "default".to_owned(),
+                outcome: complete_record("file"),
+            },
             candidate_index: 0,
         };
         let metrics = CandidateMetrics::from_records(
@@ -2579,31 +2723,6 @@ mod tests {
 
         assert!(metrics.repetition_wall_seconds.is_empty());
         assert_eq!(metrics.median_workload_seconds, None);
-    }
-
-    fn complete_record(
-        repetition: u32,
-        file_index: usize,
-        candidate_index: usize,
-        post_inference_seconds: f64,
-    ) -> StoredRecord {
-        StoredRecord {
-            value: json!({
-                "status": "complete",
-                "stage_timings": { "post_inference_seconds": post_inference_seconds },
-                "der": {
-                    "reference_speaker_time": 10.0,
-                    "missed": 1.0,
-                    "false_alarm": 0.0,
-                    "confusion": 0.0,
-                    "reference_speaker_count": 2,
-                    "predicted_speaker_count": 2
-                }
-            }),
-            repetition,
-            file_index,
-            candidate_index,
-        }
     }
 
     #[test]
@@ -2619,10 +2738,10 @@ mod tests {
             documented_der_outliers: Vec::new(),
         });
         let records = [
-            complete_record(0, 0, 0, 2.0),
-            complete_record(0, 1, 0, 2.0),
-            complete_record(0, 0, 1, 1.0),
-            complete_record(0, 1, 1, 1.0),
+            stored_complete_record(0, 0, 0, 2.0),
+            stored_complete_record(0, 1, 0, 2.0),
+            stored_complete_record(0, 0, 1, 1.0),
+            stored_complete_record(0, 1, 1, 1.0),
         ];
         let wall = BTreeMap::from([(0, 10.0)]);
         let baseline = CandidateMetrics::from_records(&manifest, &records, 0, &wall).unwrap();
@@ -2647,7 +2766,10 @@ mod tests {
     #[test]
     fn external_speed_uses_process_wall_when_clocks_differ() {
         let manifest = test_manifest();
-        let records = [complete_record(0, 0, 0, 1.0), complete_record(0, 1, 0, 1.0)];
+        let records = [
+            stored_complete_record(0, 0, 0, 1.0),
+            stored_complete_record(0, 1, 0, 1.0),
+        ];
         let baseline =
             CandidateMetrics::from_records(&manifest, &records, 0, &BTreeMap::from([(0, 10.0)]))
                 .unwrap();
@@ -2673,8 +2795,14 @@ mod tests {
     #[test]
     fn external_speed_stays_unavailable_when_process_walls_are_empty() {
         let manifest = test_manifest();
-        let baseline_records = [complete_record(0, 0, 0, 2.0), complete_record(0, 1, 0, 2.0)];
-        let candidate_records = [complete_record(0, 0, 0, 1.0), complete_record(0, 1, 0, 1.0)];
+        let baseline_records = [
+            stored_complete_record(0, 0, 0, 2.0),
+            stored_complete_record(0, 1, 0, 2.0),
+        ];
+        let candidate_records = [
+            stored_complete_record(0, 0, 0, 1.0),
+            stored_complete_record(0, 1, 0, 1.0),
+        ];
         let baseline =
             CandidateMetrics::from_records(&manifest, &baseline_records, 0, &BTreeMap::new())
                 .unwrap();
@@ -2702,15 +2830,14 @@ mod tests {
     fn missing_repetition_record_is_written_as_unmeasured() {
         let temp = tempdir().unwrap();
         let store = test_store(temp.path());
-        let experiment = ValidatedExperiment::from_spec(store.manifest.spec.clone()).unwrap();
         store
-            .write_record(0, 0, "default", &json!({"status": "complete"}))
+            .write_record(0, 0, "default", &complete_record("second"))
             .unwrap();
         store
-            .write_record(0, 1, "default", &json!({"status": "complete"}))
+            .write_record(0, 1, "default", &complete_record("first"))
             .unwrap();
 
-        assert!(store.repetition_complete(0, &experiment).unwrap());
+        assert!(store.repetition_complete(0).unwrap());
         store.ensure_unmeasured_repetition_record(0).unwrap();
 
         let record: Value = serde_json::from_reader(BufReader::new(
@@ -2752,15 +2879,15 @@ mod tests {
                 documented_der_outliers: Vec::new(),
             });
         store.manifest.files.truncate(1);
-        let experiment = ValidatedExperiment::from_spec(store.manifest.spec.clone()).unwrap();
+        store.experiment = ValidatedExperiment::from_spec(store.manifest.spec.clone()).unwrap();
         let mut calls = 0;
         store
-            .execute(experiment, |_repetition, _file, candidates| {
+            .execute(|_repetition, _file, candidates| {
                 calls += 1;
                 assert_eq!(candidates, &["default".to_owned(), "short-vbx".to_owned()]);
                 Ok(candidates
                     .iter()
-                    .map(|candidate| (candidate.clone(), json!({ "value": candidate })))
+                    .map(|candidate| (candidate.clone(), stub_record(candidate)))
                     .collect())
             })
             .unwrap();
@@ -2775,7 +2902,7 @@ mod tests {
         candidate.manifest.files = vec![source.manifest.files[1].clone()];
         candidate.manifest.spec.dataset.max_files = 1;
 
-        let (comparison, _experiment) = candidate.comparison_baseline_store(&source).unwrap();
+        let comparison = candidate.comparison_baseline_store(&source).unwrap();
 
         assert_eq!(comparison.manifest.files.len(), 1);
         assert_eq!(comparison.manifest.files[0].id, "first");
@@ -2784,7 +2911,7 @@ mod tests {
     }
 
     #[test]
-    fn comparison_baseline_preserves_source_asset_digests() {
+    fn comparison_baseline_uses_remapped_dataset_digest() {
         let temp = tempdir().unwrap();
         let mut source = test_store(&temp.path().join("source"));
         source.manifest.identity = Some(test_identity(7));
@@ -2795,12 +2922,29 @@ mod tests {
         candidate.manifest.spec.performance.seed = 99;
         candidate.manifest.identity = Some(test_identity(99));
 
-        let (comparison, _experiment) = candidate.comparison_baseline_store(&source).unwrap();
+        let comparison = candidate.comparison_baseline_store(&source).unwrap();
         let identity = comparison.manifest.identity.as_ref().unwrap();
 
-        assert_eq!(identity.model_sha256, "model");
-        assert_eq!(identity.dataset_sha256, "dataset");
-        assert_eq!(identity.worker_sha256, "worker");
+        assert_eq!(identity.model_sha256, Some(test_digest("model")));
+        assert_eq!(
+            identity.dataset_sha256,
+            Some(
+                Sha256Digest::parse(
+                    &dataset_digest(&comparison.manifest.files, &project_root()).unwrap(),
+                )
+                .unwrap(),
+            )
+        );
+        assert_ne!(
+            identity.dataset_sha256,
+            Some(
+                Sha256Digest::parse(
+                    &dataset_digest(&source.manifest.files, &project_root()).unwrap(),
+                )
+                .unwrap(),
+            )
+        );
+        assert_eq!(identity.worker_sha256, Some(test_digest("worker")));
         assert_eq!(identity.seed, 99);
         assert_eq!(identity.run_order.repetitions, [0, 1, 2, 3]);
         assert_eq!(identity.run_order.files, ["first"]);
@@ -2819,14 +2963,79 @@ mod tests {
         candidate.manifest.spec.dataset.max_files = 1;
         candidate.manifest.identity = Some(test_identity(99));
 
-        let (first, _) = candidate.comparison_baseline_store(&source).unwrap();
+        let first = candidate.comparison_baseline_store(&source).unwrap();
         let created_at = first.manifest.identity.as_ref().unwrap().created_at.clone();
-        let (second, _) = candidate.comparison_baseline_store(&source).unwrap();
+        let second = candidate.comparison_baseline_store(&source).unwrap();
 
         assert_eq!(
             second.manifest.identity.as_ref().unwrap().created_at,
             created_at
         );
+    }
+
+    #[test]
+    fn comparison_baseline_migrates_legacy_full_dataset_digest() {
+        let temp = tempdir().unwrap();
+        let mut source = test_store(&temp.path().join("source"));
+        source.manifest.identity = Some(test_identity(7));
+        let mut candidate = test_store(&temp.path().join("candidate"));
+        candidate.manifest.files = vec![source.manifest.files[1].clone()];
+        candidate.manifest.spec.dataset.max_files = 1;
+        candidate.manifest.identity = Some(test_identity(99));
+
+        let comparison = candidate.comparison_baseline_store(&source).unwrap();
+        let mut legacy = comparison.manifest;
+        legacy.identity.as_mut().unwrap().dataset_sha256 = source
+            .manifest
+            .identity
+            .as_ref()
+            .unwrap()
+            .dataset_sha256
+            .clone();
+        replace_manifest(&comparison.run_dir, &legacy).unwrap();
+
+        let migrated = candidate.comparison_baseline_store(&source).unwrap();
+        let expected = Sha256Digest::parse(
+            &dataset_digest(&migrated.manifest.files, &project_root()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            migrated
+                .manifest
+                .identity
+                .as_ref()
+                .unwrap()
+                .dataset_sha256
+                .as_ref(),
+            Some(&expected)
+        );
+        let persisted: RunManifest =
+            serde_json::from_reader(File::open(migrated.run_dir.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            persisted.identity.as_ref().unwrap().dataset_sha256.as_ref(),
+            Some(&expected)
+        );
+    }
+
+    #[test]
+    fn comparison_baseline_rejects_changed_execution_specification() {
+        let temp = tempdir().unwrap();
+        let mut source = test_store(&temp.path().join("source"));
+        source.manifest.identity = Some(test_identity(7));
+        let mut candidate = test_store(&temp.path().join("candidate"));
+        candidate.manifest.files = vec![source.manifest.files[1].clone()];
+        candidate.manifest.spec.dataset.max_files = 1;
+        candidate.manifest.identity = Some(test_identity(99));
+
+        candidate.comparison_baseline_store(&source).unwrap();
+        candidate.manifest.spec.performance.warmups += 1;
+        let error = candidate
+            .comparison_baseline_store(&source)
+            .map(|_| ())
+            .unwrap_err();
+
+        assert!(error.to_string().contains("experiment specification"));
     }
 
     #[test]
@@ -2837,7 +3046,7 @@ mod tests {
         candidate.manifest.files = vec![source.manifest.files[1].clone()];
         candidate.manifest.spec.dataset.max_files = 1;
 
-        let comparison = candidate.comparison_baseline_store(&source).unwrap().0;
+        let comparison = candidate.comparison_baseline_store(&source).unwrap();
         let mut stored = comparison.manifest;
         stored.schema_version = MANIFEST_SCHEMA_VERSION + 1;
         let manifest_path = comparison.run_dir.join("manifest.json");
@@ -2879,8 +3088,12 @@ mod tests {
         }];
         let root = project_root();
         let mut identity = test_identity(42);
-        identity.model_sha256 = digest_paths(&root, std::slice::from_ref(&models_dir)).unwrap();
-        identity.dataset_sha256 = dataset_digest(&files, &root).unwrap();
+        identity.model_sha256 = Some(
+            Sha256Digest::parse(&digest_paths(&root, std::slice::from_ref(&models_dir)).unwrap())
+                .unwrap(),
+        );
+        identity.dataset_sha256 =
+            Some(Sha256Digest::parse(&dataset_digest(&files, &root).unwrap()).unwrap());
         let mut source_manifest = RunManifest {
             schema_version: MANIFEST_SCHEMA_VERSION,
             spec: source_spec,
@@ -2900,6 +3113,7 @@ mod tests {
         candidate_spec.experiment_id = "candidate-run".to_owned();
         candidate_spec.performance.repetitions = 4;
         candidate_spec.baseline_run = Some(source_dir);
+        let experiment = ValidatedExperiment::from_spec(candidate_spec.clone()).unwrap();
         let candidate = RunStore {
             run_dir: temp.path().join("candidate-run"),
             manifest: RunManifest {
@@ -2908,6 +3122,7 @@ mod tests {
                 files,
                 identity: None,
             },
+            experiment,
         };
 
         let error = load_external_baseline(&candidate).map(|_| ()).unwrap_err();
@@ -2929,7 +3144,7 @@ mod tests {
         candidate.manifest.spec.dataset.max_files = 1;
         fs::create_dir_all(candidate.run_dir.join("comparison-baseline")).unwrap();
 
-        let (comparison, _) = candidate.comparison_baseline_store(&source).unwrap();
+        let comparison = candidate.comparison_baseline_store(&source).unwrap();
 
         assert!(comparison.run_dir.join("manifest.json").is_file());
         assert_eq!(comparison.manifest.files[0].id, "first");
@@ -2984,8 +3199,9 @@ mod tests {
         let mut source = test_store(&temp.path().join("source"));
         source.manifest.identity = Some(test_identity(7));
         let mut other = test_store(&temp.path().join("other"));
+        other.manifest.files = source.manifest.files.clone();
         let mut other_identity = test_identity(7);
-        other_identity.model_sha256 = "other-model".to_owned();
+        other_identity.model_sha256 = Some(test_digest("other-model"));
         other.manifest.identity = Some(other_identity);
         let mut candidate = test_store(&temp.path().join("candidate"));
         candidate.manifest.files = vec![source.manifest.files[1].clone()];
@@ -3031,9 +3247,13 @@ mod tests {
                 files: files.clone(),
                 identity: Some(ManifestIdentity {
                     host: None,
-                    model_sha256: model_digest(&experiment, &root).unwrap(),
-                    worker_sha256: "worker".to_owned(),
-                    dataset_sha256: dataset_digest(&files, &root).unwrap(),
+                    model_sha256: Some(
+                        Sha256Digest::parse(&model_digest(&experiment, &root).unwrap()).unwrap(),
+                    ),
+                    worker_sha256: Some(test_digest("worker")),
+                    dataset_sha256: Some(
+                        Sha256Digest::parse(&dataset_digest(&files, &root).unwrap()).unwrap(),
+                    ),
                     created_at: "2026-01-01T00:00:00Z".to_owned(),
                     seed: 42,
                     cache_state: "test".to_owned(),
@@ -3068,5 +3288,92 @@ mod tests {
     fn post_inference_comparison_has_no_inference_noise_margin() {
         assert_eq!(comparison_noise_margin(None), 0.0);
         assert_eq!(comparison_noise_margin(Some(0.23)), 0.23);
+    }
+
+    fn empty_metrics(successful_records: usize, failed_records: usize) -> CandidateMetrics {
+        CandidateMetrics {
+            observations: Vec::new(),
+            successful_records,
+            failed_records,
+            duration_weighted_der: None,
+            missed_percent: None,
+            false_alarm_percent: None,
+            confusion_percent: None,
+            usable_training_embeddings: None,
+            repetition_wall_seconds: BTreeMap::new(),
+            repetition_post_inference_seconds: BTreeMap::new(),
+            median_workload_seconds: None,
+            workload_mad_seconds: None,
+            median_post_inference_seconds: None,
+            post_inference_mad_seconds: None,
+            speaker_counts: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn pending_and_failed_candidates_are_not_labeled_baseline() {
+        let pending = empty_metrics(0, 0);
+        let failed = empty_metrics(0, 2);
+        assert_eq!(
+            comparison_decision(0, false, None, &pending),
+            ComparisonDecision::Baseline
+        );
+        assert_eq!(
+            comparison_decision(1, false, None, &pending),
+            ComparisonDecision::Pending
+        );
+        assert_eq!(
+            comparison_decision(1, false, None, &failed),
+            ComparisonDecision::Failed
+        );
+        assert_eq!(
+            comparison_decision(0, true, None, &pending),
+            ComparisonDecision::Pending
+        );
+    }
+
+    #[test]
+    fn comparison_manifest_records_current_execution_identity() {
+        let source_temp = tempfile::tempdir().unwrap();
+        let candidate_temp = tempfile::tempdir().unwrap();
+        let mut source = test_store(source_temp.path());
+        let mut candidate = test_store(candidate_temp.path());
+        source.manifest.identity = Some(test_identity(1));
+        let mut candidate_identity = test_identity(99);
+        candidate_identity.worker_sha256 = Some(test_digest("candidate-worker"));
+        candidate.manifest.identity = Some(candidate_identity);
+        let files = source.manifest.files.clone();
+        let manifest = build_comparison_manifest(&source, &candidate, files).unwrap();
+        let identity = manifest.identity.expect("comparison identity");
+        assert_eq!(identity.model_sha256, Some(test_digest("model")));
+        assert_eq!(
+            identity.dataset_sha256,
+            Some(
+                Sha256Digest::parse(&dataset_digest(&manifest.files, &project_root()).unwrap())
+                    .unwrap(),
+            )
+        );
+        assert_eq!(
+            identity.worker_sha256,
+            Some(test_digest("candidate-worker"))
+        );
+        assert_eq!(identity.seed, 99);
+    }
+
+    #[test]
+    fn nested_store_open_validates_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let nested = temp.path().join("comparison-baseline");
+        fs::create_dir(&nested).unwrap();
+        fs::write(nested.join("manifest.json"), b"{\"schema_version\":99}").unwrap();
+        let error = match RunStore::open_nested(&nested) {
+            Ok(_) => panic!("expected nested store validation to fail"),
+            Err(error) => error,
+        };
+        let message = error.to_string();
+        assert!(
+            message.contains("schema_version") || message.contains("invalid run manifest"),
+            "unexpected nested-store error: {message}"
+        );
     }
 }

@@ -13,7 +13,7 @@ mod parallel;
 mod run;
 mod tensor;
 
-pub(crate) use tensor::{WindowSpec, segmentation_window_count};
+pub(crate) use tensor::{InvalidWindowGeometry, WindowSpec, segmentation_window_count};
 
 /// Errors that can occur during segmentation inference
 #[derive(Debug, thiserror::Error)]
@@ -71,8 +71,7 @@ pub struct SegmentationModel {
     cached_batch_input_shape: CachedInputShape,
     input_buffer: ndarray::Array3<f32>,
     primary_batch_input_buffer: ndarray::Array3<f32>,
-    window_samples: usize,
-    step_samples: usize,
+    window_spec: WindowSpec,
     sample_rate: usize,
 }
 
@@ -99,9 +98,12 @@ impl SegmentationModel {
 
         let model_path = model_path.as_ref();
         let sample_rate = 16000;
-        let window_duration = 10.0;
-        let window_samples = (window_duration * sample_rate as f32) as usize;
-        let step_samples = (step_duration * sample_rate as f32) as usize;
+        let window_spec = WindowSpec::from_seconds(10.0, step_duration, sample_rate).map_err(
+            |error: InvalidWindowGeometry| ModelLoadError::InvalidConfiguration {
+                message: error.message,
+            },
+        )?;
+        let window_samples = window_spec.window_samples();
 
         #[cfg(feature = "coreml")]
         if matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
@@ -210,8 +212,7 @@ impl SegmentationModel {
                 1,
                 window_samples,
             )),
-            window_samples,
-            step_samples,
+            window_spec,
             sample_rate,
         })
     }
@@ -244,22 +245,21 @@ impl SegmentationModel {
 
     /// Number of audio samples per sliding window
     pub fn window_samples(&self) -> usize {
-        self.window_samples
+        self.window_spec.window_samples()
     }
 
     /// Number of audio samples the window advances each step
     pub fn step_samples(&self) -> usize {
-        self.step_samples
+        self.window_spec.step_samples()
     }
 
-    pub(super) fn window_spec(&self) -> WindowSpec {
-        WindowSpec::new(self.window_samples, self.step_samples)
-            .expect("window and step samples must be non-zero")
+    pub(crate) fn window_spec(&self) -> WindowSpec {
+        self.window_spec
     }
 
     /// Step size in seconds
     pub fn step_seconds(&self) -> f64 {
-        self.step_samples as f64 / self.sample_rate as f64
+        self.window_spec.step_samples() as f64 / self.sample_rate as f64
     }
 
     /// Execution mode this model was loaded with
@@ -273,4 +273,30 @@ fn batched_model_path(model_path: &Path, batch_size: usize) -> Option<PathBuf> {
     let file_name = path.file_name()?.to_str()?;
     let stem = file_name.strip_suffix(".onnx")?;
     Some(path.with_file_name(format!("{stem}-b{batch_size}.onnx")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SegmentationModel;
+    use crate::inference::{ExecutionMode, ModelLoadError};
+
+    #[test]
+    fn with_mode_rejects_invalid_step_before_loading() {
+        for step in [0.0, -0.5, f32::NAN, f32::INFINITY] {
+            let error =
+                match SegmentationModel::with_mode("/nonexistent.onnx", step, ExecutionMode::Cpu) {
+                    Ok(_) => panic!("expected invalid configuration for step={step}"),
+                    Err(error) => error,
+                };
+            match error {
+                ModelLoadError::InvalidConfiguration { message } => {
+                    assert!(
+                        message.contains("step duration"),
+                        "unexpected message for step={step}: {message}"
+                    );
+                }
+                other => panic!("expected invalid configuration for step={step}, got {other}"),
+            }
+        }
+    }
 }

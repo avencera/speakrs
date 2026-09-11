@@ -4,7 +4,9 @@
 
 - Add `QueueConfig` so queue channel capacity is configurable at construction (default 64; capacity 0 is rejected)
 - Add non-blocking `QueueSender::try_push`, which returns typed `QueueError::Full` with the rejected request when the queue is at capacity
-- Make `QueueSender::push` a non-blocking alias of `try_push` so admission uses one Full-aware submission API
+- Remove `QueueSender::push`; callers submit work with `try_push`
+- Remove `QueueError::Terminal`; a finished worker reports `Closed` or `WorkerPanicked`
+- Replace split `PipelineConfig` clustering and activity fields with checked `ClusteringConfig` and `ActivityCleanup`
 
 ## [0.5.0] - 2026-07-07
 

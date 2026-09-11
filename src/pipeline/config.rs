@@ -3,18 +3,105 @@ use crate::inference::CoreMlComputeUnits;
 use crate::inference::ExecutionMode;
 #[cfg(feature = "_metrics")]
 use crate::pipeline::SphereVbxPfConfig;
-use crate::pipeline::{AhcConfig, BinarizeConfig, VbxConfig};
+use crate::pipeline::{ActivityCleanup, AhcConfig, VbxConfig};
 
 /// Speaker clustering model and its valid configuration
-#[cfg(feature = "_metrics")]
-#[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub enum ClusteringBackend {
     /// PLDA-transformed Gaussian variational Bayes clustering
     GaussianVbx(VbxConfig),
     /// Parameter-free spherical variational Bayes clustering
+    #[cfg(feature = "_metrics")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
     SphereVbxPf(SphereVbxPfConfig),
+}
+
+/// Invalid clustering configuration
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+pub enum ClusteringConfigError {
+    /// Speaker-keep threshold was negative or non-finite
+    #[error("speaker keep threshold must be finite and non-negative, got {0}")]
+    InvalidKeepThreshold(f64),
+}
+
+/// Checked clustering settings owned by the clustering domain
+///
+/// Replaces the former split `PipelineConfig` fields `vbx`, `experimental_clustering`,
+/// `ahc`, and `speaker_keep_threshold`. Negative VBx smoothing maps to
+/// [`crate::pipeline::ResponsibilityInitialization::Hard`], zero to
+/// [`crate::pipeline::ResponsibilityInitialization::Uniform`], and a positive
+/// finite value to [`crate::pipeline::ResponsibilityInitialization::Smoothed`].
+#[derive(Debug, Clone, Copy)]
+pub struct ClusteringConfig {
+    ahc: AhcConfig,
+    speaker_keep_threshold: f64,
+    backend: ClusteringBackend,
+}
+
+impl Default for ClusteringConfig {
+    fn default() -> Self {
+        Self {
+            ahc: AhcConfig::default(),
+            speaker_keep_threshold: 1e-7,
+            backend: ClusteringBackend::GaussianVbx(VbxConfig::default()),
+        }
+    }
+}
+
+impl ClusteringConfig {
+    /// Create a checked clustering configuration
+    pub fn new(
+        ahc: AhcConfig,
+        speaker_keep_threshold: f64,
+        backend: ClusteringBackend,
+    ) -> Result<Self, ClusteringConfigError> {
+        if !(speaker_keep_threshold.is_finite() && speaker_keep_threshold >= 0.0) {
+            return Err(ClusteringConfigError::InvalidKeepThreshold(
+                speaker_keep_threshold,
+            ));
+        }
+        Ok(Self {
+            ahc,
+            speaker_keep_threshold,
+            backend,
+        })
+    }
+
+    /// Agglomerative hierarchical clustering settings
+    pub const fn ahc(self) -> AhcConfig {
+        self.ahc
+    }
+
+    /// Minimum speaker activity weight used to keep a speaker
+    pub const fn speaker_keep_threshold(self) -> f64 {
+        self.speaker_keep_threshold
+    }
+
+    /// Clustering backend that will execute
+    pub const fn backend(self) -> ClusteringBackend {
+        self.backend
+    }
+
+    /// Replace the clustering backend
+    pub const fn with_backend(mut self, backend: ClusteringBackend) -> Self {
+        self.backend = backend;
+        self
+    }
+
+    /// Replace the AHC settings
+    pub const fn with_ahc(mut self, ahc: AhcConfig) -> Self {
+        self.ahc = ahc;
+        self
+    }
+
+    /// Replace the speaker-keep threshold
+    pub fn with_speaker_keep_threshold(
+        self,
+        speaker_keep_threshold: f64,
+    ) -> Result<Self, ClusteringConfigError> {
+        Self::new(self.ahc, speaker_keep_threshold, self.backend)
+    }
 }
 
 /// How to map cluster assignments back to per-frame speaker activations
@@ -31,27 +118,27 @@ pub enum ReconstructMethod {
 }
 
 /// Tunable parameters for the diarization pipeline
+///
+/// # Configuration mapping
+///
+/// - [`Self::activity`] replaces `BinarizeConfig`
+/// - [`Self::clustering`] replaces `vbx`, `experimental_clustering`, `ahc`, and
+///   `speaker_keep_threshold`
+/// - Negative VBx smoothing maps to [`crate::pipeline::ResponsibilityInitialization::Hard`],
+///   zero to [`crate::pipeline::ResponsibilityInitialization::Uniform`], and a
+///   positive finite value to [`crate::pipeline::ResponsibilityInitialization::Smoothed`]
 #[derive(Debug, Clone)]
 pub struct PipelineConfig {
-    /// Hysteresis binarization and min-duration filtering
-    pub binarize: BinarizeConfig,
-    /// Agglomerative hierarchical clustering settings
-    pub ahc: AhcConfig,
-    /// Variational Bayes HMM clustering settings
-    pub vbx: VbxConfig,
-    /// Optional clustering backend used by the internal experiment harness
-    #[cfg(feature = "_metrics")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
-    #[doc(hidden)]
-    pub experimental_clustering: Option<ClusteringBackend>,
+    /// Frame-count activity cleanup applied after reconstruction
+    pub activity: ActivityCleanup,
+    /// Clustering backend, AHC, and speaker-keep settings
+    pub clustering: ClusteringConfig,
     /// Minimum single-speaker activity used to select clustering embeddings in experiments
     #[cfg(feature = "_metrics")]
     #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
     pub clean_frame_duration: CleanFrameDuration,
     /// Maximum gap in seconds between segments to merge into one
     pub merge_gap: f64,
-    /// Minimum speaker activity weight to keep a speaker in output
-    pub speaker_keep_threshold: f64,
     /// Strategy for mapping clusters back to frame activations
     pub reconstruct_method: ReconstructMethod,
 }
@@ -59,15 +146,11 @@ pub struct PipelineConfig {
 impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
-            binarize: BinarizeConfig::default(),
-            ahc: AhcConfig::default(),
-            vbx: VbxConfig::default(),
-            #[cfg(feature = "_metrics")]
-            experimental_clustering: None,
+            activity: ActivityCleanup::default(),
+            clustering: ClusteringConfig::default(),
             #[cfg(feature = "_metrics")]
             clean_frame_duration: CleanFrameDuration::default(),
             merge_gap: 0.0,
-            speaker_keep_threshold: 1e-7,
             reconstruct_method: ReconstructMethod::Smoothed { epsilon: 0.1 },
         }
     }
@@ -136,45 +219,29 @@ impl PipelineConfig {
     pub fn for_mode(mode: ExecutionMode) -> Self {
         match mode {
             ExecutionMode::CoreMlFast | ExecutionMode::CudaFast => Self {
-                binarize: BinarizeConfig {
-                    min_duration_on: 3,
-                    min_duration_off: 3,
-                    ..BinarizeConfig::default()
-                },
-                // fast modes use 3 VBx iterations to avoid posterior overfitting
-                // on 2 second step embeddings
-                vbx: VbxConfig {
-                    max_iters: 3,
-                    ..VbxConfig::default()
-                },
+                activity: ActivityCleanup::new(3, 3, 0, 0),
+                clustering: ClusteringConfig::default().with_backend(
+                    ClusteringBackend::GaussianVbx(
+                        VbxConfig::default()
+                            .with_max_iters(3)
+                            .expect("fast-mode iteration count is valid"),
+                    ),
+                ),
                 ..Self::default()
             },
             _ => Self::default(),
         }
     }
 
-    /// Select a typed clustering backend for metrics experiments
-    #[cfg(feature = "_metrics")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
-    pub fn with_experimental_clustering(mut self, backend: ClusteringBackend) -> Self {
-        match backend {
-            ClusteringBackend::GaussianVbx(vbx) => {
-                self.vbx = vbx;
-                self.experimental_clustering = None;
-            }
-            ClusteringBackend::SphereVbxPf(_) => {
-                self.experimental_clustering = Some(backend);
-            }
-        }
+    /// Select the clustering backend used by reconstruction
+    pub fn with_clustering(mut self, backend: ClusteringBackend) -> Self {
+        self.clustering = self.clustering.with_backend(backend);
         self
     }
 
-    /// Return the effective clustering backend for metrics diagnostics
-    #[cfg(feature = "_metrics")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
-    pub fn clustering_backend(&self) -> ClusteringBackend {
-        self.experimental_clustering
-            .unwrap_or(ClusteringBackend::GaussianVbx(self.vbx))
+    /// Return the clustering backend that will execute
+    pub const fn clustering_backend(&self) -> ClusteringBackend {
+        self.clustering.backend()
     }
 }
 
@@ -297,15 +364,69 @@ impl CoreMlChunkLayout {
     }
 }
 
+/// Layout and shape ladder that can execute together
+#[cfg(feature = "_metrics")]
+#[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExperimentInferenceLayout {
+    OneSecondPhased { shape_ladder: CoreMlShapeLadder },
+    PerWindow,
+    FastS25,
+}
+
+#[cfg(feature = "_metrics")]
+impl ExperimentInferenceLayout {
+    const fn from_full_layout(layout: CoreMlChunkLayout) -> Self {
+        match layout {
+            CoreMlChunkLayout::OneSecondPhased => Self::OneSecondPhased {
+                shape_ladder: CoreMlShapeLadder::Full,
+            },
+            CoreMlChunkLayout::PerWindow => Self::PerWindow,
+            CoreMlChunkLayout::FastS25 => Self::FastS25,
+        }
+    }
+
+    fn try_from_parts(
+        layout: CoreMlChunkLayout,
+        shape_ladder: CoreMlShapeLadder,
+    ) -> Result<Self, ExperimentInferenceConfigError> {
+        match (layout, shape_ladder) {
+            (CoreMlChunkLayout::OneSecondPhased, shape_ladder) => {
+                Ok(Self::OneSecondPhased { shape_ladder })
+            }
+            (CoreMlChunkLayout::PerWindow, CoreMlShapeLadder::Full) => Ok(Self::PerWindow),
+            (CoreMlChunkLayout::FastS25, CoreMlShapeLadder::Full) => Ok(Self::FastS25),
+            (layout, shape_ladder) => {
+                Err(ExperimentInferenceConfigError::IncompatibleShapeLadder {
+                    layout,
+                    shape_ladder,
+                })
+            }
+        }
+    }
+
+    const fn chunk_layout(self) -> CoreMlChunkLayout {
+        match self {
+            Self::OneSecondPhased { .. } => CoreMlChunkLayout::OneSecondPhased,
+            Self::PerWindow => CoreMlChunkLayout::PerWindow,
+            Self::FastS25 => CoreMlChunkLayout::FastS25,
+        }
+    }
+
+    const fn shape_ladder(self) -> CoreMlShapeLadder {
+        match self {
+            Self::OneSecondPhased { shape_ladder } => shape_ladder,
+            Self::PerWindow | Self::FastS25 => CoreMlShapeLadder::Full,
+        }
+    }
+}
+
 /// Typed inference configuration for metrics experiments
 #[cfg(feature = "_metrics")]
 #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExperimentInferenceConfig {
-    /// CoreML chunk or per-window layout and its fixed step
-    pub coreml_chunk_layout: CoreMlChunkLayout,
-    /// Fixed-shape chunk-model ladder
-    pub shape_ladder: CoreMlShapeLadder,
+    layout: ExperimentInferenceLayout,
     /// Parallel segmentation worker policy
     pub segmentation_workers: CoreMlSegmentationWorkers,
     /// Parallel filterbank preparation worker policy
@@ -321,8 +442,7 @@ impl ExperimentInferenceConfig {
     /// Create an experiment configuration for a fixed CoreML layout
     pub const fn new(coreml_chunk_layout: CoreMlChunkLayout) -> Self {
         Self {
-            coreml_chunk_layout,
-            shape_ladder: CoreMlShapeLadder::Full,
+            layout: ExperimentInferenceLayout::from_full_layout(coreml_chunk_layout),
             segmentation_workers: CoreMlSegmentationWorkers::Automatic,
             fbank_preparation_workers: CoreMlFbankPreparationWorkers::Two,
             fbank_normalization_scope: CoreMlFbankNormalizationScope::Chunk,
@@ -331,20 +451,29 @@ impl ExperimentInferenceConfig {
     }
 
     /// Create an experiment configuration with an explicit execution policy
-    pub const fn with_execution_policy(
+    pub fn with_execution_policy(
         coreml_chunk_layout: CoreMlChunkLayout,
         shape_ladder: CoreMlShapeLadder,
         segmentation_workers: CoreMlSegmentationWorkers,
         fbank_preparation_workers: CoreMlFbankPreparationWorkers,
-    ) -> Self {
-        Self {
-            coreml_chunk_layout,
-            shape_ladder,
+    ) -> Result<Self, ExperimentInferenceConfigError> {
+        Ok(Self {
+            layout: ExperimentInferenceLayout::try_from_parts(coreml_chunk_layout, shape_ladder)?,
             segmentation_workers,
             fbank_preparation_workers,
             fbank_normalization_scope: CoreMlFbankNormalizationScope::Chunk,
             embedding_compute_units: CoreMlComputeUnits::All,
-        }
+        })
+    }
+
+    /// Return the CoreML chunk or per-window layout
+    pub const fn coreml_chunk_layout(self) -> CoreMlChunkLayout {
+        self.layout.chunk_layout()
+    }
+
+    /// Return the fixed-shape chunk-model ladder
+    pub const fn shape_ladder(self) -> CoreMlShapeLadder {
+        self.layout.shape_ladder()
     }
 
     /// Select the filterbank normalization scope for a controlled comparison
@@ -364,7 +493,7 @@ impl ExperimentInferenceConfig {
 
     /// Return the fixed segmentation step required by this layout
     pub const fn step_seconds(self) -> f64 {
-        self.coreml_chunk_layout.step_seconds()
+        self.coreml_chunk_layout().step_seconds()
     }
 
     /// Return the fixed segmentation step required by this layout
@@ -374,20 +503,9 @@ impl ExperimentInferenceConfig {
 
     /// Validate this configuration for an execution mode
     pub const fn validate(self, mode: ExecutionMode) -> Result<(), ExperimentInferenceConfigError> {
-        if !self.coreml_chunk_layout.supports_mode(mode) {
-            return Err(ExperimentInferenceConfigError::IncompatibleMode {
-                mode,
-                layout: self.coreml_chunk_layout,
-            });
-        }
-
-        if matches!(self.shape_ladder, CoreMlShapeLadder::Reduced)
-            && !matches!(self.coreml_chunk_layout, CoreMlChunkLayout::OneSecondPhased)
-        {
-            return Err(ExperimentInferenceConfigError::IncompatibleShapeLadder {
-                layout: self.coreml_chunk_layout,
-                shape_ladder: self.shape_ladder,
-            });
+        let layout = self.coreml_chunk_layout();
+        if !layout.supports_mode(mode) {
+            return Err(ExperimentInferenceConfigError::IncompatibleMode { mode, layout });
         }
 
         Ok(())
@@ -404,7 +522,7 @@ impl ExperimentInferenceConfig {
         let expected = self.step_seconds();
         if !step_seconds.is_finite() || (step_seconds - expected).abs() > 1e-9 {
             return Err(ExperimentInferenceConfigError::IncompatibleStep {
-                layout: self.coreml_chunk_layout,
+                layout: self.coreml_chunk_layout(),
                 expected,
                 actual: step_seconds,
             });
@@ -621,12 +739,35 @@ mod clean_frame_duration_tests {
     use super::*;
 
     #[test]
-    fn pipeline_defaults_keep_gaussian_vbx_and_fixed_mode_steps() {
-        let standard_vbx = PipelineConfig::default().vbx;
-        let fast_vbx = PipelineConfig::for_mode(ExecutionMode::CoreMlFast).vbx;
+    fn clustering_config_rejects_invalid_keep_threshold() {
+        for threshold in [f64::NAN, f64::INFINITY, -1.0] {
+            assert!(
+                ClusteringConfig::new(
+                    AhcConfig::default(),
+                    threshold,
+                    ClusteringBackend::GaussianVbx(VbxConfig::default())
+                )
+                .is_err()
+            );
+        }
+        assert_eq!(ClusteringConfig::default().speaker_keep_threshold(), 1e-7);
+    }
 
-        assert_eq!(standard_vbx.max_iters, 20);
-        assert_eq!(fast_vbx.max_iters, 3);
+    #[test]
+    fn pipeline_defaults_keep_gaussian_vbx_and_fixed_mode_steps() {
+        let standard = match PipelineConfig::default().clustering_backend() {
+            ClusteringBackend::GaussianVbx(vbx) => vbx,
+            #[cfg(feature = "_metrics")]
+            _ => panic!("default clustering must be gaussian"),
+        };
+        let fast = match PipelineConfig::for_mode(ExecutionMode::CoreMlFast).clustering_backend() {
+            ClusteringBackend::GaussianVbx(vbx) => vbx,
+            #[cfg(feature = "_metrics")]
+            _ => panic!("fast clustering must be gaussian"),
+        };
+
+        assert_eq!(standard.max_iters(), 20);
+        assert_eq!(fast.max_iters(), 3);
         assert_eq!(segmentation_step_seconds(ExecutionMode::CoreMl), 1.0);
         assert_eq!(segmentation_step_seconds(ExecutionMode::CoreMlFast), 2.0);
     }
@@ -676,7 +817,7 @@ mod tests {
     fn experiment_execution_policy_preserves_production_defaults() {
         let config = ExperimentInferenceConfig::new(CoreMlChunkLayout::OneSecondPhased);
 
-        assert_eq!(config.shape_ladder, CoreMlShapeLadder::Full);
+        assert_eq!(config.shape_ladder(), CoreMlShapeLadder::Full);
         assert_eq!(
             config.segmentation_workers,
             CoreMlSegmentationWorkers::Automatic
@@ -740,7 +881,7 @@ mod tests {
         );
 
         assert!(matches!(
-            config.validate(ExecutionMode::CoreMlFast),
+            config,
             Err(ExperimentInferenceConfigError::IncompatibleShapeLadder { .. })
         ));
     }

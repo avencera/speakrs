@@ -272,7 +272,7 @@ impl SegmentationModel {
                 tx,
                 tasks,
                 num_workers,
-                window_samples: self.window_samples,
+                window_samples: self.window_samples(),
                 profile: &profile,
             }
             .run()?;
@@ -282,7 +282,7 @@ impl SegmentationModel {
                 tx,
                 model: shared_model,
                 num_workers: num_workers.max(1),
-                window_samples: self.window_samples,
+                window_samples: self.window_samples(),
                 profile: &profile,
             }
             .run()?;

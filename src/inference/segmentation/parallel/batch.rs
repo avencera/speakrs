@@ -137,8 +137,9 @@ impl<'ctx, 'a> BatchWorker<'ctx, 'a> {
         let (cached_batch, batch_buf) =
             scratch.buffer_for(task.batch_capacity, self.window_samples);
         self.fill_input(task, batch_buf)?;
-        let (data, frames, classes) = self.predict(task, cached_batch, batch_buf.as_slice())?;
-        self.decode_results(task, &data, frames, classes)
+        let (data, batch, frames, classes) =
+            self.predict(task, cached_batch, batch_buf.as_slice())?;
+        self.decode_results(task, &data, batch, frames, classes)
     }
 
     fn fill_input(
@@ -170,27 +171,46 @@ impl<'ctx, 'a> BatchWorker<'ctx, 'a> {
         task: &BatchTask<'a>,
         cached_batch: &CachedInputShape,
         batch_buf: &[f32],
-    ) -> Result<(Vec<f32>, usize, usize), SegmentationError> {
+    ) -> Result<(Vec<f32>, usize, usize, usize), SegmentationError> {
         let actual_batch = task.end - task.start;
         let batch_start = std::time::Instant::now();
-        let (data, out_shape) = task
+        let tensor = task
             .model
             .predict_cached(&[(cached_batch, batch_buf)])
             .map_err(|error| SegmentationError::Ort(ort::Error::new(error.to_string())))?;
         let batch_us = batch_start.elapsed().as_micros() as u64;
         self.profile
             .record_batch(task.batch_idx, task.batch_capacity, actual_batch, batch_us);
+        let (batch, frames, classes) =
+            tensor
+                .try_rank3("parallel segmentation batch")
+                .map_err(|error| SegmentationError::MalformedOutput {
+                    context: "parallel segmentation batch",
+                    message: error.to_string(),
+                })?;
+        let data = tensor.into_data();
 
-        Ok((data, out_shape[1], out_shape[2]))
+        Ok((data, batch, frames, classes))
     }
 
     fn decode_results(
         &self,
         task: &BatchTask<'a>,
         data: &[f32],
+        batch: usize,
         frames: usize,
         classes: usize,
     ) -> Result<Vec<Array2<f32>>, SegmentationError> {
+        if batch < task.batch_capacity {
+            return Err(SegmentationError::MalformedOutput {
+                context: "parallel segmentation batch",
+                message: format!(
+                    "output batch dimension {batch} was smaller than requested batch capacity {}",
+                    task.batch_capacity
+                ),
+            });
+        }
+
         let actual_batch = task.end - task.start;
         let stride = frames * classes;
         let mut results = Vec::with_capacity(actual_batch);

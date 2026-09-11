@@ -267,13 +267,15 @@ pub use models::ModelBundle;
 #[cfg_attr(docsrs, doc(cfg(feature = "online")))]
 pub use models::ModelManager;
 pub use pipeline::{
-    AhcConfig, BatchInput, BinarizeConfig, DiarizationPipeline, DiarizationResult,
-    OwnedDiarizationPipeline, PipelineBuilder, PipelineConfig, PipelineError, QueueConfig,
-    QueueError, QueueReceiver, QueueReceiverIter, QueueSender, QueuedDiarizationJobId,
-    QueuedDiarizationRequest, QueuedDiarizationResult, RuntimeConfig, VbxConfig,
+    ActivityCleanup, AhcConfig, AhcConfigError, BatchInput, ClusteringBackend, ClusteringConfig,
+    ClusteringConfigError, DiarizationPipeline, DiarizationResult, OwnedDiarizationPipeline,
+    PipelineBuilder, PipelineConfig, PipelineError, QueueConfig, QueueError, QueueReceiver,
+    QueueReceiverIter, QueueSender, QueuedDiarizationJobId, QueuedDiarizationRequest,
+    QueuedDiarizationResult, ReconstructError, ResponsibilityInitialization, RuntimeConfig,
+    VbxConfig, VbxConfigError,
 };
 pub use segment::Segment;
 
 #[cfg(feature = "_metrics")]
 #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
-pub use powerset::PowersetMapping;
+pub use powerset::{PowersetDecodeError, PowersetMapping};

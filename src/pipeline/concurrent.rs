@@ -62,7 +62,7 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
         let mut chunk_idx = 0usize;
 
         for raw_window in receiver {
-            let decoded = self.powerset.hard_decode(&raw_window);
+            let decoded = self.powerset.hard_decode(&raw_window)?;
             let seg = seg_array.get_or_insert_with(|| {
                 Array3::zeros((total_windows, decoded.nrows(), self.num_speakers))
             });
@@ -166,7 +166,7 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
             total_recv_wait_us += recv_start.elapsed().as_micros() as u64;
 
             let decode_start = std::time::Instant::now();
-            let decoded = self.powerset.hard_decode(&raw_window);
+            let decoded = self.powerset.hard_decode(&raw_window)?;
 
             let nf = *num_frames.get_or_insert(decoded.nrows());
             let seg = seg_array
@@ -330,7 +330,7 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
             channel_wait += recv_start.elapsed();
 
             let decode_start = std::time::Instant::now();
-            let decoded = self.powerset.hard_decode(&raw_window);
+            let decoded = self.powerset.hard_decode(&raw_window)?;
             let seg = seg_array.get_or_insert_with(|| {
                 Array3::zeros((total_windows, decoded.nrows(), self.num_speakers))
             });

@@ -1,4 +1,5 @@
 pub(crate) mod embedding;
+pub(crate) mod geometry;
 pub(crate) mod segmentation;
 
 #[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
@@ -158,6 +159,10 @@ impl fmt::Display for ExecutionMode {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ModelLoadError {
+    /// Hugging Face Hub could not resolve a required model asset
+    #[cfg(feature = "online")]
+    #[error(transparent)]
+    HfHub(#[from] hf_hub::api::sync::ApiError),
     /// Requested execution mode is not supported by this build
     #[error(transparent)]
     UnsupportedExecutionMode(#[from] ExecutionModeError),
