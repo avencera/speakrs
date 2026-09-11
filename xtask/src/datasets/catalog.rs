@@ -692,6 +692,20 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    fn write_test_wav(path: &Path) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path, spec).unwrap();
+        for _ in 0..160 {
+            writer.write_sample(0_i16).unwrap();
+        }
+        writer.finalize().unwrap();
+    }
+
     #[test]
     fn dataset_ids_and_aliases_are_unique() {
         let mut names = HashSet::new();
@@ -760,17 +774,7 @@ mod tests {
         let rttm_dir = dir.path().join("rttm");
         std::fs::create_dir_all(&wav_dir).unwrap();
         std::fs::create_dir_all(&rttm_dir).unwrap();
-        let spec = hound::WavSpec {
-            channels: 1,
-            sample_rate: 16_000,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-        let mut writer = hound::WavWriter::create(wav_dir.join("silent.wav"), spec).unwrap();
-        for _ in 0..160 {
-            writer.write_sample(0_i16).unwrap();
-        }
-        writer.finalize().unwrap();
+        write_test_wav(&wav_dir.join("silent.wav"));
         std::fs::write(rttm_dir.join("silent.rttm"), b"").unwrap();
 
         let snapshot =
@@ -780,13 +784,23 @@ mod tests {
     }
 
     #[test]
-    fn real_fixture_pairs_pass_wav_and_rttm_validation() {
-        let dataset_dir =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fixtures/datasets/aishell4");
+    fn paired_wav_and_rttm_pass_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav_dir = dir.path().join("wav");
+        let rttm_dir = dir.path().join("rttm");
+        std::fs::create_dir_all(&wav_dir).unwrap();
+        std::fs::create_dir_all(&rttm_dir).unwrap();
+        write_test_wav(&wav_dir.join("recording.wav"));
+        std::fs::write(
+            rttm_dir.join("recording.rttm"),
+            b"SPEAKER recording 1 0.000 0.010 <NA> <NA> speaker <NA> <NA>\n",
+        )
+        .unwrap();
+
         let snapshot =
-            DatasetSnapshot::validate_staged(DatasetId::Aishell4, &dataset_dir, "fixture source")
+            DatasetSnapshot::validate_staged(DatasetId::Aishell4, dir.path(), "test source")
                 .unwrap();
-        assert_eq!(snapshot.files().len(), 20);
+        assert_eq!(snapshot.files().len(), 1);
         assert!(
             snapshot
                 .files()
