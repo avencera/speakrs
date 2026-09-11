@@ -205,7 +205,7 @@ impl CompareCmd {
 
 #[derive(Subcommand)]
 enum BenchmarkCmd {
-    /// Measure implementations and write a schema version 2 run
+    /// Measure implementations and write a schema version 3 run
     Run {
         /// Dataset to evaluate ("all" for all datasets, "list" to show available)
         #[arg(long, default_value = "voxconverse-dev")]
@@ -239,7 +239,7 @@ enum BenchmarkCmd {
         #[arg(long, short = 's')]
         sleep_between: Option<u64>,
     },
-    /// Score a stored schema version 2 run with authoritative DER
+    /// Score a stored schema version 3 run with authoritative DER
     Score {
         /// Directory created by `benchmark run`
         run_dir: PathBuf,
