@@ -2,8 +2,9 @@ mod support;
 
 use std::path::{Path, PathBuf};
 use std::thread;
+use std::time::Duration;
 
-use speakrs::{ExecutionMode, PipelineBuilder, QueuedDiarizationRequest};
+use speakrs::{ExecutionMode, PipelineBuilder, QueueError, QueuedDiarizationRequest};
 
 use support::{ExampleResult, file_id_from_path, load_wav_samples};
 
@@ -25,21 +26,35 @@ fn main() -> ExampleResult<()> {
         let file_id = file_id_from_path(&audio_path);
         let audio = load_wav_samples(&audio_path)?;
         handles.push(thread::spawn(move || {
-            tx.try_push(QueuedDiarizationRequest::new(file_id, audio))
-                .map(|_| ())
+            let mut request = QueuedDiarizationRequest::new(file_id, audio);
+            let mut retry_delay = Duration::from_millis(1);
+
+            loop {
+                match tx.try_push(request) {
+                    Ok(_) => return Ok(()),
+                    Err(QueueError::Full(rejected)) => {
+                        request = rejected;
+                        thread::sleep(retry_delay);
+                        retry_delay = retry_delay
+                            .saturating_mul(2)
+                            .min(Duration::from_millis(100));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
         }));
     }
     drop(tx);
+
+    for result in rx {
+        let result = result?;
+        print!("{}", result.result?.rttm(&result.file_id));
+    }
 
     for handle in handles {
         handle
             .join()
             .map_err(|_| "queue sender thread panicked")??;
-    }
-
-    for result in rx {
-        let result = result?;
-        print!("{}", result.result?.rttm(&result.file_id));
     }
 
     Ok(())
