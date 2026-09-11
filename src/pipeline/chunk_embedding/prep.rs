@@ -3,13 +3,44 @@ use std::sync::Arc;
 use crossbeam_channel::{Receiver, Sender};
 
 use crate::inference::coreml::{CachedInputShape, SharedCoreMlModel};
+use crate::inference::geometry::CoreMlTensor;
 
 use super::gpu::PreparedChunk;
 use super::{
     FBANK_SEGMENT_SAMPLES, PipelineError, backend_error, chunk_audio_raw,
     write_speaker_mask_to_slice,
 };
-use crate::inference::embedding::FBANK_FRAMES;
+use crate::inference::embedding::{FBANK_FEATURES, FBANK_FRAMES};
+
+fn copy_fbank_output(
+    tensor: CoreMlTensor,
+    context: &'static str,
+    fbank: &mut [f32],
+    frame_offset: usize,
+    frame_capacity: usize,
+) -> Result<(), PipelineError> {
+    let (batch, frames, features) = tensor
+        .try_rank3(context)
+        .map_err(|error| backend_error(context, error))?;
+    if batch != 1 {
+        return Err(backend_error(
+            context,
+            format!("expected batch size 1, got {batch}"),
+        ));
+    }
+    if features != FBANK_FEATURES {
+        return Err(backend_error(
+            context,
+            format!("expected {FBANK_FEATURES} filterbank features, got {features}"),
+        ));
+    }
+
+    let value_count = frames.min(frame_capacity) * FBANK_FEATURES;
+    let output_offset = frame_offset * FBANK_FEATURES;
+    fbank[output_offset..output_offset + value_count]
+        .copy_from_slice(&tensor.into_data()[..value_count]);
+    Ok(())
+}
 
 impl PrepScratch {
     pub(super) fn new(window_samples: usize) -> Self {
@@ -35,7 +66,7 @@ impl ChunkPrep {
         let chunk_audio_end = (chunk_audio_start + chunk_audio_len).min(audio.len());
         let chunk_audio = &audio[chunk_audio_start..chunk_audio_end];
 
-        let mut fbank = vec![0.0f32; self.largest_fbank_frames * 80];
+        let mut fbank = vec![0.0f32; self.largest_fbank_frames * FBANK_FEATURES];
 
         if chunk_audio.len() <= 480_000 && self.fbank_normalization_scope.uses_chunk_scope() {
             if let Some(fbank_model) = &self.fbank_30s {
@@ -44,15 +75,13 @@ impl ChunkPrep {
                 let tensor = fbank_model
                     .predict_cached(&[(&scratch.fbank_30s_shape, &*scratch.fbank_30s_buf)])
                     .map_err(|error| backend_error("chunk fbank 30s prediction failed", error))?;
-                let (_, frames, _) = tensor
-                    .try_rank3("chunk fbank 30s output")
-                    .map_err(|error| backend_error("chunk fbank 30s output", error))?;
-                let data = tensor.into_data();
-                let copy_frames = frames.min(self.largest_fbank_frames);
-                for row_idx in 0..copy_frames {
-                    let offset = row_idx * 80;
-                    fbank[offset..offset + 80].copy_from_slice(&data[offset..offset + 80]);
-                }
+                copy_fbank_output(
+                    tensor,
+                    "chunk fbank 30s output",
+                    &mut fbank,
+                    0,
+                    self.largest_fbank_frames,
+                )?;
             }
         } else if let Some(fbank_model) = &self.fbank_10s {
             let mut fbank_offset = 0usize;
@@ -68,16 +97,13 @@ impl ChunkPrep {
                 let tensor = fbank_model
                     .predict_cached(&[(&scratch.fbank_10s_shape, &*scratch.waveform_10s_buf)])
                     .map_err(|error| backend_error("chunk fbank 10s prediction failed", error))?;
-                let (_, frames, _) = tensor
-                    .try_rank3("chunk fbank 10s output")
-                    .map_err(|error| backend_error("chunk fbank 10s output", error))?;
-                let data = tensor.into_data();
-                let copy = frames.min(self.largest_fbank_frames - fbank_offset);
-                for row_idx in 0..copy {
-                    let src = row_idx * 80;
-                    let dst = (fbank_offset + row_idx) * 80;
-                    fbank[dst..dst + 80].copy_from_slice(&data[src..src + 80]);
-                }
+                copy_fbank_output(
+                    tensor,
+                    "chunk fbank 10s output",
+                    &mut fbank,
+                    fbank_offset,
+                    self.largest_fbank_frames - fbank_offset,
+                )?;
                 fbank_offset += FBANK_FRAMES;
                 audio_offset += FBANK_SEGMENT_SAMPLES;
             }

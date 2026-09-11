@@ -1,4 +1,4 @@
-use ndarray::{Array1, Array2, Array3, s};
+use ndarray::{Array1, Array2, Array3};
 
 use super::{EMBEDDING_WIDTH, FBANK_FEATURES};
 #[cfg(any(test, feature = "coreml"))]
@@ -139,9 +139,13 @@ pub(super) fn embedding_batch(
     crate::inference::geometry::require_exact_len(data.len(), layout.element_count(), context)
         .map_err(GeometryError::into_ort)?;
 
-    let batch =
-        array2_from_shape_vec(geometry.model_rows, EMBEDDING_WIDTH, data.to_vec(), context)?;
-    Ok(batch.slice(s![0..geometry.useful_rows, ..]).to_owned())
+    let useful_len = geometry.useful_rows * EMBEDDING_WIDTH;
+    array2_from_shape_vec(
+        geometry.useful_rows,
+        EMBEDDING_WIDTH,
+        data[..useful_len].to_vec(),
+        context,
+    )
 }
 
 pub(super) fn embedding_batch_from_ort(

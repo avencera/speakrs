@@ -174,10 +174,7 @@ impl EmbeddingExecutionPlan {
                 && self.split_tail.native_single.is_some();
         }
 
-        let ort_split = self.split_fbank.single.is_some() && self.split_tail.single.is_some();
-        #[cfg(feature = "coreml")]
-        let ort_split = ort_split || self.split_tail.native_single.is_some();
-        ort_split
+        self.split_fbank.single.is_some() && self.split_tail.single.is_some()
     }
 
     pub(crate) fn split_primary_batch_size(&self) -> usize {
@@ -190,10 +187,6 @@ impl EmbeddingExecutionPlan {
         if self.split_tail.primary_batched.is_some() {
             return PRIMARY_BATCH_SIZE;
         }
-        #[cfg(feature = "coreml")]
-        if self.split_tail.native_primary_batched.is_some() {
-            return PRIMARY_BATCH_SIZE;
-        }
         0
     }
 
@@ -203,10 +196,7 @@ impl EmbeddingExecutionPlan {
             return self.split_fbank.native_batched.is_some();
         }
 
-        let has = self.split_fbank.batched.is_some();
-        #[cfg(feature = "coreml")]
-        let has = has || self.split_fbank.native_batched.is_some();
-        has
+        self.split_fbank.batched.is_some()
     }
 
     pub(crate) fn prefers_multi_mask_path(&self) -> bool {
@@ -215,10 +205,7 @@ impl EmbeddingExecutionPlan {
             return self.multi_mask.native.is_some();
         }
 
-        let has = self.multi_mask.single.is_some();
-        #[cfg(feature = "coreml")]
-        let has = has || self.multi_mask.native.is_some();
-        has
+        self.multi_mask.single.is_some()
     }
 
     pub(crate) fn multi_mask_batch_size(&self) -> usize {

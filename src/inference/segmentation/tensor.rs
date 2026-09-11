@@ -76,6 +76,13 @@ fn duration_to_samples(
             ),
         });
     }
+    if samples >= usize::MAX as f32 {
+        return Err(InvalidWindowGeometry {
+            message: format!(
+                "{name} duration {duration} exceeds the maximum usize sample count at {sample_rate} Hz"
+            ),
+        });
+    }
     NonZeroUsize::new(samples as usize).ok_or_else(|| InvalidWindowGeometry {
         message: format!("{name} duration {duration} produced zero samples"),
     })
@@ -101,8 +108,9 @@ pub(crate) fn segmentation_window_count(audio_len: usize, spec: WindowSpec) -> u
 
     let step_samples = spec.step_samples();
     let full_windows = (audio_len - window_samples) / step_samples + 1;
-    let offset_after_full = full_windows * step_samples;
-    let has_tail = offset_after_full < audio_len;
+    let has_tail = full_windows
+        .checked_mul(step_samples)
+        .is_some_and(|offset_after_full| offset_after_full < audio_len);
     full_windows + has_tail as usize
 }
 
@@ -123,9 +131,13 @@ impl<'a> SegmentationWindows<'a> {
 
         let mut offsets = Vec::new();
         let mut offset = 0;
-        while offset + window_samples <= audio.len() {
+        while audio.len() >= window_samples && offset <= audio.len() - window_samples {
             offsets.push(offset);
-            offset += step_samples;
+            let Some(next_offset) = offset.checked_add(step_samples) else {
+                offset = audio.len();
+                break;
+            };
+            offset = next_offset;
         }
 
         let padded = if offset < audio.len() && audio.len() > window_samples {
@@ -291,6 +303,13 @@ mod tests {
         assert_eq!(spec.step_samples(), 16_000);
     }
 
+    #[test]
+    fn from_seconds_rejects_finite_sample_counts_above_usize() {
+        let error = WindowSpec::from_seconds(10.0, 2.0e15, 16_000).unwrap_err();
+
+        assert!(error.message.contains("maximum usize sample count"));
+    }
+
     const WINDOW: usize = 160_000;
 
     fn window_spec(window_samples: usize, step_samples: usize) -> WindowSpec {
@@ -381,5 +400,23 @@ mod tests {
                 "window count drifted from collect at audio_len={audio_len}"
             );
         }
+    }
+
+    #[test]
+    fn collect_handles_large_step_without_overflowing_window_bound() {
+        let spec = window_spec(8, usize::MAX);
+        let audio = vec![1.0_f32; 9];
+
+        let windows = SegmentationWindows::collect(&audio, spec);
+
+        assert_eq!(windows.total_windows(), 1);
+        assert_eq!(windows.window(0, "overflowing step").unwrap(), &audio[..8]);
+    }
+
+    #[test]
+    fn window_count_handles_unrepresentable_tail_offset() {
+        let spec = window_spec(1, usize::MAX - 1);
+
+        assert_eq!(segmentation_window_count(usize::MAX, spec), 2);
     }
 }

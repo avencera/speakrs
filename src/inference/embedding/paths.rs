@@ -61,7 +61,7 @@ impl MinEmbeddingSamples {
     }
 }
 
-pub(super) fn read_min_num_samples(path: &Path) -> Result<MinEmbeddingSamples, ModelLoadError> {
+pub(crate) fn read_min_num_samples(path: &Path) -> Result<MinEmbeddingSamples, ModelLoadError> {
     let text = fs::read_to_string(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             ModelLoadError::InvalidConfiguration {

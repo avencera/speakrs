@@ -31,9 +31,10 @@ use chunk::ChunkSessionSpec;
 pub(crate) use chunk::{ChunkEmbeddingSession, ChunkResourceBundle, ChunkSessionInfo};
 #[cfg(feature = "coreml")]
 use paths::fp32_coreml_path;
+pub(crate) use paths::read_min_num_samples;
 use paths::{
-    batched_model_path, multi_mask_model_path, read_min_num_samples, select_mask,
-    split_fbank_batched_model_path, split_fbank_model_path, split_tail_model_path,
+    batched_model_path, multi_mask_model_path, select_mask, split_fbank_batched_model_path,
+    split_fbank_model_path, split_tail_model_path,
 };
 use plan::EmbeddingExecutionPlan;
 #[cfg(feature = "coreml")]
@@ -57,7 +58,7 @@ pub(crate) const FBANK_FRAMES: usize = 998;
 /// Hop between consecutive fbank frames, in samples (10ms at 16kHz)
 #[cfg(feature = "coreml")]
 pub(crate) const FBANK_HOP_SAMPLES: usize = 160;
-const FBANK_FEATURES: usize = 80;
+pub(crate) const FBANK_FEATURES: usize = 80;
 const MASK_FRAMES: usize = 589;
 
 pub struct MaskedEmbeddingInput<'a> {
