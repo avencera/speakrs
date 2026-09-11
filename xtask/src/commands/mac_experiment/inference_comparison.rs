@@ -201,7 +201,7 @@ fn run_layout(
     let experiment =
         ExperimentInferenceConfig::new(layout).with_fbank_normalization_scope(normalization_scope);
     let runtime = RuntimeConfig::default().with_experiment(experiment);
-    let mut pipeline = PipelineBuilder::from_dir(models_dir, ExecutionMode::CoreMl)
+    let mut pipeline = PipelineBuilder::from_dir(models_dir, ExecutionMode::CoreMl)?
         .runtime(runtime)
         .build()?;
     pipeline.run_inference_only(samples)?;

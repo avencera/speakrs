@@ -319,7 +319,7 @@ impl<'a> ExperimentExecutor<'a> {
         let mode = execution_mode(inference.mode());
         let inference_config = inference.to_pipeline()?;
         let runtime = RuntimeConfig::default().with_experiment(inference_config);
-        let pipeline = PipelineBuilder::from_dir(experiment.models_dir(), mode)
+        let pipeline = PipelineBuilder::from_dir(experiment.models_dir(), mode)?
             .runtime(runtime)
             .build()
             .map_err(|error| eyre!("failed to build experiment pipeline: {error}"))?;
