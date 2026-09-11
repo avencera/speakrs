@@ -103,7 +103,7 @@ pub fn run_benchmark_job(
     println!("========== {} ==========", config.dataset.display_name);
 
     config.dataset.ensure(&config.datasets_dir)?;
-    let snapshot = config.dataset.snapshot(&config.datasets_dir)?;
+    let snapshot = config.dataset.verified_snapshot(&config.datasets_dir)?;
     let pairs = snapshot
         .files()
         .iter()
@@ -175,11 +175,7 @@ pub fn run_benchmark_job(
     let mut all_results: HashMap<ImplementationId, DerImplResult> = HashMap::new();
 
     for (implementation_id, impl_type) in &config.implementations {
-        let impl_name = crate::catalog::ImplementationCatalog::all()
-            .iter()
-            .find(|spec| spec.id == *implementation_id)
-            .map(|spec| spec.display_name)
-            .unwrap_or(implementation_id.as_str());
+        let impl_name = crate::catalog::ImplementationCatalog::display_name(*implementation_id);
         println!("Running {impl_name}...");
 
         let benchmark_result = match impl_type {
@@ -233,7 +229,7 @@ pub fn run_benchmark_job(
         }
         println!();
 
-        let result = DerImplResult::completed(
+        let mut result = DerImplResult::completed(
             der_pct,
             miss_pct,
             fa_pct,
@@ -241,7 +237,6 @@ pub fn run_benchmark_job(
             benchmark_output.total_seconds,
             acc.file_count,
         );
-        let mut result = result;
         result.per_file = acc.per_file().to_vec();
         result.hypotheses = benchmark_output.per_file_rttm;
         all_results.insert(*implementation_id, result);

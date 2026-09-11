@@ -88,24 +88,25 @@ fn load_score_records(run_dir: &Path) -> Result<Vec<LoadedRecord>> {
         run_dir.display()
     );
     let root_results = run_dir.join("results.json");
-    let mut paths = Vec::new();
-    if root_results.is_file() {
-        let root_record = run_store::BenchmarkRecord::read(&root_results)?;
-        if root_record.run.datasets.len() == 1 {
-            paths.push((run_dir.to_owned(), root_results));
-        } else {
-            let child_paths = child_result_paths(run_dir)?;
-            ensure!(
-                !child_paths.is_empty(),
-                "multi-dataset benchmark run has no dataset result records"
-            );
-            paths.extend(child_paths);
+    let root_record = root_results
+        .is_file()
+        .then(|| {
+            run_store::BenchmarkRecord::read(&root_results).map(|record| LoadedRecord {
+                directory: run_dir.to_owned(),
+                record,
+            })
+        })
+        .transpose()?;
+    let mut records = Vec::new();
+    let child_paths = match root_record {
+        Some(record) if record.record.run.datasets.len() == 1 => {
+            records.push(record);
+            Vec::new()
         }
-    } else {
-        paths.extend(child_result_paths(run_dir)?);
-    }
+        Some(_) | None => child_result_paths(run_dir)?,
+    };
     ensure!(
-        !paths.is_empty(),
+        !records.is_empty() || !child_paths.is_empty(),
         "schema version {} results.json not found in {} or its dataset directories",
         run_store::SCHEMA_VERSION,
         run_dir.display()
@@ -128,8 +129,7 @@ fn load_score_records(run_dir: &Path) -> Result<Vec<LoadedRecord>> {
         Err(error) => return Err(error.into()),
     };
 
-    let mut records = Vec::with_capacity(paths.len());
-    for (directory, path) in paths {
+    for (directory, path) in child_paths {
         records.push(LoadedRecord {
             directory,
             record: run_store::BenchmarkRecord::read(&path)?,

@@ -352,19 +352,10 @@ pub struct InputManifest {
     pub selection: SelectionOptions,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ScoringOptions {
     pub collar_seconds: f64,
     pub ignore_overlap: bool,
-}
-
-impl Default for ScoringOptions {
-    fn default() -> Self {
-        Self {
-            collar_seconds: 0.0,
-            ignore_overlap: false,
-        }
-    }
 }
 
 impl ScoringOptions {

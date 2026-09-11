@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -30,7 +30,7 @@ pub struct DerResultsWriter<'a> {
     pub pyannote_batch_sizes: PyannoteBatchSizes,
 }
 
-struct SummaryFormatter<'a>(&'a DerResultsWriter<'a>);
+struct SummaryFormatter<'a>(&'a BenchmarkRecord);
 
 struct PendingArtifact {
     relative_path: PathBuf,
@@ -108,6 +108,30 @@ impl Publication {
     fn commit(mut self) {
         self.committed = true;
     }
+
+    fn rollback(&mut self) -> Result<()> {
+        let mut failures = Vec::new();
+        for path in self.published_files.iter().rev() {
+            if let Err(error) = fs::remove_file(path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                failures.push(format!("remove {}: {error}", path.display()));
+            }
+        }
+        for path in self.created_directories.iter().rev() {
+            if let Err(error) = fs::remove_dir(path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                failures.push(format!("remove {}: {error}", path.display()));
+            }
+        }
+        if failures.is_empty() {
+            self.committed = true;
+            Ok(())
+        } else {
+            Err(color_eyre::eyre::eyre!(failures.join("; ")))
+        }
+    }
 }
 
 impl Drop for Publication {
@@ -125,20 +149,33 @@ impl Drop for Publication {
 }
 
 impl<'a> SummaryFormatter<'a> {
-    fn build_lines(&self) -> Result<Vec<String>> {
-        let writer = self.0;
-        let (seg_batch_size, emb_batch_size) = writer.pyannote_batch_sizes.summary_values();
-        let file_list = writer.file_list()?;
-        let total_audio_seconds = writer.total_audio_minutes * 60.0;
+    fn build_lines(&self) -> Vec<String> {
+        let record = self.0;
+        let batch_sizes = record.source_metadata.get("pyannote_batch_sizes");
+        let seg_batch_size = batch_sizes
+            .and_then(|value| value.get("segmentation"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("default");
+        let emb_batch_size = batch_sizes
+            .and_then(|value| value.get("embedding"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("default");
+        let file_list = record
+            .inputs
+            .files
+            .iter()
+            .map(|file| file.file_id.as_str())
+            .collect::<Vec<_>>();
+        let total_audio_seconds = record.total_audio_minutes * 60.0;
         let header = self.header_line();
-        let metadata = writer.metadata;
+        let metadata = &record.metadata;
         let mut lines = vec![
             format!(
                 "{} DER ({} files, {:.1} min, collar={:.0}ms)",
-                writer.dataset.display_name(),
-                writer.files.len(),
-                writer.total_audio_minutes,
-                writer.collar * 1000.0,
+                record.dataset.display_name(),
+                record.inputs.files.len(),
+                record.total_audio_minutes,
+                record.scoring.collar_seconds * 1000.0,
             ),
             format!(
                 "Commit: {}  GPU: {}  CPU: {}  Region: {}",
@@ -146,26 +183,26 @@ impl<'a> SummaryFormatter<'a> {
             ),
             format!(
                 "Selection: greedy by duration, executed in input order, capped at max_files={}, max_minutes={}",
-                writer.max_files, writer.max_minutes
+                record.inputs.selection.max_files, record.inputs.selection.max_minutes
             ),
             format!("pyannote batch sizes: seg={seg_batch_size}, emb={emb_batch_size}"),
             format!("Files: {}", file_list.join(", ")),
         ];
-        if let Some(description) = writer.description {
+        if let Some(description) = &record.run.description {
             lines.push(format!("Description: {description}"));
         }
         lines.push(String::new());
         lines.push(header.clone());
         lines.push("─".repeat(header.len()));
 
-        for (implementation_id, _) in writer.implementations {
-            if let Some(result) = writer.results.get(implementation_id) {
-                let name = implementation_name(*implementation_id);
+        for implementation_id in &record.run.implementations {
+            if let Some(result) = record.implementations.get(implementation_id) {
+                let name = crate::catalog::ImplementationCatalog::display_name(*implementation_id);
                 lines.push(self.result_line(name, result, total_audio_seconds));
             }
         }
 
-        Ok(lines)
+        lines
     }
 
     fn header_line(&self) -> String {
@@ -186,43 +223,55 @@ impl<'a> SummaryFormatter<'a> {
     fn result_line(
         &self,
         implementation_name: &str,
-        result: &DerImplResult,
+        result: &StoredImplementationResult,
         total_audio_seconds: f64,
     ) -> String {
         let name_width = 22;
-        let (der_str, missed_str, false_alarm_str, confusion_str) = match result.der {
-            Some(der) => (
-                format!("{der:.1}%"),
-                format!("{:.1}%", result.missed.unwrap_or(0.0)),
-                format!("{:.1}%", result.false_alarm.unwrap_or(0.0)),
-                format!("{:.1}%", result.confusion.unwrap_or(0.0)),
-            ),
-            None => (
-                "N/A".to_owned(),
-                "—".to_owned(),
-                "—".to_owned(),
-                "—".to_owned(),
-            ),
-        };
-        let time_str = result
-            .time
+        let measurement = result.measurement.as_ref();
+        let (der_str, missed_str, false_alarm_str, confusion_str) =
+            match measurement.and_then(|measurement| measurement.der) {
+                Some(der) => (
+                    format!("{der:.1}%"),
+                    format!(
+                        "{:.1}%",
+                        measurement.and_then(|value| value.missed).unwrap_or(0.0)
+                    ),
+                    format!(
+                        "{:.1}%",
+                        measurement
+                            .and_then(|value| value.false_alarm)
+                            .unwrap_or(0.0)
+                    ),
+                    format!(
+                        "{:.1}%",
+                        measurement.and_then(|value| value.confusion).unwrap_or(0.0)
+                    ),
+                ),
+                None => (
+                    "N/A".to_owned(),
+                    "—".to_owned(),
+                    "—".to_owned(),
+                    "—".to_owned(),
+                ),
+            };
+        let time = measurement.and_then(|measurement| measurement.time_seconds);
+        let time_str = time
             .map(|time| format!("{time:.1}s"))
             .unwrap_or_else(|| "—".to_owned());
-        let rtfx_str = result
-            .time
+        let rtfx_str = time
             .filter(|time| *time > 0.0)
             .map(|time| format!("{:.1}x", total_audio_seconds / time))
             .unwrap_or_else(|| "—".to_owned());
         let status_str = match result.status {
-            DerImplStatus::Completed => "ok".to_owned(),
-            DerImplStatus::Skipped => format!(
+            StoredStatus::Completed => "ok".to_owned(),
+            StoredStatus::Skipped => format!(
                 "skipped ({})",
                 result.reason.as_deref().unwrap_or("no reason recorded")
             ),
-            DerImplStatus::Failed => format!(
-                "failed ({})",
-                result.reason.as_deref().unwrap_or("no reason recorded")
-            ),
+            StoredStatus::Failed => {
+                let reason = result.reason.as_deref().unwrap_or("no reason recorded");
+                format!("failed ({reason})")
+            }
         };
         format!(
             "{:<name_width$} {:>8} {:>10} {:>13} {:>12} {:>8} {:>7}  {}",
@@ -241,7 +290,7 @@ impl<'a> SummaryFormatter<'a> {
 impl<'a> DerResultsWriter<'a> {
     pub fn write(&self) -> Result<()> {
         let prepared = self.build_record()?;
-        let summary_lines = SummaryFormatter(self).build_lines()?;
+        let summary_lines = SummaryFormatter(&prepared.record).build_lines();
         let record_bytes = serde_json::to_vec_pretty(&prepared.record)?;
         let summary_bytes = (summary_lines.join("\n") + "\n").into_bytes();
         let mut artifacts = prepared.artifacts;
@@ -350,7 +399,14 @@ impl<'a> DerResultsWriter<'a> {
 
         let mut publication = Publication::new();
         for (staged, destination) in staged_paths {
-            publication.publish(&staged, &destination)?;
+            if let Err(error) = publication.publish(&staged, &destination) {
+                return match publication.rollback() {
+                    Ok(()) => Err(error),
+                    Err(rollback_error) => Err(color_eyre::eyre::eyre!(
+                        "artifact publication failed ({error}); rollback also failed ({rollback_error})"
+                    )),
+                };
+            }
         }
         publication.commit();
         Ok(())
@@ -368,18 +424,25 @@ impl<'a> DerResultsWriter<'a> {
             DerImplStatus::Failed => StoredStatus::Failed,
         };
         let (measurement, hypotheses, artifacts) = if matches!(status, StoredStatus::Completed) {
-            ensure!(
-                result.files == files.len(),
-                "completed {} result records {} files but the input manifest has {}",
-                implementation_id.as_str(),
-                result.files,
-                files.len()
+            let display_name =
+                crate::catalog::ImplementationCatalog::display_name(implementation_id);
+            let input_mismatch = completed_input_mismatch_reason(
+                display_name,
+                result,
+                files.iter().map(|file| file.file_id.as_str()),
             );
-            ensure!(
-                result.hypotheses.len() == files.len(),
-                "completed {} result is missing one or more hypothesis files",
-                implementation_id.as_str()
-            );
+            if let Some(reason) = input_mismatch {
+                return Ok((
+                    StoredImplementationResult {
+                        status: StoredStatus::Failed,
+                        reason: Some(reason),
+                        measurement: None,
+                        hypotheses: BTreeMap::new(),
+                        source_metadata: BTreeMap::new(),
+                    },
+                    Vec::new(),
+                ));
+            }
             let measurement = StoredMeasurement {
                 der: result.der,
                 missed: result.missed,
@@ -445,13 +508,6 @@ impl<'a> DerResultsWriter<'a> {
         ))
     }
 
-    fn file_list(&self) -> Result<Vec<String>> {
-        self.files
-            .iter()
-            .map(|(wav_path, _)| file_stem_string(wav_path))
-            .collect()
-    }
-
     fn source_metadata(&self) -> BTreeMap<String, serde_json::Value> {
         let (segmentation, embedding) = self.pyannote_batch_sizes.summary_values();
         [(
@@ -464,6 +520,46 @@ impl<'a> DerResultsWriter<'a> {
         .into_iter()
         .collect()
     }
+}
+
+fn completed_input_mismatch_reason<'a>(
+    display_name: &str,
+    result: &DerImplResult,
+    expected_file_ids: impl IntoIterator<Item = &'a str>,
+) -> Option<String> {
+    if !matches!(result.status, DerImplStatus::Completed) {
+        return None;
+    }
+
+    let expected: BTreeSet<&str> = expected_file_ids.into_iter().collect();
+    let actual: BTreeSet<&str> = result.hypotheses.keys().map(String::as_str).collect();
+    let mut mismatches = Vec::new();
+    if result.files != expected.len() {
+        mismatches.push(format!(
+            "records {} files but the input manifest has {}",
+            result.files,
+            expected.len()
+        ));
+    }
+    if actual.len() != expected.len() {
+        mismatches.push(format!(
+            "records {} hypotheses but the input manifest has {} files",
+            actual.len(),
+            expected.len()
+        ));
+    }
+    if actual != expected {
+        let missing = expected.difference(&actual).copied().collect::<Vec<_>>();
+        let unexpected = actual.difference(&expected).copied().collect::<Vec<_>>();
+        mismatches.push(format!(
+            "hypothesis IDs do not match the input manifest (missing: {}; unexpected: {})",
+            missing.join(", "),
+            unexpected.join(", ")
+        ));
+    }
+
+    (!mismatches.is_empty())
+        .then(|| format!("completed {display_name} result {}", mismatches.join("; ")))
 }
 
 fn hypothesis_path(implementation_id: ImplementationId, file_id: &str) -> Result<PathBuf> {
@@ -502,14 +598,6 @@ fn validate_artifact_path(path: &Path) -> Result<()> {
         path.display()
     );
     Ok(())
-}
-
-fn implementation_name(id: ImplementationId) -> &'static str {
-    crate::catalog::ImplementationCatalog::all()
-        .iter()
-        .find(|spec| spec.id == id)
-        .map(|spec| spec.display_name)
-        .unwrap_or(id.as_str())
 }
 
 pub fn format_eta(seconds: f64) -> String {
@@ -568,7 +656,23 @@ mod tests {
     }
 
     #[test]
-    fn late_validation_failure_publishes_no_partial_artifacts_and_can_retry() {
+    fn completed_result_with_wrong_hypothesis_ids_is_failed_before_storage() {
+        let mut result =
+            DerImplResult::completed(Some(0.0), Some(0.0), Some(0.0), Some(0.0), 1.0, 1);
+        result
+            .hypotheses
+            .insert("unexpected".to_owned(), String::new());
+
+        let reason =
+            completed_input_mismatch_reason("SpeakerKit", &result, std::iter::once("expected"))
+                .unwrap();
+
+        assert!(reason.contains("missing: expected"));
+        assert!(reason.contains("unexpected: unexpected"));
+    }
+
+    #[test]
+    fn completed_result_with_missing_hypotheses_is_recorded_as_failed() {
         let temp_dir = tempfile::tempdir().unwrap();
         let run_dir = temp_dir.path().join("run");
         fs::create_dir(&run_dir).unwrap();
@@ -602,35 +706,11 @@ mod tests {
                 )]),
             },
         )]);
-        let metadata = metadata();
-        {
-            let writer = DerResultsWriter {
-                run_dir: &run_dir,
-                run_identity: &run_identity,
-                dataset: DatasetIdentity::catalog(DatasetId::VoxconverseDev),
-                implementations: &implementations,
-                results: &results,
-                files: &files,
-                total_audio_minutes: 1.0 / 60.0,
-                collar: 0.0,
-                description: None,
-                max_files: 1,
-                max_minutes: 1,
-                metadata: &metadata,
-                pyannote_batch_sizes: PyannoteBatchSizes::default(),
-            };
-            assert!(writer.write().is_err());
-        }
-        assert!(!run_dir.join("results.json").exists());
-        assert!(!run_dir.join("results.txt").exists());
-        assert!(!run_dir.join("hypotheses").exists());
-        assert_eq!(fs::read(&wav).unwrap(), source_wav);
-        assert_eq!(fs::read(&rttm).unwrap(), source_rttm);
-
         results.insert(
             ImplementationId::SpeakerKit,
-            DerImplResult::skipped("not available in test".to_owned()),
+            DerImplResult::completed(Some(0.0), Some(0.0), Some(0.0), Some(0.0), 1.0, 1),
         );
+        let metadata = metadata();
         let writer = DerResultsWriter {
             run_dir: &run_dir,
             run_identity: &run_identity,
@@ -652,5 +732,41 @@ mod tests {
         assert!(run_dir.join("results.txt").is_file());
         assert!(run_dir.join("hypotheses/cpu/sample.rttm").is_file());
         assert!(!run_dir.join("hypotheses/speakerkit").exists());
+        let record = BenchmarkRecord::read(&run_dir.join("results.json")).unwrap();
+        let speakerkit = &record.implementations[&ImplementationId::SpeakerKit];
+        assert_eq!(speakerkit.status, StoredStatus::Failed);
+        assert!(speakerkit.reason.as_deref().unwrap().contains("hypotheses"));
+        assert_eq!(fs::read(&wav).unwrap(), source_wav);
+        assert_eq!(fs::read(&rttm).unwrap(), source_rttm);
+    }
+
+    #[test]
+    fn publication_rolls_back_after_a_partial_publish() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let run_dir = temp_dir.path().join("run");
+        fs::create_dir(&run_dir).unwrap();
+        fs::create_dir(run_dir.join("hypotheses")).unwrap();
+        fs::write(run_dir.join("hypotheses/speakerkit"), "blocker").unwrap();
+
+        let staging = temp_dir.path().join("staging");
+        fs::create_dir(&staging).unwrap();
+        let cpu_staged = staging.join("cpu.rttm");
+        let speakerkit_staged = staging.join("speakerkit.rttm");
+        fs::write(&cpu_staged, "cpu").unwrap();
+        fs::write(&speakerkit_staged, "speakerkit").unwrap();
+
+        let cpu_destination = run_dir.join("hypotheses/cpu/sample.rttm");
+        let speakerkit_destination = run_dir.join("hypotheses/speakerkit/sample.rttm");
+        let mut publication = Publication::new();
+        publication.publish(&cpu_staged, &cpu_destination).unwrap();
+        assert!(
+            publication
+                .publish(&speakerkit_staged, &speakerkit_destination)
+                .is_err()
+        );
+        drop(publication);
+
+        assert!(!cpu_destination.exists());
+        assert!(run_dir.join("hypotheses/speakerkit").is_file());
     }
 }

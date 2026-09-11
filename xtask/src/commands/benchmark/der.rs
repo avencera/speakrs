@@ -7,15 +7,13 @@ use std::time::Duration;
 use color_eyre::eyre::{Result, bail};
 
 use crate::cargo::cargo_build_xtask;
+use crate::catalog::{ImplementationCatalog, RunnerKind};
 use crate::cmd::{project_root, run_cmd, wav_duration_seconds};
 
 use super::*;
 use preflight::preflight_check;
 use run::{DerRunContext, run_der_implementations};
-use validate::{
-    der_build_features, handle_list_requests, resolve_eval_datasets, validate_impls,
-    validate_single_file_mode,
-};
+use validate::{handle_list_requests, resolve_eval_datasets, validate_single_file_mode};
 
 mod preflight;
 pub(super) mod run;
@@ -77,92 +75,41 @@ pub fn der(args: DerArgs) -> Result<()> {
         return Ok(());
     }
 
-    validate_impls(impls)?;
+    let selected_impls = ImplementationCatalog::resolve_many(impls)?;
 
     let single_file_mode = validate_single_file_mode(file, rttm)?;
     let datasets = resolve_eval_datasets(dataset_id, single_file_mode)?;
 
     let root = project_root();
 
-    println!("=== Building binaries ===");
-    let build_features = der_build_features(impls);
-    cargo_build_xtask(&build_features)?;
-
-    let needs_pyannote_rs =
-        impls.is_empty() || impls.iter().any(|impl_id| impl_id == "pyannote-rs");
-    if needs_pyannote_rs
-        && let Err(err) = run_cmd(
-            Command::new("cargo")
-                .args(["build", "--release"])
-                .current_dir(root.join("scripts/pyannote_rs_bench")),
-        )
-    {
-        eprintln!("warning: pyannote-rs bench build failed (skipping): {err}");
-    }
-
-    let models_dir = root.join("fixtures/models");
-    let seg_model = models_dir.join("segmentation-3.0.onnx");
-    let emb_model = models_dir.join("wespeaker_en_voxceleb_CAM++.onnx");
-    if needs_pyannote_rs {
-        ensure_pyannote_rs_emb_model(&emb_model)?;
-    }
-
-    let metadata = BenchmarkMetadata::collect();
-    let selected_impls = crate::catalog::ImplementationCatalog::resolve_many(impls)?;
-    let single_file_identity = if single_file_mode {
-        let wav_path = file
-            .as_ref()
-            .ok_or_else(|| color_eyre::eyre::eyre!("single-file mode requires --file"))?;
-        Some(super::run_store::DatasetIdentity::single_file(
-            wav_path
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().to_string())
-                .unwrap_or_else(|| "single-file".to_owned()),
-        )?)
+    let single_file_pair = if single_file_mode {
+        Some((
+            file.clone()
+                .ok_or_else(|| color_eyre::eyre::eyre!("single-file mode requires --file"))?,
+            rttm.clone()
+                .ok_or_else(|| color_eyre::eyre::eyre!("single-file mode requires --rttm"))?,
+        ))
     } else {
         None
     };
-    let suite_datasets = if let Some(identity) = single_file_identity.clone() {
-        vec![identity]
-    } else {
-        datasets
-            .iter()
-            .map(|dataset| {
-                dataset
-                    .catalog_id()
-                    .map(super::run_store::DatasetIdentity::catalog)
-            })
-            .collect::<Result<Vec<_>>>()?
-    };
-    let suite = super::BenchmarkRun::create_with_dataset_identities(
-        &root.join("_benchmarks"),
-        selected_impls.iter().map(|spec| spec.id).collect(),
-        suite_datasets,
-        description.clone(),
-        chrono::Local::now(),
-        metadata.cpu.clone(),
-    )?;
 
-    let eval_sets: Vec<EvalSet> = if single_file_mode {
-        let (wav_path, rttm_path) = match (file.clone(), rttm.clone()) {
-            (Some(wav_path), Some(rttm_path)) => (wav_path, rttm_path),
-            _ => bail!("single-file mode requires both --file and --rttm"),
-        };
-        let display_name = wav_path
+    let eval_sets: Vec<EvalSet> = if let Some((wav_path, rttm_path)) = &single_file_pair {
+        let file_stem = wav_path
             .file_stem()
             .map(|stem| stem.to_string_lossy().to_string())
-            .unwrap_or_else(|| "single-file".to_string());
+            .unwrap_or_else(|| "single-file".to_owned());
+        let identity = super::run_store::DatasetIdentity::single_file(file_stem.clone())?;
         vec![(
-            single_file_identity.expect("single-file identity"),
-            display_name,
-            vec![(wav_path, rttm_path)],
+            identity,
+            file_stem,
+            vec![(wav_path.clone(), rttm_path.clone())],
         )]
     } else {
         let fixtures_dir = root.join("fixtures/datasets");
         let mut sets = Vec::new();
         for dataset in &datasets {
             dataset.ensure(&fixtures_dir)?;
-            let snapshot = dataset.snapshot(&fixtures_dir)?;
+            let snapshot = dataset.verified_snapshot(&fixtures_dir)?;
             let pairs = snapshot
                 .files()
                 .iter()
@@ -188,6 +135,49 @@ pub fn der(args: DerArgs) -> Result<()> {
         sets
     };
 
+    ensure!(
+        !eval_sets.is_empty(),
+        "benchmark evaluation set contains no datasets"
+    );
+
+    println!("=== Building binaries ===");
+    let build_features = ImplementationCatalog::cargo_features(&selected_impls);
+    cargo_build_xtask(&build_features)?;
+
+    let needs_pyannote_rs = selected_impls
+        .iter()
+        .any(|spec| matches!(spec.runner, RunnerKind::PyannoteRs));
+    if needs_pyannote_rs
+        && let Err(err) = run_cmd(
+            Command::new("cargo")
+                .args(["build", "--release"])
+                .current_dir(root.join("scripts/pyannote_rs_bench")),
+        )
+    {
+        eprintln!("warning: pyannote-rs bench build failed (skipping): {err}");
+    }
+
+    let models_dir = root.join("fixtures/models");
+    let seg_model = models_dir.join("segmentation-3.0.onnx");
+    let emb_model = models_dir.join("wespeaker_en_voxceleb_CAM++.onnx");
+    if needs_pyannote_rs {
+        ensure_pyannote_rs_emb_model(&emb_model)?;
+    }
+
+    let metadata = BenchmarkMetadata::collect();
+    let suite_datasets = eval_sets
+        .iter()
+        .map(|(identity, _, _)| identity.clone())
+        .collect();
+    let suite = super::BenchmarkRun::create_with_dataset_identities(
+        &root.join("_benchmarks"),
+        selected_impls.iter().map(|spec| spec.id).collect(),
+        suite_datasets,
+        description.clone(),
+        chrono::Local::now(),
+        metadata.cpu.clone(),
+    )?;
+
     let preflight_failures = if no_preflight || eval_sets.is_empty() {
         HashMap::new()
     } else {
@@ -208,19 +198,7 @@ pub fn der(args: DerArgs) -> Result<()> {
             &models_dir,
             &seg_model,
             &emb_model,
-            &DerArgs {
-                dataset_id: dataset_id.clone(),
-                file: file.clone(),
-                rttm: rttm.clone(),
-                max_files,
-                max_minutes,
-                description: description.clone(),
-                impls: impls.clone(),
-                no_preflight,
-                seg_batch_size,
-                emb_batch_size,
-                sleep_between,
-            },
+            &selected_impls,
             pyannote_batch_sizes,
         )?
     };
@@ -261,7 +239,7 @@ pub fn der(args: DerArgs) -> Result<()> {
             models_dir: &models_dir,
             seg_model: &seg_model,
             emb_model: &emb_model,
-            impls,
+            implementations: &selected_impls,
             total_audio_seconds,
             preflight_failures: &preflight_failures,
             sleep_between: sleep_between.map(Duration::from_secs),

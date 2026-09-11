@@ -10,7 +10,7 @@ use super::{
     BatchCommandRunner, DerAccumulation, DerImplResult, ImplType, PyannoteBatchSizes,
     PyannoteRsFileRunner,
 };
-use crate::catalog::ImplementationId;
+use crate::catalog::{ImplementationId, ImplementationSpec};
 use crate::cmd::run_cmd;
 
 pub(super) type DerResults = (
@@ -24,7 +24,7 @@ pub(super) struct DerRunContext<'a> {
     pub models_dir: &'a Path,
     pub seg_model: &'a Path,
     pub emb_model: &'a Path,
-    pub impls: &'a [String],
+    pub implementations: &'a [&'static ImplementationSpec],
     pub total_audio_seconds: f64,
     pub preflight_failures: &'a HashMap<ImplementationId, String>,
     pub sleep_between: Option<Duration>,
@@ -182,17 +182,13 @@ pub(super) fn run_der_implementations(ctx: &DerRunContext<'_>) -> Result<DerResu
         ctx.emb_model,
         ctx.pyannote_batch_sizes,
     );
-    let implementations = selected_implementations(ctx.impls);
+    let implementations = selected_implementations(ctx.implementations);
     let wav_paths: Vec<&Path> = ctx.files.iter().map(|(wav, _)| wav.as_path()).collect();
     let mut all_results = HashMap::new();
     let batch_timeout = Duration::from_secs_f64((ctx.total_audio_seconds * 5.0).max(120.0));
 
     for (implementation_id, impl_type) in &implementations {
-        let impl_name = crate::catalog::ImplementationCatalog::all()
-            .iter()
-            .find(|spec| spec.id == *implementation_id)
-            .map(|spec| spec.display_name)
-            .unwrap_or(implementation_id.as_str());
+        let impl_name = crate::catalog::ImplementationCatalog::display_name(*implementation_id);
         println!("Running {impl_name}...");
 
         if let Some(reason) = ctx.preflight_failures.get(implementation_id) {

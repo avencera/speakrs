@@ -38,10 +38,6 @@ pub(super) fn handle_list_requests(args: &DerArgs) -> Result<bool> {
     Ok(false)
 }
 
-pub(super) fn validate_impls(impls: &[String]) -> Result<()> {
-    ImplementationCatalog::resolve_many(impls).map(|_| ())
-}
-
 pub(super) fn validate_single_file_mode(
     file: &Option<PathBuf>,
     rttm: &Option<PathBuf>,
@@ -84,25 +80,20 @@ pub(super) fn resolve_eval_datasets(
     )?])
 }
 
-pub(super) fn selected_implementations(impls: &[String]) -> Vec<(ImplementationId, ImplType)> {
-    ImplementationCatalog::resolve_many(impls)
-        .unwrap_or_default()
-        .into_iter()
+pub(super) fn selected_implementations(
+    implementations: &[&ImplementationSpec],
+) -> Vec<(ImplementationId, ImplType)> {
+    implementations
+        .iter()
         .map(|spec| (spec.id, to_impl_type(spec)))
         .collect()
 }
 
 pub(super) fn selected_preflight_implementations(
-    impls: &[String],
+    implementations: &[&ImplementationSpec],
 ) -> Vec<(ImplementationId, &'static str, ImplType)> {
-    ImplementationCatalog::resolve_many(impls)
-        .unwrap_or_default()
-        .into_iter()
+    implementations
+        .iter()
         .map(|spec| (spec.id, spec.display_name, to_impl_type(spec)))
         .collect()
-}
-
-pub(super) fn der_build_features(impls: &[String]) -> Vec<String> {
-    let selected = ImplementationCatalog::resolve_many(impls).unwrap_or_default();
-    ImplementationCatalog::cargo_features(&selected)
 }

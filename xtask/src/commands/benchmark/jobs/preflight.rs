@@ -33,11 +33,7 @@ pub(super) fn preflight(
     println!("=== Pre-flight check ({stem}, {duration:.0}s) ===");
 
     for (implementation_id, impl_type) in implementations {
-        let impl_name = crate::catalog::ImplementationCatalog::all()
-            .iter()
-            .find(|spec| spec.id == *implementation_id)
-            .map(|spec| spec.display_name)
-            .unwrap_or(implementation_id.as_str());
+        let impl_name = crate::catalog::ImplementationCatalog::display_name(*implementation_id);
         let result = match impl_type {
             ImplType::Speakrs(mode) => run_speakrs_gpu(models_dir, &preflight_files, mode, None),
             ImplType::Pyannote(device) => BatchCommandRunner::pyannote(
