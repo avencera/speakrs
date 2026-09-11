@@ -29,17 +29,17 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
-          rust-version: "1.88.0"
+          rust-version: "1.89.0"
           arguments: --no-default-features --features online,default-linalg,cuda,migraphx,load-dynamic,_metrics
 
   msrv:
-    name: MSRV Rust 1.88
+    name: MSRV Rust 1.89
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust 1.88
-        uses: dtolnay/rust-toolchain@1.88
+      - name: Install Rust 1.89
+        uses: dtolnay/rust-toolchain@1.89
 
       - name: Cache Rust builds
         uses: Swatinem/rust-cache@v2

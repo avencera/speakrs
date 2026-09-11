@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
-        | sh -s -- -y --default-toolchain 1.88.0 --profile minimal
+        | sh -s -- -y --default-toolchain 1.89.0 --profile minimal
 
 ENV CARGO_HOME=/root/.cargo \
     PATH=/root/.cargo/bin:${PATH} \
