@@ -1,5 +1,7 @@
 //! Typed implementation catalog for benchmark selection.
 
+use std::collections::HashSet;
+
 use color_eyre::eyre::{Result, bail};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -157,6 +159,24 @@ impl PlatformSet {
     pub const fn contains_linux(self) -> bool {
         matches!(self, Self::Linux | Self::All)
     }
+
+    /// Return whether this platform set includes the current target platform
+    pub const fn contains_current_platform(self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.contains_macos()
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            self.contains_linux()
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            false
+        }
+    }
 }
 
 /// Extra capabilities recorded for a catalog entry
@@ -180,6 +200,11 @@ pub struct ImplementationSpec {
 impl ImplementationSpec {
     pub const fn cli_name(self) -> &'static str {
         self.id.as_str()
+    }
+
+    /// Return whether this implementation can run on the current target platform
+    pub const fn is_current_platform_eligible(self) -> bool {
+        self.platforms.contains_current_platform()
     }
 }
 
@@ -312,22 +337,50 @@ impl ImplementationCatalog {
             .find(|spec| spec.cli_name() == name || spec.aliases.contains(&name))
     }
 
+    /// Return an implementation's display name, or its canonical ID if it is unresolved
+    pub fn display_name(id: ImplementationId) -> &'static str {
+        CATALOG
+            .iter()
+            .find(|spec| spec.id == id)
+            .map(|spec| spec.display_name)
+            .unwrap_or(id.as_str())
+    }
+
     pub fn resolve_many(names: &[String]) -> Result<Vec<&'static ImplementationSpec>> {
         if names.is_empty() {
-            return Ok(CATALOG.iter().collect());
+            return Ok(CATALOG
+                .iter()
+                .filter(|spec| spec.is_current_platform_eligible())
+                .collect());
         }
         let mut selected = Vec::new();
+        let mut selected_ids = HashSet::new();
         for name in names {
             if name == "list" {
                 continue;
             }
             let Some(spec) = Self::parse_cli(name) else {
-                let available: Vec<&str> = CATALOG.iter().map(|spec| spec.cli_name()).collect();
+                let available: Vec<&str> = CATALOG
+                    .iter()
+                    .filter(|spec| spec.is_current_platform_eligible())
+                    .map(|spec| spec.cli_name())
+                    .collect();
                 bail!(
                     "unknown implementation: {name}. Available: {}",
                     available.join(", ")
                 );
             };
+
+            if !spec.is_current_platform_eligible() {
+                bail!(
+                    "implementation {} is not available on the current platform",
+                    spec.cli_name()
+                );
+            }
+            if !selected_ids.insert(spec.id) {
+                bail!("duplicate implementation selection: {}", spec.cli_name());
+            }
+
             selected.push(spec);
         }
         Ok(selected)
@@ -408,5 +461,41 @@ mod tests {
     #[test]
     fn unknown_cli_name_is_rejected() {
         assert!(ImplementationCatalog::resolve_many(&["nope".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn default_selection_is_limited_to_the_current_platform() {
+        let selected = ImplementationCatalog::resolve_many(&[]).unwrap();
+
+        if cfg!(any(target_os = "macos", target_os = "linux")) {
+            assert!(!selected.is_empty());
+        } else {
+            assert!(selected.is_empty());
+        }
+        assert!(
+            selected
+                .iter()
+                .all(|spec| spec.is_current_platform_eligible())
+        );
+    }
+
+    #[test]
+    fn explicit_selection_rejects_unavailable_and_duplicate_ids() {
+        let unavailable = ImplementationCatalog::all()
+            .iter()
+            .find(|spec| !spec.is_current_platform_eligible());
+        if let Some(spec) = unavailable {
+            let error = ImplementationCatalog::resolve_many(&[spec.cli_name().to_owned()])
+                .expect_err("unavailable implementation should be rejected");
+            assert!(error.to_string().contains("not available"));
+        }
+
+        let spec = ImplementationCatalog::resolve_many(&[]).unwrap()[0];
+        let error = ImplementationCatalog::resolve_many(&[
+            spec.cli_name().to_owned(),
+            spec.aliases[0].to_owned(),
+        ])
+        .expect_err("duplicate implementation IDs should be rejected");
+        assert!(error.to_string().contains("duplicate implementation"));
     }
 }
