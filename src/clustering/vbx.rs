@@ -49,6 +49,9 @@ pub enum VbxConfigError {
     /// Historical smoothing number was non-finite
     #[error("VBx smoothing must be finite, got {0}")]
     NonFiniteSmoothing(f64),
+    /// Smoothed initialization scale was non-finite or not greater than zero
+    #[error("VBx smoothed initialization scale must be finite and greater than zero, got {0}")]
+    InvalidSmoothedScale(f64),
 }
 
 /// Variational Bayes HMM clustering settings.
@@ -95,7 +98,7 @@ impl VbxConfig {
         if let ResponsibilityInitialization::Smoothed(scale) = initialization
             && !(scale.is_finite() && scale > 0.0)
         {
-            return Err(VbxConfigError::NonFiniteSmoothing(scale));
+            return Err(VbxConfigError::InvalidSmoothedScale(scale));
         }
         Ok(Self {
             fa,
@@ -405,6 +408,18 @@ mod tests {
     }
 
     #[test]
+    fn gamma_init_is_hard_one_hot() {
+        let gamma = build_gamma_init(&[0, 0, 1], ResponsibilityInitialization::Hard);
+        assert_eq!(gamma, array![[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]]);
+    }
+
+    #[test]
+    fn gamma_init_is_uniform() {
+        let gamma = build_gamma_init(&[0, 0, 1], ResponsibilityInitialization::Uniform);
+        assert_eq!(gamma, array![[0.5, 0.5], [0.5, 0.5], [0.5, 0.5]]);
+    }
+
+    #[test]
     fn from_smoothing_maps_negative_zero_and_positive() {
         assert_eq!(
             ResponsibilityInitialization::from_smoothing(-1.0).unwrap(),
@@ -427,16 +442,21 @@ mod tests {
         assert!(VbxConfig::new(0.07, -1.0, 20, 1e-4, ResponsibilityInitialization::Hard).is_err());
         assert!(VbxConfig::new(0.07, 0.8, 0, 1e-4, ResponsibilityInitialization::Hard).is_err());
         assert!(VbxConfig::new(0.07, 0.8, 20, -1.0, ResponsibilityInitialization::Hard).is_err());
-        assert!(
-            VbxConfig::new(
+        for scale in [0.0, -1.0, f64::INFINITY] {
+            let error = VbxConfig::new(
                 0.07,
                 0.8,
                 20,
                 1e-4,
-                ResponsibilityInitialization::Smoothed(0.0)
+                ResponsibilityInitialization::Smoothed(scale),
             )
-            .is_err()
-        );
+            .unwrap_err();
+            let VbxConfigError::InvalidSmoothedScale(rejected) = error else {
+                panic!("expected invalid smoothed scale, got {error}");
+            };
+            assert_eq!(rejected, scale);
+            assert!(error.to_string().contains("finite and greater than zero"));
+        }
         assert_eq!(VbxConfig::default().max_iters(), 20);
         assert_eq!(
             VbxConfig::default().with_max_iters(3).unwrap().max_iters(),

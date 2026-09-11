@@ -93,15 +93,15 @@ fn remove_short_on(active: &mut [bool], min_duration: usize) {
     }
 }
 
-fn fill_short_off(active: &mut [bool], min_duration: usize) {
-    if min_duration == 0 {
+fn fill_short_off(active: &mut [bool], max_gap: usize) {
+    if max_gap == 0 {
         return;
     }
 
     let runs = find_runs(active, false);
     for (start, end) in runs {
         // only fill interior gaps (between ON regions)
-        if start > 0 && end < active.len() && end - start < min_duration {
+        if start > 0 && end < active.len() && end - start <= max_gap {
             active[start..end].fill(true);
         }
     }
@@ -160,6 +160,24 @@ mod tests {
         let config = ActivityCleanup::new(0, 2, 0, 0);
         let result = config.apply(&probs);
         let expected = array![[1.0], [1.0], [1.0], [1.0], [1.0]];
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn max_duration_off_fill() {
+        let probs = array![[0.8], [0.0], [0.0], [0.8]];
+        let config = ActivityCleanup::new(0, 2, 0, 0);
+        let result = config.apply(&probs);
+        let expected = array![[1.0], [1.0], [1.0], [1.0]];
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn longer_off_gap_is_preserved() {
+        let probs = array![[0.8], [0.0], [0.0], [0.0], [0.8]];
+        let config = ActivityCleanup::new(0, 2, 0, 0);
+        let result = config.apply(&probs);
+        let expected = array![[1.0], [0.0], [0.0], [0.0], [1.0]];
         assert_eq!(result, expected);
     }
 
