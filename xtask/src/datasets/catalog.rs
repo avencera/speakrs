@@ -247,6 +247,19 @@ impl DatasetSnapshot {
 
     /// Read and validate a published directory and its completion manifest
     pub fn from_paired_directory(dataset: DatasetId, dir: &Path) -> Result<Self> {
+        Self::from_paired_directory_with_hashes(dataset, dir, false)
+    }
+
+    /// Read and verify a published directory and its completion manifest
+    pub fn verify_paired_directory(dataset: DatasetId, dir: &Path) -> Result<Self> {
+        Self::from_paired_directory_with_hashes(dataset, dir, true)
+    }
+
+    fn from_paired_directory_with_hashes(
+        dataset: DatasetId,
+        dir: &Path,
+        verify_hashes: bool,
+    ) -> Result<Self> {
         let manifest_path = dir.join(DATASET_MANIFEST_FILE);
         let manifest: DatasetManifest = serde_json::from_reader(File::open(&manifest_path)?)
             .map_err(|error| {
@@ -257,7 +270,7 @@ impl DatasetSnapshot {
                 )
             })?;
         let files = scan_paired_directory(dataset, dir)?;
-        manifest.validate(dataset, dir, &files)?;
+        manifest.validate(dataset, dir, &files, verify_hashes)?;
         Ok(Self {
             dataset,
             files: files.into_boxed_slice(),
@@ -283,8 +296,12 @@ struct DatasetManifestFile {
     rttm: String,
     duration_seconds_millis: u64,
     wav_bytes: u64,
+    #[serde(default)]
+    wav_modified_nanos: Option<u128>,
     wav_sha256: String,
     rttm_bytes: u64,
+    #[serde(default)]
+    rttm_modified_nanos: Option<u128>,
     rttm_sha256: String,
 }
 
@@ -302,7 +319,13 @@ impl DatasetManifest {
         })
     }
 
-    fn validate(&self, dataset: DatasetId, dir: &Path, files: &[DatasetFile]) -> Result<()> {
+    fn validate(
+        &self,
+        dataset: DatasetId,
+        dir: &Path,
+        files: &[DatasetFile],
+        verify_hashes: bool,
+    ) -> Result<()> {
         if self.schema_version != DATASET_MANIFEST_VERSION {
             bail!(
                 "dataset {} has unsupported completion manifest version {}",
@@ -346,7 +369,7 @@ impl DatasetManifest {
                     file.file_id
                 )
             })?;
-            manifest_file.validate(file, dir)?;
+            manifest_file.validate(file, dir, verify_hashes)?;
         }
         Ok(())
     }
@@ -354,19 +377,23 @@ impl DatasetManifest {
 
 impl DatasetManifestFile {
     fn from_file(file: &DatasetFile, dir: &Path) -> Result<Self> {
+        let wav_metadata = file_metadata(&file.wav)?;
+        let rttm_metadata = file_metadata(&file.rttm)?;
         Ok(Self {
             file_id: file.file_id.clone(),
             wav: relative_file_name(dir, "wav", &file.wav)?,
             rttm: relative_file_name(dir, "rttm", &file.rttm)?,
             duration_seconds_millis: file.duration_seconds_millis,
-            wav_bytes: file_size(&file.wav)?,
+            wav_bytes: wav_metadata.bytes,
+            wav_modified_nanos: wav_metadata.modified_nanos,
             wav_sha256: sha256_file(&file.wav)?,
-            rttm_bytes: file_size(&file.rttm)?,
+            rttm_bytes: rttm_metadata.bytes,
+            rttm_modified_nanos: rttm_metadata.modified_nanos,
             rttm_sha256: sha256_file(&file.rttm)?,
         })
     }
 
-    fn validate(&self, file: &DatasetFile, dir: &Path) -> Result<()> {
+    fn validate(&self, file: &DatasetFile, dir: &Path, verify_hashes: bool) -> Result<()> {
         let expected_wav = relative_file_name(dir, "wav", &file.wav)?;
         let expected_rttm = relative_file_name(dir, "rttm", &file.rttm)?;
         if self.file_id != file.file_id
@@ -379,15 +406,27 @@ impl DatasetManifestFile {
                 file.file_id
             );
         }
-        let wav_bytes = file_size(&file.wav)?;
-        let rttm_bytes = file_size(&file.rttm)?;
-        if self.wav_bytes != wav_bytes || self.wav_sha256 != sha256_file(&file.wav)? {
+        let wav_metadata = file_metadata(&file.wav)?;
+        let rttm_metadata = file_metadata(&file.rttm)?;
+        let wav_metadata_matches = self.wav_modified_nanos.is_some()
+            && self.wav_bytes == wav_metadata.bytes
+            && self.wav_modified_nanos == wav_metadata.modified_nanos;
+        let rttm_metadata_matches = self.rttm_modified_nanos.is_some()
+            && self.rttm_bytes == rttm_metadata.bytes
+            && self.rttm_modified_nanos == rttm_metadata.modified_nanos;
+
+        if (verify_hashes || !wav_metadata_matches)
+            && (self.wav_bytes != wav_metadata.bytes || self.wav_sha256 != sha256_file(&file.wav)?)
+        {
             bail!(
                 "dataset WAV changed after publication: {}",
                 file.wav.display()
             );
         }
-        if self.rttm_bytes != rttm_bytes || self.rttm_sha256 != sha256_file(&file.rttm)? {
+        if (verify_hashes || !rttm_metadata_matches)
+            && (self.rttm_bytes != rttm_metadata.bytes
+                || self.rttm_sha256 != sha256_file(&file.rttm)?)
+        {
             bail!(
                 "dataset RTTM changed after publication: {}",
                 file.rttm.display()
@@ -523,6 +562,9 @@ fn collect_audio_files(
     let mut files = BTreeMap::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
+        if matches!(entry.file_name().to_str(), Some(".DS_Store" | "__MACOSX")) {
+            continue;
+        }
         let path = entry.path();
         let file_type = entry.file_type()?;
         if !file_type.is_file() {
@@ -632,8 +674,23 @@ fn relative_file_name(dir: &Path, subdir: &str, path: &Path) -> Result<String> {
     Ok(format!("{subdir}/{name}"))
 }
 
-fn file_size(path: &Path) -> Result<u64> {
-    Ok(fs::metadata(path)?.len())
+#[derive(Clone, Copy)]
+struct FileMetadata {
+    bytes: u64,
+    modified_nanos: Option<u128>,
+}
+
+fn file_metadata(path: &Path) -> Result<FileMetadata> {
+    let metadata = fs::metadata(path)?;
+    let modified_nanos = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos());
+    Ok(FileMetadata {
+        bytes: metadata.len(),
+        modified_nanos,
+    })
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
@@ -807,5 +864,24 @@ mod tests {
                 .iter()
                 .all(|file| file.duration_seconds() > 0.0)
         );
+    }
+
+    #[test]
+    fn archive_noise_is_ignored_but_dataset_files_are_validated() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav_dir = dir.path().join("wav");
+        let rttm_dir = dir.path().join("rttm");
+        std::fs::create_dir_all(wav_dir.join("__MACOSX")).unwrap();
+        std::fs::create_dir_all(&rttm_dir).unwrap();
+        write_test_wav(&wav_dir.join("recording.wav"));
+        std::fs::write(rttm_dir.join("recording.rttm"), b"").unwrap();
+        std::fs::write(wav_dir.join(".DS_Store"), b"archive metadata").unwrap();
+        std::fs::write(rttm_dir.join(".DS_Store"), b"archive metadata").unwrap();
+        std::fs::write(wav_dir.join("__MACOSX/.DS_Store"), b"archive metadata").unwrap();
+
+        let snapshot =
+            DatasetSnapshot::validate_staged(DatasetId::Aishell4, dir.path(), "test source")
+                .unwrap();
+        assert_eq!(snapshot.files().len(), 1);
     }
 }

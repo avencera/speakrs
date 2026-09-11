@@ -81,29 +81,29 @@ impl Dataset {
         }
 
         if self.source.try_tigris() {
-            let staging = create_staging_directory(base_dir, &self.id)?;
-            let result = S5cmd::try_download(&self.id, &staging).and_then(|downloaded| {
-                if !downloaded {
-                    return Ok(false);
-                }
-                self.publish_staged(
-                    dataset,
-                    &staging,
-                    &self.source.tigris_provenance(&self.id),
-                    base_dir,
-                    true,
-                )?;
-                Ok(true)
-            });
-            match result {
-                Ok(true) => return Ok(()),
-                Ok(false) => remove_staging_directory(&staging)?,
-                Err(error) => {
-                    eprintln!(
-                        "{}: Tigris acquisition was not published ({error}); trying direct source",
-                        self.id
-                    );
-                    remove_staging_directory(&staging)?;
+            let cache = acquisition_cache_directory(base_dir, &self.id)?;
+            let tigris_cache = cache.join("tigris");
+            fs::create_dir_all(&tigris_cache)?;
+            if S5cmd::try_download(&self.id, &tigris_cache)? {
+                let staging = create_staging_directory(base_dir, &self.id)?;
+                let result = copy_directory_contents(&tigris_cache, &staging).and_then(|()| {
+                    self.publish_staged(
+                        dataset,
+                        &staging,
+                        &self.source.tigris_provenance(&self.id),
+                        base_dir,
+                        true,
+                    )
+                });
+                match result {
+                    Ok(()) => return Ok(()),
+                    Err(error) => {
+                        eprintln!(
+                            "{}: Tigris acquisition was not published ({error}); trying direct source",
+                            self.id
+                        );
+                        remove_staging_directory(&staging)?;
+                    }
                 }
             }
         }
@@ -119,9 +119,10 @@ impl Dataset {
             .then(|| InstallationLock::acquire_shared(base_dir, "ami-ihm"))
             .transpose()?;
 
+        let cache = acquisition_cache_directory(base_dir, &self.id)?;
         let staging = create_staging_directory(base_dir, &self.id)?;
         let provenance = self.source.provenance(&self.id);
-        let result = self.acquire(&staging, base_dir);
+        let result = self.acquire(&staging, base_dir, &cache);
         if let Err(error) = result {
             if let Err(cleanup_error) = remove_staging_directory(&staging) {
                 return Err(eyre!(
@@ -157,6 +158,13 @@ impl Dataset {
         DatasetSnapshot::from_paired_directory(dataset, &self.dataset_dir(base_dir))
     }
 
+    /// Read a complete snapshot and verify all published file hashes
+    pub fn verified_snapshot(&self, base_dir: &Path) -> Result<DatasetSnapshot> {
+        let dataset = self.catalog_id()?;
+        let _lock = InstallationLock::acquire_shared(base_dir, &self.id)?;
+        DatasetSnapshot::verify_paired_directory(dataset, &self.dataset_dir(base_dir))
+    }
+
     fn snapshot_unlocked(&self, base_dir: &Path) -> Result<DatasetSnapshot> {
         DatasetSnapshot::from_paired_directory(self.catalog_id()?, &self.dataset_dir(base_dir))
     }
@@ -173,16 +181,16 @@ impl Dataset {
         }
     }
 
-    fn acquire(&self, staging: &Path, base_dir: &Path) -> Result<()> {
+    fn acquire(&self, staging: &Path, base_dir: &Path, cache: &Path) -> Result<()> {
         match &self.source {
-            Source::VoxConverseDev => voxconverse::ensure_dev(staging, base_dir),
-            Source::VoxConverseTest => voxconverse::ensure_test(staging),
-            Source::AmiIhm => ami::ensure_ihm(staging),
-            Source::AmiSdm => ami::ensure_sdm(staging, base_dir),
-            Source::Aishell4 => aishell4::ensure(staging),
-            Source::Earnings21 => earnings21::ensure(staging),
+            Source::VoxConverseDev => voxconverse::ensure_dev(staging, base_dir, cache),
+            Source::VoxConverseTest => voxconverse::ensure_test(staging, cache),
+            Source::AmiIhm => ami::ensure_ihm(staging, cache),
+            Source::AmiSdm => ami::ensure_sdm(staging, base_dir, cache),
+            Source::Aishell4 => aishell4::ensure(staging, cache),
+            Source::Earnings21 => earnings21::ensure(staging, cache),
             Source::AliMeeting => alimeeting::ensure(staging),
-            Source::Hf { repo } => ensure_hf(&self.display_name, repo, staging),
+            Source::Hf { repo } => ensure_hf(&self.display_name, repo, staging, cache),
             #[cfg(test)]
             Source::Local { root, .. } => copy_directory_contents(root, staging),
         }
@@ -304,6 +312,12 @@ fn installation_lock_path(base_dir: &Path, dataset_id: &str) -> PathBuf {
     base_dir.join(format!(".{dataset_id}.install.lock"))
 }
 
+fn acquisition_cache_directory(base_dir: &Path, dataset_id: &str) -> Result<PathBuf> {
+    let path = base_dir.join(".cache").join(dataset_id);
+    fs::create_dir_all(&path)?;
+    Ok(path)
+}
+
 fn create_staging_directory(base_dir: &Path, dataset_id: &str) -> Result<PathBuf> {
     for _ in 0..100 {
         let serial = STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -337,8 +351,8 @@ fn remove_stale_staging(base_dir: &Path, dataset_id: &str) -> Result<()> {
     for entry in fs::read_dir(base_dir)? {
         let entry = entry?;
         let name = entry.file_name();
-        if name.to_string_lossy().starts_with(&prefix) && entry.path().is_dir() {
-            fs::remove_dir_all(entry.path())?;
+        if name.to_string_lossy().starts_with(&prefix) {
+            remove_staging_directory(&entry.path())?;
         }
     }
     Ok(())
@@ -379,7 +393,13 @@ fn recover_interrupted_installation(
             let invalid = unique_recovery_path(base_dir, dataset_id);
             fs::rename(&final_dir, &invalid)?;
             if let Err(error) = fs::rename(&recovery, &final_dir) {
-                let _ = fs::rename(&invalid, &final_dir);
+                if let Err(restore_error) = fs::rename(&invalid, &final_dir) {
+                    return Err(eyre!(
+                        "recovering dataset {} failed ({error}); restoring invalid installation also failed ({restore_error}); recovery directory: {}",
+                        dataset_id,
+                        invalid.display()
+                    ));
+                }
                 return Err(error.into());
             }
             remove_staging_directory(&invalid)?;
@@ -387,7 +407,7 @@ fn recover_interrupted_installation(
         }
     }
     for stale in previous {
-        let _ = fs::remove_dir_all(stale);
+        fs::remove_dir_all(stale)?;
     }
     Ok(())
 }
@@ -398,7 +418,7 @@ fn unique_recovery_path(base_dir: &Path, dataset_id: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
     base_dir.join(format!(
-        ".{dataset_id}.recovery-{}-{timestamp}-{serial}",
+        ".{dataset_id}.recovery-{timestamp:020}-{}-{serial:020}",
         std::process::id()
     ))
 }
@@ -415,7 +435,7 @@ fn validate_source_manifest(dataset: DatasetId, staging: &Path, required: bool) 
         }
         return Ok(());
     }
-    DatasetSnapshot::from_paired_directory(dataset, staging).map_err(|error| {
+    DatasetSnapshot::verify_paired_directory(dataset, staging).map_err(|error| {
         eyre!(
             "dataset {} source completion manifest is invalid at {}: {error}",
             dataset.as_str(),
@@ -432,10 +452,13 @@ fn publish_staging_directory(staging: &Path, final_dir: &Path, dataset_id: &str)
             final_dir.display()
         )
     })?;
+    let serial = STAGING_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
     let previous = base_dir.join(format!(
-        ".{dataset_id}.previous-{}-{}",
+        ".{dataset_id}.previous-{timestamp:020}-{}-{serial:020}",
         std::process::id(),
-        STAGING_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
     let had_previous = final_dir.exists();
     if had_previous {
@@ -453,15 +476,12 @@ fn publish_staging_directory(staging: &Path, final_dir: &Path, dataset_id: &str)
         return Err(error.into());
     }
 
-    if had_previous && let Err(error) = fs::remove_dir_all(&previous) {
-        eprintln!(
-            "dataset {dataset_id} published, but stale previous installation could not be removed: {error}"
-        );
+    if had_previous {
+        fs::remove_dir_all(&previous)?;
     }
     Ok(())
 }
 
-#[cfg(test)]
 fn copy_directory_contents(source: &Path, destination: &Path) -> Result<()> {
     for entry in fs::read_dir(source)? {
         let entry = entry?;
@@ -612,14 +632,14 @@ impl S5cmd {
         )
     }
 
-    /// Try s5cmd download into a staging directory
-    fn try_download(dataset_id: &str, staging_dir: &Path) -> Result<bool> {
+    /// Try s5cmd download into a stable acquisition cache
+    fn try_download(dataset_id: &str, cache_dir: &Path) -> Result<bool> {
         if !Self::available() {
             return Ok(false);
         }
 
         println!("=== Downloading {dataset_id} via s5cmd from Tigris ===");
-        match Self::sync(dataset_id, staging_dir) {
+        match Self::sync(dataset_id, cache_dir) {
             Ok(()) => Ok(true),
             Err(e) => {
                 println!("{dataset_id}: s5cmd failed ({e}), falling back to direct download");
@@ -644,24 +664,15 @@ fn hf_download(repo: &str, local_dir: &Path) -> Result<()> {
     )
 }
 
-fn ensure_hf(display_name: &str, repo: &str, dir: &Path) -> Result<()> {
+fn ensure_hf(display_name: &str, repo: &str, dir: &Path, cache: &Path) -> Result<()> {
     let wav_dir = dir.join("wav");
     let rttm_dir = dir.join("rttm");
     println!("=== Downloading {display_name} from HuggingFace ===");
-    let tmp_name = repo.replace('/', "-");
-    let tmp_dir = dir.join(format!(
-        ".{tmp_name}-hf-{}-{}",
-        std::process::id(),
-        STAGING_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let _ = fs::remove_dir_all(&tmp_dir);
-    if let Err(error) = hf_download(repo, &tmp_dir) {
-        let _ = fs::remove_dir_all(&tmp_dir);
-        return Err(error);
-    }
+    let hf_dir = cache.join("huggingface");
+    hf_download(repo, &hf_dir)?;
 
     // hf datasets use parquet format with embedded audio
-    let parquet_dir = tmp_dir.join("data");
+    let parquet_dir = hf_dir.join("data");
     let extract_script = crate::cmd::project_root().join("scripts/extract_hf_dataset.py");
 
     println!("Extracting parquet to wav + rttm...");
@@ -675,7 +686,6 @@ fn ensure_hf(display_name: &str, repo: &str, dir: &Path) -> Result<()> {
             .args(["--split", "test"]),
     );
 
-    let _ = fs::remove_dir_all(&tmp_dir);
     extraction_result?;
     println!("{display_name} setup complete");
     Ok(())
@@ -685,6 +695,7 @@ fn ensure_hf(display_name: &str, repo: &str, dir: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    use std::fs::FileTimes;
     use std::io::Write;
     use std::sync::Arc;
     use std::thread;
@@ -728,6 +739,36 @@ mod tests {
             .write_all(b"changed")
             .unwrap();
         let error = dataset.snapshot(&install_dir).unwrap_err().to_string();
+        assert!(error.contains("WAV changed"), "{error}");
+    }
+
+    #[test]
+    fn verified_snapshot_rejects_same_metadata_content_changes() {
+        let temp_dir = TempDir::new().unwrap();
+        let source_dir = temp_dir.path().join("source");
+        write_fake_dataset(&source_dir, "sample", valid_rttm("sample"));
+        let install_dir = temp_dir.path().join("installed");
+        let dataset = local_dataset(&source_dir);
+        dataset.ensure(&install_dir).unwrap();
+
+        let wav_path = dataset.dataset_dir(&install_dir).join("wav/sample.wav");
+        let modified = fs::metadata(&wav_path).unwrap().modified().unwrap();
+        let mut bytes = fs::read(&wav_path).unwrap();
+        let last = bytes.last_mut().unwrap();
+        *last ^= 1;
+        fs::write(&wav_path, bytes).unwrap();
+        File::options()
+            .write(true)
+            .open(&wav_path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(modified))
+            .unwrap();
+
+        dataset.snapshot(&install_dir).unwrap();
+        let error = dataset
+            .verified_snapshot(&install_dir)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("WAV changed"), "{error}");
     }
 
@@ -849,13 +890,14 @@ mod tests {
     }
 
     #[test]
-    fn one_pair_legacy_voxconverse_directory_is_not_published() {
+    fn incomplete_legacy_voxconverse_directory_is_not_published() {
         let temp_dir = TempDir::new().unwrap();
         let base_dir = temp_dir.path().join("datasets");
         let legacy_dir = base_dir.join("voxconverse");
-        write_fake_dataset(&legacy_dir, "sample", valid_rttm("sample"));
+        fs::create_dir_all(legacy_dir.join("wav")).unwrap();
+        fs::create_dir_all(legacy_dir.join("rttm")).unwrap();
+        write_wav(&legacy_dir.join("wav/sample.wav"));
         let old_wav = fs::read(legacy_dir.join("wav/sample.wav")).unwrap();
-        let old_rttm = fs::read(legacy_dir.join("rttm/sample.rttm")).unwrap();
 
         let staging = base_dir.join("staging");
         fs::create_dir_all(&staging).unwrap();
@@ -881,9 +923,43 @@ mod tests {
             fs::read(legacy_dir.join("wav/sample.wav")).unwrap(),
             old_wav
         );
+    }
+
+    #[test]
+    fn partial_manifest_free_legacy_voxconverse_directory_is_not_migrated() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().join("datasets");
+        let legacy_dir = base_dir.join("voxconverse");
+        write_fake_dataset(&legacy_dir, "sample", valid_rttm("sample"));
+        let staging = base_dir.join("staging");
+        fs::create_dir_all(&staging).unwrap();
+
+        assert!(!voxconverse::migrate_verified_legacy_directory(&legacy_dir, &staging).unwrap());
+        assert!(fs::read_dir(staging).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn complete_manifest_free_legacy_voxconverse_directory_is_migrated() {
+        let temp_dir = TempDir::new().unwrap();
+        let base_dir = temp_dir.path().join("datasets");
+        let legacy_dir = base_dir.join("voxconverse");
+        for index in 0..voxconverse::VOXCONVERSE_DEV_FILE_COUNT {
+            let file_id = format!("sample-{index:03}");
+            write_fake_dataset(&legacy_dir, &file_id, valid_rttm(&file_id));
+        }
+        let staging = base_dir.join("staging");
+        fs::create_dir_all(&staging).unwrap();
+
+        assert!(voxconverse::migrate_verified_legacy_directory(&legacy_dir, &staging).unwrap());
+        let snapshot = DatasetSnapshot::validate_staged(
+            DatasetId::VoxconverseDev,
+            &staging,
+            "legacy VoxConverse installation",
+        )
+        .unwrap();
         assert_eq!(
-            fs::read(legacy_dir.join("rttm/sample.rttm")).unwrap(),
-            old_rttm
+            snapshot.files().len(),
+            voxconverse::VOXCONVERSE_DEV_FILE_COUNT
         );
     }
 
@@ -892,16 +968,18 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let base_dir = temp_dir.path().join("datasets");
         let legacy_dir = base_dir.join("voxconverse");
-        write_fake_dataset(&legacy_dir, "first", valid_rttm("first"));
-        write_fake_dataset(&legacy_dir, "second", valid_rttm("second"));
+        for index in 0..voxconverse::VOXCONVERSE_DEV_FILE_COUNT {
+            let file_id = format!("sample-{index:03}");
+            write_fake_dataset(&legacy_dir, &file_id, valid_rttm(&file_id));
+        }
         let dataset = Dataset::new("voxconverse-dev", "VoxConverse Dev", Source::VoxConverseDev);
         let provenance = dataset.source.provenance("voxconverse-dev");
         let snapshot =
             DatasetSnapshot::validate_staged(DatasetId::VoxconverseDev, &legacy_dir, &provenance)
                 .unwrap();
         snapshot.write_manifest(&legacy_dir).unwrap();
-        let old_wav = fs::read(legacy_dir.join("wav/first.wav")).unwrap();
-        let old_rttm = fs::read(legacy_dir.join("rttm/second.rttm")).unwrap();
+        let old_wav = fs::read(legacy_dir.join("wav/sample-000.wav")).unwrap();
+        let old_rttm = fs::read(legacy_dir.join("rttm/sample-001.rttm")).unwrap();
 
         let staging = base_dir.join("staging");
         fs::create_dir_all(&staging).unwrap();
@@ -918,11 +996,11 @@ mod tests {
 
         let installed_dir = dataset.dataset_dir(&base_dir);
         assert_eq!(
-            fs::read(installed_dir.join("wav/first.wav")).unwrap(),
+            fs::read(installed_dir.join("wav/sample-000.wav")).unwrap(),
             old_wav
         );
         assert_eq!(
-            fs::read(installed_dir.join("rttm/second.rttm")).unwrap(),
+            fs::read(installed_dir.join("rttm/sample-001.rttm")).unwrap(),
             old_rttm
         );
         assert!(dataset.snapshot(&base_dir).is_ok());

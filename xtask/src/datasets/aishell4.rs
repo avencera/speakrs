@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Result, eyre};
 
 use crate::cmd::run_cmd;
 use crate::convert::convert_to_16k_mono;
@@ -10,7 +10,7 @@ use crate::path::file_stem_string;
 
 /// AISHELL-4 test set -- Mandarin conference meetings
 /// Audio (FLAC) + RTTM from OpenSLR
-pub fn ensure(dir: &Path) -> Result<()> {
+pub fn ensure(dir: &Path, cache: &Path) -> Result<()> {
     let wav_dir = dir.join("wav");
     let rttm_dir = dir.join("rttm");
 
@@ -19,17 +19,32 @@ pub fn ensure(dir: &Path) -> Result<()> {
     }
 
     println!("=== Downloading AISHELL-4 test set (5.2 GB) ===");
-    let raw_dir = dir.join(".aishell4-raw");
+    let raw_dir = cache.join("raw");
     let tar_path = raw_dir.join("test.tar.gz");
 
     fs::create_dir_all(&raw_dir)?;
     if !tar_path.exists() {
-        run_cmd(
+        let partial_path = raw_dir.join("test.tar.gz.part");
+        if partial_path.exists() {
+            fs::remove_file(&partial_path)?;
+        }
+        let download_result = run_cmd(
             Command::new("curl")
                 .args(["--fail", "-L", "-o"])
-                .arg(&tar_path)
+                .arg(&partial_path)
                 .arg("https://openslr.trmal.net/resources/111/test.tar.gz"),
-        )?;
+        );
+        if let Err(error) = download_result {
+            if partial_path.exists()
+                && let Err(cleanup_error) = fs::remove_file(&partial_path)
+            {
+                return Err(eyre!(
+                    "AISHELL-4 download failed ({error}); partial cleanup failed ({cleanup_error})"
+                ));
+            }
+            return Err(error);
+        }
+        fs::rename(partial_path, &tar_path)?;
     }
 
     println!("Extracting...");
@@ -74,7 +89,6 @@ pub fn ensure(dir: &Path) -> Result<()> {
         }
     }
 
-    let _ = fs::remove_dir_all(&raw_dir);
     println!("AISHELL-4 setup complete");
 
     Ok(())
