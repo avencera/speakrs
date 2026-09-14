@@ -4,14 +4,14 @@ use ndarray::{Array2, Array3, s};
 
 use super::gpu::EmbeddedChunk;
 use super::{
-    ChunkEmbeddings, ChunkLayout, DecodedSegmentations, InferenceArtifacts, PipelineError,
+    ChunkEmbeddings, DecodedSegmentations, InferenceArtifacts, PipelineError, PipelineGeometry,
     invariant_error,
 };
 use crate::inference::embedding::EMBEDDING_WIDTH;
 #[cfg(feature = "_metrics")]
 use crate::pipeline::types::InternalInferenceStageTimings;
 
-pub(super) fn batch_embeddings(
+pub(crate) fn batch_embeddings(
     num_masks: usize,
     data: Vec<f32>,
     context: &str,
@@ -35,10 +35,10 @@ pub(super) fn batch_embeddings(
     })
 }
 
-pub(super) fn build_chunk_artifacts(
-    step_seconds: f64,
+pub(crate) fn build_chunk_artifacts(
     step_samples: usize,
     window_samples: usize,
+    audio_samples: usize,
     summary: super::EmbeddingSummary,
     #[cfg(feature = "_metrics")] stage_timings: InternalInferenceStageTimings,
 ) -> Result<InferenceArtifacts, PipelineError> {
@@ -49,12 +49,12 @@ pub(super) fn build_chunk_artifacts(
     }
 
     InferenceArtifacts::try_new(
-        ChunkLayout::new(
-            step_seconds,
-            step_samples,
-            window_samples,
-            summary.num_chunks,
-        ),
+        PipelineGeometry::from_legacy(
+            16_000,
+            window_samples as u64,
+            step_samples as u64,
+            audio_samples as u64,
+        )?,
         DecodedSegmentations(summary.segmentations),
         ChunkEmbeddings(summary.embeddings),
         #[cfg(feature = "_metrics")]
@@ -63,7 +63,7 @@ pub(super) fn build_chunk_artifacts(
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct CollectionPlan {
+pub(crate) struct CollectionPlan {
     file_index: usize,
     total_windows: usize,
     group_capacity: usize,
@@ -73,7 +73,7 @@ pub(super) struct CollectionPlan {
 }
 
 impl CollectionPlan {
-    pub(super) fn new(
+    pub(crate) fn new(
         file_index: usize,
         total_windows: usize,
         group_capacity: usize,
@@ -141,22 +141,22 @@ impl CollectionPlan {
         }
     }
 
-    pub(super) const fn group_capacity(self) -> usize {
+    pub(crate) const fn group_capacity(self) -> usize {
         self.group_capacity
     }
 
-    pub(super) const fn group_count(self) -> usize {
+    pub(crate) const fn group_count(self) -> usize {
         self.group_count
     }
 }
 
-pub(super) struct CollectedChunks {
-    pub(super) segmentations: Array3<f32>,
-    pub(super) embeddings: Array3<f32>,
-    pub(super) num_windows: usize,
+pub(crate) struct CollectedChunks {
+    pub(crate) segmentations: Array3<f32>,
+    pub(crate) embeddings: Array3<f32>,
+    pub(crate) num_windows: usize,
 }
 
-pub(super) struct FileCollector {
+pub(crate) struct FileCollector {
     plan: CollectionPlan,
     seg_array: Option<Array3<f32>>,
     emb_array: Option<Array3<f32>>,
@@ -165,7 +165,7 @@ pub(super) struct FileCollector {
 }
 
 impl FileCollector {
-    pub(super) fn new(plan: CollectionPlan) -> Self {
+    pub(crate) fn new(plan: CollectionPlan) -> Self {
         Self {
             plan,
             seg_array: None,
@@ -175,7 +175,7 @@ impl FileCollector {
         }
     }
 
-    pub(super) fn add(&mut self, embedded: EmbeddedChunk) -> Result<(), PipelineError> {
+    pub(crate) fn add(&mut self, embedded: EmbeddedChunk) -> Result<(), PipelineError> {
         let group = self.validate_identity(&embedded)?;
         let num_frames = self.validate_segmentations(&embedded)?;
         self.validate_embedding_geometry(&embedded)?;
@@ -345,11 +345,11 @@ impl FileCollector {
         Ok(())
     }
 
-    pub(super) fn is_complete(&self) -> bool {
+    pub(crate) fn is_complete(&self) -> bool {
         self.received_groups.iter().all(|received| *received)
     }
 
-    pub(super) fn finish(self) -> Result<CollectedChunks, PipelineError> {
+    pub(crate) fn finish(self) -> Result<CollectedChunks, PipelineError> {
         if !self.is_complete() {
             let missing: Vec<_> = self
                 .received_groups
@@ -383,20 +383,20 @@ impl FileCollector {
         })
     }
 
-    pub(super) fn into_artifacts(
+    pub(crate) fn into_artifacts(
         self,
-        step_seconds: f64,
         step_samples: usize,
         window_samples: usize,
+        audio_samples: usize,
     ) -> Result<InferenceArtifacts, PipelineError> {
         let collected = self.finish()?;
         InferenceArtifacts::try_new(
-            ChunkLayout::new(
-                step_seconds,
-                step_samples,
-                window_samples,
-                collected.num_windows,
-            ),
+            PipelineGeometry::from_legacy(
+                16_000,
+                window_samples as u64,
+                step_samples as u64,
+                audio_samples as u64,
+            )?,
             DecodedSegmentations(collected.segmentations),
             ChunkEmbeddings(collected.embeddings),
             #[cfg(feature = "_metrics")]
@@ -528,7 +528,7 @@ mod tests {
             prep_mask_us: 0,
         };
 
-        assert!(build_chunk_artifacts(1.0, 16_000, 160_000, summary).is_err());
+        assert!(build_chunk_artifacts(16_000, 160_000, 160_000, summary).is_err());
     }
 
     #[cfg(feature = "_metrics")]
@@ -553,6 +553,6 @@ mod tests {
             pipelined: false,
         };
 
-        assert!(build_chunk_artifacts(1.0, 16_000, 160_000, summary, timings).is_err());
+        assert!(build_chunk_artifacts(16_000, 160_000, 160_000, summary, timings).is_err());
     }
 }

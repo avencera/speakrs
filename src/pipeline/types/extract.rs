@@ -5,32 +5,33 @@ use crate::inference::embedding::{EmbeddingModel, MaskedEmbeddingInput, SplitTai
 use crate::pipeline::{MIN_SPEAKER_ACTIVITY, clean_masks, select_speaker_weights};
 use crate::reconstruct::aggregate_speaker_count;
 
+use super::PipelineGeometry;
 use super::{
-    ChunkEmbeddings, ChunkLayout, DecodedSegmentations, EmbeddingPath, PendingEmbedding,
-    PendingSplitEmbedding, PipelineError, SpeakerCountTrack,
+    ChunkEmbeddings, DecodedSegmentations, EmbeddingPath, PendingEmbedding, PendingSplitEmbedding,
+    PipelineError, SpeakerCountTrack,
 };
 
 impl DecodedSegmentations {
-    pub(in crate::pipeline) fn nchunks(&self) -> usize {
+    pub(crate) fn nchunks(&self) -> usize {
         self.0.shape()[0]
     }
 
-    pub(in crate::pipeline) fn num_speakers(&self) -> usize {
+    pub(crate) fn num_speakers(&self) -> usize {
         if self.0.ndim() < 3 {
             return 0;
         }
         self.0.shape()[2]
     }
 
-    pub(in crate::pipeline) fn speaker_count(&self, layout: &ChunkLayout) -> SpeakerCountTrack {
-        aggregate_speaker_count(self, &layout.start_frames, layout.output_frames)
+    pub(crate) fn speaker_count(&self, layout: &PipelineGeometry) -> SpeakerCountTrack {
+        aggregate_speaker_count(self, layout)
     }
 
-    pub(in crate::pipeline) fn extract_embeddings(
+    pub(crate) fn extract_embeddings(
         &self,
         audio: &[f32],
         emb_model: &mut EmbeddingModel,
-        layout: &ChunkLayout,
+        layout: &PipelineGeometry,
         embedding_path: EmbeddingPath,
     ) -> Result<ChunkEmbeddings, PipelineError> {
         let num_chunks = self.0.shape()[0];
@@ -60,7 +61,7 @@ impl DecodedSegmentations {
         &self,
         audio: &[f32],
         emb_model: &mut EmbeddingModel,
-        layout: &ChunkLayout,
+        layout: &PipelineGeometry,
         embeddings: &mut Array3<f32>,
     ) -> Result<(), PipelineError> {
         for chunk_idx in 0..self.0.shape()[0] {
@@ -81,7 +82,7 @@ impl DecodedSegmentations {
         &self,
         audio: &[f32],
         emb_model: &mut EmbeddingModel,
-        layout: &ChunkLayout,
+        layout: &PipelineGeometry,
         embeddings: &mut Array3<f32>,
     ) -> Result<(), PipelineError> {
         let mut storage = Array3Writer(embeddings);
@@ -126,7 +127,7 @@ impl DecodedSegmentations {
         &self,
         audio: &[f32],
         emb_model: &mut EmbeddingModel,
-        layout: &ChunkLayout,
+        layout: &PipelineGeometry,
         embeddings: &mut Array3<f32>,
     ) -> Result<(), PipelineError> {
         let batch_size = emb_model.split_primary_batch_size();
@@ -201,7 +202,7 @@ impl DecodedSegmentations {
         &self,
         audio: &[f32],
         emb_model: &mut EmbeddingModel,
-        layout: &ChunkLayout,
+        layout: &PipelineGeometry,
         embeddings: &mut Array3<f32>,
     ) -> Result<(), PipelineError> {
         let batch_size = emb_model.multi_mask_batch_size();
@@ -276,7 +277,7 @@ impl DecodedSegmentations {
     }
 }
 
-pub(in crate::pipeline) trait EmbeddingStorage {
+pub(crate) trait EmbeddingStorage {
     fn store(&mut self, chunk_idx: usize, speaker_idx: usize, embedding: &[f32]);
 }
 
@@ -296,7 +297,7 @@ fn store_row<S: EmbeddingStorage>(
 }
 
 /// Writes embeddings into a pre-allocated Array3 by (chunk, speaker) index
-pub(in crate::pipeline) struct Array3Writer<'a>(pub &'a mut Array3<f32>);
+pub(crate) struct Array3Writer<'a>(pub &'a mut Array3<f32>);
 
 impl EmbeddingStorage for Array3Writer<'_> {
     fn store(&mut self, chunk_idx: usize, speaker_idx: usize, embedding: &[f32]) {
@@ -306,7 +307,7 @@ impl EmbeddingStorage for Array3Writer<'_> {
     }
 }
 
-pub(in crate::pipeline) fn flush_masked<S: EmbeddingStorage>(
+pub(crate) fn flush_masked<S: EmbeddingStorage>(
     emb_model: &mut EmbeddingModel,
     pending: &[PendingEmbedding<'_>],
     storage: &mut S,
@@ -333,7 +334,7 @@ pub(in crate::pipeline) fn flush_masked<S: EmbeddingStorage>(
     Ok(())
 }
 
-pub(in crate::pipeline) fn flush_split<S: EmbeddingStorage>(
+pub(crate) fn flush_split<S: EmbeddingStorage>(
     emb_model: &mut EmbeddingModel,
     pending: &[PendingSplitEmbedding],
     fbanks: &[Array2<f32>],
@@ -360,7 +361,7 @@ pub(in crate::pipeline) fn flush_split<S: EmbeddingStorage>(
     Ok(())
 }
 
-pub(in crate::pipeline) fn flush_multi_mask<S: EmbeddingStorage>(
+pub(crate) fn flush_multi_mask<S: EmbeddingStorage>(
     emb_model: &mut EmbeddingModel,
     fbanks: &[Array2<f32>],
     masks: &[Vec<f32>],

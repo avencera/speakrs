@@ -10,19 +10,19 @@ use super::{
 };
 use crate::inference::embedding::FBANK_FRAMES;
 
-pub(super) enum ChunkExecution {
+pub(crate) enum ChunkExecution {
     Sequential,
     Pipelined { resources: ChunkEmbeddingResources },
 }
 
-pub(super) struct ChunkExecutionPlan {
-    pub layout: crate::pipeline::types::ChunkLayout,
+pub(crate) struct ChunkExecutionPlan {
+    pub layout: crate::pipeline::types::PipelineGeometry,
     pub collection: CollectionPlan,
     pub execution: ChunkExecution,
 }
 
 impl ChunkExecutionPlan {
-    pub(super) fn resolve(
+    pub(crate) fn resolve(
         seg_model: &SegmentationModel,
         emb_model: &mut EmbeddingModel,
         audio: &[f32],
@@ -51,17 +51,16 @@ impl ChunkExecutionPlan {
         };
 
         Ok(Some(Self {
-            layout: crate::pipeline::types::ChunkLayout::from_spec(
+            layout: crate::pipeline::types::PipelineGeometry::from_spec(
                 seg_model.window_spec(),
-                seg_model.step_seconds(),
-                0,
-            ),
+                audio.len(),
+            )?,
             collection,
             execution,
         }))
     }
 
-    pub(super) const fn is_pipelined(&self) -> bool {
+    pub(crate) const fn is_pipelined(&self) -> bool {
         matches!(self.execution, ChunkExecution::Pipelined { .. })
     }
 }
@@ -77,7 +76,7 @@ fn chunk_schedule_is_pipelined(estimated_chunks: usize) -> bool {
     }
 }
 
-pub(super) fn run_pipelined<'scope>(
+pub(crate) fn run_pipelined<'scope>(
     scope: &'scope std::thread::Scope<'scope, '_>,
     emb_start: std::time::Instant,
     resources: ChunkEmbeddingResources,
@@ -179,7 +178,7 @@ pub(super) fn run_pipelined<'scope>(
     })
 }
 
-pub(super) fn run_sequential_chunks(
+pub(crate) fn run_sequential_chunks(
     emb_model: &mut EmbeddingModel,
     chunk_rx: &Receiver<ChunkJob>,
     audio: &[f32],

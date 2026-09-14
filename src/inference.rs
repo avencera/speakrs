@@ -11,7 +11,12 @@ use std::path::PathBuf;
 #[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
 use std::sync::OnceLock;
 
-pub use embedding::EmbeddingModel;
+pub use embedding::{
+    EmbeddingArtifactMetadata, EmbeddingFrontend, EmbeddingGeometryError, EmbeddingInputError,
+    EmbeddingInputGeometry, EmbeddingMaskInterpolation, EmbeddingMetadataError, EmbeddingModel,
+    EmbeddingPooling, EmbeddingPrecision, EmbeddingRuntimeCapabilities, EmbeddingRuntimeCapability,
+    EmbeddingRuntimeProfile, Sha256Digest,
+};
 pub use segmentation::{SegmentationError, SegmentationModel};
 
 #[cfg(feature = "coreml")]

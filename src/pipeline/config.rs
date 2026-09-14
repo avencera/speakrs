@@ -3,7 +3,7 @@ use crate::inference::CoreMlComputeUnits;
 use crate::inference::ExecutionMode;
 #[cfg(feature = "_metrics")]
 use crate::pipeline::SphereVbxPfConfig;
-use crate::pipeline::{ActivityCleanup, AhcConfig, VbxConfig};
+use crate::pipeline::{ActivityCleanup, AhcConfig, PipelineGeometry, VbxConfig};
 
 /// Speaker clustering model and its valid configuration
 #[derive(Debug, Clone, Copy)]
@@ -175,8 +175,8 @@ impl CleanFrameDuration {
         self.0
     }
 
-    pub(crate) fn minimum_frames(self) -> f32 {
-        (self.0 / FRAME_STEP_SECONDS).floor() as f32
+    pub(crate) fn minimum_frames(self, geometry: &PipelineGeometry) -> f32 {
+        geometry.frame_count_for_duration(self.seconds())
     }
 }
 
@@ -737,6 +737,70 @@ pub(crate) const MIN_SPEAKER_ACTIVITY: f32 = 10.0;
 #[cfg(test)]
 mod clean_frame_duration_tests {
     use super::*;
+    use crate::imported_segmentation::{
+        AudioIdentity, ChannelSelection, Downmix, FrameGrid, OutputExtent, OutputExtentPolicy,
+        RationalSample, ResamplingIdentity, SegmentationGeometry, Sha256Digest, TailPolicy,
+        WindowPlanning, WindowPlanningKind,
+    };
+
+    fn wavlm_geometry() -> PipelineGeometry {
+        let digest = Sha256Digest::digest(b"wavlm test");
+        let audio = AudioIdentity {
+            channel_selection: ChannelSelection::First,
+            channels: 1,
+            downmix: Downmix::None,
+            original_recording_id: "test".to_owned(),
+            parent_recording_id: None,
+            resampling: ResamplingIdentity {
+                algorithm: "identity".to_owned(),
+                id: "audio.identity".to_owned(),
+                revision: "v1".to_owned(),
+                sha256: digest.clone(),
+            },
+            sample_count: 0,
+            sample_rate: 16_000,
+            waveform_sha256: digest,
+        };
+        let aggregate_grid = FrameGrid {
+            frame_count: 399,
+            origin: RationalSample {
+                numerator: 0,
+                denominator: 1,
+            },
+            step: RationalSample {
+                numerator: 320,
+                denominator: 1,
+            },
+            support: RationalSample {
+                numerator: 400,
+                denominator: 1,
+            },
+        };
+        let geometry = SegmentationGeometry {
+            aggregate_grid: aggregate_grid.clone(),
+            chunks: Vec::new(),
+            frame_grid: FrameGrid {
+                origin: RationalSample {
+                    numerator: -241,
+                    denominator: 2,
+                },
+                ..aggregate_grid
+            },
+            output_extent: OutputExtent {
+                end_samples: 0,
+                start_samples: 0,
+            },
+            output_extent_policy: OutputExtentPolicy::AggregateGrid,
+            window_planning: WindowPlanning {
+                kind: WindowPlanningKind::RegularFixedStepV1,
+                step_samples: 12_800,
+                tail_policy: TailPolicy::PadFinal,
+            },
+            window_samples: 128_000,
+        };
+
+        PipelineGeometry::from_imported(&audio, &geometry).unwrap()
+    }
 
     #[test]
     fn clustering_config_rejects_invalid_keep_threshold() {
@@ -774,7 +838,22 @@ mod clean_frame_duration_tests {
 
     #[test]
     fn default_clean_frame_duration_preserves_the_previous_frame_threshold() {
-        assert_eq!(CleanFrameDuration::default().minimum_frames(), 118.0);
+        let geometry = PipelineGeometry::from_legacy(16_000, 160_000, 16_000, 160_000).unwrap();
+
+        assert_eq!(
+            CleanFrameDuration::default().minimum_frames(&geometry),
+            118.0
+        );
+    }
+
+    #[test]
+    fn clean_frame_duration_uses_imported_aggregate_step() {
+        let geometry = wavlm_geometry();
+
+        assert_eq!(
+            CleanFrameDuration::default().minimum_frames(&geometry),
+            100.0
+        );
     }
 
     #[test]

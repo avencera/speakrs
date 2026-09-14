@@ -244,6 +244,8 @@ compile_error!("the `coreml` feature is only supported on macOS");
 
 pub(crate) mod binarize;
 pub(crate) mod clustering;
+/// Strict imported WavLM segmentation bundle contract
+pub mod imported_segmentation;
 /// Segmentation and embedding model wrappers
 pub mod inference;
 pub(crate) mod linalg;
@@ -255,7 +257,13 @@ pub mod models;
 /// High-level diarization pipeline and result types
 pub mod pipeline;
 pub(crate) mod powerset;
+pub(crate) mod rational;
 pub(crate) mod reconstruct;
+
+pub use pipeline::{
+    EmbeddingStageEntry, EmbeddingStageSnapshot, ImportedDecodeError, ImportedDiarizationPipeline,
+    ImportedPipelineError, canonical_waveform_digest, validate_waveform_identity,
+};
 /// Speaker segments, merging, and RTTM output
 pub mod segment;
 pub(crate) mod utils;
@@ -267,12 +275,12 @@ pub use models::ModelBundle;
 #[cfg_attr(docsrs, doc(cfg(feature = "online")))]
 pub use models::ModelManager;
 pub use pipeline::{
-    ActivityCleanup, AhcConfig, AhcConfigError, BatchInput, ClusteringBackend, ClusteringConfig,
-    ClusteringConfigError, DiarizationPipeline, DiarizationResult, OwnedDiarizationPipeline,
-    PipelineBuilder, PipelineConfig, PipelineError, QueueConfig, QueueError, QueueReceiver,
-    QueueReceiverIter, QueueSender, QueuedDiarizationJobId, QueuedDiarizationRequest,
-    QueuedDiarizationResult, ReconstructError, ResponsibilityInitialization, RuntimeConfig,
-    VbxConfig, VbxConfigError,
+    ActivityCleanup, AhcConfig, AhcConfigError, BatchInput, ChunkExtent, ClusteringBackend,
+    ClusteringConfig, ClusteringConfigError, DiarizationPipeline, DiarizationResult, FrameTiming,
+    OwnedDiarizationPipeline, PipelineBuilder, PipelineConfig, PipelineError, PipelineGeometry,
+    PipelineGeometryError, QueueConfig, QueueError, QueueReceiver, QueueReceiverIter, QueueSender,
+    QueuedDiarizationJobId, QueuedDiarizationRequest, QueuedDiarizationResult, ReconstructError,
+    ResponsibilityInitialization, RuntimeConfig, VbxConfig, VbxConfigError,
 };
 pub use segment::Segment;
 

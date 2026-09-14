@@ -3,6 +3,8 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use crate::inference::ModelLoadError;
+
+use super::clean_mask_threshold;
 #[cfg(feature = "coreml")]
 use crate::inference::coreml::coreml_model_path;
 
@@ -104,9 +106,12 @@ pub(super) fn select_mask<'a>(
         return mask;
     }
 
-    let min_mask_frames = (mask.len() * min_num_samples).div_ceil(num_samples) as f32;
+    let Some(min_mask_frames) = clean_mask_threshold(mask.len(), num_samples, min_num_samples)
+    else {
+        return mask;
+    };
     let clean_weight: f32 = clean_mask.iter().copied().sum();
-    if clean_weight > min_mask_frames {
+    if clean_weight > min_mask_frames as f32 {
         clean_mask
     } else {
         mask

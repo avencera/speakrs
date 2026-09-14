@@ -1,10 +1,41 @@
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use ndarray_npy::read_npy;
+use sha2::{Digest, Sha256};
 
+use crate::imported_segmentation::Sha256Digest;
 use crate::linalg::{Eigh, Inverse, LinalgError, UPLO};
 use crate::utils::l2_normalize_rows_f64;
+
+/// Stable identity for the fixed PLDA artifact accepted by the imported path
+pub const PLDA_ARTIFACT_ID: &str = "plda";
+/// Revision of the fixed PLDA artifact accepted by the imported path
+pub const PLDA_ARTIFACT_REVISION: &str = "b2-fixed";
+
+/// Verified identity receipt owned by a loaded PLDA artifact
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PldaArtifactReceipt {
+    sha256: Sha256Digest,
+}
+
+impl PldaArtifactReceipt {
+    /// Return the fixed PLDA artifact identity
+    pub const fn id(&self) -> &'static str {
+        PLDA_ARTIFACT_ID
+    }
+
+    /// Return the fixed PLDA artifact revision
+    pub const fn revision(&self) -> &'static str {
+        PLDA_ARTIFACT_REVISION
+    }
+
+    /// Return the verified digest of the complete PLDA artifact directory
+    pub fn sha256(&self) -> &Sha256Digest {
+        &self.sha256
+    }
+}
 
 /// PLDA transform computed entirely in f64 to match pyannote's numpy precision
 /// Parameters are stored as f64 internally, and the transform method returns f32
@@ -17,6 +48,7 @@ pub struct PldaTransform {
     mu: Array1<f64>,
     transform: Array2<f64>,
     phi: Array1<f64>,
+    receipt: PldaArtifactReceipt,
 }
 
 /// Projected embeddings paired with the matching PLDA eigenvalues
@@ -49,14 +81,18 @@ struct PldaParameters {
 
 impl PldaTransform {
     pub fn from_dir(models_dir: &Path) -> Result<Self, PldaError> {
-        Self::from_parameters(PldaParameters {
+        let mut transform = Self::from_parameters(PldaParameters {
             mean1: read_array1_f64(models_dir.join("plda_mean1.npy"))?,
             mean2: read_array1_f64(models_dir.join("plda_mean2.npy"))?,
             lda: read_array2_f64(models_dir.join("plda_lda.npy"))?,
             mu: read_array1_f64(models_dir.join("plda_mu.npy"))?,
             raw_transform: read_array2_f64(models_dir.join("plda_tr.npy"))?,
             psi: read_array1_f64(models_dir.join("plda_psi.npy"))?,
-        })
+        })?;
+        transform.receipt = PldaArtifactReceipt {
+            sha256: digest_tree(models_dir)?,
+        };
+        Ok(transform)
     }
 
     fn from_parameters(parameters: PldaParameters) -> Result<Self, PldaError> {
@@ -96,6 +132,10 @@ impl PldaTransform {
             transform.row_mut(dim_idx).assign(&eigenvectors.column(src));
         }
 
+        let receipt = PldaArtifactReceipt {
+            sha256: digest_parameters(&mean1, &mean2, &lda, &mu, &raw_transform, &psi),
+        };
+
         Ok(Self {
             mean1,
             mean2,
@@ -103,7 +143,13 @@ impl PldaTransform {
             mu,
             transform,
             phi,
+            receipt,
         })
+    }
+
+    /// Return the verified identity of the loaded PLDA artifact
+    pub fn receipt(&self) -> &PldaArtifactReceipt {
+        &self.receipt
     }
 
     /// Project embeddings and return features paired with matching eigenvalues
@@ -132,6 +178,111 @@ impl PldaTransform {
         let centered = embeddings - &self.mu;
         centered.dot(&self.transform.slice(s![..lda_dim, ..]).t())
     }
+}
+
+fn digest_parameters(
+    mean1: &Array1<f64>,
+    mean2: &Array1<f64>,
+    lda: &Array2<f64>,
+    mu: &Array1<f64>,
+    raw_transform: &Array2<f64>,
+    psi: &Array1<f64>,
+) -> Sha256Digest {
+    let mut digest = Sha256::new();
+    for (name, values) in [
+        ("mean1", mean1.as_slice().unwrap_or(&[])),
+        ("mean2", mean2.as_slice().unwrap_or(&[])),
+        ("lda", lda.as_slice().unwrap_or(&[])),
+        ("mu", mu.as_slice().unwrap_or(&[])),
+        ("transform", raw_transform.as_slice().unwrap_or(&[])),
+        ("psi", psi.as_slice().unwrap_or(&[])),
+    ] {
+        update_length_prefixed(&mut digest, name.as_bytes());
+        digest.update((values.len() as u64).to_le_bytes());
+        for value in values {
+            digest.update(value.to_le_bytes());
+        }
+    }
+    Sha256Digest::digest(&digest.finalize())
+}
+
+fn digest_tree(root: &Path) -> Result<Sha256Digest, PldaError> {
+    let metadata = fs::symlink_metadata(root).map_err(|error| PldaError::ArtifactIo {
+        path: root.to_owned(),
+        message: error.to_string(),
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(PldaError::ArtifactIo {
+            path: root.to_owned(),
+            message: "must be a real directory".to_owned(),
+        });
+    }
+    let mut files = Vec::new();
+    collect_files(root, root, &mut files)?;
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut digest = Sha256::new();
+    for (relative, path) in files {
+        let bytes = fs::read(&path).map_err(|error| PldaError::ArtifactIo {
+            path: path.clone(),
+            message: error.to_string(),
+        })?;
+        update_length_prefixed(&mut digest, relative.as_bytes());
+        digest.update((bytes.len() as u64).to_le_bytes());
+        digest.update(bytes);
+    }
+    Ok(Sha256Digest::digest(&digest.finalize()))
+}
+
+fn collect_files(
+    root: &Path,
+    current: &Path,
+    files: &mut Vec<(String, PathBuf)>,
+) -> Result<(), PldaError> {
+    let entries = fs::read_dir(current).map_err(|error| PldaError::ArtifactIo {
+        path: current.to_owned(),
+        message: error.to_string(),
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| PldaError::ArtifactIo {
+            path: current.to_owned(),
+            message: error.to_string(),
+        })?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|error| PldaError::ArtifactIo {
+            path: path.clone(),
+            message: error.to_string(),
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(PldaError::ArtifactIo {
+                path,
+                message: "symlinks are not allowed".to_owned(),
+            });
+        }
+        if metadata.is_dir() {
+            collect_files(root, &path, files)?;
+        } else if metadata.is_file() {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| PldaError::ArtifactIo {
+                    path: path.clone(),
+                    message: "file escaped artifact root".to_owned(),
+                })?
+                .to_string_lossy()
+                .replace('\\', "/");
+            files.push((relative, path));
+        } else {
+            return Err(PldaError::ArtifactIo {
+                path,
+                message: "unsupported artifact member".to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn update_length_prefixed(digest: &mut Sha256, bytes: &[u8]) {
+    digest.update((bytes.len() as u64).to_le_bytes());
+    digest.update(bytes);
 }
 
 fn validate_plda_parameters(
@@ -239,6 +390,14 @@ pub enum PldaError {
     /// Array file could not be read
     #[error(transparent)]
     Io(#[from] ndarray_npy::ReadNpyError),
+    /// The PLDA artifact inventory could not be inspected or read
+    #[error("plda artifact `{path}` is invalid or unreadable: {message}")]
+    ArtifactIo {
+        /// Path that failed inspection
+        path: PathBuf,
+        /// Inspection or read failure
+        message: String,
+    },
     /// Linear algebra failed while building the transform
     #[error(transparent)]
     Linalg(#[from] LinalgError),
@@ -296,6 +455,17 @@ mod tests {
         assert_eq!(projected.phi().len(), 128);
         assert_eq!(projected.features().dim(), (2, 128));
         assert!(projected.features().iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn loaded_models_have_a_stable_verified_receipt() {
+        let models_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/models");
+        let first = PldaTransform::from_dir(&models_dir).unwrap();
+        let second = PldaTransform::from_dir(&models_dir).unwrap();
+
+        assert_eq!(first.receipt(), second.receipt());
+        assert_eq!(first.receipt().id(), PLDA_ARTIFACT_ID);
+        assert_eq!(first.receipt().revision(), PLDA_ARTIFACT_REVISION);
     }
 
     #[test]

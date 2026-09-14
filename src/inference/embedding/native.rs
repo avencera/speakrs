@@ -8,8 +8,8 @@ use crate::inference::coreml::{CoreMlModel, GpuPrecision, SharedCoreMlModel};
 
 use super::plan::LazySession;
 use super::{
-    ChunkEmbeddingSession, ChunkResourceBundle, ChunkSessionInfo, EmbeddingModel,
-    array2_from_shape_vec, embedding_batch_from_coreml, fbank_hw_from_shape,
+    ChunkEmbeddingSession, ChunkResourceBundle, ChunkSessionInfo, EMBEDDING_WIDTH, EmbeddingModel,
+    array2_from_shape_vec, fbank_hw_from_shape,
 };
 
 mod loaders;
@@ -240,10 +240,11 @@ impl EmbeddingModel {
                 (&session.cached_masks_shape, masks),
             ])
             .map_err(|e| ort::Error::new(e.to_string()))?;
-        embedding_batch_from_coreml(
+        super::tensor::embedding_batch_from_coreml_with_width(
             tensor,
             session.num_masks,
             session.num_masks,
+            EMBEDDING_WIDTH,
             "chunk embedding session output",
         )
     }

@@ -1,6 +1,9 @@
 use ndarray::Array2;
 
+use crate::imported_segmentation::ArgmaxTie;
+
 /// Maps between powerset class indices and multi-speaker binary activations
+#[derive(Clone, Debug)]
 pub struct PowersetMapping {
     classes: Vec<Vec<usize>>,
     num_speakers: usize,
@@ -11,10 +14,10 @@ pub struct PowersetMapping {
 pub enum PowersetDecodeError {
     /// Logits had no class columns
     #[error("powerset logits have zero class columns")]
-    ZeroClassColumns,
+    Empty,
     /// Logits had fewer class columns than the mapping
     #[error("powerset logits have {actual} class columns, expected {expected}")]
-    TooFewClassColumns {
+    Fewer {
         /// Mapping class count
         expected: usize,
         /// Observed class count
@@ -22,7 +25,7 @@ pub enum PowersetDecodeError {
     },
     /// Logits had more class columns than the mapping
     #[error("powerset logits have {actual} class columns, expected {expected}")]
-    TooManyClassColumns {
+    More {
         /// Mapping class count
         expected: usize,
         /// Observed class count
@@ -50,6 +53,34 @@ impl PowersetMapping {
         self.classes.len()
     }
 
+    /// Build a mapping from an explicit ordered class-to-speaker list
+    pub(crate) fn from_ordered_subsets(
+        num_speakers: usize,
+        classes: Vec<Vec<usize>>,
+    ) -> Result<Self, PowersetMappingError> {
+        if num_speakers == 0 {
+            return Err(PowersetMappingError::ZeroSpeakers);
+        }
+
+        let mut seen = std::collections::BTreeSet::new();
+        for (class, subset) in classes.iter().enumerate() {
+            if subset.windows(2).any(|window| window[0] >= window[1]) {
+                return Err(PowersetMappingError::UnsortedSubset { class });
+            }
+            if subset.iter().any(|&speaker| speaker >= num_speakers) {
+                return Err(PowersetMappingError::SpeakerOutOfRange { class });
+            }
+            if !seen.insert(subset.clone()) {
+                return Err(PowersetMappingError::DuplicateSubset { class });
+            }
+        }
+
+        Ok(Self {
+            classes,
+            num_speakers,
+        })
+    }
+
     #[cfg(test)]
     fn class_row(&self, class: usize) -> Vec<f32> {
         let mut row = vec![0.0f32; self.num_speakers];
@@ -61,34 +92,74 @@ impl PowersetMapping {
 
     /// Hard decode powerset logits to binary speaker activations
     pub fn hard_decode(&self, logits: &Array2<f32>) -> Result<Array2<f32>, PowersetDecodeError> {
+        self.hard_decode_with_tie(logits, ArgmaxTie::Last)
+    }
+
+    /// Hard decode scores with an explicit first- or last-class tie rule
+    pub(crate) fn hard_decode_with_tie(
+        &self,
+        logits: &Array2<f32>,
+        tie: ArgmaxTie,
+    ) -> Result<Array2<f32>, PowersetDecodeError> {
         let num_frames = logits.nrows();
         let expected = self.num_powerset_classes();
         let actual = logits.ncols();
         if actual == 0 {
-            return Err(PowersetDecodeError::ZeroClassColumns);
+            return Err(PowersetDecodeError::Empty);
         }
         if actual < expected {
-            return Err(PowersetDecodeError::TooFewClassColumns { expected, actual });
+            return Err(PowersetDecodeError::Fewer { expected, actual });
         }
         if actual > expected {
-            return Err(PowersetDecodeError::TooManyClassColumns { expected, actual });
+            return Err(PowersetDecodeError::More { expected, actual });
         }
 
         let mut output = Array2::zeros((num_frames, self.num_speakers));
         for frame in 0..num_frames {
             let row = logits.row(frame);
-            let class = row
-                .iter()
-                .enumerate()
-                .max_by(|(_, left), (_, right)| left.total_cmp(right))
-                .map(|(idx, _)| idx)
-                .unwrap_or(0);
+            let mut class = 0;
+            for (idx, value) in row.iter().enumerate().skip(1) {
+                let ordering = value.total_cmp(&row[class]);
+                let replace = match tie {
+                    ArgmaxTie::First => ordering.is_gt(),
+                    ArgmaxTie::Last => ordering.is_ge(),
+                };
+                if replace {
+                    class = idx;
+                }
+            }
             for &speaker in &self.classes[class] {
                 output[[frame, speaker]] = 1.0;
             }
         }
         Ok(output)
     }
+}
+
+/// Invalid explicit powerset class mappings
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum PowersetMappingError {
+    /// A mapping cannot contain zero local speakers
+    #[error("powerset mapping must contain at least one speaker")]
+    ZeroSpeakers,
+    /// A class subset is not strictly increasing
+    #[error("powerset class {class} is not sorted or contains a duplicate speaker")]
+    UnsortedSubset {
+        /// Invalid class index
+        class: usize,
+    },
+    /// A class subset references a missing local speaker
+    #[error("powerset class {class} references a speaker outside the mapping")]
+    SpeakerOutOfRange {
+        /// Invalid class index
+        class: usize,
+    },
+    /// Two class columns have the same subset
+    #[error("powerset class {class} duplicates an earlier subset")]
+    DuplicateSubset {
+        /// Later duplicate class index
+        class: usize,
+    },
 }
 
 /// Generate all combinations of `size` items from `0..total` in lexicographic order
@@ -308,12 +379,12 @@ mod tests {
         let empty = Array2::<f32>::zeros((1, 0));
         assert!(matches!(
             pm.hard_decode(&empty),
-            Err(PowersetDecodeError::ZeroClassColumns)
+            Err(PowersetDecodeError::Empty)
         ));
         let short = Array2::<f32>::zeros((1, 3));
         assert!(matches!(
             pm.hard_decode(&short),
-            Err(PowersetDecodeError::TooFewClassColumns {
+            Err(PowersetDecodeError::Fewer {
                 expected: 7,
                 actual: 3
             })
@@ -321,7 +392,7 @@ mod tests {
         let long = Array2::<f32>::zeros((1, 8));
         assert!(matches!(
             pm.hard_decode(&long),
-            Err(PowersetDecodeError::TooManyClassColumns {
+            Err(PowersetDecodeError::More {
                 expected: 7,
                 actual: 8
             })

@@ -11,7 +11,9 @@ use crate::utils::cosine_similarity;
 
 use super::config::ClusteringBackend;
 use super::config::{CleanFrameDuration, MIN_SPEAKER_ACTIVITY, PipelineConfig};
-use super::types::{ChunkEmbeddings, ChunkSpeakerClusters, DecodedSegmentations, PipelineError};
+use super::types::{
+    ChunkEmbeddings, ChunkSpeakerClusters, DecodedSegmentations, PipelineError, PipelineGeometry,
+};
 
 pub(super) struct TrainingEmbeddings(pub Array2<f32>);
 
@@ -19,9 +21,10 @@ impl ChunkEmbeddings {
     pub(super) fn training_set(
         &self,
         segmentations: &DecodedSegmentations,
+        geometry: &PipelineGeometry,
         clean_frame_duration: CleanFrameDuration,
     ) -> TrainingEmbeddings {
-        let minimum_clean_frames = clean_frame_duration.minimum_frames();
+        let minimum_clean_frames = clean_frame_duration.minimum_frames(geometry);
         let mut filtered = Vec::new();
         let mut chunk_indices = Vec::new();
 

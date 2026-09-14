@@ -4,11 +4,14 @@ use crate::inference::ExecutionMode;
 use crate::pipeline::RuntimeConfig;
 
 use super::{
-    CHUNK_SPEAKER_BATCH_SIZE, PRIMARY_BATCH_SIZE, batched_model_path, multi_mask_model_path,
-    split_fbank_batched_model_path, split_fbank_model_path, split_tail_model_path,
+    CHUNK_SPEAKER_BATCH_SIZE, EmbeddingRuntimeCapabilities, PRIMARY_BATCH_SIZE, batched_model_path,
+    multi_mask_model_path, split_fbank_batched_model_path, split_fbank_model_path,
+    split_tail_model_path,
 };
 #[cfg(feature = "coreml")]
 use super::{ChunkSessionSpec, EmbeddingModel, fp32_coreml_path};
+#[cfg(test)]
+use super::{EmbeddingRuntimeCapability, EmbeddingRuntimeProfile};
 
 /// Discovered on-disk asset used by [`EmbeddingExecutionPlan`]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +76,7 @@ pub(crate) struct MultiMaskPlan {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EmbeddingExecutionPlan {
     mode: ExecutionMode,
+    capabilities: EmbeddingRuntimeCapabilities,
     pub(crate) fused: FusedPlan,
     pub(crate) split_fbank: SplitFilterbankPlan,
     pub(crate) split_tail: SplitTailPlan,
@@ -83,70 +87,149 @@ pub(crate) struct EmbeddingExecutionPlan {
 
 impl EmbeddingExecutionPlan {
     /// Snapshot usable assets once. Path selection must not re-read the file system.
+    #[cfg(test)]
     pub(crate) fn from_inventory(
         model_path: &Path,
         mode: ExecutionMode,
         #[cfg_attr(not(feature = "coreml"), allow(unused_variables))] config: &RuntimeConfig,
     ) -> Self {
+        Self::from_inventory_with_profile(
+            model_path,
+            mode,
+            config,
+            EmbeddingRuntimeProfile::LegacyOptimized,
+        )
+    }
+
+    /// Snapshot only the assets admitted by the primary model profile
+    #[cfg(test)]
+    pub(crate) fn from_inventory_with_profile(
+        model_path: &Path,
+        mode: ExecutionMode,
+        #[cfg_attr(not(feature = "coreml"), allow(unused_variables))] config: &RuntimeConfig,
+        profile: EmbeddingRuntimeProfile,
+    ) -> Self {
+        let capabilities = EmbeddingRuntimeCapabilities::for_profile(profile);
+        Self::from_inventory_with_capabilities(model_path, mode, config, capabilities)
+    }
+
+    pub(crate) fn from_inventory_with_capabilities(
+        model_path: &Path,
+        mode: ExecutionMode,
+        #[cfg_attr(not(feature = "coreml"), allow(unused_variables))] config: &RuntimeConfig,
+        capabilities: EmbeddingRuntimeCapabilities,
+    ) -> Self {
+        let profile = capabilities.profile();
+        let is_legacy = profile.is_legacy();
         let fused = FusedPlan {
             single: AssetSlot::if_exists(model_path.to_path_buf()),
-            batched: batched_model_path(model_path, PRIMARY_BATCH_SIZE)
+            batched: is_legacy
+                .then(|| batched_model_path(model_path, PRIMARY_BATCH_SIZE))
+                .flatten()
                 .and_then(AssetSlot::if_exists),
         };
         let split_fbank = SplitFilterbankPlan {
-            single: AssetSlot::if_exists(split_fbank_model_path(model_path)),
-            batched: AssetSlot::if_exists(split_fbank_batched_model_path(model_path)),
+            single: is_legacy
+                .then(|| AssetSlot::if_exists(split_fbank_model_path(model_path)))
+                .flatten(),
+            batched: is_legacy
+                .then(|| AssetSlot::if_exists(split_fbank_batched_model_path(model_path)))
+                .flatten(),
             #[cfg(feature = "coreml")]
-            native_single: native_slot(mode, fp32_coreml_path(&split_fbank_model_path(model_path))),
+            native_single: is_legacy
+                .then(|| native_slot(mode, fp32_coreml_path(&split_fbank_model_path(model_path))))
+                .flatten(),
             #[cfg(feature = "coreml")]
-            native_batched: native_slot(
-                mode,
-                fp32_coreml_path(&split_fbank_batched_model_path(model_path)),
-            ),
+            native_batched: is_legacy
+                .then(|| {
+                    native_slot(
+                        mode,
+                        fp32_coreml_path(&split_fbank_batched_model_path(model_path)),
+                    )
+                })
+                .flatten(),
             #[cfg(feature = "coreml")]
-            native_30s: native_slot(
-                mode,
-                model_path.with_file_name("wespeaker-fbank-30s.mlmodelc"),
-            ),
+            native_30s: is_legacy
+                .then(|| {
+                    native_slot(
+                        mode,
+                        model_path.with_file_name("wespeaker-fbank-30s.mlmodelc"),
+                    )
+                })
+                .flatten(),
         };
         let split_tail = SplitTailPlan {
-            single: AssetSlot::if_exists(split_tail_model_path(model_path, 1)),
-            batched: AssetSlot::if_exists(split_tail_model_path(
-                model_path,
-                CHUNK_SPEAKER_BATCH_SIZE,
-            )),
-            primary_batched: AssetSlot::if_exists(split_tail_model_path(
-                model_path,
-                PRIMARY_BATCH_SIZE,
-            )),
+            single: is_legacy
+                .then(|| AssetSlot::if_exists(split_tail_model_path(model_path, 1)))
+                .flatten(),
+            batched: is_legacy
+                .then(|| {
+                    AssetSlot::if_exists(split_tail_model_path(
+                        model_path,
+                        CHUNK_SPEAKER_BATCH_SIZE,
+                    ))
+                })
+                .flatten(),
+            primary_batched: is_legacy
+                .then(|| {
+                    AssetSlot::if_exists(split_tail_model_path(model_path, PRIMARY_BATCH_SIZE))
+                })
+                .flatten(),
             #[cfg(feature = "coreml")]
-            native_single: native_slot(
-                mode,
-                fp32_coreml_path(&split_tail_model_path(model_path, 1)),
-            ),
+            native_single: is_legacy
+                .then(|| {
+                    native_slot(
+                        mode,
+                        fp32_coreml_path(&split_tail_model_path(model_path, 1)),
+                    )
+                })
+                .flatten(),
             #[cfg(feature = "coreml")]
-            native_batched: native_slot(
-                mode,
-                fp32_coreml_path(&split_tail_model_path(model_path, CHUNK_SPEAKER_BATCH_SIZE)),
-            ),
+            native_batched: is_legacy
+                .then(|| {
+                    native_slot(
+                        mode,
+                        fp32_coreml_path(&split_tail_model_path(
+                            model_path,
+                            CHUNK_SPEAKER_BATCH_SIZE,
+                        )),
+                    )
+                })
+                .flatten(),
             #[cfg(feature = "coreml")]
-            native_primary_batched: native_slot(
-                mode,
-                fp32_coreml_path(&split_tail_model_path(model_path, PRIMARY_BATCH_SIZE)),
-            ),
+            native_primary_batched: is_legacy
+                .then(|| {
+                    native_slot(
+                        mode,
+                        fp32_coreml_path(&split_tail_model_path(model_path, PRIMARY_BATCH_SIZE)),
+                    )
+                })
+                .flatten(),
         };
         let multi_mask = MultiMaskPlan {
-            single: multi_mask_model_path(model_path, 1).and_then(AssetSlot::if_exists),
-            batched: multi_mask_model_path(model_path, PRIMARY_BATCH_SIZE)
-                .and_then(AssetSlot::if_exists),
+            single: is_legacy
+                .then(|| multi_mask_model_path(model_path, 1).and_then(AssetSlot::if_exists))
+                .flatten(),
+            batched: is_legacy
+                .then(|| {
+                    multi_mask_model_path(model_path, PRIMARY_BATCH_SIZE)
+                        .and_then(AssetSlot::if_exists)
+                })
+                .flatten(),
             #[cfg(feature = "coreml")]
-            native: native_slot(
-                mode,
-                fp32_coreml_path(&model_path.with_file_name("wespeaker-multimask-tail-b32.onnx")),
-            ),
+            native: is_legacy
+                .then(|| {
+                    native_slot(
+                        mode,
+                        fp32_coreml_path(
+                            &model_path.with_file_name("wespeaker-multimask-tail-b32.onnx"),
+                        ),
+                    )
+                })
+                .flatten(),
         };
         #[cfg(feature = "coreml")]
-        let chunk_ladder = if mode.is_coreml() {
+        let chunk_ladder = if is_legacy && mode.is_coreml() {
             EmbeddingModel::chunk_session_specs(model_path, mode, config)
         } else {
             Vec::new()
@@ -154,6 +237,7 @@ impl EmbeddingExecutionPlan {
 
         Self {
             mode,
+            capabilities,
             fused,
             split_fbank,
             split_tail,
@@ -164,10 +248,19 @@ impl EmbeddingExecutionPlan {
     }
 
     pub(crate) fn load_ort_split(&self) -> bool {
-        !self.mode.is_coreml()
+        self.capabilities
+            .supports(super::EmbeddingRuntimeCapability::LegacySplit)
+            && !self.mode.is_coreml()
     }
 
     pub(crate) fn prefers_chunk_embedding_path(&self) -> bool {
+        if !self
+            .capabilities
+            .supports(super::EmbeddingRuntimeCapability::LegacyChunk)
+        {
+            return false;
+        }
+
         #[cfg(feature = "coreml")]
         if self.mode.is_coreml() {
             return self.split_fbank.native_single.is_some()
@@ -178,6 +271,13 @@ impl EmbeddingExecutionPlan {
     }
 
     pub(crate) fn split_primary_batch_size(&self) -> usize {
+        if !self
+            .capabilities
+            .supports(super::EmbeddingRuntimeCapability::LegacySplit)
+        {
+            return 0;
+        }
+
         #[cfg(feature = "coreml")]
         if self.mode.is_coreml() {
             return usize::from(self.split_tail.native_primary_batched.is_some())
@@ -191,6 +291,13 @@ impl EmbeddingExecutionPlan {
     }
 
     pub(crate) fn has_batched_fbank(&self) -> bool {
+        if !self
+            .capabilities
+            .supports(super::EmbeddingRuntimeCapability::LegacySplit)
+        {
+            return false;
+        }
+
         #[cfg(feature = "coreml")]
         if self.mode.is_coreml() {
             return self.split_fbank.native_batched.is_some();
@@ -200,6 +307,13 @@ impl EmbeddingExecutionPlan {
     }
 
     pub(crate) fn prefers_multi_mask_path(&self) -> bool {
+        if !self
+            .capabilities
+            .supports(super::EmbeddingRuntimeCapability::LegacyMultiMask)
+        {
+            return false;
+        }
+
         #[cfg(feature = "coreml")]
         if self.mode.is_coreml() {
             return self.multi_mask.native.is_some();
@@ -209,6 +323,13 @@ impl EmbeddingExecutionPlan {
     }
 
     pub(crate) fn multi_mask_batch_size(&self) -> usize {
+        if !self
+            .capabilities
+            .supports(super::EmbeddingRuntimeCapability::LegacyMultiMask)
+        {
+            return 0;
+        }
+
         #[cfg(feature = "coreml")]
         if self.mode.is_coreml() {
             return usize::from(self.multi_mask.native.is_some()) * super::MULTI_MASK_BATCH_SIZE;
@@ -224,6 +345,13 @@ impl EmbeddingExecutionPlan {
     }
 
     pub(crate) fn has_batched_tail(&self) -> bool {
+        if !self
+            .capabilities
+            .supports(super::EmbeddingRuntimeCapability::LegacySplit)
+        {
+            return false;
+        }
+
         #[cfg(feature = "coreml")]
         if self.mode.is_coreml() {
             return self.split_tail.native_batched.is_some();
@@ -337,6 +465,62 @@ mod tests {
         assert!(!plan.prefers_multi_mask_path());
         assert_eq!(plan.split_primary_batch_size(), 0);
         assert_eq!(plan.multi_mask_batch_size(), 0);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn generic_profile_rejects_legacy_assets_even_when_present() {
+        let dir = scratch_dir("generic");
+        for name in [
+            "wespeaker-voxceleb-resnet34.onnx",
+            "wespeaker-voxceleb-resnet34-b64.onnx",
+            "wespeaker-fbank.onnx",
+            "wespeaker-fbank-b32.onnx",
+            "wespeaker-voxceleb-resnet34-tail.onnx",
+            "wespeaker-voxceleb-resnet34-tail-b3.onnx",
+            "wespeaker-voxceleb-resnet34-tail-b64.onnx",
+            "wespeaker-multimask-tail.onnx",
+            "wespeaker-multimask-tail-b64.onnx",
+        ] {
+            touch(&dir, name);
+        }
+        let plan = EmbeddingExecutionPlan::from_inventory_with_profile(
+            &dir.join("wespeaker-voxceleb-resnet34.onnx"),
+            ExecutionMode::Cpu,
+            &RuntimeConfig::default(),
+            EmbeddingRuntimeProfile::GenericPerSpeakerMasked,
+        );
+        assert!(plan.fused.single.is_some());
+        assert!(plan.fused.batched.is_none());
+        assert!(!plan.load_ort_split());
+        assert!(!plan.prefers_chunk_embedding_path());
+        assert!(!plan.prefers_multi_mask_path());
+        assert_eq!(plan.split_primary_batch_size(), 0);
+        assert_eq!(plan.multi_mask_batch_size(), 0);
+        assert!(
+            plan.capabilities
+                .supports(EmbeddingRuntimeCapability::PerSpeakerMasked)
+        );
+        for capability in [
+            EmbeddingRuntimeCapability::LegacyFusedBatch,
+            EmbeddingRuntimeCapability::LegacySplit,
+            EmbeddingRuntimeCapability::LegacyMultiMask,
+            EmbeddingRuntimeCapability::LegacyChunk,
+        ] {
+            assert!(!plan.capabilities.supports(capability));
+        }
+
+        #[cfg(feature = "coreml")]
+        {
+            assert!(plan.split_fbank.native_single.is_none());
+            assert!(plan.split_fbank.native_batched.is_none());
+            assert!(plan.split_fbank.native_30s.is_none());
+            assert!(plan.split_tail.native_single.is_none());
+            assert!(plan.split_tail.native_batched.is_none());
+            assert!(plan.split_tail.native_primary_batched.is_none());
+            assert!(plan.multi_mask.native.is_none());
+            assert!(plan.chunk_ladder.is_empty());
+        }
         let _ = fs::remove_dir_all(dir);
     }
 

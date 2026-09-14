@@ -2,11 +2,11 @@ use ndarray::{Array2, s};
 
 use crate::pipeline::{
     ChunkSpeakerClusters, DecodedSegmentations, DiscreteDiarization, FrameActivations,
-    SpeakerCountTrack,
+    PipelineGeometry, SpeakerCountTrack,
 };
 
 /// Invalid reconstruction inputs
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ReconstructError {
     /// Cluster rows do not match the number of segmentation chunks
     #[error("cluster rows {actual} do not match segmentation chunks {expected}")]
@@ -24,27 +24,38 @@ pub enum ReconstructError {
         /// Required cluster column count
         expected: usize,
     },
-    /// Start-frame count does not match the number of segmentation chunks
-    #[error("start-frame count {actual} does not match segmentation chunks {expected}")]
-    StartFramesMismatch {
-        /// Observed start-frame count
+    /// Geometry chunk count does not match the number of segmentation chunks
+    #[error("geometry chunk count {actual} does not match segmentation chunks {expected}")]
+    GeometryChunksMismatch {
+        /// Observed geometry chunk count
         actual: usize,
-        /// Required start-frame count
+        /// Required segmentation chunk count
         expected: usize,
     },
+    /// Segmentation frame count does not match the local geometry grid
+    #[error("segmentation frame count {actual} does not match geometry frames {expected}")]
+    SegmentationFramesMismatch {
+        /// Observed segmentation frame count
+        actual: usize,
+        /// Required local frame count
+        expected: usize,
+    },
+    /// Geometry timing could not be materialized
+    #[error("invalid geometry timing: {0}")]
+    GeometryTiming(String),
 }
 
 pub struct Reconstructor<'a> {
     segmentations: &'a DecodedSegmentations,
     hard_clusters: &'a ChunkSpeakerClusters,
-    start_frames: &'a [usize],
+    geometry: &'a PipelineGeometry,
 }
 
 impl<'a> Reconstructor<'a> {
     pub fn new(
         segmentations: &'a DecodedSegmentations,
         hard_clusters: &'a ChunkSpeakerClusters,
-        start_frames: &'a [usize],
+        geometry: &'a PipelineGeometry,
     ) -> Result<Self, ReconstructError> {
         let num_chunks = segmentations.shape()[0];
         if hard_clusters.nrows() != num_chunks {
@@ -59,16 +70,26 @@ impl<'a> Reconstructor<'a> {
                 expected: segmentations.shape()[2],
             });
         }
-        if start_frames.len() != num_chunks {
-            return Err(ReconstructError::StartFramesMismatch {
-                actual: start_frames.len(),
+        if geometry.chunk_count() != num_chunks {
+            return Err(ReconstructError::GeometryChunksMismatch {
+                actual: geometry.chunk_count(),
                 expected: num_chunks,
             });
         }
+        if num_chunks > 0 && segmentations.shape()[1] != geometry.frame_grid().frame_count as usize
+        {
+            return Err(ReconstructError::SegmentationFramesMismatch {
+                actual: segmentations.shape()[1],
+                expected: geometry.frame_grid().frame_count as usize,
+            });
+        }
+        geometry
+            .frame_timing()
+            .map_err(|error| ReconstructError::GeometryTiming(error.to_string()))?;
         Ok(Self {
             segmentations,
             hard_clusters,
-            start_frames,
+            geometry,
         })
     }
 
@@ -82,9 +103,15 @@ impl<'a> Reconstructor<'a> {
             .filter(|cluster| *cluster >= 0)
             .max()
             .map_or(0, |cluster| cluster as usize + 1);
-        let mut activations = Array2::<f32>::zeros((speaker_count.len(), num_clusters));
+        let mut activations = Array2::<f32>::zeros((self.geometry.output_frames(), num_clusters));
 
-        for (chunk_idx, &start_frame) in self.start_frames.iter().enumerate().take(num_chunks) {
+        for (chunk_idx, &start_frame) in self
+            .geometry
+            .start_frames()
+            .iter()
+            .enumerate()
+            .take(num_chunks)
+        {
             let chunk_labels = self.hard_clusters.row(chunk_idx);
             let chunk_segmentations = self.segmentations.slice(s![chunk_idx, .., ..]);
             let local_cluster_mapping = build_cluster_mapping(&chunk_labels, num_clusters);
@@ -129,7 +156,12 @@ impl<'a> Reconstructor<'a> {
                 discrete[[frame_idx, speaker_idx]] = 1.0;
             }
         }
-        DiscreteDiarization(discrete)
+        DiscreteDiarization::with_timing(
+            discrete,
+            self.geometry
+                .frame_timing()
+                .expect("validated geometry timing"),
+        )
     }
 
     pub fn reconstruct_smoothed(
@@ -150,7 +182,12 @@ impl<'a> Reconstructor<'a> {
             previous_speakers = current_speakers;
         }
 
-        DiscreteDiarization(discrete)
+        DiscreteDiarization::with_timing(
+            discrete,
+            self.geometry
+                .frame_timing()
+                .expect("validated geometry timing"),
+        )
     }
 }
 
@@ -258,8 +295,7 @@ fn top_k_indices_smoothed(
 
 pub(crate) fn aggregate_speaker_count(
     segmentations: &DecodedSegmentations,
-    start_frames: &[usize],
-    output_frames: usize,
+    geometry: &PipelineGeometry,
 ) -> SpeakerCountTrack {
     let num_chunks = segmentations.shape()[0];
     if num_chunks == 0 {
@@ -267,13 +303,13 @@ pub(crate) fn aggregate_speaker_count(
     }
 
     let num_frames = segmentations.shape()[1];
-    let mut numerator = vec![0.0f32; output_frames];
-    let mut denominator = vec![0.0f32; output_frames];
+    let mut numerator = vec![0.0f32; geometry.output_frames()];
+    let mut denominator = vec![0.0f32; geometry.output_frames()];
 
-    for (chunk_idx, &start_frame) in start_frames.iter().enumerate().take(num_chunks) {
+    for (chunk_idx, &start_frame) in geometry.start_frames().iter().enumerate().take(num_chunks) {
         for frame_idx in 0..num_frames {
             let out_frame = start_frame + frame_idx;
-            if out_frame >= output_frames {
+            if out_frame >= geometry.output_frames() {
                 continue;
             }
 
@@ -303,13 +339,12 @@ pub(crate) fn aggregate_speaker_count(
 fn round_ties_even(value: f32) -> f32 {
     let lower = value.floor();
     let fraction = value - lower;
-    let epsilon = 1e-6;
 
-    if fraction < 0.5 - epsilon {
+    if fraction < 0.5 {
         return lower;
     }
 
-    if fraction > 0.5 + epsilon {
+    if fraction > 0.5 {
         return value.ceil();
     }
 
@@ -333,23 +368,42 @@ mod tests {
             [[1.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
             [[0.0, 1.0], [0.0, 1.0], [1.0, 0.0]],
         ]);
-        let count = aggregate_speaker_count(&segmentations, &[0, 1], 4);
+        let geometry = PipelineGeometry::from_legacy(16_000, 160_000, 270, 160_001).unwrap();
+        let count = aggregate_speaker_count(&segmentations, &geometry);
 
-        assert_eq!(&*count, &[1, 1, 1, 1]);
+        assert_eq!(&count[..4], &[1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn speaker_count_rounds_nearest_even_ties() {
+        let mut values = ndarray::Array3::<f32>::zeros((1, 589, 2));
+        values.slice_mut(s![0, 0, ..]).assign(&array![0.5, 0.0]);
+        values.slice_mut(s![0, 1, ..]).assign(&array![1.5, 0.0]);
+        let segmentations = DecodedSegmentations(values);
+        let geometry = PipelineGeometry::from_legacy(16_000, 160_000, 270, 160_000).unwrap();
+
+        let count = aggregate_speaker_count(&segmentations, &geometry);
+
+        assert_eq!(&count[..2], &[0, 2]);
     }
 
     #[test]
     fn reconstruct_selects_top_k_per_frame() {
-        let segmentations =
-            DecodedSegmentations(array![[[1.0, 0.0], [0.5, 0.5]], [[0.0, 1.0], [0.2, 0.8]]]);
+        let mut values = ndarray::Array3::<f32>::zeros((2, 589, 2));
+        values.slice_mut(s![0, 0, ..]).assign(&array![1.0, 0.0]);
+        values.slice_mut(s![0, 1, ..]).assign(&array![0.5, 0.5]);
+        values.slice_mut(s![1, 0, ..]).assign(&array![0.0, 1.0]);
+        values.slice_mut(s![1, 1, ..]).assign(&array![0.2, 0.8]);
+        let segmentations = DecodedSegmentations(values);
         let hard_clusters = ChunkSpeakerClusters(array![[0, 1], [0, 1]]);
-        let reconstructor = Reconstructor::new(&segmentations, &hard_clusters, &[0, 1]).unwrap();
-        let speaker_count = SpeakerCountTrack(vec![1, 1, 1]);
+        let geometry = PipelineGeometry::from_legacy(16_000, 160_000, 270, 160_001).unwrap();
+        let reconstructor = Reconstructor::new(&segmentations, &hard_clusters, &geometry).unwrap();
+        let speaker_count = SpeakerCountTrack(vec![1; geometry.output_frames()]);
 
         let result = reconstructor.reconstruct(&speaker_count);
 
         let expected: Array2<f32> = array![[1.0, 0.0], [0.0, 1.0], [0.0, 1.0]];
-        assert_eq!(&*result, &expected);
+        assert_eq!(result.slice(s![..3, ..]), expected);
     }
 
     #[test]
@@ -357,7 +411,8 @@ mod tests {
         let segmentations =
             DecodedSegmentations(array![[[1.0, 0.0], [0.5, 0.5]], [[0.0, 1.0], [0.2, 0.8]]]);
         let hard_clusters = ChunkSpeakerClusters(array![[0, 1]]);
-        let error = match Reconstructor::new(&segmentations, &hard_clusters, &[0, 1]) {
+        let geometry = PipelineGeometry::from_legacy(16_000, 160_000, 160_000, 320_000).unwrap();
+        let error = match Reconstructor::new(&segmentations, &hard_clusters, &geometry) {
             Ok(_) => panic!("expected incomplete reconstruction inputs to fail"),
             Err(error) => error,
         };
@@ -378,7 +433,8 @@ mod tests {
     fn reconstructor_rejects_mismatched_cluster_columns() {
         let segmentations = DecodedSegmentations(array![[[1.0, 0.0], [0.5, 0.5]]]);
         let hard_clusters = ChunkSpeakerClusters(array![[0]]);
-        let error = match Reconstructor::new(&segmentations, &hard_clusters, &[0]) {
+        let geometry = PipelineGeometry::from_legacy(16_000, 160_000, 160_000, 160_000).unwrap();
+        let error = match Reconstructor::new(&segmentations, &hard_clusters, &geometry) {
             Ok(_) => panic!("expected mismatched cluster columns to fail"),
             Err(error) => error,
         };
@@ -396,14 +452,15 @@ mod tests {
     fn reconstructor_rejects_mismatched_start_frames() {
         let segmentations = DecodedSegmentations(array![[[1.0, 0.0], [0.5, 0.5]]]);
         let hard_clusters = ChunkSpeakerClusters(array![[0, 1]]);
-        let error = match Reconstructor::new(&segmentations, &hard_clusters, &[]) {
+        let geometry = PipelineGeometry::from_legacy(16_000, 160_000, 160_000, 0).unwrap();
+        let error = match Reconstructor::new(&segmentations, &hard_clusters, &geometry) {
             Ok(_) => panic!("expected mismatched start frames to fail"),
             Err(error) => error,
         };
 
         assert_eq!(
             error,
-            ReconstructError::StartFramesMismatch {
+            ReconstructError::GeometryChunksMismatch {
                 actual: 0,
                 expected: 1,
             }

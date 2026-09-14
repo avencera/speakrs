@@ -15,9 +15,10 @@ use super::super::plan::EmbeddingExecutionPlan;
 #[cfg(feature = "coreml")]
 use super::super::plan::LazySession;
 use super::super::{
-    CHUNK_SPEAKER_BATCH_SIZE, EmbeddingBuffers, EmbeddingMeta, EmbeddingModel, FBANK_BATCH_SIZE,
-    FBANK_FEATURES, FBANK_FRAMES, MASK_FRAMES, MULTI_MASK_BATCH_SIZE, NUM_SPEAKERS,
-    OrtEmbeddingState, PRIMARY_BATCH_SIZE, preallocated_run_options, read_min_num_samples,
+    CHUNK_SPEAKER_BATCH_SIZE, EmbeddingArtifactMetadata, EmbeddingBuffers, EmbeddingMeta,
+    EmbeddingModel, EmbeddingRuntimeCapabilities, FBANK_BATCH_SIZE, FBANK_FEATURES, FBANK_FRAMES,
+    LEGACY_POOLING_FRAMES, MULTI_MASK_BATCH_SIZE, NUM_SPEAKERS, OrtEmbeddingState,
+    PRIMARY_BATCH_SIZE, VerifiedEmbeddingArtifact, preallocated_run_options, read_min_num_samples,
 };
 
 pub(super) struct LoadedOrtSessions {
@@ -38,6 +39,11 @@ pub(super) struct LoadedCoreMlState {
 }
 
 pub(super) struct LoadedSessions {
+    geometry: super::super::EmbeddingInputGeometry,
+    capabilities: EmbeddingRuntimeCapabilities,
+    pooling_frames: usize,
+    min_num_samples: usize,
+    artifact: Option<VerifiedEmbeddingArtifact>,
     plan: EmbeddingExecutionPlan,
     ort: LoadedOrtSessions,
     #[cfg(feature = "coreml")]
@@ -64,14 +70,6 @@ impl LoadedSessions {
                 })?;
         }
 
-        let plan = EmbeddingExecutionPlan::from_inventory(model_path, mode, config);
-        let load_ort_split = plan.load_ort_split();
-
-        #[cfg(feature = "coreml")]
-        if matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
-            EmbeddingModel::validate_native_coreml_assets(model_path, mode, config)?;
-        }
-
         macro_rules! timed {
             ($expr:expr) => {{
                 let start = std::time::Instant::now();
@@ -84,6 +82,39 @@ impl LoadedSessions {
             model_path,
             EmbeddingModel::single_execution_mode(mode)
         )?);
+        let geometry = EmbeddingModel::validate_primary_session(&session)?;
+        let capabilities = EmbeddingRuntimeCapabilities::for_geometry(geometry);
+        let (pooling_frames, min_num_samples, artifact) =
+            if capabilities.supports_legacy_optimized() {
+                let metadata_path = model_path.with_extension("min_num_samples.txt");
+                (
+                    LEGACY_POOLING_FRAMES,
+                    read_min_num_samples(&metadata_path)?.get(),
+                    None,
+                )
+            } else {
+                let artifact = EmbeddingArtifactMetadata::read_verified_for(model_path, geometry)?;
+                (
+                    artifact.metadata().resnet_frames,
+                    artifact.metadata().min_num_samples,
+                    Some(artifact),
+                )
+            };
+        let plan = EmbeddingExecutionPlan::from_inventory_with_capabilities(
+            model_path,
+            mode,
+            config,
+            capabilities,
+        );
+        let load_ort_split = plan.load_ort_split();
+
+        #[cfg(feature = "coreml")]
+        if matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast)
+            && capabilities.supports_legacy_optimized()
+        {
+            EmbeddingModel::validate_native_coreml_assets(model_path, mode, config)?;
+        }
+
         let (primary_batched_session, primary_batched_elapsed) = timed!(
             plan.fused
                 .batched
@@ -169,6 +200,11 @@ impl LoadedSessions {
         };
 
         Ok(Self {
+            geometry,
+            capabilities,
+            pooling_frames,
+            min_num_samples,
+            artifact,
             plan,
             ort,
             #[cfg(feature = "coreml")]
@@ -181,17 +217,16 @@ impl LoadedSessions {
         model_path: &Path,
         mode: ExecutionMode,
     ) -> Result<EmbeddingModel, ModelLoadError> {
-        let metadata_path = model_path.with_extension("min_num_samples.txt");
-
         Ok(EmbeddingModel {
             meta: EmbeddingMeta {
                 model_path: model_path.to_path_buf(),
                 mode,
-                sample_rate: 16_000,
-                window_samples: 160_000,
-                mask_frames: 589,
-                min_num_samples: read_min_num_samples(&metadata_path)?.get(),
+                geometry: self.geometry,
+                pooling_frames: self.pooling_frames,
+                min_num_samples: self.min_num_samples,
+                artifact: self.artifact,
             },
+            capabilities: self.capabilities,
             plan: self.plan.clone(),
             ort: OrtEmbeddingState {
                 session: self.ort.session,
@@ -211,7 +246,7 @@ impl LoadedSessions {
                     .map(|_| {
                         let mut opts = preallocated_run_options(
                             PRIMARY_BATCH_SIZE,
-                            256,
+                            self.geometry.embedding_width(),
                             "primary batched embedding output",
                         )?;
                         let _ = opts.disable_device_sync();
@@ -257,12 +292,15 @@ impl LoadedSessions {
                 ),
                 cached_tail_weights_shape: CachedInputShape::new(
                     "weights",
-                    &[PRIMARY_BATCH_SIZE, MASK_FRAMES],
+                    &[PRIMARY_BATCH_SIZE, self.geometry.mask_frames()],
                 ),
-                cached_fbank_single_shape: CachedInputShape::new("waveform", &[1, 1, 160_000]),
+                cached_fbank_single_shape: CachedInputShape::new(
+                    "waveform",
+                    &[1, 1, self.geometry.window_samples()],
+                ),
                 cached_fbank_batch_shape: CachedInputShape::new(
                     "waveform",
-                    &[FBANK_BATCH_SIZE, 1, 160_000],
+                    &[FBANK_BATCH_SIZE, 1, self.geometry.window_samples()],
                 ),
                 cached_multi_mask_fbank_shape: CachedInputShape::new(
                     "fbank",
@@ -270,7 +308,10 @@ impl LoadedSessions {
                 ),
                 cached_multi_mask_masks_shape: CachedInputShape::new(
                     "masks",
-                    &[MULTI_MASK_BATCH_SIZE * NUM_SPEAKERS, MASK_FRAMES],
+                    &[
+                        MULTI_MASK_BATCH_SIZE * NUM_SPEAKERS,
+                        self.geometry.mask_frames(),
+                    ],
                 ),
             },
             buffers: EmbeddingBuffers {
@@ -281,26 +322,43 @@ impl LoadedSessions {
                 )),
                 multi_mask_masks_buffer: Array2::zeros((
                     MULTI_MASK_BATCH_SIZE * NUM_SPEAKERS,
-                    MASK_FRAMES,
+                    self.geometry.mask_frames(),
                 )),
-                waveform_buffer: Array3::zeros((1, 1, 160_000)),
-                weights_buffer: Array2::zeros((1, 589)),
-                primary_batch_waveform_buffer: Array3::zeros((PRIMARY_BATCH_SIZE, 1, 160_000)),
-                primary_batch_weights_buffer: Array2::zeros((PRIMARY_BATCH_SIZE, 589)),
-                split_waveform_buffer: Array3::zeros((1, 1, 160_000)),
-                split_fbank_batch_buffer: Array3::zeros((FBANK_BATCH_SIZE, 1, 160_000)),
+                waveform_buffer: Array3::zeros((1, 1, self.geometry.window_samples())),
+                weights_buffer: Array2::zeros((1, self.geometry.mask_frames())),
+                primary_batch_waveform_buffer: Array3::zeros((
+                    PRIMARY_BATCH_SIZE,
+                    1,
+                    self.geometry.window_samples(),
+                )),
+                primary_batch_weights_buffer: Array2::zeros((
+                    PRIMARY_BATCH_SIZE,
+                    self.geometry.mask_frames(),
+                )),
+                split_waveform_buffer: Array3::zeros((1, 1, self.geometry.window_samples())),
+                split_fbank_batch_buffer: Array3::zeros((
+                    FBANK_BATCH_SIZE,
+                    1,
+                    self.geometry.window_samples(),
+                )),
                 split_feature_batch_buffer: Array3::zeros((
                     CHUNK_SPEAKER_BATCH_SIZE,
                     FBANK_FRAMES,
                     FBANK_FEATURES,
                 )),
-                split_weights_batch_buffer: Array2::zeros((CHUNK_SPEAKER_BATCH_SIZE, 589)),
+                split_weights_batch_buffer: Array2::zeros((
+                    CHUNK_SPEAKER_BATCH_SIZE,
+                    self.geometry.mask_frames(),
+                )),
                 split_primary_feature_batch_buffer: Array3::zeros((
                     PRIMARY_BATCH_SIZE,
                     FBANK_FRAMES,
                     FBANK_FEATURES,
                 )),
-                split_primary_weights_batch_buffer: Array2::zeros((PRIMARY_BATCH_SIZE, 589)),
+                split_primary_weights_batch_buffer: Array2::zeros((
+                    PRIMARY_BATCH_SIZE,
+                    self.geometry.mask_frames(),
+                )),
             },
         })
     }

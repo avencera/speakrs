@@ -1,5 +1,7 @@
 use ndarray::Array2;
 
+use crate::pipeline::FrameTiming;
+
 /// A single speaker turn with start/end times in seconds
 #[derive(Debug, Clone, PartialEq)]
 pub struct Segment {
@@ -46,6 +48,27 @@ pub fn to_segments(
     frame_step: f64,
     frame_duration: f64,
 ) -> Vec<Segment> {
+    to_segments_at(activations, |frame_idx| {
+        frame_middle(frame_idx, frame_step, frame_duration)
+    })
+}
+
+/// Convert frame activations with checked sample-grid timing
+pub(crate) fn to_segments_with_timing(
+    activations: &Array2<f32>,
+    timing: FrameTiming,
+) -> Vec<Segment> {
+    to_segments_at(activations, |frame_idx| {
+        timing
+            .frame_middle_seconds(frame_idx)
+            .expect("validated frame timing")
+    })
+}
+
+fn to_segments_at<F>(activations: &Array2<f32>, frame_middle: F) -> Vec<Segment>
+where
+    F: Fn(usize) -> f64,
+{
     let (_num_frames, num_speakers) = activations.dim();
     let mut segments = Vec::new();
 
@@ -57,12 +80,12 @@ pub fn to_segments(
             continue;
         }
 
-        let mut start = frame_middle(0, frame_step, frame_duration);
+        let mut start = frame_middle(0);
         let mut is_active = column[0] > 0.5;
         let mut last_timestamp = start;
 
         for (frame_idx, &value) in column.iter().enumerate().skip(1) {
-            let timestamp = frame_middle(frame_idx, frame_step, frame_duration);
+            let timestamp = frame_middle(frame_idx);
             last_timestamp = timestamp;
 
             if is_active {

@@ -1,6 +1,8 @@
 use ndarray::{Array1, Array2, Array3};
 
-use super::{EMBEDDING_WIDTH, FBANK_FEATURES};
+#[cfg(test)]
+use super::EMBEDDING_WIDTH;
+use super::FBANK_FEATURES;
 #[cfg(any(test, feature = "coreml"))]
 use crate::inference::geometry::CoreMlTensor;
 use crate::inference::geometry::{GeometryError, TensorLayout};
@@ -59,13 +61,14 @@ pub(super) fn array3_slice_mut<'a>(
 fn embedding_vector(
     layout: &TensorLayout,
     data: &[f32],
+    embedding_width: usize,
     context: &'static str,
 ) -> Result<Array1<f32>, ort::Error> {
     layout
         .try_rank(2, context)
         .map_err(GeometryError::into_ort)?;
     layout
-        .try_exact_dims(&[1, EMBEDDING_WIDTH], context)
+        .try_exact_dims(&[1, embedding_width], context)
         .map_err(GeometryError::into_ort)?;
     crate::inference::geometry::require_exact_len(data.len(), layout.element_count(), context)
         .map_err(GeometryError::into_ort)?;
@@ -73,22 +76,41 @@ fn embedding_vector(
     Ok(Array1::from_vec(data.to_vec()))
 }
 
+#[cfg(test)]
 pub(super) fn embedding_vector_from_ort(
     shape: &ort::value::Shape,
     data: &[f32],
     context: &'static str,
 ) -> Result<Array1<f32>, ort::Error> {
-    let layout = TensorLayout::from_ort_shape(shape, context).map_err(GeometryError::into_ort)?;
-    embedding_vector(&layout, data, context)
+    embedding_vector_from_ort_with_width(shape, data, EMBEDDING_WIDTH, context)
 }
 
-#[cfg(any(test, feature = "coreml"))]
+pub(crate) fn embedding_vector_from_ort_with_width(
+    shape: &ort::value::Shape,
+    data: &[f32],
+    embedding_width: usize,
+    context: &'static str,
+) -> Result<Array1<f32>, ort::Error> {
+    let layout = TensorLayout::from_ort_shape(shape, context).map_err(GeometryError::into_ort)?;
+    embedding_vector(&layout, data, embedding_width, context)
+}
+
+#[cfg(test)]
 pub(super) fn embedding_vector_from_coreml(
     tensor: CoreMlTensor,
     context: &'static str,
 ) -> Result<Array1<f32>, ort::Error> {
+    embedding_vector_from_coreml_with_width(tensor, EMBEDDING_WIDTH, context)
+}
+
+#[cfg(any(test, feature = "coreml"))]
+pub(crate) fn embedding_vector_from_coreml_with_width(
+    tensor: CoreMlTensor,
+    embedding_width: usize,
+    context: &'static str,
+) -> Result<Array1<f32>, ort::Error> {
     let (layout, data) = tensor.into_parts();
-    embedding_vector(&layout, &data, context)
+    embedding_vector(&layout, &data, embedding_width, context)
 }
 
 /// Model output rows and useful rows selected by the caller
@@ -96,12 +118,14 @@ pub(super) fn embedding_vector_from_coreml(
 struct EmbeddingBatchGeometry {
     model_rows: usize,
     useful_rows: usize,
+    embedding_width: usize,
 }
 
 impl EmbeddingBatchGeometry {
     fn new(
         model_rows: usize,
         useful_rows: usize,
+        embedding_width: usize,
         context: &'static str,
     ) -> Result<Self, ort::Error> {
         if useful_rows > model_rows {
@@ -109,15 +133,16 @@ impl EmbeddingBatchGeometry {
                 "{context}: useful rows {useful_rows} exceed model capacity {model_rows}"
             )));
         }
-        model_rows.checked_mul(EMBEDDING_WIDTH).ok_or_else(|| {
+        model_rows.checked_mul(embedding_width).ok_or_else(|| {
             ort::Error::new(format!("{context}: embedding batch size overflowed"))
         })?;
-        useful_rows.checked_mul(EMBEDDING_WIDTH).ok_or_else(|| {
+        useful_rows.checked_mul(embedding_width).ok_or_else(|| {
             ort::Error::new(format!("{context}: useful embedding size overflowed"))
         })?;
         Ok(Self {
             model_rows,
             useful_rows,
+            embedding_width,
         })
     }
 }
@@ -127,27 +152,29 @@ pub(super) fn embedding_batch(
     data: &[f32],
     model_rows: usize,
     useful_rows: usize,
+    embedding_width: usize,
     context: &'static str,
 ) -> Result<Array2<f32>, ort::Error> {
-    let geometry = EmbeddingBatchGeometry::new(model_rows, useful_rows, context)?;
+    let geometry = EmbeddingBatchGeometry::new(model_rows, useful_rows, embedding_width, context)?;
     layout
         .try_rank(2, context)
         .map_err(GeometryError::into_ort)?;
     layout
-        .try_exact_dims(&[geometry.model_rows, EMBEDDING_WIDTH], context)
+        .try_exact_dims(&[geometry.model_rows, geometry.embedding_width], context)
         .map_err(GeometryError::into_ort)?;
     crate::inference::geometry::require_exact_len(data.len(), layout.element_count(), context)
         .map_err(GeometryError::into_ort)?;
 
-    let useful_len = geometry.useful_rows * EMBEDDING_WIDTH;
+    let useful_len = geometry.useful_rows * geometry.embedding_width;
     array2_from_shape_vec(
         geometry.useful_rows,
-        EMBEDDING_WIDTH,
+        geometry.embedding_width,
         data[..useful_len].to_vec(),
         context,
     )
 }
 
+#[cfg(test)]
 pub(super) fn embedding_batch_from_ort(
     shape: &ort::value::Shape,
     data: &[f32],
@@ -155,19 +182,52 @@ pub(super) fn embedding_batch_from_ort(
     useful_rows: usize,
     context: &'static str,
 ) -> Result<Array2<f32>, ort::Error> {
+    embedding_batch_from_ort_with_width(
+        shape,
+        data,
+        model_rows,
+        useful_rows,
+        EMBEDDING_WIDTH,
+        context,
+    )
+}
+
+pub(crate) fn embedding_batch_from_ort_with_width(
+    shape: &ort::value::Shape,
+    data: &[f32],
+    model_rows: usize,
+    useful_rows: usize,
+    embedding_width: usize,
+    context: &'static str,
+) -> Result<Array2<f32>, ort::Error> {
     let layout = TensorLayout::from_ort_shape(shape, context).map_err(GeometryError::into_ort)?;
-    embedding_batch(&layout, data, model_rows, useful_rows, context)
+    embedding_batch(
+        &layout,
+        data,
+        model_rows,
+        useful_rows,
+        embedding_width,
+        context,
+    )
 }
 
 #[cfg(feature = "coreml")]
-pub(super) fn embedding_batch_from_coreml(
+pub(crate) fn embedding_batch_from_coreml_with_width(
     tensor: CoreMlTensor,
     model_rows: usize,
     useful_rows: usize,
+    embedding_width: usize,
     context: &'static str,
 ) -> Result<Array2<f32>, ort::Error> {
     let (layout, data) = tensor.into_parts();
-    embedding_batch(&layout, &data, model_rows, useful_rows, context)
+    embedding_batch(
+        &layout,
+        &data,
+        model_rows,
+        useful_rows,
+        embedding_width,
+        context,
+    )
 }
 
 pub(super) fn fbank_hw_from_shape(

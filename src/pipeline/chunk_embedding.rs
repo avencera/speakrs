@@ -17,8 +17,8 @@ use super::types::InternalInferenceStageTimings;
 use super::types::{
     BatchInput, DecodedSegmentations, DiarizationResult, InferenceArtifacts, PipelineError,
 };
-pub(super) use super::types::{ChunkEmbeddings, ChunkLayout, chunk_audio_raw};
-pub(super) use super::write_speaker_mask_to_slice;
+pub(crate) use super::types::{ChunkEmbeddings, PipelineGeometry, chunk_audio_raw};
+pub(crate) use super::write_speaker_mask_to_slice;
 
 mod collect;
 mod error;
@@ -36,7 +36,7 @@ use prep::{ChunkJob, ChunkPrep, PrepScratch, PrepWorker};
 /// Each call yields FBANK_FRAMES frames, which covers fewer samples than the 10s
 /// window itself. Advancing by the full window would slip the stitched fbank by two
 /// frames per segment relative to the speaker masks
-pub(super) const FBANK_SEGMENT_SAMPLES: usize = FBANK_FRAMES * FBANK_HOP_SAMPLES;
+pub(crate) const FBANK_SEGMENT_SAMPLES: usize = FBANK_FRAMES * FBANK_HOP_SAMPLES;
 
 struct ChunkParams {
     step_samples: usize,
@@ -75,7 +75,7 @@ fn chunk_session_for_windows(
     })
 }
 
-pub(super) fn try_chunk_embedding(
+pub(crate) fn try_chunk_embedding(
     seg_model: &mut SegmentationModel,
     emb_model: &mut EmbeddingModel,
     powerset: &PowersetMapping,
@@ -90,10 +90,9 @@ pub(super) fn try_chunk_embedding(
     let chunk_win_capacity = collection_plan.group_capacity();
 
     let inference_start = std::time::Instant::now();
-    let step_seconds = seg_model.step_seconds();
     let params = ChunkParams {
-        step_samples: plan.layout.step_samples,
-        window_samples: plan.layout.window_samples,
+        step_samples: plan.layout.step_samples(),
+        window_samples: plan.layout.window_samples(),
         num_speakers: 3,
         min_num_samples: emb_model.min_num_samples(),
         segmentation_workers: execution_policy.segmentation_workers,
@@ -193,9 +192,9 @@ pub(super) fn try_chunk_embedding(
             pipelined: use_pipelined,
         };
         let artifacts = build_chunk_artifacts(
-            step_seconds,
             params.step_samples,
             params.window_samples,
+            audio.len(),
             summary,
             #[cfg(feature = "_metrics")]
             stage_timings,
@@ -220,7 +219,7 @@ pub(super) fn try_chunk_embedding(
     })
 }
 
-pub(super) fn try_batch_chunk_embedding(
+pub(crate) fn try_batch_chunk_embedding(
     seg_model: &mut SegmentationModel,
     emb_model: &mut EmbeddingModel,
     powerset: &PowersetMapping,
@@ -240,7 +239,6 @@ pub(super) fn try_batch_chunk_embedding(
 
     let step_samples = seg_model.step_samples();
     let window_samples = seg_model.window_samples();
-    let step_seconds = seg_model.step_seconds();
     let num_speakers = 3usize;
     let min_num_samples = emb_model.min_num_samples();
     let segmentation_workers = execution_policy.segmentation_workers;
@@ -420,7 +418,7 @@ pub(super) fn try_batch_chunk_embedding(
                     }
                 };
                 match collector
-                    .into_artifacts(step_seconds, step_samples, window_samples)
+                    .into_artifacts(step_samples, window_samples, files[file_idx].audio.len())
                     .and_then(|artifacts| post_inference(artifacts, config, plda))
                 {
                     Ok(result) => results[file_idx] = Some(result),

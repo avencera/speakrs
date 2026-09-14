@@ -36,12 +36,13 @@ fn extract_embeddings(
     segmentations: &Array3<f32>,
 ) -> Result<Array3<f32>, PipelineError> {
     let decoded_segmentations = DecodedSegmentations(segmentations.clone());
-    let layout = ChunkLayout::new(
-        seg_model.step_seconds(),
-        seg_model.step_samples(),
-        seg_model.window_samples(),
-        decoded_segmentations.nchunks(),
-    );
+    let layout = PipelineGeometry::from_legacy(
+        16_000,
+        seg_model.window_samples() as u64,
+        seg_model.step_samples() as u64,
+        audio.len() as u64,
+    )
+    .unwrap();
     let embedding_path = if emb_model.prefers_multi_mask_path()
         && emb_model.multi_mask_batch_size() > 0
     {
@@ -443,6 +444,7 @@ fn filter_embeddings_matches_python_fixture() {
 
     let train = ChunkEmbeddings(embeddings).training_set(
         &DecodedSegmentations(segmentations),
+        &PipelineGeometry::from_legacy(16_000, 160_000, 16_000, 160_000).unwrap(),
         CleanFrameDuration::default(),
     );
 
@@ -457,10 +459,23 @@ fn filter_embeddings_matches_python_fixture() {
 fn training_set_honors_non_default_clean_frame_duration() {
     let segmentations = DecodedSegmentations(array![[[1.0], [1.0], [1.0], [0.0]]]);
     let embeddings = ChunkEmbeddings(array![[[1.0, 0.0]]]);
+    let geometry = PipelineGeometry::from_legacy(16_000, 160_000, 16_000, 160_000).unwrap();
     let short = CleanFrameDuration::new(FRAME_STEP_SECONDS * 2.0).unwrap();
     let long = CleanFrameDuration::new(FRAME_STEP_SECONDS * 4.0).unwrap();
-    assert_eq!(embeddings.training_set(&segmentations, short).0.nrows(), 1);
-    assert_eq!(embeddings.training_set(&segmentations, long).0.nrows(), 0);
+    assert_eq!(
+        embeddings
+            .training_set(&segmentations, &geometry, short)
+            .0
+            .nrows(),
+        1
+    );
+    assert_eq!(
+        embeddings
+            .training_set(&segmentations, &geometry, long)
+            .0
+            .nrows(),
+        0
+    );
 }
 
 #[test]

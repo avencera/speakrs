@@ -33,10 +33,13 @@ pub(crate) use types::FrameActivations;
 #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
 pub use types::InferenceStageTimings;
 pub use types::{
-    BatchInput, ChunkEmbeddings, ChunkSpeakerClusters, DecodedSegmentations, DiarizationResult,
-    DiscreteDiarization, InferenceArtifacts, PipelineError, SpeakerCountTrack,
+    BatchInput, ChunkEmbeddings, ChunkExtent, ChunkSpeakerClusters, DecodedSegmentations,
+    DiarizationResult, DiscreteDiarization, EmbeddingAvailability, EmbeddingAvailabilityGrid,
+    EmbeddingFailureReason, EmbeddingReceipt, EmbeddingStageEntry, EmbeddingStageSnapshot,
+    FrameTiming, InactiveEmbeddingReason, InferenceArtifacts, PipelineError, PipelineGeometry,
+    PipelineGeometryError, SpeakerCountTrack,
 };
-use types::{ChunkLayout, EmbeddingPath, InferencePath, RawSegmentationWindows};
+use types::{EmbeddingPath, InferencePath, RawSegmentationWindows};
 #[cfg(test)]
 use types::{chunk_audio_raw, chunk_start_frames, total_output_frames};
 
@@ -50,6 +53,15 @@ use concurrent::ConcurrentEmbeddingRunner;
 
 mod post_inference;
 pub use post_inference::post_inference;
+
+mod imported_decoder;
+pub use imported_decoder::ImportedDecodeError;
+
+mod imported;
+pub use imported::{
+    ImportedDiarizationPipeline, ImportedPipelineError, canonical_waveform_digest,
+    validate_waveform_identity,
+};
 
 #[cfg(feature = "coreml")]
 mod chunk_embedding;
@@ -434,12 +446,12 @@ impl<'a> PipelineRunner<'a> {
         debug!(windows = raw_windows.0.len(), "Segmentation complete");
 
         let segmentations = raw_windows.decode(self.powerset)?;
-        let layout = ChunkLayout::new(
-            self.seg_model.step_seconds(),
-            self.seg_model.step_samples(),
-            self.seg_model.window_samples(),
-            segmentations.nchunks(),
-        );
+        let layout = PipelineGeometry::from_legacy(
+            16_000,
+            self.seg_model.window_samples() as u64,
+            self.seg_model.step_samples() as u64,
+            audio.len() as u64,
+        )?;
         let embeddings = segmentations.extract_embeddings(
             audio,
             self.emb_model,
@@ -466,16 +478,17 @@ impl<'a> PipelineRunner<'a> {
         &mut self,
         audio: &[f32],
     ) -> Result<InferenceArtifacts, PipelineError> {
-        let layout = ChunkLayout::without_frame_extent(
-            self.seg_model.step_seconds(),
-            self.seg_model.step_samples(),
-            self.seg_model.window_samples(),
-        );
+        let layout = PipelineGeometry::from_legacy(
+            16_000,
+            self.seg_model.window_samples() as u64,
+            self.seg_model.step_samples() as u64,
+            audio.len() as u64,
+        )?;
         let concurrent_embedding_runner = ConcurrentEmbeddingRunner {
             powerset: self.powerset,
             audio,
-            step_samples: layout.step_samples,
-            window_samples: layout.window_samples,
+            step_samples: layout.step_samples(),
+            window_samples: layout.window_samples(),
             num_speakers: 3,
         };
         let embedding_path = self.embedding_path();
@@ -542,7 +555,12 @@ impl<'a> PipelineRunner<'a> {
         }
 
         let num_chunks = concurrent_result.num_chunks;
-        let layout = layout.with_num_chunks(num_chunks);
+        if layout.chunk_count() != num_chunks {
+            return Err(PipelineError::Invariant(format!(
+                "concurrent segmentation produced {num_chunks} chunks, expected {}",
+                layout.chunk_count()
+            )));
+        }
         debug!(
             chunks = concurrent_result.segmentations.shape()[0],
             speakers = concurrent_result.segmentations.shape()[2],
@@ -568,7 +586,7 @@ impl<'a> PipelineRunner<'a> {
         post_inference(inference_artifacts, config, self.plda)
     }
 
-    fn empty_inference_artifacts(layout: ChunkLayout) -> InferenceArtifacts {
-        InferenceArtifacts::empty_with_layout(layout)
+    fn empty_inference_artifacts(layout: PipelineGeometry) -> InferenceArtifacts {
+        InferenceArtifacts::empty_with_geometry(layout)
     }
 }

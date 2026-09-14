@@ -1,4 +1,4 @@
-use ndarray::{Array2, s};
+use ndarray::Array2;
 use ort::value::TensorRef;
 
 #[cfg(feature = "coreml")]
@@ -12,17 +12,12 @@ use super::{
 impl EmbeddingModel {
     /// Compute fbank features for a single audio chunk via the split fbank model
     pub(crate) fn compute_chunk_fbank(&mut self, audio: &[f32]) -> Result<Array2<f32>, ort::Error> {
-        let copy_len = audio.len().min(self.meta.window_samples);
-        self.buffers
-            .split_waveform_buffer
-            .slice_mut(s![0, 0, ..copy_len])
-            .assign(&ndarray::ArrayView1::from(&audio[..copy_len]));
-        if copy_len < self.meta.window_samples {
-            self.buffers
-                .split_waveform_buffer
-                .slice_mut(s![0, 0, copy_len..])
-                .fill(0.0);
-        }
+        Self::prepare_waveform(
+            0,
+            audio,
+            self.meta.geometry.window_samples(),
+            &mut self.buffers.split_waveform_buffer.view_mut(),
+        )?;
 
         #[cfg(feature = "coreml")]
         {
@@ -89,7 +84,7 @@ impl EmbeddingModel {
                 continue;
             }
 
-            self.fill_split_fbank_batch_buffer(batch);
+            self.fill_split_fbank_batch_buffer(batch)?;
 
             #[cfg(feature = "coreml")]
             if self.try_push_native_fbank_batch(&mut results, batch.len())? {
@@ -120,15 +115,17 @@ impl EmbeddingModel {
         Ok(results)
     }
 
-    fn fill_split_fbank_batch_buffer(&mut self, audios: &[&[f32]]) {
+    fn fill_split_fbank_batch_buffer(&mut self, audios: &[&[f32]]) -> Result<(), ort::Error> {
         self.buffers.split_fbank_batch_buffer.fill(0.0);
         for (idx, audio) in audios.iter().enumerate() {
-            let copy_len = audio.len().min(self.meta.window_samples);
-            self.buffers
-                .split_fbank_batch_buffer
-                .slice_mut(s![idx, 0, ..copy_len])
-                .assign(&ndarray::ArrayView1::from(&audio[..copy_len]));
+            Self::prepare_waveform(
+                idx,
+                audio,
+                self.meta.geometry.window_samples(),
+                &mut self.buffers.split_fbank_batch_buffer.view_mut(),
+            )?;
         }
+        Ok(())
     }
 
     fn push_fbank_batch_results(

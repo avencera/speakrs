@@ -3,13 +3,15 @@ use ort::value::TensorRef;
 
 #[cfg(feature = "coreml")]
 use super::tensor::{array2_slice, array3_slice};
-use super::{
-    CHUNK_SPEAKER_BATCH_SIZE, EMBEDDING_WIDTH, EmbeddingModel, FBANK_FEATURES, FBANK_FRAMES,
-    array1_slice, array3_slice_mut, embedding_batch_from_ort, embedding_vector_from_ort,
-    first_output, select_mask, should_use_clean_mask,
-};
 #[cfg(feature = "coreml")]
-use super::{embedding_batch_from_coreml, embedding_vector_from_coreml};
+use super::tensor::{
+    embedding_batch_from_coreml_with_width, embedding_vector_from_coreml_with_width,
+};
+use super::{
+    CHUNK_SPEAKER_BATCH_SIZE, EmbeddingModel, FBANK_FEATURES, FBANK_FRAMES, array1_slice,
+    array3_slice_mut, embedding_batch_from_ort_with_width, first_output,
+    mask_selection_window_samples, select_mask, should_use_clean_mask,
+};
 
 impl EmbeddingModel {
     /// Extract per-speaker embeddings for one audio chunk using segmentation masks
@@ -19,8 +21,19 @@ impl EmbeddingModel {
         segmentations: ArrayView2<'_, f32>,
         clean_masks: &Array2<f32>,
     ) -> Result<Array2<f32>, ort::Error> {
+        self.validate_audio_input(audio)?;
         let speaker_count = segmentations.ncols();
-        let mut embeddings = Array2::<f32>::zeros((speaker_count, EMBEDDING_WIDTH));
+        if segmentations.nrows() != self.meta.geometry.mask_frames()
+            || clean_masks.nrows() != self.meta.geometry.mask_frames()
+            || clean_masks.ncols() != speaker_count
+        {
+            return Err(ort::Error::new(format!(
+                "chunk speaker masks must have shape [{}, {speaker_count}]",
+                self.meta.geometry.mask_frames()
+            )));
+        }
+        let mut embeddings =
+            Array2::<f32>::zeros((speaker_count, self.meta.geometry.embedding_width()));
         if !self.prefers_chunk_embedding_path() {
             for speaker_idx in 0..speaker_count {
                 let mask = segmentations.column(speaker_idx).to_owned();
@@ -47,7 +60,7 @@ impl EmbeddingModel {
             let used_mask = select_mask(
                 array1_slice(&mask, "chunk tail mask")?,
                 Some(array1_slice(&clean_mask, "chunk tail clean mask")?),
-                audio.len(),
+                self.mask_selection_window_samples(audio.len()),
                 self.meta.min_num_samples,
             );
             let embedding = self.embed_tail_single(&fbank, used_mask)?;
@@ -69,9 +82,9 @@ impl EmbeddingModel {
         Self::prepare_weights(
             0,
             weights,
-            self.meta.mask_frames,
+            self.meta.geometry.mask_frames(),
             &mut self.buffers.split_weights_batch_buffer.view_mut(),
-        );
+        )?;
 
         #[cfg(feature = "coreml")]
         {
@@ -93,10 +106,18 @@ impl EmbeddingModel {
             let tensor = native
                 .predict(&[
                     ("fbank", &[1, FBANK_FRAMES, FBANK_FEATURES], fbank_data),
-                    ("weights", &[1, self.meta.mask_frames], weights_data),
+                    (
+                        "weights",
+                        &[1, self.meta.geometry.mask_frames()],
+                        weights_data,
+                    ),
                 ])
                 .map_err(|e| ort::Error::new(e.to_string()))?;
-            return embedding_vector_from_coreml(tensor, "native tail output");
+            return embedding_vector_from_coreml_with_width(
+                tensor,
+                self.meta.geometry.embedding_width(),
+                "native tail output",
+            );
         }
 
         let feature_slice = self
@@ -114,7 +135,12 @@ impl EmbeddingModel {
             .run(ort::inputs!["fbank" => fbank_tensor, "weights" => weights_tensor])?;
         let output = first_output(outputs.values(), "split tail output")?;
         let (shape, data) = output.try_extract_tensor::<f32>()?;
-        embedding_vector_from_ort(shape, data, "split tail output")
+        super::tensor::embedding_vector_from_ort_with_width(
+            shape,
+            data,
+            self.meta.geometry.embedding_width(),
+            "split tail output",
+        )
     }
 
     fn embed_tail_batch(
@@ -144,7 +170,11 @@ impl EmbeddingModel {
             let use_clean = should_use_clean_mask(
                 &clean_col,
                 mask_col.len(),
-                num_samples,
+                mask_selection_window_samples(
+                    self.capabilities,
+                    num_samples,
+                    self.meta.geometry.window_samples(),
+                ),
                 self.meta.min_num_samples,
             );
             let weights: Vec<f32> = if use_clean {
@@ -155,9 +185,9 @@ impl EmbeddingModel {
             Self::prepare_weights(
                 speaker_idx,
                 &weights,
-                self.meta.mask_frames,
+                self.meta.geometry.mask_frames(),
                 &mut self.buffers.split_weights_batch_buffer.view_mut(),
-            );
+            )?;
         }
 
         #[cfg(feature = "coreml")]
@@ -178,13 +208,18 @@ impl EmbeddingModel {
             let tensor = native
                 .predict(&[
                     ("fbank", &[batch, FBANK_FRAMES, FBANK_FEATURES], fbank_data),
-                    ("weights", &[batch, self.meta.mask_frames], weights_data),
+                    (
+                        "weights",
+                        &[batch, self.meta.geometry.mask_frames()],
+                        weights_data,
+                    ),
                 ])
                 .map_err(|e| ort::Error::new(e.to_string()))?;
-            return embedding_batch_from_coreml(
+            return embedding_batch_from_coreml_with_width(
                 tensor,
                 CHUNK_SPEAKER_BATCH_SIZE,
                 segmentations.ncols(),
+                self.meta.geometry.embedding_width(),
                 "native tail batch output",
             );
         }
@@ -201,11 +236,12 @@ impl EmbeddingModel {
             .run(ort::inputs!["fbank" => fbank_tensor, "weights" => weights_tensor])?;
         let output = first_output(outputs.values(), "tail batch output")?;
         let (shape, data) = output.try_extract_tensor::<f32>()?;
-        embedding_batch_from_ort(
+        embedding_batch_from_ort_with_width(
             shape,
             data,
             CHUNK_SPEAKER_BATCH_SIZE,
             segmentations.ncols(),
+            self.meta.geometry.embedding_width(),
             "tail batch output",
         )
     }

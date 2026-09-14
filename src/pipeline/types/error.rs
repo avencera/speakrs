@@ -25,6 +25,9 @@ pub enum PipelineError {
     /// Reconstruction inputs are inconsistent
     #[error(transparent)]
     Reconstruct(#[from] crate::reconstruct::ReconstructError),
+    /// Pipeline timing and chunk geometry are inconsistent
+    #[error(transparent)]
+    Geometry(#[from] super::layout::PipelineGeometryError),
     /// SphereVBx-PF clustering input error
     #[cfg(feature = "_metrics")]
     #[error(transparent)]

@@ -1,12 +1,62 @@
 use std::path::Path;
 
 use ort::session::Session;
+use ort::value::TensorElementType;
 
 use crate::inference::with_execution_mode;
 
-use super::{EmbeddingModel, ExecutionMode};
+use super::{
+    EmbeddingGeometryError, EmbeddingInputGeometry, EmbeddingModel, ExecutionMode,
+    PrimaryTensorShape, geometry_from_primary_shapes,
+};
 
 impl EmbeddingModel {
+    pub(crate) fn validate_primary_session(
+        session: &Session,
+    ) -> Result<EmbeddingInputGeometry, EmbeddingGeometryError> {
+        let input_names: Vec<String> = session
+            .inputs()
+            .iter()
+            .map(|input| input.name().to_owned())
+            .collect();
+        if input_names.len() != 2
+            || !input_names.iter().any(|name| name == "waveform")
+            || !input_names.iter().any(|name| name == "weights")
+        {
+            return Err(EmbeddingGeometryError::UnexpectedInputs {
+                actual: input_names,
+            });
+        }
+
+        let waveform = primary_tensor_shape(session, "waveform")?;
+        let weights = primary_tensor_shape(session, "weights")?;
+        let output_count = session.outputs().len();
+        if output_count != 1 {
+            return Err(EmbeddingGeometryError::UnexpectedOutputs {
+                count: output_count,
+            });
+        }
+        let output = session.outputs()[0].dtype();
+        let output_shape =
+            output
+                .tensor_shape()
+                .ok_or_else(|| EmbeddingGeometryError::NotATensor {
+                    tensor: session.outputs()[0].name().to_owned(),
+                })?;
+        if output.tensor_type() != Some(TensorElementType::Float32) {
+            return Err(EmbeddingGeometryError::TypeMismatch {
+                tensor: session.outputs()[0].name().to_owned(),
+                actual: output
+                    .tensor_type()
+                    .map_or_else(|| output.to_string(), |value| value.to_string()),
+            });
+        }
+        let output =
+            PrimaryTensorShape::new(session.outputs()[0].name(), output_shape.iter().copied());
+
+        geometry_from_primary_shapes(&waveform, &weights, &output)
+    }
+
     pub(super) fn build_session(
         model_path: &Path,
         mode: ExecutionMode,
@@ -96,4 +146,30 @@ impl EmbeddingModel {
     ) -> Result<Session, ort::Error> {
         Self::build_session(model_path, Self::single_execution_mode(mode))
     }
+}
+
+fn primary_tensor_shape(
+    session: &Session,
+    name: &'static str,
+) -> Result<PrimaryTensorShape, EmbeddingGeometryError> {
+    let outlet = session
+        .inputs()
+        .iter()
+        .find(|input| input.name() == name)
+        .ok_or(EmbeddingGeometryError::MissingInput { name })?;
+    let dtype = outlet.dtype();
+    if dtype.tensor_type() != Some(TensorElementType::Float32) {
+        return Err(EmbeddingGeometryError::TypeMismatch {
+            tensor: name.to_owned(),
+            actual: dtype
+                .tensor_type()
+                .map_or_else(|| dtype.to_string(), |value| value.to_string()),
+        });
+    }
+    let shape = dtype
+        .tensor_shape()
+        .ok_or_else(|| EmbeddingGeometryError::NotATensor {
+            tensor: name.to_owned(),
+        })?;
+    Ok(PrimaryTensorShape::new(name, shape.iter().copied()))
 }
