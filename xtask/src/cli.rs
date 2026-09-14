@@ -45,6 +45,11 @@ enum Command {
         #[command(subcommand)]
         cmd: commands::mac_experiment::MacExperimentCommand,
     },
+    /// Compare an imported WavLM segmentation bundle through Speakrs
+    WavlmBridge {
+        #[command(subcommand)]
+        cmd: commands::wavlm_bridge::WavlmBridgeCommand,
+    },
     /// Remote GPU benchmarks via dstack
     Dstack {
         #[command(subcommand)]
@@ -109,6 +114,7 @@ impl Command {
             Self::Compare { cmd } => cmd.run(),
             Self::Benchmark { cmd } => cmd.run(),
             Self::MacExperiment { cmd } => cmd.run(),
+            Self::WavlmBridge { cmd } => cmd.run(),
             Self::Dstack { cmd } => cmd.run(),
             Self::Dataset { cmd } => cmd.run(),
             Self::Diarize {
@@ -501,6 +507,56 @@ mod tests {
         assert!(Cli::try_parse_from(["xtask", "benchmark", "run", "--dataset", "list"]).is_ok());
         assert!(Cli::try_parse_from(["xtask", "benchmark", "score", "/tmp/run"]).is_ok());
         assert!(Cli::try_parse_from(["xtask", "compare", "rttm", "a.rttm", "b.rttm"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "xtask",
+                "wavlm-bridge",
+                "validate",
+                "--bundle",
+                "bundle",
+                "--audio",
+                "audio.wav"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "xtask",
+                "wavlm-bridge",
+                "run",
+                "--spec",
+                "spec.json",
+                "--models-dir",
+                "models",
+                "--mode",
+                "cpu",
+                "--output-dir",
+                "run",
+                "--recipe",
+                "reference",
+                "--recipe",
+                "candidate"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "xtask",
+                "wavlm-bridge",
+                "report",
+                "--spec",
+                "spec.json",
+                "--unchanged-speakrs",
+                "speakrs.json",
+                "--frozen-python",
+                "python.json",
+                "--hybrid",
+                "hybrid.json",
+                "--output-dir",
+                "report"
+            ])
+            .is_ok()
+        );
     }
 
     #[test]

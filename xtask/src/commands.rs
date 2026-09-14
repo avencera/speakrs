@@ -8,3 +8,4 @@ pub mod models;
 pub mod profile_ort_embedding;
 pub mod profile_stages;
 pub(crate) mod profile_support;
+pub mod wavlm_bridge;

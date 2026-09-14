@@ -150,3 +150,62 @@ The `speakrs-bm` binary uses the same `--impls` syntax with its GPU subset:
 | `speakrs` | `sg` | speakrs CUDA (fused, 1s step) |
 | `speakrs-fast` | `sgf` | speakrs CUDA Fast (fused, 2s step) |
 | `pyannote` | `pg` | pyannote CUDA |
+
+## WavLM bridge experiments
+
+`wavlm-bridge` is the bounded B3 adapter for a verified Python WavLM
+segmentation bundle. It never loads a segmentation model. The bridge validates
+the bundle, canonical 16 kHz audio, reference, and UEM identities before it
+loads the Speakrs embedding and PLDA assets.
+
+```bash
+cargo xtask wavlm-bridge validate \
+  --bundle /path/to/bundle \
+  --audio /path/to/canonical.wav \
+  --output validation.json
+
+cargo xtask wavlm-bridge run \
+  --spec bridge-spec.json \
+  --models-dir /path/to/speakrs-models \
+  --mode cpu \
+  --output-dir _benchmarks/wavlm-bridge/run-001 \
+  --cache-dir _benchmarks/wavlm-bridge/cache \
+  --recipe reference
+
+cargo xtask wavlm-bridge report \
+  --spec bridge-spec.json \
+  --unchanged-speakrs unchanged.json \
+  --frozen-python frozen-python.json \
+  --hybrid _benchmarks/wavlm-bridge/run-001/systems/hybrid_wavlm_speakrs/reference.json \
+  --output-dir _benchmarks/wavlm-bridge/report-001
+```
+
+`run` writes `run.json`, one strict hybrid system manifest per recipe, five
+stage dependency receipts per recording, `speaker_tracks.json`, and the exact
+RTTM returned by the imported library path. Output and cache directories are
+immutable. A cache entry is reusable only when its completion marker, hashes,
+receipt chain, stage keys, geometry, and recording/recipe identities all pass
+validation. A stale or partial entry is an error.
+
+The cache has a separate immutable embedding-stage namespace. A recipe that
+changes only clustering or reconstruction reuses the exact decoded masks and
+typed per-slot embedding snapshot, then runs downstream stages again. The run
+record marks final-output reuse with `cache_reused` and embedding-stage reuse
+with `embedding_cache_reused`.
+
+The runtime identity must bind the B2 fixed embedding asset
+`wespeaker-voxceleb-resnet34-fixed.onnx`, its adjacent
+`wespeaker-voxceleb-resnet34-fixed.embedding.json` sidecar, and the PLDA
+directory. The bridge admits only `cpu` and, in CUDA builds, `cuda`; legacy
+fast and CoreML modes are not bridge modes.
+
+`report` only joins typed system manifests. It requires the unchanged Speakrs,
+frozen Python WavLM, and hybrid systems to use identical membership, audio,
+reference, UEM, and pyannote.metrics 4.0.0 scorer identities (zero collar,
+overlap included, automatic speaker count). It does not calculate DER, JER, or
+any other score. Missing score documents remain `unavailable` and make the
+report `incomplete`; no absent score is replaced or claimed. An available score
+document must use score schema version 1, contain finite per-record components,
+counts, diagnostics, runtime, and peak-memory evidence, and cover every source,
+domain, parent, equal-domain, and pooled aggregate. Invalid or incomplete score
+documents are rejected.
