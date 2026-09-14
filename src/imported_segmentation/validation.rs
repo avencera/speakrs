@@ -543,9 +543,14 @@ fn validate_policy(
     {
         return invalid("decoder policy does not match head score semantics".to_owned());
     }
-    if policy.filter.enabled && (policy.filter.width == 0 || policy.filter.width.is_multiple_of(2))
+    if policy.filter.enabled
+        && (policy.filter.width == 0
+            || policy.filter.width.is_multiple_of(2)
+            || u64::from(policy.filter.width) > MAX_MEDIAN_FILTER_WIDTH as u64)
     {
-        return invalid("enabled median filter width must be a positive odd number".to_owned());
+        return invalid(format!(
+            "enabled median filter width must be a positive odd number at most {MAX_MEDIAN_FILTER_WIDTH}"
+        ));
     }
     if policy.embedding.min_num_samples == 0 || policy.embedding.target_frames == 0 {
         return invalid("embedding policy sample/frame bounds must be positive".to_owned());
@@ -594,4 +599,24 @@ pub(crate) fn validate_member_path(path: &str) -> Result<(), SegmentationBundleE
         return invalid(format!("non-canonical tensor member path {path}"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_validation_rejects_an_overlarge_median_filter() {
+        let mut manifest = SegmentationManifest::from_json(include_bytes!(
+            "../../fixtures/wavlm_bridge/manifest.json"
+        ))
+        .unwrap();
+        manifest.policy.filter.width = (MAX_MEDIAN_FILTER_WIDTH + 2) as u32;
+
+        assert!(matches!(
+            manifest.validate(),
+            Err(SegmentationBundleError::Invalid(message))
+                if message.contains("median filter width")
+        ));
+    }
 }

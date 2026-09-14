@@ -4,7 +4,7 @@ use ndarray::s;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::clustering::plda::PldaTransform;
+use crate::clustering::plda::{PldaError, PldaTransform};
 use crate::imported_segmentation::{
     MaskInterpolation, SegmentationBundle, SegmentationBundleError, SegmentationManifest,
     Sha256Digest,
@@ -99,8 +99,11 @@ impl<'a> ImportedDiarizationPipeline<'a> {
         emb_model: &'a mut EmbeddingModel,
         models_dir: &Path,
     ) -> Result<Self, ImportedPipelineError> {
-        let plda = PldaTransform::from_dir(models_dir)
-            .map_err(|error| ImportedPipelineError::Pipeline(PipelineError::Plda(error)))?;
+        let plda = PldaTransform::from_imported_artifact(
+            models_dir,
+            &bundle.manifest.policy.embedding.plda,
+        )
+        .map_err(map_plda_error)?;
         Self::from_parts(bundle, emb_model, plda)
     }
 
@@ -477,6 +480,21 @@ fn validate_plda_contract(
         policy.sha256.as_str(),
         receipt.sha256().as_str(),
     )
+}
+
+fn map_plda_error(error: PldaError) -> ImportedPipelineError {
+    match error {
+        PldaError::ArtifactIdentityMismatch {
+            field,
+            expected,
+            actual,
+        } => ImportedPipelineError::EmbeddingContractMismatch {
+            field,
+            expected,
+            actual,
+        },
+        error => ImportedPipelineError::Pipeline(PipelineError::Plda(error)),
+    }
 }
 
 fn check_embedding_identity(

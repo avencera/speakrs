@@ -2,7 +2,8 @@ use ndarray::{Array2, Array3, s};
 use thiserror::Error;
 
 use crate::imported_segmentation::{
-    ArgmaxTie, FilterBoundary, SegmentationBundle, SegmentationBundleError, SegmentationManifest,
+    ArgmaxTie, FilterBoundary, MAX_MEDIAN_FILTER_WIDTH, SegmentationBundle,
+    SegmentationBundleError, SegmentationManifest,
 };
 use crate::powerset::{PowersetDecodeError, PowersetMapping};
 
@@ -23,8 +24,8 @@ pub enum ImportedDecodeError {
     /// A powerset score row could not be hard-decoded
     #[error(transparent)]
     Powerset(#[from] PowersetDecodeError),
-    /// A median filter width is not an enabled odd-width filter
-    #[error("median filter width must be positive and odd, got {0}")]
+    /// A median filter width is not a bounded positive odd width
+    #[error("median filter width must be positive, odd, and bounded, got {0}")]
     InvalidFilterWidth(usize),
 }
 
@@ -72,7 +73,7 @@ impl ImportedSegmentationDecoder {
         let filter_width = usize::try_from(manifest.policy.filter.width).map_err(|_| {
             ImportedDecodeError::InvalidFilterWidth(manifest.policy.filter.width as usize)
         })?;
-        if manifest.policy.filter.enabled && (filter_width == 0 || filter_width.is_multiple_of(2)) {
+        if manifest.policy.filter.enabled && !is_valid_filter_width(filter_width) {
             return Err(ImportedDecodeError::InvalidFilterWidth(filter_width));
         }
 
@@ -196,7 +197,7 @@ pub(crate) fn median_filter_reflect(
     mut values: ndarray::ArrayViewMut2<'_, f32>,
     width: usize,
 ) -> Result<(), ImportedDecodeError> {
-    if width == 0 || width.is_multiple_of(2) {
+    if !is_valid_filter_width(width) {
         return Err(ImportedDecodeError::InvalidFilterWidth(width));
     }
     if values.nrows() == 0 {
@@ -219,6 +220,10 @@ pub(crate) fn median_filter_reflect(
         }
     }
     Ok(())
+}
+
+fn is_valid_filter_width(width: usize) -> bool {
+    width > 0 && !width.is_multiple_of(2) && width <= MAX_MEDIAN_FILTER_WIDTH
 }
 
 fn reflect_index(index: isize, length: usize) -> usize {
@@ -256,6 +261,26 @@ mod tests {
         median_filter_reflect(values.view_mut(), 11).unwrap();
         assert_eq!(values[[0, 0]], 2.0);
         assert_eq!(values[[10, 0]], 8.0);
+    }
+
+    #[test]
+    fn median_filter_rejects_width_above_the_shared_limit() {
+        let mut values = array![[0.0]];
+        let width = MAX_MEDIAN_FILTER_WIDTH + 2;
+        assert!(matches!(
+            median_filter_reflect(values.view_mut(), width),
+            Err(ImportedDecodeError::InvalidFilterWidth(actual)) if actual == width
+        ));
+
+        let mut manifest = crate::imported_segmentation::SegmentationManifest::from_json(
+            include_bytes!("../../fixtures/wavlm_bridge/manifest.json"),
+        )
+        .unwrap();
+        manifest.policy.filter.width = width as u32;
+        assert!(matches!(
+            ImportedSegmentationDecoder::from_manifest(&manifest),
+            Err(ImportedDecodeError::InvalidFilterWidth(actual)) if actual == width
+        ));
     }
 
     #[test]

@@ -24,14 +24,7 @@ pub(crate) struct InferenceStageReceipts {
     pub(crate) embedding: ReceiptDocument,
 }
 
-impl InferenceStageReceipts {
-    pub(crate) fn embedding_without_outputs(&self) -> color_eyre::eyre::Result<ReceiptDocument> {
-        let mut embedding = self.embedding.clone();
-        embedding.receipt.outputs.clear();
-        embedding.receipt_sha256 = canonical_json_digest(&embedding.receipt)?;
-        Ok(embedding)
-    }
-}
+pub(crate) const EMBEDDING_IMPLEMENTATION_IDENTITY: &str = "speakrs-imported-embedding-v1";
 
 pub(crate) fn stage_receipts(
     recipe: &RecipeSpec,
@@ -112,15 +105,24 @@ pub(crate) fn stage_dependencies(
                 &recipe_identity(&recipe.embedding),
             ),
             dependency(
+                StageDependencyName::Implementation,
+                EMBEDDING_IMPLEMENTATION_IDENTITY,
+            ),
+            dependency(
                 StageDependencyName::Model,
                 &format!(
                     "{}:{}:{}",
                     model_digest, runtime.embedding_model.sha256, runtime.plda.sha256
                 ),
             ),
+            dependency(StageDependencyName::Runtime, &runtime_identity(runtime)),
             dependency(StageDependencyName::Geometry, geometry_digest.as_ref()),
         ],
     ))
+}
+
+fn runtime_identity(runtime: &RuntimeIdentity) -> String {
+    serde_json::to_string(&runtime.mode).expect("bridge mode serialization cannot fail")
 }
 
 pub(crate) fn embedding_stage_key(
@@ -190,6 +192,16 @@ pub(crate) fn embedding_stage_receipt_files(
             ))
         })
         .collect()
+}
+
+pub(crate) fn receipt_with_output(
+    document: &ReceiptDocument,
+    output: ArtifactRef,
+) -> color_eyre::eyre::Result<ReceiptDocument> {
+    let mut document = document.clone();
+    document.receipt.outputs = vec![output];
+    document.receipt_sha256 = canonical_json_digest(&document.receipt)?;
+    Ok(document)
 }
 
 pub(crate) fn document_availability(
@@ -465,9 +477,10 @@ pub(crate) fn run_from_embedding_cache(
     let tracks = super::run::speaker_tracks(recording, &result, geometry.clone());
     let tracks_bytes = serde_json::to_vec_pretty(&tracks)?;
     let hypothesis_bytes = result.rttm(&recording.spec.id).into_bytes();
+    let output_relative = super::run::recording_relative(recipe, recording);
     let reconstruction_outputs = vec![
-        super::run::artifact_for_bytes("speaker_tracks.json", &tracks_bytes),
-        super::run::artifact_for_bytes("output.rttm", &hypothesis_bytes),
+        super::run::artifact_for_path(&output_relative.join("speaker_tracks.json"), &tracks_bytes),
+        super::run::artifact_for_path(&output_relative.join("output.rttm"), &hypothesis_bytes),
     ];
     let clustering_dependencies = vec![
         dependency(
@@ -486,7 +499,13 @@ pub(crate) fn run_from_embedding_cache(
             canonical_json_digest(geometry)?.as_ref(),
         ),
     ];
-    let embedding_receipt = cached_stage_receipts.embedding_without_outputs()?;
+    let snapshot_relative_path = super::run::recording_relative(recipe, recording)
+        .join("stages")
+        .join("embedding_snapshot.json");
+    let embedding_receipt = receipt_with_output(
+        &cached_stage_receipts.embedding,
+        super::run::artifact_for_path(&snapshot_relative_path, &hit.snapshot.0),
+    )?;
     let clustering_receipt = make_receipt(
         StageKind::Clustering,
         clustering_dependencies,
@@ -524,7 +543,7 @@ pub(crate) fn run_from_embedding_cache(
         cache_key: expected_cache_key.clone(),
         receipt_files,
         embedding_stage_receipt_files: Vec::new(),
-        embedding_snapshot_bytes: Vec::new(),
+        embedding_snapshot_bytes: hit.snapshot.0,
         speaker_tracks_bytes: tracks_bytes,
         hypothesis_bytes,
         stage_receipts: Vec::new(),

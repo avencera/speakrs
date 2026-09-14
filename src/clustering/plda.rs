@@ -5,7 +5,7 @@ use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use ndarray_npy::read_npy;
 use sha2::{Digest, Sha256};
 
-use crate::imported_segmentation::Sha256Digest;
+use crate::imported_segmentation::{IdentityReference, Sha256Digest};
 use crate::linalg::{Eigh, Inverse, LinalgError, UPLO};
 use crate::utils::l2_normalize_rows_f64;
 
@@ -14,7 +14,7 @@ pub const PLDA_ARTIFACT_ID: &str = "plda";
 /// Revision of the fixed PLDA artifact accepted by the imported path
 pub const PLDA_ARTIFACT_REVISION: &str = "b2-fixed";
 
-/// Verified identity receipt owned by a loaded PLDA artifact
+/// Identity receipt owned by a loaded PLDA artifact
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PldaArtifactReceipt {
     sha256: Sha256Digest,
@@ -31,9 +31,19 @@ impl PldaArtifactReceipt {
         PLDA_ARTIFACT_REVISION
     }
 
-    /// Return the verified digest of the complete PLDA artifact directory
+    /// Return the digest associated with the loaded PLDA parameters
     pub fn sha256(&self) -> &Sha256Digest {
         &self.sha256
+    }
+
+    fn verify(&self, expected: &IdentityReference) -> Result<(), PldaError> {
+        verify_identity("plda.id", expected.id.as_str(), self.id())?;
+        verify_identity("plda.revision", expected.revision.as_str(), self.revision())?;
+        verify_identity(
+            "plda.sha256",
+            expected.sha256.as_str(),
+            self.sha256.as_str(),
+        )
     }
 }
 
@@ -80,18 +90,26 @@ struct PldaParameters {
 }
 
 impl PldaTransform {
+    /// Load PLDA parameters from a directory without binding them to an imported manifest
     pub fn from_dir(models_dir: &Path) -> Result<Self, PldaError> {
-        let mut transform = Self::from_parameters(PldaParameters {
+        Self::from_parameters(PldaParameters {
             mean1: read_array1_f64(models_dir.join("plda_mean1.npy"))?,
             mean2: read_array1_f64(models_dir.join("plda_mean2.npy"))?,
             lda: read_array2_f64(models_dir.join("plda_lda.npy"))?,
             mu: read_array1_f64(models_dir.join("plda_mu.npy"))?,
             raw_transform: read_array2_f64(models_dir.join("plda_tr.npy"))?,
             psi: read_array1_f64(models_dir.join("plda_psi.npy"))?,
-        })?;
-        transform.receipt = PldaArtifactReceipt {
-            sha256: digest_tree(models_dir)?,
-        };
+        })
+    }
+
+    /// Load PLDA parameters and verify their identity against an imported manifest reference
+    pub fn from_imported_artifact(
+        models_dir: &Path,
+        expected: &IdentityReference,
+    ) -> Result<Self, PldaError> {
+        let mut transform = Self::from_dir(models_dir)?;
+        transform.receipt.sha256 = digest_tree(models_dir)?;
+        transform.receipt.verify(expected)?;
         Ok(transform)
     }
 
@@ -147,7 +165,7 @@ impl PldaTransform {
         })
     }
 
-    /// Return the verified identity of the loaded PLDA artifact
+    /// Return the identity of the loaded PLDA artifact
     pub fn receipt(&self) -> &PldaArtifactReceipt {
         &self.receipt
     }
@@ -203,7 +221,7 @@ fn digest_parameters(
             digest.update(value.to_le_bytes());
         }
     }
-    Sha256Digest::digest(&digest.finalize())
+    finalize_digest(digest)
 }
 
 fn digest_tree(root: &Path) -> Result<Sha256Digest, PldaError> {
@@ -230,7 +248,7 @@ fn digest_tree(root: &Path) -> Result<Sha256Digest, PldaError> {
         digest.update((bytes.len() as u64).to_le_bytes());
         digest.update(bytes);
     }
-    Ok(Sha256Digest::digest(&digest.finalize()))
+    Ok(finalize_digest(digest))
 }
 
 fn collect_files(
@@ -283,6 +301,22 @@ fn collect_files(
 fn update_length_prefixed(digest: &mut Sha256, bytes: &[u8]) {
     digest.update((bytes.len() as u64).to_le_bytes());
     digest.update(bytes);
+}
+
+fn finalize_digest(digest: Sha256) -> Sha256Digest {
+    Sha256Digest::new(format!("{:x}", digest.finalize()))
+        .expect("SHA-256 formatting always produces a canonical digest")
+}
+
+fn verify_identity(field: &'static str, expected: &str, actual: &str) -> Result<(), PldaError> {
+    if expected == actual {
+        return Ok(());
+    }
+    Err(PldaError::ArtifactIdentityMismatch {
+        field,
+        expected: expected.to_owned(),
+        actual: actual.to_owned(),
+    })
 }
 
 fn validate_plda_parameters(
@@ -398,6 +432,16 @@ pub enum PldaError {
         /// Inspection or read failure
         message: String,
     },
+    /// The loaded artifact did not match the imported identity reference
+    #[error("plda artifact identity mismatch for {field}: expected {expected}, got {actual}")]
+    ArtifactIdentityMismatch {
+        /// Identity field that differed
+        field: &'static str,
+        /// Identity required by the imported manifest
+        expected: String,
+        /// Identity measured from the loaded artifact
+        actual: String,
+    },
     /// Linear algebra failed while building the transform
     #[error(transparent)]
     Linalg(#[from] LinalgError),
@@ -417,7 +461,7 @@ mod tests {
     use approx::assert_abs_diff_eq;
     use ndarray::array;
     use ndarray_npy::ReadNpyExt;
-    use std::fs::File;
+    use std::fs::{self, File};
 
     use super::*;
 
@@ -458,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn loaded_models_have_a_stable_verified_receipt() {
+    fn loaded_models_have_a_stable_receipt() {
         let models_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/models");
         let first = PldaTransform::from_dir(&models_dir).unwrap();
         let second = PldaTransform::from_dir(&models_dir).unwrap();
@@ -466,6 +510,86 @@ mod tests {
         assert_eq!(first.receipt(), second.receipt());
         assert_eq!(first.receipt().id(), PLDA_ARTIFACT_ID);
         assert_eq!(first.receipt().revision(), PLDA_ARTIFACT_REVISION);
+    }
+
+    #[test]
+    fn imported_loader_binds_the_complete_tree_digest() {
+        let source_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/models");
+        let directory = tempfile::tempdir().unwrap();
+        for name in [
+            "plda_mean1.npy",
+            "plda_mean2.npy",
+            "plda_lda.npy",
+            "plda_mu.npy",
+            "plda_tr.npy",
+            "plda_psi.npy",
+        ] {
+            fs::copy(source_dir.join(name), directory.path().join(name)).unwrap();
+        }
+        let models_dir = directory.path();
+        let expected = IdentityReference {
+            id: PLDA_ARTIFACT_ID.to_owned(),
+            revision: PLDA_ARTIFACT_REVISION.to_owned(),
+            sha256: digest_tree(models_dir).unwrap(),
+        };
+
+        let plda = PldaTransform::from_imported_artifact(models_dir, &expected).unwrap();
+
+        assert_eq!(plda.receipt().sha256(), &expected.sha256);
+    }
+
+    #[test]
+    fn tree_digest_matches_cross_language_vector() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("nested")).unwrap();
+        fs::write(directory.path().join("a.txt"), b"alpha").unwrap();
+        fs::write(directory.path().join("nested/b.bin"), [0, 1, 2, 255]).unwrap();
+
+        // this vector matches the Python bridge tree digest contract
+        assert_eq!(
+            digest_tree(directory.path()).unwrap().as_str(),
+            "48c74f4785da606a9f2147aa1d62640e8d2f9008b8101281983344624ca64e18"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permissive_loader_accepts_symlinked_snapshot_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/models");
+        let snapshot_dir = directory.path().join("snapshot");
+        fs::create_dir(&snapshot_dir).unwrap();
+        for name in [
+            "plda_mean1.npy",
+            "plda_mean2.npy",
+            "plda_lda.npy",
+            "plda_mu.npy",
+            "plda_tr.npy",
+            "plda_psi.npy",
+        ] {
+            std::os::unix::fs::symlink(source_dir.join(name), snapshot_dir.join(name)).unwrap();
+        }
+
+        assert!(PldaTransform::from_dir(&snapshot_dir).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn strict_imported_loader_rejects_a_symlinked_model_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let models_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/models");
+        let link = directory.path().join("models");
+        std::os::unix::fs::symlink(models_dir, &link).unwrap();
+        let expected = IdentityReference {
+            id: PLDA_ARTIFACT_ID.to_owned(),
+            revision: PLDA_ARTIFACT_REVISION.to_owned(),
+            sha256: Sha256Digest::digest(b"expected"),
+        };
+
+        assert!(matches!(
+            PldaTransform::from_imported_artifact(&link, &expected),
+            Err(PldaError::ArtifactIo { message, .. }) if message == "must be a real directory"
+        ));
     }
 
     #[test]

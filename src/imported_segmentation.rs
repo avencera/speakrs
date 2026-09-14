@@ -42,6 +42,9 @@ pub const MAX_FRAMES: u64 = 100_000;
 /// Maximum number of powerset classes in one chunk tensor
 pub const MAX_CLASSES: u64 = 4_096;
 
+/// Maximum odd median window width admitted for imported score filtering
+pub const MAX_MEDIAN_FILTER_WIDTH: usize = 255;
+
 /// Maximum UTF-8 byte length of a relative tensor member path
 pub const MAX_MEMBER_PATH_BYTES: usize = 512;
 

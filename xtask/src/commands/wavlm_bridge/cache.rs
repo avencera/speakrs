@@ -1,7 +1,14 @@
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
+
+#[cfg(unix)]
+use std::ffi::CString;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 use color_eyre::eyre::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -21,6 +28,7 @@ pub struct CacheEntry {
     pub recording_id: String,
     pub recipe_id: String,
     pub stage_receipts: Vec<ArtifactRef>,
+    pub embedding_snapshot: ArtifactRef,
     pub speaker_tracks: ArtifactRef,
     pub hypothesis: ArtifactRef,
 }
@@ -30,8 +38,16 @@ pub struct CacheEntry {
 pub struct CacheHit {
     pub key: Sha256Digest,
     pub stage_receipts: Vec<(PathBuf, Vec<u8>, ArtifactRef)>,
+    pub embedding_snapshot: (Vec<u8>, ArtifactRef),
     pub speaker_tracks: (Vec<u8>, ArtifactRef),
     pub hypothesis: (Vec<u8>, ArtifactRef),
+}
+
+pub(crate) struct CachePublication<'a> {
+    pub(crate) stage_receipts: &'a [(String, Vec<u8>)],
+    pub(crate) embedding_snapshot: &'a [u8],
+    pub(crate) speaker_tracks: &'a [u8],
+    pub(crate) hypothesis: &'a [u8],
 }
 
 /// Files loaded from a verified embedding-stage cache entry
@@ -59,8 +75,10 @@ pub fn lookup(
     ensure_directory(&entry_root, "cache entry")?;
     let entry_path = entry_root.join("entry.json");
     let marker_path = entry_root.join(".complete");
+    if !completion_marker_present(&marker_path, "cache completion marker")? {
+        return Ok(None);
+    }
     ensure_regular_file(&entry_path, "cache entry manifest")?;
-    ensure_regular_file(&marker_path, "cache completion marker")?;
     let entry_bytes = fs::read(&entry_path)?;
     let expected_marker = digest_bytes(&entry_bytes);
     let marker = fs::read_to_string(&marker_path)?;
@@ -115,6 +133,39 @@ pub fn lookup(
         receipts.push((artifact.relative_path.clone(), bytes, artifact.clone()));
     }
     validate_receipt_chain(&documents)?;
+    let embedding = documents
+        .get(&StageKind::Embedding)
+        .expect("checked stage order");
+    let snapshot_path = member_path(&entry_root, &entry.embedding_snapshot.relative_path)?;
+    let snapshot_bytes = read_bounded_member(
+        &snapshot_path,
+        &entry.embedding_snapshot,
+        super::domain::MAX_EMBEDDING_STAGE_BYTES,
+    )?;
+    let snapshot_document: EmbeddingStageDocument = serde_json::from_slice(&snapshot_bytes)
+        .wrap_err_with(|| {
+            format!(
+                "invalid cached embedding snapshot {}",
+                snapshot_path.display()
+            )
+        })?;
+    snapshot_document.validate()?;
+    ensure!(
+        snapshot_document.recording_id == entry.recording_id
+            && snapshot_document.stage_key == embedding.receipt.cache_key,
+        "cached embedding snapshot identity does not match cache entry"
+    );
+    ensure!(
+        snapshot_document.geometry == embedding.receipt.geometry,
+        "cached embedding snapshot geometry does not match embedding receipt"
+    );
+    ensure!(
+        embedding
+            .receipt
+            .outputs
+            .contains(&entry.embedding_snapshot),
+        "cached embedding receipt does not name the snapshot"
+    );
     let reconstruction = documents
         .get(&StageKind::Reconstruction)
         .expect("checked stage order");
@@ -142,6 +193,7 @@ pub fn lookup(
     Ok(Some(CacheHit {
         key: entry.cache_key,
         stage_receipts: receipts,
+        embedding_snapshot: (snapshot_bytes, entry.embedding_snapshot),
         speaker_tracks: (tracks_bytes, entry.speaker_tracks),
         hypothesis: (hypothesis_bytes, entry.hypothesis),
     }))
@@ -168,8 +220,10 @@ pub fn lookup_embedding(
     ensure_directory(&entry_root, "embedding cache entry")?;
     let entry_path = entry_root.join("entry.json");
     let marker_path = entry_root.join(".complete");
+    if !completion_marker_present(&marker_path, "embedding cache completion marker")? {
+        return Ok(None);
+    }
     ensure_regular_file(&entry_path, "embedding cache entry manifest")?;
-    ensure_regular_file(&marker_path, "embedding cache completion marker")?;
     ensure!(
         fs::metadata(&entry_path)?.len() <= super::domain::MAX_EMBEDDING_STAGE_BYTES as u64,
         "embedding cache entry manifest exceeds size bound"
@@ -261,19 +315,12 @@ pub fn publish(
     key: &Sha256Digest,
     recording_id: &str,
     recipe_id: &str,
-    stage_receipts: &[(String, Vec<u8>)],
-    speaker_tracks: &[u8],
-    hypothesis: &[u8],
+    publication: &CachePublication<'_>,
 ) -> Result<CacheEntry> {
     fs::create_dir_all(cache_root)
         .wrap_err_with(|| format!("failed to create cache root {}", cache_root.display()))?;
     ensure_directory(cache_root, "cache root")?;
     let entry_root = cache_root.join(key.as_str());
-    ensure!(
-        !entry_root.exists(),
-        "cache entry already exists: {}",
-        entry_root.display()
-    );
     let staging = tempfile::tempdir_in(cache_root).wrap_err_with(|| {
         format!(
             "failed to create cache staging directory in {}",
@@ -282,18 +329,31 @@ pub fn publish(
     })?;
     let staging_root = staging.path();
     fs::create_dir(staging_root.join("stages"))?;
-    let mut receipt_artifacts = Vec::with_capacity(stage_receipts.len());
-    for (name, bytes) in stage_receipts {
+    let mut receipt_artifacts = Vec::with_capacity(publication.stage_receipts.len());
+    for (name, bytes) in publication.stage_receipts {
         let relative = PathBuf::from("stages").join(name);
         let path = staging_root.join(&relative);
         write_new(&path, bytes)?;
         receipt_artifacts.push(artifact_for(staging_root, &relative)?);
     }
-    let tracks_relative = PathBuf::from("speaker_tracks.json");
-    write_new(&staging_root.join(&tracks_relative), speaker_tracks)?;
+    let recording_relative = run_relative(recipe_id, recording_id);
+    let snapshot_relative = recording_relative.join("stages/embedding_snapshot.json");
+    write_new(
+        &staging_root.join(&snapshot_relative),
+        publication.embedding_snapshot,
+    )?;
+    let snapshot_artifact = artifact_for(staging_root, &snapshot_relative)?;
+    let tracks_relative = recording_relative.join("speaker_tracks.json");
+    write_new(
+        &staging_root.join(&tracks_relative),
+        publication.speaker_tracks,
+    )?;
     let tracks_artifact = artifact_for(staging_root, &tracks_relative)?;
-    let hypothesis_relative = PathBuf::from("output.rttm");
-    write_new(&staging_root.join(&hypothesis_relative), hypothesis)?;
+    let hypothesis_relative = recording_relative.join("output.rttm");
+    write_new(
+        &staging_root.join(&hypothesis_relative),
+        publication.hypothesis,
+    )?;
     let hypothesis_artifact = artifact_for(staging_root, &hypothesis_relative)?;
     let entry = CacheEntry {
         schema_version: CACHE_SCHEMA_VERSION,
@@ -301,22 +361,24 @@ pub fn publish(
         recording_id: recording_id.to_owned(),
         recipe_id: recipe_id.to_owned(),
         stage_receipts: receipt_artifacts,
+        embedding_snapshot: snapshot_artifact,
         speaker_tracks: tracks_artifact,
         hypothesis: hypothesis_artifact,
     };
     let entry_bytes = serde_json::to_vec_pretty(&entry)?;
     write_new(&staging_root.join("entry.json"), &entry_bytes)?;
-    fs::create_dir(&entry_root).wrap_err_with(|| {
-        format!(
-            "failed to reserve cache entry {} without replacement",
-            entry_root.display()
-        )
-    })?;
-    publish_staged_tree(staging_root, &entry_root)?;
-    let marker = format!("{}\n", digest_bytes(&entry_bytes));
-    write_new(&entry_root.join(".complete"), marker.as_bytes())?;
-    make_tree_read_only(&entry_root)?;
-    Ok(entry)
+    write_new(
+        &staging_root.join(".complete"),
+        format!("{}\n", digest_bytes(&entry_bytes)).as_bytes(),
+    )?;
+    make_tree_read_only(staging_root)?;
+    publish_or_reuse(
+        staging,
+        &entry_root,
+        "cache entry",
+        || existing_entry(cache_root, key, recording_id, recipe_id),
+        entry,
+    )
 }
 
 pub fn publish_embedding(
@@ -338,9 +400,7 @@ pub fn publish_embedding(
         .wrap_err_with(|| format!("failed to create cache root {}", cache_root.display()))?;
     ensure_directory(cache_root, "cache root")?;
     let embedding_root = cache_root.join("embedding");
-    if !embedding_root.exists() {
-        fs::create_dir(&embedding_root)?;
-    }
+    fs::create_dir_all(&embedding_root)?;
     ensure_directory(&embedding_root, "embedding cache root")?;
     let entry_root = embedding_root.join(key.as_str());
     let staging = tempfile::tempdir_in(&embedding_root).wrap_err_with(|| {
@@ -369,19 +429,18 @@ pub fn publish_embedding(
     };
     let entry_bytes = serde_json::to_vec_pretty(&entry)?;
     write_new(&staging_root.join("entry.json"), &entry_bytes)?;
-    fs::create_dir(&entry_root).wrap_err_with(|| {
-        format!(
-            "failed to reserve embedding cache entry {} without replacement",
-            entry_root.display()
-        )
-    })?;
-    publish_staged_tree(staging_root, &entry_root)?;
     write_new(
-        &entry_root.join(".complete"),
+        &staging_root.join(".complete"),
         format!("{}\n", digest_bytes(&entry_bytes)).as_bytes(),
     )?;
-    make_tree_read_only(&entry_root)?;
-    Ok(entry)
+    make_tree_read_only(staging_root)?;
+    publish_or_reuse(
+        staging,
+        &entry_root,
+        "embedding cache entry",
+        || existing_embedding_entry(cache_root, key, recording_id),
+        entry,
+    )
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -394,36 +453,272 @@ pub struct EmbeddingCacheEntry {
     pub snapshot: ArtifactRef,
 }
 
-fn publish_staged_tree(staging: &Path, destination: &Path) -> Result<()> {
-    for entry in fs::read_dir(staging)? {
-        let entry = entry?;
-        let source = entry.path();
-        let target = destination.join(entry.file_name());
-        let metadata = fs::symlink_metadata(&source)?;
-        ensure!(
-            !metadata.file_type().is_symlink(),
-            "cache staging tree contains a symlink: {}",
-            source.display()
-        );
-        if metadata.is_dir() {
-            fs::create_dir(&target).wrap_err_with(|| {
+fn run_relative(recipe_id: &str, recording_id: &str) -> PathBuf {
+    PathBuf::from("recipes")
+        .join(recipe_id)
+        .join("recordings")
+        .join(recording_id)
+}
+
+fn publish_or_reuse<T: PartialEq>(
+    staging: tempfile::TempDir,
+    destination: &Path,
+    label: &str,
+    existing: impl Fn() -> Result<Option<T>>,
+    entry: T,
+) -> Result<T> {
+    let staging_path = staging.path().to_owned();
+    let result = (|| -> Result<T> {
+        match atomic_publish_no_replace(&staging_path, destination) {
+            Ok(()) => Ok(entry),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                if let Some(existing) = existing()? {
+                    ensure!(
+                        existing == entry,
+                        "{label} {} conflicts with the requested contents",
+                        destination.display()
+                    );
+                    return Ok(existing);
+                }
+                if let Err(error) = remove_partial(destination) {
+                    if destination.join(".complete").exists()
+                        && let Some(existing) = existing()?
+                    {
+                        ensure!(
+                            existing == entry,
+                            "{label} {} conflicts with the requested contents",
+                            destination.display()
+                        );
+                        return Ok(existing);
+                    }
+                    return Err(error);
+                }
+                match atomic_publish_no_replace(&staging_path, destination) {
+                    Ok(()) => Ok(entry),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                        let existing = existing()?.ok_or_else(|| {
+                            color_eyre::eyre::eyre!(
+                                "{label} {} was concurrently published without a complete marker",
+                                destination.display()
+                            )
+                        })?;
+                        ensure!(
+                            existing == entry,
+                            "{label} {} conflicts with the requested contents",
+                            destination.display()
+                        );
+                        Ok(existing)
+                    }
+                    Err(error) => Err(error).wrap_err_with(|| {
+                        format!(
+                            "failed to publish {label} {} without replacement",
+                            destination.display()
+                        )
+                    }),
+                }
+            }
+            Err(error) => Err(error).wrap_err_with(|| {
                 format!(
-                    "failed to create cache directory {} without replacement",
-                    target.display()
+                    "failed to publish {label} {} without replacement",
+                    destination.display()
                 )
-            })?;
-            publish_staged_tree(&source, &target)?;
-        } else if metadata.is_file() {
-            write_new(&target, &fs::read(&source)?)?;
-        } else {
-            ensure!(
-                false,
-                "unsupported cache staging member: {}",
-                source.display()
-            );
+            }),
+        }
+    })();
+    let cleanup = cleanup_staging(staging);
+    match cleanup {
+        Ok(()) => result,
+        Err(cleanup_error) => match result {
+            Ok(_) => Err(cleanup_error),
+            Err(error) => Err(error).wrap_err_with(|| {
+                format!(
+                    "failed to clean up cache staging directory {}: {cleanup_error}",
+                    staging_path.display()
+                )
+            }),
+        },
+    }
+}
+
+fn existing_entry(
+    cache_root: &Path,
+    key: &Sha256Digest,
+    recording_id: &str,
+    recipe_id: &str,
+) -> Result<Option<CacheEntry>> {
+    let entry_root = cache_root.join(key.as_str());
+    if !entry_root.exists() {
+        return Ok(None);
+    }
+    if !entry_root.join(".complete").exists() {
+        return Ok(None);
+    }
+    ensure!(
+        lookup(cache_root, key, recording_id, recipe_id)?.is_some(),
+        "cache entry disappeared during validation"
+    );
+    let bytes = fs::read(entry_root.join("entry.json"))?;
+    Ok(Some(serde_json::from_slice(&bytes)?))
+}
+
+fn existing_embedding_entry(
+    cache_root: &Path,
+    key: &Sha256Digest,
+    recording_id: &str,
+) -> Result<Option<EmbeddingCacheEntry>> {
+    let entry_root = cache_root.join("embedding").join(key.as_str());
+    if !entry_root.exists() {
+        return Ok(None);
+    }
+    if !entry_root.join(".complete").exists() {
+        return Ok(None);
+    }
+    ensure!(
+        lookup_embedding(cache_root, key, recording_id)?.is_some(),
+        "embedding cache entry disappeared during validation"
+    );
+    let bytes = fs::read(entry_root.join("entry.json"))?;
+    Ok(Some(serde_json::from_slice(&bytes)?))
+}
+
+fn completion_marker_present(path: &Path, label: &str) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {
+            ensure_regular_file(path, label)?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => {
+            Err(error).wrap_err_with(|| format!("failed to inspect {label} {}", path.display()))
+        }
+    }
+}
+
+fn cleanup_staging(staging: tempfile::TempDir) -> Result<()> {
+    let staging_path = staging.path().to_owned();
+    match fs::symlink_metadata(&staging_path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).wrap_err_with(|| {
+                format!(
+                    "failed to inspect cache staging directory {}",
+                    staging_path.display()
+                )
+            });
+        }
+    }
+    make_tree_writable(&staging_path)?;
+    staging.close().wrap_err_with(|| {
+        format!(
+            "failed to remove cache staging directory {}",
+            staging_path.display()
+        )
+    })
+}
+
+fn make_tree_writable(root: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(root)?;
+    ensure!(
+        !metadata.file_type().is_symlink(),
+        "cache staging tree contains a symlink: {}",
+        root.display()
+    );
+    let mut permissions = metadata.permissions();
+    #[cfg(unix)]
+    permissions.set_mode(permissions.mode() | 0o200);
+    #[cfg(not(unix))]
+    permissions.set_readonly(false);
+    fs::set_permissions(root, permissions)?;
+    if metadata.is_dir() {
+        for entry in fs::read_dir(root)? {
+            make_tree_writable(&entry?.path())?;
         }
     }
     Ok(())
+}
+
+fn remove_partial(destination: &Path) -> Result<()> {
+    if !destination.exists() {
+        return Ok(());
+    }
+    let metadata = match fs::symlink_metadata(destination) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(
+        !metadata.file_type().is_symlink(),
+        "refusing to remove symlink cache entry {}",
+        destination.display()
+    );
+    ensure!(
+        !destination.join(".complete").exists(),
+        "cache entry {} has a completion marker but failed validation",
+        destination.display()
+    );
+    if let Err(error) = fs::remove_dir_all(destination)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        return Err(error).wrap_err_with(|| {
+            format!(
+                "failed to remove partial cache entry {}",
+                destination.display()
+            )
+        });
+    }
+    Ok(())
+}
+
+fn atomic_publish_no_replace(source: &Path, destination: &Path) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let source = CString::new(source.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
+        let destination = CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "destination path contains NUL")
+        })?;
+        let result =
+            // SAFETY: both pointers reference NUL-terminated paths owned by these CStrings
+            unsafe { libc::renamex_np(source.as_ptr(), destination.as_ptr(), libc::RENAME_EXCL) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let source = CString::new(source.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "source path contains NUL"))?;
+        let destination = CString::new(destination.as_os_str().as_bytes()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "destination path contains NUL")
+        })?;
+        // SAFETY: both pointers reference NUL-terminated paths owned by these CStrings
+        let result = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                source.as_ptr(),
+                libc::AT_FDCWD,
+                destination.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        if destination.exists() {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, destination));
+        }
+        fs::rename(source, destination)
+    }
 }
 
 fn validate_receipt_chain(documents: &BTreeMap<StageKind, ReceiptDocument>) -> Result<()> {
@@ -665,6 +960,7 @@ mod tests {
 
     fn stage_documents(
         key: &Sha256Digest,
+        snapshot: &ArtifactRef,
         tracks: &ArtifactRef,
         hypothesis: &ArtifactRef,
     ) -> Vec<(String, Vec<u8>)> {
@@ -678,10 +974,10 @@ mod tests {
         ];
         let mut parents = Vec::new();
         for stage in stages {
-            let outputs = if stage == StageKind::Reconstruction {
-                vec![tracks.clone(), hypothesis.clone()]
-            } else {
-                Vec::new()
+            let outputs = match stage {
+                StageKind::Embedding => vec![snapshot.clone()],
+                StageKind::Reconstruction => vec![tracks.clone(), hypothesis.clone()],
+                _ => Vec::new(),
             };
             let receipt = StageReceipt {
                 schema_version: super::super::domain::RECEIPT_SCHEMA_VERSION,
@@ -735,11 +1031,37 @@ mod tests {
             sha256: digest_bytes(hypothesis),
             bytes: hypothesis.len() as u64,
         };
-        for (name, bytes) in stage_documents(key, &tracks_artifact, &hypothesis_artifact) {
+        let snapshot_bytes = serde_json::to_vec(&EmbeddingStageDocument {
+            schema_version: super::super::domain::EMBEDDING_STAGE_SCHEMA_VERSION,
+            recording_id: "recording".into(),
+            stage_key: digest_bytes(b"Embedding"),
+            geometry: geometry(),
+            segmentation_shape: [0, 0, 0],
+            segmentation_values: Vec::new(),
+            entries: Vec::new(),
+            embedding_receipt: AvailabilityCounts::default(),
+        })
+        .unwrap();
+        let snapshot_relative =
+            PathBuf::from("recipes/recipe/recordings/recording/stages/embedding_snapshot.json");
+        let snapshot_artifact = ArtifactRef {
+            relative_path: snapshot_relative.clone(),
+            sha256: digest_bytes(&snapshot_bytes),
+            bytes: snapshot_bytes.len() as u64,
+        };
+        for (name, bytes) in stage_documents(
+            key,
+            &snapshot_artifact,
+            &tracks_artifact,
+            &hypothesis_artifact,
+        ) {
             let path = entry_root.join("stages").join(name);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, bytes).unwrap();
         }
+        let snapshot_path = entry_root.join(&snapshot_relative);
+        fs::create_dir_all(snapshot_path.parent().unwrap()).unwrap();
+        fs::write(snapshot_path, &snapshot_bytes).unwrap();
         for (relative, bytes) in [(tracks_relative, tracks), (hypothesis_relative, hypothesis)] {
             let path = entry_root.join(relative);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -763,6 +1085,7 @@ mod tests {
             recording_id: "recording".into(),
             recipe_id: "recipe".into(),
             stage_receipts,
+            embedding_snapshot: snapshot_artifact,
             speaker_tracks: tracks_artifact,
             hypothesis: hypothesis_artifact,
         };
@@ -840,6 +1163,9 @@ mod tests {
             bytes: snapshot.len() as u64,
         };
         let stage_receipts = embedding_stage_documents(&key, &snapshot_artifact);
+        let partial_root = cache.path().join("embedding").join(key.as_str());
+        fs::create_dir_all(&partial_root).unwrap();
+        fs::write(partial_root.join("partial"), b"interrupted").unwrap();
         publish_embedding(cache.path(), &key, "recording", &stage_receipts, &snapshot).unwrap();
         let hit = lookup_embedding(cache.path(), &key, "recording")
             .unwrap()
@@ -847,22 +1173,147 @@ mod tests {
         assert_eq!(hit.key, key);
         assert_eq!(hit.snapshot.0, snapshot);
         assert!(
-            publish_embedding(cache.path(), &key, "recording", &stage_receipts, &snapshot).is_err()
+            fs::metadata(cache.path().join("embedding").join(key.as_str()))
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+        assert!(
+            publish_embedding(cache.path(), &key, "recording", &stage_receipts, &snapshot).is_ok()
+        );
+        let conflicting_snapshot = [snapshot.as_slice(), b"conflict"].concat();
+        assert!(
+            publish_embedding(
+                cache.path(),
+                &key,
+                "recording",
+                &stage_receipts,
+                &conflicting_snapshot
+            )
+            .is_err()
         );
     }
 
     #[test]
-    fn embedding_cache_rejects_interrupted_entry() {
+    fn concurrent_embedding_publications_reuse_one_complete_tree() {
+        let cache = tempfile::tempdir().unwrap();
+        let key = digest_bytes(b"concurrent-embedding-stage");
+        let snapshot_document = EmbeddingStageDocument {
+            schema_version: super::super::domain::EMBEDDING_STAGE_SCHEMA_VERSION,
+            recording_id: "recording".into(),
+            stage_key: key.clone(),
+            geometry: geometry(),
+            segmentation_shape: [0, 0, 0],
+            segmentation_values: Vec::new(),
+            entries: Vec::new(),
+            embedding_receipt: AvailabilityCounts::default(),
+        };
+        let snapshot = serde_json::to_vec(&snapshot_document).unwrap();
+        let snapshot_artifact = ArtifactRef {
+            relative_path: "embedding_snapshot.json".into(),
+            sha256: digest_bytes(&snapshot),
+            bytes: snapshot.len() as u64,
+        };
+        let stage_receipts = embedding_stage_documents(&key, &snapshot_artifact);
+
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                publish_embedding(cache.path(), &key, "recording", &stage_receipts, &snapshot)
+                    .is_ok()
+            });
+            let second = scope.spawn(|| {
+                publish_embedding(cache.path(), &key, "recording", &stage_receipts, &snapshot)
+                    .is_ok()
+            });
+            assert!(first.join().unwrap());
+            assert!(second.join().unwrap());
+        });
+
+        assert!(
+            lookup_embedding(cache.path(), &key, "recording")
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn losing_publication_removes_read_only_staging_tree() {
+        let cache = tempfile::tempdir().unwrap();
+        let destination = cache.path().join("destination");
+        fs::create_dir(&destination).unwrap();
+        fs::write(destination.join("winner"), b"winner").unwrap();
+
+        let staging = tempfile::tempdir_in(cache.path()).unwrap();
+        let staging_path = staging.path().to_owned();
+        fs::write(staging.path().join("staged"), b"staged").unwrap();
+        make_tree_read_only(staging.path()).unwrap();
+
+        let result = publish_or_reuse(
+            staging,
+            &destination,
+            "test cache",
+            || Ok(Some("winner")),
+            "winner",
+        )
+        .unwrap();
+
+        assert_eq!(result, "winner");
+        assert!(!staging_path.exists());
+        assert_eq!(fs::read(destination.join("winner")).unwrap(), b"winner");
+    }
+
+    #[test]
+    fn publication_error_removes_read_only_staging_tree() {
+        let cache = tempfile::tempdir().unwrap();
+        let destination = cache.path().join("missing").join("destination");
+        let staging = tempfile::tempdir_in(cache.path()).unwrap();
+        let staging_path = staging.path().to_owned();
+        fs::write(staging.path().join("staged"), b"staged").unwrap();
+        make_tree_read_only(staging.path()).unwrap();
+
+        let error = publish_or_reuse(staging, &destination, "test cache", || Ok(None), ())
+            .expect_err("publication into a missing parent should fail");
+
+        assert!(error.to_string().contains("without replacement"));
+        assert!(!staging_path.exists());
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn embedding_cache_treats_interrupted_entry_as_miss() {
         let cache = tempfile::tempdir().unwrap();
         let key = digest_bytes(b"interrupted-embedding-stage");
         let entry_root = cache.path().join("embedding").join(key.as_str());
         fs::create_dir_all(&entry_root).unwrap();
         fs::write(entry_root.join("entry.json"), b"{}").unwrap();
-        assert!(lookup_embedding(cache.path(), &key, "recording").is_err());
+        assert!(
+            lookup_embedding(cache.path(), &key, "recording")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
-    fn partial_entry_fails_closed() {
+    fn completed_embedding_entry_with_invalid_manifest_fails_closed() {
+        let cache = tempfile::tempdir().unwrap();
+        let key = digest_bytes(b"completed-invalid-embedding");
+        let entry_root = cache.path().join("embedding").join(key.as_str());
+        fs::create_dir_all(&entry_root).unwrap();
+        let bytes = b"{}";
+        fs::write(entry_root.join("entry.json"), bytes).unwrap();
+        fs::write(
+            entry_root.join(".complete"),
+            format!("{}\n", digest_bytes(bytes)),
+        )
+        .unwrap();
+
+        let error = lookup_embedding(cache.path(), &key, "recording")
+            .expect_err("completed invalid embedding entry was accepted");
+        assert!(error.to_string().contains("invalid embedding cache entry"));
+    }
+
+    #[test]
+    fn completed_entry_with_invalid_manifest_fails_closed() {
         let cache = tempfile::tempdir().unwrap();
         let key = digest_bytes(b"partial");
         let entry_root = cache.path().join(key.as_str());
@@ -873,6 +1324,12 @@ mod tests {
             recording_id: "recording".into(),
             recipe_id: "recipe".into(),
             stage_receipts: Vec::new(),
+            embedding_snapshot: ArtifactRef {
+                relative_path: "recipes/recipe/recordings/recording/stages/embedding_snapshot.json"
+                    .into(),
+                sha256: digest_bytes(b""),
+                bytes: 0,
+            },
             speaker_tracks: ArtifactRef {
                 relative_path: "speaker_tracks.json".into(),
                 sha256: digest_bytes(b""),
@@ -899,6 +1356,21 @@ mod tests {
     }
 
     #[test]
+    fn lookup_treats_interrupted_entry_as_miss() {
+        let cache = tempfile::tempdir().unwrap();
+        let key = digest_bytes(b"interrupted-cache-entry");
+        let entry_root = cache.path().join(key.as_str());
+        fs::create_dir_all(&entry_root).unwrap();
+        fs::write(entry_root.join("entry.json"), b"{}").unwrap();
+
+        assert!(
+            lookup(cache.path(), &key, "recording", "recipe")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
     fn published_entry_is_reused_only_after_receipts_validate() {
         let cache = tempfile::tempdir().unwrap();
         let key = digest_bytes(b"complete");
@@ -909,6 +1381,36 @@ mod tests {
             tracks: Vec::new(),
         })
         .unwrap();
+        let snapshot = serde_json::to_vec(&EmbeddingStageDocument {
+            schema_version: super::super::domain::EMBEDDING_STAGE_SCHEMA_VERSION,
+            recording_id: "recording".into(),
+            stage_key: digest_bytes(b"Embedding"),
+            geometry: geometry(),
+            segmentation_shape: [0, 0, 0],
+            segmentation_values: Vec::new(),
+            entries: Vec::new(),
+            embedding_receipt: AvailabilityCounts::default(),
+        })
+        .unwrap();
+        let snapshot_artifact = ArtifactRef {
+            relative_path: "recipes/recipe/recordings/recording/stages/embedding_snapshot.json"
+                .into(),
+            sha256: digest_bytes(&snapshot),
+            bytes: snapshot.len() as u64,
+        };
+        let tracks_relative =
+            PathBuf::from("recipes/recipe/recordings/recording/speaker_tracks.json");
+        let hypothesis_relative = PathBuf::from("recipes/recipe/recordings/recording/output.rttm");
+        let tracks_artifact = ArtifactRef {
+            relative_path: tracks_relative,
+            sha256: digest_bytes(&tracks),
+            bytes: tracks.len() as u64,
+        };
+        let hypothesis_artifact = ArtifactRef {
+            relative_path: hypothesis_relative,
+            sha256: digest_bytes(b""),
+            bytes: 0,
+        };
         let mut documents = Vec::new();
         let stages = [
             StageKind::Bundle,
@@ -919,21 +1421,12 @@ mod tests {
         ];
         let mut parents = Vec::new();
         for stage in stages {
-            let outputs = if stage == StageKind::Reconstruction {
-                vec![
-                    ArtifactRef {
-                        relative_path: "speaker_tracks.json".into(),
-                        sha256: digest_bytes(&tracks),
-                        bytes: tracks.len() as u64,
-                    },
-                    ArtifactRef {
-                        relative_path: "output.rttm".into(),
-                        sha256: digest_bytes(b""),
-                        bytes: 0,
-                    },
-                ]
-            } else {
-                Vec::new()
+            let outputs = match stage {
+                StageKind::Embedding => vec![snapshot_artifact.clone()],
+                StageKind::Reconstruction => {
+                    vec![tracks_artifact.clone(), hypothesis_artifact.clone()]
+                }
+                _ => Vec::new(),
             };
             let receipt = StageReceipt {
                 schema_version: super::super::domain::RECEIPT_SCHEMA_VERSION,
@@ -964,30 +1457,51 @@ mod tests {
                 serde_json::to_vec(&document).unwrap(),
             ));
         }
-        publish(
-            cache.path(),
-            &key,
-            "recording",
-            "recipe",
-            &documents,
-            &tracks,
-            b"",
-        )
-        .unwrap();
-        let hit = lookup(cache.path(), &key, "recording", "recipe").unwrap();
-        assert!(hit.is_some());
+        let partial_root = cache.path().join(key.as_str());
+        fs::create_dir_all(&partial_root).unwrap();
+        fs::write(partial_root.join("partial"), b"interrupted").unwrap();
+        let publication = CachePublication {
+            stage_receipts: &documents,
+            embedding_snapshot: &snapshot,
+            speaker_tracks: &tracks,
+            hypothesis: b"",
+        };
+        std::thread::scope(|scope| {
+            let first =
+                scope.spawn(|| publish(cache.path(), &key, "recording", "recipe", &publication));
+            let second =
+                scope.spawn(|| publish(cache.path(), &key, "recording", "recipe", &publication));
+            assert!(first.join().unwrap().is_ok());
+            assert!(second.join().unwrap().is_ok());
+        });
+        assert!(
+            fs::metadata(cache.path().join(key.as_str()))
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+        let hit = lookup(cache.path(), &key, "recording", "recipe")
+            .unwrap()
+            .expect("published cache should be reusable");
+        assert_eq!(hit.embedding_snapshot.0, snapshot);
+        assert!(
+            publish(cache.path(), &key, "recording", "recipe", &publication,).is_ok(),
+            "valid cache publication should be reusable"
+        );
+        let conflicting_snapshot = [snapshot.as_slice(), b"conflict"].concat();
+        let conflicting_publication = CachePublication {
+            embedding_snapshot: &conflicting_snapshot,
+            ..publication
+        };
         assert!(
             publish(
                 cache.path(),
                 &key,
                 "recording",
                 "recipe",
-                &documents,
-                &tracks,
-                b"",
+                &conflicting_publication,
             )
-            .is_err(),
-            "cache publication replaced an existing entry"
+            .is_err()
         );
     }
 

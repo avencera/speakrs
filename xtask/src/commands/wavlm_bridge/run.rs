@@ -22,9 +22,9 @@ use super::domain::{
 use crate::wav::load_wav_samples;
 
 use super::stage::{
-    availability_counts_from_snapshot, dependency, embedding_snapshot_bytes, embedding_stage_key,
-    embedding_stage_receipt_files, make_receipt, receipt_ref, run_from_embedding_cache, stage_name,
-    stage_receipts,
+    EMBEDDING_IMPLEMENTATION_IDENTITY, availability_counts_from_snapshot, dependency,
+    embedding_snapshot_bytes, embedding_stage_key, embedding_stage_receipt_files, make_receipt,
+    receipt_ref, receipt_with_output, run_from_embedding_cache, stage_name, stage_receipts,
 };
 
 pub struct ValidatedRecording {
@@ -177,10 +177,6 @@ pub fn run(options: RunOptions) -> Result<()> {
     let (embedding_path, plda_dir) = validate_model_assets(&options.models_dir, &spec.runtime)?;
 
     let recipes = select_recipes(&spec, &options.recipe_ids)?;
-    let mut recordings = Vec::with_capacity(spec.recordings.len());
-    for recording in &spec.recordings {
-        recordings.push(validate_recording(recording)?);
-    }
     let mut embedding_model =
         speakrs::inference::EmbeddingModel::with_mode(embedding_path, execution_mode)?;
     let mut run_context = RunContext {
@@ -191,12 +187,21 @@ pub fn run(options: RunOptions) -> Result<()> {
         runtime: &spec.runtime,
     };
     let staging = create_output_staging(&options.output_dir)?;
-    let mut run_records = Vec::new();
-    let mut recipe_ids = Vec::with_capacity(recipes.len());
-    for recipe in recipes {
-        recipe_ids.push(recipe.id.clone());
-        let mut recipe_records = Vec::with_capacity(recordings.len());
-        for recording in &recordings {
+    let recipe_ids = recipes
+        .iter()
+        .map(|recipe| recipe.id.clone())
+        .collect::<Vec<_>>();
+    let mut run_records_by_recipe = recipes
+        .iter()
+        .map(|_| Vec::with_capacity(spec.recordings.len()))
+        .collect::<Vec<Vec<_>>>();
+    let mut system_records_by_recipe = recipes
+        .iter()
+        .map(|_| Vec::with_capacity(spec.recordings.len()))
+        .collect::<Vec<Vec<_>>>();
+    for recording_spec in &spec.recordings {
+        let recording = validate_recording(recording_spec)?;
+        for (recipe_index, recipe) in recipes.iter().enumerate() {
             let cache_key = cache_key(&spec, &recording.spec, recipe, &model_digest)?;
             let cache_hit = options
                 .cache_dir
@@ -206,7 +211,7 @@ pub fn run(options: RunOptions) -> Result<()> {
                 .flatten();
             let (outputs, runtime_seconds, embedding_cache_reused) = match cache_hit {
                 Some(hit) => (
-                    materialize_cache_hit(staging.path(), recipe, recording, hit)?,
+                    materialize_cache_hit(staging.path(), recipe, &recording, hit)?,
                     None,
                     false,
                 ),
@@ -216,7 +221,7 @@ pub fn run(options: RunOptions) -> Result<()> {
                         &recording.bundle.manifest.geometry,
                     )?);
                     let embedding_key =
-                        embedding_stage_key(recipe, recording, &run_context, &geometry)?;
+                        embedding_stage_key(recipe, &recording, &run_context, &geometry)?;
                     let embedding_hit = options
                         .cache_dir
                         .as_deref()
@@ -230,7 +235,7 @@ pub fn run(options: RunOptions) -> Result<()> {
                         Some(hit) => (
                             run_from_embedding_cache(
                                 recipe,
-                                recording,
+                                &recording,
                                 &mut run_context,
                                 &cache_key,
                                 &geometry,
@@ -239,7 +244,7 @@ pub fn run(options: RunOptions) -> Result<()> {
                             true,
                         ),
                         None => (
-                            run_one(recipe, recording, &mut run_context, &cache_key)?,
+                            run_one(recipe, &recording, &mut run_context, &cache_key)?,
                             false,
                         ),
                     };
@@ -250,14 +255,18 @@ pub fn run(options: RunOptions) -> Result<()> {
                             .iter()
                             .map(|(name, bytes)| (name.clone(), bytes.clone()))
                             .collect::<Vec<_>>();
+                        let publication = cache::CachePublication {
+                            stage_receipts: &stage_files,
+                            embedding_snapshot: &outputs.embedding_snapshot_bytes,
+                            speaker_tracks: &outputs.speaker_tracks_bytes,
+                            hypothesis: &outputs.hypothesis_bytes,
+                        };
                         cache::publish(
                             cache_dir,
                             &cache_key,
                             &recording.spec.id,
                             &recipe.id,
-                            &stage_files,
-                            &outputs.speaker_tracks_bytes,
-                            &outputs.hypothesis_bytes,
+                            &publication,
                         )?;
                         if !embedding_reused {
                             cache::publish_embedding(
@@ -270,7 +279,7 @@ pub fn run(options: RunOptions) -> Result<()> {
                         }
                     }
                     (
-                        materialize_outputs(staging.path(), recipe, recording, &outputs)?,
+                        materialize_outputs(staging.path(), recipe, &recording, &outputs)?,
                         Some(runtime),
                         embedding_reused,
                     )
@@ -280,7 +289,7 @@ pub fn run(options: RunOptions) -> Result<()> {
             let speaker_tracks = outputs.speaker_tracks.clone();
             let stage_receipts = outputs.stage_receipts.clone();
             let cache_reused = runtime_seconds.is_none();
-            run_records.push(RunRecording {
+            run_records_by_recipe[recipe_index].push(RunRecording {
                 recording_id: recording.spec.id.clone(),
                 recipe_id: recipe.id.clone(),
                 cache_key: cache_key.clone(),
@@ -290,7 +299,7 @@ pub fn run(options: RunOptions) -> Result<()> {
                 hypothesis: hypothesis.clone(),
                 speaker_tracks: speaker_tracks.clone(),
             });
-            recipe_records.push(SystemRecord {
+            system_records_by_recipe[recipe_index].push(SystemRecord {
                 recording_id: recording.spec.id.clone(),
                 source: recording.spec.source.clone(),
                 domain: recording.spec.domain.clone(),
@@ -314,13 +323,15 @@ pub fn run(options: RunOptions) -> Result<()> {
                 },
             });
         }
+    }
+    for (recipe_index, recipe) in recipes.iter().enumerate() {
         let system = SystemManifest {
             schema_version: super::domain::SYSTEM_SCHEMA_VERSION,
             experiment_id: spec.experiment_id.clone(),
             system: SystemKind::HybridWavlmSpeakrs,
             join: spec.join.clone(),
             recipe_id: recipe.id.clone(),
-            records: recipe_records,
+            records: std::mem::take(&mut system_records_by_recipe[recipe_index]),
             score_document: super::domain::ScoreDocumentState::Unavailable {
                 reason: AvailabilityReason::NotCalculated,
             },
@@ -333,6 +344,7 @@ pub fn run(options: RunOptions) -> Result<()> {
             &serde_json::to_vec_pretty(&system)?,
         )?;
     }
+    let run_records = run_records_by_recipe.into_iter().flatten().collect();
     let run_document = RunDocument {
         schema_version: super::domain::RUN_SCHEMA_VERSION,
         experiment_id: spec.experiment_id.clone(),
@@ -454,7 +466,7 @@ fn run_one(
     let config = recipe.pipeline_config(context.mode)?;
     let snapshot = pipeline.run_embedding_stage(&recording.samples)?;
     let availability = availability_counts_from_snapshot(&snapshot);
-    let stage_receipts = stage_receipts(
+    let mut stage_receipts = stage_receipts(
         recipe,
         recording,
         &model_digest,
@@ -468,13 +480,21 @@ fn run_one(
         &snapshot,
         &geometry,
     )?;
+    let snapshot_relative_path = recording_relative(recipe, recording)
+        .join("stages")
+        .join("embedding_snapshot.json");
+    stage_receipts.embedding = receipt_with_output(
+        &stage_receipts.embedding,
+        artifact_for_path(&snapshot_relative_path, &snapshot_bytes),
+    )?;
     let result = pipeline.finish_embedding_stage(snapshot, &config)?;
     let tracks = speaker_tracks(recording, &result, geometry.clone());
     let tracks_bytes = serde_json::to_vec_pretty(&tracks)?;
     let hypothesis_bytes = result.rttm(&recording.spec.id).into_bytes();
+    let output_relative = recording_relative(recipe, recording);
     let reconstruction_outputs = vec![
-        artifact_for_bytes("speaker_tracks.json", &tracks_bytes),
-        artifact_for_bytes("output.rttm", &hypothesis_bytes),
+        artifact_for_path(&output_relative.join("speaker_tracks.json"), &tracks_bytes),
+        artifact_for_path(&output_relative.join("output.rttm"), &hypothesis_bytes),
     ];
     let clustering_dependencies = vec![
         dependency(
@@ -520,12 +540,12 @@ fn run_one(
     let receipt_files = receipt_documents
         .iter()
         .map(|document| {
-            (
+            Ok((
                 format!("{}.receipt.json", stage_name(document.receipt.stage)),
-                serde_json::to_vec_pretty(document).expect("receipt serialization cannot fail"),
-            )
+                serde_json::to_vec_pretty(document)?,
+            ))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     let embedding_stage_receipt_files =
         embedding_stage_receipt_files(&stage_receipts, &snapshot_bytes)?;
     Ok(PreparedOutputs {
@@ -567,6 +587,10 @@ fn materialize_outputs(
             &relative.join("stages").join(name),
         )?);
     }
+    write_new(
+        root.join("stages").join("embedding_snapshot.json"),
+        &outputs.embedding_snapshot_bytes,
+    )?;
     let tracks_path = root.join("speaker_tracks.json");
     write_new(&tracks_path, &outputs.speaker_tracks_bytes)?;
     let hypothesis_path = root.join("output.rttm");
@@ -603,6 +627,10 @@ fn materialize_cache_hit(
         stage_receipts.push(artifact_for_run(run_root, &relative_path)?);
     }
     write_new(
+        root.join("stages").join("embedding_snapshot.json"),
+        &hit.embedding_snapshot.0,
+    )?;
+    write_new(
         run_root.join(relative.join("speaker_tracks.json")),
         &hit.speaker_tracks.0,
     )?;
@@ -614,7 +642,7 @@ fn materialize_cache_hit(
         cache_key: hit.key,
         receipt_files: Vec::new(),
         embedding_stage_receipt_files: Vec::new(),
-        embedding_snapshot_bytes: Vec::new(),
+        embedding_snapshot_bytes: hit.embedding_snapshot.0,
         speaker_tracks_bytes: hit.speaker_tracks.0,
         hypothesis_bytes: hit.hypothesis.0,
         stage_receipts,
@@ -623,7 +651,7 @@ fn materialize_cache_hit(
     })
 }
 
-fn recording_relative(recipe: &RecipeSpec, recording: &ValidatedRecording) -> PathBuf {
+pub(crate) fn recording_relative(recipe: &RecipeSpec, recording: &ValidatedRecording) -> PathBuf {
     PathBuf::from("recipes")
         .join(&recipe.id)
         .join("recordings")
@@ -669,6 +697,7 @@ fn cache_key(
         recipe: &'a RecipeSpec,
         model: &'a Sha256Digest,
         runtime: &'a RuntimeIdentity,
+        implementation: &'static str,
     }
     canonical_json_digest(&Key {
         recording: &recording.id,
@@ -678,6 +707,7 @@ fn cache_key(
         recipe,
         model: model_digest,
         runtime: &spec.runtime,
+        implementation: EMBEDDING_IMPLEMENTATION_IDENTITY,
     })
 }
 
@@ -791,8 +821,12 @@ fn artifact_for_run(root: &Path, relative: &Path) -> Result<ArtifactRef> {
 }
 
 pub(crate) fn artifact_for_bytes(relative_path: &str, bytes: &[u8]) -> ArtifactRef {
+    artifact_for_path(Path::new(relative_path), bytes)
+}
+
+pub(crate) fn artifact_for_path(relative_path: &Path, bytes: &[u8]) -> ArtifactRef {
     ArtifactRef {
-        relative_path: PathBuf::from(relative_path),
+        relative_path: relative_path.to_owned(),
         sha256: digest_bytes(bytes),
         bytes: bytes.len() as u64,
     }
@@ -994,7 +1028,14 @@ mod tests {
             output_extent_end_samples: 0,
             output_extent_policy: speakrs::imported_segmentation::OutputExtentPolicy::AggregateGrid,
         };
-        let dependencies = vec![dependency(StageDependencyName::Embedding, "embedding@v1")];
+        let dependencies = vec![
+            dependency(StageDependencyName::Embedding, "embedding@v1"),
+            dependency(
+                StageDependencyName::Implementation,
+                "speakrs-imported-embedding-v1",
+            ),
+            dependency(StageDependencyName::Runtime, "\"cpu\""),
+        ];
         let first = make_receipt(
             StageKind::Embedding,
             dependencies.clone(),
@@ -1006,7 +1047,7 @@ mod tests {
             StageKind::Embedding,
             dependencies,
             Vec::new(),
-            geometry,
+            geometry.clone(),
             AvailabilityCounts {
                 chunks: 4,
                 local_slots: 3,
@@ -1019,5 +1060,37 @@ mod tests {
         );
         assert_eq!(first.receipt.cache_key, second.receipt.cache_key);
         assert_ne!(first.receipt_sha256, second.receipt_sha256);
+
+        let first_values = receipt_with_output(
+            &first,
+            artifact_for_bytes("embedding_snapshot.json", b"first vectors"),
+        )
+        .unwrap();
+        let second_values = receipt_with_output(
+            &first,
+            artifact_for_bytes("embedding_snapshot.json", b"second vectors"),
+        )
+        .unwrap();
+        assert_eq!(
+            first_values.receipt.cache_key,
+            second_values.receipt.cache_key
+        );
+        assert_ne!(first_values.receipt_sha256, second_values.receipt_sha256);
+
+        let cpu = make_receipt(
+            StageKind::Embedding,
+            vec![dependency(StageDependencyName::Runtime, "\"cpu\"")],
+            Vec::new(),
+            geometry.clone(),
+            AvailabilityCounts::default(),
+        );
+        let cuda = make_receipt(
+            StageKind::Embedding,
+            vec![dependency(StageDependencyName::Runtime, "\"cuda\"")],
+            Vec::new(),
+            geometry,
+            AvailabilityCounts::default(),
+        );
+        assert_ne!(cpu.receipt.cache_key, cuda.receipt.cache_key);
     }
 }

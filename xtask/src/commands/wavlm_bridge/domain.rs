@@ -14,9 +14,9 @@ pub const VALIDATION_SCHEMA_VERSION: u32 = 1;
 pub const RUN_SCHEMA_VERSION: u32 = 1;
 pub const SYSTEM_SCHEMA_VERSION: u32 = 1;
 pub const REPORT_SCHEMA_VERSION: u32 = 1;
-pub const SCORE_SCHEMA_VERSION: u32 = 1;
+pub const SCORE_SCHEMA_VERSION: u32 = 2;
 pub const RECEIPT_SCHEMA_VERSION: u32 = 1;
-pub const CACHE_SCHEMA_VERSION: u32 = 1;
+pub const CACHE_SCHEMA_VERSION: u32 = 2;
 pub const EMBEDDING_CACHE_SCHEMA_VERSION: u32 = 1;
 pub const EMBEDDING_STAGE_SCHEMA_VERSION: u32 = 1;
 pub const MAX_EMBEDDING_STAGE_BYTES: usize = 256 * 1024 * 1024;
@@ -570,7 +570,7 @@ pub fn digest_tree(root: &Path) -> Result<Sha256Digest> {
         digest.update((bytes.len() as u64).to_le_bytes());
         digest.update(bytes);
     }
-    Ok(digest_bytes(&digest.finalize()))
+    Ok(finalize_digest(digest))
 }
 
 fn collect_files(root: &Path, current: &Path, files: &mut Vec<(String, PathBuf)>) -> Result<()> {
@@ -604,6 +604,11 @@ fn collect_files(root: &Path, current: &Path, files: &mut Vec<(String, PathBuf)>
 fn update_length_prefixed(digest: &mut Sha256, bytes: &[u8]) {
     digest.update((bytes.len() as u64).to_le_bytes());
     digest.update(bytes);
+}
+
+fn finalize_digest(digest: Sha256) -> Sha256Digest {
+    Sha256Digest::new(format!("{:x}", digest.finalize()))
+        .expect("SHA-256 formatting always produces a canonical digest")
 }
 
 pub fn canonical_json_digest<T: Serialize>(value: &T) -> Result<Sha256Digest> {
@@ -714,7 +719,9 @@ pub enum StageDependencyName {
     Bundle,
     Decoder,
     Embedding,
+    Implementation,
     Model,
+    Runtime,
     Geometry,
     Clustering,
     Reconstruction,
@@ -1010,7 +1017,9 @@ pub struct ScoreDocument {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecordScore {
+    pub recipe_id: String,
     pub recording_id: String,
+    pub hypothesis_sha256: Sha256Digest,
     pub miss_seconds: f64,
     pub false_alarm_seconds: f64,
     pub confusion_seconds: f64,
@@ -1093,7 +1102,10 @@ fn validate_record_scores(expected: &BTreeSet<String>, scores: &[RecordScore]) -
         "score record count does not match membership"
     );
     let mut seen = BTreeSet::new();
+    let mut recipe_ids = BTreeSet::new();
     for score in scores {
+        validate_id("score.recipe_id", &score.recipe_id)?;
+        recipe_ids.insert(&score.recipe_id);
         ensure!(
             expected.contains(&score.recording_id),
             "score row is outside membership: {}",
@@ -1130,6 +1142,10 @@ fn validate_record_scores(expected: &BTreeSet<String>, scores: &[RecordScore]) -
     ensure!(
         seen.len() == expected.len(),
         "score membership is incomplete"
+    );
+    ensure!(
+        recipe_ids.len() == 1,
+        "score rows do not contain a recipe identity"
     );
     Ok(())
 }
@@ -1483,7 +1499,9 @@ mod tests {
 
     fn record_score(recording_id: &str) -> RecordScore {
         RecordScore {
+            recipe_id: "recipe".into(),
             recording_id: recording_id.into(),
+            hypothesis_sha256: digest_bytes(recording_id.as_bytes()),
             miss_seconds: 1.0,
             false_alarm_seconds: 2.0,
             confusion_seconds: 3.0,
@@ -1631,9 +1649,23 @@ mod tests {
     }
 
     #[test]
-    fn score_schema_zero_is_rejected() {
+    fn model_tree_digest_matches_cross_language_vector() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("nested")).unwrap();
+        fs::write(directory.path().join("a.txt"), b"alpha").unwrap();
+        fs::write(directory.path().join("nested/b.bin"), [0, 1, 2, 255]).unwrap();
+
+        // this vector matches the Python bridge tree digest contract
+        assert_eq!(
+            digest_tree(directory.path()).unwrap().as_str(),
+            "48c74f4785da606a9f2147aa1d62640e8d2f9008b8101281983344624ca64e18"
+        );
+    }
+
+    #[test]
+    fn previous_score_schema_is_rejected() {
         let (spec, mut document) = valid_score_document();
-        document.schema_version = 0;
+        document.schema_version = SCORE_SCHEMA_VERSION - 1;
         assert!(document.validate_for(&spec).is_err());
     }
 
@@ -1648,6 +1680,17 @@ mod tests {
     fn nonfinite_score_metric_is_rejected() {
         let (spec, mut document) = valid_score_document();
         document.per_record[0].der = Some(f64::NAN);
+        assert!(document.validate_for(&spec).is_err());
+    }
+
+    #[test]
+    fn score_rows_require_one_recipe_identity() {
+        let (spec, mut document) = valid_score_document();
+        document.per_record[1].recipe_id = "other".into();
+        assert!(document.validate_for(&spec).is_err());
+
+        let (spec, mut document) = valid_score_document();
+        document.per_record[0].recipe_id.clear();
         assert!(document.validate_for(&spec).is_err());
     }
 
