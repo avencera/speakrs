@@ -91,7 +91,7 @@ impl ImportedSegmentationDecoder {
         &self,
         bundle: &SegmentationBundle,
     ) -> Result<DecodedSegmentations, ImportedDecodeError> {
-        let manifest = &bundle.manifest;
+        let manifest = bundle.manifest();
         let chunks = manifest.geometry.chunks.len();
         let frames = usize::try_from(manifest.geometry.frame_grid.frame_count).map_err(|_| {
             ImportedDecodeError::Shape("frame count does not fit in usize".to_owned())
@@ -107,17 +107,17 @@ impl ImportedSegmentationDecoder {
 
         let mut decoded = Array3::<f32>::zeros((chunks, frames, slots));
         let mut next_chunk = 0_usize;
-        for shard in &bundle.shards {
-            let shard_start = usize::try_from(shard.chunk_start).map_err(|_| {
+        for shard in bundle.shards() {
+            let shard_start = usize::try_from(shard.chunk_start()).map_err(|_| {
                 ImportedDecodeError::Shape("shard chunk start does not fit in usize".to_owned())
             })?;
-            let shard_end = usize::try_from(shard.chunk_end).map_err(|_| {
+            let shard_end = usize::try_from(shard.chunk_end()).map_err(|_| {
                 ImportedDecodeError::Shape("shard chunk end does not fit in usize".to_owned())
             })?;
             if shard_start != next_chunk || shard_end < shard_start || shard_end > chunks {
                 return Err(ImportedDecodeError::Shape(format!(
                     "shard {} does not continue chunk order",
-                    shard.path
+                    shard.path()
                 )));
             }
             let shard_chunks = shard_end - shard_start;
@@ -127,21 +127,21 @@ impl ImportedSegmentationDecoder {
                 .ok_or_else(|| {
                     ImportedDecodeError::Shape("score tensor shape overflow".to_owned())
                 })?;
-            if shard.shape
+            if shard.shape()
                 != [
-                    shard.chunk_end - shard.chunk_start,
+                    shard.chunk_end() - shard.chunk_start(),
                     u64::from(manifest.geometry.frame_grid.frame_count),
                     u64::try_from(classes).map_err(|_| {
                         ImportedDecodeError::Shape("class count does not fit in u64".to_owned())
                     })?,
                 ]
-                || shard.values.len() != expected_values
+                || shard.values().len() != expected_values
             {
                 return Err(ImportedDecodeError::Shape(format!(
                     "shard {} has shape {:?} and {} values",
-                    shard.path,
-                    shard.shape,
-                    shard.values.len()
+                    shard.path(),
+                    shard.shape(),
+                    shard.values().len()
                 )));
             }
 
@@ -152,7 +152,7 @@ impl ImportedSegmentationDecoder {
                     .ok_or_else(|| {
                         ImportedDecodeError::Shape("score tensor offset overflow".to_owned())
                     })?;
-                let chunk_values = &shard.values[chunk_offset..chunk_offset + frames * classes];
+                let chunk_values = &shard.values()[chunk_offset..chunk_offset + frames * classes];
                 let scores = Array2::from_shape_vec((frames, classes), chunk_values.to_vec())
                     .map_err(|error| ImportedDecodeError::Shape(error.to_string()))?;
                 let hard = self.decode_scores(&scores)?;

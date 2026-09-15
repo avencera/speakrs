@@ -404,10 +404,13 @@ fn fixture_bundle_loads_without_a_model() {
 
     let bundle =
         speakrs::imported_segmentation::SegmentationBundle::open(temporary.path()).unwrap();
-    assert_eq!(bundle.manifest.geometry.frame_grid.origin.numerator, -241);
-    assert_eq!(bundle.manifest.geometry.aggregate_grid.origin.numerator, 0);
-    assert_eq!(bundle.shards[0].shape, [1, 399, 11]);
-    assert_eq!(bundle.shards[0].values.len(), 399 * 11);
+    assert_eq!(bundle.manifest().geometry.frame_grid.origin.numerator, -241);
+    assert_eq!(
+        bundle.manifest().geometry.aggregate_grid.origin.numerator,
+        0
+    );
+    assert_eq!(bundle.shards()[0].shape(), [1, 399, 11]);
+    assert_eq!(bundle.shards()[0].values().len(), 399 * 11);
 }
 
 #[test]
@@ -424,10 +427,10 @@ fn checked_repository_fixture_parses() {
     set_read_only(&temporary.path().join(".complete"), true);
     set_read_only(temporary.path(), true);
     let bundle = load_imported_segmentation_bundle(temporary.path()).unwrap();
-    assert!(bundle.shards.is_empty());
-    assert_eq!(bundle.manifest.audio.sample_count, 0);
+    assert!(bundle.shards().is_empty());
+    assert_eq!(bundle.manifest().audio.sample_count, 0);
     assert_eq!(
-        bundle.manifest.geometry.output_extent_policy,
+        bundle.manifest().geometry.output_extent_policy,
         OutputExtentPolicy::AggregateGrid
     );
 }
@@ -454,16 +457,16 @@ fn python_published_fixture_is_accepted_cross_language() {
     let bundle = SegmentationBundle::open(published_root.path()).unwrap();
 
     assert_eq!(
-        bundle.manifest.identity.manifest_digest.as_str(),
+        bundle.manifest().identity.manifest_digest.as_str(),
         "f57270976fc903354f5cee01fb2bec442589b9bc717722266ac5ee2ce453bb6d"
     );
     assert_eq!(
-        bundle.manifest.identity.bundle_id.as_str(),
+        bundle.manifest().identity.bundle_id.as_str(),
         "56ac038bbed01d542f992478562e55f90c172af53f966b46471176a5ae8fe885"
     );
-    assert_eq!(bundle.shards.len(), 1);
-    assert_eq!(bundle.shards[0].shape, [1, 399, 11]);
-    assert_eq!(bundle.shards[0].values, vec![0.0_f32; 399 * 11]);
+    assert_eq!(bundle.shards().len(), 1);
+    assert_eq!(bundle.shards()[0].shape(), [1, 399, 11]);
+    assert_eq!(bundle.shards()[0].values(), vec![0.0_f32; 399 * 11]);
 
     for path in [
         published_root.path().to_path_buf(),
@@ -1045,7 +1048,7 @@ fn regular_fixed_step_geometry_covers_a_padded_tail_exactly() {
     let temporary = bundle_tempdir();
     write_bundle(temporary.path(), &manifest, &shard);
     let bundle = load_imported_segmentation_bundle(temporary.path()).unwrap();
-    assert_eq!(bundle.shards[0].shape[0], 3);
+    assert_eq!(bundle.shards()[0].shape()[0], 3);
 }
 
 #[test]
@@ -1090,5 +1093,8 @@ fn aggregate_extent_tracks_overlapping_window_offsets() {
     let temporary = bundle_tempdir();
     write_bundle(temporary.path(), &manifest, &shard);
     let bundle = load_imported_segmentation_bundle(temporary.path()).unwrap();
-    assert_eq!(bundle.manifest.geometry.output_extent.end_samples, 134_800);
+    assert_eq!(
+        bundle.manifest().geometry.output_extent.end_samples,
+        134_800
+    );
 }

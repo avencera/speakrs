@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use ndarray::s;
+use ndarray::{Array1, s};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -17,9 +17,9 @@ use crate::inference::embedding::{
 use super::config::PipelineConfig;
 use super::imported_decoder::{ImportedDecodeError, ImportedSegmentationDecoder};
 use super::types::{
-    DecodedSegmentations, EmbeddingAvailability, EmbeddingFailureReason, EmbeddingMaskChoice,
-    EmbeddingStageSnapshot, InactiveEmbeddingReason, InferenceArtifacts, PipelineError,
-    PipelineGeometry, TypedChunkEmbeddings, TypedEmbedding,
+    DecodedSegmentations, EmbeddingAvailability, EmbeddingMaskChoice, EmbeddingStageSnapshot,
+    InactiveEmbeddingReason, InferenceArtifacts, PipelineError, PipelineGeometry,
+    TypedChunkEmbeddings, TypedEmbedding,
 };
 
 /// Errors raised before or during an imported segmentation run
@@ -69,6 +69,51 @@ pub enum ImportedPipelineError {
         /// Model value
         actual: String,
     },
+    /// The embedding runtime could not execute one active slot
+    #[error(
+        "embedding execution failed for chunk {chunk_index}, local speaker {speaker_index}: {source}"
+    )]
+    EmbeddingExecution {
+        /// Zero-based chunk index
+        chunk_index: usize,
+        /// Zero-based local-speaker index
+        speaker_index: usize,
+        /// Runtime execution error
+        #[source]
+        source: ort::Error,
+    },
+    /// The embedding runtime returned a vector with the wrong width
+    #[error(
+        "embedding output width mismatch for chunk {chunk_index}, local speaker {speaker_index}: expected {expected_width}, got {actual_width}"
+    )]
+    EmbeddingOutputWidthMismatch {
+        /// Zero-based chunk index
+        chunk_index: usize,
+        /// Zero-based local-speaker index
+        speaker_index: usize,
+        /// Required embedding width
+        expected_width: usize,
+        /// Observed embedding width
+        actual_width: usize,
+    },
+    /// The embedding runtime returned a non-finite value
+    #[error(
+        "embedding output is non-finite at value {value_index} for chunk {chunk_index}, local speaker {speaker_index}"
+    )]
+    EmbeddingOutputNonFinite {
+        /// Zero-based chunk index
+        chunk_index: usize,
+        /// Zero-based local-speaker index
+        speaker_index: usize,
+        /// Zero-based vector index
+        value_index: usize,
+    },
+    /// A restored embedding snapshot contains failed inference slots
+    #[error("embedding snapshot contains {count} failed inference slots")]
+    FailedEmbeddingSnapshot {
+        /// Number of failed slots
+        count: usize,
+    },
 }
 
 /// Which mask was selected for one embedding attempt
@@ -101,7 +146,7 @@ impl<'a> ImportedDiarizationPipeline<'a> {
     ) -> Result<Self, ImportedPipelineError> {
         let plda = PldaTransform::from_imported_artifact(
             models_dir,
-            &bundle.manifest.policy.embedding.plda,
+            &bundle.manifest().policy.embedding.plda,
         )
         .map_err(map_plda_error)?;
         Self::from_parts(bundle, emb_model, plda)
@@ -113,12 +158,12 @@ impl<'a> ImportedDiarizationPipeline<'a> {
         emb_model: &'a mut EmbeddingModel,
         plda: PldaTransform,
     ) -> Result<Self, ImportedPipelineError> {
-        bundle.manifest.validate()?;
+        bundle.manifest().validate()?;
         let geometry =
-            PipelineGeometry::from_imported(&bundle.manifest.audio, &bundle.manifest.geometry)?;
-        let decoder = ImportedSegmentationDecoder::from_manifest(&bundle.manifest)?;
-        validate_embedding_contract(&bundle.manifest, emb_model)?;
-        validate_plda_contract(&bundle.manifest, &plda)?;
+            PipelineGeometry::from_imported(&bundle.manifest().audio, &bundle.manifest().geometry)?;
+        let decoder = ImportedSegmentationDecoder::from_manifest(bundle.manifest())?;
+        validate_embedding_contract(bundle.manifest(), emb_model)?;
+        validate_plda_contract(bundle.manifest(), &plda)?;
         Ok(Self {
             bundle,
             geometry,
@@ -130,7 +175,7 @@ impl<'a> ImportedDiarizationPipeline<'a> {
 
     /// Return the immutable manifest bound to this pipeline
     pub fn manifest(&self) -> &SegmentationManifest {
-        &self.bundle.manifest
+        self.bundle.manifest()
     }
 
     /// Return the checked geometry derived from the bundle and audio identity
@@ -140,7 +185,7 @@ impl<'a> ImportedDiarizationPipeline<'a> {
 
     /// Validate a canonical mono 16 kHz waveform against the bundle identity
     pub fn validate_waveform(&self, audio: &[f32]) -> Result<(), ImportedPipelineError> {
-        validate_waveform_identity(audio, &self.bundle.manifest)
+        validate_waveform_identity(audio, self.bundle.manifest())
     }
 
     /// Decode the bundle and extract typed per-speaker inference artifacts
@@ -176,13 +221,14 @@ impl<'a> ImportedDiarizationPipeline<'a> {
         snapshot: EmbeddingStageSnapshot,
         config: &PipelineConfig,
     ) -> Result<super::DiarizationResult, ImportedPipelineError> {
+        ensure_successful_embedding_snapshot(&snapshot)?;
         if snapshot.geometry() != &self.geometry {
             return Err(ImportedPipelineError::Pipeline(PipelineError::Invariant(
                 "embedding snapshot geometry does not match the imported bundle".to_owned(),
             )));
         }
         let shape = snapshot.segmentation_shape();
-        if shape[2] != self.bundle.manifest.head.local_slots as usize {
+        if shape[2] != self.bundle.manifest().head.local_slots as usize {
             return Err(ImportedPipelineError::Pipeline(PipelineError::Invariant(
                 "embedding snapshot local-slot count does not match the imported bundle".to_owned(),
             )));
@@ -244,36 +290,13 @@ impl<'a> ImportedDiarizationPipeline<'a> {
                 let result = self
                     .emb_model
                     .embed_masked(chunk_audio, &mask, Some(&clean_mask));
-                match result {
-                    Ok(vector)
-                        if vector.len() == width
-                            && vector.iter().all(|value| value.is_finite()) =>
-                    {
-                        outcomes.push(TypedEmbedding {
-                            availability: EmbeddingAvailability::Available,
-                            values: Some(vector.to_vec()),
-                            mask_choice: Some(choice),
-                        });
-                    }
-                    Ok(_vector) => {
-                        outcomes.push(TypedEmbedding {
-                            availability: EmbeddingAvailability::InferenceFailed {
-                                reason: EmbeddingFailureReason::InvalidOutput,
-                            },
-                            values: None,
-                            mask_choice: Some(choice),
-                        });
-                    }
-                    Err(_error) => {
-                        outcomes.push(TypedEmbedding {
-                            availability: EmbeddingAvailability::InferenceFailed {
-                                reason: EmbeddingFailureReason::ModelExecution,
-                            },
-                            values: None,
-                            mask_choice: Some(choice),
-                        });
-                    }
-                }
+                outcomes.push(admit_embedding_result(
+                    result,
+                    width,
+                    chunk_idx,
+                    speaker_idx,
+                    choice,
+                )?);
             }
         }
 
@@ -283,6 +306,52 @@ impl<'a> ImportedDiarizationPipeline<'a> {
         );
         Ok(outcomes)
     }
+}
+
+fn admit_embedding_result(
+    result: Result<Array1<f32>, ort::Error>,
+    expected_width: usize,
+    chunk_index: usize,
+    speaker_index: usize,
+    mask_choice: EmbeddingMaskChoice,
+) -> Result<TypedEmbedding, ImportedPipelineError> {
+    let vector = result.map_err(|source| ImportedPipelineError::EmbeddingExecution {
+        chunk_index,
+        speaker_index,
+        source,
+    })?;
+    if vector.len() != expected_width {
+        return Err(ImportedPipelineError::EmbeddingOutputWidthMismatch {
+            chunk_index,
+            speaker_index,
+            expected_width,
+            actual_width: vector.len(),
+        });
+    }
+    if let Some(value_index) = vector.iter().position(|value| !value.is_finite()) {
+        return Err(ImportedPipelineError::EmbeddingOutputNonFinite {
+            chunk_index,
+            speaker_index,
+            value_index,
+        });
+    }
+
+    Ok(TypedEmbedding {
+        availability: EmbeddingAvailability::Available,
+        values: Some(vector.to_vec()),
+        mask_choice: Some(mask_choice),
+    })
+}
+
+fn ensure_successful_embedding_snapshot(
+    snapshot: &EmbeddingStageSnapshot,
+) -> Result<(), ImportedPipelineError> {
+    let count = snapshot.embedding_receipt().inference_failure_count;
+    if count > 0 {
+        return Err(ImportedPipelineError::FailedEmbeddingSnapshot { count });
+    }
+
+    Ok(())
 }
 
 /// Validate embedding input, pooling, output, and minimum-activity contracts
@@ -604,6 +673,7 @@ mod tests {
     use ndarray::array;
 
     use super::*;
+    use crate::pipeline::{EmbeddingReceipt, EmbeddingStageEntry};
 
     #[test]
     fn waveform_digest_distinguishes_negative_zero() {
@@ -664,6 +734,82 @@ mod tests {
         let segmentations = array![[1.0, 1.0], [1.0, 0.0]];
         let clean = clean_overlap_masks(&segmentations.view());
         assert_eq!(clean, array![[0.0, 0.0], [1.0, 0.0]]);
+    }
+
+    #[test]
+    fn embedding_execution_error_is_fatal() {
+        let error = admit_embedding_result(
+            Err(ort::Error::new("execution failed")),
+            256,
+            2,
+            1,
+            EmbeddingMaskChoice::Full,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ImportedPipelineError::EmbeddingExecution {
+                chunk_index: 2,
+                speaker_index: 1,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn invalid_embedding_output_is_fatal() {
+        let wrong_width =
+            admit_embedding_result(Ok(Array1::zeros(255)), 256, 2, 1, EmbeddingMaskChoice::Full)
+                .unwrap_err();
+        assert!(matches!(
+            wrong_width,
+            ImportedPipelineError::EmbeddingOutputWidthMismatch {
+                expected_width: 256,
+                actual_width: 255,
+                ..
+            }
+        ));
+
+        let mut values = Array1::zeros(256);
+        values[17] = f32::NAN;
+        let non_finite =
+            admit_embedding_result(Ok(values), 256, 2, 1, EmbeddingMaskChoice::Full).unwrap_err();
+        assert!(matches!(
+            non_finite,
+            ImportedPipelineError::EmbeddingOutputNonFinite {
+                value_index: 17,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn failed_embedding_snapshot_cannot_enter_post_inference() {
+        let geometry = PipelineGeometry::from_legacy(16_000, 160_000, 160_000, 160_000).unwrap();
+        let shape = [1, geometry.frame_grid().frame_count as usize, 1];
+        let snapshot = EmbeddingStageSnapshot::from_flat_parts(
+            geometry,
+            shape,
+            vec![1.0; shape.iter().product()],
+            vec![EmbeddingStageEntry::new(
+                EmbeddingAvailability::InferenceFailed {
+                    reason: crate::pipeline::EmbeddingFailureReason::ModelExecution,
+                },
+                None,
+            )],
+            EmbeddingReceipt {
+                full_mask_fallback_count: 1,
+                inference_failure_count: 1,
+                ..EmbeddingReceipt::default()
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            ensure_successful_embedding_snapshot(&snapshot),
+            Err(ImportedPipelineError::FailedEmbeddingSnapshot { count: 1 })
+        ));
     }
 
     #[test]

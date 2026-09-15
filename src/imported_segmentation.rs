@@ -8,7 +8,7 @@
 
 use std::fmt;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -645,26 +645,70 @@ pub struct SegmentationManifest {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LoadedTensorShard {
     /// Relative member path from the bundle root
-    pub path: String,
+    path: String,
     /// Inclusive chunk range start
-    pub chunk_start: u64,
+    chunk_start: u64,
     /// Exclusive chunk range end
-    pub chunk_end: u64,
+    chunk_end: u64,
     /// Rank-three tensor shape `[chunks, frames, classes]`
-    pub shape: [u64; 3],
+    shape: [u64; 3],
     /// C-order float32 values
-    pub values: Vec<f32>,
+    values: Vec<f32>,
+}
+
+impl LoadedTensorShard {
+    /// Return the relative member path from the bundle root
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Return the inclusive chunk range start
+    pub const fn chunk_start(&self) -> u64 {
+        self.chunk_start
+    }
+
+    /// Return the exclusive chunk range end
+    pub const fn chunk_end(&self) -> u64 {
+        self.chunk_end
+    }
+
+    /// Return the rank-three tensor shape `[chunks, frames, classes]`
+    pub const fn shape(&self) -> [u64; 3] {
+        self.shape
+    }
+
+    /// Return the admitted C-order float32 values
+    pub fn values(&self) -> &[f32] {
+        &self.values
+    }
 }
 
 /// A complete immutable segmentation bundle with loaded score shards
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImportedSegmentationBundle {
     /// Canonical path of the published bundle directory
-    pub root: PathBuf,
+    root: PathBuf,
     /// Strict validated manifest
-    pub manifest: SegmentationManifest,
+    manifest: SegmentationManifest,
     /// Loaded score shards in manifest order
-    pub shards: Vec<LoadedTensorShard>,
+    shards: Vec<LoadedTensorShard>,
+}
+
+impl ImportedSegmentationBundle {
+    /// Return the canonical path of the published bundle directory
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Return the strict validated manifest
+    pub const fn manifest(&self) -> &SegmentationManifest {
+        &self.manifest
+    }
+
+    /// Return loaded score shards in manifest order
+    pub fn shards(&self) -> &[LoadedTensorShard] {
+        &self.shards
+    }
 }
 
 /// Public name for a validated immutable imported segmentation bundle
