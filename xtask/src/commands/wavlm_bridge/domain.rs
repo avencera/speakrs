@@ -1062,20 +1062,28 @@ impl ScoreDocument {
             .map(|recording| recording.id.clone())
             .collect::<BTreeSet<_>>();
         validate_record_scores(&expected_ids, &self.per_record)?;
+        let scores_by_id = self
+            .per_record
+            .iter()
+            .map(|score| (score.recording_id.as_str(), score))
+            .collect::<BTreeMap<_, _>>();
         validate_aggregate_rows(
             "source",
             &self.source_rows,
             &grouped_recordings(spec, GroupField::Source),
+            &scores_by_id,
         )?;
         validate_aggregate_rows(
             "domain",
             &self.domain_rows,
             &grouped_recordings(spec, GroupField::Domain),
+            &scores_by_id,
         )?;
         validate_aggregate_rows(
             "parent",
             &self.parent_rows,
             &grouped_recordings(spec, GroupField::Parent),
+            &scores_by_id,
         )?;
         let equal_domain = self
             .hierarchical_equal_domain
@@ -1085,13 +1093,31 @@ impl ScoreDocument {
             equal_domain.key == "equal_domain",
             "equal-domain aggregate has wrong key"
         );
-        validate_aggregate_row("equal-domain", equal_domain, &expected_ids)?;
+        let all_components = DerComponents::from_records(&expected_ids, &scores_by_id)?;
+        let equal_domain_der = if spec.join.aggregation.equal_domain_average {
+            mean_required_metric(&self.domain_rows, |row| row.der, "domain DER")?
+        } else {
+            all_components.der("equal-domain DER")?
+        };
+        validate_aggregate_row(
+            "equal-domain",
+            equal_domain,
+            &expected_ids,
+            all_components,
+            equal_domain_der,
+        )?;
         let pooled = self
             .pooled
             .as_ref()
             .ok_or_else(|| color_eyre::eyre::eyre!("missing pooled aggregate"))?;
         ensure!(pooled.key == "pooled", "pooled aggregate has wrong key");
-        validate_aggregate_row("pooled", pooled, &expected_ids)?;
+        validate_aggregate_row(
+            "pooled",
+            pooled,
+            &expected_ids,
+            all_components,
+            all_components.der("pooled DER")?,
+        )?;
         Ok(())
     }
 }
@@ -1129,7 +1155,19 @@ fn validate_record_scores(expected: &BTreeSet<String>, scores: &[RecordScore]) -
             "record {} has no reference speakers",
             score.recording_id
         );
-        required_metric(score.der, "der")?;
+        let der = required_metric(score.der, "der")?;
+        let expected_der = checked_der(
+            score.miss_seconds,
+            score.false_alarm_seconds,
+            score.confusion_seconds,
+            score.reference_speaker_seconds,
+            &format!("record {} DER", score.recording_id),
+        )?;
+        ensure_metric_matches(
+            &format!("record {} DER", score.recording_id),
+            der,
+            expected_der,
+        )?;
         required_metric(score.jer, "jer")?;
         required_metric(score.fragmentation, "fragmentation")?;
         let retention = required_metric(score.short_speaker_retention, "short_speaker_retention")?;
@@ -1177,6 +1215,7 @@ fn validate_aggregate_rows(
     label: &str,
     rows: &[AggregateScoreRow],
     expected: &BTreeMap<String, BTreeSet<String>>,
+    scores_by_id: &BTreeMap<&str, &RecordScore>,
 ) -> Result<()> {
     ensure!(
         rows.len() == expected.len(),
@@ -1192,7 +1231,14 @@ fn validate_aggregate_rows(
             "duplicate {label} aggregate {}",
             row.key
         );
-        validate_aggregate_row(label, row, expected_ids)?;
+        let components = DerComponents::from_records(expected_ids, scores_by_id)?;
+        validate_aggregate_row(
+            label,
+            row,
+            expected_ids,
+            components,
+            components.der(&format!("{label} aggregate {} DER", row.key))?,
+        )?;
     }
     ensure!(
         seen.len() == expected.len(),
@@ -1205,6 +1251,8 @@ fn validate_aggregate_row(
     label: &str,
     row: &AggregateScoreRow,
     expected_ids: &BTreeSet<String>,
+    expected_components: DerComponents,
+    expected_der: f64,
 ) -> Result<()> {
     ensure!(!row.key.is_empty(), "{label} aggregate key is empty");
     ensure!(
@@ -1219,14 +1267,147 @@ fn validate_aggregate_row(
         "{label} aggregate {} has invalid recording coverage",
         row.key
     );
-    required_positive_metric(row.reference_speaker_seconds, "reference_speaker_seconds")?;
-    required_metric(row.der, "der")?;
-    required_metric(row.miss, "miss")?;
-    required_metric(row.false_alarm, "false_alarm")?;
-    required_metric(row.confusion, "confusion")?;
+    let reference =
+        required_positive_metric(row.reference_speaker_seconds, "reference_speaker_seconds")?;
+    let der = required_metric(row.der, "der")?;
+    let miss = required_metric(row.miss, "miss")?;
+    let false_alarm = required_metric(row.false_alarm, "false_alarm")?;
+    let confusion = required_metric(row.confusion, "confusion")?;
     required_metric(row.jer, "jer")?;
     required_metric(row.uncertainty, "uncertainty")?;
+
+    ensure_metric_matches(
+        &format!("{label} aggregate {} reference speaker seconds", row.key),
+        reference,
+        expected_components.reference_speaker_seconds,
+    )?;
+    ensure_metric_matches(
+        &format!("{label} aggregate {} miss", row.key),
+        miss,
+        expected_components.miss,
+    )?;
+    ensure_metric_matches(
+        &format!("{label} aggregate {} false alarm", row.key),
+        false_alarm,
+        expected_components.false_alarm,
+    )?;
+    ensure_metric_matches(
+        &format!("{label} aggregate {} confusion", row.key),
+        confusion,
+        expected_components.confusion,
+    )?;
+    ensure_metric_matches(
+        &format!("{label} aggregate {} DER", row.key),
+        der,
+        expected_der,
+    )?;
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct DerComponents {
+    reference_speaker_seconds: f64,
+    miss: f64,
+    false_alarm: f64,
+    confusion: f64,
+}
+
+impl DerComponents {
+    fn from_records(
+        recording_ids: &BTreeSet<String>,
+        scores_by_id: &BTreeMap<&str, &RecordScore>,
+    ) -> Result<Self> {
+        let mut components = Self {
+            reference_speaker_seconds: 0.0,
+            miss: 0.0,
+            false_alarm: 0.0,
+            confusion: 0.0,
+        };
+        for recording_id in recording_ids {
+            let score = scores_by_id.get(recording_id.as_str()).ok_or_else(|| {
+                color_eyre::eyre::eyre!("aggregate references missing record {recording_id}")
+            })?;
+            components.reference_speaker_seconds = checked_sum(
+                components.reference_speaker_seconds,
+                score.reference_speaker_seconds,
+                "aggregate reference speaker seconds",
+            )?;
+            components.miss = checked_sum(components.miss, score.miss_seconds, "aggregate miss")?;
+            components.false_alarm = checked_sum(
+                components.false_alarm,
+                score.false_alarm_seconds,
+                "aggregate false alarm",
+            )?;
+            components.confusion = checked_sum(
+                components.confusion,
+                score.confusion_seconds,
+                "aggregate confusion",
+            )?;
+        }
+
+        Ok(components)
+    }
+
+    fn der(self, label: &str) -> Result<f64> {
+        checked_der(
+            self.miss,
+            self.false_alarm,
+            self.confusion,
+            self.reference_speaker_seconds,
+            label,
+        )
+    }
+}
+
+fn mean_required_metric(
+    rows: &[AggregateScoreRow],
+    value: impl Fn(&AggregateScoreRow) -> Option<f64>,
+    field: &str,
+) -> Result<f64> {
+    ensure!(!rows.is_empty(), "cannot average empty {field} rows");
+    let sum = rows.iter().try_fold(0.0, |sum, row| {
+        let value = required_metric(value(row), field)?;
+        checked_sum(sum, value, &format!("{field} sum"))
+    })?;
+    let mean = sum / rows.len() as f64;
+    ensure!(mean.is_finite(), "{field} mean is not finite");
+
+    Ok(mean)
+}
+
+fn ensure_metric_matches(label: &str, actual: f64, expected: f64) -> Result<()> {
+    const ABSOLUTE_TOLERANCE: f64 = 1e-9;
+    const RELATIVE_TOLERANCE: f64 = 1e-9;
+
+    ensure!(expected.is_finite(), "computed {label} is not finite");
+    let tolerance = ABSOLUTE_TOLERANCE.max(RELATIVE_TOLERANCE * expected.abs());
+    ensure!(
+        (actual - expected).abs() <= tolerance,
+        "{label} is {actual}, expected {expected} within {tolerance}"
+    );
+    Ok(())
+}
+
+fn checked_der(
+    miss: f64,
+    false_alarm: f64,
+    confusion: f64,
+    reference_speaker_seconds: f64,
+    label: &str,
+) -> Result<f64> {
+    let errors = checked_sum(miss, false_alarm, &format!("{label} error sum"))?;
+    let errors = checked_sum(errors, confusion, &format!("{label} error sum"))?;
+    let der = errors / reference_speaker_seconds;
+    ensure!(der.is_finite(), "computed {label} is not finite");
+
+    Ok(der)
+}
+
+fn checked_sum(left: f64, right: f64, label: &str) -> Result<f64> {
+    let sum = left + right;
+    ensure!(sum.is_finite(), "computed {label} is not finite");
+
+    Ok(sum)
 }
 
 fn required_metric(value: Option<f64>, field: &str) -> Result<f64> {
@@ -1680,6 +1861,86 @@ mod tests {
     fn nonfinite_score_metric_is_rejected() {
         let (spec, mut document) = valid_score_document();
         document.per_record[0].der = Some(f64::NAN);
+        assert!(document.validate_for(&spec).is_err());
+    }
+
+    #[test]
+    fn record_der_must_match_its_additive_components() {
+        let (spec, mut document) = valid_score_document();
+        document.per_record[0].der = Some(0.0);
+
+        assert!(document.validate_for(&spec).is_err());
+    }
+
+    #[test]
+    fn record_der_rejects_overflowing_arithmetic() {
+        let (spec, mut document) = valid_score_document();
+        document.per_record[0].miss_seconds = 1e308;
+        document.per_record[0].false_alarm_seconds = 1e308;
+        document.per_record[0].confusion_seconds = 0.0;
+        document.per_record[0].der = Some(1.0);
+
+        assert!(document.validate_for(&spec).is_err());
+    }
+
+    #[test]
+    fn aggregate_components_must_match_their_member_records() {
+        let (spec, mut document) = valid_score_document();
+        document.source_rows[0].miss = Some(0.0);
+
+        assert!(document.validate_for(&spec).is_err());
+    }
+
+    #[test]
+    fn aggregate_components_reject_overflowing_totals() {
+        let (spec, mut document) = valid_score_document();
+        for score in &mut document.per_record {
+            score.miss_seconds = 1e308;
+            score.false_alarm_seconds = 0.0;
+            score.confusion_seconds = 0.0;
+            score.reference_speaker_seconds = 1e308;
+            score.der = Some(1.0);
+        }
+        for rows in [
+            &mut document.source_rows,
+            &mut document.domain_rows,
+            &mut document.parent_rows,
+        ] {
+            for row in rows {
+                row.reference_speaker_seconds = Some(1e308);
+                row.der = Some(1.0);
+                row.miss = Some(1e308);
+                row.false_alarm = Some(0.0);
+                row.confusion = Some(0.0);
+            }
+        }
+
+        assert!(document.validate_for(&spec).is_err());
+    }
+
+    #[test]
+    fn equal_domain_der_must_use_equal_domain_weighting() {
+        let (spec, mut document) = valid_score_document();
+        document.per_record[1].reference_speaker_seconds = 200.0;
+        document.per_record[1].der = Some(0.03);
+        for rows in [
+            &mut document.source_rows,
+            &mut document.domain_rows,
+            &mut document.parent_rows,
+        ] {
+            rows[1].reference_speaker_seconds = Some(200.0);
+            rows[1].der = Some(0.03);
+        }
+        let equal_domain = document.hierarchical_equal_domain.as_mut().unwrap();
+        equal_domain.reference_speaker_seconds = Some(300.0);
+        equal_domain.der = Some(0.045);
+        let pooled = document.pooled.as_mut().unwrap();
+        pooled.reference_speaker_seconds = Some(300.0);
+        pooled.der = Some(0.04);
+
+        assert!(document.validate_for(&spec).is_ok());
+
+        document.hierarchical_equal_domain.as_mut().unwrap().der = Some(0.04);
         assert!(document.validate_for(&spec).is_err());
     }
 
