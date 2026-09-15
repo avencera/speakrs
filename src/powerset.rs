@@ -119,10 +119,9 @@ impl PowersetMapping {
             let row = logits.row(frame);
             let mut class = 0;
             for (idx, value) in row.iter().enumerate().skip(1) {
-                let ordering = value.total_cmp(&row[class]);
                 let replace = match tie {
-                    ArgmaxTie::First => ordering.is_gt(),
-                    ArgmaxTie::Last => ordering.is_ge(),
+                    ArgmaxTie::First => *value > row[class],
+                    ArgmaxTie::Last => *value >= row[class],
                 };
                 if replace {
                     class = idx;
@@ -275,6 +274,30 @@ mod tests {
         let logits = array![[10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
         let result = pm.hard_decode(&logits).unwrap();
         assert_eq!(result, array![[0.0, 0.0, 0.0]]);
+    }
+
+    #[test]
+    fn hard_decode_first_tie_treats_signed_zero_as_equal() {
+        let mapping = PowersetMapping::new(3, 2);
+        let logits = array![[-0.0, 0.0, -1.0, -1.0, -1.0, -1.0, -1.0]];
+
+        let result = mapping
+            .hard_decode_with_tie(&logits, ArgmaxTie::First)
+            .unwrap();
+
+        assert_eq!(result, array![[0.0, 0.0, 0.0]]);
+    }
+
+    #[test]
+    fn hard_decode_last_tie_treats_signed_zero_as_equal() {
+        let mapping = PowersetMapping::new(3, 2);
+        let logits = array![[0.0, -0.0, -1.0, -1.0, -1.0, -1.0, -1.0]];
+
+        let result = mapping
+            .hard_decode_with_tie(&logits, ArgmaxTie::Last)
+            .unwrap();
+
+        assert_eq!(result, array![[1.0, 0.0, 0.0]]);
     }
 
     #[test]
