@@ -1,5 +1,6 @@
 mod cache;
 mod domain;
+mod embedding_execution;
 mod report;
 mod run;
 mod stage;

@@ -1,5 +1,8 @@
 use std::collections::BTreeSet;
+use std::env;
 use std::path::PathBuf;
+
+use serde::Serialize;
 
 use speakrs::pipeline::{
     EmbeddingAvailability, EmbeddingFailureReason, EmbeddingReceipt,
@@ -13,8 +16,9 @@ use super::domain::{
     EmbeddingInactiveReason, EmbeddingSlotAvailability, EmbeddingStageDocument,
     EmbeddingStageEntry as DocumentEmbeddingStageEntry, GeometryReceipt, ReceiptDocument,
     ReceiptRef, RecipeSpec, RuntimeIdentity, Sha256Digest, StageDependency, StageDependencyName,
-    StageKind, StageReceipt, canonical_json_digest, digest_bytes,
+    StageKind, StageReceipt, canonical_json_digest, digest_bytes, digest_file,
 };
+use super::embedding_execution::ensure_recipe_matches_bundle;
 use super::run::{RunContext, ValidatedRecording};
 
 #[derive(Clone)]
@@ -24,18 +28,41 @@ pub(crate) struct InferenceStageReceipts {
     pub(crate) embedding: ReceiptDocument,
 }
 
-pub(crate) const EMBEDDING_IMPLEMENTATION_IDENTITY: &str = "speakrs-imported-embedding-v1";
+pub(crate) const EMBEDDING_IMPLEMENTATION_IDENTITY: &str =
+    env!("WAVLM_EMBEDDING_IMPLEMENTATION_SHA256");
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ExecutionIdentity {
+    executable_sha256: Sha256Digest,
+    onnx_runtime_build: String,
+    onnx_runtime_api: u32,
+}
+
+impl ExecutionIdentity {
+    pub(crate) fn capture() -> color_eyre::eyre::Result<Self> {
+        let executable = env::current_exe()?;
+        Ok(Self {
+            executable_sha256: digest_file(&executable)?,
+            onnx_runtime_build: ort::info().to_owned(),
+            onnx_runtime_api: ort::MINOR_VERSION,
+        })
+    }
+
+    pub(crate) fn executable_sha256(&self) -> &Sha256Digest {
+        &self.executable_sha256
+    }
+}
 
 pub(crate) fn stage_receipts(
     recipe: &RecipeSpec,
     recording: &ValidatedRecording,
-    model_digest: &Sha256Digest,
     runtime: &RuntimeIdentity,
+    execution: &ExecutionIdentity,
     geometry: GeometryReceipt,
     availability: AvailabilityCounts,
 ) -> color_eyre::eyre::Result<InferenceStageReceipts> {
     let (bundle_dependencies, decode_dependencies, embedding_dependencies) =
-        stage_dependencies(recipe, recording, model_digest, runtime, &geometry)?;
+        stage_dependencies(recipe, recording, runtime, execution, &geometry)?;
     let bundle = make_receipt(
         StageKind::Bundle,
         bundle_dependencies,
@@ -67,8 +94,8 @@ pub(crate) fn stage_receipts(
 pub(crate) fn stage_dependencies(
     recipe: &RecipeSpec,
     recording: &ValidatedRecording,
-    model_digest: &Sha256Digest,
     runtime: &RuntimeIdentity,
+    execution: &ExecutionIdentity,
     geometry: &GeometryReceipt,
 ) -> color_eyre::eyre::Result<(
     Vec<StageDependency>,
@@ -88,6 +115,10 @@ pub(crate) fn stage_dependencies(
                 recording.spec.bundle.bundle_id.as_str(),
             ),
             dependency(StageDependencyName::Geometry, geometry_digest.as_ref()),
+            dependency(
+                StageDependencyName::Implementation,
+                EMBEDDING_IMPLEMENTATION_IDENTITY,
+            ),
         ],
         vec![
             dependency(
@@ -97,6 +128,10 @@ pub(crate) fn stage_dependencies(
             dependency(
                 StageDependencyName::Decoder,
                 &recipe_identity(&recipe.decoder),
+            ),
+            dependency(
+                StageDependencyName::Implementation,
+                EMBEDDING_IMPLEMENTATION_IDENTITY,
             ),
         ],
         vec![
@@ -111,18 +146,33 @@ pub(crate) fn stage_dependencies(
             dependency(
                 StageDependencyName::Model,
                 &format!(
-                    "{}:{}:{}",
-                    model_digest, runtime.embedding_model.sha256, runtime.plda.sha256
+                    "{}:{}",
+                    runtime.embedding_model.sha256, runtime.embedding_model.sidecar_sha256
                 ),
             ),
-            dependency(StageDependencyName::Runtime, &runtime_identity(runtime)),
+            dependency(
+                StageDependencyName::Runtime,
+                &embedding_runtime_identity(runtime, execution),
+            ),
             dependency(StageDependencyName::Geometry, geometry_digest.as_ref()),
         ],
     ))
 }
 
-fn runtime_identity(runtime: &RuntimeIdentity) -> String {
-    serde_json::to_string(&runtime.mode).expect("bridge mode serialization cannot fail")
+fn embedding_runtime_identity(runtime: &RuntimeIdentity, execution: &ExecutionIdentity) -> String {
+    #[derive(Serialize)]
+    struct Identity<'a> {
+        mode: super::domain::BridgeMode,
+        onnx_runtime_build: &'a str,
+        onnx_runtime_api: u32,
+    }
+
+    serde_json::to_string(&Identity {
+        mode: runtime.mode,
+        onnx_runtime_build: &execution.onnx_runtime_build,
+        onnx_runtime_api: execution.onnx_runtime_api,
+    })
+    .expect("bridge runtime identity serialization cannot fail")
 }
 
 pub(crate) fn embedding_stage_key(
@@ -134,8 +184,8 @@ pub(crate) fn embedding_stage_key(
     let receipts = stage_receipts(
         recipe,
         recording,
-        context.model_digest,
         context.runtime,
+        context.execution,
         geometry.clone(),
         AvailabilityCounts::default(),
     )?;
@@ -289,6 +339,44 @@ pub(crate) fn dependency(name: StageDependencyName, value: &str) -> StageDepende
     }
 }
 
+pub(crate) fn clustering_dependencies(
+    recipe: &RecipeSpec,
+    execution: &ExecutionIdentity,
+) -> color_eyre::eyre::Result<Vec<StageDependency>> {
+    Ok(vec![
+        dependency(
+            StageDependencyName::Clustering,
+            canonical_json_digest(&recipe.clustering)?.as_ref(),
+        ),
+        dependency(StageDependencyName::Seed, &recipe.seed.to_string()),
+        dependency(
+            StageDependencyName::Implementation,
+            execution.executable_sha256().as_ref(),
+        ),
+    ])
+}
+
+pub(crate) fn reconstruction_dependencies(
+    recipe: &RecipeSpec,
+    geometry: &GeometryReceipt,
+    execution: &ExecutionIdentity,
+) -> color_eyre::eyre::Result<Vec<StageDependency>> {
+    Ok(vec![
+        dependency(
+            StageDependencyName::Reconstruction,
+            canonical_json_digest(&recipe.reconstruction)?.as_ref(),
+        ),
+        dependency(
+            StageDependencyName::Geometry,
+            canonical_json_digest(geometry)?.as_ref(),
+        ),
+        dependency(
+            StageDependencyName::Implementation,
+            execution.executable_sha256().as_ref(),
+        ),
+    ])
+}
+
 pub(crate) fn recipe_identity(identity: &super::domain::RecipeIdentity) -> String {
     format!("{}@{}", identity.id, identity.revision)
 }
@@ -391,10 +479,10 @@ pub(crate) fn run_from_embedding_cache(
     geometry: &GeometryReceipt,
     hit: cache::EmbeddingCacheHit,
 ) -> color_eyre::eyre::Result<super::run::PreparedOutputs> {
-    super::run::ensure_recipe_matches_bundle(recipe, &recording.bundle)?;
+    ensure_recipe_matches_bundle(recipe, recording)?;
     let pipeline_geometry = PipelineGeometry::from_imported(
-        &recording.bundle.manifest.audio,
-        &recording.bundle.manifest.geometry,
+        &recording.bundle.manifest().audio,
+        &recording.bundle.manifest().geometry,
     )?;
     let snapshot_document: EmbeddingStageDocument = serde_json::from_slice(&hit.snapshot.0)?;
     snapshot_document.validate()?;
@@ -460,8 +548,8 @@ pub(crate) fn run_from_embedding_cache(
     let expected_stage_receipts = stage_receipts(
         recipe,
         recording,
-        context.model_digest,
         context.runtime,
+        context.execution,
         geometry.clone(),
         snapshot_document.embedding_receipt,
     )?;
@@ -482,23 +570,9 @@ pub(crate) fn run_from_embedding_cache(
         super::run::artifact_for_path(&output_relative.join("speaker_tracks.json"), &tracks_bytes),
         super::run::artifact_for_path(&output_relative.join("output.rttm"), &hypothesis_bytes),
     ];
-    let clustering_dependencies = vec![
-        dependency(
-            StageDependencyName::Clustering,
-            canonical_json_digest(&recipe.clustering)?.as_ref(),
-        ),
-        dependency(StageDependencyName::Seed, &recipe.seed.to_string()),
-    ];
-    let reconstruction_dependencies = vec![
-        dependency(
-            StageDependencyName::Reconstruction,
-            canonical_json_digest(&recipe.reconstruction)?.as_ref(),
-        ),
-        dependency(
-            StageDependencyName::Geometry,
-            canonical_json_digest(geometry)?.as_ref(),
-        ),
-    ];
+    let clustering_dependencies = clustering_dependencies(recipe, context.execution)?;
+    let reconstruction_dependencies =
+        reconstruction_dependencies(recipe, geometry, context.execution)?;
     let snapshot_relative_path = super::run::recording_relative(recipe, recording)
         .join("stages")
         .join("embedding_snapshot.json");
@@ -558,4 +632,72 @@ pub(crate) fn run_from_embedding_cache(
             bytes: 0,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::wavlm_bridge::domain::{
+        BridgeMode, EmbeddingModelIdentity, ModelIdentity, Precision, digest_bytes,
+    };
+
+    fn runtime() -> RuntimeIdentity {
+        RuntimeIdentity {
+            mode: BridgeMode::Cpu,
+            models_sha256: digest_bytes(b"models"),
+            embedding_model: EmbeddingModelIdentity {
+                id: "embedding".into(),
+                revision: "v1".into(),
+                path: "embedding.onnx".into(),
+                sha256: digest_bytes(b"embedding"),
+                sidecar_sha256: digest_bytes(b"sidecar"),
+            },
+            plda: ModelIdentity {
+                id: "plda".into(),
+                revision: "v1".into(),
+                path: "plda".into(),
+                sha256: digest_bytes(b"plda"),
+            },
+            precision: Precision::Float32,
+        }
+    }
+
+    fn execution(executable: &[u8], runtime_build: &str) -> ExecutionIdentity {
+        ExecutionIdentity {
+            executable_sha256: digest_bytes(executable),
+            onnx_runtime_build: runtime_build.into(),
+            onnx_runtime_api: 17,
+        }
+    }
+
+    #[test]
+    fn embedding_implementation_identity_is_a_source_digest() {
+        assert_eq!(EMBEDDING_IMPLEMENTATION_IDENTITY.len(), 64);
+        assert!(
+            EMBEDDING_IMPLEMENTATION_IDENTITY
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
+    }
+
+    #[test]
+    fn embedding_runtime_identity_tracks_onnx_runtime_but_not_downstream_executable() {
+        let runtime = runtime();
+        let first = execution(b"first executable", "runtime-a");
+        let rebuilt = execution(b"rebuilt executable", "runtime-a");
+        let upgraded_runtime = execution(b"first executable", "runtime-b");
+
+        assert_eq!(
+            embedding_runtime_identity(&runtime, &first),
+            embedding_runtime_identity(&runtime, &rebuilt)
+        );
+        assert_ne!(
+            embedding_runtime_identity(&runtime, &first),
+            embedding_runtime_identity(&runtime, &upgraded_runtime)
+        );
+        assert_ne!(
+            canonical_json_digest(&first).unwrap(),
+            canonical_json_digest(&rebuilt).unwrap()
+        );
+    }
 }

@@ -9,22 +9,24 @@ use serde::Serialize;
 
 use speakrs::imported_segmentation::{SegmentationBundle, load_imported_segmentation_bundle};
 use speakrs::inference::EmbeddingArtifactMetadata;
-use speakrs::pipeline::{EmbeddingAvailability, ImportedDiarizationPipeline, PipelineGeometry};
+use speakrs::pipeline::{EmbeddingAvailability, PipelineGeometry};
 
 use super::cache::{self, CacheHit};
 use super::domain::{
     ArtifactRef, ArtifactState, AvailabilityCounts, AvailabilityReason, BridgeMode, BridgeSpec,
     GeometryReceipt, RecipeSpec, RunDocument, RunRecording, RuntimeIdentity, Sha256Digest,
-    SpeakerTrack, SpeakerTracks, StageDependencyName, StageKind, SystemKind, SystemManifest,
-    SystemRecord, TimedSegment, ValidationDocument, canonical_json_digest, digest_bytes,
-    digest_file, digest_tree, ensure_regular_file, make_tree_read_only,
+    SpeakerTrack, SpeakerTracks, StageKind, SystemKind, SystemManifest, SystemRecord, TimedSegment,
+    ValidationDocument, canonical_json_digest, digest_bytes, digest_file, digest_tree,
+    ensure_regular_file, make_tree_read_only,
 };
+use super::embedding_execution::{load_embedding_model, run_embedding_stage};
 use crate::wav::load_wav_samples;
 
 use super::stage::{
-    EMBEDDING_IMPLEMENTATION_IDENTITY, availability_counts_from_snapshot, dependency,
+    ExecutionIdentity, availability_counts_from_snapshot, clustering_dependencies,
     embedding_snapshot_bytes, embedding_stage_key, embedding_stage_receipt_files, make_receipt,
-    receipt_ref, receipt_with_output, run_from_embedding_cache, stage_name, stage_receipts,
+    receipt_ref, receipt_with_output, reconstruction_dependencies, run_from_embedding_cache,
+    stage_name, stage_receipts,
 };
 
 pub struct ValidatedRecording {
@@ -43,15 +45,16 @@ pub fn validate_bundle_audio(bundle_path: &Path, audio_path: &Path) -> Result<Va
     let bundle = load_imported_segmentation_bundle(bundle_path)
         .wrap_err_with(|| format!("failed to validate bundle {}", bundle_path.display()))?;
     validate_waveform_and_bundle(&bundle, &samples, sample_rate, None)?;
+    let manifest = bundle.manifest();
     let geometry = geometry_receipt(&PipelineGeometry::from_imported(
-        &bundle.manifest.audio,
-        &bundle.manifest.geometry,
+        &manifest.audio,
+        &manifest.geometry,
     )?);
     Ok(ValidationDocument {
         schema_version: super::domain::VALIDATION_SCHEMA_VERSION,
         bundle_path: bundle_path.to_owned(),
-        bundle_id: bundle.manifest.identity.bundle_id.clone(),
-        manifest_sha256: bundle.manifest.identity.manifest_digest.clone(),
+        bundle_id: manifest.identity.bundle_id.clone(),
+        manifest_sha256: manifest.identity.manifest_digest.clone(),
         audio_path: audio_path.to_owned(),
         sample_rate,
         sample_count: samples.len(),
@@ -96,24 +99,25 @@ fn validate_waveform_and_bundle(
     sample_rate: u32,
     recording: Option<&super::domain::RecordingSpec>,
 ) -> Result<()> {
+    let manifest = bundle.manifest();
     ensure!(
-        bundle.manifest.audio.sample_rate == sample_rate,
+        manifest.audio.sample_rate == sample_rate,
         "bundle sample rate {} does not match audio sample rate {sample_rate}",
-        bundle.manifest.audio.sample_rate
+        manifest.audio.sample_rate
     );
     ensure!(
-        bundle.manifest.audio.channels == 1,
+        manifest.audio.channels == 1,
         "bundle audio contract is not mono"
     );
     ensure!(
-        bundle.manifest.audio.sample_count == samples.len() as u64,
+        manifest.audio.sample_count == samples.len() as u64,
         "bundle sample count {} does not match audio sample count {}",
-        bundle.manifest.audio.sample_count,
+        manifest.audio.sample_count,
         samples.len()
     );
     let waveform = speakrs::canonical_waveform_digest(samples);
     ensure!(
-        waveform == bundle.manifest.audio.waveform_sha256,
+        waveform == manifest.audio.waveform_sha256,
         "bundle waveform digest does not match audio"
     );
     if let Some(recording) = recording {
@@ -123,12 +127,12 @@ fn validate_waveform_and_bundle(
             recording.id
         );
         ensure!(
-            bundle.manifest.identity.bundle_id == recording.bundle.bundle_id,
+            manifest.identity.bundle_id == recording.bundle.bundle_id,
             "bundle id mismatch for recording {}",
             recording.id
         );
         ensure!(
-            bundle.manifest.identity.manifest_digest == recording.bundle.manifest_sha256,
+            manifest.identity.manifest_digest == recording.bundle.manifest_sha256,
             "bundle manifest digest mismatch for recording {}",
             recording.id
         );
@@ -177,14 +181,14 @@ pub fn run(options: RunOptions) -> Result<()> {
     let (embedding_path, plda_dir) = validate_model_assets(&options.models_dir, &spec.runtime)?;
 
     let recipes = select_recipes(&spec, &options.recipe_ids)?;
-    let mut embedding_model =
-        speakrs::inference::EmbeddingModel::with_mode(embedding_path, execution_mode)?;
+    let mut embedding_model = load_embedding_model(embedding_path, execution_mode)?;
+    let execution_identity = ExecutionIdentity::capture()?;
     let mut run_context = RunContext {
         embedding_model: &mut embedding_model,
         plda_dir: &plda_dir,
         mode: execution_mode,
-        model_digest: &model_digest,
         runtime: &spec.runtime,
+        execution: &execution_identity,
     };
     let staging = create_output_staging(&options.output_dir)?;
     let recipe_ids = recipes
@@ -202,7 +206,13 @@ pub fn run(options: RunOptions) -> Result<()> {
     for recording_spec in &spec.recordings {
         let recording = validate_recording(recording_spec)?;
         for (recipe_index, recipe) in recipes.iter().enumerate() {
-            let cache_key = cache_key(&spec, &recording.spec, recipe, &model_digest)?;
+            let cache_key = cache_key(
+                &spec,
+                &recording.spec,
+                recipe,
+                &model_digest,
+                &execution_identity,
+            )?;
             let cache_hit = options
                 .cache_dir
                 .as_deref()
@@ -217,8 +227,8 @@ pub fn run(options: RunOptions) -> Result<()> {
                 ),
                 None => {
                     let geometry = geometry_receipt(&PipelineGeometry::from_imported(
-                        &recording.bundle.manifest.audio,
-                        &recording.bundle.manifest.geometry,
+                        &recording.bundle.manifest().audio,
+                        &recording.bundle.manifest().geometry,
                     )?);
                     let embedding_key =
                         embedding_stage_key(recipe, &recording, &run_context, &geometry)?;
@@ -441,8 +451,8 @@ pub(crate) struct RunContext<'a> {
     pub(crate) embedding_model: &'a mut speakrs::inference::EmbeddingModel,
     pub(crate) plda_dir: &'a Path,
     pub(crate) mode: speakrs::ExecutionMode,
-    pub(crate) model_digest: &'a Sha256Digest,
     pub(crate) runtime: &'a RuntimeIdentity,
+    pub(crate) execution: &'a ExecutionIdentity,
 }
 
 fn run_one(
@@ -451,26 +461,20 @@ fn run_one(
     context: &mut RunContext<'_>,
     expected_cache_key: &Sha256Digest,
 ) -> Result<PreparedOutputs> {
-    ensure_recipe_matches_bundle(recipe, &recording.bundle)?;
     let geometry = geometry_receipt(&PipelineGeometry::from_imported(
-        &recording.bundle.manifest.audio,
-        &recording.bundle.manifest.geometry,
+        &recording.bundle.manifest().audio,
+        &recording.bundle.manifest().geometry,
     )?);
-    let model_digest = context.model_digest.clone();
     let runtime = context.runtime.clone();
-    let mut pipeline = ImportedDiarizationPipeline::new(
-        recording.bundle.clone(),
-        context.embedding_model,
-        context.plda_dir,
-    )?;
+    let (pipeline, snapshot) =
+        run_embedding_stage(recipe, recording, context.embedding_model, context.plda_dir)?;
     let config = recipe.pipeline_config(context.mode)?;
-    let snapshot = pipeline.run_embedding_stage(&recording.samples)?;
     let availability = availability_counts_from_snapshot(&snapshot);
     let mut stage_receipts = stage_receipts(
         recipe,
         recording,
-        &model_digest,
         &runtime,
+        context.execution,
         geometry.clone(),
         availability,
     )?;
@@ -496,23 +500,9 @@ fn run_one(
         artifact_for_path(&output_relative.join("speaker_tracks.json"), &tracks_bytes),
         artifact_for_path(&output_relative.join("output.rttm"), &hypothesis_bytes),
     ];
-    let clustering_dependencies = vec![
-        dependency(
-            StageDependencyName::Clustering,
-            canonical_json_digest(&recipe.clustering)?.as_ref(),
-        ),
-        dependency(StageDependencyName::Seed, &recipe.seed.to_string()),
-    ];
-    let reconstruction_dependencies = vec![
-        dependency(
-            StageDependencyName::Reconstruction,
-            canonical_json_digest(&recipe.reconstruction)?.as_ref(),
-        ),
-        dependency(
-            StageDependencyName::Geometry,
-            canonical_json_digest(&geometry)?.as_ref(),
-        ),
-    ];
+    let clustering_dependencies = clustering_dependencies(recipe, context.execution)?;
+    let reconstruction_dependencies =
+        reconstruction_dependencies(recipe, &geometry, context.execution)?;
     let clustering_receipt = make_receipt(
         StageKind::Clustering,
         clustering_dependencies,
@@ -658,33 +648,12 @@ pub(crate) fn recording_relative(recipe: &RecipeSpec, recording: &ValidatedRecor
         .join(&recording.spec.id)
 }
 
-pub(crate) fn ensure_recipe_matches_bundle(
-    recipe: &RecipeSpec,
-    bundle: &SegmentationBundle,
-) -> Result<()> {
-    ensure!(
-        recipe.decoder.id == bundle.manifest.policy.decoder.id
-            && recipe.decoder.revision == bundle.manifest.policy.decoder.revision,
-        "recipe decoder does not match imported bundle policy"
-    );
-    ensure!(
-        recipe.embedding.id == bundle.manifest.policy.embedding.id
-            && recipe.embedding.revision == bundle.manifest.policy.embedding.revision,
-        "recipe embedding does not match imported bundle policy"
-    );
-    ensure!(
-        recipe.reconstruction.id == bundle.manifest.policy.reconstruction.id
-            && recipe.reconstruction.revision == bundle.manifest.policy.reconstruction.revision,
-        "recipe reconstruction does not match imported bundle policy"
-    );
-    Ok(())
-}
-
 fn cache_key(
     spec: &BridgeSpec,
     recording: &super::domain::RecordingSpec,
     recipe: &RecipeSpec,
     model_digest: &Sha256Digest,
+    execution: &ExecutionIdentity,
 ) -> Result<Sha256Digest> {
     // cache stores unscored inference artifacts
     // reference, UEM, and scorer identities belong to report admission
@@ -697,7 +666,7 @@ fn cache_key(
         recipe: &'a RecipeSpec,
         model: &'a Sha256Digest,
         runtime: &'a RuntimeIdentity,
-        implementation: &'static str,
+        execution: &'a ExecutionIdentity,
     }
     canonical_json_digest(&Key {
         recording: &recording.id,
@@ -707,7 +676,7 @@ fn cache_key(
         recipe,
         model: model_digest,
         runtime: &spec.runtime,
-        implementation: EMBEDDING_IMPLEMENTATION_IDENTITY,
+        execution,
     })
 }
 
@@ -917,7 +886,9 @@ fn write_new(path: impl AsRef<Path>, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::wavlm_bridge::domain::StageDependencyName;
     use crate::commands::wavlm_bridge::domain::{EmbeddingModelIdentity, ModelIdentity, Precision};
+    use crate::commands::wavlm_bridge::stage::dependency;
 
     #[test]
     fn validates_explicit_fixed_embedding_asset_and_sidecar() {

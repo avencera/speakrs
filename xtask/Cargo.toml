@@ -69,3 +69,8 @@ objc2-foundation = { version = "0.3", features = [
     "NSString",
     "NSURL",
 ] }
+
+[build-dependencies]
+cargo-lock = "11.1.0"
+sha2 = "0.10"
+toml = "1.1.6"
