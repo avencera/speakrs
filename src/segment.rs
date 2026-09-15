@@ -1,5 +1,6 @@
 use ndarray::Array2;
 
+use crate::imported_segmentation::{OutputExtent, OutputExtentPolicy};
 use crate::pipeline::FrameTiming;
 
 /// A single speaker turn with start/end times in seconds
@@ -57,12 +58,38 @@ pub fn to_segments(
 pub(crate) fn to_segments_with_timing(
     activations: &Array2<f32>,
     timing: FrameTiming,
+    output_extent: OutputExtent,
+    output_extent_policy: OutputExtentPolicy,
 ) -> Vec<Segment> {
-    to_segments_at(activations, |frame_idx| {
+    let segments = to_segments_at(activations, |frame_idx| {
         timing
             .frame_middle_seconds(frame_idx)
             .expect("validated frame timing")
-    })
+    });
+    match output_extent_policy {
+        OutputExtentPolicy::AggregateGrid => segments,
+        OutputExtentPolicy::AudioExtent => {
+            clip_segments_to_output_extent(segments, timing, output_extent)
+        }
+    }
+}
+
+fn clip_segments_to_output_extent(
+    segments: Vec<Segment>,
+    timing: FrameTiming,
+    output_extent: OutputExtent,
+) -> Vec<Segment> {
+    let sample_rate = f64::from(timing.sample_rate());
+    let extent_start = output_extent.start_samples as f64 / sample_rate;
+    let extent_end = output_extent.end_samples as f64 / sample_rate;
+    segments
+        .into_iter()
+        .filter_map(|mut segment| {
+            segment.start = segment.start.max(extent_start);
+            segment.end = segment.end.min(extent_end);
+            (segment.start < segment.end).then_some(segment)
+        })
+        .collect()
 }
 
 fn to_segments_at<F>(activations: &Array2<f32>, frame_middle: F) -> Vec<Segment>

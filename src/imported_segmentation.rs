@@ -369,7 +369,7 @@ pub enum OutputExtentPolicy {
 }
 
 /// Canonical output sample extent
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputExtent {
     /// Exclusive end sample

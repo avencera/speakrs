@@ -4,7 +4,7 @@ use ndarray::{Array2, Array3, s};
 
 use crate::powerset::PowersetMapping;
 
-use super::{FrameTiming, PipelineGeometry};
+use super::{DiscreteDiarization, PipelineGeometry};
 
 pub(crate) struct PendingEmbedding<'a> {
     pub chunk_idx: usize,
@@ -521,76 +521,6 @@ impl Deref for ChunkSpeakerClusters {
     }
 }
 
-/// Frame-level binary speaker activations with their exact output timing
-#[derive(Debug, Clone)]
-pub struct DiscreteDiarization {
-    activations: Array2<f32>,
-    timing: FrameTiming,
-}
-
-impl Deref for DiscreteDiarization {
-    type Target = Array2<f32>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.activations
-    }
-}
-
-impl DiscreteDiarization {
-    /// Create activations checked against a pipeline geometry
-    pub fn try_new(
-        activations: Array2<f32>,
-        geometry: &PipelineGeometry,
-    ) -> Result<Self, super::PipelineError> {
-        if activations.nrows() != geometry.output_frames() {
-            return Err(super::PipelineError::Invariant(format!(
-                "activation frames {} do not match geometry output frames {}",
-                activations.nrows(),
-                geometry.output_frames()
-            )));
-        }
-        let timing = geometry.frame_timing()?;
-        Ok(Self {
-            activations,
-            timing,
-        })
-    }
-
-    pub(crate) fn with_timing(activations: Array2<f32>, timing: FrameTiming) -> Self {
-        Self {
-            activations,
-            timing,
-        }
-    }
-
-    pub(crate) fn map_activations(
-        &self,
-        activations: Array2<f32>,
-    ) -> Result<Self, super::PipelineError> {
-        if activations.raw_dim() != self.activations.raw_dim() {
-            return Err(super::PipelineError::Invariant(
-                "activation transform changed the diarization shape".to_owned(),
-            ));
-        }
-        Ok(Self::with_timing(activations, self.timing))
-    }
-
-    /// Return the exact frame timing owned by these activations
-    pub const fn timing(&self) -> FrameTiming {
-        self.timing
-    }
-
-    /// Zero out all but the highest-scoring speaker in each frame, making activations exclusive
-    pub fn make_exclusive(&mut self) {
-        crate::reconstruct::make_exclusive(&mut self.activations);
-    }
-
-    /// Convert frame activations to time-stamped speaker segments using owned timing
-    pub fn to_segments(&self) -> Vec<crate::segment::Segment> {
-        crate::segment::to_segments_with_timing(&self.activations, self.timing)
-    }
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct FrameActivations(pub(crate) Array2<f32>);
 
@@ -961,9 +891,8 @@ pub(crate) enum EmbeddingPath {
 mod tests {
     use super::super::layout::PipelineGeometry;
     use super::*;
-    use crate::imported_segmentation::{ChunkGeometry, SegmentationManifest};
     use crate::inference::embedding::EMBEDDING_WIDTH;
-    use ndarray::{Array2, Array3};
+    use ndarray::Array3;
 
     #[test]
     fn try_new_rejects_mismatched_chunk_counts() {
@@ -1083,37 +1012,6 @@ mod tests {
         assert_eq!(artifacts.segmentations.0.shape()[0], 0);
         assert_eq!(artifacts.embeddings.0.shape()[0], 0);
         assert!(artifacts.geometry.start_frames().is_empty());
-    }
-
-    #[test]
-    fn imported_diarization_uses_first_and_last_exact_frame_timing() {
-        let mut manifest = SegmentationManifest::from_json(include_bytes!(
-            "../../../fixtures/wavlm_bridge/manifest.json"
-        ))
-        .unwrap();
-        manifest.audio.sample_count = 1;
-        manifest.geometry.chunks = vec![ChunkGeometry {
-            index: 0,
-            padding_samples: 127_999,
-            start_samples: 0,
-            valid_samples: 1,
-        }];
-        manifest.geometry.output_extent.end_samples = 128_400;
-        let geometry =
-            PipelineGeometry::from_imported(&manifest.audio, &manifest.geometry).unwrap();
-
-        let mut activations = Array2::<f32>::zeros((geometry.output_frames(), 1));
-        activations[[0, 0]] = 1.0;
-        activations[[geometry.output_frames() - 1, 0]] = 1.0;
-        let diarization = DiscreteDiarization::try_new(activations, &geometry).unwrap();
-
-        let segments = diarization.to_segments();
-
-        assert_eq!(segments.len(), 2);
-        assert!((segments[0].start - 200.0 / 16_000.0).abs() < 1e-12);
-        assert!((segments[0].end - 520.0 / 16_000.0).abs() < 1e-12);
-        assert!((segments[1].start - 128_200.0 / 16_000.0).abs() < 1e-12);
-        assert!((segments[1].end - 128_200.0 / 16_000.0).abs() < 1e-12);
     }
 
     #[test]

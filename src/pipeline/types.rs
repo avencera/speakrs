@@ -1,4 +1,5 @@
 mod data;
+mod discrete;
 mod error;
 mod extract;
 mod layout;
@@ -11,14 +12,15 @@ pub use data::InferenceStageTimings;
 pub(crate) use data::InferenceStageTimings as InternalInferenceStageTimings;
 pub use data::{
     BatchInput, ChunkEmbeddings, ChunkSpeakerClusters, DecodedSegmentations, DiarizationResult,
-    DiscreteDiarization, EmbeddingAvailability, EmbeddingAvailabilityGrid, EmbeddingFailureReason,
-    EmbeddingReceipt, EmbeddingStageEntry, EmbeddingStageSnapshot, InactiveEmbeddingReason,
-    InferenceArtifacts, SpeakerCountTrack,
+    EmbeddingAvailability, EmbeddingAvailabilityGrid, EmbeddingFailureReason, EmbeddingReceipt,
+    EmbeddingStageEntry, EmbeddingStageSnapshot, InactiveEmbeddingReason, InferenceArtifacts,
+    SpeakerCountTrack,
 };
 pub(crate) use data::{
     EmbeddingMaskChoice, EmbeddingPath, InferencePath, PendingEmbedding, PendingSplitEmbedding,
     RawSegmentationWindows, TypedChunkEmbeddings, TypedEmbedding,
 };
+pub use discrete::DiscreteDiarization;
 pub use error::PipelineError;
 pub(crate) use extract::{Array3Writer, EmbeddingStorage, flush_masked, flush_split};
 pub(crate) use layout::chunk_audio_raw;

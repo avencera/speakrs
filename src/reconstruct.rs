@@ -156,12 +156,8 @@ impl<'a> Reconstructor<'a> {
                 discrete[[frame_idx, speaker_idx]] = 1.0;
             }
         }
-        DiscreteDiarization::with_timing(
-            discrete,
-            self.geometry
-                .frame_timing()
-                .expect("validated geometry timing"),
-        )
+        DiscreteDiarization::try_new(discrete, self.geometry)
+            .expect("reconstruction preserves validated geometry")
     }
 
     pub fn reconstruct_smoothed(
@@ -182,12 +178,8 @@ impl<'a> Reconstructor<'a> {
             previous_speakers = current_speakers;
         }
 
-        DiscreteDiarization::with_timing(
-            discrete,
-            self.geometry
-                .frame_timing()
-                .expect("validated geometry timing"),
-        )
+        DiscreteDiarization::try_new(discrete, self.geometry)
+            .expect("reconstruction preserves validated geometry")
     }
 }
 

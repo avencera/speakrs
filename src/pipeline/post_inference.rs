@@ -99,7 +99,7 @@ pub(crate) fn apply_activity_cleanup(
 
 #[cfg(test)]
 mod tests {
-    use ndarray::array;
+    use ndarray::Array2;
 
     use super::apply_activity_cleanup;
     use crate::binarize::ActivityCleanup;
@@ -111,10 +111,9 @@ mod tests {
         let geometry =
             crate::pipeline::PipelineGeometry::from_legacy(16_000, 160_000, 16_000, 48_000)
                 .unwrap();
-        let discrete = DiscreteDiarization::with_timing(
-            array![[0.0], [1.0], [0.0]],
-            geometry.frame_timing().unwrap(),
-        );
+        let mut activations = Array2::zeros((geometry.output_frames(), 1));
+        activations[[1, 0]] = 1.0;
+        let discrete = DiscreteDiarization::try_new(activations, &geometry).unwrap();
         let cleaned = apply_activity_cleanup(discrete.clone(), ActivityCleanup::default()).unwrap();
         assert_eq!(&*cleaned, &*discrete);
         assert_eq!(cleaned.timing(), discrete.timing());
@@ -127,13 +126,21 @@ mod tests {
         let geometry =
             crate::pipeline::PipelineGeometry::from_legacy(16_000, 160_000, 16_000, 48_000)
                 .unwrap();
-        let discrete = DiscreteDiarization::with_timing(
-            array![[0.0], [0.0], [1.0], [0.0], [0.0]],
-            geometry.frame_timing().unwrap(),
-        );
+        let mut activations = Array2::zeros((geometry.output_frames(), 1));
+        activations[[2, 0]] = 1.0;
+        let discrete = DiscreteDiarization::try_new(activations, &geometry).unwrap();
         let timing = discrete.timing();
         let cleaned = apply_activity_cleanup(discrete, config).unwrap();
-        assert_eq!(&*cleaned, &array![[0.0], [1.0], [1.0], [1.0], [0.0]]);
+        assert_eq!(cleaned[[0, 0]], 0.0);
+        assert_eq!(cleaned[[1, 0]], 1.0);
+        assert_eq!(cleaned[[2, 0]], 1.0);
+        assert_eq!(cleaned[[3, 0]], 1.0);
+        assert!(
+            cleaned
+                .slice(ndarray::s![4.., ..])
+                .iter()
+                .all(|value| *value == 0.0)
+        );
         assert_eq!(cleaned.timing(), timing);
     }
 }
