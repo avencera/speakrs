@@ -57,26 +57,42 @@ def simplify_onnx_graph(path: str, inputs: dict[str, np.ndarray]) -> float:
         simplified.SerializeToString(), providers=["CPUExecutionProvider"]
     )
 
-    original_input_names = [value.name for value in original_session.get_inputs()]
-    simplified_input_names = [value.name for value in simplified_session.get_inputs()]
-    if original_input_names != simplified_input_names:
+    original_inputs = original_session.get_inputs()
+    simplified_inputs = simplified_session.get_inputs()
+    original_input_metadata = [
+        (value.name, value.type, tuple(value.shape)) for value in original_inputs
+    ]
+    simplified_input_metadata = [
+        (value.name, value.type, tuple(value.shape)) for value in simplified_inputs
+    ]
+    if original_input_metadata != simplified_input_metadata:
         raise RuntimeError(
-            f"simplified input names changed for {path}: "
-            f"{original_input_names} != {simplified_input_names}"
+            f"simplified input metadata changed for {path}: "
+            f"{original_input_metadata} != {simplified_input_metadata}"
         )
+    original_input_names = [value.name for value in original_inputs]
     if set(inputs) != set(original_input_names):
         raise RuntimeError(
             f"validation inputs do not match {path}: "
             f"{sorted(inputs)} != {sorted(original_input_names)}"
         )
 
-    original_output_names = [value.name for value in original_session.get_outputs()]
-    simplified_output_names = [value.name for value in simplified_session.get_outputs()]
-    if original_output_names != simplified_output_names:
+    original_outputs_metadata = original_session.get_outputs()
+    simplified_outputs_metadata = simplified_session.get_outputs()
+    original_output_metadata = [
+        (value.name, value.type, tuple(value.shape))
+        for value in original_outputs_metadata
+    ]
+    simplified_output_metadata = [
+        (value.name, value.type, tuple(value.shape))
+        for value in simplified_outputs_metadata
+    ]
+    if original_output_metadata != simplified_output_metadata:
         raise RuntimeError(
-            f"simplified output names changed for {path}: "
-            f"{original_output_names} != {simplified_output_names}"
+            f"simplified output metadata changed for {path}: "
+            f"{original_output_metadata} != {simplified_output_metadata}"
         )
+    original_output_names = [value.name for value in original_outputs_metadata]
 
     original_outputs = original_session.run(None, inputs)
     simplified_outputs = simplified_session.run(None, inputs)
