@@ -4,6 +4,7 @@ use crossbeam_channel::{Receiver, Sender};
 
 use crate::inference::coreml::{CachedInputShape, SharedCoreMlModel};
 use crate::inference::geometry::CoreMlTensor;
+use crate::pipeline::config::ChunkFbankNormalizationScope;
 
 use super::gpu::PreparedChunk;
 use super::{
@@ -12,25 +13,25 @@ use super::{
 };
 use crate::inference::embedding::{FBANK_FEATURES, FBANK_FRAMES};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FbankPath {
-    ThirtySecond,
-    TenSecond,
+#[derive(Debug, PartialEq, Eq)]
+enum SelectedFbankModel<'a, T> {
+    ThirtySecond(&'a T),
+    TenSecond(&'a T),
 }
 
-fn select_fbank_path(
+fn select_fbank_model<'a, T>(
     chunk_len: usize,
-    uses_chunk_scope: bool,
-    has_30s: bool,
-    has_10s: bool,
-) -> Option<FbankPath> {
-    if chunk_len <= 480_000 && uses_chunk_scope && has_30s {
-        Some(FbankPath::ThirtySecond)
-    } else if has_10s {
-        Some(FbankPath::TenSecond)
-    } else {
-        None
+    normalization_scope: ChunkFbankNormalizationScope,
+    fbank_30s: Option<&'a T>,
+    fbank_10s: Option<&'a T>,
+) -> Option<SelectedFbankModel<'a, T>> {
+    if chunk_len <= 480_000 && normalization_scope.uses_chunk_scope() {
+        if let Some(model) = fbank_30s {
+            return Some(SelectedFbankModel::ThirtySecond(model));
+        }
     }
+
+    fbank_10s.map(SelectedFbankModel::TenSecond)
 }
 
 fn copy_fbank_output(
@@ -87,22 +88,18 @@ impl ChunkPrep {
         let chunk_audio_end = (chunk_audio_start + chunk_audio_len).min(audio.len());
         let chunk_audio = &audio[chunk_audio_start..chunk_audio_end];
 
-        let path = select_fbank_path(
+        let selected_model = select_fbank_model(
             chunk_audio.len(),
-            self.fbank_normalization_scope.uses_chunk_scope(),
-            self.fbank_30s.is_some(),
-            self.fbank_10s.is_some(),
+            self.fbank_normalization_scope,
+            self.fbank_30s.as_deref(),
+            self.fbank_10s.as_deref(),
         )
         .ok_or_else(|| invariant_error("no compatible chunk fbank model is available"))?;
 
         let mut fbank = vec![0.0f32; self.largest_fbank_frames * FBANK_FEATURES];
 
-        match path {
-            FbankPath::ThirtySecond => {
-                let fbank_model = self.fbank_30s.as_ref().ok_or_else(|| {
-                    invariant_error("selected 30s chunk fbank model is unavailable")
-                })?;
-
+        match selected_model {
+            SelectedFbankModel::ThirtySecond(fbank_model) => {
                 scratch.fbank_30s_buf[..chunk_audio.len()].copy_from_slice(chunk_audio);
                 scratch.fbank_30s_buf[chunk_audio.len()..].fill(0.0);
                 let tensor = fbank_model
@@ -117,11 +114,7 @@ impl ChunkPrep {
                     self.largest_fbank_frames,
                 )?;
             }
-            FbankPath::TenSecond => {
-                let fbank_model = self.fbank_10s.as_ref().ok_or_else(|| {
-                    invariant_error("selected 10s chunk fbank model is unavailable")
-                })?;
-
+            SelectedFbankModel::TenSecond(fbank_model) => {
                 let mut fbank_offset = 0usize;
                 let mut audio_offset = 0usize;
                 while fbank_offset < self.largest_fbank_frames && audio_offset < chunk_audio.len() {
@@ -282,7 +275,7 @@ pub(super) struct ChunkPrep {
     pub(super) max_active: usize,
     pub(super) fbank_30s: Option<Arc<SharedCoreMlModel>>,
     pub(super) fbank_10s: Option<Arc<SharedCoreMlModel>>,
-    pub(super) fbank_normalization_scope: crate::pipeline::config::ChunkFbankNormalizationScope,
+    pub(super) fbank_normalization_scope: ChunkFbankNormalizationScope,
 }
 
 pub(super) struct PrepScratch {
@@ -326,43 +319,79 @@ impl ChunkJob {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChunkJob, FbankPath, audio_for, select_fbank_path};
+    use super::{ChunkJob, SelectedFbankModel, audio_for, select_fbank_model};
+    use crate::pipeline::config::ChunkFbankNormalizationScope;
     use ndarray::Array2;
 
     #[test]
     fn chunk_scope_prefers_30s_model_for_supported_audio() {
         assert_eq!(
-            select_fbank_path(480_000, true, true, true),
-            Some(FbankPath::ThirtySecond)
+            select_fbank_model(
+                480_000,
+                ChunkFbankNormalizationScope::Chunk,
+                Some(&30),
+                Some(&10),
+            ),
+            Some(SelectedFbankModel::ThirtySecond(&30))
         );
     }
 
     #[test]
     fn missing_30s_model_falls_back_to_10s_model() {
         assert_eq!(
-            select_fbank_path(480_000, true, false, true),
-            Some(FbankPath::TenSecond)
+            select_fbank_model(
+                480_000,
+                ChunkFbankNormalizationScope::Chunk,
+                None,
+                Some(&10),
+            ),
+            Some(SelectedFbankModel::TenSecond(&10))
         );
     }
 
     #[test]
-    fn segment_scope_and_long_audio_use_10s_model() {
+    fn long_audio_uses_10s_model() {
         assert_eq!(
-            select_fbank_path(480_000, false, true, true),
-            Some(FbankPath::TenSecond)
+            select_fbank_model(
+                480_001,
+                ChunkFbankNormalizationScope::Chunk,
+                Some(&30),
+                Some(&10),
+            ),
+            Some(SelectedFbankModel::TenSecond(&10))
         );
+    }
 
+    #[cfg(feature = "_metrics")]
+    #[test]
+    fn segment_scope_uses_10s_model() {
         assert_eq!(
-            select_fbank_path(480_001, true, true, true),
-            Some(FbankPath::TenSecond)
+            select_fbank_model(
+                480_000,
+                ChunkFbankNormalizationScope::TenSecondSegments,
+                Some(&30),
+                Some(&10),
+            ),
+            Some(SelectedFbankModel::TenSecond(&10))
         );
     }
 
     #[test]
-    fn missing_compatible_model_has_no_fbank_path() {
-        assert_eq!(select_fbank_path(480_000, true, false, false), None);
-        assert_eq!(select_fbank_path(480_001, true, true, false), None);
-        assert_eq!(select_fbank_path(480_000, false, true, false), None);
+    fn missing_compatible_model_has_no_selection() {
+        assert_eq!(
+            select_fbank_model::<u8>(480_000, ChunkFbankNormalizationScope::Chunk, None, None),
+            None
+        );
+
+        assert_eq!(
+            select_fbank_model(
+                480_001,
+                ChunkFbankNormalizationScope::Chunk,
+                Some(&30),
+                None,
+            ),
+            None
+        );
     }
 
     #[test]
