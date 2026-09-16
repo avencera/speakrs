@@ -128,6 +128,7 @@ jobs:
             plda_psi.npy
             plda_tr.npy
             segmentation-3.0.onnx
+            wespeaker-fbank.onnx
             wespeaker-voxceleb-resnet34.min_num_samples.txt
             wespeaker-voxceleb-resnet34.onnx
             wespeaker-voxceleb-resnet34.onnx.data
@@ -183,6 +184,7 @@ jobs:
             plda_psi.npy
             plda_tr.npy
             segmentation-3.0.onnx
+            wespeaker-fbank.onnx
             wespeaker-voxceleb-resnet34.min_num_samples.txt
             wespeaker-voxceleb-resnet34.onnx
             wespeaker-voxceleb-resnet34.onnx.data

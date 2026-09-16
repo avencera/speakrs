@@ -477,6 +477,7 @@ mod tests {
         RuntimeConfig {
             chunk_emb_compute_units: crate::inference::CoreMlComputeUnits::All,
             experiment: Some(crate::pipeline::ExperimentInferenceConfig::new(layout)),
+            ..RuntimeConfig::default()
         }
     }
 

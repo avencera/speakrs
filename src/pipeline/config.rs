@@ -602,11 +602,132 @@ impl std::fmt::Display for ExperimentInferenceConfigError {
 #[cfg(feature = "_metrics")]
 impl std::error::Error for ExperimentInferenceConfigError {}
 
+/// Number of intra-operation threads for one ONNX Runtime session
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrtThreadCount(std::num::NonZeroI32);
+
+impl OrtThreadCount {
+    /// Create a nonzero ONNX Runtime thread count
+    pub const fn new(threads: usize) -> Result<Self, OrtThreadCountError> {
+        if threads == 0 {
+            return Err(OrtThreadCountError::Zero);
+        }
+        if threads > i32::MAX as usize {
+            return Err(OrtThreadCountError::TooLarge(threads));
+        }
+
+        match std::num::NonZeroI32::new(threads as i32) {
+            Some(threads) => Ok(Self(threads)),
+            None => Err(OrtThreadCountError::Zero),
+        }
+    }
+
+    /// Return the configured thread count
+    pub const fn get(self) -> usize {
+        self.0.get() as usize
+    }
+}
+
+impl Default for OrtThreadCount {
+    fn default() -> Self {
+        let threads = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .unwrap_or(1)
+            .min(4);
+
+        Self(std::num::NonZeroI32::new(threads as i32).expect("thread count is at least one"))
+    }
+}
+
+/// Invalid ONNX Runtime thread count
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum OrtThreadCountError {
+    /// A zero thread count was requested
+    #[error("ONNX Runtime thread count must be greater than zero")]
+    Zero,
+    /// The thread count cannot be represented by the ONNX Runtime C API
+    #[error("ONNX Runtime thread count must fit in a positive 32-bit signed integer, got {0}")]
+    TooLarge(usize),
+}
+
+/// CPU filterbank session pool policy
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FbankSessionPool {
+    /// Size the pool from host parallelism and the per-session thread count
+    #[default]
+    Automatic,
+    /// Do not create a filterbank session pool
+    Disabled,
+    /// Create the requested nonzero number of sessions
+    Fixed(FbankSessionPoolSize),
+}
+
+const MAX_FBANK_SESSIONS: usize = 8;
+
+/// Validated fixed filterbank session pool size
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FbankSessionPoolSize(std::num::NonZeroUsize);
+
+impl FbankSessionPoolSize {
+    /// Create a session pool size between one and eight
+    pub const fn new(sessions: usize) -> Result<Self, FbankSessionPoolSizeError> {
+        match std::num::NonZeroUsize::new(sessions) {
+            Some(sessions) if sessions.get() <= MAX_FBANK_SESSIONS => Ok(Self(sessions)),
+            Some(_) => Err(FbankSessionPoolSizeError::TooLarge(sessions)),
+            None => Err(FbankSessionPoolSizeError::Zero),
+        }
+    }
+
+    /// Return the validated session count
+    pub const fn get(self) -> usize {
+        self.0.get()
+    }
+}
+
+impl FbankSessionPool {
+    /// Create a fixed session pool with between one and eight sessions
+    pub const fn fixed(sessions: usize) -> Result<Self, FbankSessionPoolSizeError> {
+        match FbankSessionPoolSize::new(sessions) {
+            Ok(sessions) => Ok(Self::Fixed(sessions)),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn resolve(self, threads: OrtThreadCount) -> usize {
+        match self {
+            Self::Automatic => {
+                let available = std::thread::available_parallelism()
+                    .map(std::num::NonZeroUsize::get)
+                    .unwrap_or(1);
+
+                (available / threads.get()).clamp(1, MAX_FBANK_SESSIONS)
+            }
+            Self::Disabled => 0,
+            Self::Fixed(sessions) => sessions.get(),
+        }
+    }
+}
+
+/// Invalid fixed filterbank session pool size
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum FbankSessionPoolSizeError {
+    /// A zero session count was requested
+    #[error("fixed filterbank session pool size must be greater than zero")]
+    Zero,
+    /// The session count exceeds the supported maximum
+    #[error("fixed filterbank session pool size must not exceed eight, got {0}")]
+    TooLarge(usize),
+}
+
 /// Runtime configuration for the diarization pipeline
 ///
 /// Controls execution parameters that can affect numerical output and performance.
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeConfig {
+    /// CPU filterbank session pool policy for non-CoreML split inference
+    pub fbank_pool: FbankSessionPool,
+    /// Intra-operation threads used by each CPU filterbank session
+    pub fbank_threads: OrtThreadCount,
     /// CoreML compute units for native embedding models (CoreML modes only)
     #[cfg(feature = "coreml")]
     #[cfg_attr(docsrs, doc(cfg(feature = "coreml")))]
@@ -618,6 +739,18 @@ pub struct RuntimeConfig {
 }
 
 impl RuntimeConfig {
+    /// Select the CPU filterbank session pool policy
+    pub const fn with_fbank_pool(mut self, pool: FbankSessionPool) -> Self {
+        self.fbank_pool = pool;
+        self
+    }
+
+    /// Select the intra-operation thread count for each CPU filterbank session
+    pub const fn with_fbank_threads(mut self, threads: OrtThreadCount) -> Self {
+        self.fbank_threads = threads;
+        self
+    }
+
     /// Set a typed inference layout for metrics experiments
     #[cfg(feature = "_metrics")]
     #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
@@ -739,6 +872,45 @@ mod clean_frame_duration_tests {
     use super::*;
 
     #[test]
+    fn ort_thread_count_rejects_zero() {
+        assert_eq!(OrtThreadCount::new(0), Err(OrtThreadCountError::Zero));
+        assert_eq!(OrtThreadCount::new(3).unwrap().get(), 3);
+    }
+
+    #[test]
+    fn ort_thread_count_stays_within_the_c_api_range() {
+        assert_eq!(
+            OrtThreadCount::new(i32::MAX as usize).unwrap().get(),
+            i32::MAX as usize
+        );
+        assert_eq!(
+            OrtThreadCount::new(i32::MAX as usize + 1),
+            Err(OrtThreadCountError::TooLarge(i32::MAX as usize + 1))
+        );
+    }
+
+    #[test]
+    fn fbank_pool_models_disabled_automatic_and_fixed_policies() {
+        let threads = OrtThreadCount::new(i32::MAX as usize).unwrap();
+
+        assert_eq!(FbankSessionPool::Disabled.resolve(threads), 0);
+        assert_eq!(FbankSessionPool::Automatic.resolve(threads), 1);
+        assert_eq!(
+            FbankSessionPool::fixed(0),
+            Err(FbankSessionPoolSizeError::Zero)
+        );
+        assert_eq!(
+            FbankSessionPool::fixed(MAX_FBANK_SESSIONS + 1),
+            Err(FbankSessionPoolSizeError::TooLarge(MAX_FBANK_SESSIONS + 1))
+        );
+        assert_eq!(
+            FbankSessionPoolSize::new(MAX_FBANK_SESSIONS).unwrap().get(),
+            MAX_FBANK_SESSIONS
+        );
+        assert_eq!(FbankSessionPool::fixed(3).unwrap().resolve(threads), 3);
+    }
+
+    #[test]
     fn clustering_config_rejects_invalid_keep_threshold() {
         for threshold in [f64::NAN, f64::INFINITY, -1.0] {
             assert!(
@@ -854,6 +1026,7 @@ mod tests {
         let runtime = RuntimeConfig {
             chunk_emb_compute_units: CoreMlComputeUnits::CpuAndNeuralEngine,
             experiment: Some(experiment),
+            ..RuntimeConfig::default()
         };
 
         assert_eq!(
@@ -864,6 +1037,7 @@ mod tests {
         let runtime = RuntimeConfig {
             chunk_emb_compute_units: CoreMlComputeUnits::CpuAndNeuralEngine,
             experiment: None,
+            ..RuntimeConfig::default()
         };
         assert_eq!(
             runtime.coreml_embedding_compute_units(),

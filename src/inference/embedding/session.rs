@@ -3,6 +3,7 @@ use std::path::Path;
 use ort::session::Session;
 
 use crate::inference::with_execution_mode;
+use crate::pipeline::OrtThreadCount;
 
 use super::{EmbeddingModel, ExecutionMode};
 
@@ -70,13 +71,11 @@ impl EmbeddingModel {
     pub(super) fn build_fbank_session(
         model_path: &Path,
         mode: ExecutionMode,
+        threads: OrtThreadCount,
     ) -> Result<Session, ort::Error> {
-        let threads = std::thread::available_parallelism()
-            .map(|count| count.get().min(4))
-            .unwrap_or(1);
         let builder = Session::builder()?
             .with_independent_thread_pool()?
-            .with_intra_threads(threads)?
+            .with_intra_threads(threads.get())?
             .with_inter_threads(1)?
             .with_memory_pattern(true)?;
         let mut builder = with_execution_mode(builder, mode)?;

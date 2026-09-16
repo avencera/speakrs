@@ -148,6 +148,7 @@ pub fn run(
                 #[cfg(feature = "coreml")]
                 chunk_emb_compute_units: compute_units,
                 experiment: None,
+                ..RuntimeConfig::default()
             };
             if compute_units != CoreMlComputeUnits::All {
                 eprintln!("runtime config: compute_units={chunk_emb_compute_units:?}");

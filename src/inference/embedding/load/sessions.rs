@@ -14,7 +14,8 @@ use super::super::plan::EmbeddingExecutionPlan;
 #[cfg(feature = "coreml")]
 use super::super::plan::LazySession;
 use super::super::{
-    EmbeddingBuffers, EmbeddingMeta, EmbeddingModel, OrtEmbeddingState, read_min_num_samples,
+    EmbeddingBuffers, EmbeddingMeta, EmbeddingModel, OrtEmbeddingState, SharedFbankPool,
+    read_min_num_samples,
 };
 #[cfg(feature = "coreml")]
 use super::super::{
@@ -26,6 +27,7 @@ pub(super) struct LoadedOrtSessions {
     session: Session,
     primary_batched_session: Option<Session>,
     split_fbank_session: Option<Session>,
+    split_fbank_pool: Vec<Session>,
     split_fbank_batched_session: Option<Session>,
     split_tail_session: Option<Session>,
     split_tail_batched_session: Option<Session>,
@@ -96,12 +98,20 @@ impl LoadedSessions {
         let (split_fbank_session, split_fbank_elapsed) = timed!(load_optional_ort(
             load_ort_split,
             plan.split_fbank.single.as_ref(),
-            |path| EmbeddingModel::build_fbank_session(path, ExecutionMode::Cpu),
+            |path| EmbeddingModel::build_fbank_session(
+                path,
+                ExecutionMode::Cpu,
+                config.fbank_threads,
+            ),
         )?);
         let (split_fbank_batched_session, split_fbank_batched_elapsed) = timed!(load_optional_ort(
             load_ort_split,
             plan.split_fbank.batched.as_ref(),
-            |path| EmbeddingModel::build_fbank_session(path, ExecutionMode::Cpu),
+            |path| EmbeddingModel::build_fbank_session(
+                path,
+                ExecutionMode::Cpu,
+                config.fbank_threads,
+            ),
         )?);
         let (split_tail_session, split_tail_elapsed) = timed!(load_optional_ort(
             load_ort_split,
@@ -129,6 +139,11 @@ impl LoadedSessions {
             plan.multi_mask.batched.as_ref(),
             |path| EmbeddingModel::build_session(path, mode),
         )?);
+        let (split_fbank_pool, split_fbank_pool_elapsed) = timed!(load_fbank_pool(
+            load_ort_split && !mode.is_coreml(),
+            plan.split_fbank.single.as_ref(),
+            config,
+        )?);
 
         let total_ms = (session_elapsed
             + primary_batched_elapsed
@@ -138,7 +153,8 @@ impl LoadedSessions {
             + split_tail_batched_elapsed
             + split_primary_tail_batched_elapsed
             + multi_mask_elapsed
-            + multi_mask_batched_elapsed)
+            + multi_mask_batched_elapsed
+            + split_fbank_pool_elapsed)
             .as_millis();
         tracing::trace!(
             ort_single_ms = session_elapsed.as_millis(),
@@ -150,6 +166,8 @@ impl LoadedSessions {
             split_tail_b64_ms = split_primary_tail_batched_elapsed.as_millis(),
             ort_multi_mask_ms = multi_mask_elapsed.as_millis(),
             ort_multi_mask_b64_ms = multi_mask_batched_elapsed.as_millis(),
+            split_fbank_pool_ms = split_fbank_pool_elapsed.as_millis(),
+            split_fbank_pool_size = split_fbank_pool.len(),
             total_ms,
             "Embedding model init",
         );
@@ -158,6 +176,7 @@ impl LoadedSessions {
             session,
             primary_batched_session,
             split_fbank_session,
+            split_fbank_pool,
             split_fbank_batched_session,
             split_tail_session,
             split_tail_batched_session,
@@ -200,6 +219,13 @@ impl LoadedSessions {
                 session: SharedSession::new(self.ort.session),
                 primary_batched_session: self.ort.primary_batched_session.map(SharedSession::new),
                 split_fbank_session: self.ort.split_fbank_session.map(SharedSession::new),
+                split_fbank_pool: SharedFbankPool::new(
+                    self.ort
+                        .split_fbank_pool
+                        .into_iter()
+                        .map(SharedSession::new)
+                        .collect(),
+                ),
                 split_fbank_batched_session: self
                     .ort
                     .split_fbank_batched_session
@@ -290,4 +316,29 @@ fn load_optional_ort<T, E>(
         return Ok(None);
     }
     slot.map(|slot| load(slot.path())).transpose()
+}
+
+fn load_fbank_pool(
+    enabled: bool,
+    slot: Option<&super::super::plan::AssetSlot>,
+    config: &crate::pipeline::RuntimeConfig,
+) -> Result<Vec<Session>, ort::Error> {
+    if !enabled {
+        return Ok(Vec::new());
+    }
+    let Some(slot) = slot else {
+        return Ok(Vec::new());
+    };
+
+    let sessions = config.fbank_pool.resolve(config.fbank_threads);
+    tracing::debug!(sessions, "CPU filterbank session pool");
+    (0..sessions)
+        .map(|_| {
+            EmbeddingModel::build_fbank_session(
+                slot.path(),
+                ExecutionMode::Cpu,
+                config.fbank_threads,
+            )
+        })
+        .collect()
 }
