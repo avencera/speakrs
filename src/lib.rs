@@ -268,7 +268,8 @@ pub use models::ModelBundle;
 pub use models::ModelManager;
 pub use pipeline::{
     ActivityCleanup, AhcConfig, AhcConfigError, BatchInput, ClusteringBackend, ClusteringConfig,
-    ClusteringConfigError, DiarizationPipeline, DiarizationResult, OwnedDiarizationPipeline,
+    ClusteringConfigError, DiarizationPipeline, DiarizationResult, FbankSessionPool,
+    FbankSessionPoolSizeError, OrtThreadCount, OrtThreadCountError, OwnedDiarizationPipeline,
     PipelineBuilder, PipelineConfig, PipelineError, QueueConfig, QueueError, QueueReceiver,
     QueueReceiverIter, QueueSender, QueuedDiarizationJobId, QueuedDiarizationRequest,
     QueuedDiarizationResult, ReconstructError, ResponsibilityInitialization, RuntimeConfig,
