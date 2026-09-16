@@ -42,6 +42,7 @@ def simplify_onnx_graph(path: str, inputs: dict[str, np.ndarray]) -> float:
     from onnxsim import simplify
 
     original = onnx.load(path)
+    original_bytes = original.SerializeToString()
     simplified, valid = simplify(original)
     if not valid:
         raise RuntimeError(
@@ -50,7 +51,7 @@ def simplify_onnx_graph(path: str, inputs: dict[str, np.ndarray]) -> float:
 
     onnx.checker.check_model(simplified)
     original_session = ort.InferenceSession(
-        original.SerializeToString(), providers=["CPUExecutionProvider"]
+        original_bytes, providers=["CPUExecutionProvider"]
     )
     simplified_session = ort.InferenceSession(
         simplified.SerializeToString(), providers=["CPUExecutionProvider"]
