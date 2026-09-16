@@ -32,6 +32,77 @@ pub enum ReconstructError {
         /// Required start-frame count
         expected: usize,
     },
+    /// Frame activations do not match the reconstructed diarization shape
+    #[error(
+        "activation shape {activation_frames}x{activation_speakers} does not match diarization shape {diarization_frames}x{diarization_speakers}"
+    )]
+    ActivationShapeMismatch {
+        /// Number of diarization frames
+        diarization_frames: usize,
+        /// Number of diarization speakers
+        diarization_speakers: usize,
+        /// Number of activation frames
+        activation_frames: usize,
+        /// Number of activation speakers
+        activation_speakers: usize,
+    },
+}
+
+/// Frame-level diarization with at most one active speaker per frame
+pub(crate) struct ExclusiveDiarization(DiscreteDiarization);
+
+impl ExclusiveDiarization {
+    pub(crate) fn from_scored(
+        full: &DiscreteDiarization,
+        activations: &FrameActivations,
+    ) -> Result<Self, ReconstructError> {
+        if full.dim() != activations.dim() {
+            let (diarization_frames, diarization_speakers) = full.dim();
+            let (activation_frames, activation_speakers) = activations.dim();
+
+            return Err(ReconstructError::ActivationShapeMismatch {
+                diarization_frames,
+                diarization_speakers,
+                activation_frames,
+                activation_speakers,
+            });
+        }
+
+        let mut discrete = Array2::<f32>::zeros(full.raw_dim());
+        for (frame_idx, row) in full.rows().into_iter().enumerate() {
+            let mut winner: Option<(usize, f32)> = None;
+            for (speaker_idx, &value) in row.iter().enumerate() {
+                if value <= 0.0 {
+                    continue;
+                }
+
+                let score = activations[[frame_idx, speaker_idx]];
+                if winner.is_none_or(|(_, best_score)| score.total_cmp(&best_score).is_gt()) {
+                    winner = Some((speaker_idx, score));
+                }
+            }
+
+            if let Some((speaker_idx, _)) = winner {
+                discrete[[frame_idx, speaker_idx]] = 1.0;
+            }
+        }
+
+        Ok(Self(DiscreteDiarization(discrete)))
+    }
+
+    pub(crate) fn to_segments(&self) -> Vec<crate::segment::Segment> {
+        self.0.to_segments()
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::ExclusiveDiarization;
+    use crate::pipeline::DiscreteDiarization;
+
+    pub(crate) fn exclusive_as_discrete(exclusive: &ExclusiveDiarization) -> &DiscreteDiarization {
+        &exclusive.0
+    }
 }
 
 pub struct Reconstructor<'a> {
@@ -121,29 +192,32 @@ impl<'a> Reconstructor<'a> {
         FrameActivations(activations)
     }
 
-    pub fn reconstruct(&self, speaker_count: &SpeakerCountTrack) -> DiscreteDiarization {
-        let activations = self.frame_activations(speaker_count);
+    pub(crate) fn reconstruct_with(
+        &self,
+        activations: &FrameActivations,
+        speaker_count: &SpeakerCountTrack,
+    ) -> DiscreteDiarization {
         let mut discrete = Array2::<f32>::zeros(activations.raw_dim());
         for (frame_idx, &count) in speaker_count.iter().enumerate() {
-            for speaker_idx in top_k_indices(&activations, frame_idx, count) {
+            for speaker_idx in top_k_indices(activations, frame_idx, count) {
                 discrete[[frame_idx, speaker_idx]] = 1.0;
             }
         }
         DiscreteDiarization(discrete)
     }
 
-    pub fn reconstruct_smoothed(
+    pub(crate) fn reconstruct_smoothed_with(
         &self,
+        activations: &FrameActivations,
         speaker_count: &SpeakerCountTrack,
         epsilon: f32,
     ) -> DiscreteDiarization {
-        let activations = self.frame_activations(speaker_count);
         let mut discrete = Array2::<f32>::zeros(activations.raw_dim());
         let mut previous_speakers: Vec<usize> = Vec::new();
 
         for (frame_idx, &count) in speaker_count.iter().enumerate() {
             let current_speakers =
-                top_k_indices_smoothed(&activations, frame_idx, count, &previous_speakers, epsilon);
+                top_k_indices_smoothed(activations, frame_idx, count, &previous_speakers, epsilon);
             for &speaker_idx in &current_speakers {
                 discrete[[frame_idx, speaker_idx]] = 1.0;
             }
@@ -346,10 +420,49 @@ mod tests {
         let reconstructor = Reconstructor::new(&segmentations, &hard_clusters, &[0, 1]).unwrap();
         let speaker_count = SpeakerCountTrack(vec![1, 1, 1]);
 
-        let result = reconstructor.reconstruct(&speaker_count);
+        let activations = reconstructor.frame_activations(&speaker_count);
+        let result = reconstructor.reconstruct_with(&activations, &speaker_count);
 
         let expected: Array2<f32> = array![[1.0, 0.0], [0.0, 1.0], [0.0, 1.0]];
         assert_eq!(&*result, &expected);
+    }
+
+    #[test]
+    fn exclusive_diarization_uses_scores_and_preserves_speech() {
+        let full = DiscreteDiarization(array![[0.0, 0.0], [1.0, 1.0], [1.0, 0.0], [0.0, 1.0],]);
+        let activations = FrameActivations(array![[0.0, 0.0], [0.2, 0.8], [0.6, 0.1], [0.1, 0.7],]);
+
+        let exclusive = ExclusiveDiarization::from_scored(&full, &activations).unwrap();
+        let expected = array![[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [0.0, 1.0]];
+        assert_eq!(&exclusive.0.0, &expected);
+
+        for (full_row, exclusive_row) in full.rows().into_iter().zip(exclusive.0.rows()) {
+            assert_eq!(
+                full_row.iter().any(|value| *value > 0.0),
+                exclusive_row.iter().any(|value| *value > 0.0)
+            );
+            assert!(exclusive_row.iter().filter(|value| **value > 0.0).count() <= 1);
+        }
+    }
+
+    #[test]
+    fn exclusive_diarization_rejects_shape_mismatch() {
+        let full = DiscreteDiarization(Array2::zeros((2, 2)));
+        let activations = FrameActivations(Array2::zeros((2, 1)));
+
+        let error = match ExclusiveDiarization::from_scored(&full, &activations) {
+            Ok(_) => panic!("expected mismatched exclusive inputs to fail"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            ReconstructError::ActivationShapeMismatch {
+                diarization_frames: 2,
+                diarization_speakers: 2,
+                activation_frames: 2,
+                activation_speakers: 1,
+            }
+        );
     }
 
     #[test]

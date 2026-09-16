@@ -32,14 +32,11 @@ fn main() -> ExampleResult<()> {
     let mut pipeline = OwnedDiarizationPipeline::from_dir(models_dir, ExecutionMode::Cpu)?;
     let result = pipeline.run(&audio)?;
 
-    let mut exclusive = result.discrete_diarization.clone();
-    exclusive.make_exclusive();
-    let segments = exclusive.to_segments();
     let transcript = load_transcript(transcript_path)?;
 
     println!("start\tend\tspeaker\ttext");
     for row in transcript {
-        let speaker = dominant_speaker(&segments, row.start, row.end)
+        let speaker = dominant_speaker(&result.exclusive_segments, row.start, row.end)
             .unwrap_or("UNKNOWN")
             .to_owned();
         println!(

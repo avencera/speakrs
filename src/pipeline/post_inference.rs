@@ -3,8 +3,8 @@ use tracing::debug;
 
 use crate::binarize::ActivityCleanup;
 use crate::clustering::plda::PldaTransform;
-use crate::reconstruct::Reconstructor;
-use crate::segment::merge_segments;
+use crate::reconstruct::{ExclusiveDiarization, Reconstructor};
+use crate::segment::{merge_exclusive_segments, merge_segments};
 
 use super::config::{PipelineConfig, ReconstructMethod};
 use super::types::{
@@ -38,6 +38,7 @@ pub fn post_inference(
             hard_clusters: ChunkSpeakerClusters(Array2::zeros((0, 0))),
             discrete_diarization: DiscreteDiarization(Array2::zeros((0, 0))),
             segments: Vec::new(),
+            exclusive_segments: Vec::new(),
         });
     }
 
@@ -46,17 +47,22 @@ pub fn post_inference(
     let hard_clusters = training_embeddings.cluster(&segmentations, &embeddings, plda, config)?;
 
     let reconstructor = Reconstructor::new(&segmentations, &hard_clusters, &layout.start_frames)?;
+    let activations = reconstructor.frame_activations(&speaker_count);
     let discrete_diarization = match config.reconstruct_method {
         ReconstructMethod::Smoothed { epsilon } => {
-            reconstructor.reconstruct_smoothed(&speaker_count, epsilon)
+            reconstructor.reconstruct_smoothed_with(&activations, &speaker_count, epsilon)
         }
-        ReconstructMethod::Standard => reconstructor.reconstruct(&speaker_count),
+        ReconstructMethod::Standard => reconstructor.reconstruct_with(&activations, &speaker_count),
     };
 
     let discrete_diarization = apply_activity_cleanup(discrete_diarization, config.activity);
+    let exclusive_diarization =
+        ExclusiveDiarization::from_scored(&discrete_diarization, &activations)?;
 
     let segments = discrete_diarization.to_segments();
     let segments = merge_segments(&segments, config.merge_gap);
+    let exclusive_segments = exclusive_diarization.to_segments();
+    let exclusive_segments = merge_exclusive_segments(&exclusive_segments, config.merge_gap);
 
     debug!(
         post_inference_ms = post_start.elapsed().as_millis(),
@@ -70,6 +76,7 @@ pub fn post_inference(
         hard_clusters,
         discrete_diarization,
         segments,
+        exclusive_segments,
     })
 }
 
@@ -90,7 +97,9 @@ mod tests {
 
     use super::apply_activity_cleanup;
     use crate::binarize::ActivityCleanup;
-    use crate::pipeline::DiscreteDiarization;
+    use crate::pipeline::{DiscreteDiarization, FrameActivations};
+    use crate::reconstruct::ExclusiveDiarization;
+    use crate::reconstruct::test_support::exclusive_as_discrete;
 
     #[test]
     fn default_cleanup_is_identity() {
@@ -107,5 +116,41 @@ mod tests {
         let discrete = DiscreteDiarization(array![[0.0], [0.0], [1.0], [0.0], [0.0]]);
         let cleaned = apply_activity_cleanup(discrete, config);
         assert_eq!(&*cleaned, &array![[0.0], [1.0], [1.0], [1.0], [0.0]]);
+    }
+
+    #[test]
+    fn cleanup_before_exclusive_selection_preserves_surviving_speech() {
+        let full = DiscreteDiarization(array![
+            [0.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+            [0.0, 1.0],
+            [0.0, 0.0],
+        ]);
+        let activations = FrameActivations(array![
+            [0.0, 0.0],
+            [0.1, 0.8],
+            [0.9, 0.2],
+            [0.1, 0.8],
+            [0.0, 0.0],
+        ]);
+        let cleaned = apply_activity_cleanup(full, ActivityCleanup::new(2, 0, 0, 0));
+
+        let exclusive = ExclusiveDiarization::from_scored(&cleaned, &activations).unwrap();
+        assert_eq!(
+            &exclusive_as_discrete(&exclusive).0,
+            &array![[0.0, 0.0], [0.0, 1.0], [0.0, 1.0], [0.0, 1.0], [0.0, 0.0],]
+        );
+
+        for (cleaned_row, exclusive_row) in cleaned
+            .rows()
+            .into_iter()
+            .zip(exclusive_as_discrete(&exclusive).rows())
+        {
+            assert_eq!(
+                cleaned_row.iter().any(|value| *value > 0.0),
+                exclusive_row.iter().any(|value| *value > 0.0)
+            );
+        }
     }
 }
