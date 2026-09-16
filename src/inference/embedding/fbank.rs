@@ -49,12 +49,13 @@ impl EmbeddingModel {
 
         let waveform_tensor =
             TensorRef::from_array_view(self.buffers.split_waveform_buffer.view())?;
-        let outputs = self
+        let mut session = self
             .ort
             .split_fbank_session
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| ort::Error::new("missing split fbank session"))?
-            .run(ort::inputs!["waveform" => waveform_tensor])?;
+            .lock()?;
+        let outputs = session.run(ort::inputs!["waveform" => waveform_tensor])?;
         let output = first_output(outputs.values(), "chunk fbank output")?;
         let (shape, data) = output.try_extract_tensor::<f32>()?;
         let (frames, features) = fbank_hw_from_i64(shape, "chunk fbank output")?;
@@ -105,12 +106,13 @@ impl EmbeddingModel {
 
             let waveform_tensor =
                 TensorRef::from_array_view(self.buffers.split_fbank_batch_buffer.view())?;
-            let outputs = self
+            let mut session = self
                 .ort
                 .split_fbank_batched_session
-                .as_mut()
+                .as_ref()
                 .ok_or_else(|| ort::Error::new("missing split fbank batched session"))?
-                .run(ort::inputs!["waveform" => waveform_tensor])?;
+                .lock()?;
+            let outputs = session.run(ort::inputs!["waveform" => waveform_tensor])?;
             let output = first_output(outputs.values(), "batched chunk fbank output")?;
             let (shape, data) = output.try_extract_tensor::<f32>()?;
             let (frames, features) = fbank_hw_from_i64(shape, "batched chunk fbank output")?;

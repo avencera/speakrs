@@ -145,7 +145,8 @@ impl SegmentationModel {
             .assign(&ndarray::ArrayView1::from(window));
         let input_tensor = TensorRef::from_array_view(self.input_buffer.view())?;
 
-        let outputs = self.session.run(ort::inputs![input_tensor])?;
+        let mut session = self.session.lock()?;
+        let outputs = session.run(ort::inputs![input_tensor])?;
         let output = first_output(outputs.values(), "segmentation window output")?;
         let (shape, data) = output.try_extract_tensor::<f32>()?;
 
@@ -179,11 +180,12 @@ impl SegmentationModel {
         }
         let input_tensor = TensorRef::from_array_view(self.primary_batch_input_buffer.view())?;
 
-        let outputs = self
+        let mut session = self
             .primary_batched_session
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| ort::Error::new("missing primary batched segmentation session"))?
-            .run(ort::inputs![input_tensor])?;
+            .lock()?;
+        let outputs = session.run(ort::inputs![input_tensor])?;
         let output = first_output(outputs.values(), "segmentation batch output")?;
         let (shape, data) = output.try_extract_tensor::<f32>()?;
 

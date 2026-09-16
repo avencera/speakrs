@@ -1,6 +1,7 @@
 use ndarray::Array2;
 
 /// Maps between powerset class indices and multi-speaker binary activations
+#[derive(Clone)]
 pub struct PowersetMapping {
     classes: Vec<Vec<usize>>,
     num_speakers: usize,

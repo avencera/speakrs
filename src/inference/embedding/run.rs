@@ -37,9 +37,8 @@ impl EmbeddingModel {
 
         let waveform_tensor = TensorRef::from_array_view(self.buffers.waveform_buffer.view())?;
         let weights_tensor = TensorRef::from_array_view(self.buffers.weights_buffer.view())?;
-        let outputs = self
-            .ort
-            .session
+        let mut session = self.ort.session.lock()?;
+        let outputs = session
             .run(ort::inputs!["waveform" => waveform_tensor, "weights" => weights_tensor])?;
         let output = first_output(outputs.values(), "masked embedding output")?;
         let (shape, data) = output.try_extract_tensor::<f32>()?;

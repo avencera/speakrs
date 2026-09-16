@@ -106,12 +106,14 @@ impl EmbeddingModel {
         let weight_slice = self.buffers.split_weights_batch_buffer.slice(s![0..1, ..]);
         let fbank_tensor = TensorRef::from_array_view(feature_slice.view())?;
         let weights_tensor = TensorRef::from_array_view(weight_slice.view())?;
-        let outputs = self
+        let mut session = self
             .ort
             .split_tail_session
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| ort::Error::new("missing split tail session"))?
-            .run(ort::inputs!["fbank" => fbank_tensor, "weights" => weights_tensor])?;
+            .lock()?;
+        let outputs =
+            session.run(ort::inputs!["fbank" => fbank_tensor, "weights" => weights_tensor])?;
         let output = first_output(outputs.values(), "split tail output")?;
         let (shape, data) = output.try_extract_tensor::<f32>()?;
         embedding_vector_from_ort(shape, data, "split tail output")
@@ -193,12 +195,14 @@ impl EmbeddingModel {
             TensorRef::from_array_view(self.buffers.split_feature_batch_buffer.view())?;
         let weights_tensor =
             TensorRef::from_array_view(self.buffers.split_weights_batch_buffer.view())?;
-        let outputs = self
+        let mut session = self
             .ort
             .split_tail_batched_session
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| ort::Error::new("missing split tail batched session"))?
-            .run(ort::inputs!["fbank" => fbank_tensor, "weights" => weights_tensor])?;
+            .lock()?;
+        let outputs =
+            session.run(ort::inputs!["fbank" => fbank_tensor, "weights" => weights_tensor])?;
         let output = first_output(outputs.values(), "tail batch output")?;
         let (shape, data) = output.try_extract_tensor::<f32>()?;
         embedding_batch_from_ort(

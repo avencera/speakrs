@@ -18,7 +18,24 @@ pub use segmentation::{SegmentationError, SegmentationModel};
 pub(crate) mod coreml;
 
 use ort::ep;
+use ort::session::Session;
 use ort::session::builder::SessionBuilder;
+
+/// Shared ownership of one ONNX Runtime session
+#[derive(Clone)]
+pub(crate) struct SharedSession(std::sync::Arc<std::sync::Mutex<Session>>);
+
+impl SharedSession {
+    pub(crate) fn new(session: Session) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(session)))
+    }
+
+    pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, Session>, ort::Error> {
+        self.0
+            .lock()
+            .map_err(|_| ort::Error::new("shared ONNX Runtime session lock was poisoned"))
+    }
+}
 
 #[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
 static ORT_RUNTIME_INIT: OnceLock<Result<(), OrtRuntimeError>> = OnceLock::new();

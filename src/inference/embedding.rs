@@ -5,11 +5,11 @@ use std::sync::Arc;
 
 #[cfg(feature = "coreml")]
 use crate::inference::coreml::{CachedInputShape, CoreMlModel, SharedCoreMlModel};
-use crate::inference::{ExecutionMode, ModelLoadError};
+use crate::inference::{ExecutionMode, ModelLoadError, SharedSession};
 use ndarray::{Array2, Array3, s};
 #[cfg(feature = "coreml")]
 use objc2_core_ml::MLComputeUnits;
-use ort::session::{HasSelectedOutputs, RunOptions, Session};
+use ort::session::{HasSelectedOutputs, RunOptions};
 
 mod batch;
 #[cfg(feature = "coreml")]
@@ -61,9 +61,13 @@ pub(crate) const FBANK_HOP_SAMPLES: usize = 160;
 pub(crate) const FBANK_FEATURES: usize = 80;
 const MASK_FRAMES: usize = 589;
 
+/// One masked audio window for [`EmbeddingModel::embed_batch`]
 pub struct MaskedEmbeddingInput<'a> {
+    /// 16 kHz mono samples (padded/truncated to the model window internally)
     pub audio: &'a [f32],
+    /// Frame-level speaker weights over the segmentation mask grid
     pub mask: &'a [f32],
+    /// Optional overlap-cleaned mask, preferred when it keeps enough weight
     pub clean_mask: Option<&'a [f32]>,
 }
 
@@ -72,6 +76,7 @@ pub(crate) struct SplitTailInput<'a> {
     pub weights: &'a [f32],
 }
 
+#[derive(Clone)]
 struct EmbeddingMeta {
     #[allow(dead_code)]
     model_path: PathBuf,
@@ -84,16 +89,54 @@ struct EmbeddingMeta {
 }
 
 struct OrtEmbeddingState {
-    session: Session,
-    primary_batched_session: Option<Session>,
-    split_fbank_session: Option<Session>,
-    split_fbank_batched_session: Option<Session>,
-    split_tail_session: Option<Session>,
-    split_tail_batched_session: Option<Session>,
-    split_primary_tail_batched_session: Option<Session>,
-    multi_mask_session: Option<Session>,
-    multi_mask_batched_session: Option<Session>,
+    session: SharedSession,
+    primary_batched_session: Option<SharedSession>,
+    split_fbank_session: Option<SharedSession>,
+    split_fbank_batched_session: Option<SharedSession>,
+    split_tail_session: Option<SharedSession>,
+    split_tail_batched_session: Option<SharedSession>,
+    split_primary_tail_batched_session: Option<SharedSession>,
+    multi_mask_session: Option<SharedSession>,
+    multi_mask_batched_session: Option<SharedSession>,
+    // per-handle state carries a preallocated output tensor
+    // do not share it across concurrent runs
     primary_batch_run_options: Option<RunOptions<HasSelectedOutputs>>,
+}
+
+impl OrtEmbeddingState {
+    fn fresh_primary_run_options(
+        has_primary_batched: bool,
+    ) -> Result<Option<RunOptions<HasSelectedOutputs>>, ort::Error> {
+        has_primary_batched
+            .then(|| {
+                let mut opts = preallocated_run_options(
+                    PRIMARY_BATCH_SIZE,
+                    256,
+                    "primary batched embedding output",
+                )?;
+                let _ = opts.disable_device_sync();
+                Ok::<RunOptions<HasSelectedOutputs>, ort::Error>(opts)
+            })
+            .transpose()
+    }
+
+    #[cfg(not(feature = "coreml"))]
+    fn clone_shared(&self) -> Result<Self, ort::Error> {
+        Ok(Self {
+            session: self.session.clone(),
+            primary_batched_session: self.primary_batched_session.clone(),
+            split_fbank_session: self.split_fbank_session.clone(),
+            split_fbank_batched_session: self.split_fbank_batched_session.clone(),
+            split_tail_session: self.split_tail_session.clone(),
+            split_tail_batched_session: self.split_tail_batched_session.clone(),
+            split_primary_tail_batched_session: self.split_primary_tail_batched_session.clone(),
+            multi_mask_session: self.multi_mask_session.clone(),
+            multi_mask_batched_session: self.multi_mask_batched_session.clone(),
+            primary_batch_run_options: Self::fresh_primary_run_options(
+                self.primary_batched_session.is_some(),
+            )?,
+        })
+    }
 }
 
 #[cfg(feature = "coreml")]
@@ -131,6 +174,40 @@ struct EmbeddingBuffers {
     split_primary_weights_batch_buffer: Array2<f32>,
 }
 
+impl EmbeddingBuffers {
+    fn fresh() -> Self {
+        Self {
+            multi_mask_fbank_buffer: Array3::zeros((
+                MULTI_MASK_BATCH_SIZE,
+                FBANK_FRAMES,
+                FBANK_FEATURES,
+            )),
+            multi_mask_masks_buffer: Array2::zeros((
+                MULTI_MASK_BATCH_SIZE * NUM_SPEAKERS,
+                MASK_FRAMES,
+            )),
+            waveform_buffer: Array3::zeros((1, 1, 160_000)),
+            weights_buffer: Array2::zeros((1, 589)),
+            primary_batch_waveform_buffer: Array3::zeros((PRIMARY_BATCH_SIZE, 1, 160_000)),
+            primary_batch_weights_buffer: Array2::zeros((PRIMARY_BATCH_SIZE, 589)),
+            split_waveform_buffer: Array3::zeros((1, 1, 160_000)),
+            split_fbank_batch_buffer: Array3::zeros((FBANK_BATCH_SIZE, 1, 160_000)),
+            split_feature_batch_buffer: Array3::zeros((
+                CHUNK_SPEAKER_BATCH_SIZE,
+                FBANK_FRAMES,
+                FBANK_FEATURES,
+            )),
+            split_weights_batch_buffer: Array2::zeros((CHUNK_SPEAKER_BATCH_SIZE, 589)),
+            split_primary_feature_batch_buffer: Array3::zeros((
+                PRIMARY_BATCH_SIZE,
+                FBANK_FRAMES,
+                FBANK_FEATURES,
+            )),
+            split_primary_weights_batch_buffer: Array2::zeros((PRIMARY_BATCH_SIZE, 589)),
+        }
+    }
+}
+
 /// WeSpeaker speaker embedding model with split-backend and chunk embedding support
 pub struct EmbeddingModel {
     meta: EmbeddingMeta,
@@ -153,6 +230,20 @@ impl EmbeddingModel {
         mode: ExecutionMode,
     ) -> Result<Self, ModelLoadError> {
         Self::with_mode_and_config(model_path, mode, &crate::pipeline::RuntimeConfig::default())
+    }
+
+    /// Create a handle that shares ORT sessions and owns new scratch buffers
+    ///
+    /// Session weights and arenas are shared. Staging buffers and preallocated
+    /// output state remain private to the new handle.
+    #[cfg(not(feature = "coreml"))]
+    pub(crate) fn clone_shared(&self) -> Result<Self, ort::Error> {
+        Ok(Self {
+            meta: self.meta.clone(),
+            plan: self.plan.clone(),
+            ort: self.ort.clone_shared()?,
+            buffers: EmbeddingBuffers::fresh(),
+        })
     }
 
     /// Audio sample rate in Hz (16000)

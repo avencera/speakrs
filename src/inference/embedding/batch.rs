@@ -20,7 +20,7 @@ impl EmbeddingModel {
         if let Some(sess) = self
             .ort
             .primary_batched_session
-            .as_mut()
+            .as_ref()
             .filter(|_| inputs.len() == PRIMARY_BATCH_SIZE)
         {
             for (batch_idx, input) in inputs.iter().enumerate() {
@@ -50,6 +50,7 @@ impl EmbeddingModel {
                 TensorRef::from_array_view(self.buffers.primary_batch_weights_buffer.view())?;
             let ort_inputs =
                 ort::inputs!["waveform" => waveform_tensor, "weights" => weights_tensor];
+            let mut sess = sess.lock()?;
             let outputs = if let Some(opts) = &self.ort.primary_batch_run_options {
                 sess.run_with_options(ort_inputs, opts)?
             } else {
@@ -164,12 +165,14 @@ impl EmbeddingModel {
                 TensorRef::from_array_view(self.buffers.multi_mask_fbank_buffer.view())?;
             let masks_tensor =
                 TensorRef::from_array_view(self.buffers.multi_mask_masks_buffer.view())?;
-            let outputs = self
+            let mut session = self
                 .ort
                 .multi_mask_batched_session
-                .as_mut()
+                .as_ref()
                 .ok_or_else(|| ort::Error::new("missing multi-mask batched session"))?
-                .run(ort::inputs!["fbank" => fbank_tensor, "masks" => masks_tensor])?;
+                .lock()?;
+            let outputs =
+                session.run(ort::inputs!["fbank" => fbank_tensor, "masks" => masks_tensor])?;
             let output = first_output(outputs.values(), "multi-mask batched output")?;
             let (shape, data) = output.try_extract_tensor::<f32>()?;
             embedding_batch_from_ort(
@@ -195,12 +198,14 @@ impl EmbeddingModel {
                     .slice(s![mask_start..mask_end, ..]);
                 let fbank_tensor = TensorRef::from_array_view(fbank_slice.view())?;
                 let masks_tensor = TensorRef::from_array_view(masks_slice.view())?;
-                let outputs = self
+                let mut session = self
                     .ort
                     .multi_mask_session
-                    .as_mut()
+                    .as_ref()
                     .ok_or_else(|| ort::Error::new("missing multi-mask session"))?
-                    .run(ort::inputs!["fbank" => fbank_tensor, "masks" => masks_tensor])?;
+                    .lock()?;
+                let outputs =
+                    session.run(ort::inputs!["fbank" => fbank_tensor, "masks" => masks_tensor])?;
                 let output = first_output(outputs.values(), "multi-mask output")?;
                 let (shape, data) = output.try_extract_tensor::<f32>()?;
                 let decoded = embedding_batch_from_ort(
@@ -298,12 +303,14 @@ impl EmbeddingModel {
             TensorRef::from_array_view(self.buffers.split_primary_feature_batch_buffer.view())?;
         let weights_tensor =
             TensorRef::from_array_view(self.buffers.split_primary_weights_batch_buffer.view())?;
-        let outputs = self
+        let mut session = self
             .ort
             .split_primary_tail_batched_session
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| ort::Error::new("missing primary tail batched session"))?
-            .run(ort::inputs!["fbank" => fbank_tensor, "weights" => weights_tensor])?;
+            .lock()?;
+        let outputs =
+            session.run(ort::inputs!["fbank" => fbank_tensor, "weights" => weights_tensor])?;
         let output = first_output(outputs.values(), "primary tail batched output")?;
         let (shape, data) = output.try_extract_tensor::<f32>()?;
         embedding_batch_from_ort(
