@@ -662,12 +662,15 @@ pub enum FbankSessionPool {
     Fixed(std::num::NonZeroUsize),
 }
 
+const MAX_FBANK_SESSIONS: usize = 8;
+
 impl FbankSessionPool {
-    /// Create a fixed nonzero session pool
+    /// Create a fixed session pool with between one and eight sessions
     pub const fn fixed(sessions: usize) -> Result<Self, FbankSessionPoolSizeError> {
         match std::num::NonZeroUsize::new(sessions) {
-            Some(sessions) => Ok(Self::Fixed(sessions)),
-            None => Err(FbankSessionPoolSizeError),
+            Some(sessions) if sessions.get() <= MAX_FBANK_SESSIONS => Ok(Self::Fixed(sessions)),
+            Some(_) => Err(FbankSessionPoolSizeError::TooLarge(sessions)),
+            None => Err(FbankSessionPoolSizeError::Zero),
         }
     }
 
@@ -678,7 +681,7 @@ impl FbankSessionPool {
                     .map(std::num::NonZeroUsize::get)
                     .unwrap_or(1);
 
-                (available / threads.get()).clamp(1, 8)
+                (available / threads.get()).clamp(1, MAX_FBANK_SESSIONS)
             }
             Self::Disabled => 0,
             Self::Fixed(sessions) => sessions.get(),
@@ -686,10 +689,16 @@ impl FbankSessionPool {
     }
 }
 
-/// A zero fixed filterbank session pool size was requested
+/// Invalid fixed filterbank session pool size
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("fixed filterbank session pool size must be greater than zero")]
-pub struct FbankSessionPoolSizeError;
+pub enum FbankSessionPoolSizeError {
+    /// A zero session count was requested
+    #[error("fixed filterbank session pool size must be greater than zero")]
+    Zero,
+    /// The session count exceeds the supported maximum
+    #[error("fixed filterbank session pool size must not exceed eight, got {0}")]
+    TooLarge(usize),
+}
 
 /// Runtime configuration for the diarization pipeline
 ///
@@ -867,7 +876,14 @@ mod clean_frame_duration_tests {
 
         assert_eq!(FbankSessionPool::Disabled.resolve(threads), 0);
         assert_eq!(FbankSessionPool::Automatic.resolve(threads), 1);
-        assert_eq!(FbankSessionPool::fixed(0), Err(FbankSessionPoolSizeError));
+        assert_eq!(
+            FbankSessionPool::fixed(0),
+            Err(FbankSessionPoolSizeError::Zero)
+        );
+        assert_eq!(
+            FbankSessionPool::fixed(MAX_FBANK_SESSIONS + 1),
+            Err(FbankSessionPoolSizeError::TooLarge(MAX_FBANK_SESSIONS + 1))
+        );
         assert_eq!(FbankSessionPool::fixed(3).unwrap().resolve(threads), 3);
     }
 

@@ -20,7 +20,7 @@ fn fbank_pool_route(input_count: usize, pool_size: usize, has_batched: bool) -> 
     if input_count <= 1 || pool_size == 0 {
         return FbankPoolRoute::Standard;
     }
-    if pool_size == 1 && input_count == FBANK_BATCH_SIZE && has_batched {
+    if pool_size == 1 && input_count >= FBANK_BATCH_SIZE && has_batched {
         return FbankPoolRoute::Standard;
     }
 
@@ -292,6 +292,10 @@ mod tests {
     fn one_session_pool_keeps_the_full_batched_route() {
         assert_eq!(
             fbank_pool_route(FBANK_BATCH_SIZE, 1, true),
+            FbankPoolRoute::Standard
+        );
+        assert_eq!(
+            fbank_pool_route(FBANK_BATCH_SIZE * 2, 1, true),
             FbankPoolRoute::Standard
         );
     }
