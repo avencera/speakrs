@@ -197,7 +197,7 @@ fn validate_geometry(
     {
         return invalid("unsupported window planning policy".to_owned());
     }
-    let expected_starts = planned_starts(
+    let expected_starts = regular_fixed_step_starts(
         audio.sample_count,
         geometry.window_samples,
         geometry.window_planning.step_samples,
@@ -279,37 +279,6 @@ fn aggregate_grid_extent(
         end_samples,
         start_samples: 0,
     })
-}
-
-fn planned_starts(
-    sample_count: u64,
-    window_samples: u64,
-    step_samples: u64,
-) -> Result<Vec<u64>, SegmentationBundleError> {
-    if sample_count == 0 {
-        return Ok(Vec::new());
-    }
-    let last = if sample_count <= window_samples {
-        0
-    } else {
-        let remainder = sample_count - window_samples;
-        remainder
-            .checked_add(step_samples - 1)
-            .ok_or_else(|| SegmentationBundleError::Invalid("window start overflow".to_owned()))?
-            / step_samples
-            * step_samples
-    };
-    let count = last / step_samples + 1;
-    if count > MAX_CHUNKS {
-        return invalid("planned chunk count exceeds the admission bound".to_owned());
-    }
-    (0..count)
-        .map(|index| {
-            index
-                .checked_mul(step_samples)
-                .ok_or_else(|| SegmentationBundleError::Invalid("window start overflow".to_owned()))
-        })
-        .collect()
 }
 
 fn validate_grid(grid: &FrameGrid) -> Result<(), SegmentationBundleError> {

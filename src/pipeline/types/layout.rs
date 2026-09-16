@@ -1,6 +1,6 @@
 use crate::imported_segmentation::{
     AudioIdentity, FrameGrid, OutputExtent, OutputExtentPolicy, RationalSample,
-    SegmentationGeometry,
+    SegmentationGeometry, regular_fixed_step_starts,
 };
 use crate::inference::segmentation::{WindowSpec, segmentation_window_count};
 use crate::rational::{CheckedRational, RationalError};
@@ -413,28 +413,37 @@ fn imported_chunks(
     step_samples: usize,
     geometry: &SegmentationGeometry,
 ) -> Result<Vec<ChunkExtent>, PipelineGeometryError> {
-    let expected = planned_chunks(sample_count, window_samples, step_samples)?;
-    if expected.len() != geometry.chunks.len() {
+    let expected_starts = regular_fixed_step_starts(
+        sample_count as u64,
+        window_samples as u64,
+        step_samples as u64,
+    )
+    .map_err(|error| PipelineGeometryError::Invalid(error.to_string()))?;
+    if expected_starts.len() != geometry.chunks.len() {
         return Err(PipelineGeometryError::Invalid(format!(
             "imported geometry has {} chunks, expected {}",
             geometry.chunks.len(),
-            expected.len()
+            expected_starts.len()
         )));
     }
 
     geometry
         .chunks
         .iter()
-        .zip(expected)
+        .zip(expected_starts)
         .enumerate()
-        .map(|(index, (chunk, expected))| {
+        .map(|(index, (chunk, expected_start))| {
             let actual_start = to_usize(chunk.start_samples, "chunk start")?;
             let actual_valid = to_usize(chunk.valid_samples, "chunk valid samples")?;
             let actual_padding = to_usize(chunk.padding_samples, "chunk padding samples")?;
+            let expected_start = to_usize(expected_start, "expected chunk start")?;
+            let expected_valid = sample_count
+                .saturating_sub(expected_start)
+                .min(window_samples);
             if chunk.index != index as u64
-                || actual_start != expected.start_samples
-                || actual_valid != expected.valid_samples
-                || actual_padding != expected.padding_samples
+                || actual_start != expected_start
+                || actual_valid != expected_valid
+                || actual_padding != window_samples - expected_valid
             {
                 return Err(PipelineGeometryError::Invalid(format!(
                     "imported chunk {index} does not match fixed-step audio planning"
@@ -912,6 +921,40 @@ mod tests {
         assert_eq!(geometry.output_frames(), 481);
         assert_eq!(geometry.chunks()[2].padding_samples(), 3_600);
         assert_eq!(geometry.output_extent().end_samples, 154_000);
+    }
+
+    #[test]
+    fn imported_geometry_uses_the_declared_pad_final_planning_policy() {
+        let mut manifest = SegmentationManifest::from_json(include_bytes!(
+            "../../../fixtures/wavlm_bridge/manifest.json"
+        ))
+        .unwrap();
+        manifest.audio.sample_count = 140_800;
+        manifest.geometry.chunks = vec![
+            ChunkGeometry {
+                index: 0,
+                padding_samples: 0,
+                start_samples: 0,
+                valid_samples: 128_000,
+            },
+            ChunkGeometry {
+                index: 1,
+                padding_samples: 0,
+                start_samples: 12_800,
+                valid_samples: 128_000,
+            },
+        ];
+
+        let chunks = imported_chunks(
+            manifest.audio.sample_count as usize,
+            manifest.geometry.window_samples as usize,
+            manifest.geometry.window_planning.step_samples as usize,
+            &manifest.geometry,
+        )
+        .unwrap();
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[1].start_samples(), 12_800);
     }
 
     #[test]

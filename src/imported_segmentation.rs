@@ -714,6 +714,39 @@ impl ImportedSegmentationBundle {
 /// Public name for a validated immutable imported segmentation bundle
 pub type SegmentationBundle = ImportedSegmentationBundle;
 
+pub(crate) fn regular_fixed_step_starts(
+    sample_count: u64,
+    window_samples: u64,
+    step_samples: u64,
+) -> Result<Vec<u64>, SegmentationBundleError> {
+    if sample_count == 0 {
+        return Ok(Vec::new());
+    }
+    let last = if sample_count <= window_samples {
+        0
+    } else {
+        let remainder = sample_count - window_samples;
+        remainder
+            .checked_add(step_samples - 1)
+            .ok_or_else(|| SegmentationBundleError::Invalid("window start overflow".to_owned()))?
+            / step_samples
+            * step_samples
+    };
+    let count = last / step_samples + 1;
+    if count > MAX_CHUNKS {
+        return Err(SegmentationBundleError::Invalid(
+            "planned chunk count exceeds the admission bound".to_owned(),
+        ));
+    }
+    (0..count)
+        .map(|index| {
+            index
+                .checked_mul(step_samples)
+                .ok_or_else(|| SegmentationBundleError::Invalid("window start overflow".to_owned()))
+        })
+        .collect()
+}
+
 mod admission;
 mod canonical;
 mod validation;
