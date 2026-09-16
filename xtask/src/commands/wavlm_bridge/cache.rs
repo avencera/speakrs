@@ -394,7 +394,9 @@ pub fn publish_embedding(
     );
     ensure!(
         snapshot.len() <= super::domain::MAX_EMBEDDING_STAGE_BYTES,
-        "embedding snapshot exceeds size bound"
+        "embedding snapshot is {} bytes, maximum is {} bytes",
+        snapshot.len(),
+        super::domain::MAX_EMBEDDING_STAGE_BYTES
     );
     fs::create_dir_all(cache_root)
         .wrap_err_with(|| format!("failed to create cache root {}", cache_root.display()))?;
@@ -909,8 +911,8 @@ impl ReceiptRef {
 mod tests {
     use super::*;
     use crate::commands::wavlm_bridge::domain::{
-        AvailabilityCounts, EmbeddingStageDocument, GeometryReceipt, RationalReceipt,
-        StageDependency, StageReceipt,
+        AvailabilityCounts, EmbeddingStageDocument, GeometryReceipt, PackedSegmentationMask,
+        RationalReceipt, StageDependency, StageReceipt,
     };
 
     fn geometry() -> GeometryReceipt {
@@ -1037,7 +1039,7 @@ mod tests {
             stage_key: digest_bytes(b"Embedding"),
             geometry: geometry(),
             segmentation_shape: [0, 0, 0],
-            segmentation_values: Vec::new(),
+            segmentation_values: PackedSegmentationMask::empty(),
             entries: Vec::new(),
             embedding_receipt: AvailabilityCounts::default(),
         })
@@ -1152,7 +1154,7 @@ mod tests {
             stage_key: key.clone(),
             geometry: geometry(),
             segmentation_shape: [0, 0, 0],
-            segmentation_values: Vec::new(),
+            segmentation_values: PackedSegmentationMask::empty(),
             entries: Vec::new(),
             embedding_receipt: AvailabilityCounts::default(),
         };
@@ -1204,7 +1206,7 @@ mod tests {
             stage_key: key.clone(),
             geometry: geometry(),
             segmentation_shape: [0, 0, 0],
-            segmentation_values: Vec::new(),
+            segmentation_values: PackedSegmentationMask::empty(),
             entries: Vec::new(),
             embedding_receipt: AvailabilityCounts::default(),
         };
@@ -1290,6 +1292,71 @@ mod tests {
             lookup_embedding(cache.path(), &key, "recording")
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn embedding_cache_rejects_previous_cache_schema() {
+        let cache = tempfile::tempdir().unwrap();
+        let key = digest_bytes(b"previous-embedding-cache-schema");
+        let snapshot = serde_json::to_vec(&EmbeddingStageDocument {
+            schema_version: super::super::domain::EMBEDDING_STAGE_SCHEMA_VERSION,
+            recording_id: "recording".into(),
+            stage_key: key.clone(),
+            geometry: geometry(),
+            segmentation_shape: [0, 0, 0],
+            segmentation_values: PackedSegmentationMask::empty(),
+            entries: Vec::new(),
+            embedding_receipt: AvailabilityCounts::default(),
+        })
+        .unwrap();
+        let snapshot_artifact = ArtifactRef {
+            relative_path: "embedding_snapshot.json".into(),
+            sha256: digest_bytes(&snapshot),
+            bytes: snapshot.len() as u64,
+        };
+        let stage_receipts = embedding_stage_documents(&key, &snapshot_artifact);
+        let entry_root = cache.path().join("embedding").join(key.as_str());
+        fs::create_dir_all(entry_root.join("stages")).unwrap();
+        let stage_artifacts = stage_receipts
+            .iter()
+            .map(|(name, bytes)| {
+                let relative_path = PathBuf::from("stages").join(name);
+                fs::write(entry_root.join(&relative_path), bytes).unwrap();
+                ArtifactRef {
+                    relative_path,
+                    sha256: digest_bytes(bytes),
+                    bytes: bytes.len() as u64,
+                }
+            })
+            .collect::<Vec<_>>();
+        fs::write(entry_root.join("embedding_snapshot.json"), &snapshot).unwrap();
+        let snapshot_artifact = ArtifactRef {
+            relative_path: "embedding_snapshot.json".into(),
+            sha256: digest_bytes(&snapshot),
+            bytes: snapshot.len() as u64,
+        };
+        let entry = EmbeddingCacheEntry {
+            schema_version: EMBEDDING_CACHE_SCHEMA_VERSION - 1,
+            cache_key: key.clone(),
+            recording_id: "recording".into(),
+            stage_receipts: stage_artifacts,
+            snapshot: snapshot_artifact,
+        };
+        let entry_bytes = serde_json::to_vec(&entry).unwrap();
+        fs::write(entry_root.join("entry.json"), &entry_bytes).unwrap();
+        fs::write(
+            entry_root.join(".complete"),
+            format!("{}\n", digest_bytes(&entry_bytes)),
+        )
+        .unwrap();
+
+        let error = lookup_embedding(cache.path(), &key, "recording")
+            .expect_err("previous embedding cache schema was reused");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported embedding cache schema")
         );
     }
 
@@ -1387,7 +1454,7 @@ mod tests {
             stage_key: digest_bytes(b"Embedding"),
             geometry: geometry(),
             segmentation_shape: [0, 0, 0],
-            segmentation_values: Vec::new(),
+            segmentation_values: PackedSegmentationMask::empty(),
             entries: Vec::new(),
             embedding_receipt: AvailabilityCounts::default(),
         })

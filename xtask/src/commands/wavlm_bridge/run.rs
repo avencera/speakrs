@@ -250,11 +250,23 @@ pub fn run(options: RunOptions) -> Result<()> {
                                 &cache_key,
                                 &geometry,
                                 hit,
-                            )?,
+                            )
+                            .wrap_err_with(|| {
+                                format!(
+                                    "failed recipe_id={} recording_id={}",
+                                    recipe.id, recording.spec.id
+                                )
+                            })?,
                             true,
                         ),
                         None => (
-                            run_one(recipe, &recording, &mut run_context, &cache_key)?,
+                            run_one(recipe, &recording, &mut run_context, &cache_key)
+                                .wrap_err_with(|| {
+                                    format!(
+                                        "failed recipe_id={} recording_id={}",
+                                        recipe.id, recording.spec.id
+                                    )
+                                })?,
                             false,
                         ),
                     };

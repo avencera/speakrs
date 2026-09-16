@@ -5,18 +5,15 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 use speakrs::pipeline::{
-    EmbeddingAvailability, EmbeddingFailureReason, EmbeddingReceipt,
-    EmbeddingStageEntry as LibraryEmbeddingStageEntry, EmbeddingStageSnapshot,
-    ImportedDiarizationPipeline, InactiveEmbeddingReason, PipelineGeometry,
+    EmbeddingAvailability, EmbeddingStageSnapshot, ImportedDiarizationPipeline, PipelineGeometry,
 };
 
 use super::cache;
 use super::domain::{
-    ArtifactRef, AvailabilityCounts, EmbeddingFailureReason as DocumentEmbeddingFailureReason,
-    EmbeddingInactiveReason, EmbeddingSlotAvailability, EmbeddingStageDocument,
-    EmbeddingStageEntry as DocumentEmbeddingStageEntry, GeometryReceipt, ReceiptDocument,
-    ReceiptRef, RecipeSpec, RuntimeIdentity, Sha256Digest, StageDependency, StageDependencyName,
-    StageKind, StageReceipt, canonical_json_digest, digest_bytes, digest_file,
+    ArtifactRef, AvailabilityCounts, EmbeddingStageDocument,
+    EmbeddingStageEntry as DocumentEmbeddingStageEntry, GeometryReceipt, PackedSegmentationMask,
+    ReceiptDocument, ReceiptRef, RecipeSpec, RuntimeIdentity, Sha256Digest, StageDependency,
+    StageDependencyName, StageKind, StageReceipt, canonical_json_digest, digest_bytes, digest_file,
 };
 use super::embedding_execution::ensure_recipe_matches_bundle;
 use super::run::{RunContext, ValidatedRecording};
@@ -30,6 +27,13 @@ pub(crate) struct InferenceStageReceipts {
 
 pub(crate) const EMBEDDING_IMPLEMENTATION_IDENTITY: &str =
     env!("WAVLM_EMBEDDING_IMPLEMENTATION_SHA256");
+
+fn embedding_stage_implementation_identity() -> String {
+    format!(
+        "{EMBEDDING_IMPLEMENTATION_IDENTITY}:snapshot-v{}",
+        super::domain::EMBEDDING_STAGE_SCHEMA_VERSION
+    )
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct ExecutionIdentity {
@@ -103,6 +107,7 @@ pub(crate) fn stage_dependencies(
     Vec<StageDependency>,
 )> {
     let geometry_digest = canonical_json_digest(geometry)?;
+    let embedding_implementation_identity = embedding_stage_implementation_identity();
     Ok((
         vec![
             dependency(StageDependencyName::Recording, recording.spec.id.as_str()),
@@ -141,7 +146,7 @@ pub(crate) fn stage_dependencies(
             ),
             dependency(
                 StageDependencyName::Implementation,
-                EMBEDDING_IMPLEMENTATION_IDENTITY,
+                &embedding_implementation_identity,
             ),
             dependency(
                 StageDependencyName::Model,
@@ -198,28 +203,33 @@ pub(crate) fn embedding_snapshot_bytes(
     snapshot: &EmbeddingStageSnapshot,
     geometry: &GeometryReceipt,
 ) -> color_eyre::eyre::Result<Vec<u8>> {
+    let segmentation_shape = snapshot.segmentation_shape();
+    let segmentation_values = PackedSegmentationMask::try_from_values(
+        segmentation_shape,
+        &snapshot.segmentation_values(),
+    )?;
+    let entries = snapshot
+        .entries()
+        .iter()
+        .map(DocumentEmbeddingStageEntry::try_from)
+        .collect::<color_eyre::eyre::Result<Vec<_>>>()?;
     let document = EmbeddingStageDocument {
         schema_version: super::domain::EMBEDDING_STAGE_SCHEMA_VERSION,
         recording_id: recording.spec.id.clone(),
         stage_key: stage_key.clone(),
         geometry: geometry.clone(),
-        segmentation_shape: snapshot.segmentation_shape(),
-        segmentation_values: snapshot.segmentation_values(),
-        entries: snapshot
-            .entries()
-            .iter()
-            .map(|entry| DocumentEmbeddingStageEntry {
-                availability: document_availability(entry.availability()),
-                values: entry.values().map(ToOwned::to_owned),
-            })
-            .collect(),
+        segmentation_shape,
+        segmentation_values,
+        entries,
         embedding_receipt: availability_counts_from_snapshot(snapshot),
     };
     document.validate()?;
-    let bytes = serde_json::to_vec_pretty(&document)?;
+    let bytes = serde_json::to_vec(&document)?;
     color_eyre::eyre::ensure!(
         bytes.len() <= super::domain::MAX_EMBEDDING_STAGE_BYTES,
-        "embedding snapshot exceeds size bound"
+        "embedding snapshot is {} bytes, maximum is {} bytes",
+        bytes.len(),
+        super::domain::MAX_EMBEDDING_STAGE_BYTES
     );
     Ok(bytes)
 }
@@ -252,68 +262,6 @@ pub(crate) fn receipt_with_output(
     document.receipt.outputs = vec![output];
     document.receipt_sha256 = canonical_json_digest(&document.receipt)?;
     Ok(document)
-}
-
-pub(crate) fn document_availability(
-    availability: &EmbeddingAvailability,
-) -> super::domain::EmbeddingSlotAvailability {
-    match availability {
-        EmbeddingAvailability::Available => EmbeddingSlotAvailability::Available,
-        EmbeddingAvailability::Inactive { reason } => EmbeddingSlotAvailability::Inactive {
-            reason: match reason {
-                InactiveEmbeddingReason::NoActivity => EmbeddingInactiveReason::NoActivity,
-                InactiveEmbeddingReason::InsufficientActivity => {
-                    EmbeddingInactiveReason::InsufficientActivity
-                }
-            },
-        },
-        EmbeddingAvailability::InferenceFailed { reason } => {
-            EmbeddingSlotAvailability::InferenceFailed {
-                reason: match reason {
-                    EmbeddingFailureReason::ModelExecution => {
-                        DocumentEmbeddingFailureReason::ModelExecution
-                    }
-                    EmbeddingFailureReason::InvalidOutput => {
-                        DocumentEmbeddingFailureReason::InvalidOutput
-                    }
-                    EmbeddingFailureReason::LegacyUnavailable => {
-                        DocumentEmbeddingFailureReason::LegacyUnavailable
-                    }
-                },
-            }
-        }
-    }
-}
-
-pub(crate) fn library_availability(
-    availability: &EmbeddingSlotAvailability,
-) -> color_eyre::eyre::Result<EmbeddingAvailability> {
-    Ok(match availability {
-        EmbeddingSlotAvailability::Available => EmbeddingAvailability::Available,
-        EmbeddingSlotAvailability::Inactive { reason } => EmbeddingAvailability::Inactive {
-            reason: match reason {
-                EmbeddingInactiveReason::NoActivity => InactiveEmbeddingReason::NoActivity,
-                EmbeddingInactiveReason::InsufficientActivity => {
-                    InactiveEmbeddingReason::InsufficientActivity
-                }
-            },
-        },
-        EmbeddingSlotAvailability::InferenceFailed { reason } => {
-            EmbeddingAvailability::InferenceFailed {
-                reason: match reason {
-                    DocumentEmbeddingFailureReason::ModelExecution => {
-                        EmbeddingFailureReason::ModelExecution
-                    }
-                    DocumentEmbeddingFailureReason::InvalidOutput => {
-                        EmbeddingFailureReason::InvalidOutput
-                    }
-                    DocumentEmbeddingFailureReason::LegacyUnavailable => {
-                        EmbeddingFailureReason::LegacyUnavailable
-                    }
-                },
-            }
-        }
-    })
 }
 
 pub(crate) fn availability_counts_from_snapshot(
@@ -491,7 +439,6 @@ pub(crate) fn run_from_embedding_cache(
         &recording.bundle.manifest().geometry,
     )?;
     let snapshot_document: EmbeddingStageDocument = serde_json::from_slice(&hit.snapshot.0)?;
-    snapshot_document.validate()?;
     color_eyre::eyre::ensure!(
         snapshot_document.geometry == *geometry,
         "cached embedding snapshot geometry does not match the recording"
@@ -500,28 +447,7 @@ pub(crate) fn run_from_embedding_cache(
         snapshot_document.stage_key == hit.key,
         "cached embedding snapshot key does not match its receipts"
     );
-    let entries = snapshot_document
-        .entries
-        .iter()
-        .map(|entry| {
-            Ok(LibraryEmbeddingStageEntry::new(
-                library_availability(&entry.availability)?,
-                entry.values.clone(),
-            ))
-        })
-        .collect::<color_eyre::eyre::Result<Vec<_>>>()?;
-    let snapshot = EmbeddingStageSnapshot::from_flat_parts(
-        pipeline_geometry,
-        snapshot_document.segmentation_shape,
-        snapshot_document.segmentation_values,
-        entries,
-        EmbeddingReceipt {
-            clean_mask_count: snapshot_document.embedding_receipt.clean_mask,
-            full_mask_fallback_count: snapshot_document.embedding_receipt.full_mask_fallback,
-            inactive_count: snapshot_document.embedding_receipt.inactive,
-            inference_failure_count: snapshot_document.embedding_receipt.inference_failed,
-        },
-    )?;
+    let snapshot = snapshot_document.to_library_snapshot(pipeline_geometry)?;
     let mut documents = BTreeSet::new();
     let mut stage_documents = Vec::new();
     for (_, bytes, _) in &hit.stage_receipts {
@@ -683,6 +609,17 @@ mod tests {
             EMBEDDING_IMPLEMENTATION_IDENTITY
                 .bytes()
                 .all(|byte| byte.is_ascii_hexdigit())
+        );
+    }
+
+    #[test]
+    fn embedding_stage_identity_includes_snapshot_schema() {
+        assert_eq!(
+            embedding_stage_implementation_identity(),
+            format!(
+                "{EMBEDDING_IMPLEMENTATION_IDENTITY}:snapshot-v{}",
+                super::super::domain::EMBEDDING_STAGE_SCHEMA_VERSION
+            )
         );
     }
 

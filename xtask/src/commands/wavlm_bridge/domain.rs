@@ -2,12 +2,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::ValueEnum;
 use color_eyre::eyre::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as ShaDigest, Sha256};
 
 pub use speakrs::imported_segmentation::Sha256Digest;
+use speakrs::pipeline::{
+    EmbeddingAvailability, EmbeddingFailureReason as LibraryEmbeddingFailureReason,
+    EmbeddingReceipt, EmbeddingStageEntry as LibraryEmbeddingStageEntry, EmbeddingStageSnapshot,
+    InactiveEmbeddingReason as LibraryInactiveEmbeddingReason, PipelineGeometry,
+};
 
 pub const SPEC_SCHEMA_VERSION: u32 = 1;
 pub const VALIDATION_SCHEMA_VERSION: u32 = 1;
@@ -17,11 +23,12 @@ pub const REPORT_SCHEMA_VERSION: u32 = 1;
 pub const SCORE_SCHEMA_VERSION: u32 = 2;
 pub const RECEIPT_SCHEMA_VERSION: u32 = 1;
 pub const CACHE_SCHEMA_VERSION: u32 = 2;
-pub const EMBEDDING_CACHE_SCHEMA_VERSION: u32 = 1;
-pub const EMBEDDING_STAGE_SCHEMA_VERSION: u32 = 1;
+pub const EMBEDDING_CACHE_SCHEMA_VERSION: u32 = 2;
+pub const EMBEDDING_STAGE_SCHEMA_VERSION: u32 = 2;
 pub const MAX_EMBEDDING_STAGE_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_EMBEDDING_STAGE_VALUES: usize = 64 * 1024 * 1024;
 pub const MAX_EMBEDDING_STAGE_ENTRIES: usize = 4 * 1024 * 1024;
+const MAX_EMBEDDING_STAGE_MASK_BYTES: usize = MAX_EMBEDDING_STAGE_VALUES.div_ceil(8);
 const IMPORTED_EMBEDDING_WIDTH: usize = 256;
 
 /// Execution mode admitted by the bridge command
@@ -810,15 +817,6 @@ pub struct ReceiptDocument {
     pub receipt_sha256: Sha256Digest,
 }
 
-/// A serialized typed availability state for one embedding slot
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
-pub enum EmbeddingSlotAvailability {
-    Available,
-    Inactive { reason: EmbeddingInactiveReason },
-    InferenceFailed { reason: EmbeddingFailureReason },
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EmbeddingInactiveReason {
@@ -834,29 +832,324 @@ pub enum EmbeddingFailureReason {
     LegacyUnavailable,
 }
 
-/// One serialized embedding-stage slot without a sentinel vector
+/// One validated embedding vector serialized as standard padded base64
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct EncodedEmbeddingVector([f32; IMPORTED_EMBEDDING_WIDTH]);
+
+impl EncodedEmbeddingVector {
+    pub(crate) fn try_from_values(values: &[f32]) -> Result<Self> {
+        ensure!(
+            values.len() == IMPORTED_EMBEDDING_WIDTH,
+            "embedding vector has width {}, expected {IMPORTED_EMBEDDING_WIDTH}",
+            values.len()
+        );
+        ensure!(
+            values.iter().all(|value| value.is_finite()),
+            "embedding vector contains non-finite values"
+        );
+        Ok(Self(
+            values
+                .try_into()
+                .expect("embedding vector width was checked"),
+        ))
+    }
+
+    pub(crate) fn as_slice(&self) -> &[f32] {
+        &self.0
+    }
+
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            self.0.iter().all(|value| value.is_finite()),
+            "embedding vector contains non-finite values"
+        );
+        Ok(())
+    }
+}
+
+impl Serialize for EncodedEmbeddingVector {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if let Err(error) = self.validate() {
+            return Err(serde::ser::Error::custom(error.to_string()));
+        }
+        let bytes = self
+            .0
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+}
+
+impl<'de> Deserialize<'de> for EncodedEmbeddingVector {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let bytes = decode_canonical_base64(
+            &value,
+            IMPORTED_EMBEDDING_WIDTH * std::mem::size_of::<f32>(),
+            "embedding vector",
+        )
+        .map_err(|error| serde::de::Error::custom(error.to_string()))?;
+        let values = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|bytes| f32::from_le_bytes(*bytes))
+            .collect::<Vec<_>>();
+        Self::try_from_values(&values).map_err(|error| serde::de::Error::custom(error.to_string()))
+    }
+}
+
+/// Packed segmentation bits with bounded canonical base64 serialization
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PackedSegmentationMask(Vec<u8>);
+
+impl PackedSegmentationMask {
+    pub(crate) fn try_from_values(shape: [usize; 3], values: &[f32]) -> Result<Self> {
+        let value_count = checked_segmentation_value_count(shape)?;
+        ensure!(
+            values.len() == value_count,
+            "embedding-stage segmentation values {} do not match shape {shape:?}",
+            values.len()
+        );
+        ensure!(
+            value_count <= MAX_EMBEDDING_STAGE_VALUES,
+            "embedding-stage segmentation values exceed bound"
+        );
+        let byte_count = packed_mask_byte_count(value_count)?;
+        let mut bytes = vec![0_u8; byte_count];
+        for (index, value) in values.iter().enumerate() {
+            ensure!(
+                value.is_finite() && (*value == 0.0 || *value == 1.0),
+                "embedding-stage masks are not finite binary values"
+            );
+            if *value == 1.0 {
+                bytes[index / 8] |= 1 << (index % 8);
+            }
+        }
+        Ok(Self(bytes))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn empty() -> Self {
+        Self(Vec::new())
+    }
+}
+
+impl Serialize for PackedSegmentationMask {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        if self.0.len() > MAX_EMBEDDING_STAGE_MASK_BYTES {
+            return Err(serde::ser::Error::custom(
+                "embedding-stage segmentation mask exceeds the decoded size bound",
+            ));
+        }
+        serializer.serialize_str(&STANDARD.encode(&self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for PackedSegmentationMask {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let bytes = decode_bounded_canonical_base64(
+            &value,
+            MAX_EMBEDDING_STAGE_MASK_BYTES,
+            "embedding-stage segmentation mask",
+        )
+        .map_err(|error| serde::de::Error::custom(error.to_string()))?;
+        Ok(Self(bytes))
+    }
+}
+
+/// One serialized embedding-stage slot with availability-specific data
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct EmbeddingStageEntry {
-    pub availability: EmbeddingSlotAvailability,
-    pub values: Option<Vec<f32>>,
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum EmbeddingStageEntry {
+    Available { values: Box<EncodedEmbeddingVector> },
+    Inactive { reason: EmbeddingInactiveReason },
+    InferenceFailed { reason: EmbeddingFailureReason },
+}
+
+impl TryFrom<&LibraryEmbeddingStageEntry> for EmbeddingStageEntry {
+    type Error = color_eyre::eyre::Report;
+
+    fn try_from(entry: &LibraryEmbeddingStageEntry) -> std::result::Result<Self, Self::Error> {
+        match entry.availability() {
+            EmbeddingAvailability::Available => {
+                let values = entry
+                    .values()
+                    .ok_or_else(|| color_eyre::eyre::eyre!("available embedding has no vector"))?;
+                Ok(Self::Available {
+                    values: Box::new(EncodedEmbeddingVector::try_from_values(values)?),
+                })
+            }
+            EmbeddingAvailability::Inactive { reason } => {
+                ensure!(
+                    entry.values().is_none(),
+                    "unavailable embedding has a vector"
+                );
+                Ok(Self::Inactive {
+                    reason: match reason {
+                        LibraryInactiveEmbeddingReason::NoActivity => {
+                            EmbeddingInactiveReason::NoActivity
+                        }
+                        LibraryInactiveEmbeddingReason::InsufficientActivity => {
+                            EmbeddingInactiveReason::InsufficientActivity
+                        }
+                    },
+                })
+            }
+            EmbeddingAvailability::InferenceFailed { reason } => {
+                ensure!(
+                    entry.values().is_none(),
+                    "unavailable embedding has a vector"
+                );
+                Ok(Self::InferenceFailed {
+                    reason: match reason {
+                        LibraryEmbeddingFailureReason::ModelExecution => {
+                            EmbeddingFailureReason::ModelExecution
+                        }
+                        LibraryEmbeddingFailureReason::InvalidOutput => {
+                            EmbeddingFailureReason::InvalidOutput
+                        }
+                        LibraryEmbeddingFailureReason::LegacyUnavailable => {
+                            EmbeddingFailureReason::LegacyUnavailable
+                        }
+                    },
+                })
+            }
+        }
+    }
+}
+
+impl EmbeddingStageEntry {
+    fn validate(&self) -> Result<()> {
+        if let Self::Available { values } = self {
+            values.validate()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn to_library(&self) -> LibraryEmbeddingStageEntry {
+        match self {
+            Self::Available { values } => LibraryEmbeddingStageEntry::new(
+                EmbeddingAvailability::Available,
+                Some(values.as_slice().to_vec()),
+            ),
+            Self::Inactive { reason } => LibraryEmbeddingStageEntry::new(
+                EmbeddingAvailability::Inactive {
+                    reason: match reason {
+                        EmbeddingInactiveReason::NoActivity => {
+                            LibraryInactiveEmbeddingReason::NoActivity
+                        }
+                        EmbeddingInactiveReason::InsufficientActivity => {
+                            LibraryInactiveEmbeddingReason::InsufficientActivity
+                        }
+                    },
+                },
+                None,
+            ),
+            Self::InferenceFailed { reason } => LibraryEmbeddingStageEntry::new(
+                EmbeddingAvailability::InferenceFailed {
+                    reason: match reason {
+                        EmbeddingFailureReason::ModelExecution => {
+                            LibraryEmbeddingFailureReason::ModelExecution
+                        }
+                        EmbeddingFailureReason::InvalidOutput => {
+                            LibraryEmbeddingFailureReason::InvalidOutput
+                        }
+                        EmbeddingFailureReason::LegacyUnavailable => {
+                            LibraryEmbeddingFailureReason::LegacyUnavailable
+                        }
+                    },
+                },
+                None,
+            ),
+        }
+    }
 }
 
 /// Immutable serialized output of bundle decode and per-speaker embedding
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct EmbeddingStageDocument {
+pub(crate) struct EmbeddingStageDocument {
     pub schema_version: u32,
     pub recording_id: String,
     pub stage_key: Sha256Digest,
     pub geometry: GeometryReceipt,
     pub segmentation_shape: [usize; 3],
-    pub segmentation_values: Vec<f32>,
+    /// Row-major mask bits with the least-significant bit first in each byte
+    pub segmentation_values: PackedSegmentationMask,
     pub entries: Vec<EmbeddingStageEntry>,
     pub embedding_receipt: AvailabilityCounts,
 }
 
 impl EmbeddingStageDocument {
+    pub(crate) fn decode_segmentation_values(&self) -> Result<Vec<f32>> {
+        let value_count = checked_segmentation_value_count(self.segmentation_shape)?;
+        let bytes = self.decode_segmentation_bytes()?;
+        Ok((0..value_count)
+            .map(|index| {
+                if bytes[index / 8] & (1 << (index % 8)) == 0 {
+                    0.0
+                } else {
+                    1.0
+                }
+            })
+            .collect())
+    }
+
+    fn decode_segmentation_bytes(&self) -> Result<Vec<u8>> {
+        let value_count = checked_segmentation_value_count(self.segmentation_shape)?;
+        ensure!(
+            value_count <= MAX_EMBEDDING_STAGE_VALUES,
+            "embedding-stage segmentation values exceed bound"
+        );
+        let bytes = self.segmentation_values.0.as_slice();
+        ensure!(
+            bytes.len() == packed_mask_byte_count(value_count)?,
+            "embedding-stage segmentation mask byte count does not match shape"
+        );
+        ensure_mask_padding_is_zero(bytes, value_count)?;
+        Ok(bytes.to_owned())
+    }
+
+    pub(crate) fn to_library_snapshot(
+        &self,
+        geometry: PipelineGeometry,
+    ) -> Result<EmbeddingStageSnapshot> {
+        self.validate()?;
+        let entries = self
+            .entries
+            .iter()
+            .map(EmbeddingStageEntry::to_library)
+            .collect::<Vec<_>>();
+        EmbeddingStageSnapshot::from_flat_parts(
+            geometry,
+            self.segmentation_shape,
+            self.decode_segmentation_values()?,
+            entries,
+            EmbeddingReceipt {
+                clean_mask_count: self.embedding_receipt.clean_mask,
+                full_mask_fallback_count: self.embedding_receipt.full_mask_fallback,
+                inactive_count: self.embedding_receipt.inactive,
+                inference_failure_count: self.embedding_receipt.inference_failed,
+            },
+        )
+        .map_err(Into::into)
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.schema_version == EMBEDDING_STAGE_SCHEMA_VERSION,
@@ -867,26 +1160,12 @@ impl EmbeddingStageDocument {
             !self.recording_id.is_empty(),
             "embedding-stage recording id is empty"
         );
-        let values = self
-            .segmentation_shape
-            .iter()
-            .try_fold(1usize, |count, extent| {
-                ensure!(
-                    *extent <= MAX_EMBEDDING_STAGE_VALUES,
-                    "embedding-stage shape extent is too large"
-                );
-                count
-                    .checked_mul(*extent)
-                    .ok_or_else(|| color_eyre::eyre::eyre!("embedding-stage shape overflow"))
-            })?;
-        ensure!(
-            values == self.segmentation_values.len(),
-            "embedding-stage segmentation shape does not match values"
-        );
+        let values = checked_segmentation_value_count(self.segmentation_shape)?;
         ensure!(
             values <= MAX_EMBEDDING_STAGE_VALUES,
             "embedding-stage segmentation values exceed bound"
         );
+        self.decode_segmentation_bytes()?;
         let entries = self.segmentation_shape[0]
             .checked_mul(self.segmentation_shape[2])
             .ok_or_else(|| color_eyre::eyre::eyre!("embedding-stage entry shape overflow"))?;
@@ -894,35 +1173,15 @@ impl EmbeddingStageDocument {
             entries == self.entries.len() && entries <= MAX_EMBEDDING_STAGE_ENTRIES,
             "embedding-stage entries do not match shape or exceed bound"
         );
-        ensure!(
-            self.segmentation_values
-                .iter()
-                .all(|value| value.is_finite() && (*value == 0.0 || *value == 1.0)),
-            "embedding-stage masks are not finite binary values"
-        );
         let mut available = 0;
         let mut inactive = 0;
         let mut failed = 0;
         for entry in &self.entries {
-            match (&entry.availability, &entry.values) {
-                (EmbeddingSlotAvailability::Available, Some(values)) => {
-                    available += 1;
-                    ensure!(
-                        !values.is_empty(),
-                        "available embedding has an empty vector"
-                    );
-                    ensure!(
-                        values.len() == IMPORTED_EMBEDDING_WIDTH
-                            && values.iter().all(|value| value.is_finite()),
-                        "available embedding has invalid values"
-                    );
-                }
-                (EmbeddingSlotAvailability::Available, None) => {
-                    bail!("available embedding has no vector")
-                }
-                (EmbeddingSlotAvailability::Inactive { .. }, None) => inactive += 1,
-                (EmbeddingSlotAvailability::InferenceFailed { .. }, None) => failed += 1,
-                (_, Some(_)) => bail!("unavailable embedding has a vector"),
+            entry.validate()?;
+            match entry {
+                EmbeddingStageEntry::Available { .. } => available += 1,
+                EmbeddingStageEntry::Inactive { .. } => inactive += 1,
+                EmbeddingStageEntry::InferenceFailed { .. } => failed += 1,
             }
         }
         ensure!(
@@ -951,6 +1210,91 @@ impl EmbeddingStageDocument {
         );
         Ok(())
     }
+}
+
+fn checked_segmentation_value_count(shape: [usize; 3]) -> Result<usize> {
+    shape.iter().try_fold(1usize, |count, extent| {
+        ensure!(
+            *extent <= MAX_EMBEDDING_STAGE_VALUES,
+            "embedding-stage shape extent is too large"
+        );
+        count
+            .checked_mul(*extent)
+            .ok_or_else(|| color_eyre::eyre::eyre!("embedding-stage shape overflow"))
+    })
+}
+
+fn packed_mask_byte_count(value_count: usize) -> Result<usize> {
+    value_count
+        .checked_add(7)
+        .map(|count| count / 8)
+        .ok_or_else(|| color_eyre::eyre::eyre!("embedding-stage mask byte count overflow"))
+}
+
+fn ensure_mask_padding_is_zero(bytes: &[u8], value_count: usize) -> Result<()> {
+    if let Some(last) = bytes.last() {
+        let used_bits = value_count % 8;
+        if used_bits != 0 {
+            ensure!(
+                last & !((1_u8 << used_bits) - 1) == 0,
+                "embedding-stage segmentation mask has nonzero padding bits"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn decode_canonical_base64(value: &str, expected_bytes: usize, label: &str) -> Result<Vec<u8>> {
+    let expected_encoded_bytes = encoded_base64_len(expected_bytes)?;
+    ensure!(
+        value.len() == expected_encoded_bytes,
+        "{label} has {} encoded bytes, expected {expected_encoded_bytes}",
+        value.len()
+    );
+    let decoded = STANDARD
+        .decode(value)
+        .wrap_err_with(|| format!("{label} is not valid standard base64"))?;
+    ensure!(
+        decoded.len() == expected_bytes,
+        "{label} decodes to {} bytes, expected {expected_bytes}",
+        decoded.len()
+    );
+    ensure!(
+        STANDARD.encode(&decoded) == value,
+        "{label} is not canonical standard-padded base64"
+    );
+    Ok(decoded)
+}
+
+fn decode_bounded_canonical_base64(
+    value: &str,
+    maximum_bytes: usize,
+    label: &str,
+) -> Result<Vec<u8>> {
+    ensure!(
+        value.len() <= encoded_base64_len(maximum_bytes)?,
+        "{label} exceeds the encoded size bound"
+    );
+    let decoded = STANDARD
+        .decode(value)
+        .wrap_err_with(|| format!("{label} is not valid standard base64"))?;
+    ensure!(
+        decoded.len() <= maximum_bytes,
+        "{label} exceeds the decoded size bound"
+    );
+    ensure!(
+        STANDARD.encode(&decoded) == value,
+        "{label} is not canonical standard-padded base64"
+    );
+    Ok(decoded)
+}
+
+fn encoded_base64_len(decoded_bytes: usize) -> Result<usize> {
+    decoded_bytes
+        .checked_add(2)
+        .and_then(|bytes| bytes.checked_div(3))
+        .and_then(|groups| groups.checked_mul(4))
+        .ok_or_else(|| color_eyre::eyre::eyre!("base64 encoded length overflow"))
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -1799,10 +2143,13 @@ mod tests {
                     speakrs::imported_segmentation::OutputExtentPolicy::AggregateGrid,
             },
             segmentation_shape: [1, 1, 1],
-            segmentation_values: vec![1.0],
-            entries: vec![EmbeddingStageEntry {
-                availability: EmbeddingSlotAvailability::Available,
-                values: Some(vec![0.0; IMPORTED_EMBEDDING_WIDTH]),
+            segmentation_values: PackedSegmentationMask::try_from_values([1, 1, 1], &[1.0])
+                .unwrap(),
+            entries: vec![EmbeddingStageEntry::Available {
+                values: Box::new(
+                    EncodedEmbeddingVector::try_from_values(&[0.0; IMPORTED_EMBEDDING_WIDTH])
+                        .unwrap(),
+                ),
             }],
             embedding_receipt: AvailabilityCounts {
                 chunks: 1,
@@ -1977,17 +2324,114 @@ mod tests {
     }
 
     #[test]
-    fn embedding_snapshot_rejects_nonbinary_masks() {
+    fn embedding_snapshot_rejects_truncated_masks() {
         let mut document = valid_embedding_stage_document();
-        document.segmentation_values[0] = 0.5;
+        document.segmentation_values = PackedSegmentationMask::empty();
         assert!(document.validate().is_err());
     }
 
     #[test]
-    fn embedding_snapshot_rejects_wrong_vector_width() {
+    fn embedding_snapshot_round_trips_packed_masks_and_exact_vector_bits() {
         let mut document = valid_embedding_stage_document();
-        document.entries[0].values = Some(vec![0.0; IMPORTED_EMBEDDING_WIDTH - 1]);
-        assert!(document.validate().is_err());
+        let shape = [1, 9, 1];
+        let mask_values = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0];
+        document.segmentation_shape = shape;
+        document.segmentation_values =
+            PackedSegmentationMask::try_from_values(shape, &mask_values).unwrap();
+        assert_eq!(
+            serde_json::to_string(&document.segmentation_values).unwrap(),
+            "\"gQE=\""
+        );
+        let vector = (0..IMPORTED_EMBEDDING_WIDTH)
+            .map(|index| f32::from_bits(0x3f80_0000 + index as u32))
+            .collect::<Vec<_>>();
+        document.entries[0] = EmbeddingStageEntry::Available {
+            values: Box::new(EncodedEmbeddingVector::try_from_values(&vector).unwrap()),
+        };
+
+        document.validate().unwrap();
+        assert_eq!(document.decode_segmentation_values().unwrap(), mask_values);
+        let decoded = match &document.entries[0] {
+            EmbeddingStageEntry::Available { values } => values
+                .as_slice()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            _ => panic!("test entry is not available"),
+        };
+        assert_eq!(
+            decoded,
+            vector.into_iter().map(f32::to_bits).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn embedding_snapshot_serializes_compactly() {
+        let document = valid_embedding_stage_document();
+        let bytes = serde_json::to_vec(&document).unwrap();
+        assert!(!bytes.contains(&b'\n'));
+        assert!(
+            serde_json::from_slice::<EmbeddingStageDocument>(&bytes)
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn embedding_snapshot_rejects_mask_padding_bits() {
+        let mut document = valid_embedding_stage_document();
+        document.segmentation_values = PackedSegmentationMask(vec![0b0000_0011]);
+        let error = document.validate().unwrap_err();
+        assert!(error.to_string().contains("padding bits"));
+    }
+
+    #[test]
+    fn embedding_snapshot_rejects_noncanonical_base64() {
+        let encoded = serde_json::to_string("/x==").unwrap();
+        assert!(serde_json::from_str::<PackedSegmentationMask>(&encoded).is_err());
+    }
+
+    #[test]
+    fn embedding_snapshot_rejects_nonfinite_embedding_bits() {
+        let mut bytes = vec![0_u8; IMPORTED_EMBEDDING_WIDTH * std::mem::size_of::<f32>()];
+        bytes[..std::mem::size_of::<f32>()].copy_from_slice(&f32::NAN.to_le_bytes());
+        let encoded = serde_json::to_string(&STANDARD.encode(bytes)).unwrap();
+        assert!(serde_json::from_str::<EncodedEmbeddingVector>(&encoded).is_err());
+    }
+
+    #[test]
+    fn embedding_snapshot_rejects_wrong_vector_width() {
+        let values: Vec<f32> = vec![0.0; IMPORTED_EMBEDDING_WIDTH - 1];
+        let encoded = STANDARD.encode(
+            values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            serde_json::from_str::<EncodedEmbeddingVector>(
+                &serde_json::to_string(&encoded).unwrap()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn embedding_stage_entry_rejects_impossible_json_shapes() {
+        assert!(serde_json::from_str::<EmbeddingStageEntry>(r#"{"state":"available"}"#).is_err());
+        assert!(
+            serde_json::from_str::<EmbeddingStageEntry>(
+                r#"{"state":"inactive","reason":"no_activity","values":"AA=="}"#
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<EmbeddingStageEntry>(
+                r#"{"state":"inactive","reason":"no_activity","extra":true}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]
