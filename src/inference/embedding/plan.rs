@@ -4,8 +4,9 @@ use crate::inference::ExecutionMode;
 use crate::pipeline::RuntimeConfig;
 
 use super::{
-    CHUNK_SPEAKER_BATCH_SIZE, PRIMARY_BATCH_SIZE, batched_model_path, multi_mask_model_path,
-    split_fbank_batched_model_path, split_fbank_model_path, split_tail_model_path,
+    CHUNK_SPEAKER_BATCH_SIZE, MULTI_MASK_BATCH_SIZE, PRIMARY_BATCH_SIZE, batched_model_path,
+    multi_mask_model_path, split_fbank_batched_model_path, split_fbank_model_path,
+    split_tail_model_path,
 };
 #[cfg(feature = "coreml")]
 use super::{ChunkSessionSpec, EmbeddingModel, fp32_coreml_path};
@@ -137,7 +138,7 @@ impl EmbeddingExecutionPlan {
         };
         let multi_mask = MultiMaskPlan {
             single: multi_mask_model_path(model_path, 1).and_then(AssetSlot::if_exists),
-            batched: multi_mask_model_path(model_path, PRIMARY_BATCH_SIZE)
+            batched: multi_mask_model_path(model_path, MULTI_MASK_BATCH_SIZE)
                 .and_then(AssetSlot::if_exists),
             #[cfg(feature = "coreml")]
             native: native_slot(
@@ -377,7 +378,7 @@ mod tests {
         touch(&dir, "wespeaker-fbank-b32.onnx");
         touch(&dir, "wespeaker-voxceleb-resnet34-tail.onnx");
         touch(&dir, "wespeaker-multimask-tail.onnx");
-        touch(&dir, "wespeaker-multimask-tail-b64.onnx");
+        touch(&dir, "wespeaker-multimask-tail-b32.onnx");
         let plan = plan_for(&dir, ExecutionMode::Cpu);
         assert!(plan.fused.batched.is_some());
         assert!(plan.has_batched_fbank());
@@ -388,6 +389,18 @@ mod tests {
             super::super::MULTI_MASK_BATCH_SIZE
         );
         assert!(plan.load_ort_split());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cpu_mode_ignores_primary_sized_multi_mask_asset() {
+        let dir = scratch_dir("cpu-primary-sized-multi-mask");
+        touch(&dir, "wespeaker-voxceleb-resnet34.onnx");
+        touch(&dir, "wespeaker-multimask-tail.onnx");
+        touch(&dir, "wespeaker-multimask-tail-b64.onnx");
+        let plan = plan_for(&dir, ExecutionMode::Cpu);
+        assert!(plan.multi_mask.batched.is_none());
+        assert_eq!(plan.multi_mask_batch_size(), 1);
         let _ = fs::remove_dir_all(dir);
     }
 
