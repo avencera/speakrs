@@ -225,15 +225,25 @@ fn compute_fbanks_with_pool(
             })
             .collect();
         let mut results = Vec::with_capacity(audios.len());
+        let mut failure = None;
 
         for handle in handles {
-            let worker_results = handle
-                .join()
-                .map_err(|_| ort::Error::new("filterbank session pool worker panicked"))??;
-            results.extend(worker_results);
+            match handle.join() {
+                Ok(Ok(worker_results)) if failure.is_none() => results.extend(worker_results),
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) if failure.is_none() => failure = Some(error),
+                Ok(Err(_)) => {}
+                Err(_) if failure.is_none() => {
+                    failure = Some(ort::Error::new("filterbank session pool worker panicked"));
+                }
+                Err(_) => {}
+            }
         }
 
-        Ok(results)
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(results),
+        }
     })
 }
 

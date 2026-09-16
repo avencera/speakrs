@@ -604,20 +604,27 @@ impl std::error::Error for ExperimentInferenceConfigError {}
 
 /// Number of intra-operation threads for one ONNX Runtime session
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OrtThreadCount(std::num::NonZeroUsize);
+pub struct OrtThreadCount(std::num::NonZeroI32);
 
 impl OrtThreadCount {
     /// Create a nonzero ONNX Runtime thread count
     pub const fn new(threads: usize) -> Result<Self, OrtThreadCountError> {
-        match std::num::NonZeroUsize::new(threads) {
+        if threads == 0 {
+            return Err(OrtThreadCountError::Zero);
+        }
+        if threads > i32::MAX as usize {
+            return Err(OrtThreadCountError::TooLarge(threads));
+        }
+
+        match std::num::NonZeroI32::new(threads as i32) {
             Some(threads) => Ok(Self(threads)),
-            None => Err(OrtThreadCountError),
+            None => Err(OrtThreadCountError::Zero),
         }
     }
 
     /// Return the configured thread count
     pub const fn get(self) -> usize {
-        self.0.get()
+        self.0.get() as usize
     }
 }
 
@@ -628,14 +635,20 @@ impl Default for OrtThreadCount {
             .unwrap_or(1)
             .min(4);
 
-        Self(std::num::NonZeroUsize::new(threads).expect("thread count is at least one"))
+        Self(std::num::NonZeroI32::new(threads as i32).expect("thread count is at least one"))
     }
 }
 
-/// A zero ONNX Runtime thread count was requested
+/// Invalid ONNX Runtime thread count
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("ONNX Runtime thread count must be greater than zero")]
-pub struct OrtThreadCountError;
+pub enum OrtThreadCountError {
+    /// A zero thread count was requested
+    #[error("ONNX Runtime thread count must be greater than zero")]
+    Zero,
+    /// The thread count cannot be represented by the ONNX Runtime C API
+    #[error("ONNX Runtime thread count must fit in a positive 32-bit signed integer, got {0}")]
+    TooLarge(usize),
+}
 
 /// CPU filterbank session pool policy
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -832,13 +845,25 @@ mod clean_frame_duration_tests {
 
     #[test]
     fn ort_thread_count_rejects_zero() {
-        assert_eq!(OrtThreadCount::new(0), Err(OrtThreadCountError));
+        assert_eq!(OrtThreadCount::new(0), Err(OrtThreadCountError::Zero));
         assert_eq!(OrtThreadCount::new(3).unwrap().get(), 3);
     }
 
     #[test]
+    fn ort_thread_count_stays_within_the_c_api_range() {
+        assert_eq!(
+            OrtThreadCount::new(i32::MAX as usize).unwrap().get(),
+            i32::MAX as usize
+        );
+        assert_eq!(
+            OrtThreadCount::new(i32::MAX as usize + 1),
+            Err(OrtThreadCountError::TooLarge(i32::MAX as usize + 1))
+        );
+    }
+
+    #[test]
     fn fbank_pool_models_disabled_automatic_and_fixed_policies() {
-        let threads = OrtThreadCount::new(usize::MAX).unwrap();
+        let threads = OrtThreadCount::new(i32::MAX as usize).unwrap();
 
         assert_eq!(FbankSessionPool::Disabled.resolve(threads), 0);
         assert_eq!(FbankSessionPool::Automatic.resolve(threads), 1);
