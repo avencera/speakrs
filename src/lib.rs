@@ -269,11 +269,11 @@ pub use models::ModelManager;
 pub use pipeline::{
     ActivityCleanup, AhcConfig, AhcConfigError, BatchInput, ClusteringBackend, ClusteringConfig,
     ClusteringConfigError, DiarizationPipeline, DiarizationResult, FbankSessionPool,
-    FbankSessionPoolSizeError, OrtThreadCount, OrtThreadCountError, OwnedDiarizationPipeline,
-    PipelineBuilder, PipelineConfig, PipelineError, QueueConfig, QueueError, QueueReceiver,
-    QueueReceiverIter, QueueSender, QueuedDiarizationJobId, QueuedDiarizationRequest,
-    QueuedDiarizationResult, ReconstructError, ResponsibilityInitialization, RuntimeConfig,
-    VbxConfig, VbxConfigError,
+    FbankSessionPoolSize, FbankSessionPoolSizeError, OrtThreadCount, OrtThreadCountError,
+    OwnedDiarizationPipeline, PipelineBuilder, PipelineConfig, PipelineError, QueueConfig,
+    QueueError, QueueReceiver, QueueReceiverIter, QueueSender, QueuedDiarizationJobId,
+    QueuedDiarizationRequest, QueuedDiarizationResult, ReconstructError,
+    ResponsibilityInitialization, RuntimeConfig, VbxConfig, VbxConfigError,
 };
 pub use segment::Segment;
 
