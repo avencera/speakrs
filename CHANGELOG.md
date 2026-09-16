@@ -7,6 +7,9 @@
 - Remove `QueueSender::push`; callers submit work with `try_push`
 - Remove `QueueError::Terminal`; a finished worker reports `Closed` or `WorkerPanicked`
 - Replace split `PipelineConfig` clustering and activity fields with checked `ClusteringConfig` and `ActivityCleanup`
+- Add activation-aware `DiarizationResult::exclusive_segments` and remove the obsolete `DiscreteDiarization::make_exclusive` binary tie-breaker
+- Add checked filterbank session-pool and thread settings to `RuntimeConfig`
+- Add `OwnedDiarizationPipeline::clone_shared` for concurrent pipelines that share model sessions
 
 ## [0.5.0] - 2026-07-07
 

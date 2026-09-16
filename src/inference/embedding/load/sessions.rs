@@ -140,7 +140,7 @@ impl LoadedSessions {
             |path| EmbeddingModel::build_session(path, mode),
         )?);
         let (split_fbank_pool, split_fbank_pool_elapsed) = timed!(load_fbank_pool(
-            load_ort_split && !mode.is_coreml(),
+            load_ort_split,
             plan.split_fbank.single.as_ref(),
             config,
         )?);
