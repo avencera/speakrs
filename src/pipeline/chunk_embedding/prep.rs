@@ -374,6 +374,16 @@ mod tests {
             ),
             Some(SelectedFbankModel::TenSecond(&10))
         );
+
+        assert_eq!(
+            select_fbank_model(
+                480_000,
+                ChunkFbankNormalizationScope::TenSecondSegments,
+                Some(&30),
+                None,
+            ),
+            None
+        );
     }
 
     #[test]
