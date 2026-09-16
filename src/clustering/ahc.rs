@@ -343,6 +343,15 @@ mod tests {
     }
 
     #[test]
+    fn zero_threshold_keeps_close_vectors_separate() {
+        let embeddings = array![[1.0, 0.0], [1.0, 1e-5]];
+
+        let labels = cluster(&embeddings.view(), AhcConfig::new(0.0).unwrap());
+
+        assert_ne!(labels[0], labels[1]);
+    }
+
+    #[test]
     fn blocked_distances_are_identical_across_worker_counts() {
         let embeddings = Array2::from_shape_fn((1_030, 8), |(row, col)| {
             ((row * 17 + col * 31) % 97) as f32 / 97.0
