@@ -126,8 +126,21 @@ fn condensed_euclidean_with_workers(embeddings: &Array2<f32>, workers: usize) ->
                     for (local_row, row) in (block_start..block_end).enumerate() {
                         for col in row + 1..observations {
                             let dot = gram[[local_row, col - block_start]];
-                            let squared_distance =
-                                (squared_norms[row] + squared_norms[col] - 2.0 * dot).max(0.0);
+                            let gram_distance = squared_norms[row] + squared_norms[col] - 2.0 * dot;
+                            // avoid cancellation changing distinct close vectors into duplicates
+                            let squared_distance = if gram_distance <= 1e-6 {
+                                embeddings
+                                    .row(row)
+                                    .iter()
+                                    .zip(embeddings.row(col))
+                                    .map(|(left, right)| {
+                                        let delta = left - right;
+                                        delta * delta
+                                    })
+                                    .sum()
+                            } else {
+                                gram_distance
+                            };
                             output[output_index] = squared_distance.sqrt();
                             output_index += 1;
                         }
@@ -313,11 +326,20 @@ mod tests {
 
             for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
                 assert!(
-                    (actual - expected).abs() <= 1e-3,
+                    (actual - expected).abs() <= 1e-5,
                     "distance {index} differs with {workers} workers: {actual} != {expected}"
                 );
             }
         }
+    }
+
+    #[test]
+    fn blocked_distances_preserve_distinct_close_vectors() {
+        let embeddings = array![[1.0, 0.0], [1.0, 1e-5]];
+
+        let distances = condensed_euclidean_with_workers(&embeddings, 1);
+
+        assert_eq!(distances, vec![1e-5]);
     }
 
     #[test]
