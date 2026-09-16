@@ -616,10 +616,9 @@ impl OrtThreadCount {
             return Err(OrtThreadCountError::TooLarge(threads));
         }
 
-        match std::num::NonZeroI32::new(threads as i32) {
-            Some(threads) => Ok(Self(threads)),
-            None => Err(OrtThreadCountError::Zero),
-        }
+        Ok(Self(
+            std::num::NonZeroI32::new(threads as i32).expect("thread count is nonzero"),
+        ))
     }
 
     /// Return the configured thread count

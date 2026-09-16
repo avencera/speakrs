@@ -84,11 +84,6 @@ impl Deref for DiscreteDiarization {
 }
 
 impl DiscreteDiarization {
-    /// Zero out all but the highest-scoring speaker in each frame, making activations exclusive
-    pub fn make_exclusive(&mut self) {
-        crate::reconstruct::make_exclusive(&mut self.0);
-    }
-
     /// Convert frame activations to time-stamped speaker segments using default frame timing.
     pub fn to_segments(&self) -> Vec<crate::segment::Segment> {
         self.to_segments_with(

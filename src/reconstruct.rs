@@ -228,29 +228,6 @@ impl<'a> Reconstructor<'a> {
     }
 }
 
-/// Zero out all but the highest-scoring speaker in each frame, making activations exclusive
-pub fn make_exclusive(activations: &mut Array2<f32>) {
-    for mut row in activations.rows_mut() {
-        let max_val = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-        if max_val == 0.0 {
-            continue;
-        }
-
-        let argmax = row
-            .iter()
-            .enumerate()
-            .max_by(|(_, lhs), (_, rhs)| lhs.total_cmp(rhs))
-            .map(|(idx, _)| idx)
-            .unwrap_or(0);
-
-        for (column_idx, value) in row.iter_mut().enumerate() {
-            if column_idx != argmax {
-                *value = 0.0;
-            }
-        }
-    }
-}
-
 fn build_cluster_mapping(
     chunk_labels: &ndarray::ArrayView1<i32>,
     num_clusters: usize,
