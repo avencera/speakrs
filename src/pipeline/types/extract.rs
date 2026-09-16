@@ -133,6 +133,7 @@ impl DecodedSegmentations {
         let batch_size = emb_model.split_primary_batch_size();
         let num_speakers = self.0.shape()[2];
         let min_num_samples = emb_model.min_num_samples();
+        let pooling_frames = emb_model.pooling_frames();
 
         let mut storage = Array3Writer(embeddings);
         let mut pending: Vec<PendingSplitEmbedding> = Vec::with_capacity(batch_size);
@@ -156,6 +157,7 @@ impl DecodedSegmentations {
                     speaker_idx,
                     chunk_audio.len(),
                     min_num_samples,
+                    pooling_frames,
                 ) else {
                     continue;
                 };
@@ -209,6 +211,7 @@ impl DecodedSegmentations {
         let num_speakers = self.0.shape()[2];
         let num_chunks = self.0.shape()[0];
         let min_num_samples = emb_model.min_num_samples();
+        let pooling_frames = emb_model.pooling_frames();
 
         let mut storage = Array3Writer(embeddings);
         let mut fbank_buffer: Vec<Array2<f32>> = Vec::with_capacity(batch_size);
@@ -232,6 +235,7 @@ impl DecodedSegmentations {
                     speaker_idx,
                     chunk_audio.len(),
                     min_num_samples,
+                    pooling_frames,
                 ) else {
                     masks_buffer.push(vec![0.0; 589]);
                     continue;

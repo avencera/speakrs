@@ -11,10 +11,10 @@ use crate::imported_segmentation::{
 };
 use crate::inference::embedding::{
     EmbeddingFrontend, EmbeddingInputGeometry, EmbeddingMaskInterpolation, EmbeddingModel,
-    EmbeddingPooling, EmbeddingPrecision, clean_mask_threshold,
+    EmbeddingPooling, EmbeddingPrecision, should_use_clean_mask_slice,
 };
 
-use super::config::PipelineConfig;
+use super::config::{MIN_SPEAKER_ACTIVITY, PipelineConfig};
 use super::imported_decoder::{ImportedDecodeError, ImportedSegmentationDecoder};
 use super::types::{
     DecodedSegmentations, EmbeddingAvailability, EmbeddingMaskChoice, EmbeddingStageSnapshot,
@@ -265,12 +265,9 @@ impl<'a> ImportedDiarizationPipeline<'a> {
             for speaker_idx in 0..speakers {
                 let mask = chunk.column(speaker_idx).to_vec();
                 let clean_mask = clean_masks.column(speaker_idx).to_vec();
-                let active = mask.iter().any(|value| *value > 0.0);
-                if !active {
+                if let Some(reason) = inactive_embedding_reason(&mask) {
                     outcomes.push(TypedEmbedding {
-                        availability: EmbeddingAvailability::Inactive {
-                            reason: InactiveEmbeddingReason::NoActivity,
-                        },
+                        availability: EmbeddingAvailability::Inactive { reason },
                         values: None,
                         mask_choice: None,
                     });
@@ -282,6 +279,7 @@ impl<'a> ImportedDiarizationPipeline<'a> {
                     &clean_mask,
                     self.emb_model.window_samples(),
                     self.emb_model.min_num_samples(),
+                    self.emb_model.pooling_frames(),
                 );
                 let choice = match selection {
                     ImportedMaskSelection::Clean => EmbeddingMaskChoice::Clean,
@@ -306,6 +304,18 @@ impl<'a> ImportedDiarizationPipeline<'a> {
         );
         Ok(outcomes)
     }
+}
+
+fn inactive_embedding_reason(mask: &[f32]) -> Option<InactiveEmbeddingReason> {
+    let activity = mask.iter().copied().sum::<f32>();
+    if activity == 0.0 {
+        return Some(InactiveEmbeddingReason::NoActivity);
+    }
+    if activity < MIN_SPEAKER_ACTIVITY {
+        return Some(InactiveEmbeddingReason::InsufficientActivity);
+    }
+
+    None
 }
 
 fn admit_embedding_result(
@@ -645,10 +655,10 @@ pub(crate) fn choose_mask(
     clean_mask: &[f32],
     window_samples: usize,
     min_num_samples: usize,
+    pooling_frames: usize,
 ) -> ImportedMaskSelection {
-    let threshold = clean_mask_threshold(mask.len(), window_samples, min_num_samples);
-    let clean_activity: f32 = clean_mask.iter().copied().sum();
-    if threshold.is_some_and(|threshold| clean_activity > threshold as f32) {
+    debug_assert_eq!(mask.len(), clean_mask.len());
+    if should_use_clean_mask_slice(clean_mask, window_samples, min_num_samples, pooling_frames) {
         ImportedMaskSelection::Clean
     } else {
         ImportedMaskSelection::Full
@@ -714,19 +724,50 @@ mod tests {
 
     #[test]
     fn clean_mask_falls_back_at_the_strict_threshold() {
+        let mut below_threshold = [0.0; 399];
+        below_threshold[..4].fill(1.0);
+        let mut above_threshold = [0.0; 399];
+        above_threshold[..6].fill(1.0);
+
         assert_eq!(
-            choose_mask(&[1.0; 399], &[1.0, 1.0, 1.0, 0.0], 128_000, 1_284),
+            choose_mask(&[1.0; 399], &below_threshold, 128_000, 1_284, 100),
             ImportedMaskSelection::Full
         );
         assert_eq!(
-            choose_mask(
-                &[1.0; 399],
-                &[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0],
-                128_000,
-                1_284,
-            ),
+            choose_mask(&[1.0; 399], &above_threshold, 128_000, 1_284, 100,),
             ImportedMaskSelection::Clean
         );
+    }
+
+    #[test]
+    fn clean_mask_falls_back_when_pooling_resize_drops_all_activity() {
+        let full = [1.0; 399];
+        let mut clean = [0.0; 399];
+        clean[176..179].fill(1.0);
+
+        assert_eq!(
+            choose_mask(&full, &clean, 128_000, 400, 100),
+            ImportedMaskSelection::Full
+        );
+
+        clean[175] = 1.0;
+        assert_eq!(
+            choose_mask(&full, &clean, 128_000, 400, 100),
+            ImportedMaskSelection::Clean
+        );
+    }
+
+    #[test]
+    fn embedding_activity_must_reach_the_pipeline_threshold() {
+        assert_eq!(
+            inactive_embedding_reason(&[0.0; 10]),
+            Some(InactiveEmbeddingReason::NoActivity)
+        );
+        assert_eq!(
+            inactive_embedding_reason(&[1.0, 0.0, 0.0]),
+            Some(InactiveEmbeddingReason::InsufficientActivity)
+        );
+        assert_eq!(inactive_embedding_reason(&[1.0; 10]), None);
     }
 
     #[test]

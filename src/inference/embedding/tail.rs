@@ -62,6 +62,7 @@ impl EmbeddingModel {
                 Some(array1_slice(&clean_mask, "chunk tail clean mask")?),
                 self.mask_selection_window_samples(audio.len()),
                 self.meta.min_num_samples,
+                self.meta.pooling_frames,
             );
             let embedding = self.embed_tail_single(&fbank, used_mask)?;
             embeddings.row_mut(speaker_idx).assign(&embedding);
@@ -176,6 +177,7 @@ impl EmbeddingModel {
                     self.meta.geometry.window_samples(),
                 ),
                 self.meta.min_num_samples,
+                self.meta.pooling_frames,
             );
             let weights: Vec<f32> = if use_clean {
                 clean_col.iter().copied().collect()

@@ -262,6 +262,9 @@ pub(crate) fn document_availability(
         EmbeddingAvailability::Inactive { reason } => EmbeddingSlotAvailability::Inactive {
             reason: match reason {
                 InactiveEmbeddingReason::NoActivity => EmbeddingInactiveReason::NoActivity,
+                InactiveEmbeddingReason::InsufficientActivity => {
+                    EmbeddingInactiveReason::InsufficientActivity
+                }
             },
         },
         EmbeddingAvailability::InferenceFailed { reason } => {
@@ -290,6 +293,9 @@ pub(crate) fn library_availability(
         EmbeddingSlotAvailability::Inactive { reason } => EmbeddingAvailability::Inactive {
             reason: match reason {
                 EmbeddingInactiveReason::NoActivity => InactiveEmbeddingReason::NoActivity,
+                EmbeddingInactiveReason::InsufficientActivity => {
+                    InactiveEmbeddingReason::InsufficientActivity
+                }
             },
         },
         EmbeddingSlotAvailability::InferenceFailed { reason } => {

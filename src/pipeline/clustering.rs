@@ -6,7 +6,7 @@ use crate::clustering::plda::PldaTransform;
 #[cfg(feature = "_metrics")]
 use crate::clustering::sphere_vbx::cluster_sphere_vbx_pf;
 use crate::clustering::vbx::cluster_vbx;
-use crate::inference::embedding::should_use_clean_mask;
+use crate::inference::embedding::{clean_mask_is_eligible, should_use_clean_mask};
 use crate::utils::cosine_similarity;
 
 use super::config::ClusteringBackend;
@@ -385,6 +385,7 @@ pub(crate) fn select_speaker_weights(
     speaker_idx: usize,
     audio_len: usize,
     min_num_samples: usize,
+    pooling_frames: usize,
 ) -> Option<Vec<f32>> {
     let mask_col = seg_view.column(speaker_idx);
     let activity: f32 = mask_col.iter().sum();
@@ -393,7 +394,13 @@ pub(crate) fn select_speaker_weights(
     }
 
     let clean_col = clean_masks.column(speaker_idx);
-    let use_clean = should_use_clean_mask(&clean_col, mask_col.len(), audio_len, min_num_samples);
+    let use_clean = should_use_clean_mask(
+        &clean_col,
+        mask_col.len(),
+        audio_len,
+        min_num_samples,
+        pooling_frames,
+    );
     if use_clean {
         Some(clean_col.iter().copied().collect())
     } else {
@@ -408,6 +415,7 @@ pub(crate) fn write_speaker_mask_to_slice(
     speaker_idx: usize,
     audio_len: usize,
     min_num_samples: usize,
+    pooling_frames: usize,
     dest: &mut [f32],
 ) -> bool {
     let mask_col = seg_view.column(speaker_idx);
@@ -427,11 +435,21 @@ pub(crate) fn write_speaker_mask_to_slice(
         }
     }
 
-    // inline should_use_clean_mask logic
-    let use_clean = audio_len > 0 && {
-        let min_mask_frames = (nrows * min_num_samples).div_ceil(audio_len) as f32;
-        clean_sum > min_mask_frames
-    };
+    let use_clean = clean_mask_is_eligible(
+        nrows,
+        audio_len,
+        min_num_samples,
+        pooling_frames,
+        clean_sum,
+        |row_idx| {
+            let row_sum: f32 = seg_view.row(row_idx).iter().sum();
+            if row_sum < 2.0 {
+                seg_view[[row_idx, speaker_idx]]
+            } else {
+                0.0
+            }
+        },
+    );
 
     let copy_len = nrows.min(dest.len());
     if use_clean {
@@ -486,6 +504,7 @@ mod tests {
                 speaker_idx,
                 audio_len,
                 min_num_samples,
+                seg.nrows(),
             );
 
             let mut dest = vec![0.0f32; seg.nrows()];
@@ -494,6 +513,7 @@ mod tests {
                 speaker_idx,
                 audio_len,
                 min_num_samples,
+                seg.nrows(),
                 &mut dest,
             );
 

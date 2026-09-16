@@ -23,6 +23,7 @@ impl EmbeddingModel {
             clean_mask,
             self.mask_selection_window_samples(audio.len()),
             self.meta.min_num_samples,
+            self.meta.pooling_frames,
         );
         self.embed_single(audio, used_mask)
     }

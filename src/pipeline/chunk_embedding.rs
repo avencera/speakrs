@@ -43,6 +43,7 @@ struct ChunkParams {
     window_samples: usize,
     num_speakers: usize,
     min_num_samples: usize,
+    pooling_frames: usize,
     segmentation_workers: usize,
     fbank_preparation_workers: usize,
     fbank_normalization_scope: ChunkFbankNormalizationScope,
@@ -95,6 +96,7 @@ pub(crate) fn try_chunk_embedding(
         window_samples: plan.layout.window_samples(),
         num_speakers: 3,
         min_num_samples: emb_model.min_num_samples(),
+        pooling_frames: emb_model.pooling_frames(),
         segmentation_workers: execution_policy.segmentation_workers,
         fbank_preparation_workers: execution_policy.fbank_preparation_workers,
         fbank_normalization_scope: execution_policy.fbank_normalization_scope,
@@ -241,6 +243,7 @@ pub(crate) fn try_batch_chunk_embedding(
     let window_samples = seg_model.window_samples();
     let num_speakers = 3usize;
     let min_num_samples = emb_model.min_num_samples();
+    let pooling_frames = emb_model.pooling_frames();
     let segmentation_workers = execution_policy.segmentation_workers;
     let fbank_preparation_workers = execution_policy.fbank_preparation_workers;
 
@@ -280,6 +283,7 @@ pub(crate) fn try_batch_chunk_embedding(
         window_samples,
         num_speakers,
         min_num_samples,
+        pooling_frames,
         largest_fbank_frames: largest.fbank_frames,
         largest_num_masks: largest.num_masks,
         max_active: largest.num_windows * num_speakers,

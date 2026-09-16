@@ -92,6 +92,7 @@ pub(crate) fn run_pipelined<'scope>(
         window_samples: params.window_samples,
         num_speakers: params.num_speakers,
         min_num_samples: params.min_num_samples,
+        pooling_frames: params.pooling_frames,
         largest_fbank_frames: largest.fbank_frames,
         largest_num_masks: largest.num_masks,
         max_active,
@@ -252,6 +253,7 @@ pub(crate) fn run_sequential_chunks(
             window_samples: params.window_samples,
             num_speakers: params.num_speakers,
             min_num_samples: params.min_num_samples,
+            pooling_frames: params.pooling_frames,
             num_masks: sess_num_masks,
             max_active: sess_num_masks,
         }

@@ -60,6 +60,7 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
         let mut pending: Vec<PendingSplitEmbedding> = Vec::with_capacity(batch_size);
         let mut fbanks: Vec<Array2<f32>> = Vec::new();
         let mut chunk_idx = 0usize;
+        let pooling_frames = embedding_model.pooling_frames();
 
         for raw_window in receiver {
             let decoded = self.powerset.hard_decode(&raw_window)?;
@@ -89,6 +90,7 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
                     speaker_idx,
                     chunk_audio.len(),
                     min_num_samples,
+                    pooling_frames,
                 ) else {
                     continue;
                 };
@@ -150,6 +152,7 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
         let mut active_flags: Vec<bool> = Vec::with_capacity(mask_capacity);
         let mut chunk_indices: Vec<usize> = Vec::with_capacity(batch_size);
         let mut chunk_idx = 0usize;
+        let pooling_frames = embedding_model.pooling_frames();
 
         let mut total_recv_wait_us = 0u64;
         let mut total_decode_us = 0u64;
@@ -198,6 +201,7 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
                     speaker_idx,
                     chunk_audio.len(),
                     min_num_samples,
+                    pooling_frames,
                     dest,
                 );
                 active_flags.push(active);

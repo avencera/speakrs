@@ -823,6 +823,7 @@ pub enum EmbeddingSlotAvailability {
 #[serde(rename_all = "snake_case")]
 pub enum EmbeddingInactiveReason {
     NoActivity,
+    InsufficientActivity,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

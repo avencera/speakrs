@@ -35,6 +35,7 @@ impl EmbeddingModel {
                         self.meta.geometry.window_samples(),
                     ),
                     self.meta.min_num_samples,
+                    self.meta.pooling_frames,
                 );
                 Self::prepare_waveform(
                     batch_idx,

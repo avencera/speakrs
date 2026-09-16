@@ -50,6 +50,8 @@ impl Deref for ChunkEmbeddings {
 pub enum InactiveEmbeddingReason {
     /// The decoded speaker mask contains no active frames
     NoActivity,
+    /// The decoded speaker mask is too short for stable embedding inference
+    InsufficientActivity,
 }
 
 /// Closed reason why a model-backed embedding is unavailable

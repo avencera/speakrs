@@ -125,6 +125,7 @@ impl ChunkPrep {
             window_samples: self.window_samples,
             num_speakers: self.num_speakers,
             min_num_samples: self.min_num_samples,
+            pooling_frames: self.pooling_frames,
             num_masks: self.largest_num_masks,
             max_active: self.max_active,
         }
@@ -147,6 +148,7 @@ pub(super) struct SpeakerMaskLayout {
     pub(super) window_samples: usize,
     pub(super) num_speakers: usize,
     pub(super) min_num_samples: usize,
+    pub(super) pooling_frames: usize,
     pub(super) num_masks: usize,
     pub(super) max_active: usize,
 }
@@ -176,6 +178,7 @@ impl SpeakerMaskLayout {
                     speaker_idx,
                     win_audio.len(),
                     self.min_num_samples,
+                    self.pooling_frames,
                     dest,
                 ) {
                     active.push((local_idx, speaker_idx));
@@ -235,6 +238,7 @@ pub(super) struct ChunkPrep {
     pub(super) window_samples: usize,
     pub(super) num_speakers: usize,
     pub(super) min_num_samples: usize,
+    pub(super) pooling_frames: usize,
     pub(super) largest_fbank_frames: usize,
     pub(super) largest_num_masks: usize,
     pub(super) max_active: usize,

@@ -276,6 +276,7 @@ impl EmbeddingModel {
             clean_mask,
             self.mask_selection_window_samples(num_samples),
             self.meta.min_num_samples,
+            self.meta.pooling_frames,
         )
     }
 
@@ -359,13 +360,58 @@ pub(crate) fn should_use_clean_mask(
     mask_len: usize,
     window_samples: usize,
     min_num_samples: usize,
+    pooling_frames: usize,
+) -> bool {
+    let clean_weight = clean_col.iter().copied().sum();
+    clean_mask_is_eligible(
+        mask_len,
+        window_samples,
+        min_num_samples,
+        pooling_frames,
+        clean_weight,
+        |index| clean_col[index],
+    )
+}
+
+pub(crate) fn should_use_clean_mask_slice(
+    clean_mask: &[f32],
+    window_samples: usize,
+    min_num_samples: usize,
+    pooling_frames: usize,
+) -> bool {
+    let clean_weight = clean_mask.iter().copied().sum();
+    clean_mask_is_eligible(
+        clean_mask.len(),
+        window_samples,
+        min_num_samples,
+        pooling_frames,
+        clean_weight,
+        |index| clean_mask[index],
+    )
+}
+
+pub(crate) fn clean_mask_is_eligible(
+    mask_len: usize,
+    window_samples: usize,
+    min_num_samples: usize,
+    pooling_frames: usize,
+    clean_weight: f32,
+    clean_value: impl Fn(usize) -> f32,
 ) -> bool {
     let Some(min_mask_frames) = clean_mask_threshold(mask_len, window_samples, min_num_samples)
     else {
         return false;
     };
-    let clean_weight: f32 = clean_col.iter().copied().sum();
-    clean_weight > min_mask_frames as f32
+    if clean_weight <= min_mask_frames as f32 || pooling_frames == 0 {
+        return false;
+    }
+
+    // PyTorch nearest maps each target index to floor(target * source / target_count)
+    (0..pooling_frames).any(|target_index| {
+        let source_index =
+            ((target_index as u128) * (mask_len as u128) / (pooling_frames as u128)) as usize;
+        clean_value(source_index) > 0.0
+    })
 }
 
 #[cfg(test)]
@@ -378,7 +424,7 @@ mod tests {
         let mask = [1.0, 1.0, 1.0, 0.0];
         let clean = [1.0, 1.0, 1.0, 0.0];
 
-        let selected = select_mask(&mask, Some(&clean), 16_000, 6_000);
+        let selected = select_mask(&mask, Some(&clean), 16_000, 6_000, 4);
 
         assert_eq!(selected, clean);
     }
@@ -400,11 +446,11 @@ mod tests {
         assert_eq!(legacy_window, 8_000);
         assert_eq!(imported_window, 128_000);
         assert_eq!(
-            select_mask(&mask, Some(&clean), legacy_window, 100),
+            select_mask(&mask, Some(&clean), legacy_window, 100, 100),
             mask.as_slice()
         );
         assert_eq!(
-            select_mask(&mask, Some(&clean), imported_window, 100),
+            select_mask(&mask, Some(&clean), imported_window, 100, 100),
             clean.as_slice()
         );
     }
@@ -414,7 +460,7 @@ mod tests {
         let mask = [1.0, 1.0, 1.0, 0.0];
         let clean = [1.0, 0.0, 0.0, 0.0];
 
-        let selected = select_mask(&mask, Some(&clean), 16_000, 6_000);
+        let selected = select_mask(&mask, Some(&clean), 16_000, 6_000, 4);
 
         assert_eq!(selected, mask);
     }
@@ -429,13 +475,26 @@ mod tests {
             4,
             16_000,
             6_000,
+            4,
         ));
         assert!(should_use_clean_mask(
             &above_threshold.view(),
             4,
             16_000,
             6_000,
+            4,
         ));
+    }
+
+    #[test]
+    fn clean_mask_must_survive_nearest_pooling_resize() {
+        let mut clean = vec![0.0; 399];
+        clean[176..179].fill(1.0);
+
+        assert!(!should_use_clean_mask_slice(&clean, 128_000, 400, 100));
+
+        clean[175] = 1.0;
+        assert!(should_use_clean_mask_slice(&clean, 128_000, 400, 100));
     }
 
     #[test]
