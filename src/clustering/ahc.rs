@@ -49,31 +49,127 @@ pub fn cluster(embeddings: &ArrayView2<f32>, config: AhcConfig) -> Vec<usize> {
     }
 
     let normalized = l2_normalize_rows(embeddings);
+    let distance_start = std::time::Instant::now();
     let mut condensed = condensed_euclidean(&normalized);
+    let distance_ms = distance_start.elapsed().as_millis();
+    let linkage_start = std::time::Instant::now();
     let dendrogram = linkage(&mut condensed, observations, Method::Centroid);
-    flat_clusters(observations, dendrogram.steps(), config.threshold())
+    let linkage_ms = linkage_start.elapsed().as_millis();
+    let flat_start = std::time::Instant::now();
+    let labels = flat_clusters(observations, dendrogram.steps(), config.threshold());
+    tracing::debug!(
+        observations,
+        distance_ms,
+        linkage_ms,
+        flat_ms = flat_start.elapsed().as_millis(),
+        "AHC stage timing"
+    );
+
+    labels
 }
 
 fn condensed_euclidean(embeddings: &Array2<f32>) -> Vec<f32> {
+    condensed_euclidean_with_workers(embeddings, pdist_worker_count())
+}
+
+fn condensed_euclidean_with_workers(embeddings: &Array2<f32>, workers: usize) -> Vec<f32> {
     let observations = embeddings.nrows();
-    let mut condensed = Vec::with_capacity(observations * (observations - 1) / 2);
-    for row in 0..observations.saturating_sub(1) {
-        for col in row + 1..observations {
-            let lhs = embeddings.row(row);
-            let rhs = embeddings.row(col);
-            let distance = lhs
-                .iter()
-                .zip(rhs.iter())
-                .map(|(left, right)| {
-                    let delta = left - right;
-                    delta * delta
-                })
-                .sum::<f32>()
-                .sqrt();
-            condensed.push(distance);
+    if observations < 2 {
+        return Vec::new();
+    }
+
+    let mut condensed = vec![0.0; observations * (observations - 1) / 2];
+    let squared_norms: Vec<f32> = embeddings
+        .rows()
+        .into_iter()
+        .map(|row| row.dot(&row))
+        .collect();
+
+    const BLOCK_SIZE: usize = 1024;
+    let row_offset = |row: usize| row * (observations - 1) - row * row.saturating_sub(1) / 2;
+
+    // each block owns a contiguous output slice, so workers need no write lock
+    let mut blocks = Vec::new();
+    {
+        let mut remaining = condensed.as_mut_slice();
+        let mut consumed = 0;
+        let mut block_start = 0;
+        while block_start < observations - 1 {
+            let block_end = (block_start + BLOCK_SIZE).min(observations - 1);
+            let end_offset = row_offset(block_end);
+            let (block, tail) = remaining.split_at_mut(end_offset - consumed);
+            blocks.push((block_start, block_end, block));
+            remaining = tail;
+            consumed = end_offset;
+            block_start = block_end;
         }
     }
+
+    // a bounded queue limits the number of live Gram matrices
+    blocks.reverse();
+    let workers = workers.max(1).min(blocks.len());
+    let blocks = std::sync::Mutex::new(blocks);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let next = blocks.lock().expect("pdist queue poisoned").pop();
+                    let Some((block_start, block_end, output)) = next else {
+                        break;
+                    };
+
+                    let left = embeddings.slice(ndarray::s![block_start..block_end, ..]);
+                    let right = embeddings.slice(ndarray::s![block_start.., ..]);
+                    let gram = left.dot(&right.t());
+                    let mut output_index = 0;
+
+                    for (local_row, row) in (block_start..block_end).enumerate() {
+                        for col in row + 1..observations {
+                            let dot = gram[[local_row, col - block_start]];
+                            let gram_distance = squared_norms[row] + squared_norms[col] - 2.0 * dot;
+                            // avoid cancellation changing distinct close vectors into duplicates
+                            let squared_distance = if gram_distance <= 1e-6 {
+                                embeddings
+                                    .row(row)
+                                    .iter()
+                                    .zip(embeddings.row(col))
+                                    .map(|(left, right)| {
+                                        let delta = left - right;
+                                        delta * delta
+                                    })
+                                    .sum()
+                            } else {
+                                gram_distance
+                            };
+                            output[output_index] = squared_distance.sqrt();
+                            output_index += 1;
+                        }
+                    }
+                }
+            });
+        }
+    });
+
     condensed
+}
+
+fn pdist_worker_count() -> usize {
+    std::env::var("SPEAKRS_AHC_THREADS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|workers| *workers > 0)
+        .unwrap_or_else(|| {
+            let available = std::thread::available_parallelism()
+                .map(std::num::NonZeroUsize::get)
+                .unwrap_or(1);
+            let matrix_workers = std::env::var("MATMUL_NUM_THREADS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(available)
+                .clamp(1, 4);
+
+            available.div_ceil(matrix_workers).min(8)
+        })
 }
 
 fn flat_clusters(observations: usize, steps: &[Step<f32>], threshold: f32) -> Vec<usize> {
@@ -189,6 +285,98 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("fixtures")
             .join(name)
+    }
+
+    fn condensed_euclidean_reference(embeddings: &Array2<f32>) -> Vec<f32> {
+        let observations = embeddings.nrows();
+        let mut condensed = Vec::with_capacity(observations * observations.saturating_sub(1) / 2);
+
+        for row in 0..observations.saturating_sub(1) {
+            for col in row + 1..observations {
+                let squared_distance = embeddings
+                    .row(row)
+                    .iter()
+                    .zip(embeddings.row(col))
+                    .map(|(left, right)| {
+                        let delta = left - right;
+                        delta * delta
+                    })
+                    .sum::<f32>();
+                condensed.push(squared_distance.sqrt());
+            }
+        }
+
+        condensed
+    }
+
+    #[test]
+    fn blocked_distances_match_scalar_reference() {
+        let rows = 1_030;
+        let cols = 16;
+        let data = (0..rows * cols)
+            .map(|index| ((index * 37 % 101) as f32 / 101.0) - 0.5)
+            .collect();
+        let embeddings =
+            l2_normalize_rows(&Array2::from_shape_vec((rows, cols), data).unwrap().view());
+        let expected = condensed_euclidean_reference(&embeddings);
+
+        for workers in [1, 2, 8] {
+            let actual = condensed_euclidean_with_workers(&embeddings, workers);
+            assert_eq!(actual.len(), expected.len());
+
+            for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+                assert!(
+                    (actual - expected).abs() <= 1e-5,
+                    "distance {index} differs with {workers} workers: {actual} != {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn blocked_distances_preserve_distinct_close_vectors() {
+        let embeddings = array![[1.0, 0.0], [1.0, 1e-5]];
+
+        let distances = condensed_euclidean_with_workers(&embeddings, 1);
+
+        assert_eq!(distances, vec![1e-5]);
+    }
+
+    #[test]
+    fn zero_threshold_keeps_close_vectors_separate() {
+        let embeddings = array![[1.0, 0.0], [1.0, 1e-5]];
+
+        let labels = cluster(&embeddings.view(), AhcConfig::new(0.0).unwrap());
+
+        assert_ne!(labels[0], labels[1]);
+    }
+
+    #[test]
+    fn blocked_distances_are_identical_across_worker_counts() {
+        let embeddings = Array2::from_shape_fn((1_030, 8), |(row, col)| {
+            ((row * 17 + col * 31) % 97) as f32 / 97.0
+        });
+        let expected = condensed_euclidean_with_workers(&embeddings, 1);
+
+        for workers in [2, 8] {
+            let actual = condensed_euclidean_with_workers(&embeddings, workers);
+            assert!(
+                actual
+                    .iter()
+                    .zip(&expected)
+                    .all(|(actual, expected)| actual.to_bits() == expected.to_bits()),
+                "worker count {workers} changed the distance output"
+            );
+        }
+    }
+
+    #[test]
+    fn default_worker_count_is_bounded() {
+        let workers = pdist_worker_count();
+        assert!(workers >= 1);
+        if std::env::var_os("SPEAKRS_AHC_THREADS").is_none() {
+            assert!(workers <= 8);
+        }
     }
 
     #[test]
