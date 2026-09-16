@@ -19,7 +19,7 @@ pub fn ensure(dir: &Path) -> Result<()> {
     }
 
     println!("=== Downloading AliMeeting eval set (3.4 GB) ===");
-    let raw_dir = std::env::temp_dir().join("alimeeting-raw");
+    let raw_dir = dir.join(".alimeeting-raw");
     let tar_path = raw_dir.join("Eval_Ali.tar.gz");
 
     fs::create_dir_all(&raw_dir)?;
@@ -72,19 +72,23 @@ pub fn ensure(dir: &Path) -> Result<()> {
     }
 
     if far_audio.is_dir() {
-        let mut entries: Vec<_> = fs::read_dir(&far_audio)?
+        let recordings: Vec<_> = fs::read_dir(&far_audio)?
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_file())
+            .map(|e| e.path())
+            .filter(|path| path.is_file())
             .collect();
-        entries.sort_by_key(|e| e.file_name());
-
-        for entry in &entries {
-            let path = entry.path();
-            let stem = file_stem_string(&path)?;
-            // wav filenames have a mic suffix (e.g. R8001_M8004_MS801.wav)
-            // textgrid filenames don't (R8001_M8004.TextGrid)
-            // use the wav stem as-is for the output filename
-            convert_to_16k_mono(&path, &wav_dir.join(format!("{stem}.wav")))?;
+        let mut rttm_stems: Vec<_> = fs::read_dir(&rttm_dir)?
+            .filter_map(|e| e.ok())
+            .filter_map(|e| file_stem_string(&e.path()).ok())
+            .collect();
+        rttm_stems.sort();
+        for session_id in rttm_stems {
+            let Some(source) =
+                crate::datasets::select_alimeeting_far_field(&recordings, &session_id)
+            else {
+                continue;
+            };
+            convert_to_16k_mono(source, &wav_dir.join(format!("{session_id}.wav")))?;
         }
     }
 

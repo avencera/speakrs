@@ -2,61 +2,92 @@ use ndarray::Array2;
 
 /// Maps between powerset class indices and multi-speaker binary activations
 pub struct PowersetMapping {
-    mapping: Array2<f32>,
+    classes: Vec<Vec<usize>>,
+    num_speakers: usize,
+}
+
+/// Invalid powerset logits at the decode boundary
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PowersetDecodeError {
+    /// Logits had no class columns
+    #[error("powerset logits have zero class columns")]
+    ZeroClassColumns,
+    /// Logits had fewer class columns than the mapping
+    #[error("powerset logits have {actual} class columns, expected {expected}")]
+    TooFewClassColumns {
+        /// Mapping class count
+        expected: usize,
+        /// Observed class count
+        actual: usize,
+    },
+    /// Logits had more class columns than the mapping
+    #[error("powerset logits have {actual} class columns, expected {expected}")]
+    TooManyClassColumns {
+        /// Mapping class count
+        expected: usize,
+        /// Observed class count
+        actual: usize,
+    },
 }
 
 impl PowersetMapping {
     /// Build the powerset mapping for a given number of speakers and max simultaneous speakers
     pub fn new(num_speakers: usize, max_set_size: usize) -> Self {
-        let mut rows: Vec<Vec<f32>> = Vec::new();
-
+        let mut classes = Vec::new();
         for size in 0..=max_set_size {
             for combo in combinations(num_speakers, size) {
-                let mut row = vec![0.0f32; num_speakers];
-                for speaker in combo {
-                    row[speaker] = 1.0;
-                }
-                rows.push(row);
+                classes.push(combo);
             }
         }
-
-        let num_classes = rows.len();
-        let mut mapping = Array2::zeros((num_classes, num_speakers));
-        for (i, row) in rows.iter().enumerate() {
-            for (j, &val) in row.iter().enumerate() {
-                mapping[[i, j]] = val;
-            }
+        Self {
+            classes,
+            num_speakers,
         }
-
-        Self { mapping }
     }
 
     /// Number of powerset classes (e.g. 7 for 3 speakers with max overlap 2)
     pub fn num_powerset_classes(&self) -> usize {
-        self.mapping.nrows()
+        self.classes.len()
+    }
+
+    #[cfg(test)]
+    fn class_row(&self, class: usize) -> Vec<f32> {
+        let mut row = vec![0.0f32; self.num_speakers];
+        for &speaker in &self.classes[class] {
+            row[speaker] = 1.0;
+        }
+        row
     }
 
     /// Hard decode powerset logits to binary speaker activations
-    pub fn hard_decode(&self, logits: &Array2<f32>) -> Array2<f32> {
+    pub fn hard_decode(&self, logits: &Array2<f32>) -> Result<Array2<f32>, PowersetDecodeError> {
         let num_frames = logits.nrows();
-        let num_classes = self.num_powerset_classes();
-
-        let mut one_hot = Array2::zeros((num_frames, num_classes));
-        for i in 0..num_frames {
-            let row = logits.row(i);
-            if row.is_empty() {
-                continue;
-            }
-            let argmax = row
-                .iter()
-                .enumerate()
-                .max_by(|(_, a), (_, b)| a.total_cmp(b))
-                .map(|(idx, _)| idx)
-                .unwrap_or(0);
-            one_hot[[i, argmax]] = 1.0;
+        let expected = self.num_powerset_classes();
+        let actual = logits.ncols();
+        if actual == 0 {
+            return Err(PowersetDecodeError::ZeroClassColumns);
+        }
+        if actual < expected {
+            return Err(PowersetDecodeError::TooFewClassColumns { expected, actual });
+        }
+        if actual > expected {
+            return Err(PowersetDecodeError::TooManyClassColumns { expected, actual });
         }
 
-        one_hot.dot(&self.mapping)
+        let mut output = Array2::zeros((num_frames, self.num_speakers));
+        for frame in 0..num_frames {
+            let row = logits.row(frame);
+            let class = row
+                .iter()
+                .enumerate()
+                .max_by(|(_, left), (_, right)| left.total_cmp(right))
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+            for &speaker in &self.classes[class] {
+                output[[frame, speaker]] = 1.0;
+            }
+        }
+        Ok(output)
     }
 }
 
@@ -112,8 +143,8 @@ mod tests {
             for i in 0..num_frames {
                 let frame = multilabel.row(i);
                 for c in 0..num_classes {
-                    let mapping_row = self.mapping.row(c);
-                    if frame == mapping_row {
+                    let mapping_row = ndarray::Array1::from(self.class_row(c));
+                    if frame == mapping_row.view() {
                         output[[i, c]] = 1.0;
                         break;
                     }
@@ -121,6 +152,16 @@ mod tests {
             }
 
             output
+        }
+
+        fn mapping_matrix(&self) -> Array2<f32> {
+            let mut mapping = Array2::zeros((self.num_powerset_classes(), self.num_speakers));
+            for (class, _) in self.classes.iter().enumerate() {
+                for (speaker, value) in self.class_row(class).into_iter().enumerate() {
+                    mapping[[class, speaker]] = value;
+                }
+            }
+            mapping
         }
     }
 
@@ -144,7 +185,7 @@ mod tests {
             [1.0, 0.0, 1.0], // S0+S2
             [0.0, 1.0, 1.0], // S1+S2
         ];
-        assert_eq!(pm.mapping, expected);
+        assert_eq!(pm.mapping_matrix(), expected);
     }
 
     #[test]
@@ -161,7 +202,7 @@ mod tests {
 
         // logits with the highest value at class 0 (empty set) give all zeros
         let logits = array![[10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]];
-        let result = pm.hard_decode(&logits);
+        let result = pm.hard_decode(&logits).unwrap();
         assert_eq!(result, array![[0.0, 0.0, 0.0]]);
     }
 
@@ -171,7 +212,7 @@ mod tests {
 
         // logits with highest value at class 2 (S1)
         let logits = array![[0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 0.0]];
-        let result = pm.hard_decode(&logits);
+        let result = pm.hard_decode(&logits).unwrap();
         assert_eq!(result, array![[0.0, 1.0, 0.0]]);
     }
 
@@ -181,7 +222,7 @@ mod tests {
 
         // logits with highest value at class 4 (S0+S1)
         let logits = array![[0.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0]];
-        let result = pm.hard_decode(&logits);
+        let result = pm.hard_decode(&logits).unwrap();
         assert_eq!(result, array![[1.0, 1.0, 0.0]]);
     }
 
@@ -195,7 +236,7 @@ mod tests {
                 // identity matrix as one-hot powerset input
                 let identity = Array2::eye(num_classes);
 
-                let decoded = pm.hard_decode(&identity);
+                let decoded = pm.hard_decode(&identity).unwrap();
                 let re_encoded = pm.encode(&decoded);
 
                 assert_eq!(
@@ -226,12 +267,13 @@ mod tests {
             let expected: Array2<f32> =
                 Array2::read_npy(File::open(fixture_path(&filename)).unwrap()).unwrap();
 
+            let mapping = pm.mapping_matrix();
             assert_eq!(
-                pm.mapping.shape(),
+                mapping.shape(),
                 expected.shape(),
                 "shape mismatch for nc={nc}, ms={ms}"
             );
-            for (a, b) in pm.mapping.iter().zip(expected.iter()) {
+            for (a, b) in mapping.iter().zip(expected.iter()) {
                 assert!(
                     (a - b).abs() < 1e-6,
                     "value mismatch for nc={nc}, ms={ms}: {a} vs {b}"
@@ -254,9 +296,35 @@ mod tests {
         let expected = expected_3d.index_axis(ndarray::Axis(0), 0).to_owned();
 
         let pm = PowersetMapping::new(3, 2);
-        let result = pm.hard_decode(&logits);
+        let result = pm.hard_decode(&logits).unwrap();
 
         assert_eq!(result.shape(), expected.shape());
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn hard_decode_rejects_class_column_mismatch() {
+        let pm = PowersetMapping::new(3, 2);
+        let empty = Array2::<f32>::zeros((1, 0));
+        assert!(matches!(
+            pm.hard_decode(&empty),
+            Err(PowersetDecodeError::ZeroClassColumns)
+        ));
+        let short = Array2::<f32>::zeros((1, 3));
+        assert!(matches!(
+            pm.hard_decode(&short),
+            Err(PowersetDecodeError::TooFewClassColumns {
+                expected: 7,
+                actual: 3
+            })
+        ));
+        let long = Array2::<f32>::zeros((1, 8));
+        assert!(matches!(
+            pm.hard_decode(&long),
+            Err(PowersetDecodeError::TooManyClassColumns {
+                expected: 7,
+                actual: 8
+            })
+        ));
     }
 }

@@ -4,6 +4,11 @@ mod extract;
 mod layout;
 
 pub(crate) use data::FrameActivations;
+#[cfg(feature = "_metrics")]
+#[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
+pub use data::InferenceStageTimings;
+#[cfg(all(feature = "_metrics", feature = "coreml"))]
+pub(super) use data::InferenceStageTimings as InternalInferenceStageTimings;
 pub use data::{
     BatchInput, ChunkEmbeddings, ChunkSpeakerClusters, DecodedSegmentations, DiarizationResult,
     DiscreteDiarization, InferenceArtifacts, SpeakerCountTrack,

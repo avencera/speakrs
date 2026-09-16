@@ -8,6 +8,7 @@ use crate::commands::profile_support;
 use crate::wav;
 
 pub fn run(mode: &str, wav_path: &str, iterations: usize, log_every: usize) -> Result<()> {
+    let mode = crate::counts::parse_stage_mode(mode)?;
     let log_every = if log_every == 0 {
         if mode == "embed-repeat" { 200 } else { 100 }
     } else {
@@ -47,7 +48,7 @@ pub fn run(mode: &str, wav_path: &str, iterations: usize, log_every: usize) -> R
         return Ok(());
     }
 
-    let segmentations = profile_support::decode_windows(raw_windows, &powerset);
+    let segmentations = profile_support::decode_windows(raw_windows, &powerset)?;
     eprintln!(
         "after_decode shape=({}, {}, {}) rss_mb={:.1}",
         segmentations.shape()[0],

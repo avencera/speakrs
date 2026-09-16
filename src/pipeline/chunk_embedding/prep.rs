@@ -3,29 +3,64 @@ use std::sync::Arc;
 use crossbeam_channel::{Receiver, Sender};
 
 use crate::inference::coreml::{CachedInputShape, SharedCoreMlModel};
+use crate::inference::geometry::CoreMlTensor;
 
-use super::gpu::{PreparedChunk, TaggedPrepared};
-use super::{PipelineError, backend_error, chunk_audio_raw, write_speaker_mask_to_slice};
+use super::gpu::PreparedChunk;
+use super::{
+    FBANK_SEGMENT_SAMPLES, PipelineError, backend_error, chunk_audio_raw, invariant_error,
+    write_speaker_mask_to_slice,
+};
+use crate::inference::embedding::{FBANK_FEATURES, FBANK_FRAMES};
 
-/// Which fbank model `compute_chunk_fbank` should drive for a given chunk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum FbankPath {
+enum FbankPath {
     ThirtySecond,
     TenSecond,
-    None,
 }
 
-/// The 30s model only accepts chunks up to 480_000 samples, but when it is absent a short
-/// chunk must still fall back to the 10s model — otherwise the caller ships an all-zero
-/// fbank downstream. Mirrors the fallback in `orchestrate.rs`.
-pub(super) fn select_fbank_path(chunk_len: usize, has_30s: bool, has_10s: bool) -> FbankPath {
-    if chunk_len <= 480_000 && has_30s {
-        FbankPath::ThirtySecond
+fn select_fbank_path(
+    chunk_len: usize,
+    uses_chunk_scope: bool,
+    has_30s: bool,
+    has_10s: bool,
+) -> Option<FbankPath> {
+    if chunk_len <= 480_000 && uses_chunk_scope && has_30s {
+        Some(FbankPath::ThirtySecond)
     } else if has_10s {
-        FbankPath::TenSecond
+        Some(FbankPath::TenSecond)
     } else {
-        FbankPath::None
+        None
     }
+}
+
+fn copy_fbank_output(
+    tensor: CoreMlTensor,
+    context: &'static str,
+    fbank: &mut [f32],
+    frame_offset: usize,
+    frame_capacity: usize,
+) -> Result<(), PipelineError> {
+    let (batch, frames, features) = tensor
+        .try_rank3(context)
+        .map_err(|error| backend_error(context, error))?;
+    if batch != 1 {
+        return Err(backend_error(
+            context,
+            format!("expected batch size 1, got {batch}"),
+        ));
+    }
+    if features != FBANK_FEATURES {
+        return Err(backend_error(
+            context,
+            format!("expected {FBANK_FEATURES} filterbank features, got {features}"),
+        ));
+    }
+
+    let value_count = frames.min(frame_capacity) * FBANK_FEATURES;
+    let output_offset = frame_offset * FBANK_FEATURES;
+    fbank[output_offset..output_offset + value_count]
+        .copy_from_slice(&tensor.into_data()[..value_count]);
+    Ok(())
 }
 
 impl PrepScratch {
@@ -40,10 +75,6 @@ impl PrepScratch {
 }
 
 impl ChunkPrep {
-    pub(super) fn chunk_win_capacity(&self) -> usize {
-        self.max_active / self.num_speakers
-    }
-
     fn compute_chunk_fbank(
         &self,
         global_start: usize,
@@ -56,69 +87,129 @@ impl ChunkPrep {
         let chunk_audio_end = (chunk_audio_start + chunk_audio_len).min(audio.len());
         let chunk_audio = &audio[chunk_audio_start..chunk_audio_end];
 
-        let mut fbank = vec![0.0f32; self.largest_fbank_frames * 80];
-
         let path = select_fbank_path(
             chunk_audio.len(),
+            self.fbank_normalization_scope.uses_chunk_scope(),
             self.fbank_30s.is_some(),
             self.fbank_10s.is_some(),
-        );
+        )
+        .ok_or_else(|| invariant_error("no compatible chunk fbank model is available"))?;
 
-        if let (FbankPath::ThirtySecond, Some(fbank_model)) = (path, &self.fbank_30s) {
-            scratch.fbank_30s_buf[..chunk_audio.len()].copy_from_slice(chunk_audio);
-            scratch.fbank_30s_buf[chunk_audio.len()..].fill(0.0);
-            let (data, out_shape) = fbank_model
-                .predict_cached(&[(&scratch.fbank_30s_shape, &*scratch.fbank_30s_buf)])
-                .map_err(|error| backend_error("chunk fbank 30s prediction failed", error))?;
-            let copy_frames = out_shape[1].min(self.largest_fbank_frames);
-            for row_idx in 0..copy_frames {
-                let offset = row_idx * 80;
-                fbank[offset..offset + 80].copy_from_slice(&data[offset..offset + 80]);
+        let mut fbank = vec![0.0f32; self.largest_fbank_frames * FBANK_FEATURES];
+
+        match path {
+            FbankPath::ThirtySecond => {
+                let fbank_model = self.fbank_30s.as_ref().ok_or_else(|| {
+                    invariant_error("selected 30s chunk fbank model is unavailable")
+                })?;
+
+                scratch.fbank_30s_buf[..chunk_audio.len()].copy_from_slice(chunk_audio);
+                scratch.fbank_30s_buf[chunk_audio.len()..].fill(0.0);
+                let tensor = fbank_model
+                    .predict_cached(&[(&scratch.fbank_30s_shape, &*scratch.fbank_30s_buf)])
+                    .map_err(|error| backend_error("chunk fbank 30s prediction failed", error))?;
+
+                copy_fbank_output(
+                    tensor,
+                    "chunk fbank 30s output",
+                    &mut fbank,
+                    0,
+                    self.largest_fbank_frames,
+                )?;
             }
-        } else if let (FbankPath::TenSecond, Some(fbank_model)) = (path, &self.fbank_10s) {
-            let mut fbank_offset = 0usize;
-            let mut audio_offset = 0usize;
-            while fbank_offset < self.largest_fbank_frames && audio_offset < chunk_audio.len() {
-                let segment_end = (audio_offset + self.window_samples).min(chunk_audio.len());
-                let segment_len = segment_end - audio_offset;
-                scratch.waveform_10s_buf[..segment_len]
-                    .copy_from_slice(&chunk_audio[audio_offset..segment_end]);
-                if segment_len < self.window_samples {
-                    scratch.waveform_10s_buf[segment_len..].fill(0.0);
+            FbankPath::TenSecond => {
+                let fbank_model = self.fbank_10s.as_ref().ok_or_else(|| {
+                    invariant_error("selected 10s chunk fbank model is unavailable")
+                })?;
+
+                let mut fbank_offset = 0usize;
+                let mut audio_offset = 0usize;
+                while fbank_offset < self.largest_fbank_frames && audio_offset < chunk_audio.len() {
+                    let segment_end = (audio_offset + self.window_samples).min(chunk_audio.len());
+                    let segment_len = segment_end - audio_offset;
+                    scratch.waveform_10s_buf[..segment_len]
+                        .copy_from_slice(&chunk_audio[audio_offset..segment_end]);
+                    if segment_len < self.window_samples {
+                        scratch.waveform_10s_buf[segment_len..].fill(0.0);
+                    }
+                    let tensor = fbank_model
+                        .predict_cached(&[(&scratch.fbank_10s_shape, &*scratch.waveform_10s_buf)])
+                        .map_err(|error| {
+                            backend_error("chunk fbank 10s prediction failed", error)
+                        })?;
+
+                    copy_fbank_output(
+                        tensor,
+                        "chunk fbank 10s output",
+                        &mut fbank,
+                        fbank_offset,
+                        self.largest_fbank_frames - fbank_offset,
+                    )?;
+                    fbank_offset += FBANK_FRAMES;
+                    audio_offset += FBANK_SEGMENT_SAMPLES;
                 }
-                let (data, out_shape) = fbank_model
-                    .predict_cached(&[(&scratch.fbank_10s_shape, &*scratch.waveform_10s_buf)])
-                    .map_err(|error| backend_error("chunk fbank 10s prediction failed", error))?;
-                let copy = out_shape[1].min(self.largest_fbank_frames - fbank_offset);
-                for row_idx in 0..copy {
-                    let src = row_idx * 80;
-                    let dst = (fbank_offset + row_idx) * 80;
-                    fbank[dst..dst + 80].copy_from_slice(&data[src..src + 80]);
-                }
-                fbank_offset += 998;
-                audio_offset += self.window_samples;
             }
         }
 
         Ok(fbank)
     }
 
-    fn collect_chunk_masks(
+    pub(super) fn prep(
         &self,
-        global_start: usize,
-        decoded_chunk: &[ndarray::Array2<f32>],
+        job: ChunkJob,
+        audio: &[f32],
+        scratch: &mut PrepScratch,
+    ) -> Result<PreparedChunk, PipelineError> {
+        let fbank =
+            self.compute_chunk_fbank(job.window_start, job.decoded.len(), audio, scratch)?;
+        let (masks, active) = SpeakerMaskLayout {
+            step_samples: self.step_samples,
+            window_samples: self.window_samples,
+            num_speakers: self.num_speakers,
+            min_num_samples: self.min_num_samples,
+            num_masks: self.largest_num_masks,
+            max_active: self.max_active,
+        }
+        .collect(job.window_start, &job.decoded, audio);
+
+        Ok(PreparedChunk {
+            file_index: job.file_index,
+            window_start: job.window_start,
+            decoded: job.decoded,
+            fbank,
+            masks,
+            active,
+            num_masks: self.largest_num_masks,
+        })
+    }
+}
+
+pub(super) struct SpeakerMaskLayout {
+    pub(super) step_samples: usize,
+    pub(super) window_samples: usize,
+    pub(super) num_speakers: usize,
+    pub(super) min_num_samples: usize,
+    pub(super) num_masks: usize,
+    pub(super) max_active: usize,
+}
+
+impl SpeakerMaskLayout {
+    pub(super) fn collect(
+        self,
+        window_start: usize,
+        decoded: &[ndarray::Array2<f32>],
         audio: &[f32],
     ) -> (Vec<f32>, Vec<(usize, usize)>) {
-        let mut masks = vec![0.0f32; self.largest_num_masks * 589];
+        let mut masks = vec![0.0f32; self.num_masks * 589];
         let mut active = Vec::with_capacity(self.max_active);
 
-        for (local_idx, decoded) in decoded_chunk.iter().enumerate() {
-            let global_idx = global_start + local_idx;
+        for (local_idx, decoded) in decoded.iter().enumerate() {
+            let global_idx = window_start + local_idx;
             let win_audio =
                 chunk_audio_raw(audio, self.step_samples, self.window_samples, global_idx);
             for speaker_idx in 0..self.num_speakers {
                 let mask_idx = local_idx * self.num_speakers + speaker_idx;
-                if mask_idx >= self.largest_num_masks {
+                if mask_idx >= self.num_masks {
                     break;
                 }
                 let dest = &mut masks[mask_idx * 589..mask_idx * 589 + 589];
@@ -136,31 +227,18 @@ impl ChunkPrep {
 
         (masks, active)
     }
+}
 
-    pub(super) fn prep(
-        &self,
-        decoded: DecodedChunk,
-        audio: &[f32],
-        scratch: &mut PrepScratch,
-    ) -> Result<PreparedChunk, PipelineError> {
-        let fbank = self.compute_chunk_fbank(
-            decoded.global_start,
-            decoded.decoded_chunk.len(),
-            audio,
-            scratch,
-        )?;
-        let (masks, active) =
-            self.collect_chunk_masks(decoded.global_start, &decoded.decoded_chunk, audio);
-
-        Ok(PreparedChunk {
-            global_start: decoded.global_start,
-            decoded_chunk: decoded.decoded_chunk,
-            fbank,
-            masks,
-            active,
-            num_masks: self.largest_num_masks,
-        })
-    }
+pub(super) fn audio_for<'a>(
+    audios: &'a [&[f32]],
+    file_index: usize,
+) -> Result<&'a [f32], PipelineError> {
+    audios.get(file_index).copied().ok_or_else(|| {
+        super::invariant_error(format!(
+            "chunk job file index {file_index} is outside audio table length {}",
+            audios.len()
+        ))
+    })
 }
 
 pub(super) struct PrepWorker {
@@ -171,67 +249,21 @@ pub(super) struct PrepWorker {
 impl PrepWorker {
     pub(super) fn run(
         mut self,
-        audio: &[f32],
-        step_samples: usize,
-        window_samples: usize,
-        chunk_rx: &Receiver<DecodedChunk>,
+        audios: &[&[f32]],
+        job_rx: Receiver<ChunkJob>,
         prep_tx: Sender<PreparedChunk>,
     ) -> Result<PrepStats, PipelineError> {
         let mut stats = PrepStats::default();
 
-        while let Ok(decoded) = chunk_rx.recv() {
-            let chunk_audio_start = decoded.global_start * step_samples;
-            if chunk_audio_start + window_samples > audio.len() {
-                continue;
-            }
+        while let Ok(job) = job_rx.recv() {
+            let audio = audio_for(audios, job.file_index)?;
+            let chunk_audio_start = job.window_start * self.prep.step_samples;
+            debug_assert!(chunk_audio_start < audio.len());
             let prep_start = std::time::Instant::now();
-            let prepared = self.prep.prep(decoded, audio, &mut self.scratch)?;
+            let prepared = self.prep.prep(job, audio, &mut self.scratch)?;
             stats.fbank_us += prep_start.elapsed().as_micros() as u64;
             stats.chunks += 1;
             if prep_tx.send(prepared).is_err() {
-                break;
-            }
-        }
-        Ok(stats)
-    }
-}
-
-pub(super) struct BatchPrepWorker {
-    pub(super) prep: ChunkPrep,
-    pub(super) scratch: PrepScratch,
-}
-
-impl BatchPrepWorker {
-    pub(super) fn run(
-        mut self,
-        audios: &[&[f32]],
-        decoded_rx: &Receiver<TaggedDecoded>,
-        prepared_tx: Sender<TaggedPrepared>,
-    ) -> Result<PrepStats, PipelineError> {
-        let mut stats = PrepStats::default();
-
-        while let Ok(tagged) = decoded_rx.recv() {
-            let audio = audios[tagged.file_idx];
-            let decoded = DecodedChunk {
-                global_start: tagged.local_start * self.prep.chunk_win_capacity(),
-                decoded_chunk: tagged.decoded_chunk,
-            };
-            let chunk_audio_start = decoded.global_start * self.prep.step_samples;
-            if chunk_audio_start + self.prep.window_samples > audio.len() {
-                continue;
-            }
-            let prep_start = std::time::Instant::now();
-            let prepared = self.prep.prep(decoded, audio, &mut self.scratch)?;
-            stats.fbank_us += prep_start.elapsed().as_micros() as u64;
-            stats.chunks += 1;
-            if prepared_tx
-                .send(TaggedPrepared {
-                    file_idx: tagged.file_idx,
-                    local_start: tagged.local_start,
-                    prepared,
-                })
-                .is_err()
-            {
                 break;
             }
         }
@@ -250,6 +282,7 @@ pub(super) struct ChunkPrep {
     pub(super) max_active: usize,
     pub(super) fbank_30s: Option<Arc<SharedCoreMlModel>>,
     pub(super) fbank_10s: Option<Arc<SharedCoreMlModel>>,
+    pub(super) fbank_normalization_scope: crate::pipeline::config::ChunkFbankNormalizationScope,
 }
 
 pub(super) struct PrepScratch {
@@ -265,49 +298,84 @@ pub(super) struct PrepStats {
     pub(super) fbank_us: u64,
 }
 
-pub(super) struct DecodedChunk {
-    pub(super) global_start: usize,
-    pub(super) decoded_chunk: Vec<ndarray::Array2<f32>>,
+/// One non-empty group of decoded windows. Single-file work uses file index zero.
+pub(super) struct ChunkJob {
+    pub(super) file_index: usize,
+    pub(super) window_start: usize,
+    pub(super) decoded: Vec<ndarray::Array2<f32>>,
 }
 
-pub(super) struct TaggedDecoded {
-    pub(super) file_idx: usize,
-    pub(super) local_start: usize,
-    pub(super) decoded_chunk: Vec<ndarray::Array2<f32>>,
+impl ChunkJob {
+    pub(super) fn new(
+        file_index: usize,
+        window_start: usize,
+        decoded: Vec<ndarray::Array2<f32>>,
+    ) -> Result<Self, PipelineError> {
+        if decoded.is_empty() {
+            return Err(super::invariant_error(
+                "chunk job decoded windows must be non-empty",
+            ));
+        }
+        Ok(Self {
+            file_index,
+            window_start,
+            decoded,
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{FbankPath, select_fbank_path};
+    use super::{ChunkJob, FbankPath, audio_for, select_fbank_path};
+    use ndarray::Array2;
 
     #[test]
-    fn short_chunk_uses_30s_model_when_available() {
+    fn chunk_scope_prefers_30s_model_for_supported_audio() {
         assert_eq!(
-            select_fbank_path(240_000, true, true),
-            FbankPath::ThirtySecond
-        );
-        assert_eq!(
-            select_fbank_path(480_000, true, true),
-            FbankPath::ThirtySecond
+            select_fbank_path(480_000, true, true, true),
+            Some(FbankPath::ThirtySecond)
         );
     }
 
     #[test]
-    fn short_chunk_falls_back_to_10s_when_30s_missing() {
-        // Regression: this previously produced an all-zero fbank instead of falling back.
-        assert_eq!(select_fbank_path(240_000, false, true), FbankPath::TenSecond);
-        assert_eq!(select_fbank_path(480_000, false, true), FbankPath::TenSecond);
+    fn missing_30s_model_falls_back_to_10s_model() {
+        assert_eq!(
+            select_fbank_path(480_000, true, false, true),
+            Some(FbankPath::TenSecond)
+        );
     }
 
     #[test]
-    fn long_chunk_uses_10s_model() {
-        assert_eq!(select_fbank_path(960_000, true, true), FbankPath::TenSecond);
-        assert_eq!(select_fbank_path(960_000, false, true), FbankPath::TenSecond);
+    fn segment_scope_and_long_audio_use_10s_model() {
+        assert_eq!(
+            select_fbank_path(480_000, false, true, true),
+            Some(FbankPath::TenSecond)
+        );
+
+        assert_eq!(
+            select_fbank_path(480_001, true, true, true),
+            Some(FbankPath::TenSecond)
+        );
     }
 
     #[test]
-    fn no_models_available_yields_no_path() {
-        assert_eq!(select_fbank_path(240_000, false, false), FbankPath::None);
-        assert_eq!(select_fbank_path(960_000, false, false), FbankPath::None);
+    fn missing_compatible_model_has_no_fbank_path() {
+        assert_eq!(select_fbank_path(480_000, true, false, false), None);
+        assert_eq!(select_fbank_path(480_001, true, true, false), None);
+        assert_eq!(select_fbank_path(480_000, false, true, false), None);
+    }
+
+    #[test]
+    fn chunk_job_rejects_empty_decoded_windows() {
+        assert!(ChunkJob::new(0, 0, Vec::new()).is_err());
+        assert!(ChunkJob::new(0, 0, vec![Array2::zeros((2, 3))]).is_ok());
+    }
+
+    #[test]
+    fn audio_table_rejects_invalid_file_index() {
+        let audio: &[f32] = &[0.0; 8];
+        let audios = [audio];
+        assert!(audio_for(&audios, 0).is_ok());
+        assert!(audio_for(&audios, 1).is_err());
     }
 }

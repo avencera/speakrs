@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "experiment_id": "mac-metal-smoke-v3",
+  "dataset": {
+    "id": "ami-ihm",
+    "max_files": 1,
+    "max_minutes": 30
+  },
+  "models_dir": "fixtures/models",
+  "inference": {
+    "mode": "coreml",
+    "layout": "one_second_phased"
+  },
+  "post_inference": [
+    {
+      "id": "default",
+      "vbx_max_iters": 20
+    }
+  ],
+  "performance": {
+    "warmups": 1,
+    "repetitions": 1,
+    "sleep_seconds": 0,
+    "seed": 42
+  },
+  "acceptance": "standard_performance",
+  "profile": {
+    "template": "metal_system_trace",
+    "file_index": 0,
+    "time_limit_seconds": 300
+  }
+}

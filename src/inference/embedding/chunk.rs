@@ -13,7 +13,7 @@ pub(crate) struct ChunkEmbeddingSession {
     pub(crate) cached_masks_shape: Arc<CachedInputShape>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ChunkSessionSpec {
     pub coreml_path: PathBuf,
     pub num_windows: usize,

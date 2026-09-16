@@ -4,6 +4,7 @@ use std::process::Command;
 use std::str::FromStr;
 use std::time::Instant;
 
+use clap::ValueEnum;
 use color_eyre::eyre::{Result, bail, ensure};
 use speakrs::inference::CoreMlComputeUnits;
 use speakrs::inference::ExecutionMode;
@@ -35,6 +36,26 @@ pub enum PyannoteDevice {
     Cpu,
     Mps,
     Cuda,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum ChunkEmbeddingComputeUnits {
+    #[default]
+    All,
+    #[value(alias = "ane")]
+    CpuAndNeuralEngine,
+    #[value(alias = "cpu")]
+    CpuOnly,
+}
+
+impl ChunkEmbeddingComputeUnits {
+    const fn into_runtime(self) -> CoreMlComputeUnits {
+        match self {
+            Self::All => CoreMlComputeUnits::All,
+            Self::CpuAndNeuralEngine => CoreMlComputeUnits::CpuAndNeuralEngine,
+            Self::CpuOnly => CoreMlComputeUnits::CpuOnly,
+        }
+    }
 }
 
 impl SpeakrsMode {
@@ -106,8 +127,7 @@ impl fmt::Display for DiarizeMode {
 pub fn run(
     mode: DiarizeMode,
     models_dir: Option<PathBuf>,
-    chunk_emb_workers: usize,
-    chunk_emb_compute_units: &str,
+    chunk_emb_compute_units: ChunkEmbeddingComputeUnits,
     wav_files: Vec<PathBuf>,
 ) -> Result<()> {
     let command_start = Instant::now();
@@ -123,19 +143,14 @@ pub fn run(
         DiarizeMode::Speakrs(speakrs_mode) => {
             let execution_mode = speakrs_mode.execution_mode();
 
-            let compute_units = match chunk_emb_compute_units {
-                "ane" | "cpu-and-neural-engine" => CoreMlComputeUnits::CpuAndNeuralEngine,
-                _ => CoreMlComputeUnits::All,
-            };
+            let compute_units = chunk_emb_compute_units.into_runtime();
             let runtime_config = RuntimeConfig {
-                chunk_emb_workers,
                 #[cfg(feature = "coreml")]
                 chunk_emb_compute_units: compute_units,
+                experiment: None,
             };
-            if chunk_emb_workers > 1 || compute_units != CoreMlComputeUnits::All {
-                eprintln!(
-                    "runtime config: workers={chunk_emb_workers} compute_units={chunk_emb_compute_units}"
-                );
+            if compute_units != CoreMlComputeUnits::All {
+                eprintln!("runtime config: compute_units={chunk_emb_compute_units:?}");
             }
 
             let models_dir_start = Instant::now();

@@ -3,18 +3,25 @@ use tracing::{debug, trace};
 
 use crate::clustering::ahc::cluster as cluster_ahc;
 use crate::clustering::plda::PldaTransform;
+#[cfg(feature = "_metrics")]
+use crate::clustering::sphere_vbx::cluster_sphere_vbx_pf;
 use crate::clustering::vbx::cluster_vbx;
 use crate::inference::embedding::should_use_clean_mask;
 use crate::utils::cosine_similarity;
 
-use super::config::{MIN_SPEAKER_ACTIVITY, PipelineConfig};
-use super::types::{ChunkEmbeddings, ChunkSpeakerClusters, DecodedSegmentations};
+use super::config::ClusteringBackend;
+use super::config::{CleanFrameDuration, MIN_SPEAKER_ACTIVITY, PipelineConfig};
+use super::types::{ChunkEmbeddings, ChunkSpeakerClusters, DecodedSegmentations, PipelineError};
 
 pub(super) struct TrainingEmbeddings(pub Array2<f32>);
 
 impl ChunkEmbeddings {
-    pub(super) fn training_set(&self, segmentations: &DecodedSegmentations) -> TrainingEmbeddings {
-        let num_frames = segmentations.0.shape()[1] as f32;
+    pub(super) fn training_set(
+        &self,
+        segmentations: &DecodedSegmentations,
+        clean_frame_duration: CleanFrameDuration,
+    ) -> TrainingEmbeddings {
+        let minimum_clean_frames = clean_frame_duration.minimum_frames();
         let mut filtered = Vec::new();
         let mut chunk_indices = Vec::new();
 
@@ -36,7 +43,7 @@ impl ChunkEmbeddings {
                     .sum::<f32>();
                 let embedding = self.0.slice(s![chunk_idx, speaker_idx, ..]);
                 let valid_embedding = embedding.iter().all(|value| value.is_finite());
-                if valid_embedding && clean_frames >= 0.2 * num_frames {
+                if valid_embedding && clean_frames >= minimum_clean_frames {
                     filtered.extend(embedding.iter());
                     chunk_indices.push(chunk_idx);
                 }
@@ -62,15 +69,15 @@ impl TrainingEmbeddings {
         embeddings: &ChunkEmbeddings,
         plda: &PldaTransform,
         config: &PipelineConfig,
-    ) -> ChunkSpeakerClusters {
+    ) -> Result<ChunkSpeakerClusters, PipelineError> {
         if self.0.nrows() < 2 {
             let mut clusters =
                 Array2::<i32>::zeros((segmentations.0.shape()[0], segmentations.0.shape()[2]));
             mark_inactive_speakers(&segmentations.0, &mut clusters);
-            return ChunkSpeakerClusters(clusters);
+            return Ok(ChunkSpeakerClusters(clusters));
         }
 
-        let ahc_labels = cluster_ahc(&self.0.view(), config.ahc);
+        let ahc_labels = initial_ahc_labels(&self.0, plda, config);
         debug!(
             rows = self.0.nrows(),
             cols = self.0.ncols(),
@@ -85,14 +92,7 @@ impl TrainingEmbeddings {
             }
         }
 
-        let plda_features = plda.transform(&self.0.view(), 128);
-        let phi = plda.phi();
-        let (gamma, pi): (Array2<f32>, ndarray::Array1<f32>) = cluster_vbx(
-            &ahc_labels,
-            &plda_features.view(),
-            &phi.slice(s![..128]),
-            &config.vbx,
-        );
+        let (gamma, pi) = cluster_probabilities(&ahc_labels, &self.0, plda, config)?;
 
         debug!(?pi, "VBx speaker priors");
 
@@ -100,7 +100,7 @@ impl TrainingEmbeddings {
             .iter()
             .enumerate()
             .filter_map(|(speaker_idx, weight)| {
-                (*weight > config.speaker_keep_threshold as f32).then_some(speaker_idx)
+                (*weight > config.clustering.speaker_keep_threshold() as f32).then_some(speaker_idx)
             })
             .collect();
         if kept_speakers.is_empty() && !pi.is_empty() {
@@ -131,7 +131,58 @@ impl TrainingEmbeddings {
             "hard_clusters shape"
         );
 
-        ChunkSpeakerClusters(clusters)
+        Ok(ChunkSpeakerClusters(clusters))
+    }
+}
+
+fn initial_ahc_labels(
+    embeddings: &Array2<f32>,
+    _plda: &PldaTransform,
+    config: &PipelineConfig,
+) -> Vec<usize> {
+    #[cfg(feature = "_metrics")]
+    if let ClusteringBackend::SphereVbxPf(sphere) = config.clustering_backend()
+        && matches!(
+            sphere.ahc_initialization(),
+            crate::clustering::sphere_vbx::SphereVbxAhcInitialization::PldaTransformed
+        )
+    {
+        let plda_features = _plda.project(&embeddings.view(), 128);
+        return cluster_ahc(&plda_features.features(), config.clustering.ahc());
+    }
+
+    cluster_ahc(&embeddings.view(), config.clustering.ahc())
+}
+
+fn cluster_probabilities(
+    ahc_labels: &[usize],
+    embeddings: &Array2<f32>,
+    plda: &PldaTransform,
+    config: &PipelineConfig,
+) -> Result<(Array2<f32>, ndarray::Array1<f32>), PipelineError> {
+    #[cfg(feature = "_metrics")]
+    if let ClusteringBackend::SphereVbxPf(sphere) = config.clustering_backend() {
+        return Ok(cluster_sphere_vbx_pf(
+            ahc_labels,
+            &embeddings.view(),
+            &sphere,
+        )?);
+    }
+
+    let projected = plda.project(&embeddings.view(), 128);
+    Ok(cluster_vbx(
+        ahc_labels,
+        &projected.features(),
+        &projected.phi(),
+        &executed_gaussian_vbx(config),
+    ))
+}
+
+pub(super) fn executed_gaussian_vbx(config: &PipelineConfig) -> crate::clustering::vbx::VbxConfig {
+    match config.clustering_backend() {
+        ClusteringBackend::GaussianVbx(vbx) => vbx,
+        #[cfg(feature = "_metrics")]
+        ClusteringBackend::SphereVbxPf(_) => crate::clustering::vbx::VbxConfig::default(),
     }
 }
 
@@ -400,7 +451,27 @@ pub(crate) fn write_speaker_mask_to_slice(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "_metrics")]
+    use super::super::config::ClusteringConfig;
     use super::*;
+
+    #[cfg(feature = "_metrics")]
+    #[test]
+    fn gaussian_payload_from_experimental_clustering_is_executed() {
+        let custom = crate::clustering::vbx::VbxConfig::default()
+            .with_max_iters(3)
+            .unwrap();
+        let config = PipelineConfig {
+            clustering: ClusteringConfig::default()
+                .with_backend(ClusteringBackend::GaussianVbx(custom)),
+            ..PipelineConfig::default()
+        };
+        match config.clustering_backend() {
+            ClusteringBackend::GaussianVbx(reported) => assert_eq!(reported.max_iters(), 3),
+            _ => panic!("expected gaussian backend"),
+        }
+        assert_eq!(executed_gaussian_vbx(&config).max_iters(), 3);
+    }
 
     /// Verify write_speaker_mask_to_slice matches clean_masks + select_speaker_weights
     fn assert_matches_original(seg: &Array2<f32>, audio_len: usize, min_num_samples: usize) {

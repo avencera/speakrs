@@ -21,6 +21,10 @@ pub fn run(
     batch_size: Option<usize>,
     ort_defaults: bool,
 ) -> Result<()> {
+    let mode = crate::counts::parse_ort_embedding_mode(mode)?;
+    if let Some(batch_size) = batch_size {
+        crate::counts::nonzero_usize("batch-size", batch_size)?;
+    }
     let iterations = if mode.starts_with("stream-") {
         0
     } else if iterations == 0 {
@@ -54,7 +58,7 @@ pub fn run(
     );
 
     let raw_windows = seg_model.run(&samples)?;
-    let segmentations = profile_support::decode_windows(raw_windows, &powerset);
+    let segmentations = profile_support::decode_windows(raw_windows, &powerset)?;
     let resolved_model_path =
         model_path.unwrap_or_else(|| models_dir.join("wespeaker-voxceleb-resnet34.onnx"));
     let mut session = build_embedding_session(&resolved_model_path, ort_defaults)?;

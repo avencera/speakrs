@@ -15,6 +15,9 @@ lint: clippy python-lint
 test *args:
     cargo test --workspace {{args}}
 
+test-gpuq-workload:
+    tests/gpuq-workload.sh
+
 check: fmt lint test
 
 # Bump version: just bump major|minor|patch
@@ -55,22 +58,16 @@ compare-models-coreml:
 generate-fixtures:
     cargo xtask fixtures generate
 
-# Compare
-compare source python_device="cpu" rust_mode="cpu":
-    cargo xtask compare run {{source}} --python-device {{python_device}} --rust-mode {{rust_mode}}
-
-compare-apple-accuracy source rust_mode="pyannote-mps":
-    cargo xtask compare accuracy {{source}} --rust-mode {{rust_mode}}
+# Informal RTTM timeline comparison
+compare-rttm a b:
+    cargo xtask compare rttm {{a}} {{b}}
 
 # Benchmark (local)
-bench-run source python_device="auto" runs="1" warmups="1" rust_mode="cpu":
-    cargo xtask bench run {{source}} --python-device {{python_device}} --runs {{runs}} --warmups {{warmups}} --rust-mode {{rust_mode}}
-
-bench-compare source runs="1" warmups="1":
-    cargo xtask bench compare {{source}} --runs {{runs}} --warmups {{warmups}}
-
 bench-der max_files="10" max_minutes="30" *args="":
-    cargo xtask bench der --max-files {{max_files}} --max-minutes {{max_minutes}} {{args}}
+    cargo xtask benchmark run --max-files {{max_files}} --max-minutes {{max_minutes}} {{args}}
+
+bench-score run_dir:
+    cargo xtask benchmark score {{run_dir}}
 
 # GPU image: build via nsc to GHCR, then copy to Docker Hub via skopeo
 gpu-image suffix="":
@@ -90,6 +87,17 @@ gpu-image suffix="":
     echo "$TAG" > _local/gpu-image-tag
     sed -i '' "s|image:.*speakrs-gpu:[a-zA-Z0-9._-]*|image: avencera/speakrs-gpu:${TAG}|g" .dstack/*.yml
     echo "Built and pushed: $DOCKERHUB (updated .dstack/*.yml)"
+
+# CUDA 12.4 linux/amd64 image for the gpuq canary
+gpuq-canary-image:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TAG=$(git rev-parse --short HEAD)
+    IMAGE="ghcr.io/avencera/speakrs-gpuq-canary:${TAG}"
+    nsc build -f docker/gpuq-canary.Dockerfile --platform linux/amd64 -t "$IMAGE" --push .
+    DIGEST=$(skopeo inspect "docker://${IMAGE}" | jq -r .Digest)
+    echo "Built and pushed: ${IMAGE}"
+    echo "Set gpuq.toml image to ghcr.io/avencera/speakrs-gpuq-canary@${DIGEST}"
 
 gpu-base-image:
     nsc build -f docker/base.Dockerfile --platform linux/amd64 -t ghcr.io/avencera/speakrs-gpu-base:latest --push .

@@ -2,6 +2,7 @@ use ndarray::{Array2, Array3, s};
 use tracing::{debug, trace};
 
 use crate::inference::embedding::EmbeddingModel;
+use crate::inference::segmentation::{WindowSpec, segmentation_window_count};
 use crate::powerset::PowersetMapping;
 
 use super::config::MIN_SPEAKER_ACTIVITY;
@@ -23,19 +24,6 @@ impl ConcurrentEmbeddingResult {
     }
 }
 
-/// Compute total window count matching the streaming segmentation sliding-window logic
-/// Includes the zero-padded tail window. Returns 0 when audio is shorter than one window
-fn streaming_total_windows(audio_len: usize, window_samples: usize, step_samples: usize) -> usize {
-    let full_windows = if audio_len >= window_samples {
-        (audio_len - window_samples) / step_samples + 1
-    } else {
-        return 0;
-    };
-    let offset_after_full = full_windows * step_samples;
-    let has_tail = offset_after_full < audio_len;
-    full_windows + has_tail as usize
-}
-
 struct MultiMaskBatch<'a> {
     audio_slices: &'a [&'a [f32]],
     flat_masks: &'a [f32],
@@ -54,7 +42,9 @@ pub(super) struct ConcurrentEmbeddingRunner<'a> {
 
 impl<'a> ConcurrentEmbeddingRunner<'a> {
     fn total_windows(&self) -> usize {
-        streaming_total_windows(self.audio.len(), self.window_samples, self.step_samples)
+        let spec = WindowSpec::new(self.window_samples, self.step_samples)
+            .expect("window and step samples must be non-zero");
+        segmentation_window_count(self.audio.len(), spec)
     }
 
     pub fn run_split(
@@ -72,7 +62,7 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
         let mut chunk_idx = 0usize;
 
         for raw_window in receiver {
-            let decoded = self.powerset.hard_decode(&raw_window);
+            let decoded = self.powerset.hard_decode(&raw_window)?;
             let seg = seg_array.get_or_insert_with(|| {
                 Array3::zeros((total_windows, decoded.nrows(), self.num_speakers))
             });
@@ -176,7 +166,7 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
             total_recv_wait_us += recv_start.elapsed().as_micros() as u64;
 
             let decode_start = std::time::Instant::now();
-            let decoded = self.powerset.hard_decode(&raw_window);
+            let decoded = self.powerset.hard_decode(&raw_window)?;
 
             let nf = *num_frames.get_or_insert(decoded.nrows());
             let seg = seg_array
@@ -340,7 +330,7 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
             channel_wait += recv_start.elapsed();
 
             let decode_start = std::time::Instant::now();
-            let decoded = self.powerset.hard_decode(&raw_window);
+            let decoded = self.powerset.hard_decode(&raw_window)?;
             let seg = seg_array.get_or_insert_with(|| {
                 Array3::zeros((total_windows, decoded.nrows(), self.num_speakers))
             });

@@ -65,8 +65,8 @@ for segment in result.discrete_diarization.to_segments() {
 
 ### Background queue
 
-[`QueueSender`](https://docs.rs/speakrs/latest/speakrs/pipeline/queued/struct.QueueSender.html) and [`QueueReceiver`](https://docs.rs/speakrs/latest/speakrs/pipeline/queued/struct.QueueReceiver.html) run a background worker. Push audio
-from any thread and read results as they finish:
+[`QueueSender`](https://docs.rs/speakrs/latest/speakrs/pipeline/queued/struct.QueueSender.html) and [`QueueReceiver`](https://docs.rs/speakrs/latest/speakrs/pipeline/queued/struct.QueueReceiver.html) run a background worker. Use
+[`QueueSender::try_push`](https://docs.rs/speakrs/latest/speakrs/pipeline/queued/struct.QueueSender.html#method.try_push) to submit audio without blocking:
 
 ```rust
 use speakrs::{ExecutionMode, OwnedDiarizationPipeline, QueuedDiarizationRequest};
@@ -76,7 +76,7 @@ let (tx, rx) = pipeline.into_queued()?;
 
 std::thread::spawn(move || {
     for (file_id, audio) in receive_files() {
-        tx.push(QueuedDiarizationRequest::new(file_id, audio)).unwrap();
+        tx.try_push(QueuedDiarizationRequest::new(file_id, audio)).unwrap();
     }
 });
 
@@ -232,6 +232,7 @@ Start here:
 
 - [`OwnedDiarizationPipeline`](https://docs.rs/speakrs/latest/speakrs/pipeline/struct.OwnedDiarizationPipeline.html): pipeline entry point
 - [`QueueSender`](https://docs.rs/speakrs/latest/speakrs/pipeline/queued/struct.QueueSender.html) and [`QueueReceiver`](https://docs.rs/speakrs/latest/speakrs/pipeline/queued/struct.QueueReceiver.html): background worker interface
+- [`QueueConfig`](https://docs.rs/speakrs/latest/speakrs/pipeline/queued/struct.QueueConfig.html): in-process queue capacity
 - [`DiarizationResult`](https://docs.rs/speakrs/latest/speakrs/pipeline/types/data/struct.DiarizationResult.html): frame-level activations, segments, clusters, embeddings, RTTM
 - [`PipelineConfig`](https://docs.rs/speakrs/latest/speakrs/pipeline/config/struct.PipelineConfig.html) and [`RuntimeConfig`](https://docs.rs/speakrs/latest/speakrs/pipeline/config/struct.RuntimeConfig.html): tuning knobs
 - [`ModelManager`](https://docs.rs/speakrs/latest/speakrs/models/struct.ModelManager.html): model download when `online` is enabled

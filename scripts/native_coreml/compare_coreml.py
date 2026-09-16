@@ -8,13 +8,19 @@ from typing import Any
 import coremltools as ct
 import numpy as np
 import torch
-
 from common import (
+    FBANK_FEATURES,
+    NUM_SPEAKERS,
     SEGMENTATION_FRAMES,
     SEGMENTATION_SAMPLES,
     TAIL_BATCH_SIZES,
+    OneSecondPhasedChunkConfig,
+    build_chunk_embedding_wrapper,
     build_fbank_wrapper,
     build_tail_wrapper,
+    check_phased_chunk_parity,
+    chunk_embedding_compiled_path,
+    chunk_embedding_package_path,
     load_pipeline,
     segmentation_package_path,
     tail_package_path,
@@ -109,6 +115,71 @@ def compare_tail(
             )
 
 
+def _phased_chunk_artifact(
+    output_dir: Path, config: OneSecondPhasedChunkConfig
+) -> Path | None:
+    package_path = chunk_embedding_package_path(output_dir, config)
+    if package_path.exists():
+        return package_path
+    compiled_path = chunk_embedding_compiled_path(output_dir, config)
+    if compiled_path.exists():
+        return compiled_path
+    return None
+
+
+def compare_phased_chunk(
+    pipeline: Any,
+    output_dir: Path,
+    atol: float,
+) -> None:
+    check_phased_chunk_parity(pipeline, atol=min(atol, 1e-5))
+
+    config = OneSecondPhasedChunkConfig(21)
+    artifact = _phased_chunk_artifact(output_dir, config)
+    if artifact is None:
+        print("phased chunk CoreML artifact missing; skipped CoreML comparison")
+        return
+
+    wrapper = build_chunk_embedding_wrapper(pipeline, config)
+    coreml_model = ct.models.MLModel(str(artifact), compute_units=ct.ComputeUnit.ALL)
+    fbank = torch.randn(1, config.fbank_frames, FBANK_FEATURES)
+    masks = torch.rand(config.num_windows * NUM_SPEAKERS, SEGMENTATION_FRAMES)
+    with torch.inference_mode():
+        torch_output = wrapper(fbank, masks).detach().cpu().numpy()
+    coreml_output = np.asarray(
+        coreml_model.predict(
+            {
+                "fbank": fbank.detach().cpu().numpy(),
+                "masks": masks.detach().cpu().numpy(),
+            }
+        )["output"],
+        dtype=np.float32,
+    )
+
+    even_max = 0.0
+    odd_max = 0.0
+    for window in range(config.num_windows):
+        speaker_slice = slice(window * NUM_SPEAKERS, (window + 1) * NUM_SPEAKERS)
+        diff = float(
+            np.max(np.abs(torch_output[speaker_slice] - coreml_output[speaker_slice]))
+        )
+        if window % 2 == 0:
+            even_max = max(even_max, diff)
+        else:
+            odd_max = max(odd_max, diff)
+
+    print(f"phased chunk CoreML even-window max_abs={even_max:.6e}")
+    print(f"phased chunk CoreML odd-window max_abs={odd_max:.6e}")
+    if even_max > atol:
+        raise SystemExit(
+            f"phased chunk CoreML even-window parity failed: {even_max:.6e} > {atol:.6e}"
+        )
+    if odd_max > atol:
+        raise SystemExit(
+            f"phased chunk CoreML odd-window parity failed: {odd_max:.6e} > {atol:.6e}"
+        )
+
+
 def main() -> None:
     args = parse_args()
     np.random.seed(0)
@@ -116,6 +187,7 @@ def main() -> None:
     pipeline = load_pipeline()
     compare_segmentation(pipeline, args.output_dir, args.segmentation_atol)
     compare_tail(pipeline, args.output_dir, args.tail_atol)
+    compare_phased_chunk(pipeline, args.output_dir, args.tail_atol)
     print("CoreML parity checks passed")
 
 

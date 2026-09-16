@@ -1,9 +1,10 @@
 use std::any::Any;
+use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
 
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, TrySendError};
 
 use super::{
     BatchInput, DiarizationResult, OwnedDiarizationPipeline, PipelineConfig, PipelineError,
@@ -17,9 +18,54 @@ const _: () = {
     }
 };
 
-/// Monotonically increasing job identifier assigned by the queue on push
+/// Monotonically increasing job identifier assigned by the in-process queue
+///
+/// IDs are local to one sender lineage and are not durable across process restarts
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct QueuedDiarizationJobId(u64);
+
+/// Construction options for a background diarization queue
+///
+/// The local queue is in-process only. Capacity bounds the request channel and
+/// is not durable across process restarts
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueConfig {
+    /// Maximum number of in-flight requests the worker channel will hold
+    pub capacity: usize,
+}
+
+impl QueueConfig {
+    /// Default request-channel capacity used by [`Self::default`]
+    pub const DEFAULT_CAPACITY: usize = 64;
+
+    /// Create a queue config with the given request-channel capacity
+    ///
+    /// # Errors
+    ///
+    /// Returns [`QueueError::InvalidCapacity`] when `capacity` is 0
+    pub fn new(capacity: usize) -> Result<Self, QueueError> {
+        let config = Self { capacity };
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Return [`QueueError::InvalidCapacity`] when capacity is 0
+    pub(crate) fn validate(self) -> Result<(), QueueError> {
+        if self.capacity == 0 {
+            Err(QueueError::InvalidCapacity)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Default for QueueConfig {
+    fn default() -> Self {
+        Self {
+            capacity: Self::DEFAULT_CAPACITY,
+        }
+    }
+}
 
 /// A diarization request that owns its audio buffer
 pub struct QueuedDiarizationRequest {
@@ -35,13 +81,27 @@ impl QueuedDiarizationRequest {
             audio,
         }
     }
+
+    /// File identifier carried with this request
+    pub fn file_id(&self) -> &str {
+        &self.file_id
+    }
+}
+
+impl fmt::Debug for QueuedDiarizationRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QueuedDiarizationRequest")
+            .field("file_id", &self.file_id)
+            .field("samples", &self.audio.len())
+            .finish()
+    }
 }
 
 /// Result from a queued diarization job
 ///
 /// Per-job failures are surfaced here without stopping the worker
 pub struct QueuedDiarizationResult {
-    /// The job identifier returned by [`QueueSender::push`]
+    /// The job identifier returned by [`QueueSender::try_push`]
     pub job_id: QueuedDiarizationJobId,
     /// The file identifier from the original request
     pub file_id: String,
@@ -59,21 +119,20 @@ pub enum QueueError {
     /// The background worker has shut down or was never started
     #[error("queue worker has shut down")]
     WorkerGone,
+    /// The request channel is at capacity
+    ///
+    /// Contains the rejected request so the caller can retry
+    #[error("queue is full")]
+    Full(QueuedDiarizationRequest),
+    /// Queue capacity must be greater than zero
+    #[error("queue capacity must be greater than zero")]
+    InvalidCapacity,
     /// The background worker thread could not be started
     #[error("failed to start queue worker: {0}")]
     WorkerStart(#[source] std::io::Error),
     /// The background worker thread panicked
     #[error("worker thread panicked: {0}")]
     WorkerPanicked(String),
-    /// The receiver reached an unexpected terminal queue error
-    #[error("queue reached terminal error: {0}")]
-    Terminal(String),
-}
-
-impl QueueError {
-    fn format_worker_panic(err: Box<dyn Any + Send + 'static>) -> Self {
-        Self::WorkerPanicked(panic_payload_message(err))
-    }
 }
 
 struct WorkerRequest {
@@ -88,6 +147,8 @@ struct WorkerRequest {
 /// `run_batch_with_config`, preserving cross-file batch optimizations within
 /// each worker pass
 ///
+/// Admission uses [`Self::try_push`], which never blocks
+///
 /// ```no_run
 /// # use speakrs::pipeline::*;
 /// # use speakrs::inference::ExecutionMode;
@@ -95,8 +156,8 @@ struct WorkerRequest {
 ///
 /// let audio1: Vec<f32> = vec![]; // 16 kHz mono samples
 /// let audio2: Vec<f32> = vec![];
-/// tx.push(QueuedDiarizationRequest::new("file1", audio1))?;
-/// tx.push(QueuedDiarizationRequest::new("file2", audio2))?;
+/// tx.try_push(QueuedDiarizationRequest::new("file1", audio1))?;
+/// tx.try_push(QueuedDiarizationRequest::new("file2", audio2))?;
 /// drop(tx);
 ///
 /// for result in rx {
@@ -110,15 +171,21 @@ struct WorkerRequest {
 pub struct QueueSender {
     request_tx: Sender<WorkerRequest>,
     next_job_id: Arc<AtomicU64>,
+    capacity: usize,
 }
 
 impl QueueSender {
-    pub(super) fn new(
+    /// Start a background worker with the given pipeline and queue config
+    pub(crate) fn new(
         pipeline: OwnedDiarizationPipeline,
         config: PipelineConfig,
+        queue: QueueConfig,
     ) -> Result<(Self, QueueReceiver), QueueError> {
-        let (request_tx, request_rx) = crossbeam_channel::bounded::<WorkerRequest>(64);
-        let (result_tx, result_rx) = crossbeam_channel::bounded::<QueuedDiarizationResult>(64);
+        queue.validate()?;
+
+        let (request_tx, request_rx) = crossbeam_channel::bounded::<WorkerRequest>(queue.capacity);
+        let (result_tx, result_rx) =
+            crossbeam_channel::bounded::<QueuedDiarizationResult>(queue.capacity);
 
         let worker = std::thread::Builder::new()
             .name("speakrs-queue-worker".into())
@@ -129,6 +196,7 @@ impl QueueSender {
             Self {
                 request_tx,
                 next_job_id: Arc::new(AtomicU64::new(0)),
+                capacity: queue.capacity,
             },
             QueueReceiver {
                 result_rx,
@@ -138,22 +206,35 @@ impl QueueSender {
         ))
     }
 
-    /// Submit a single file for background diarization
-    pub fn push(
+    /// Maximum number of requests the worker channel will hold
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Submit a single file for background diarization without blocking
+    ///
+    /// Returns [`QueueError::Full`] immediately when the request channel is at
+    /// capacity. The rejected request is returned so the caller can retry
+    pub fn try_push(
         &self,
         request: QueuedDiarizationRequest,
     ) -> Result<QueuedDiarizationJobId, QueueError> {
         let job_id = QueuedDiarizationJobId(self.next_job_id.fetch_add(1, Ordering::Relaxed));
 
-        self.request_tx
-            .send(WorkerRequest {
-                job_id,
-                file_id: request.file_id,
-                audio: request.audio,
-            })
-            .map_err(|_| QueueError::WorkerGone)?;
+        match self.request_tx.try_send(WorkerRequest {
+            job_id,
+            file_id: request.file_id,
+            audio: request.audio,
+        }) {
+            Ok(()) => Ok(job_id),
 
-        Ok(job_id)
+            Err(TrySendError::Full(rejected)) => Err(QueueError::Full(QueuedDiarizationRequest {
+                file_id: rejected.file_id,
+                audio: rejected.audio,
+            })),
+
+            Err(TrySendError::Disconnected(_)) => Err(QueueError::WorkerGone),
+        }
     }
 }
 
@@ -162,7 +243,6 @@ enum QueueReceiverState {
     Running,
     Closed,
     WorkerPanicked(String),
-    Terminal(String),
 }
 
 /// Background queue receiver for diarization results
@@ -213,14 +293,9 @@ impl QueueReceiver {
                 self.state = QueueReceiverState::Closed;
                 QueueError::Closed
             }
-            Err(QueueError::WorkerPanicked(message)) => {
+            Err(message) => {
                 self.state = QueueReceiverState::WorkerPanicked(message.clone());
                 QueueError::WorkerPanicked(message)
-            }
-            Err(err) => {
-                let message = err.to_string();
-                self.state = QueueReceiverState::Terminal(message);
-                err
             }
         }
     }
@@ -232,7 +307,6 @@ impl QueueReceiver {
             QueueReceiverState::WorkerPanicked(message) => {
                 QueueError::WorkerPanicked(message.clone())
             }
-            QueueReceiverState::Terminal(message) => QueueError::Terminal(message.clone()),
         }
     }
 }
@@ -278,9 +352,9 @@ impl IntoIterator for QueueReceiver {
     }
 }
 
-fn join_worker(worker: Option<JoinHandle<()>>) -> Result<(), QueueError> {
+fn join_worker(worker: Option<JoinHandle<()>>) -> Result<(), String> {
     if let Some(handle) = worker {
-        handle.join().map_err(QueueError::format_worker_panic)?;
+        handle.join().map_err(panic_payload_message)?;
     }
 
     Ok(())
@@ -303,19 +377,31 @@ fn worker_loop(
     result_tx: Sender<QueuedDiarizationResult>,
 ) {
     while let Ok(first) = request_rx.recv() {
-        // drain all currently queued requests into one batch
-        let mut batch = vec![first];
-        while let Ok(req) = request_rx.try_recv() {
-            batch.push(req);
-        }
+        let batch = drain_batch(first, &request_rx);
 
         let results = process_batch(&mut pipeline, &batch, &config);
-        for result in results {
-            if result_tx.send(result).is_err() {
-                return;
-            }
+        if !send_results(&result_tx, results) {
+            return;
         }
     }
+}
+
+fn drain_batch(first: WorkerRequest, request_rx: &Receiver<WorkerRequest>) -> Vec<WorkerRequest> {
+    // drain all currently queued requests into one batch
+    let mut batch = vec![first];
+    while let Ok(req) = request_rx.try_recv() {
+        batch.push(req);
+    }
+    batch
+}
+
+fn send_results(
+    result_tx: &Sender<QueuedDiarizationResult>,
+    results: Vec<QueuedDiarizationResult>,
+) -> bool {
+    results
+        .into_iter()
+        .all(|result| result_tx.send(result).is_ok())
 }
 
 fn process_batch(
@@ -331,33 +417,129 @@ fn process_batch(
         })
         .collect();
 
-    match pipeline.run_batch_with_config(&inputs, config) {
-        Ok(results) => batch
-            .iter()
-            .zip(results)
-            .map(|(req, result)| QueuedDiarizationResult {
-                job_id: req.job_id,
-                file_id: req.file_id.clone(),
-                result: Ok(result),
-            })
-            .collect(),
-        Err(_) => {
-            // the batch failed, so retry each file individually to isolate failures
-            batch
-                .iter()
-                .map(|req| QueuedDiarizationResult {
-                    job_id: req.job_id,
-                    file_id: req.file_id.clone(),
-                    result: pipeline.run_with_config(&req.audio, &req.file_id, config),
-                })
-                .collect()
-        }
+    let Ok(results) = pipeline.run_batch_with_config(&inputs, config) else {
+        return process_individually(pipeline, batch, config);
+    };
+
+    batch
+        .iter()
+        .zip(results)
+        .map(|(req, result)| queued_result(req, Ok(result)))
+        .collect()
+}
+
+fn process_individually(
+    pipeline: &mut OwnedDiarizationPipeline,
+    batch: &[WorkerRequest],
+    config: &PipelineConfig,
+) -> Vec<QueuedDiarizationResult> {
+    // the batch failed, so retry each file individually to isolate failures
+    batch
+        .iter()
+        .map(|req| {
+            queued_result(
+                req,
+                pipeline.run_with_config(&req.audio, &req.file_id, config),
+            )
+        })
+        .collect()
+}
+
+fn queued_result(
+    request: &WorkerRequest,
+    result: Result<DiarizationResult, PipelineError>,
+) -> QueuedDiarizationResult {
+    QueuedDiarizationResult {
+        job_id: request.job_id,
+        file_id: request.file_id.clone(),
+        result,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl QueueSender {
+        fn from_request_tx(request_tx: Sender<WorkerRequest>) -> Self {
+            let capacity = request_tx
+                .capacity()
+                .expect("test senders use a bounded channel");
+
+            Self {
+                request_tx,
+                next_job_id: Arc::new(AtomicU64::new(0)),
+                capacity,
+            }
+        }
+    }
+
+    #[test]
+    fn queue_config_rejects_zero_capacity() {
+        assert!(matches!(
+            QueueConfig::new(0),
+            Err(QueueError::InvalidCapacity)
+        ));
+        assert!(matches!(
+            QueueConfig { capacity: 0 }.validate(),
+            Err(QueueError::InvalidCapacity)
+        ));
+    }
+
+    #[test]
+    fn queue_config_default_capacity_is_64() {
+        assert_eq!(
+            QueueConfig::default().capacity,
+            QueueConfig::DEFAULT_CAPACITY
+        );
+        assert_eq!(QueueConfig::DEFAULT_CAPACITY, 64);
+        assert_eq!(QueueConfig::new(2).unwrap().capacity, 2);
+    }
+
+    #[test]
+    fn sender_reports_configured_capacity() {
+        let (request_tx, _request_rx) = crossbeam_channel::bounded::<WorkerRequest>(2);
+        let sender = QueueSender::from_request_tx(request_tx);
+        assert_eq!(sender.capacity(), 2);
+    }
+
+    #[test]
+    fn try_push_returns_full_when_channel_has_no_consumer() {
+        let (request_tx, _request_rx) = crossbeam_channel::bounded::<WorkerRequest>(1);
+        let sender = QueueSender::from_request_tx(request_tx);
+
+        sender
+            .try_push(QueuedDiarizationRequest::new("first", Vec::new()))
+            .unwrap();
+
+        let err = sender
+            .try_push(QueuedDiarizationRequest::new("second", vec![1.0]))
+            .unwrap_err();
+
+        match err {
+            QueueError::Full(request) => assert_eq!(request.file_id(), "second"),
+            other => panic!("expected Full, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_push_succeeds_after_a_slot_is_freed() {
+        let (request_tx, request_rx) = crossbeam_channel::bounded::<WorkerRequest>(1);
+        let sender = QueueSender::from_request_tx(request_tx);
+
+        sender
+            .try_push(QueuedDiarizationRequest::new("first", Vec::new()))
+            .unwrap();
+
+        let rejected = match sender.try_push(QueuedDiarizationRequest::new("second", vec![1.0])) {
+            Err(QueueError::Full(request)) => request,
+            other => panic!("expected Full, got {other:?}"),
+        };
+
+        assert_eq!(rejected.file_id(), "second");
+        let _drained = request_rx.recv().unwrap();
+        sender.try_push(rejected).unwrap();
+    }
 
     #[test]
     fn receiver_reports_clean_close_after_worker_exit() {
@@ -419,31 +601,11 @@ mod tests {
         let (request_tx, request_rx) = crossbeam_channel::bounded::<WorkerRequest>(1);
         drop(request_rx);
 
-        let sender = QueueSender {
-            request_tx,
-            next_job_id: Arc::new(AtomicU64::new(0)),
-        };
+        let sender = QueueSender::from_request_tx(request_tx);
 
         assert!(matches!(
-            sender.push(QueuedDiarizationRequest::new("file", Vec::new())),
+            sender.try_push(QueuedDiarizationRequest::new("file", Vec::new())),
             Err(QueueError::WorkerGone)
         ));
-    }
-
-    #[test]
-    fn receiver_repeats_unexpected_terminal_error_without_panicking() {
-        let (_result_tx, result_rx) = crossbeam_channel::bounded(1);
-        let mut receiver = QueueReceiver {
-            result_rx,
-            worker: None,
-            state: QueueReceiverState::Terminal("future terminal error".to_owned()),
-        };
-
-        assert!(
-            matches!(receiver.recv(), Err(QueueError::Terminal(message)) if message == "future terminal error")
-        );
-        assert!(
-            matches!(receiver.try_recv(), Err(QueueError::Terminal(message)) if message == "future terminal error")
-        );
     }
 }

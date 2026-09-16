@@ -36,15 +36,6 @@ impl CommandSpec {
         }
     }
 
-    pub fn from_argv(argv: &[String]) -> Self {
-        debug_assert!(!argv.is_empty());
-        let mut command_spec = Self::new(argv[0].clone());
-        for arg in &argv[1..] {
-            command_spec = command_spec.arg(arg.clone());
-        }
-        command_spec
-    }
-
     pub fn arg(mut self, arg: impl Into<OsString>) -> Self {
         self.args.push(arg.into());
         self

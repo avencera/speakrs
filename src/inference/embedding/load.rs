@@ -2,21 +2,13 @@ use std::path::Path;
 
 use crate::inference::{ExecutionMode, ModelLoadError, ensure_ort_ready};
 
-use super::{EmbeddingModel, multi_mask_model_path, split_fbank_model_path, split_tail_model_path};
+use super::EmbeddingModel;
 
 mod sessions;
 
 use sessions::LoadedSessions;
 
 impl EmbeddingModel {
-    pub(super) fn split_backend_available(model_path: &Path) -> bool {
-        let split_fbank_path = split_fbank_model_path(model_path);
-        let split_tail_path = split_tail_model_path(model_path, 1);
-        let has_multi_mask = multi_mask_model_path(model_path, 1).is_some_and(|path| path.exists());
-
-        split_fbank_path.exists() && (split_tail_path.exists() || has_multi_mask)
-    }
-
     /// Load the WeSpeaker embedding model with the requested execution mode and runtime config
     pub fn with_mode_and_config(
         model_path: impl AsRef<Path>,

@@ -36,7 +36,7 @@ Hardware: Apple M4 Pro, macOS 26.3
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
 | pyannote community-1 (MPS) | 17.0% | 8.1% | 4.3% | 4.5% | 3326.2s | 20x |
-| **speakrs CoreML** | **17.2%** | 8.1% | 4.3% | 4.8% | 101.3s | 666x |
+| **speakrs CoreML** | **17.0%** | 8.1% | 4.3% | 4.6% | 149.8s | 450x |
 | speakrs CoreML Fast | 17.6% | 7.8% | 4.7% | 5.1% | 73.9s | **912x** |
 | SpeakerKit | 18.0% | 8.5% | 5.2% | 4.3% | 82.8s | 814x |
 
@@ -154,12 +154,23 @@ Requires models (`just export-models`) and datasets (auto-downloaded on first ru
 
 ```bash
 # macOS (CoreML)
-cargo xtask benchmark der --dataset voxconverse-dev --impls pmps,scm,scmf,sk
+cargo xtask benchmark run --dataset voxconverse-dev --impls pmps,scm,scmf,sk
 
 # Linux (CUDA) -- via dstack
 cargo xtask dstack bp my-bench --dataset voxconverse-dev,ami-ihm --impls sg,sgf,pg
 
 # list available implementations and datasets
-cargo xtask benchmark der --impls list
-cargo xtask benchmark der --dataset list
+cargo xtask benchmark run --impls list
+cargo xtask benchmark run --dataset list
 ```
+
+To recalculate a completed run from its recorded reference and hypothesis
+RTTM files, run `cargo xtask benchmark score <run-directory>`. This does not
+run inference. It atomically replaces `<run-directory>/score.json` on each
+repeat and keeps the recorded results and RTTM files unchanged. Stored scoring
+uses collar `0ms` and includes overlap; other scoring options are rejected.
+
+Stored benchmark records use schema version 3. The schema version 2 flat
+`results.json` writer format remains readable through explicit conversion to a
+version 3 record because the typed record shape is not wire-compatible with
+the old flat shape. New benchmark runs and score reports use version 3.

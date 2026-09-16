@@ -6,7 +6,7 @@ exclude = ["scripts/"]
 name = "speakrs"
 version = "0.5.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 description = "Fast Rust speaker diarization with pyannote-level accuracy and native CoreML/CUDA acceleration"
 license = "Apache-2.0"
 repository = "https://github.com/avencera/speakrs"
@@ -21,7 +21,12 @@ include = ["/src/**", "/examples/**", "/README.md", "/LICENSE", "/Cargo.toml"]
 default = ["online", "default-linalg"]
 default-linalg = ["dep:ndarray-linalg-default"]
 online = ["dep:hf-hub", "hf-hub/ureq", "hf-hub/native-tls"]
-coreml = ["dep:objc2", "dep:objc2-core-ml", "dep:objc2-foundation", "dep:block2"]
+coreml = [
+    "dep:block2",
+    "dep:objc2",
+    "dep:objc2-core-ml",
+    "dep:objc2-foundation",
+]
 cuda = ["ort/cuda"]
 migraphx = ["ort/migraphx"]
 load-dynamic = ["ort/load-dynamic", "dep:libloading"]

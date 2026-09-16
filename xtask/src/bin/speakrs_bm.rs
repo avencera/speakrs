@@ -79,7 +79,7 @@ fn main() -> Result<()> {
 
     if cli.impls.len() == 1 && cli.impls[0] == "list" {
         println!("Available implementations:");
-        for (cli_id, alias, display_name, _) in gpu_impls() {
+        for (cli_id, alias, display_name) in gpu_impls() {
             println!("  {alias:<4} {cli_id:<15} {display_name}");
         }
         return Ok(());

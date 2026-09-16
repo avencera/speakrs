@@ -1,17 +1,37 @@
 mod config;
-pub use crate::binarize::BinarizeConfig;
-pub use crate::clustering::ahc::AhcConfig;
-pub use crate::clustering::vbx::VbxConfig;
+pub use crate::binarize::ActivityCleanup;
+pub use crate::clustering::ahc::{AhcConfig, AhcConfigError};
+#[cfg(feature = "_metrics")]
+#[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
+pub use crate::clustering::sphere_vbx::{
+    ResponsibilitySmoothing, ResponsibilitySmoothingError, SpeakerRegularizationScale,
+    SpeakerRegularizationScaleError, SphereVbxAhcInitialization, SphereVbxInitialization,
+    SphereVbxPfConfig, SphereVbxResponsibilityTolerance, SphereVbxResponsibilityToleranceError,
+    SufficientStatisticsScale, SufficientStatisticsScaleError,
+};
+pub use crate::clustering::vbx::{ResponsibilityInitialization, VbxConfig, VbxConfigError};
+pub use crate::reconstruct::ReconstructError;
 pub(crate) use config::MIN_SPEAKER_ACTIVITY;
 pub use config::{
-    COREML_SEGMENTATION_STEP_SECONDS, CUDA_SEGMENTATION_STEP_SECONDS,
+    COREML_SEGMENTATION_STEP_SECONDS, CUDA_SEGMENTATION_STEP_SECONDS, CleanFrameDuration,
+    CleanFrameDurationError, ClusteringBackend, ClusteringConfig, ClusteringConfigError,
     FAST_SEGMENTATION_STEP_SECONDS, FRAME_DURATION_SECONDS, FRAME_STEP_SECONDS, PipelineConfig,
     ReconstructMethod, RuntimeConfig, SEGMENTATION_STEP_SECONDS, SEGMENTATION_WINDOW_SECONDS,
     segmentation_step_seconds,
 };
+#[cfg(feature = "_metrics")]
+#[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
+pub use config::{
+    CoreMlChunkLayout, CoreMlFbankNormalizationScope, CoreMlFbankPreparationWorkers,
+    CoreMlSegmentationWorkers, CoreMlShapeLadder, ExperimentInferenceConfig,
+    ExperimentInferenceConfigError,
+};
 
 mod types;
 pub(crate) use types::FrameActivations;
+#[cfg(feature = "_metrics")]
+#[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
+pub use types::InferenceStageTimings;
 pub use types::{
     BatchInput, ChunkEmbeddings, ChunkSpeakerClusters, DecodedSegmentations, DiarizationResult,
     DiscreteDiarization, InferenceArtifacts, PipelineError, SpeakerCountTrack,
@@ -39,16 +59,18 @@ pub use builder::PipelineBuilder;
 
 mod queued;
 pub use queued::{
-    QueueError, QueueReceiver, QueueReceiverIter, QueueSender, QueuedDiarizationJobId,
+    QueueConfig, QueueError, QueueReceiver, QueueReceiverIter, QueueSender, QueuedDiarizationJobId,
     QueuedDiarizationRequest, QueuedDiarizationResult,
 };
 
+#[cfg(test)]
+mod test_support;
 #[cfg(test)]
 mod tests;
 
 use std::path::Path;
 
-use ndarray::{Array2, Array3};
+use ndarray::Array2;
 use tracing::{debug, trace};
 
 use crate::clustering::plda::PldaTransform;
@@ -139,6 +161,8 @@ pub struct OwnedDiarizationPipeline {
     pub(crate) plda: PldaTransform,
     pub(crate) powerset: PowersetMapping,
     pub(crate) default_config: PipelineConfig,
+    #[cfg(feature = "coreml")]
+    coreml_chunk_execution_policy: config::CoreMlChunkExecutionPolicy,
 }
 
 impl OwnedDiarizationPipeline {
@@ -147,7 +171,7 @@ impl OwnedDiarizationPipeline {
         models_dir: impl Into<std::path::PathBuf>,
         mode: ExecutionMode,
     ) -> Result<Self, PipelineError> {
-        PipelineBuilder::from_dir(models_dir, mode).build()
+        PipelineBuilder::from_dir(models_dir, mode)?.build()
     }
 
     /// Build from a resolved [`ModelBundle`](crate::models::ModelBundle) using default config
@@ -189,7 +213,25 @@ impl OwnedDiarizationPipeline {
         self,
         config: PipelineConfig,
     ) -> Result<(QueueSender, QueueReceiver), QueueError> {
-        QueueSender::new(self, config)
+        QueueSender::new(self, config, QueueConfig::default())
+    }
+
+    /// Convert into a background-processing queue with custom queue capacity
+    pub fn into_queued_with_queue_config(
+        self,
+        queue: QueueConfig,
+    ) -> Result<(QueueSender, QueueReceiver), QueueError> {
+        let config = self.default_config.clone();
+        self.into_queued_with_configs(config, queue)
+    }
+
+    /// Convert into a background-processing queue with custom pipeline and queue config
+    pub fn into_queued_with_configs(
+        self,
+        config: PipelineConfig,
+        queue: QueueConfig,
+    ) -> Result<(QueueSender, QueueReceiver), QueueError> {
+        QueueSender::new(self, config, queue)
     }
 }
 
@@ -200,6 +242,8 @@ pub struct DiarizationPipeline<'a> {
     plda: PldaTransform,
     powerset: PowersetMapping,
     default_config: PipelineConfig,
+    #[cfg(feature = "coreml")]
+    coreml_chunk_execution_policy: config::CoreMlChunkExecutionPolicy,
 }
 
 impl<'a> DiarizationPipeline<'a> {
@@ -226,6 +270,8 @@ impl<'a> DiarizationPipeline<'a> {
             plda: PldaTransform::from_dir(models_dir)?,
             powerset: PowersetMapping::new(3, 2),
             default_config,
+            #[cfg(feature = "coreml")]
+            coreml_chunk_execution_policy: config::CoreMlChunkExecutionPolicy::default(),
         })
     }
 
@@ -244,6 +290,8 @@ impl OwnedDiarizationPipeline {
             emb_model: &mut self.emb_model,
             plda: &self.plda,
             powerset: &self.powerset,
+            #[cfg(feature = "coreml")]
+            coreml_chunk_execution_policy: self.coreml_chunk_execution_policy,
         }
     }
 }
@@ -255,6 +303,8 @@ impl<'a> DiarizationPipeline<'a> {
             emb_model: self.emb_model,
             plda: &self.plda,
             powerset: &self.powerset,
+            #[cfg(feature = "coreml")]
+            coreml_chunk_execution_policy: self.coreml_chunk_execution_policy,
         }
     }
 }
@@ -264,6 +314,8 @@ struct PipelineRunner<'a> {
     emb_model: &'a mut EmbeddingModel,
     plda: &'a PldaTransform,
     powerset: &'a PowersetMapping,
+    #[cfg(feature = "coreml")]
+    coreml_chunk_execution_policy: config::CoreMlChunkExecutionPolicy,
 }
 
 impl<'a> PipelineRunner<'a> {
@@ -342,6 +394,7 @@ impl<'a> PipelineRunner<'a> {
                 self.plda,
                 files,
                 config,
+                self.coreml_chunk_execution_policy,
             )?
         {
             return Ok(results);
@@ -364,6 +417,7 @@ impl<'a> PipelineRunner<'a> {
                     self.emb_model,
                     self.powerset,
                     audio,
+                    self.coreml_chunk_execution_policy,
                 )? {
                     return Ok(result);
                 }
@@ -379,7 +433,7 @@ impl<'a> PipelineRunner<'a> {
         let raw_windows = RawSegmentationWindows(self.seg_model.run(audio)?);
         debug!(windows = raw_windows.0.len(), "Segmentation complete");
 
-        let segmentations = raw_windows.decode(self.powerset);
+        let segmentations = raw_windows.decode(self.powerset)?;
         let layout = ChunkLayout::new(
             self.seg_model.step_seconds(),
             self.seg_model.step_samples(),
@@ -399,11 +453,13 @@ impl<'a> PipelineRunner<'a> {
             "Embeddings complete"
         );
 
-        Ok(InferenceArtifacts {
+        InferenceArtifacts::try_new(
             layout,
             segmentations,
             embeddings,
-        })
+            #[cfg(feature = "_metrics")]
+            None,
+        )
     }
 
     fn run_concurrent_inference(
@@ -495,11 +551,13 @@ impl<'a> PipelineRunner<'a> {
             "Concurrent seg+emb complete"
         );
 
-        Ok(InferenceArtifacts {
+        InferenceArtifacts::try_new(
             layout,
-            segmentations: DecodedSegmentations(concurrent_result.segmentations),
-            embeddings: ChunkEmbeddings(concurrent_result.embeddings),
-        })
+            DecodedSegmentations(concurrent_result.segmentations),
+            ChunkEmbeddings(concurrent_result.embeddings),
+            #[cfg(feature = "_metrics")]
+            None,
+        )
     }
 
     fn run_post_inference(
@@ -511,10 +569,6 @@ impl<'a> PipelineRunner<'a> {
     }
 
     fn empty_inference_artifacts(layout: ChunkLayout) -> InferenceArtifacts {
-        InferenceArtifacts {
-            layout: layout.with_num_chunks(0),
-            segmentations: DecodedSegmentations(Array3::zeros((0, 0, 0))),
-            embeddings: ChunkEmbeddings(Array3::zeros((0, 0, 0))),
-        }
+        InferenceArtifacts::empty_with_layout(layout)
     }
 }

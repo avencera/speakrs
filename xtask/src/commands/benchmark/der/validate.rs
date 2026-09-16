@@ -2,20 +2,26 @@ use std::path::PathBuf;
 
 use color_eyre::eyre::{Result, bail};
 
-use super::{DerArgs, IMPL_REGISTRY};
+use super::DerArgs;
+use crate::catalog::{ImplementationCatalog, ImplementationId, ImplementationSpec, RunnerKind};
 use crate::commands::benchmark::ImplType;
 
-pub(super) fn resolve_impl(name: &str) -> Option<usize> {
-    IMPL_REGISTRY
-        .iter()
-        .position(|(cli_id, alias, _, _)| *cli_id == name || *alias == name)
+fn to_impl_type(spec: &ImplementationSpec) -> ImplType {
+    match spec.runner {
+        RunnerKind::Speakrs(mode) => ImplType::Speakrs(mode.as_cli()),
+        RunnerKind::Pyannote(device) => ImplType::Pyannote(device.as_cli()),
+        RunnerKind::PyannoteRs => ImplType::PyannoteRs,
+        RunnerKind::FluidAudio => ImplType::FluidAudioBench,
+        RunnerKind::SpeakerKit => ImplType::SpeakerKitBench,
+    }
 }
 
 pub(super) fn handle_list_requests(args: &DerArgs) -> Result<bool> {
     if args.impls.len() == 1 && args.impls[0] == "list" {
         println!("Available implementations:");
-        for (cli_id, alias, display_name, _) in IMPL_REGISTRY {
-            println!("  {alias:<4} {cli_id:<15} {display_name}");
+        for spec in ImplementationCatalog::all() {
+            let alias = spec.aliases.first().copied().unwrap_or("");
+            println!("  {alias:<4} {:<15} {}", spec.cli_name(), spec.display_name);
         }
         return Ok(true);
     }
@@ -30,23 +36,6 @@ pub(super) fn handle_list_requests(args: &DerArgs) -> Result<bool> {
     }
 
     Ok(false)
-}
-
-pub(super) fn validate_impls(impls: &[String]) -> Result<()> {
-    for id in impls {
-        if id != "list" && resolve_impl(id).is_none() {
-            let available: Vec<String> = IMPL_REGISTRY
-                .iter()
-                .map(|(cli_id, alias, _, _)| format!("{cli_id} ({alias})"))
-                .collect();
-            bail!(
-                "unknown implementation: {id}. Available: {}",
-                available.join(", ")
-            );
-        }
-    }
-
-    Ok(())
 }
 
 pub(super) fn validate_single_file_mode(
@@ -91,60 +80,20 @@ pub(super) fn resolve_eval_datasets(
     )?])
 }
 
-pub(super) fn selected_implementations(impls: &[String]) -> Vec<(&'static str, ImplType)> {
-    IMPL_REGISTRY
+pub(super) fn selected_implementations(
+    implementations: &[&ImplementationSpec],
+) -> Vec<(ImplementationId, ImplType)> {
+    implementations
         .iter()
-        .filter(|(cli_id, alias, _, _)| {
-            impls.is_empty() || impls.iter().any(|value| value == cli_id || value == alias)
-        })
-        .map(|(_, _, display_name, impl_type)| (*display_name, *impl_type))
+        .map(|spec| (spec.id, to_impl_type(spec)))
         .collect()
 }
 
 pub(super) fn selected_preflight_implementations(
-    impls: &[String],
-) -> Vec<(&'static str, &'static str, ImplType)> {
-    IMPL_REGISTRY
+    implementations: &[&ImplementationSpec],
+) -> Vec<(ImplementationId, &'static str, ImplType)> {
+    implementations
         .iter()
-        .filter(|(cli_id, alias, _, _)| {
-            impls.is_empty() || impls.iter().any(|value| value == cli_id || value == alias)
-        })
-        .map(|(cli_id, _, display_name, impl_type)| (*cli_id, *display_name, *impl_type))
+        .map(|spec| (spec.id, spec.display_name, to_impl_type(spec)))
         .collect()
-}
-
-pub(super) fn der_build_features(impls: &[String]) -> Vec<String> {
-    let active_impls: Vec<&ImplType> = if impls.is_empty() {
-        IMPL_REGISTRY.iter().map(|(_, _, _, kind)| kind).collect()
-    } else {
-        IMPL_REGISTRY
-            .iter()
-            .filter(|(cli_id, alias, _, _)| {
-                impls.iter().any(|value| value == cli_id || value == alias)
-            })
-            .map(|(_, _, _, kind)| kind)
-            .collect()
-    };
-
-    let mut features = Vec::new();
-
-    #[cfg(target_os = "macos")]
-    let needs_coreml = active_impls
-        .iter()
-        .any(|kind| matches!(kind, ImplType::Speakrs(mode) if mode.starts_with("coreml")));
-    #[cfg(not(target_os = "macos"))]
-    let needs_coreml = false;
-
-    let needs_cuda = active_impls
-        .iter()
-        .any(|kind| matches!(kind, ImplType::Speakrs("cuda" | "cuda-fast")));
-
-    if needs_coreml {
-        features.push("coreml".to_string());
-    }
-    if needs_cuda {
-        features.push("cuda".to_string());
-    }
-
-    features
 }

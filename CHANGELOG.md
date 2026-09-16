@@ -2,6 +2,12 @@
 
 ## [unreleased]
 
+- Add `QueueConfig` so queue channel capacity is configurable at construction (default 64; capacity 0 is rejected)
+- Add non-blocking `QueueSender::try_push`, which returns typed `QueueError::Full` with the rejected request when the queue is at capacity
+- Remove `QueueSender::push`; callers submit work with `try_push`
+- Remove `QueueError::Terminal`; a finished worker reports `Closed` or `WorkerPanicked`
+- Replace split `PipelineConfig` clustering and activity fields with checked `ClusteringConfig` and `ActivityCleanup`
+
 ## [0.5.0] - 2026-07-07
 
 - Clean up the public API for 0.5.0: expose tuning config types, make selected enums non-exhaustive, rename custom segment conversion to `to_segments_with`, and make `Segment` display human-readable text instead of RTTM.

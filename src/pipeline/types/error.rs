@@ -16,13 +16,19 @@ pub enum PipelineError {
     /// Segmentation inference error
     #[error(transparent)]
     Segmentation(#[from] crate::inference::segmentation::SegmentationError),
+    /// Powerset class decode error
+    #[error(transparent)]
+    Powerset(#[from] crate::powerset::PowersetDecodeError),
     /// PLDA scoring/training error
     #[error(transparent)]
     Plda(#[from] crate::clustering::plda::PldaError),
-    /// Hugging Face Hub download error
-    #[cfg(feature = "online")]
+    /// Reconstruction inputs are inconsistent
     #[error(transparent)]
-    HfHub(#[from] hf_hub::api::sync::ApiError),
+    Reconstruct(#[from] crate::reconstruct::ReconstructError),
+    /// SphereVBx-PF clustering input error
+    #[cfg(feature = "_metrics")]
+    #[error(transparent)]
+    SphereVbx(#[from] crate::clustering::sphere_vbx::SphereVbxError),
     /// Queue setup or execution error
     #[error(transparent)]
     Queue(#[from] super::super::queued::QueueError),

@@ -9,7 +9,7 @@ use crate::powerset::PowersetMapping;
 
 use super::OwnedDiarizationPipeline;
 use super::config::{PipelineConfig, RuntimeConfig, segmentation_step_seconds};
-use super::queued::{QueueReceiver, QueueSender};
+use super::queued::{QueueConfig, QueueReceiver, QueueSender};
 use super::types::PipelineError;
 
 /// Builder for constructing diarization pipelines
@@ -22,14 +22,8 @@ use super::types::PipelineError;
 /// // minimal
 /// let mut pipeline = PipelineBuilder::from_pretrained(ExecutionMode::Cpu)?.build()?;
 ///
-/// // with custom runtime config
-/// # use speakrs::RuntimeConfig;
-/// let mut pipeline = PipelineBuilder::from_pretrained(ExecutionMode::Cpu)?
-///     .runtime(RuntimeConfig { chunk_emb_workers: 4, ..Default::default() })
-///     .build()?;
-///
 /// // from local directory
-/// let mut pipeline = PipelineBuilder::from_dir("./models", ExecutionMode::Cpu)
+/// let mut pipeline = PipelineBuilder::from_dir("./models", ExecutionMode::Cpu)?
 ///     .build()?;
 /// # Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
 /// ```
@@ -38,17 +32,22 @@ pub struct PipelineBuilder {
     mode: ExecutionMode,
     runtime: Option<RuntimeConfig>,
     pipeline: Option<PipelineConfig>,
+    queue: Option<QueueConfig>,
 }
 
 impl PipelineBuilder {
     /// Start from a local models directory
-    pub fn from_dir(models_dir: impl Into<PathBuf>, mode: ExecutionMode) -> Self {
-        Self {
-            bundle: ModelBundle::from_dir(models_dir),
+    pub fn from_dir(
+        models_dir: impl Into<PathBuf>,
+        mode: ExecutionMode,
+    ) -> Result<Self, PipelineError> {
+        Ok(Self {
+            bundle: ModelBundle::from_dir(models_dir)?,
             mode,
             runtime: None,
             pipeline: None,
-        }
+            queue: None,
+        })
     }
 
     /// Start from a pre-resolved [`ModelBundle`](ModelBundle)
@@ -58,6 +57,7 @@ impl PipelineBuilder {
             mode,
             runtime: None,
             pipeline: None,
+            queue: None,
         }
     }
 
@@ -70,7 +70,7 @@ impl PipelineBuilder {
         Ok(Self::from_bundle(bundle, mode))
     }
 
-    /// Override runtime config (workers, compute units)
+    /// Override runtime config
     pub fn runtime(mut self, config: RuntimeConfig) -> Self {
         self.runtime = Some(config);
         self
@@ -82,6 +82,14 @@ impl PipelineBuilder {
         self
     }
 
+    /// Override queue construction config
+    ///
+    /// Controls request-channel capacity. The local queue is not durable
+    pub fn queue(mut self, config: QueueConfig) -> Self {
+        self.queue = Some(config);
+        self
+    }
+
     /// Build the owned pipeline
     pub fn build(self) -> Result<OwnedDiarizationPipeline, PipelineError> {
         self.mode.validate()?;
@@ -90,6 +98,20 @@ impl PipelineBuilder {
             .pipeline
             .unwrap_or_else(|| PipelineConfig::for_mode(self.mode));
         let runtime = self.runtime.unwrap_or_default();
+        #[cfg(feature = "coreml")]
+        let coreml_chunk_execution_policy = runtime.coreml_chunk_execution_policy();
+
+        #[cfg(feature = "_metrics")]
+        let step = match runtime.experiment {
+            Some(experiment) => {
+                experiment
+                    .validate(self.mode)
+                    .map_err(|error| PipelineError::Other(error.to_string()))?;
+                experiment.segmentation_step_seconds()
+            }
+            None => segmentation_step_seconds(self.mode),
+        };
+        #[cfg(not(feature = "_metrics"))]
         let step = segmentation_step_seconds(self.mode);
 
         let seg_model =
@@ -107,12 +129,16 @@ impl PipelineBuilder {
             plda,
             powerset: PowersetMapping::new(3, 2),
             default_config: pipeline,
+            #[cfg(feature = "coreml")]
+            coreml_chunk_execution_policy,
         })
     }
 
     /// Build and immediately convert to a background-processing queue
     pub fn build_queued(self) -> Result<(QueueSender, QueueReceiver), PipelineError> {
+        let queue = self.queue.unwrap_or_default();
+        queue.validate()?;
         let pipeline = self.build()?;
-        Ok(pipeline.into_queued()?)
+        Ok(pipeline.into_queued_with_queue_config(queue)?)
     }
 }

@@ -3,16 +3,39 @@ use ndarray::{Array2, ArrayView2};
 
 use crate::utils::l2_normalize_rows;
 
+/// Invalid agglomerative clustering configuration
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+pub enum AhcConfigError {
+    /// Merge threshold was negative or non-finite
+    #[error("AHC threshold must be finite and non-negative, got {0}")]
+    InvalidThreshold(f32),
+}
+
 /// Agglomerative hierarchical clustering settings for speaker embeddings.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AhcConfig {
-    /// Maximum dendrogram merge distance to keep observations in one flat cluster.
-    pub threshold: f32,
+    threshold: f32,
 }
 
 impl Default for AhcConfig {
     fn default() -> Self {
         Self { threshold: 0.6 }
+    }
+}
+
+impl AhcConfig {
+    /// Create a checked AHC configuration
+    pub fn new(threshold: f32) -> Result<Self, AhcConfigError> {
+        if threshold.is_finite() && threshold >= 0.0 {
+            Ok(Self { threshold })
+        } else {
+            Err(AhcConfigError::InvalidThreshold(threshold))
+        }
+    }
+
+    /// Maximum dendrogram merge distance to keep observations in one flat cluster
+    pub const fn threshold(self) -> f32 {
+        self.threshold
     }
 }
 
@@ -28,7 +51,7 @@ pub fn cluster(embeddings: &ArrayView2<f32>, config: AhcConfig) -> Vec<usize> {
     let normalized = l2_normalize_rows(embeddings);
     let mut condensed = condensed_euclidean(&normalized);
     let dendrogram = linkage(&mut condensed, observations, Method::Centroid);
-    flat_clusters(observations, dendrogram.steps(), config.threshold)
+    flat_clusters(observations, dendrogram.steps(), config.threshold())
 }
 
 fn condensed_euclidean(embeddings: &Array2<f32>) -> Vec<f32> {
@@ -172,7 +195,7 @@ mod tests {
     fn separates_two_clusters() {
         let embeddings = array![[1.0, 0.0], [0.95, 0.05], [-1.0, 0.0], [-0.95, -0.05],];
 
-        let labels = cluster(&embeddings.view(), AhcConfig { threshold: 0.6 });
+        let labels = cluster(&embeddings.view(), AhcConfig::new(0.6).unwrap());
 
         assert_eq!(labels[0], labels[1]);
         assert_eq!(labels[2], labels[3]);
@@ -196,7 +219,7 @@ mod tests {
     fn cluster_matches_scipy_label_order_on_toy_example() {
         let embeddings = array![[1.0, 0.0], [0.9, 0.3], [0.0, 1.0], [0.05, 1.0],];
 
-        let labels = cluster(&embeddings.view(), AhcConfig { threshold: 0.6 });
+        let labels = cluster(&embeddings.view(), AhcConfig::new(0.6).unwrap());
 
         assert_eq!(labels, vec![1, 1, 0, 0]);
     }
@@ -216,5 +239,13 @@ mod tests {
         for (lhs, rhs) in labels.iter().zip(expected.iter()) {
             assert_eq!(*lhs as i64, *rhs);
         }
+    }
+
+    #[test]
+    fn new_rejects_invalid_threshold() {
+        for threshold in [f32::NAN, f32::INFINITY, -0.1] {
+            assert!(AhcConfig::new(threshold).is_err());
+        }
+        assert_eq!(AhcConfig::new(0.0).unwrap().threshold(), 0.0);
     }
 }
