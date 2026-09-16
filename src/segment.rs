@@ -133,6 +133,31 @@ pub fn merge_segments(segments: &[Segment], max_gap: f64) -> Vec<Segment> {
     merged
 }
 
+/// Merge adjacent same-speaker turns without crossing another speaker turn
+pub(crate) fn merge_exclusive_segments(segments: &[Segment], max_gap: f64) -> Vec<Segment> {
+    let mut sorted = segments.to_vec();
+    sorted.sort_by(|left, right| {
+        left.start
+            .total_cmp(&right.start)
+            .then(left.speaker.cmp(&right.speaker))
+    });
+
+    let mut merged: Vec<Segment> = Vec::with_capacity(sorted.len());
+    for segment in sorted {
+        if let Some(previous) = merged.last_mut()
+            && previous.speaker == segment.speaker
+            && (segment.start - previous.end) < max_gap
+        {
+            previous.end = previous.end.max(segment.end);
+            continue;
+        }
+
+        merged.push(segment);
+    }
+
+    merged
+}
+
 /// Format segments as RTTM output
 pub fn to_rttm(segments: &[Segment], file_id: &str) -> String {
     segments
@@ -203,6 +228,30 @@ mod tests {
         assert!((merged[0].start - 0.0).abs() < 1e-9);
         assert!((merged[0].end - 2.0).abs() < 1e-9);
         assert_eq!(merged[1].speaker, "SPEAKER_01");
+    }
+
+    #[test]
+    fn exclusive_merge_does_not_cross_another_speaker() {
+        let segments = vec![
+            Segment::new(0.0, 1.0, "SPEAKER_00"),
+            Segment::new(1.0, 1.05, "SPEAKER_01"),
+            Segment::new(1.05, 2.0, "SPEAKER_00"),
+        ];
+        let merged = merge_exclusive_segments(&segments, 0.1);
+
+        assert_eq!(merged, segments);
+        assert!(merged.windows(2).all(|pair| pair[0].end <= pair[1].start));
+    }
+
+    #[test]
+    fn exclusive_merge_can_cross_silence() {
+        let segments = vec![
+            Segment::new(0.0, 1.0, "SPEAKER_00"),
+            Segment::new(1.05, 2.0, "SPEAKER_00"),
+        ];
+        let merged = merge_exclusive_segments(&segments, 0.1);
+
+        assert_eq!(merged, vec![Segment::new(0.0, 2.0, "SPEAKER_00")]);
     }
 
     #[test]
