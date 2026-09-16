@@ -25,10 +25,11 @@ fn select_fbank_model<'a, T>(
     fbank_30s: Option<&'a T>,
     fbank_10s: Option<&'a T>,
 ) -> Option<SelectedFbankModel<'a, T>> {
-    if chunk_len <= 480_000 && normalization_scope.uses_chunk_scope() {
-        if let Some(model) = fbank_30s {
-            return Some(SelectedFbankModel::ThirtySecond(model));
-        }
+    if chunk_len <= 480_000
+        && normalization_scope.uses_chunk_scope()
+        && let Some(model) = fbank_30s
+    {
+        return Some(SelectedFbankModel::ThirtySecond(model));
     }
 
     fbank_10s.map(SelectedFbankModel::TenSecond)
