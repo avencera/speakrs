@@ -80,6 +80,66 @@ fn pipeline_runs_on_main_fixture_audio() {
     assert!(result.rttm("fixture").contains("SPEAKER fixture 1"));
 }
 
+#[cfg(not(feature = "coreml"))]
+#[test]
+fn shared_pipeline_handles_match_when_run_concurrently() {
+    let models_dir = fixture_path("models");
+    let Some(mut baseline) = build_pipeline_or_skip(OwnedDiarizationPipeline::from_dir(
+        &models_dir,
+        ExecutionMode::Cpu,
+    )) else {
+        return;
+    };
+    let (first_audio, first_sample_rate) = load_wav_samples(&fixture_path("test.wav"));
+    let (second_audio, second_sample_rate) = load_wav_samples(&fixture_path("test_short.wav"));
+    assert_eq!(first_sample_rate, 16_000);
+    assert_eq!(second_sample_rate, 16_000);
+
+    let first_expected = baseline.run_with_file_id(&first_audio, "first").unwrap();
+    let second_expected = baseline.run_with_file_id(&second_audio, "second").unwrap();
+    let mut first = baseline.clone_shared().unwrap();
+    let mut second = baseline.clone_shared().unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+
+    let (first_result, second_result) = std::thread::scope(|scope| {
+        let first_barrier = barrier.clone();
+        let first_handle = scope.spawn(move || {
+            first_barrier.wait();
+            first.run_with_file_id(&first_audio, "first")
+        });
+        let second_barrier = barrier.clone();
+        let second_handle = scope.spawn(move || {
+            second_barrier.wait();
+            second.run_with_file_id(&second_audio, "second")
+        });
+        barrier.wait();
+
+        (
+            first_handle.join().unwrap().unwrap(),
+            second_handle.join().unwrap().unwrap(),
+        )
+    });
+
+    assert_eq!(first_result.segments, first_expected.segments);
+    assert_eq!(
+        first_result.exclusive_segments,
+        first_expected.exclusive_segments
+    );
+    assert_eq!(
+        first_result.discrete_diarization.0,
+        first_expected.discrete_diarization.0
+    );
+    assert_eq!(second_result.segments, second_expected.segments);
+    assert_eq!(
+        second_result.exclusive_segments,
+        second_expected.exclusive_segments
+    );
+    assert_eq!(
+        second_result.discrete_diarization.0,
+        second_expected.discrete_diarization.0
+    );
+}
+
 #[cfg(all(feature = "coreml", feature = "_metrics"))]
 const VOXCONVERSE_TEST_FILES: &[&str] = &[
     "hqyok", "tfvyr", "qrzjk", "qpylu", "szsyz", "gwtwd", "fxgvy", "whmpa", "rtvuw", "usbgm",

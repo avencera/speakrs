@@ -1,13 +1,12 @@
 use std::path::Path;
 
-use ndarray::{Array2, Array3};
 #[cfg(feature = "coreml")]
 use objc2_core_ml::MLComputeUnits;
-use ort::session::{HasSelectedOutputs, RunOptions, Session};
+use ort::session::Session;
 
 #[cfg(feature = "coreml")]
 use crate::inference::coreml::CachedInputShape;
-use crate::inference::{ExecutionMode, ModelLoadError};
+use crate::inference::{ExecutionMode, ModelLoadError, SharedSession};
 
 #[cfg(feature = "coreml")]
 use super::super::CoreMlEmbeddingState;
@@ -15,9 +14,12 @@ use super::super::plan::EmbeddingExecutionPlan;
 #[cfg(feature = "coreml")]
 use super::super::plan::LazySession;
 use super::super::{
-    CHUNK_SPEAKER_BATCH_SIZE, EmbeddingBuffers, EmbeddingMeta, EmbeddingModel, FBANK_BATCH_SIZE,
-    FBANK_FEATURES, FBANK_FRAMES, MASK_FRAMES, MULTI_MASK_BATCH_SIZE, NUM_SPEAKERS,
-    OrtEmbeddingState, PRIMARY_BATCH_SIZE, preallocated_run_options, read_min_num_samples,
+    EmbeddingBuffers, EmbeddingMeta, EmbeddingModel, OrtEmbeddingState, read_min_num_samples,
+};
+#[cfg(feature = "coreml")]
+use super::super::{
+    FBANK_BATCH_SIZE, FBANK_FEATURES, FBANK_FRAMES, MASK_FRAMES, MULTI_MASK_BATCH_SIZE,
+    NUM_SPEAKERS, PRIMARY_BATCH_SIZE,
 };
 
 pub(super) struct LoadedOrtSessions {
@@ -183,6 +185,7 @@ impl LoadedSessions {
     ) -> Result<EmbeddingModel, ModelLoadError> {
         let metadata_path = model_path.with_extension("min_num_samples.txt");
 
+        let has_primary_batched = self.ort.primary_batched_session.is_some();
         Ok(EmbeddingModel {
             meta: EmbeddingMeta {
                 model_path: model_path.to_path_buf(),
@@ -194,30 +197,30 @@ impl LoadedSessions {
             },
             plan: self.plan.clone(),
             ort: OrtEmbeddingState {
-                session: self.ort.session,
-                primary_batched_session: self.ort.primary_batched_session,
-                split_fbank_session: self.ort.split_fbank_session,
-                split_fbank_batched_session: self.ort.split_fbank_batched_session,
-                split_tail_session: self.ort.split_tail_session,
-                split_tail_batched_session: self.ort.split_tail_batched_session,
-                split_primary_tail_batched_session: self.ort.split_primary_tail_batched_session,
-                multi_mask_session: self.ort.multi_mask_session,
-                multi_mask_batched_session: self.ort.multi_mask_batched_session,
-                primary_batch_run_options: self
-                    .plan
-                    .fused
-                    .batched
-                    .as_ref()
-                    .map(|_| {
-                        let mut opts = preallocated_run_options(
-                            PRIMARY_BATCH_SIZE,
-                            256,
-                            "primary batched embedding output",
-                        )?;
-                        let _ = opts.disable_device_sync();
-                        Ok::<RunOptions<HasSelectedOutputs>, ort::Error>(opts)
-                    })
-                    .transpose()?,
+                session: SharedSession::new(self.ort.session),
+                primary_batched_session: self.ort.primary_batched_session.map(SharedSession::new),
+                split_fbank_session: self.ort.split_fbank_session.map(SharedSession::new),
+                split_fbank_batched_session: self
+                    .ort
+                    .split_fbank_batched_session
+                    .map(SharedSession::new),
+                split_tail_session: self.ort.split_tail_session.map(SharedSession::new),
+                split_tail_batched_session: self
+                    .ort
+                    .split_tail_batched_session
+                    .map(SharedSession::new),
+                split_primary_tail_batched_session: self
+                    .ort
+                    .split_primary_tail_batched_session
+                    .map(SharedSession::new),
+                multi_mask_session: self.ort.multi_mask_session.map(SharedSession::new),
+                multi_mask_batched_session: self
+                    .ort
+                    .multi_mask_batched_session
+                    .map(SharedSession::new),
+                primary_batch_run_options: OrtEmbeddingState::fresh_primary_run_options(
+                    has_primary_batched,
+                )?,
             },
             #[cfg(feature = "coreml")]
             coreml: CoreMlEmbeddingState {
@@ -273,35 +276,7 @@ impl LoadedSessions {
                     &[MULTI_MASK_BATCH_SIZE * NUM_SPEAKERS, MASK_FRAMES],
                 ),
             },
-            buffers: EmbeddingBuffers {
-                multi_mask_fbank_buffer: Array3::zeros((
-                    MULTI_MASK_BATCH_SIZE,
-                    FBANK_FRAMES,
-                    FBANK_FEATURES,
-                )),
-                multi_mask_masks_buffer: Array2::zeros((
-                    MULTI_MASK_BATCH_SIZE * NUM_SPEAKERS,
-                    MASK_FRAMES,
-                )),
-                waveform_buffer: Array3::zeros((1, 1, 160_000)),
-                weights_buffer: Array2::zeros((1, 589)),
-                primary_batch_waveform_buffer: Array3::zeros((PRIMARY_BATCH_SIZE, 1, 160_000)),
-                primary_batch_weights_buffer: Array2::zeros((PRIMARY_BATCH_SIZE, 589)),
-                split_waveform_buffer: Array3::zeros((1, 1, 160_000)),
-                split_fbank_batch_buffer: Array3::zeros((FBANK_BATCH_SIZE, 1, 160_000)),
-                split_feature_batch_buffer: Array3::zeros((
-                    CHUNK_SPEAKER_BATCH_SIZE,
-                    FBANK_FRAMES,
-                    FBANK_FEATURES,
-                )),
-                split_weights_batch_buffer: Array2::zeros((CHUNK_SPEAKER_BATCH_SIZE, 589)),
-                split_primary_feature_batch_buffer: Array3::zeros((
-                    PRIMARY_BATCH_SIZE,
-                    FBANK_FRAMES,
-                    FBANK_FEATURES,
-                )),
-                split_primary_weights_batch_buffer: Array2::zeros((PRIMARY_BATCH_SIZE, 589)),
-            },
+            buffers: EmbeddingBuffers::fresh(),
         })
     }
 }

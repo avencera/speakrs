@@ -188,6 +188,22 @@ impl OwnedDiarizationPipeline {
         PipelineBuilder::from_pretrained(mode)?.build()
     }
 
+    /// Create an independent pipeline handle that shares loaded ORT sessions
+    ///
+    /// The new handle has private scratch buffers and can run on another thread.
+    /// Calls that use the same shared session are serialized through inference,
+    /// output validation, and output copying.
+    #[cfg(not(feature = "coreml"))]
+    pub fn clone_shared(&self) -> Result<Self, PipelineError> {
+        Ok(Self {
+            seg_model: self.seg_model.clone_shared(),
+            emb_model: self.emb_model.clone_shared()?,
+            plda: self.plda.clone(),
+            powerset: self.powerset.clone(),
+            default_config: self.default_config.clone(),
+        })
+    }
+
     pipeline_run_methods!();
 
     /// Run post-inference (clustering + reconstruction) on pre-computed artifacts
