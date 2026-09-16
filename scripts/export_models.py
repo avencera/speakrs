@@ -5,7 +5,9 @@
 #     "torch>=2.6",
 #     "numpy",
 #     "onnx",
+#     "onnxruntime",
 #     "onnxscript",
+#     "onnxsim",
 # ]
 # ///
 """Download and export ONNX models + PLDA params for speakrs.
@@ -19,7 +21,9 @@ Requires accepting terms at:
 """
 
 import os
+import stat
 import sys
+import tempfile
 from typing import Any, cast
 
 import numpy as np
@@ -29,6 +33,115 @@ import torch.nn.functional as F
 from torchaudio.compliance.kaldi import get_mel_banks
 
 os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
+
+
+def simplify_onnx_graph(path: str, inputs: dict[str, np.ndarray]) -> float:
+    """Simplify an ONNX graph after verifying equivalent CPU outputs."""
+    import onnx
+    import onnxruntime as ort
+    from onnxsim import simplify
+
+    original = onnx.load(path)
+    original_bytes = original.SerializeToString()
+    simplified, valid = simplify(original)
+    if not valid:
+        raise RuntimeError(
+            f"onnxsim could not validate the simplified graph for {path}"
+        )
+
+    onnx.checker.check_model(simplified)
+    original_session = ort.InferenceSession(
+        original_bytes, providers=["CPUExecutionProvider"]
+    )
+    simplified_session = ort.InferenceSession(
+        simplified.SerializeToString(), providers=["CPUExecutionProvider"]
+    )
+
+    original_inputs = original_session.get_inputs()
+    simplified_inputs = simplified_session.get_inputs()
+    original_input_metadata = [
+        (value.name, value.type, tuple(value.shape)) for value in original_inputs
+    ]
+    simplified_input_metadata = [
+        (value.name, value.type, tuple(value.shape)) for value in simplified_inputs
+    ]
+    if original_input_metadata != simplified_input_metadata:
+        raise RuntimeError(
+            f"simplified input metadata changed for {path}: "
+            f"{original_input_metadata} != {simplified_input_metadata}"
+        )
+    original_input_names = [value.name for value in original_inputs]
+    if set(inputs) != set(original_input_names):
+        raise RuntimeError(
+            f"validation inputs do not match {path}: "
+            f"{sorted(inputs)} != {sorted(original_input_names)}"
+        )
+
+    original_outputs_metadata = original_session.get_outputs()
+    simplified_outputs_metadata = simplified_session.get_outputs()
+    original_output_metadata = [
+        (value.name, value.type, tuple(value.shape))
+        for value in original_outputs_metadata
+    ]
+    simplified_output_metadata = [
+        (value.name, value.type, tuple(value.shape))
+        for value in simplified_outputs_metadata
+    ]
+    if original_output_metadata != simplified_output_metadata:
+        raise RuntimeError(
+            f"simplified output metadata changed for {path}: "
+            f"{original_output_metadata} != {simplified_output_metadata}"
+        )
+    original_output_names = [value.name for value in original_outputs_metadata]
+
+    original_outputs = original_session.run(None, inputs)
+    simplified_outputs = simplified_session.run(None, inputs)
+    max_abs_diff = 0.0
+    for name, original_output, simplified_output in zip(
+        original_output_names, original_outputs, simplified_outputs, strict=True
+    ):
+        if original_output.shape != simplified_output.shape:
+            raise RuntimeError(
+                f"simplified output shape changed for {path}:{name}: "
+                f"{original_output.shape} != {simplified_output.shape}"
+            )
+        if original_output.dtype != simplified_output.dtype:
+            raise RuntimeError(
+                f"simplified output dtype changed for {path}:{name}: "
+                f"{original_output.dtype} != {simplified_output.dtype}"
+            )
+        if not np.isfinite(original_output).all():
+            raise RuntimeError(f"original output is not finite for {path}:{name}")
+        if not np.isfinite(simplified_output).all():
+            raise RuntimeError(f"simplified output is not finite for {path}:{name}")
+
+        output_diff = (
+            float(np.max(np.abs(original_output - simplified_output)))
+            if original_output.size
+            else 0.0
+        )
+        max_abs_diff = max(max_abs_diff, output_diff)
+        if not np.allclose(original_output, simplified_output, rtol=1e-5, atol=1e-6):
+            raise RuntimeError(
+                f"simplified output differs for {path}:{name}: "
+                f"max absolute difference = {output_diff:.3e}"
+            )
+
+    directory = os.path.dirname(path) or "."
+    original_mode = stat.S_IMODE(os.stat(path).st_mode)
+    file_descriptor, temporary_path = tempfile.mkstemp(
+        prefix=f".{os.path.basename(path)}.", suffix=".tmp", dir=directory
+    )
+    os.close(file_descriptor)
+    try:
+        onnx.save(simplified, temporary_path)
+        os.chmod(temporary_path, original_mode)
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.unlink(temporary_path)
+
+    return max_abs_diff
 
 
 def main() -> None:
@@ -72,6 +185,8 @@ def export_segmentation(pipeline: Any, models_dir: str) -> None:
     seg_model.eval()
 
     dummy = torch.randn(1, 1, 160000)
+    dummy_b32 = torch.randn(32, 1, 160000)
+    dummy_b64 = torch.randn(64, 1, 160000)
     with torch.no_grad():
         torch.onnx.export(
             seg_model,
@@ -85,7 +200,7 @@ def export_segmentation(pipeline: Any, models_dir: str) -> None:
         )
         torch.onnx.export(
             seg_model,
-            (torch.randn(32, 1, 160000),),
+            (dummy_b32,),
             os.path.join(models_dir, "segmentation-3.0-b32.onnx"),
             input_names=["input"],
             output_names=["output"],
@@ -94,13 +209,24 @@ def export_segmentation(pipeline: Any, models_dir: str) -> None:
         )
         torch.onnx.export(
             seg_model,
-            (torch.randn(64, 1, 160000),),
+            (dummy_b64,),
             os.path.join(models_dir, "segmentation-3.0-b64.onnx"),
             input_names=["input"],
             output_names=["output"],
             opset_version=14,
             dynamo=False,
         )
+
+    validation_inputs = (
+        ("segmentation-3.0.onnx", dummy),
+        ("segmentation-3.0-b32.onnx", dummy_b32),
+        ("segmentation-3.0-b64.onnx", dummy_b64),
+    )
+    for filename, input_tensor in validation_inputs:
+        path = os.path.join(models_dir, filename)
+        inputs = {"input": input_tensor.detach().cpu().numpy()}
+        max_abs_diff = simplify_onnx_graph(path, inputs)
+        print(f"  {filename} simplification verified (max diff = {max_abs_diff:.2e})")
 
     sz = os.path.getsize(os.path.join(models_dir, "segmentation-3.0.onnx")) / 1e6
     print(f"  segmentation-3.0.onnx ({sz:.1f} MB)")
