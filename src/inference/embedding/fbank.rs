@@ -147,7 +147,9 @@ impl EmbeddingModel {
     }
 
     fn compute_fbanks_with_pool(&self, audios: &[&[f32]]) -> Result<Vec<Array2<f32>>, ort::Error> {
-        compute_fbanks_with_pool(&self.ort.split_fbank_pool, audios, self.meta.window_samples)
+        self.ort
+            .split_fbank_pool
+            .run(audios, self.meta.window_samples)
     }
 
     fn fill_split_fbank_batch_buffer(&mut self, audios: &[&[f32]]) {
@@ -207,7 +209,7 @@ impl EmbeddingModel {
     }
 }
 
-fn compute_fbanks_with_pool(
+pub(super) fn compute_fbanks_with_pool(
     pool: &[SharedSession],
     audios: &[&[f32]],
     window_samples: usize,

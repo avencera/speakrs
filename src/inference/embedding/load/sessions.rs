@@ -14,7 +14,8 @@ use super::super::plan::EmbeddingExecutionPlan;
 #[cfg(feature = "coreml")]
 use super::super::plan::LazySession;
 use super::super::{
-    EmbeddingBuffers, EmbeddingMeta, EmbeddingModel, OrtEmbeddingState, read_min_num_samples,
+    EmbeddingBuffers, EmbeddingMeta, EmbeddingModel, OrtEmbeddingState, SharedFbankPool,
+    read_min_num_samples,
 };
 #[cfg(feature = "coreml")]
 use super::super::{
@@ -218,12 +219,13 @@ impl LoadedSessions {
                 session: SharedSession::new(self.ort.session),
                 primary_batched_session: self.ort.primary_batched_session.map(SharedSession::new),
                 split_fbank_session: self.ort.split_fbank_session.map(SharedSession::new),
-                split_fbank_pool: self
-                    .ort
-                    .split_fbank_pool
-                    .into_iter()
-                    .map(SharedSession::new)
-                    .collect(),
+                split_fbank_pool: SharedFbankPool::new(
+                    self.ort
+                        .split_fbank_pool
+                        .into_iter()
+                        .map(SharedSession::new)
+                        .collect(),
+                ),
                 split_fbank_batched_session: self
                     .ort
                     .split_fbank_batched_session

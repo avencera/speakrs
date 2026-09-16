@@ -1,6 +1,5 @@
 use std::path::Path;
 use std::path::PathBuf;
-#[cfg(feature = "coreml")]
 use std::sync::Arc;
 
 #[cfg(feature = "coreml")]
@@ -92,7 +91,7 @@ struct OrtEmbeddingState {
     session: SharedSession,
     primary_batched_session: Option<SharedSession>,
     split_fbank_session: Option<SharedSession>,
-    split_fbank_pool: Vec<SharedSession>,
+    split_fbank_pool: SharedFbankPool,
     split_fbank_batched_session: Option<SharedSession>,
     split_tail_session: Option<SharedSession>,
     split_tail_batched_session: Option<SharedSession>,
@@ -102,6 +101,41 @@ struct OrtEmbeddingState {
     // per-handle state carries a preallocated output tensor
     // do not share it across concurrent runs
     primary_batch_run_options: Option<RunOptions<HasSelectedOutputs>>,
+}
+
+#[derive(Clone)]
+struct SharedFbankPool(Arc<FbankPool>);
+
+struct FbankPool {
+    sessions: Vec<SharedSession>,
+    execution: std::sync::Mutex<()>,
+}
+
+impl SharedFbankPool {
+    fn new(sessions: Vec<SharedSession>) -> Self {
+        Self(Arc::new(FbankPool {
+            sessions,
+            execution: std::sync::Mutex::new(()),
+        }))
+    }
+
+    fn len(&self) -> usize {
+        self.0.sessions.len()
+    }
+
+    fn run(
+        &self,
+        audios: &[&[f32]],
+        window_samples: usize,
+    ) -> Result<Vec<Array2<f32>>, ort::Error> {
+        let _execution = self
+            .0
+            .execution
+            .lock()
+            .map_err(|_| ort::Error::new("shared filterbank pool lock was poisoned"))?;
+
+        fbank::compute_fbanks_with_pool(&self.0.sessions, audios, window_samples)
+    }
 }
 
 impl OrtEmbeddingState {
