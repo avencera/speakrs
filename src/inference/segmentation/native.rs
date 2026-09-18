@@ -14,11 +14,18 @@ use crate::inference::{ExecutionMode, ModelLoadError};
 
 use super::{LARGE_BATCH_SIZE, PRIMARY_BATCH_SIZE, SegmentationModel, batched_model_path};
 
+fn parse_env_flag(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on" | "y" | "t"
+    )
+}
+
 fn coreml_uses_w8a16_segmentation(mode: ExecutionMode) -> bool {
     match mode {
         ExecutionMode::CoreMlFast => true,
         ExecutionMode::CoreMl => {
-            std::env::var_os("SPEAKRS_COREML_SEG_W8A16").is_some_and(|value| value != "0")
+            std::env::var("SPEAKRS_COREML_SEG_W8A16").is_ok_and(|value| parse_env_flag(&value))
         }
         _ => false,
     }
@@ -299,5 +306,19 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn parse_env_flag_accepts_true_like_values() {
+        for value in ["1", "true", "TRUE", " Yes ", "on", "Y", "t"] {
+            assert!(parse_env_flag(value), "{value}");
+        }
+    }
+
+    #[test]
+    fn parse_env_flag_rejects_false_like_and_unknown_values() {
+        for value in ["0", "false", "FALSE", " no ", "off", "n", "f", "", "w8a16"] {
+            assert!(!parse_env_flag(value), "{value}");
+        }
     }
 }
