@@ -17,8 +17,9 @@ use super::{LARGE_BATCH_SIZE, PRIMARY_BATCH_SIZE, SegmentationModel, batched_mod
 fn coreml_uses_w8a16_segmentation(mode: ExecutionMode) -> bool {
     match mode {
         ExecutionMode::CoreMlFast => true,
-        ExecutionMode::CoreMl => std::env::var_os("SPEAKRS_COREML_SEG_W8A16")
-            .is_some_and(|value| value != "0"),
+        ExecutionMode::CoreMl => {
+            std::env::var_os("SPEAKRS_COREML_SEG_W8A16").is_some_and(|value| value != "0")
+        }
         _ => false,
     }
 }
