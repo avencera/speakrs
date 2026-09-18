@@ -14,6 +14,15 @@ use crate::inference::{ExecutionMode, ModelLoadError};
 
 use super::{LARGE_BATCH_SIZE, PRIMARY_BATCH_SIZE, SegmentationModel, batched_model_path};
 
+fn coreml_uses_w8a16_segmentation(mode: ExecutionMode) -> bool {
+    match mode {
+        ExecutionMode::CoreMlFast => true,
+        ExecutionMode::CoreMl => std::env::var_os("SPEAKRS_COREML_SEG_W8A16")
+            .is_some_and(|value| value != "0"),
+        _ => false,
+    }
+}
+
 impl SegmentationModel {
     fn require_native_asset(path: PathBuf, mode: ExecutionMode) -> Result<PathBuf, ModelLoadError> {
         if path.exists() {
@@ -30,6 +39,9 @@ impl SegmentationModel {
         let Some(single_path) = Self::resolve_coreml_path(model_path, mode) else {
             return Ok(());
         };
+        if matches!(mode, ExecutionMode::CoreMl) && coreml_uses_w8a16_segmentation(mode) {
+            info!("SPEAKRS_COREML_SEG_W8A16: using W8A16 segmentation on standard CoreML");
+        }
         Self::require_native_asset(single_path, mode)?;
 
         let batched_path = Self::resolve_batched_coreml_path(model_path, mode, PRIMARY_BATCH_SIZE)
@@ -71,8 +83,10 @@ impl SegmentationModel {
     }
 
     pub(super) fn resolve_coreml_path(model_path: &Path, mode: ExecutionMode) -> Option<PathBuf> {
+        if coreml_uses_w8a16_segmentation(mode) {
+            return Some(coreml_w8a16_model_path(model_path));
+        }
         match mode {
-            ExecutionMode::CoreMlFast => Some(coreml_w8a16_model_path(model_path)),
             ExecutionMode::CoreMl => Some(coreml_model_path(model_path)),
             _ => None,
         }
