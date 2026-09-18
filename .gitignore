@@ -6,8 +6,10 @@ __pycache__/
 
 .gpu-instances/
 
-fixtures/models/
-fixtures/datasets/
+fixtures/models
+fixtures/datasets
+fixtures/dataset-instructions.md
+fixtures/wavlm_bridge/
 
 .envrc
 /scripts/speakerkit-bench/Packages
