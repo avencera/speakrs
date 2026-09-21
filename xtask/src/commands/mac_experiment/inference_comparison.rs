@@ -5,6 +5,7 @@ use color_eyre::eyre::{Context, ContextCompat, Result, ensure};
 use serde::Serialize;
 use speakrs::{
     ExecutionMode, PipelineBuilder, RuntimeConfig,
+    audio::load_wav,
     pipeline::{
         CoreMlChunkLayout, CoreMlFbankNormalizationScope, DiarizationResult,
         ExperimentInferenceConfig, InferenceArtifacts,
@@ -17,7 +18,6 @@ use super::{
     store::atomic_write,
 };
 use crate::cmd::project_root;
-use crate::wav::load_wav_samples;
 
 const SAMPLE_RATE: u32 = 16_000;
 
@@ -84,7 +84,9 @@ pub(super) fn run(
     let audio = audio
         .canonicalize()
         .wrap_err_with(|| format!("failed to resolve {}", audio.display()))?;
-    let (samples, sample_rate) = load_wav_samples(&audio.to_string_lossy())?;
+    let wav = load_wav(&audio)?;
+    let sample_rate = wav.sample_rate().get();
+    let samples = wav.into_samples();
     ensure!(
         sample_rate == SAMPLE_RATE,
         "audio sample rate must be {SAMPLE_RATE} Hz, got {sample_rate} Hz"

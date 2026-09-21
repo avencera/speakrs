@@ -13,4 +13,3 @@ pub mod datasets;
 pub mod fluidaudio;
 pub mod path;
 pub mod python;
-pub mod wav;

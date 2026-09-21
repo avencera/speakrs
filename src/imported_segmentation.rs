@@ -1,4 +1,4 @@
-//! Strict WavLM segmentation bundle contracts and bounded shard loading
+//! Strict WavLM segmentation bundle contracts and bounded score validation
 //!
 //! The bundle is an immutable hand-off from the Python model runner.  This
 //! module validates its meaning and bytes without constructing a model
@@ -56,6 +56,12 @@ pub const SCORE_LOG_PROBABILITY_TOLERANCE: f64 = 1.0e-4;
 
 /// Maximum byte length of a free-form identity label
 pub const MAX_IDENTITY_TEXT_BYTES: usize = 512;
+
+/// Version of the score-free validation result JSON contract
+pub const VALIDATION_RESULT_SCHEMA_VERSION: u32 = 1;
+
+/// Maximum score payload read by one validation operation
+pub const SCORE_VALIDATION_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Error returned when a segmentation manifest, shard, or publication is
 /// malformed or inconsistent
@@ -641,6 +647,64 @@ pub struct SegmentationManifest {
     pub tensors: TensorInventory,
 }
 
+/// Dimensions of the complete imported score tensor
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScoreTensorDimensions {
+    /// Number of planned audio chunks
+    pub chunks: u64,
+    /// Number of frames in each chunk
+    pub frames: u64,
+    /// Number of powerset classes in each frame
+    pub classes: u64,
+}
+
+/// Measurements collected while validating score payloads
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScoreValidationMeasurements {
+    /// Number of score shards
+    pub shard_count: u64,
+    /// Number of serialized bytes across all score shards
+    pub serialized_bytes: u64,
+    /// Number of float32 score values
+    pub value_count: u64,
+    /// Number of class rows validated
+    pub row_count: u64,
+    /// Number of finite score values
+    pub finite_value_count: u64,
+    /// Minimum finite score value, when the tensor is non-empty
+    pub finite_minimum: Option<f32>,
+    /// Maximum finite score value, when the tensor is non-empty
+    pub finite_maximum: Option<f32>,
+}
+
+/// Compact result of validating one imported segmentation bundle
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SegmentationBundleValidation {
+    /// Version of this score-free validation result
+    pub schema_version: u32,
+    /// Imported bundle format version
+    pub format_version: u32,
+    /// Imported bundle schema identifier
+    pub schema_id: String,
+    /// Recording and waveform identity
+    pub audio: AudioIdentity,
+    /// Model, producer, source, and bundle identities
+    pub identity: BundleIdentity,
+    /// Validated geometry without score values
+    pub geometry: SegmentationGeometry,
+    /// Score stage represented by the bundle
+    pub score_stage: ScoreStage,
+    /// Score representation used by every score row
+    pub score_representation: ScoreRepresentation,
+    /// Complete score tensor dimensions
+    pub dimensions: ScoreTensorDimensions,
+    /// Bounded validation measurements
+    pub measurements: ScoreValidationMeasurements,
+}
+
 /// A decoded and validated NPY score shard
 #[derive(Clone, Debug, PartialEq)]
 pub struct LoadedTensorShard {
@@ -751,5 +815,5 @@ mod admission;
 mod canonical;
 mod validation;
 
-pub use admission::load_imported_segmentation_bundle;
+pub use admission::{load_imported_segmentation_bundle, validate_imported_segmentation_bundle};
 pub use canonical::{canonical_bundle_id, canonical_manifest_digest, parse_manifest};

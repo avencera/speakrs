@@ -544,8 +544,13 @@ fn validate_text(value: &str, context: &str) -> Result<(), SegmentationBundleErr
 }
 
 pub(crate) fn validate_member_path(path: &str) -> Result<(), SegmentationBundleError> {
-    if path.is_empty() || path.len() > MAX_MEMBER_PATH_BYTES || path.contains('\0') {
-        return invalid("tensor member path is empty or too long".to_owned());
+    if path.is_empty()
+        || path.len() > MAX_MEMBER_PATH_BYTES
+        || path.contains('\0')
+        || path.contains('\\')
+        || path.split('/').any(str::is_empty)
+    {
+        return invalid("tensor member path is empty, non-canonical, or too long".to_owned());
     }
     if !path.ends_with(".npy") {
         return invalid(format!("tensor member path must name an NPY file: {path}"));

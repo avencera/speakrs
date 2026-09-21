@@ -242,6 +242,8 @@
 #[cfg(all(feature = "coreml", not(target_os = "macos")))]
 compile_error!("the `coreml` feature is only supported on macOS");
 
+/// WAV audio decoding and validated waveform types
+pub mod audio;
 pub(crate) mod binarize;
 pub(crate) mod clustering;
 /// Strict imported WavLM segmentation bundle contract

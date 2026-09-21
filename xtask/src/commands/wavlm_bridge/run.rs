@@ -6,8 +6,12 @@ use std::time::Instant;
 
 use color_eyre::eyre::{Context, Result, ensure};
 use serde::Serialize;
+use speakrs::audio::load_wav;
 
-use speakrs::imported_segmentation::{SegmentationBundle, load_imported_segmentation_bundle};
+use speakrs::imported_segmentation::{
+    SegmentationBundle, SegmentationBundleValidation, load_imported_segmentation_bundle,
+    validate_imported_segmentation_bundle,
+};
 use speakrs::inference::EmbeddingArtifactMetadata;
 use speakrs::pipeline::{EmbeddingAvailability, PipelineGeometry};
 
@@ -20,8 +24,6 @@ use super::domain::{
     ensure_regular_file, make_tree_read_only,
 };
 use super::embedding_execution::{load_embedding_model, run_embedding_stage};
-use crate::wav::load_wav_samples;
-
 use super::stage::{
     ExecutionIdentity, availability_counts_from_snapshot, clustering_dependencies,
     embedding_snapshot_bytes, embedding_stage_key, embedding_stage_receipt_files, make_receipt,
@@ -37,29 +39,32 @@ pub struct ValidatedRecording {
 
 pub fn validate_bundle_audio(bundle_path: &Path, audio_path: &Path) -> Result<ValidationDocument> {
     ensure_regular_file(audio_path, "audio")?;
-    let (samples, sample_rate) = load_wav_samples(&audio_path.to_string_lossy())?;
+    let audio = load_wav(audio_path)?;
+    let sample_rate = audio.sample_rate().get();
+    let waveform_sha256 = audio.waveform_sha256().clone();
+    let samples = audio.into_samples();
     ensure!(
         sample_rate == 16_000,
         "expected 16 kHz WAV, got {sample_rate} Hz"
     );
-    let bundle = load_imported_segmentation_bundle(bundle_path)
+    let validation = validate_imported_segmentation_bundle(bundle_path)
         .wrap_err_with(|| format!("failed to validate bundle {}", bundle_path.display()))?;
-    validate_waveform_and_bundle(&bundle, &samples, sample_rate, None)?;
-    let manifest = bundle.manifest();
+    validate_waveform_and_validation(&validation, &samples, sample_rate, &waveform_sha256)?;
     let geometry = geometry_receipt(&PipelineGeometry::from_imported(
-        &manifest.audio,
-        &manifest.geometry,
+        &validation.audio,
+        &validation.geometry,
     )?);
     Ok(ValidationDocument {
         schema_version: super::domain::VALIDATION_SCHEMA_VERSION,
         bundle_path: bundle_path.to_owned(),
-        bundle_id: manifest.identity.bundle_id.clone(),
-        manifest_sha256: manifest.identity.manifest_digest.clone(),
+        bundle_id: validation.identity.bundle_id.clone(),
+        manifest_sha256: validation.identity.manifest_digest.clone(),
         audio_path: audio_path.to_owned(),
         sample_rate,
         sample_count: samples.len(),
-        waveform_sha256: speakrs::canonical_waveform_digest(&samples),
+        waveform_sha256,
         geometry,
+        bundle_validation: validation,
     })
 }
 
@@ -67,7 +72,10 @@ pub fn validate_recording(recording: &super::domain::RecordingSpec) -> Result<Va
     ensure_regular_file(&recording.audio.path, "audio")?;
     ensure_regular_file(&recording.reference.path, "reference")?;
     ensure_regular_file(&recording.uem.path, "UEM")?;
-    let (samples, sample_rate) = load_wav_samples(&recording.audio.path.to_string_lossy())?;
+    let audio = load_wav(&recording.audio.path)?;
+    let sample_rate = audio.sample_rate().get();
+    let waveform_sha256 = audio.waveform_sha256().clone();
+    let samples = audio.into_samples();
     ensure!(
         sample_rate == 16_000,
         "recording {} is not 16 kHz",
@@ -75,7 +83,13 @@ pub fn validate_recording(recording: &super::domain::RecordingSpec) -> Result<Va
     );
     let bundle = load_imported_segmentation_bundle(&recording.bundle.path)
         .wrap_err_with(|| format!("failed to validate bundle for recording {}", recording.id))?;
-    validate_waveform_and_bundle(&bundle, &samples, sample_rate, Some(recording))?;
+    validate_waveform_and_bundle(
+        &bundle,
+        &samples,
+        sample_rate,
+        &waveform_sha256,
+        Some(recording),
+    )?;
     ensure!(
         digest_file(&recording.reference.path)? == recording.reference.sha256,
         "reference digest mismatch for recording {}",
@@ -97,6 +111,7 @@ fn validate_waveform_and_bundle(
     bundle: &SegmentationBundle,
     samples: &[f32],
     sample_rate: u32,
+    waveform_sha256: &Sha256Digest,
     recording: Option<&super::domain::RecordingSpec>,
 ) -> Result<()> {
     let manifest = bundle.manifest();
@@ -115,14 +130,13 @@ fn validate_waveform_and_bundle(
         manifest.audio.sample_count,
         samples.len()
     );
-    let waveform = speakrs::canonical_waveform_digest(samples);
     ensure!(
-        waveform == manifest.audio.waveform_sha256,
+        waveform_sha256 == &manifest.audio.waveform_sha256,
         "bundle waveform digest does not match audio"
     );
     if let Some(recording) = recording {
         ensure!(
-            waveform == recording.audio.sha256,
+            waveform_sha256 == &recording.audio.sha256,
             "audio digest mismatch for recording {}",
             recording.id
         );
@@ -137,6 +151,34 @@ fn validate_waveform_and_bundle(
             recording.id
         );
     }
+    Ok(())
+}
+
+fn validate_waveform_and_validation(
+    validation: &SegmentationBundleValidation,
+    samples: &[f32],
+    sample_rate: u32,
+    waveform_sha256: &Sha256Digest,
+) -> Result<()> {
+    ensure!(
+        validation.audio.sample_rate == sample_rate,
+        "bundle sample rate {} does not match audio sample rate {sample_rate}",
+        validation.audio.sample_rate
+    );
+    ensure!(
+        validation.audio.channels == 1,
+        "bundle audio contract is not mono"
+    );
+    ensure!(
+        validation.audio.sample_count == samples.len() as u64,
+        "bundle sample count {} does not match audio sample count {}",
+        validation.audio.sample_count,
+        samples.len()
+    );
+    ensure!(
+        waveform_sha256 == &validation.audio.waveform_sha256,
+        "bundle waveform digest does not match audio"
+    );
     Ok(())
 }
 

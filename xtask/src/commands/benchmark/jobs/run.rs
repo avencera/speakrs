@@ -283,12 +283,11 @@ pub fn run_speakrs_gpu(
     mode: &str,
     progress_cb: Option<&(dyn Fn(&ProgressUpdate) + Send + Sync)>,
 ) -> Result<BatchRunOutput> {
+    use speakrs::audio::load_wav;
     use speakrs::inference::{EmbeddingModel, ExecutionMode, SegmentationModel};
     use speakrs::pipeline::{
         CUDA_SEGMENTATION_STEP_SECONDS, DiarizationPipeline, FAST_SEGMENTATION_STEP_SECONDS,
     };
-
-    use crate::wav;
 
     let execution_mode = match mode {
         "cuda-fast" => ExecutionMode::CudaFast,
@@ -317,7 +316,9 @@ pub fn run_speakrs_gpu(
 
         let file_start = std::time::Instant::now();
         let load_start = std::time::Instant::now();
-        let (samples, sample_rate) = wav::load_wav_samples(&wav_path.to_string_lossy())?;
+        let wav = load_wav(wav_path)?;
+        let sample_rate = wav.sample_rate().get();
+        let samples = wav.into_samples();
         let load_elapsed = load_start.elapsed();
         ensure!(
             sample_rate == 16000,

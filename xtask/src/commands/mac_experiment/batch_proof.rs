@@ -5,7 +5,9 @@ use chrono::{SecondsFormat, Utc};
 use color_eyre::eyre::{Context, ContextCompat, Result, ensure};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use speakrs::{BatchInput, DiarizationResult, ExecutionMode, OwnedDiarizationPipeline};
+use speakrs::{
+    BatchInput, DiarizationResult, ExecutionMode, OwnedDiarizationPipeline, audio::load_wav,
+};
 
 use super::{
     identity::{HostIdentity, digest_paths, digest_paths_cached},
@@ -13,7 +15,6 @@ use super::{
     store::atomic_write,
 };
 use crate::cmd::project_root;
-use crate::wav::load_wav_samples;
 
 const SAMPLE_RATE: u32 = 16_000;
 const MAX_FILES: usize = 32;
@@ -316,7 +317,9 @@ fn load_inputs(paths: &[std::path::PathBuf], sample_count: usize) -> Result<Vec<
             let path = path
                 .canonicalize()
                 .wrap_err_with(|| format!("failed to resolve {}", path.display()))?;
-            let (mut samples, sample_rate) = load_wav_samples(&path.to_string_lossy())?;
+            let audio = load_wav(&path)?;
+            let sample_rate = audio.sample_rate().get();
+            let mut samples = audio.into_samples();
             ensure!(
                 sample_rate == SAMPLE_RATE,
                 "audio sample rate must be {SAMPLE_RATE} Hz, got {sample_rate} Hz"

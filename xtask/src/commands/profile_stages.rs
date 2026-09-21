@@ -1,11 +1,11 @@
 use color_eyre::eyre::{Result, bail, ensure};
 use ndarray::{Array3, s};
 use speakrs::PowersetMapping;
+use speakrs::audio::load_wav;
 use speakrs::inference::{EmbeddingModel, SegmentationModel};
 use speakrs::pipeline::SEGMENTATION_STEP_SECONDS;
 
 use crate::commands::profile_support;
-use crate::wav;
 
 pub fn run(mode: &str, wav_path: &str, iterations: usize, log_every: usize) -> Result<()> {
     let mode = crate::counts::parse_stage_mode(mode)?;
@@ -30,7 +30,9 @@ pub fn run(mode: &str, wav_path: &str, iterations: usize, log_every: usize) -> R
     let mut emb_model = EmbeddingModel::new(models_dir.join("wespeaker-voxceleb-resnet34.onnx"))?;
     let powerset = PowersetMapping::new(3, 2);
 
-    let (samples, sample_rate) = wav::load_wav_samples(wav_path)?;
+    let wav = load_wav(wav_path)?;
+    let sample_rate = wav.sample_rate().get();
+    let samples = wav.into_samples();
     ensure!(
         sample_rate == 16_000,
         "expected 16kHz WAV, got {sample_rate}Hz"

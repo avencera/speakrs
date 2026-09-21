@@ -8,7 +8,7 @@ use color_eyre::eyre::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as ShaDigest, Sha256};
 
-pub use speakrs::imported_segmentation::Sha256Digest;
+pub use speakrs::imported_segmentation::{SegmentationBundleValidation, Sha256Digest};
 use speakrs::pipeline::{
     EmbeddingAvailability, EmbeddingFailureReason as LibraryEmbeddingFailureReason,
     EmbeddingReceipt, EmbeddingStageEntry as LibraryEmbeddingStageEntry, EmbeddingStageSnapshot,
@@ -16,7 +16,7 @@ use speakrs::pipeline::{
 };
 
 pub const SPEC_SCHEMA_VERSION: u32 = 1;
-pub const VALIDATION_SCHEMA_VERSION: u32 = 1;
+pub const VALIDATION_SCHEMA_VERSION: u32 = 2;
 pub const RUN_SCHEMA_VERSION: u32 = 1;
 pub const SYSTEM_SCHEMA_VERSION: u32 = 1;
 pub const REPORT_SCHEMA_VERSION: u32 = 1;
@@ -1851,7 +1851,7 @@ pub struct RunDocument {
     pub records: Vec<RunRecording>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidationDocument {
     pub schema_version: u32,
@@ -1863,6 +1863,7 @@ pub struct ValidationDocument {
     pub sample_count: usize,
     pub waveform_sha256: Sha256Digest,
     pub geometry: GeometryReceipt,
+    pub bundle_validation: SegmentationBundleValidation,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]

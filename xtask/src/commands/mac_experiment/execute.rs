@@ -7,14 +7,11 @@ use std::time::{Duration, Instant};
 
 use color_eyre::eyre::{Context, Result, ensure, eyre};
 use serde::Serialize;
+use speakrs::audio::load_wav;
 use speakrs::inference::ExecutionMode;
 use speakrs::pipeline::{
     ClusteringBackend, OwnedDiarizationPipeline, PipelineBuilder, RuntimeConfig,
 };
-
-use crate::cmd::project_root;
-use crate::commands::benchmark::{DerAccumulation, PerFileDerResult};
-use crate::wav::load_wav_samples;
 
 use super::domain::{
     CandidateClustering, CheckedCandidate, ComparisonSide, CoreMlMode, ExecutableExperiment,
@@ -25,6 +22,8 @@ use super::record::{
     StageTimings,
 };
 use super::store::{ManifestFile, RunStore};
+use crate::cmd::project_root;
+use crate::commands::benchmark::{DerAccumulation, PerFileDerResult};
 
 const REQUIRED_SAMPLE_RATE: u32 = 16_000;
 
@@ -573,8 +572,10 @@ fn apply_candidate_config(
 }
 
 fn load_audio(file: &ManifestFile) -> Result<(Vec<f32>, u32)> {
-    load_wav_samples(&file.wav.to_string_lossy())
-        .wrap_err_with(|| format!("failed to load WAV {}", file.wav.display()))
+    let wav = load_wav(&file.wav)
+        .wrap_err_with(|| format!("failed to load WAV {}", file.wav.display()))?;
+    let sample_rate = wav.sample_rate().get();
+    Ok((wav.into_samples(), sample_rate))
 }
 
 fn ensure_sample_rate(file: &ManifestFile, sample_rate: u32) -> Result<()> {

@@ -1,4 +1,5 @@
 use std::fs;
+use std::mem::size_of;
 use std::path::Path;
 
 #[cfg(unix)]
@@ -11,10 +12,11 @@ use speakrs::imported_segmentation::{
     EmbeddingPooling, EmbeddingPrecision, FORMAT_VERSION, FilterBoundary, FilterPolicy, FrameGrid,
     IdentityReference, MaskInterpolation, OutputExtent, OutputExtentPolicy, Precision,
     RationalSample, ReconstructionBoundary, ReconstructionPolicy, ResamplingIdentity, SCHEMA_ID,
-    ScoreRepresentation, ScoreStage, SegmentationBundle, SegmentationGeometry, SegmentationHead,
-    SegmentationManifest, SegmentationPolicy, Sha256Digest, TailPolicy, TensorInventory,
-    TensorShard, WindowPlanning, WindowPlanningKind, canonical_manifest_digest,
-    load_imported_segmentation_bundle,
+    SCORE_VALIDATION_CHUNK_BYTES, ScoreRepresentation, ScoreStage, SegmentationBundle,
+    SegmentationGeometry, SegmentationHead, SegmentationManifest, SegmentationPolicy, Sha256Digest,
+    TailPolicy, TensorInventory, TensorShard, WindowPlanning, WindowPlanningKind,
+    canonical_manifest_digest, load_imported_segmentation_bundle,
+    validate_imported_segmentation_bundle,
 };
 
 const WINDOW_SAMPLES: u64 = 128_000;
@@ -411,6 +413,102 @@ fn fixture_bundle_loads_without_a_model() {
     );
     assert_eq!(bundle.shards()[0].shape(), [1, 399, 11]);
     assert_eq!(bundle.shards()[0].values().len(), 399 * 11);
+}
+
+#[test]
+fn bounded_validation_returns_score_measurements_without_loaded_values() {
+    let values = vec![0.0_f32; FRAME_COUNT as usize * 64];
+    let (manifest, shard) = make_manifest(
+        6,
+        6,
+        1,
+        "scores/000000.npy",
+        ScoreRepresentation::Logits,
+        &values,
+    );
+    assert!(SCORE_VALIDATION_CHUNK_BYTES < values.len() * size_of::<f32>());
+    let temporary = bundle_tempdir();
+    write_bundle(temporary.path(), &manifest, &shard);
+
+    let validation = validate_imported_segmentation_bundle(temporary.path()).unwrap();
+
+    assert_eq!(validation.identity.bundle_id, manifest.identity.bundle_id);
+    assert_eq!(
+        validation.audio.waveform_sha256,
+        manifest.audio.waveform_sha256
+    );
+    assert_eq!(validation.dimensions.chunks, 1);
+    assert_eq!(validation.dimensions.frames, u64::from(FRAME_COUNT));
+    assert_eq!(validation.dimensions.classes, 64);
+    assert_eq!(validation.measurements.shard_count, 1);
+    assert_eq!(validation.measurements.serialized_bytes, shard.len() as u64);
+    assert_eq!(validation.measurements.value_count, values.len() as u64);
+    assert_eq!(validation.measurements.row_count, FRAME_COUNT as u64);
+    assert_eq!(
+        validation.measurements.finite_value_count,
+        values.len() as u64
+    );
+    assert_eq!(validation.measurements.finite_minimum, Some(0.0));
+    assert_eq!(validation.measurements.finite_maximum, Some(0.0));
+}
+
+#[test]
+fn validation_rejects_an_unexpected_tree_member() {
+    let values = vec![0.0_f32; FRAME_COUNT as usize * 11];
+    let (manifest, shard) = make_manifest(
+        4,
+        2,
+        1,
+        "scores/000000.npy",
+        ScoreRepresentation::Logits,
+        &values,
+    );
+    let temporary = bundle_tempdir();
+    write_bundle(temporary.path(), &manifest, &shard);
+    set_read_only(temporary.path(), false);
+    let unexpected = temporary.path().join("unexpected.txt");
+    fs::write(&unexpected, b"unexpected").unwrap();
+    set_read_only(&unexpected, true);
+    set_read_only(temporary.path(), true);
+
+    assert!(validate_imported_segmentation_bundle(temporary.path()).is_err());
+}
+
+#[test]
+fn bounded_validation_rejects_truncated_and_non_finite_scores() {
+    let values = vec![0.0_f32; FRAME_COUNT as usize * 11];
+    let (manifest, shard) = make_manifest(
+        4,
+        2,
+        1,
+        "scores/000000.npy",
+        ScoreRepresentation::Logits,
+        &values,
+    );
+    let temporary = bundle_tempdir();
+    write_bundle(temporary.path(), &manifest, &shard[..shard.len() - 1]);
+    assert!(validate_imported_segmentation_bundle(temporary.path()).is_err());
+
+    let mut wrong_digest_shard = shard.clone();
+    let last = wrong_digest_shard.len() - 1;
+    wrong_digest_shard[last] ^= 1;
+    let temporary = bundle_tempdir();
+    write_bundle(temporary.path(), &manifest, &wrong_digest_shard);
+    assert!(validate_imported_segmentation_bundle(temporary.path()).is_err());
+
+    let mut non_finite_values = values;
+    non_finite_values[0] = f32::NAN;
+    let (non_finite_manifest, non_finite_shard) = make_manifest(
+        4,
+        2,
+        1,
+        "scores/000000.npy",
+        ScoreRepresentation::Logits,
+        &non_finite_values,
+    );
+    let temporary = bundle_tempdir();
+    write_bundle(temporary.path(), &non_finite_manifest, &non_finite_shard);
+    assert!(validate_imported_segmentation_bundle(temporary.path()).is_err());
 }
 
 #[test]

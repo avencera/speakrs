@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use clap::ValueEnum;
 use color_eyre::eyre::{Result, bail, ensure};
+use speakrs::audio::load_wav;
 use speakrs::inference::CoreMlComputeUnits;
 use speakrs::inference::ExecutionMode;
 use speakrs::inference::{EmbeddingModel, SegmentationModel};
@@ -13,8 +14,6 @@ use speakrs::pipeline::{
     COREML_SEGMENTATION_STEP_SECONDS, CUDA_SEGMENTATION_STEP_SECONDS, DiarizationPipeline,
     FAST_SEGMENTATION_STEP_SECONDS, RuntimeConfig, SEGMENTATION_STEP_SECONDS,
 };
-
-use crate::wav;
 
 #[derive(Debug, Clone, Copy)]
 pub enum DiarizeMode {
@@ -199,7 +198,9 @@ pub fn run(
                     .file_stem()
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "file1".to_string());
-                let (samples, sr) = wav::load_wav_samples(&wav_path.to_string_lossy())?;
+                let audio = load_wav(wav_path)?;
+                let sr = audio.sample_rate().get();
+                let samples = audio.into_samples();
                 ensure!(sr == 16000, "expected 16kHz WAV, got {sr}Hz");
                 audio_data.push((file_id, samples));
             }

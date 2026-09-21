@@ -5,12 +5,12 @@ use ort::memory::Allocator;
 use ort::session::{OutputSelector, RunOptions, Session};
 use ort::value::{Tensor, TensorRef};
 use speakrs::PowersetMapping;
+use speakrs::audio::load_wav;
 use speakrs::inference::SegmentationModel;
 use speakrs::pipeline::SEGMENTATION_STEP_SECONDS;
 use std::path::{Path, PathBuf};
 
 use crate::commands::profile_support;
-use crate::wav;
 
 pub fn run(
     mode: &str,
@@ -51,7 +51,9 @@ pub fn run(
     )?;
     let powerset = PowersetMapping::new(3, 2);
 
-    let (samples, sample_rate) = wav::load_wav_samples(wav_path)?;
+    let wav = load_wav(wav_path)?;
+    let sample_rate = wav.sample_rate().get();
+    let samples = wav.into_samples();
     ensure!(
         sample_rate == 16_000,
         "expected 16kHz WAV, got {sample_rate}Hz"
