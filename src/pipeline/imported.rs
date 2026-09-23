@@ -9,9 +9,12 @@ use crate::imported_segmentation::{
     MaskInterpolation, SegmentationBundle, SegmentationBundleError, SegmentationManifest,
     Sha256Digest,
 };
+#[cfg(test)]
+use crate::inference::embedding::select_mask;
 use crate::inference::embedding::{
-    EmbeddingFrontend, EmbeddingInputGeometry, EmbeddingMaskInterpolation, EmbeddingModel,
-    EmbeddingPooling, EmbeddingPrecision, should_use_clean_mask_slice,
+    EmbeddingFrontend, EmbeddingInputGeometry, EmbeddingMaskEligibility,
+    EmbeddingMaskInterpolation, EmbeddingMaskSource, EmbeddingModel, EmbeddingPooling,
+    EmbeddingPrecision,
 };
 
 use super::config::{MIN_SPEAKER_ACTIVITY, PipelineConfig};
@@ -114,15 +117,6 @@ pub enum ImportedPipelineError {
         /// Number of failed slots
         count: usize,
     },
-}
-
-/// Which mask was selected for one embedding attempt
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(crate) enum ImportedMaskSelection {
-    /// The clean mask had activity above the strict threshold
-    Clean,
-    /// The clean mask was too short, so the full mask was selected
-    Full,
 }
 
 /// Checked imported segmentation and embedding pipeline
@@ -266,24 +260,21 @@ impl<'a> ImportedDiarizationPipeline<'a> {
                 let mask = chunk.column(speaker_idx).to_vec();
                 let clean_mask = clean_masks.column(speaker_idx).to_vec();
                 if let Some(reason) = inactive_embedding_reason(&mask) {
-                    outcomes.push(TypedEmbedding {
-                        availability: EmbeddingAvailability::Inactive { reason },
-                        values: None,
-                        mask_choice: None,
-                    });
+                    outcomes.push(inactive_embedding_outcome(reason));
                     continue;
                 }
 
-                let selection = choose_mask(
+                let selection = self.emb_model.select_embedding_mask(
                     &mask,
-                    &clean_mask,
-                    self.emb_model.window_samples(),
-                    self.emb_model.min_num_samples(),
-                    self.emb_model.pooling_frames(),
+                    Some(&clean_mask),
+                    chunk_audio.len(),
                 );
-                let choice = match selection {
-                    ImportedMaskSelection::Clean => EmbeddingMaskChoice::Clean,
-                    ImportedMaskSelection::Full => EmbeddingMaskChoice::Full,
+                let choice = match embedding_mask_choice(selection) {
+                    Ok(choice) => choice,
+                    Err(reason) => {
+                        outcomes.push(inactive_embedding_outcome(reason));
+                        continue;
+                    }
                 };
                 let result = self
                     .emb_model
@@ -316,6 +307,28 @@ fn inactive_embedding_reason(mask: &[f32]) -> Option<InactiveEmbeddingReason> {
     }
 
     None
+}
+
+fn inactive_embedding_outcome(reason: InactiveEmbeddingReason) -> TypedEmbedding {
+    TypedEmbedding {
+        availability: EmbeddingAvailability::Inactive { reason },
+        values: None,
+        mask_choice: None,
+    }
+}
+
+fn embedding_mask_choice(
+    selection: EmbeddingMaskEligibility<'_>,
+) -> Result<EmbeddingMaskChoice, InactiveEmbeddingReason> {
+    match selection {
+        EmbeddingMaskEligibility::Eligible { source, .. } => Ok(match source {
+            EmbeddingMaskSource::Clean => EmbeddingMaskChoice::Clean,
+            EmbeddingMaskSource::Full => EmbeddingMaskChoice::Full,
+        }),
+        EmbeddingMaskEligibility::NoActivityAfterResize { .. } => {
+            Err(InactiveEmbeddingReason::NoActivityAfterMaskResize)
+        }
+    }
 }
 
 fn admit_embedding_result(
@@ -649,22 +662,6 @@ pub fn validate_waveform_identity(
     Ok(())
 }
 
-/// Select a clean or full mask with the model-owned strict threshold
-pub(crate) fn choose_mask(
-    mask: &[f32],
-    clean_mask: &[f32],
-    window_samples: usize,
-    min_num_samples: usize,
-    pooling_frames: usize,
-) -> ImportedMaskSelection {
-    debug_assert_eq!(mask.len(), clean_mask.len());
-    if should_use_clean_mask_slice(clean_mask, window_samples, min_num_samples, pooling_frames) {
-        ImportedMaskSelection::Clean
-    } else {
-        ImportedMaskSelection::Full
-    }
-}
-
 fn clean_overlap_masks(segmentations: &ndarray::ArrayView2<'_, f32>) -> ndarray::Array2<f32> {
     let mut clean = ndarray::Array2::<f32>::zeros(segmentations.raw_dim());
     for frame_idx in 0..segmentations.nrows() {
@@ -730,12 +727,18 @@ mod tests {
         above_threshold[..6].fill(1.0);
 
         assert_eq!(
-            choose_mask(&[1.0; 399], &below_threshold, 128_000, 1_284, 100),
-            ImportedMaskSelection::Full
+            select_mask(&[1.0; 399], Some(&below_threshold), 128_000, 1_284, 100),
+            EmbeddingMaskEligibility::Eligible {
+                mask: &[1.0; 399],
+                source: EmbeddingMaskSource::Full,
+            }
         );
         assert_eq!(
-            choose_mask(&[1.0; 399], &above_threshold, 128_000, 1_284, 100,),
-            ImportedMaskSelection::Clean
+            select_mask(&[1.0; 399], Some(&above_threshold), 128_000, 1_284, 100),
+            EmbeddingMaskEligibility::Eligible {
+                mask: &above_threshold,
+                source: EmbeddingMaskSource::Clean,
+            }
         );
     }
 
@@ -746,14 +749,68 @@ mod tests {
         clean[176..179].fill(1.0);
 
         assert_eq!(
-            choose_mask(&full, &clean, 128_000, 400, 100),
-            ImportedMaskSelection::Full
+            select_mask(&full, Some(&clean), 128_000, 400, 100),
+            EmbeddingMaskEligibility::Eligible {
+                mask: &full,
+                source: EmbeddingMaskSource::Full,
+            }
         );
 
         clean[175] = 1.0;
         assert_eq!(
-            choose_mask(&full, &clean, 128_000, 400, 100),
-            ImportedMaskSelection::Clean
+            select_mask(&full, Some(&clean), 128_000, 400, 100),
+            EmbeddingMaskEligibility::Eligible {
+                mask: &clean,
+                source: EmbeddingMaskSource::Clean,
+            }
+        );
+    }
+
+    #[test]
+    fn empty_resized_mask_is_inactive_and_a_valid_control_is_available() {
+        let mut full = vec![0.0; 399];
+        for index in [256, 261, 262, 268, 269, 270, 280, 393, 397, 398] {
+            full[index] = 1.0;
+        }
+        let mut clean = vec![0.0; 399];
+        clean[393] = 1.0;
+        clean[398] = 1.0;
+
+        let sparse = select_mask(&full, Some(&clean), 128_000, 1, 100);
+        assert_eq!(
+            embedding_mask_choice(sparse),
+            Err(InactiveEmbeddingReason::NoActivityAfterMaskResize)
+        );
+        let inactive = inactive_embedding_outcome(embedding_mask_choice(sparse).unwrap_err());
+        assert_eq!(
+            inactive.availability,
+            EmbeddingAvailability::Inactive {
+                reason: InactiveEmbeddingReason::NoActivityAfterMaskResize,
+            }
+        );
+        assert!(inactive.values.is_none());
+
+        full[395] = 1.0;
+        let valid = select_mask(&full, Some(&clean), 128_000, 1, 100);
+        assert_eq!(embedding_mask_choice(valid), Ok(EmbeddingMaskChoice::Full));
+        let available = admit_embedding_result(
+            Ok(Array1::from_elem(
+                crate::inference::embedding::EMBEDDING_WIDTH,
+                0.25,
+            )),
+            crate::inference::embedding::EMBEDDING_WIDTH,
+            2_144,
+            1,
+            EmbeddingMaskChoice::Full,
+        )
+        .unwrap();
+        assert_eq!(available.availability, EmbeddingAvailability::Available);
+        assert!(
+            available
+                .values
+                .unwrap()
+                .iter()
+                .all(|value| value.is_finite())
         );
     }
 

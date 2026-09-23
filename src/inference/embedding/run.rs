@@ -1,7 +1,7 @@
 use ndarray::Array1;
 use ort::value::TensorRef;
 
-use super::{EmbeddingModel, first_output, select_mask};
+use super::{EmbeddingModel, first_output};
 
 impl EmbeddingModel {
     /// Extract a speaker embedding from raw audio with a uniform mask
@@ -18,13 +18,14 @@ impl EmbeddingModel {
         clean_mask: Option<&[f32]>,
     ) -> Result<Array1<f32>, ort::Error> {
         self.validate_input(audio, mask, clean_mask)?;
-        let used_mask = select_mask(
-            mask,
-            clean_mask,
-            self.mask_selection_window_samples(audio.len()),
-            self.meta.min_num_samples,
-            self.meta.pooling_frames,
-        );
+        let selection = self.select_embedding_mask(mask, clean_mask, audio.len());
+        let used_mask = selection.mask().ok_or_else(|| {
+            ort::Error::new(format!(
+                "selected {:?} embedding mask has no active frame after nearest resize to {}",
+                selection.source(),
+                self.meta.pooling_frames
+            ))
+        })?;
         self.embed_single(audio, used_mask)
     }
 

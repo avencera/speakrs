@@ -24,7 +24,7 @@ pub const SCORE_SCHEMA_VERSION: u32 = 2;
 pub const RECEIPT_SCHEMA_VERSION: u32 = 1;
 pub const CACHE_SCHEMA_VERSION: u32 = 2;
 pub const EMBEDDING_CACHE_SCHEMA_VERSION: u32 = 2;
-pub const EMBEDDING_STAGE_SCHEMA_VERSION: u32 = 2;
+pub const EMBEDDING_STAGE_SCHEMA_VERSION: u32 = 3;
 pub const MAX_EMBEDDING_STAGE_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_EMBEDDING_STAGE_VALUES: usize = 64 * 1024 * 1024;
 pub const MAX_EMBEDDING_STAGE_ENTRIES: usize = 4 * 1024 * 1024;
@@ -822,6 +822,7 @@ pub struct ReceiptDocument {
 pub enum EmbeddingInactiveReason {
     NoActivity,
     InsufficientActivity,
+    NoActivityAfterMaskResize,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1007,6 +1008,9 @@ impl TryFrom<&LibraryEmbeddingStageEntry> for EmbeddingStageEntry {
                         LibraryInactiveEmbeddingReason::InsufficientActivity => {
                             EmbeddingInactiveReason::InsufficientActivity
                         }
+                        LibraryInactiveEmbeddingReason::NoActivityAfterMaskResize => {
+                            EmbeddingInactiveReason::NoActivityAfterMaskResize
+                        }
                     },
                 })
             }
@@ -1055,6 +1059,9 @@ impl EmbeddingStageEntry {
                         }
                         EmbeddingInactiveReason::InsufficientActivity => {
                             LibraryInactiveEmbeddingReason::InsufficientActivity
+                        }
+                        EmbeddingInactiveReason::NoActivityAfterMaskResize => {
+                            LibraryInactiveEmbeddingReason::NoActivityAfterMaskResize
                         }
                     },
                 },
@@ -2432,6 +2439,61 @@ mod tests {
                 r#"{"state":"inactive","reason":"no_activity","extra":true}"#
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn empty_resized_mask_and_valid_control_have_explicit_embedding_statuses() {
+        let inactive_library = LibraryEmbeddingStageEntry::new(
+            EmbeddingAvailability::Inactive {
+                reason: LibraryInactiveEmbeddingReason::NoActivityAfterMaskResize,
+            },
+            None,
+        );
+        let inactive = EmbeddingStageEntry::try_from(&inactive_library).unwrap();
+        assert_eq!(
+            serde_json::to_string(&inactive).unwrap(),
+            r#"{"state":"inactive","reason":"no_activity_after_mask_resize"}"#
+        );
+        assert_eq!(
+            inactive.to_library().availability(),
+            &EmbeddingAvailability::Inactive {
+                reason: LibraryInactiveEmbeddingReason::NoActivityAfterMaskResize,
+            }
+        );
+
+        let mut inactive_stage = valid_embedding_stage_document();
+        inactive_stage.entries[0] = inactive;
+        inactive_stage.embedding_receipt = AvailabilityCounts {
+            chunks: 1,
+            local_slots: 1,
+            inactive: 1,
+            ..AvailabilityCounts::default()
+        };
+        inactive_stage.validate().unwrap();
+        let inactive_json = serde_json::to_value(&inactive_stage).unwrap();
+        assert_eq!(
+            inactive_json["schema_version"],
+            EMBEDDING_STAGE_SCHEMA_VERSION
+        );
+        assert_eq!(inactive_json["entries"][0]["state"], "inactive");
+        assert_eq!(
+            inactive_json["entries"][0]["reason"],
+            "no_activity_after_mask_resize"
+        );
+
+        let available_library = LibraryEmbeddingStageEntry::new(
+            EmbeddingAvailability::Available,
+            Some(vec![0.25; IMPORTED_EMBEDDING_WIDTH]),
+        );
+        let available = EmbeddingStageEntry::try_from(&available_library).unwrap();
+        valid_embedding_stage_document().validate().unwrap();
+        let available_json = serde_json::to_value(&available).unwrap();
+        assert_eq!(available_json["state"], "available");
+        assert!(available_json["values"].is_string());
+        assert_eq!(
+            available.to_library().availability(),
+            &EmbeddingAvailability::Available
         );
     }
 

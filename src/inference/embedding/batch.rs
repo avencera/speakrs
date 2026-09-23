@@ -6,7 +6,7 @@ use super::tensor::{array2_slice, array3_slice};
 use super::{
     EmbeddingModel, FBANK_FEATURES, FBANK_FRAMES, MULTI_MASK_BATCH_SIZE, MaskedEmbeddingInput,
     NUM_SPEAKERS, PRIMARY_BATCH_SIZE, SplitTailInput, array3_slice_mut,
-    embedding_batch_from_ort_with_width, first_output, mask_selection_window_samples, select_mask,
+    embedding_batch_from_ort_with_width, first_output,
 };
 
 impl EmbeddingModel {
@@ -19,24 +19,35 @@ impl EmbeddingModel {
             self.validate_input(input.audio, input.mask, input.clean_mask)?;
         }
 
+        let selected_masks: Vec<_> = inputs
+            .iter()
+            .map(|input| {
+                self.select_embedding_mask(input.mask, input.clean_mask, input.audio.len())
+            })
+            .collect();
+        let pooling_frames = self.pooling_frames();
+        for (batch_idx, selection) in selected_masks.iter().enumerate() {
+            if selection.mask().is_none() {
+                return Err(ort::Error::new(format!(
+                    "embedding batch item {batch_idx} has no active frame after nearest resize to {pooling_frames}"
+                )));
+            }
+        }
+
         if let Some(sess) = self
             .ort
             .primary_batched_session
             .as_mut()
             .filter(|_| inputs.len() == PRIMARY_BATCH_SIZE)
         {
-            for (batch_idx, input) in inputs.iter().enumerate() {
-                let used_mask = select_mask(
-                    input.mask,
-                    input.clean_mask,
-                    mask_selection_window_samples(
-                        self.capabilities,
-                        input.audio.len(),
-                        self.meta.geometry.window_samples(),
-                    ),
-                    self.meta.min_num_samples,
-                    self.meta.pooling_frames,
-                );
+            for (batch_idx, (input, selection)) in
+                inputs.iter().zip(selected_masks.iter()).enumerate()
+            {
+                let used_mask = selection.mask().ok_or_else(|| {
+                    ort::Error::new(format!(
+                        "embedding batch item {batch_idx} has no active frame after nearest resize to {pooling_frames}"
+                    ))
+                })?;
                 Self::prepare_waveform(
                     batch_idx,
                     input.audio,

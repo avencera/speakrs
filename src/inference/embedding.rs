@@ -43,8 +43,9 @@ pub(crate) use contract::{clean_mask_threshold, validate_audio_length, validate_
 #[cfg(feature = "coreml")]
 use paths::fp32_coreml_path;
 pub(crate) use paths::read_min_num_samples;
+pub(crate) use paths::{EmbeddingMaskEligibility, EmbeddingMaskSource, select_mask};
 use paths::{
-    batched_model_path, multi_mask_model_path, select_mask, split_fbank_batched_model_path,
+    batched_model_path, multi_mask_model_path, split_fbank_batched_model_path,
     split_fbank_model_path, split_tail_model_path,
 };
 use plan::EmbeddingExecutionPlan;
@@ -264,20 +265,29 @@ impl EmbeddingModel {
         )
     }
 
+    pub(crate) fn select_embedding_mask<'a>(
+        &self,
+        mask: &'a [f32],
+        clean_mask: Option<&'a [f32]>,
+        valid_audio_samples: usize,
+    ) -> EmbeddingMaskEligibility<'a> {
+        select_mask(
+            mask,
+            clean_mask,
+            self.mask_selection_window_samples(valid_audio_samples),
+            self.meta.min_num_samples,
+            self.meta.pooling_frames,
+        )
+    }
+
     #[cfg(all(test, feature = "coreml"))]
     pub(crate) fn select_chunk_mask<'a>(
         &self,
         mask: &'a [f32],
         clean_mask: Option<&'a [f32]>,
         num_samples: usize,
-    ) -> &'a [f32] {
-        select_mask(
-            mask,
-            clean_mask,
-            self.mask_selection_window_samples(num_samples),
-            self.meta.min_num_samples,
-            self.meta.pooling_frames,
-        )
+    ) -> EmbeddingMaskEligibility<'a> {
+        self.select_embedding_mask(mask, clean_mask, num_samples)
     }
 
     fn prepare_waveform(
@@ -406,11 +416,8 @@ pub(crate) fn clean_mask_is_eligible(
         return false;
     }
 
-    // PyTorch nearest maps each target index to floor(target * source / target_count)
-    (0..pooling_frames).any(|target_index| {
-        let source_index =
-            ((target_index as u128) * (mask_len as u128) / (pooling_frames as u128)) as usize;
-        clean_value(source_index) > 0.0
+    paths::nearest_resize_has_activity_by(mask_len, pooling_frames, |index| {
+        clean_value(index) > 0.0
     })
 }
 
@@ -426,7 +433,7 @@ mod tests {
 
         let selected = select_mask(&mask, Some(&clean), 16_000, 6_000, 4);
 
-        assert_eq!(selected, clean);
+        assert_eq!(selected.mask(), Some(clean.as_slice()));
     }
 
     #[test]
@@ -446,12 +453,12 @@ mod tests {
         assert_eq!(legacy_window, 8_000);
         assert_eq!(imported_window, 128_000);
         assert_eq!(
-            select_mask(&mask, Some(&clean), legacy_window, 100, 100),
-            mask.as_slice()
+            select_mask(&mask, Some(&clean), legacy_window, 100, 100).mask(),
+            None
         );
         assert_eq!(
-            select_mask(&mask, Some(&clean), imported_window, 100, 100),
-            clean.as_slice()
+            select_mask(&mask, Some(&clean), imported_window, 100, 100).mask(),
+            Some(clean.as_slice())
         );
     }
 
@@ -462,7 +469,7 @@ mod tests {
 
         let selected = select_mask(&mask, Some(&clean), 16_000, 6_000, 4);
 
-        assert_eq!(selected, mask);
+        assert_eq!(selected.mask(), Some(mask.as_slice()));
     }
 
     #[test]

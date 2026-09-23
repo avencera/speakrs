@@ -619,6 +619,8 @@ fn fast_apple_split_primary_batch_matches_single_tail_path() {
                     Some(clean_mask.as_slice().unwrap()),
                     chunk_audio.len(),
                 )
+                .mask()
+                .expect("test mask has activity after resize")
                 .to_vec();
             expected.push(
                 emb_model

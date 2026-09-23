@@ -52,6 +52,8 @@ pub enum InactiveEmbeddingReason {
     NoActivity,
     /// The decoded speaker mask is too short for stable embedding inference
     InsufficientActivity,
+    /// The selected mask contains no active frames after nearest-neighbor resize
+    NoActivityAfterMaskResize,
 }
 
 /// Closed reason why a model-backed embedding is unavailable
@@ -475,7 +477,7 @@ pub(crate) struct TypedEmbedding {
     pub(crate) mask_choice: Option<EmbeddingMaskChoice>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum EmbeddingMaskChoice {
     Clean,
     Full,
@@ -1019,11 +1021,18 @@ mod tests {
     #[test]
     fn typed_unavailable_embeddings_become_nan_only_at_the_artifact_boundary() {
         let geometry = PipelineGeometry::from_legacy(16_000, 160_000, 160_000, 160_000).unwrap();
-        let segmentations = DecodedSegmentations(Array3::zeros((1, 589, 2)));
-        let mut typed = TypedChunkEmbeddings::new(1, 2, EMBEDDING_WIDTH);
+        let segmentations = DecodedSegmentations(Array3::zeros((1, 589, 3)));
+        let mut typed = TypedChunkEmbeddings::new(1, 3, EMBEDDING_WIDTH);
         typed.push(TypedEmbedding {
             availability: EmbeddingAvailability::Inactive {
                 reason: InactiveEmbeddingReason::NoActivity,
+            },
+            values: None,
+            mask_choice: None,
+        });
+        typed.push(TypedEmbedding {
+            availability: EmbeddingAvailability::Inactive {
+                reason: InactiveEmbeddingReason::NoActivityAfterMaskResize,
             },
             values: None,
             mask_choice: None,
@@ -1051,12 +1060,18 @@ mod tests {
         ));
         assert!(matches!(
             artifacts.embedding_availability.get(0, 1),
+            Some(EmbeddingAvailability::Inactive {
+                reason: InactiveEmbeddingReason::NoActivityAfterMaskResize
+            })
+        ));
+        assert!(matches!(
+            artifacts.embedding_availability.get(0, 2),
             Some(EmbeddingAvailability::InferenceFailed {
                 reason: EmbeddingFailureReason::InvalidOutput
             })
         ));
         assert_eq!(artifacts.embedding_receipt.full_mask_fallback_count, 1);
-        assert_eq!(artifacts.embedding_receipt.inactive_count, 1);
+        assert_eq!(artifacts.embedding_receipt.inactive_count, 2);
         assert_eq!(artifacts.embedding_receipt.inference_failure_count, 1);
     }
 }
