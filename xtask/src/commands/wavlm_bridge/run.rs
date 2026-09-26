@@ -226,9 +226,7 @@ pub fn run(options: RunOptions) -> Result<()> {
 
     let recipes = select_recipes(&spec, &options.recipe_ids)?;
     let worker_count = schedule::worker_count(options.workers.get(), spec.recordings.len());
-    let embedding_models = (0..worker_count.get())
-        .map(|_| load_embedding_model(embedding_path.clone(), execution_mode))
-        .collect::<Result<Vec<_>>>()?;
+    let embedding_models = load_embedding_models(&embedding_path, execution_mode, worker_count)?;
     let execution_identity = ExecutionIdentity::capture()?;
     let staging = create_output_staging(&options.output_dir)?;
     let shared = RunShared {
@@ -305,6 +303,43 @@ pub fn run(options: RunOptions) -> Result<()> {
     publish_output(staging, &options.output_dir)?;
     println!("wrote wavlm-bridge run {}", options.output_dir.display());
     Ok(())
+}
+
+/// Load one embedding model per recording worker
+///
+/// A load builds ONNX Runtime sessions and runs a probe window, which mostly
+/// waits on the runtime and the GPU, so all models load at the same time
+fn load_embedding_models(
+    embedding_path: &Path,
+    mode: speakrs::ExecutionMode,
+    count: std::num::NonZeroUsize,
+) -> Result<Vec<EmbeddingModel>> {
+    let loaders = (0..count.get())
+        .map(|_| ModelLoader {
+            embedding_path,
+            mode,
+        })
+        .collect();
+    schedule::run_ordered(
+        loaders,
+        vec![(); count.get()],
+        DispatchOrder::sequential(count.get()),
+    )
+}
+
+/// Worker that loads one embedding model per job
+struct ModelLoader<'a> {
+    embedding_path: &'a Path,
+    mode: speakrs::ExecutionMode,
+}
+
+impl Worker for ModelLoader<'_> {
+    type Job = ();
+    type Output = EmbeddingModel;
+
+    fn run(&mut self, (): ()) -> Result<EmbeddingModel> {
+        load_embedding_model(self.embedding_path.to_path_buf(), self.mode)
+    }
 }
 
 /// Read-only inputs shared by every recording worker
@@ -1003,9 +1038,51 @@ fn publish_output(staging: tempfile::TempDir, output: &Path) -> Result<()> {
     Ok(())
 }
 
+// each published file is synced before the next starts, so a few writers in
+// flight hide most of the sync latency
+const PUBLISH_WRITERS: usize = 8;
+
+/// Copy the staged tree into `destination`, creating every entry without replacement
 fn publish_staged_tree(staging: &Path, destination: &Path) -> Result<()> {
-    for entry in fs::read_dir(staging)? {
-        let entry = entry?;
+    let mut files = Vec::new();
+    create_staged_directories(staging, destination, &mut files)?;
+    let writers = schedule::worker_count(
+        std::num::NonZeroUsize::new(PUBLISH_WRITERS).unwrap_or(std::num::NonZeroUsize::MIN),
+        files.len(),
+    );
+    let order = DispatchOrder::sequential(files.len());
+    schedule::run_ordered(vec![FileWriter; writers.get()], files, order)?;
+    Ok(())
+}
+
+/// One staged file and its published path
+struct StagedFile {
+    source: PathBuf,
+    target: PathBuf,
+}
+
+/// Worker that publishes one staged file per job
+#[derive(Clone)]
+struct FileWriter;
+
+impl Worker for FileWriter {
+    type Job = StagedFile;
+    type Output = ();
+
+    fn run(&mut self, file: StagedFile) -> Result<()> {
+        write_new(&file.target, &fs::read(&file.source)?)
+    }
+}
+
+/// Create the staged directory tree under `destination` and list its files
+fn create_staged_directories(
+    staging: &Path,
+    destination: &Path,
+    files: &mut Vec<StagedFile>,
+) -> Result<()> {
+    let mut entries = fs::read_dir(staging)?.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(fs::DirEntry::file_name);
+    for entry in entries {
         let source = entry.path();
         let target = destination.join(entry.file_name());
         let metadata = fs::symlink_metadata(&source)?;
@@ -1021,9 +1098,9 @@ fn publish_staged_tree(staging: &Path, destination: &Path) -> Result<()> {
                     target.display()
                 )
             })?;
-            publish_staged_tree(&source, &target)?;
+            create_staged_directories(&source, &target, files)?;
         } else if metadata.is_file() {
-            write_new(&target, &fs::read(&source)?)?;
+            files.push(StagedFile { source, target });
         } else {
             ensure!(
                 false,
@@ -1108,6 +1185,73 @@ mod tests {
         assert!(publish_output(staging, &output).is_err());
         assert_eq!(fs::read(output.join("sentinel")).unwrap(), b"keep");
         assert!(!output.join(".complete").exists());
+    }
+
+    #[test]
+    fn concurrent_publication_copies_the_whole_staged_tree() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir_in(root.path()).unwrap();
+        let mut expected = Vec::new();
+        for recording in 0..20 {
+            let stages = staging
+                .path()
+                .join(format!("recordings/r{recording:02}/stages"));
+            fs::create_dir_all(&stages).unwrap();
+            for stage in ["decode", "embedding"] {
+                let relative = format!("recordings/r{recording:02}/stages/{stage}.json");
+                let bytes = format!("{recording}:{stage}")
+                    .repeat(recording + 1)
+                    .into_bytes();
+                fs::write(staging.path().join(&relative), &bytes).unwrap();
+                expected.push((relative, bytes));
+            }
+        }
+        fs::write(staging.path().join("run.json"), b"run").unwrap();
+        expected.push(("run.json".to_owned(), b"run".to_vec()));
+        let output = root.path().join("run");
+
+        publish_output(staging, &output).unwrap();
+
+        let published = walk_files(&output);
+        assert_eq!(published.len(), expected.len() + 1);
+        for (relative, bytes) in expected {
+            assert_eq!(
+                fs::read(output.join(&relative)).unwrap(),
+                bytes,
+                "{relative}"
+            );
+        }
+        let run_digest = digest_bytes(b"run");
+        assert_eq!(
+            fs::read_to_string(output.join(".complete")).unwrap(),
+            format!("{run_digest}\n")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn publication_rejects_staged_symlinks_before_writing_files() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = tempfile::tempdir_in(root.path()).unwrap();
+        fs::write(staging.path().join("a.json"), b"a").unwrap();
+        std::os::unix::fs::symlink("a.json", staging.path().join("b.json")).unwrap();
+        let output = root.path().join("run");
+
+        assert!(publish_output(staging, &output).is_err());
+        assert!(walk_files(&output).is_empty());
+    }
+
+    fn walk_files(root: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        for entry in fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files.extend(walk_files(&path));
+            } else {
+                files.push(path);
+            }
+        }
+        files
     }
 
     #[test]
