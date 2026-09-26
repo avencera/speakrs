@@ -69,6 +69,21 @@ impl EmbeddingModel {
         mode: ExecutionMode,
         cuda_graph: bool,
     ) -> Result<Session, ort::Error> {
+        Self::session_builder(mode, cuda_graph)?.commit_from_file(model_path)
+    }
+
+    /// Build a session from serialized model bytes with the primary session options
+    pub(super) fn build_session_from_memory(
+        model: &[u8],
+        mode: ExecutionMode,
+    ) -> Result<Session, ort::Error> {
+        Self::session_builder(mode, false)?.commit_from_memory(model)
+    }
+
+    fn session_builder(
+        mode: ExecutionMode,
+        cuda_graph: bool,
+    ) -> Result<ort::session::builder::SessionBuilder, ort::Error> {
         let builder = Session::builder()?
             .with_independent_thread_pool()?
             // Embedding inference dominates CPU-mode wall time. With
@@ -83,13 +98,11 @@ impl EmbeddingModel {
             )?
             .with_inter_threads(1)?
             .with_memory_pattern(true)?;
-        let mut builder =
-            if cuda_graph && matches!(mode, ExecutionMode::Cuda | ExecutionMode::CudaFast) {
-                Self::with_cuda_graph_mode(builder)?
-            } else {
-                with_execution_mode(builder, mode)?
-            };
-        builder.commit_from_file(model_path)
+        if cuda_graph && matches!(mode, ExecutionMode::Cuda | ExecutionMode::CudaFast) {
+            Self::with_cuda_graph_mode(builder)
+        } else {
+            with_execution_mode(builder, mode)
+        }
     }
 
     #[cfg(feature = "cuda")]

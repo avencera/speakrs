@@ -14,6 +14,7 @@ const BASE_EMBEDDING_DEPENDENCIES: &[&str] = &[
     "ndarray",
     "ndarray-npy",
     "ort",
+    "realfft",
     "serde",
     "serde_json",
     "sha2",

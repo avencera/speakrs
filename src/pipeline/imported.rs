@@ -256,6 +256,8 @@ impl<'a> ImportedDiarizationPipeline<'a> {
             let chunk_audio = self.geometry.chunk_audio(audio, chunk_idx);
             let chunk = segmentations.slice(s![chunk_idx, .., ..]);
             let clean_masks = clean_overlap_masks(&chunk);
+            // prepared on the first active speaker, so silent chunks skip the frontend
+            let mut window = None;
             for speaker_idx in 0..speakers {
                 let mask = chunk.column(speaker_idx).to_vec();
                 let clean_mask = clean_masks.column(speaker_idx).to_vec();
@@ -276,9 +278,23 @@ impl<'a> ImportedDiarizationPipeline<'a> {
                         continue;
                     }
                 };
+                let prepared = match window {
+                    Some(ref prepared) => prepared,
+                    None => {
+                        let prepared =
+                            self.emb_model
+                                .prepare_window(chunk_audio)
+                                .map_err(|source| ImportedPipelineError::EmbeddingExecution {
+                                    chunk_index: chunk_idx,
+                                    speaker_index: speaker_idx,
+                                    source,
+                                })?;
+                        window.insert(prepared)
+                    }
+                };
                 let result = self
                     .emb_model
-                    .embed_masked(chunk_audio, &mask, Some(&clean_mask));
+                    .embed_window_masked(prepared, &mask, Some(&clean_mask));
                 outcomes.push(admit_embedding_result(
                     result,
                     width,

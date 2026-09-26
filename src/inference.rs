@@ -15,7 +15,8 @@ pub use embedding::{
     EmbeddingArtifactMetadata, EmbeddingFrontend, EmbeddingGeometryError, EmbeddingInputError,
     EmbeddingInputGeometry, EmbeddingMaskInterpolation, EmbeddingMetadataError, EmbeddingModel,
     EmbeddingPooling, EmbeddingPrecision, EmbeddingRuntimeCapabilities, EmbeddingRuntimeCapability,
-    EmbeddingRuntimeProfile, Sha256Digest,
+    EmbeddingRuntimeProfile, EmbeddingWindow, FbankFrontendError, FixedSplitError, Sha256Digest,
+    WireError,
 };
 pub use segmentation::{SegmentationError, SegmentationModel};
 
@@ -200,6 +201,15 @@ pub enum ModelLoadError {
     InvalidConfiguration {
         /// Boundary validation error
         message: String,
+    },
+    /// The fixed embedding model could not be split into host frontend and tail
+    #[error("fixed embedding model cannot be split: {0}")]
+    FixedSplit(#[from] FixedSplitError),
+    /// The split embedding path disagrees with the fused model on the probe window
+    #[error("split embedding differs from the fused model: relative error {relative_error}")]
+    FixedSplitParity {
+        /// L2 norm of the difference over the L2 norm of the fused embedding
+        relative_error: f32,
     },
 }
 

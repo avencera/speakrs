@@ -16,6 +16,7 @@ mod batch;
 mod chunk;
 mod contract;
 mod fbank;
+mod fixed_split;
 mod load;
 #[cfg(feature = "coreml")]
 mod native;
@@ -25,6 +26,7 @@ mod run;
 mod session;
 mod tail;
 mod tensor;
+mod wespeaker_fbank;
 
 #[cfg(feature = "coreml")]
 use chunk::ChunkSessionSpec;
@@ -40,6 +42,7 @@ pub(crate) use contract::{
     LEGACY_POOLING_FRAMES, PrimaryTensorShape, geometry_from_primary_shapes,
 };
 pub(crate) use contract::{clean_mask_threshold, validate_audio_length, validate_mask_length};
+pub use fixed_split::{FixedSplitError, WireError};
 #[cfg(feature = "coreml")]
 use paths::fp32_coreml_path;
 pub(crate) use paths::read_min_num_samples;
@@ -51,12 +54,14 @@ use paths::{
 use plan::EmbeddingExecutionPlan;
 #[cfg(feature = "coreml")]
 use plan::LazySession;
+pub use run::EmbeddingWindow;
 #[cfg(feature = "coreml")]
 use tensor::fbank_hw_from_shape;
 use tensor::{
     array1_slice, array2_from_shape_vec, array3_slice_mut, embedding_batch_from_ort_with_width,
     fbank_hw_from_i64, first_output, preallocated_run_options,
 };
+pub use wespeaker_fbank::FbankFrontendError;
 const PRIMARY_BATCH_SIZE: usize = 64;
 pub(crate) const EMBEDDING_WIDTH: usize = 256;
 const MULTI_MASK_BATCH_SIZE: usize = 32;
@@ -104,6 +109,8 @@ struct OrtEmbeddingState {
     multi_mask_session: Option<Session>,
     multi_mask_batched_session: Option<Session>,
     primary_batch_run_options: Option<RunOptions<HasSelectedOutputs>>,
+    // host fbank plus tail session, cut from a verified fixed-shape model
+    fixed_split: Option<fixed_split::FixedSplitSession>,
 }
 
 #[cfg(feature = "coreml")]

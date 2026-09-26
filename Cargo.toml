@@ -66,6 +66,7 @@ thiserror = "2.0.18"
 # concurrency
 crossbeam-channel = "0.5"
 rayon = "1.11.0"
+realfft = "3.5.0"
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 ndarray-linalg-default = { package = "ndarray-linalg", version = "0.18.1", features = ["intel-mkl-static"], optional = true }

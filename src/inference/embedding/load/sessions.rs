@@ -11,13 +11,14 @@ use crate::inference::{ExecutionMode, ModelLoadError};
 
 #[cfg(feature = "coreml")]
 use super::super::CoreMlEmbeddingState;
+use super::super::fixed_split::FixedSplitSession;
 use super::super::plan::EmbeddingExecutionPlan;
 #[cfg(feature = "coreml")]
 use super::super::plan::LazySession;
 use super::super::{
-    CHUNK_SPEAKER_BATCH_SIZE, EmbeddingArtifactMetadata, EmbeddingBuffers, EmbeddingMeta,
-    EmbeddingModel, EmbeddingRuntimeCapabilities, FBANK_BATCH_SIZE, FBANK_FEATURES, FBANK_FRAMES,
-    LEGACY_POOLING_FRAMES, MULTI_MASK_BATCH_SIZE, NUM_SPEAKERS, OrtEmbeddingState,
+    CHUNK_SPEAKER_BATCH_SIZE, EmbeddingArtifactMetadata, EmbeddingBuffers, EmbeddingFrontend,
+    EmbeddingMeta, EmbeddingModel, EmbeddingRuntimeCapabilities, FBANK_BATCH_SIZE, FBANK_FEATURES,
+    FBANK_FRAMES, LEGACY_POOLING_FRAMES, MULTI_MASK_BATCH_SIZE, NUM_SPEAKERS, OrtEmbeddingState,
     PRIMARY_BATCH_SIZE, VerifiedEmbeddingArtifact, preallocated_run_options, read_min_num_samples,
 };
 
@@ -31,6 +32,7 @@ pub(super) struct LoadedOrtSessions {
     split_primary_tail_batched_session: Option<Session>,
     multi_mask_session: Option<Session>,
     multi_mask_batched_session: Option<Session>,
+    fixed_split: Option<FixedSplitSession>,
 }
 
 #[cfg(feature = "coreml")]
@@ -159,7 +161,26 @@ impl LoadedSessions {
             |path| EmbeddingModel::build_session(path, mode),
         )?);
 
+        let (fixed_split, fixed_split_elapsed) = timed!(match artifact
+            .as_ref()
+            .map(|artifact| artifact.metadata().frontend)
+        {
+            Some(EmbeddingFrontend::WeSpeakerFbankV1) => Some(FixedSplitSession::load(
+                model_path,
+                geometry.window_samples(),
+                |tail| {
+                    EmbeddingModel::build_session_from_memory(
+                        tail,
+                        EmbeddingModel::single_execution_mode(mode),
+                    )
+                    .map_err(ModelLoadError::from)
+                },
+            )?),
+            None => None,
+        });
+
         let total_ms = (session_elapsed
+            + fixed_split_elapsed
             + primary_batched_elapsed
             + split_fbank_elapsed
             + split_fbank_batched_elapsed
@@ -179,6 +200,7 @@ impl LoadedSessions {
             split_tail_b64_ms = split_primary_tail_batched_elapsed.as_millis(),
             ort_multi_mask_ms = multi_mask_elapsed.as_millis(),
             ort_multi_mask_b64_ms = multi_mask_batched_elapsed.as_millis(),
+            fixed_split_ms = fixed_split_elapsed.as_millis(),
             total_ms,
             "Embedding model init",
         );
@@ -193,6 +215,7 @@ impl LoadedSessions {
             split_primary_tail_batched_session,
             multi_mask_session,
             multi_mask_batched_session,
+            fixed_split,
         };
         #[cfg(feature = "coreml")]
         let coreml = LoadedCoreMlState {
@@ -217,7 +240,7 @@ impl LoadedSessions {
         model_path: &Path,
         mode: ExecutionMode,
     ) -> Result<EmbeddingModel, ModelLoadError> {
-        Ok(EmbeddingModel {
+        let mut model = EmbeddingModel {
             meta: EmbeddingMeta {
                 model_path: model_path.to_path_buf(),
                 mode,
@@ -253,6 +276,7 @@ impl LoadedSessions {
                         Ok::<RunOptions<HasSelectedOutputs>, ort::Error>(opts)
                     })
                     .transpose()?,
+                fixed_split: self.ort.fixed_split,
             },
             #[cfg(feature = "coreml")]
             coreml: CoreMlEmbeddingState {
@@ -360,7 +384,9 @@ impl LoadedSessions {
                     self.geometry.mask_frames(),
                 )),
             },
-        })
+        };
+        model.verify_fixed_split_parity()?;
+        Ok(model)
     }
 }
 
