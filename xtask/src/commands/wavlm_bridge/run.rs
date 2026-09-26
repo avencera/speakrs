@@ -12,18 +12,19 @@ use speakrs::imported_segmentation::{
     SegmentationBundle, SegmentationBundleValidation, load_imported_segmentation_bundle,
     validate_imported_segmentation_bundle,
 };
-use speakrs::inference::EmbeddingArtifactMetadata;
+use speakrs::inference::{EmbeddingArtifactMetadata, EmbeddingModel};
 use speakrs::pipeline::{EmbeddingAvailability, PipelineGeometry};
 
 use super::cache::{self, CacheHit};
 use super::domain::{
     ArtifactRef, ArtifactState, AvailabilityCounts, AvailabilityReason, BridgeMode, BridgeSpec,
-    GeometryReceipt, RecipeSpec, RunDocument, RunRecording, RuntimeIdentity, Sha256Digest,
-    SpeakerTrack, SpeakerTracks, StageKind, SystemKind, SystemManifest, SystemRecord, TimedSegment,
-    ValidationDocument, canonical_json_digest, digest_bytes, digest_file, digest_tree,
-    ensure_regular_file, make_tree_read_only,
+    BridgeWorkers, GeometryReceipt, RecipeSpec, RecordingSpec, RunDocument, RunRecording,
+    RuntimeIdentity, Sha256Digest, SpeakerTrack, SpeakerTracks, StageKind, SystemKind,
+    SystemManifest, SystemRecord, TimedSegment, ValidationDocument, canonical_json_digest,
+    digest_bytes, digest_file, digest_tree, ensure_regular_file, make_tree_read_only,
 };
 use super::embedding_execution::{load_embedding_model, run_embedding_stage};
+use super::schedule::{self, DispatchOrder, Worker};
 use super::stage::{
     ExecutionIdentity, availability_counts_from_snapshot, clustering_dependencies,
     embedding_snapshot_bytes, embedding_stage_key, embedding_stage_receipt_files, make_receipt,
@@ -189,6 +190,7 @@ pub struct RunOptions {
     pub output_dir: PathBuf,
     pub cache_dir: Option<PathBuf>,
     pub recipe_ids: Vec<String>,
+    pub workers: BridgeWorkers,
 }
 
 pub fn run(options: RunOptions) -> Result<()> {
@@ -223,16 +225,32 @@ pub fn run(options: RunOptions) -> Result<()> {
     let (embedding_path, plda_dir) = validate_model_assets(&options.models_dir, &spec.runtime)?;
 
     let recipes = select_recipes(&spec, &options.recipe_ids)?;
-    let mut embedding_model = load_embedding_model(embedding_path, execution_mode)?;
+    let worker_count = schedule::worker_count(options.workers.get(), spec.recordings.len());
+    let embedding_models = (0..worker_count.get())
+        .map(|_| load_embedding_model(embedding_path.clone(), execution_mode))
+        .collect::<Result<Vec<_>>>()?;
     let execution_identity = ExecutionIdentity::capture()?;
-    let mut run_context = RunContext {
-        embedding_model: &mut embedding_model,
+    let staging = create_output_staging(&options.output_dir)?;
+    let shared = RunShared {
+        spec: &spec,
+        recipes: &recipes,
+        model_digest: &model_digest,
         plda_dir: &plda_dir,
         mode: execution_mode,
-        runtime: &spec.runtime,
         execution: &execution_identity,
+        cache_dir: options.cache_dir.as_deref(),
+        staging_root: staging.path(),
     };
-    let staging = create_output_staging(&options.output_dir)?;
+    let workers = embedding_models
+        .into_iter()
+        .map(|embedding_model| RecordingWorker {
+            embedding_model,
+            shared: &shared,
+        })
+        .collect::<Vec<_>>();
+    let order = DispatchOrder::for_pool(&recording_costs(&spec.recordings), worker_count);
+    let recordings = schedule::run_ordered(workers, spec.recordings.iter().collect(), order)?;
+
     let recipe_ids = recipes
         .iter()
         .map(|recipe| recipe.id.clone())
@@ -245,147 +263,10 @@ pub fn run(options: RunOptions) -> Result<()> {
         .iter()
         .map(|_| Vec::with_capacity(spec.recordings.len()))
         .collect::<Vec<Vec<_>>>();
-    for recording_spec in &spec.recordings {
-        let recording = validate_recording(recording_spec)?;
-        for (recipe_index, recipe) in recipes.iter().enumerate() {
-            let cache_key = cache_key(
-                &spec,
-                &recording.spec,
-                recipe,
-                &model_digest,
-                &execution_identity,
-            )?;
-            let cache_hit = options
-                .cache_dir
-                .as_deref()
-                .map(|root| cache::lookup(root, &cache_key, &recording.spec.id, &recipe.id))
-                .transpose()?
-                .flatten();
-            let (outputs, runtime_seconds, embedding_cache_reused) = match cache_hit {
-                Some(hit) => (
-                    materialize_cache_hit(staging.path(), recipe, &recording, hit)?,
-                    None,
-                    false,
-                ),
-                None => {
-                    let geometry = geometry_receipt(&PipelineGeometry::from_imported(
-                        &recording.bundle.manifest().audio,
-                        &recording.bundle.manifest().geometry,
-                    )?);
-                    let embedding_key =
-                        embedding_stage_key(recipe, &recording, &run_context, &geometry)?;
-                    let embedding_hit = options
-                        .cache_dir
-                        .as_deref()
-                        .map(|root| {
-                            cache::lookup_embedding(root, &embedding_key, &recording.spec.id)
-                        })
-                        .transpose()?
-                        .flatten();
-                    let started = Instant::now();
-                    let (outputs, embedding_reused) = match embedding_hit {
-                        Some(hit) => (
-                            run_from_embedding_cache(
-                                recipe,
-                                &recording,
-                                &mut run_context,
-                                &cache_key,
-                                &geometry,
-                                hit,
-                            )
-                            .wrap_err_with(|| {
-                                format!(
-                                    "failed recipe_id={} recording_id={}",
-                                    recipe.id, recording.spec.id
-                                )
-                            })?,
-                            true,
-                        ),
-                        None => (
-                            run_one(recipe, &recording, &mut run_context, &cache_key)
-                                .wrap_err_with(|| {
-                                    format!(
-                                        "failed recipe_id={} recording_id={}",
-                                        recipe.id, recording.spec.id
-                                    )
-                                })?,
-                            false,
-                        ),
-                    };
-                    let runtime = started.elapsed().as_secs_f64();
-                    if let Some(cache_dir) = &options.cache_dir {
-                        let stage_files = outputs
-                            .receipt_files
-                            .iter()
-                            .map(|(name, bytes)| (name.clone(), bytes.clone()))
-                            .collect::<Vec<_>>();
-                        let publication = cache::CachePublication {
-                            stage_receipts: &stage_files,
-                            embedding_snapshot: &outputs.embedding_snapshot_bytes,
-                            speaker_tracks: &outputs.speaker_tracks_bytes,
-                            hypothesis: &outputs.hypothesis_bytes,
-                        };
-                        cache::publish(
-                            cache_dir,
-                            &cache_key,
-                            &recording.spec.id,
-                            &recipe.id,
-                            &publication,
-                        )?;
-                        if !embedding_reused {
-                            cache::publish_embedding(
-                                cache_dir,
-                                &embedding_key,
-                                &recording.spec.id,
-                                &outputs.embedding_stage_receipt_files,
-                                &outputs.embedding_snapshot_bytes,
-                            )?;
-                        }
-                    }
-                    (
-                        materialize_outputs(staging.path(), recipe, &recording, &outputs)?,
-                        Some(runtime),
-                        embedding_reused,
-                    )
-                }
-            };
-            let hypothesis = outputs.hypothesis.clone();
-            let speaker_tracks = outputs.speaker_tracks.clone();
-            let stage_receipts = outputs.stage_receipts.clone();
-            let cache_reused = runtime_seconds.is_none();
-            run_records_by_recipe[recipe_index].push(RunRecording {
-                recording_id: recording.spec.id.clone(),
-                recipe_id: recipe.id.clone(),
-                cache_key: cache_key.clone(),
-                cache_reused,
-                embedding_cache_reused,
-                stage_receipts,
-                hypothesis: hypothesis.clone(),
-                speaker_tracks: speaker_tracks.clone(),
-            });
-            system_records_by_recipe[recipe_index].push(SystemRecord {
-                recording_id: recording.spec.id.clone(),
-                source: recording.spec.source.clone(),
-                domain: recording.spec.domain.clone(),
-                parent_group: recording.spec.parent_group.clone(),
-                audio_sha256: recording.spec.audio.sha256.clone(),
-                reference_sha256: recording.spec.reference.sha256.clone(),
-                uem_sha256: recording.spec.uem.sha256.clone(),
-                hypothesis: ArtifactState::Available {
-                    artifact: hypothesis,
-                },
-                speaker_tracks: ArtifactState::Available {
-                    artifact: speaker_tracks,
-                },
-                runtime_seconds: runtime_seconds
-                    .map(|value| super::domain::MeasurementState::Available { value })
-                    .unwrap_or(super::domain::MeasurementState::Unavailable {
-                        reason: AvailabilityReason::NotMeasured,
-                    }),
-                peak_memory_bytes: super::domain::MeasurementState::Unavailable {
-                    reason: AvailabilityReason::NotMeasured,
-                },
-            });
+    for recording in recordings {
+        for (recipe_index, records) in recording.0.into_iter().enumerate() {
+            run_records_by_recipe[recipe_index].push(records.run);
+            system_records_by_recipe[recipe_index].push(records.system);
         }
     }
     for (recipe_index, recipe) in recipes.iter().enumerate() {
@@ -424,6 +305,238 @@ pub fn run(options: RunOptions) -> Result<()> {
     publish_output(staging, &options.output_dir)?;
     println!("wrote wavlm-bridge run {}", options.output_dir.display());
     Ok(())
+}
+
+/// Read-only inputs shared by every recording worker
+struct RunShared<'a> {
+    spec: &'a BridgeSpec,
+    recipes: &'a [&'a RecipeSpec],
+    model_digest: &'a Sha256Digest,
+    plda_dir: &'a Path,
+    mode: speakrs::ExecutionMode,
+    execution: &'a ExecutionIdentity,
+    cache_dir: Option<&'a Path>,
+    staging_root: &'a Path,
+}
+
+/// Run and system records of one recording for one recipe
+struct RecipeRecords {
+    run: RunRecording,
+    system: SystemRecord,
+}
+
+/// Records of one recording, in selected recipe order
+struct RecordingRecords(Vec<RecipeRecords>);
+
+/// Worker that owns one embedding session and runs whole recordings
+///
+/// Recordings share no mutable state: each one writes only its own staging
+/// directory and its own cache keys, so workers need no coordination
+struct RecordingWorker<'a> {
+    embedding_model: EmbeddingModel,
+    shared: &'a RunShared<'a>,
+}
+
+impl<'a> Worker for RecordingWorker<'a> {
+    type Job = &'a RecordingSpec;
+    type Output = RecordingRecords;
+
+    fn run(&mut self, recording_spec: &'a RecordingSpec) -> Result<RecordingRecords> {
+        let shared = self.shared;
+        let recording = validate_recording(recording_spec)?;
+        let mut context = RunContext {
+            embedding_model: &mut self.embedding_model,
+            plda_dir: shared.plda_dir,
+            mode: shared.mode,
+            runtime: &shared.spec.runtime,
+            execution: shared.execution,
+        };
+        shared
+            .recipes
+            .iter()
+            .map(|recipe| run_recipe(shared, &recording, recipe, &mut context))
+            .collect::<Result<Vec<_>>>()
+            .map(RecordingRecords)
+    }
+}
+
+/// Dispatch cost of each recording, from its audio file size
+///
+/// A missing file costs zero here; the worker reports the real error
+fn recording_costs(recordings: &[RecordingSpec]) -> Vec<u64> {
+    recordings
+        .iter()
+        .map(|recording| {
+            fs::metadata(&recording.audio.path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+fn run_recipe(
+    shared: &RunShared<'_>,
+    recording: &ValidatedRecording,
+    recipe: &RecipeSpec,
+    context: &mut RunContext<'_>,
+) -> Result<RecipeRecords> {
+    let cache_key = cache_key(
+        shared.spec,
+        &recording.spec,
+        recipe,
+        shared.model_digest,
+        shared.execution,
+    )?;
+    let cache_hit = shared
+        .cache_dir
+        .map(|root| cache::lookup(root, &cache_key, &recording.spec.id, &recipe.id))
+        .transpose()?
+        .flatten();
+    let (outputs, runtime_seconds, embedding_cache_reused) = match cache_hit {
+        Some(hit) => (
+            materialize_cache_hit(shared.staging_root, recipe, recording, hit)?,
+            None,
+            false,
+        ),
+        None => {
+            let (outputs, runtime, embedding_reused) =
+                run_uncached_recipe(shared, recording, recipe, context, &cache_key)?;
+            (outputs, Some(runtime), embedding_reused)
+        }
+    };
+    Ok(recipe_records(
+        recording,
+        recipe,
+        cache_key,
+        outputs,
+        runtime_seconds,
+        embedding_cache_reused,
+    ))
+}
+
+fn run_uncached_recipe(
+    shared: &RunShared<'_>,
+    recording: &ValidatedRecording,
+    recipe: &RecipeSpec,
+    context: &mut RunContext<'_>,
+    cache_key: &Sha256Digest,
+) -> Result<(PreparedOutputs, f64, bool)> {
+    let geometry = geometry_receipt(&PipelineGeometry::from_imported(
+        &recording.bundle.manifest().audio,
+        &recording.bundle.manifest().geometry,
+    )?);
+    let embedding_key = embedding_stage_key(recipe, recording, context, &geometry)?;
+    let embedding_hit = shared
+        .cache_dir
+        .map(|root| cache::lookup_embedding(root, &embedding_key, &recording.spec.id))
+        .transpose()?
+        .flatten();
+    let started = Instant::now();
+    let embedding_reused = embedding_hit.is_some();
+    let outputs = match embedding_hit {
+        Some(hit) => {
+            run_from_embedding_cache(recipe, recording, context, cache_key, &geometry, hit)
+        }
+        None => run_one(recipe, recording, context, cache_key),
+    }
+    .wrap_err_with(|| {
+        format!(
+            "failed recipe_id={} recording_id={}",
+            recipe.id, recording.spec.id
+        )
+    })?;
+    let runtime = started.elapsed().as_secs_f64();
+    if let Some(cache_dir) = shared.cache_dir {
+        publish_to_cache(
+            cache_dir,
+            recording,
+            recipe,
+            cache_key,
+            &embedding_key,
+            &outputs,
+            embedding_reused,
+        )?;
+    }
+    let outputs = materialize_outputs(shared.staging_root, recipe, recording, &outputs)?;
+    Ok((outputs, runtime, embedding_reused))
+}
+
+fn publish_to_cache(
+    cache_dir: &Path,
+    recording: &ValidatedRecording,
+    recipe: &RecipeSpec,
+    cache_key: &Sha256Digest,
+    embedding_key: &Sha256Digest,
+    outputs: &PreparedOutputs,
+    embedding_reused: bool,
+) -> Result<()> {
+    let publication = cache::CachePublication {
+        stage_receipts: &outputs.receipt_files,
+        embedding_snapshot: &outputs.embedding_snapshot_bytes,
+        speaker_tracks: &outputs.speaker_tracks_bytes,
+        hypothesis: &outputs.hypothesis_bytes,
+    };
+    cache::publish(
+        cache_dir,
+        cache_key,
+        &recording.spec.id,
+        &recipe.id,
+        &publication,
+    )?;
+    if !embedding_reused {
+        cache::publish_embedding(
+            cache_dir,
+            embedding_key,
+            &recording.spec.id,
+            &outputs.embedding_stage_receipt_files,
+            &outputs.embedding_snapshot_bytes,
+        )?;
+    }
+    Ok(())
+}
+
+fn recipe_records(
+    recording: &ValidatedRecording,
+    recipe: &RecipeSpec,
+    cache_key: Sha256Digest,
+    outputs: PreparedOutputs,
+    runtime_seconds: Option<f64>,
+    embedding_cache_reused: bool,
+) -> RecipeRecords {
+    let run = RunRecording {
+        recording_id: recording.spec.id.clone(),
+        recipe_id: recipe.id.clone(),
+        cache_key,
+        cache_reused: runtime_seconds.is_none(),
+        embedding_cache_reused,
+        stage_receipts: outputs.stage_receipts,
+        hypothesis: outputs.hypothesis.clone(),
+        speaker_tracks: outputs.speaker_tracks.clone(),
+    };
+    let system = SystemRecord {
+        recording_id: recording.spec.id.clone(),
+        source: recording.spec.source.clone(),
+        domain: recording.spec.domain.clone(),
+        parent_group: recording.spec.parent_group.clone(),
+        audio_sha256: recording.spec.audio.sha256.clone(),
+        reference_sha256: recording.spec.reference.sha256.clone(),
+        uem_sha256: recording.spec.uem.sha256.clone(),
+        hypothesis: ArtifactState::Available {
+            artifact: outputs.hypothesis,
+        },
+        speaker_tracks: ArtifactState::Available {
+            artifact: outputs.speaker_tracks,
+        },
+        runtime_seconds: runtime_seconds
+            .map(|value| super::domain::MeasurementState::Available { value })
+            .unwrap_or(super::domain::MeasurementState::Unavailable {
+                reason: AvailabilityReason::NotMeasured,
+            }),
+        peak_memory_bytes: super::domain::MeasurementState::Unavailable {
+            reason: AvailabilityReason::NotMeasured,
+        },
+    };
+    RecipeRecords { run, system }
 }
 
 fn select_recipes<'a>(spec: &'a BridgeSpec, requested: &[String]) -> Result<Vec<&'a RecipeSpec>> {
@@ -502,7 +615,7 @@ pub(crate) struct PreparedOutputs {
 }
 
 pub(crate) struct RunContext<'a> {
-    pub(crate) embedding_model: &'a mut speakrs::inference::EmbeddingModel,
+    pub(crate) embedding_model: &'a mut EmbeddingModel,
     pub(crate) plda_dir: &'a Path,
     pub(crate) mode: speakrs::ExecutionMode,
     pub(crate) runtime: &'a RuntimeIdentity,

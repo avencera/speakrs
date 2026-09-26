@@ -3548,6 +3548,7 @@ dependencies = [
  "chrono",
  "clap",
  "color-eyre",
+ "crossbeam-channel",
  "hound",
  "libc",
  "mimalloc",

@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use clap::ValueEnum;
@@ -51,6 +53,44 @@ impl BridgeMode {
             #[cfg(feature = "cuda")]
             Self::Cuda => Ok(speakrs::ExecutionMode::Cuda),
         }
+    }
+}
+
+/// Number of recordings that a bridge run processes at the same time
+///
+/// Each worker owns one embedding session, so this count also bounds the
+/// loaded sessions and the recordings held in memory
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BridgeWorkers(NonZeroUsize);
+
+impl BridgeWorkers {
+    /// Worker count used when the caller does not choose one
+    pub fn default_for(mode: BridgeMode) -> Self {
+        let count = match mode {
+            // each CPU session already uses up to six intra-op threads
+            BridgeMode::Cpu => 1,
+            // one embedding call keeps one host thread busy and the GPU at
+            // about a quarter of its capacity, so concurrent sessions fill it
+            #[cfg(feature = "cuda")]
+            BridgeMode::Cuda => 4,
+        };
+        Self(NonZeroUsize::new(count).unwrap_or(NonZeroUsize::MIN))
+    }
+
+    /// Worker count as a non-zero integer
+    pub fn get(self) -> NonZeroUsize {
+        self.0
+    }
+}
+
+impl FromStr for BridgeWorkers {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        value
+            .parse::<NonZeroUsize>()
+            .map(Self)
+            .map_err(|_| format!("worker count must be a positive integer, got {value:?}"))
     }
 }
 
@@ -2167,6 +2207,15 @@ mod tests {
                 ..AvailabilityCounts::default()
             },
         }
+    }
+
+    #[test]
+    fn bridge_workers_parse_only_positive_counts() {
+        assert_eq!("3".parse::<BridgeWorkers>().unwrap().get().get(), 3);
+        assert!("0".parse::<BridgeWorkers>().is_err());
+        assert!("-1".parse::<BridgeWorkers>().is_err());
+        assert!("four".parse::<BridgeWorkers>().is_err());
+        assert_eq!(BridgeWorkers::default_for(BridgeMode::Cpu).get().get(), 1);
     }
 
     #[test]

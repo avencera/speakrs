@@ -3,6 +3,7 @@ mod domain;
 mod embedding_execution;
 mod report;
 mod run;
+mod schedule;
 mod stage;
 
 use std::path::PathBuf;
@@ -10,7 +11,7 @@ use std::path::PathBuf;
 use clap::Subcommand;
 use color_eyre::eyre::Result;
 
-pub use domain::BridgeMode;
+pub use domain::{BridgeMode, BridgeWorkers};
 
 /// Standalone WavLM-to-Speakrs bridge commands
 #[derive(Subcommand)]
@@ -47,6 +48,10 @@ pub enum WavlmBridgeCommand {
         /// Recipe ID to run; repeat for a subset, or omit for all recipes
         #[arg(long = "recipe")]
         recipes: Vec<String>,
+        /// Recordings to process at the same time, each with its own embedding
+        /// session; defaults to 1 for cpu and 4 for cuda
+        #[arg(long, env = "SPEAKRS_BRIDGE_WORKERS")]
+        workers: Option<BridgeWorkers>,
     },
     /// Join unchanged Speakrs, frozen Python WavLM, and hybrid system documents
     Report {
@@ -93,6 +98,7 @@ impl WavlmBridgeCommand {
                 output_dir,
                 cache_dir,
                 recipes,
+                workers,
             } => run::run(run::RunOptions {
                 spec_path: spec,
                 models_dir,
@@ -100,6 +106,7 @@ impl WavlmBridgeCommand {
                 output_dir,
                 cache_dir,
                 recipe_ids: recipes,
+                workers: workers.unwrap_or_else(|| BridgeWorkers::default_for(mode)),
             }),
             Self::Report {
                 spec,

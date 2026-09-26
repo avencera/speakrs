@@ -26,6 +26,7 @@ base64 = "0.23.1"
 chrono = "0.4.44"
 clap = { version = "4", features = ["derive", "env"] }
 color-eyre = "0.6"
+crossbeam-channel = "0.5"
 hound = "3.5.1"
 libc = "0.2"
 mimalloc = "0.1.48"
