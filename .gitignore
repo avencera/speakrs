@@ -9,7 +9,6 @@ __pycache__/
 fixtures/models
 fixtures/datasets
 fixtures/dataset-instructions.md
-fixtures/wavlm_bridge/
 
 .envrc
 /scripts/speakerkit-bench/Packages
