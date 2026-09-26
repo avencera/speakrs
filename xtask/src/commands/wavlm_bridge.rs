@@ -49,7 +49,7 @@ pub enum WavlmBridgeCommand {
         #[arg(long = "recipe")]
         recipes: Vec<String>,
         /// Recordings to process at the same time, each with its own embedding
-        /// session; defaults to 1 for cpu and 4 for cuda
+        /// session; defaults to 1 for cpu and 8 for cuda
         #[arg(long, env = "SPEAKRS_BRIDGE_WORKERS")]
         workers: Option<BridgeWorkers>,
     },

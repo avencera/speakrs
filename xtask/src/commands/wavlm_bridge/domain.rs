@@ -70,9 +70,11 @@ impl BridgeWorkers {
             // each CPU session already uses up to six intra-op threads
             BridgeMode::Cpu => 1,
             // one embedding call keeps one host thread busy and the GPU at
-            // about a quarter of its capacity, so concurrent sessions fill it
+            // about a quarter of its capacity, so concurrent sessions fill it;
+            // on the fixed-100 probe, 8 workers ran fastest (4 took 1.6x and
+            // 12 took 1.1x as long) and used about 1.9 GB of GPU memory
             #[cfg(feature = "cuda")]
-            BridgeMode::Cuda => 4,
+            BridgeMode::Cuda => 8,
         };
         Self(NonZeroUsize::new(count).unwrap_or(NonZeroUsize::MIN))
     }
