@@ -137,7 +137,7 @@ pub(super) struct BatchTask<'a> {
 
 struct BatchTaskPlanner<'a> {
     shared_model: &'a SharedCoreMlModel,
-    small_model: Option<&'a SharedCoreMlModel>,
+    small_model: &'a SharedCoreMlModel,
     total_windows: usize,
     batch_size: usize,
     use_warm_start_b32: bool,
@@ -146,9 +146,9 @@ struct BatchTaskPlanner<'a> {
 }
 
 impl<'a> BatchTaskPlanner<'a> {
-    fn build(self) -> Result<Vec<BatchTask<'a>>, SegmentationError> {
+    fn build(self) -> Vec<BatchTask<'a>> {
         if !self.use_warm_start_b32 {
-            return Ok((0..self.total_windows.div_ceil(self.batch_size))
+            return (0..self.total_windows.div_ceil(self.batch_size))
                 .map(|batch_idx| {
                     let start = batch_idx * self.batch_size;
                     let end = (start + self.batch_size).min(self.total_windows);
@@ -160,16 +160,10 @@ impl<'a> BatchTaskPlanner<'a> {
                         model: self.shared_model,
                     }
                 })
-                .collect());
+                .collect();
         }
 
-        let Some(small_model) = self.small_model else {
-            return Err(SegmentationError::Invariant {
-                context: "parallel segmentation warm start",
-                message: "missing native b32 model".to_owned(),
-            });
-        };
-
+        let small_model = self.small_model;
         let mut tasks = Vec::new();
         let mut start = 0usize;
         let mut batch_idx = 0usize;
@@ -201,7 +195,7 @@ impl<'a> BatchTaskPlanner<'a> {
             batch_idx += 1;
         }
 
-        Ok(tasks)
+        tasks
     }
 }
 
@@ -223,10 +217,10 @@ impl SegmentationModel {
             return Ok(0);
         }
 
-        let Some((shared_model, batch_size)) = self.select_parallel_native_model(total_windows)
-        else {
+        let Some(backend) = self.coreml_backend() else {
             return self.run_streaming(audio, tx);
         };
+        let (shared_model, batch_size) = backend.select_parallel_model(total_windows);
 
         let seg_start = std::time::Instant::now();
         let profile = ParallelProfile::new();
@@ -252,20 +246,19 @@ impl SegmentationModel {
         let use_warm_start_b32 = batch_size == LARGE_BATCH_SIZE
             && total_windows < 1024
             && total_windows > PRIMARY_BATCH_SIZE
-            && warm_start_small_windows > PRIMARY_BATCH_SIZE
-            && self.native_batched_session.is_some();
+            && warm_start_small_windows > PRIMARY_BATCH_SIZE;
 
         if batch_size > 1 {
             let tasks = BatchTaskPlanner {
                 shared_model,
-                small_model: self.native_batched_session.as_ref(),
+                small_model: backend.batched_model(),
                 total_windows,
                 batch_size,
                 use_warm_start_b32,
                 warm_start_small_windows,
                 warm_start_batch_capacity,
             }
-            .build()?;
+            .build();
 
             ParallelBatchExecutor {
                 windows: &windows,

@@ -69,6 +69,7 @@ enum Command {
         wav_files: Vec<PathBuf>,
     },
     /// Profile ORT embedding inference strategies
+    #[cfg(feature = "cpu")]
     ProfileOrtEmbedding {
         /// Mode: borrow, owned, prealloc, stream-borrow, stream-owned, stream-prealloc, stream-batched
         mode: String,
@@ -88,7 +89,8 @@ enum Command {
         #[arg(long)]
         ort_defaults: bool,
     },
-    /// Profile pipeline stages
+    /// Profile pipeline stages on the CPU
+    #[cfg(feature = "cpu")]
     ProfileStages {
         /// Mode: seg-only, embed-stream, embed-store, embed-repeat
         mode: String,
@@ -117,6 +119,7 @@ impl Command {
                 chunk_emb_compute_units,
                 wav_files,
             } => commands::diarize::run(mode, models_dir, chunk_emb_compute_units, wav_files),
+            #[cfg(feature = "cpu")]
             Self::ProfileOrtEmbedding {
                 mode,
                 wav_path,
@@ -137,6 +140,7 @@ impl Command {
                     .map(|value| value.get()),
                 ort_defaults,
             ),
+            #[cfg(feature = "cpu")]
             Self::ProfileStages {
                 mode,
                 wav_path,

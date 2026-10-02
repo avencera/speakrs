@@ -11,6 +11,8 @@
 //!
 //! # Usage
 //!
+//! No inference backend is enabled by default. Pick the one for your platform:
+//!
 //! ```toml
 //! # macOS (CoreML)
 //! speakrs = { version = "0.6", features = ["coreml"] }
@@ -18,12 +20,15 @@
 //! # NVIDIA GPU
 //! speakrs = { version = "0.6", features = ["cuda"] }
 //!
-//! # CPU only
-//! speakrs = "0.6"
+//! # CPU
+//! speakrs = { version = "0.6", features = ["cpu"] }
 //!
 //! # AMD GPU
 //! speakrs = { version = "0.6", features = ["migraphx"] }
 //! ```
+//!
+//! The `coreml` feature runs on native CoreML only, so a macOS build with just `coreml`
+//! does not compile, link, or download ONNX Runtime.
 //!
 //! ## Quick start
 //!
@@ -125,6 +130,10 @@
 //! | `cuda-fast` | ONNX Runtime CUDA | 2s | NVIDIA GPU for higher throughput |
 //! | `migraphx` | ONNX Runtime MIGraphX | 1s | AMD GPU |
 //!
+//! Each mode needs its Cargo feature: `cpu`, `coreml` for both CoreML modes, `cuda` for both
+//! CUDA modes, or `migraphx`. Requesting a mode whose feature is off returns
+//! `ModelLoadError::UnsupportedExecutionMode`.
+//!
 //! The `*-fast` modes move the segmentation window every 2 seconds instead of
 //! every 1 second. That gives the pipeline fewer windows to score, so it can be much faster, but speaker changes
 //! may land a little farther from the exact word or pause where they happened.
@@ -218,15 +227,21 @@
 //!
 //! # Features and build notes
 //!
-//! Common features:
+//! Enable at least one inference backend; the build fails with a clear error otherwise:
 //!
-//! - `online` (default): model download via [`ModelManager`]
-//! - `coreml`: native CoreML backend on macOS
+//! - `coreml`: native CoreML backend on macOS, without ONNX Runtime
+//! - `cpu`: CPU backend via ONNX Runtime
 //! - `cuda`: NVIDIA CUDA backend via ONNX Runtime
 //! - `migraphx`: AMD GPU backend via ONNX Runtime MIGraphX
-//! - `load-dynamic`: load the ONNX Runtime library at startup instead of static linking
 //!
-//! The ONNX Runtime dependency (`ort` 2.0.0-rc.13) is still pre-release.
+//! Other features:
+//!
+//! - `online` (default): model download via [`ModelManager`]
+//! - `load-dynamic`: load the ONNX Runtime library at startup instead of static linking; use it
+//!   with `cpu`, `cuda`, or `migraphx`
+//!
+//! The ONNX Runtime dependency behind `cpu`, `cuda`, and `migraphx` (`ort` 2.0.0-rc.13) is still
+//! pre-release.
 //!
 //! # Public API
 //!
@@ -243,30 +258,57 @@
 #[cfg(all(feature = "coreml", not(target_os = "macos")))]
 compile_error!("the `coreml` feature is only supported on macOS");
 
+#[cfg(not(feature = "_backend"))]
+compile_error!(
+    "speakrs needs an inference backend; enable at least one of these Cargo features:\n\
+     - macOS (Apple Silicon): `coreml`\n\
+     - NVIDIA GPU: `cuda`\n\
+     - AMD GPU: `migraphx`\n\
+     - CPU (ONNX Runtime): `cpu`\n\
+     for example: speakrs = { version = \"0.6\", features = [\"coreml\"] }"
+);
+
+// a build without a backend reports only the `compile_error!` above: every crate item is gated
+// on `_backend`, which each backend feature enables, so no follow-on type errors appear
+#[cfg(feature = "_backend")]
 pub(crate) mod binarize;
+#[cfg(feature = "_backend")]
 pub(crate) mod clustering;
 /// Segmentation and embedding model wrappers
+#[cfg(feature = "_backend")]
 pub mod inference;
+#[cfg(feature = "_backend")]
 pub(crate) mod linalg;
 /// Diarization error rate (DER) evaluation utilities
 #[cfg(feature = "_metrics")]
+#[cfg(feature = "_backend")]
 pub mod metrics;
 /// Model paths and HuggingFace download support
+#[cfg(feature = "_backend")]
 pub mod models;
 /// High-level diarization pipeline and result types
+#[cfg(feature = "_backend")]
 pub mod pipeline;
+#[cfg(feature = "_backend")]
 pub(crate) mod powerset;
+#[cfg(feature = "_backend")]
 pub(crate) mod reconstruct;
 /// Speaker segments, merging, and RTTM output
+#[cfg(feature = "_backend")]
 pub mod segment;
+#[cfg(feature = "_backend")]
 pub(crate) mod utils;
 
 // crate-root re-exports for the main import path
+#[cfg(feature = "_backend")]
 pub use inference::{CoreMlComputeUnits, ExecutionMode};
+#[cfg(feature = "_backend")]
 pub use models::ModelBundle;
 #[cfg(feature = "online")]
 #[cfg_attr(docsrs, doc(cfg(feature = "online")))]
+#[cfg(feature = "_backend")]
 pub use models::ModelManager;
+#[cfg(feature = "_backend")]
 pub use pipeline::{
     ActivityCleanup, AhcConfig, AhcConfigError, BatchInput, ClusteringBackend, ClusteringConfig,
     ClusteringConfigError, DiarizationPipeline, DiarizationResult, FbankSessionPool,
@@ -276,8 +318,10 @@ pub use pipeline::{
     QueuedDiarizationRequest, QueuedDiarizationResult, ReconstructError,
     ResponsibilityInitialization, RuntimeConfig, VbxConfig, VbxConfigError,
 };
+#[cfg(feature = "_backend")]
 pub use segment::Segment;
 
 #[cfg(feature = "_metrics")]
 #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
+#[cfg(feature = "_backend")]
 pub use powerset::{PowersetDecodeError, PowersetMapping};

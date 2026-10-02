@@ -11,7 +11,9 @@ fn main() -> ExampleResult<()> {
     support::init_tracing();
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 3 {
-        eprintln!("Usage: cargo run --example speaker_airtime -- <models-dir> <audio.wav>");
+        eprintln!(
+            "Usage: cargo run --features cpu --example speaker_airtime -- <models-dir> <audio.wav>"
+        );
         std::process::exit(1);
     }
 

@@ -3,6 +3,12 @@
 ## [unreleased]
 
 - Remove the `default-linalg`, `intel-mkl`, `openblas-static`, and `openblas-system` features: PLDA setup now uses a small built-in Rust solver, so builds no longer link MKL or OpenBLAS
+- Make ONNX Runtime optional (breaking): no inference backend is enabled by default, so enable `coreml` (macOS), `cuda` (NVIDIA), `migraphx` (AMD), or the new `cpu` feature; a build without one fails with a compile error naming these choices, and a `coreml`-only build no longer compiles, links, or downloads ONNX Runtime
+- Require the `cpu` feature for `ExecutionMode::Cpu`, including `SegmentationModel::new` and `EmbeddingModel::new`; `load-dynamic` now needs `cpu`, `cuda`, or `migraphx` alongside it
+- Replace `ort::Error` in the public API with the new `InferenceError`: `EmbeddingModel` methods return it, `SegmentationModel::run` returns `SegmentationError`, and `SegmentationError::Ort` and `PipelineError::Ort` become `SegmentationError::Inference` and `PipelineError::Inference`; native CoreML failures surface as the typed `CoreMlError` and shape failures as `TensorShapeError`
+- Gate `ModelLoadError::Ort`, `ModelLoadError::Runtime`, `OrtRuntimeError`, `DynamicRuntimeError`, and `with_execution_mode` behind the ONNX Runtime backends; `with_execution_mode` now returns `ModelLoadError`
+- Stop building ONNX Runtime sessions in CoreML modes: `EmbeddingModel::embed`, `embed_masked`, and `embed_batch` run on the native CoreML filterbank and tail, following `RuntimeConfig::chunk_emb_compute_units` (use `CpuOnly` for the closest match to the CPU path)
+- Stop downloading ONNX files for CoreML modes in `ModelManager`; CoreML modes need only the compiled bundles, PLDA files, and embedding metadata
 
 ## [0.6.0] - 2026-10-02
 

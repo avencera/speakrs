@@ -19,7 +19,7 @@ fn main() -> ExampleResult<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() != 4 {
         eprintln!(
-            "Usage: cargo run --example assign_transcript_speakers -- <models-dir> <audio.wav> <transcript.tsv>"
+            "Usage: cargo run --features cpu --example assign_transcript_speakers -- <models-dir> <audio.wav> <transcript.tsv>"
         );
         std::process::exit(1);
     }

@@ -1,20 +1,24 @@
 use ndarray::{Array1, Array2, Array3};
+#[cfg(feature = "_ort")]
+use ort::memory::Allocator;
+#[cfg(feature = "_ort")]
+use ort::session::{HasSelectedOutputs, OutputSelector, RunOptions};
+#[cfg(feature = "_ort")]
+use ort::value::Tensor;
 
 use super::{EMBEDDING_WIDTH, FBANK_FEATURES};
 #[cfg(any(test, feature = "coreml"))]
 use crate::inference::geometry::CoreMlTensor;
-use crate::inference::geometry::{GeometryError, TensorLayout};
-use ort::memory::Allocator;
-use ort::session::{HasSelectedOutputs, OutputSelector, RunOptions};
-use ort::value::Tensor;
+use crate::inference::geometry::TensorLayout;
+use crate::inference::{InferenceError, TensorShapeError};
 
 pub(super) fn array1_slice<'a>(
     array: &'a Array1<f32>,
     context: &'static str,
-) -> Result<&'a [f32], ort::Error> {
+) -> Result<&'a [f32], InferenceError> {
     array
         .as_slice()
-        .ok_or_else(|| ort::Error::new(format!("{context}: mask buffer was not contiguous")))
+        .ok_or(InferenceError::NonContiguousBuffer { context })
 }
 
 pub(super) fn array2_from_shape_vec(
@@ -22,63 +26,59 @@ pub(super) fn array2_from_shape_vec(
     cols: usize,
     data: Vec<f32>,
     context: &'static str,
-) -> Result<Array2<f32>, ort::Error> {
+) -> Result<Array2<f32>, InferenceError> {
     Array2::from_shape_vec((rows, cols), data)
-        .map_err(|error| ort::Error::new(format!("{context}: invalid output shape: {error}")))
+        .map_err(|source| InferenceError::OutputArray { context, source })
 }
 
 #[cfg(feature = "coreml")]
 pub(super) fn array2_slice<'a>(
     array: &'a Array2<f32>,
     context: &'static str,
-) -> Result<&'a [f32], ort::Error> {
+) -> Result<&'a [f32], InferenceError> {
     array
         .as_slice()
-        .ok_or_else(|| ort::Error::new(format!("{context}: array buffer was not contiguous")))
+        .ok_or(InferenceError::NonContiguousBuffer { context })
 }
 
 #[cfg(feature = "coreml")]
 pub(super) fn array3_slice<'a>(
     array: &'a Array3<f32>,
     context: &'static str,
-) -> Result<&'a [f32], ort::Error> {
+) -> Result<&'a [f32], InferenceError> {
     array
         .as_slice()
-        .ok_or_else(|| ort::Error::new(format!("{context}: array buffer was not contiguous")))
+        .ok_or(InferenceError::NonContiguousBuffer { context })
 }
 
 pub(super) fn array3_slice_mut<'a>(
     array: &'a mut Array3<f32>,
     context: &'static str,
-) -> Result<&'a mut [f32], ort::Error> {
+) -> Result<&'a mut [f32], InferenceError> {
     array
         .as_slice_mut()
-        .ok_or_else(|| ort::Error::new(format!("{context}: array buffer was not contiguous")))
+        .ok_or(InferenceError::NonContiguousBuffer { context })
 }
 
 fn embedding_vector(
     layout: &TensorLayout,
     data: &[f32],
     context: &'static str,
-) -> Result<Array1<f32>, ort::Error> {
-    layout
-        .try_rank(2, context)
-        .map_err(GeometryError::into_ort)?;
-    layout
-        .try_exact_dims(&[1, EMBEDDING_WIDTH], context)
-        .map_err(GeometryError::into_ort)?;
-    crate::inference::geometry::require_exact_len(data.len(), layout.element_count(), context)
-        .map_err(GeometryError::into_ort)?;
+) -> Result<Array1<f32>, InferenceError> {
+    layout.try_rank(2, context)?;
+    layout.try_exact_dims(&[1, EMBEDDING_WIDTH], context)?;
+    crate::inference::geometry::require_exact_len(data.len(), layout.element_count(), context)?;
 
     Ok(Array1::from_vec(data.to_vec()))
 }
 
+#[cfg(feature = "_ort")]
 pub(super) fn embedding_vector_from_ort(
     shape: &ort::value::Shape,
     data: &[f32],
     context: &'static str,
-) -> Result<Array1<f32>, ort::Error> {
-    let layout = TensorLayout::from_ort_shape(shape, context).map_err(GeometryError::into_ort)?;
+) -> Result<Array1<f32>, InferenceError> {
+    let layout = TensorLayout::from_ort_shape(shape, context)?;
     embedding_vector(&layout, data, context)
 }
 
@@ -86,7 +86,7 @@ pub(super) fn embedding_vector_from_ort(
 pub(super) fn embedding_vector_from_coreml(
     tensor: CoreMlTensor,
     context: &'static str,
-) -> Result<Array1<f32>, ort::Error> {
+) -> Result<Array1<f32>, InferenceError> {
     let (layout, data) = tensor.into_parts();
     embedding_vector(&layout, &data, context)
 }
@@ -103,18 +103,20 @@ impl EmbeddingBatchGeometry {
         model_rows: usize,
         useful_rows: usize,
         context: &'static str,
-    ) -> Result<Self, ort::Error> {
+    ) -> Result<Self, InferenceError> {
         if useful_rows > model_rows {
-            return Err(ort::Error::new(format!(
-                "{context}: useful rows {useful_rows} exceed model capacity {model_rows}"
-            )));
+            return Err(InferenceError::BatchTooLarge {
+                context,
+                rows: useful_rows,
+                capacity: model_rows,
+            });
         }
-        model_rows.checked_mul(EMBEDDING_WIDTH).ok_or_else(|| {
-            ort::Error::new(format!("{context}: embedding batch size overflowed"))
-        })?;
-        useful_rows.checked_mul(EMBEDDING_WIDTH).ok_or_else(|| {
-            ort::Error::new(format!("{context}: useful embedding size overflowed"))
-        })?;
+        model_rows
+            .checked_mul(EMBEDDING_WIDTH)
+            .ok_or(TensorShapeError::Overflow { context })?;
+        useful_rows
+            .checked_mul(EMBEDDING_WIDTH)
+            .ok_or(TensorShapeError::Overflow { context })?;
         Ok(Self {
             model_rows,
             useful_rows,
@@ -122,22 +124,17 @@ impl EmbeddingBatchGeometry {
     }
 }
 
-pub(super) fn embedding_batch(
+fn embedding_batch(
     layout: &TensorLayout,
     data: &[f32],
     model_rows: usize,
     useful_rows: usize,
     context: &'static str,
-) -> Result<Array2<f32>, ort::Error> {
+) -> Result<Array2<f32>, InferenceError> {
     let geometry = EmbeddingBatchGeometry::new(model_rows, useful_rows, context)?;
-    layout
-        .try_rank(2, context)
-        .map_err(GeometryError::into_ort)?;
-    layout
-        .try_exact_dims(&[geometry.model_rows, EMBEDDING_WIDTH], context)
-        .map_err(GeometryError::into_ort)?;
-    crate::inference::geometry::require_exact_len(data.len(), layout.element_count(), context)
-        .map_err(GeometryError::into_ort)?;
+    layout.try_rank(2, context)?;
+    layout.try_exact_dims(&[geometry.model_rows, EMBEDDING_WIDTH], context)?;
+    crate::inference::geometry::require_exact_len(data.len(), layout.element_count(), context)?;
 
     let useful_len = geometry.useful_rows * EMBEDDING_WIDTH;
     array2_from_shape_vec(
@@ -148,14 +145,15 @@ pub(super) fn embedding_batch(
     )
 }
 
+#[cfg(feature = "_ort")]
 pub(super) fn embedding_batch_from_ort(
     shape: &ort::value::Shape,
     data: &[f32],
     model_rows: usize,
     useful_rows: usize,
     context: &'static str,
-) -> Result<Array2<f32>, ort::Error> {
-    let layout = TensorLayout::from_ort_shape(shape, context).map_err(GeometryError::into_ort)?;
+) -> Result<Array2<f32>, InferenceError> {
+    let layout = TensorLayout::from_ort_shape(shape, context)?;
     embedding_batch(&layout, data, model_rows, useful_rows, context)
 }
 
@@ -165,75 +163,102 @@ pub(super) fn embedding_batch_from_coreml(
     model_rows: usize,
     useful_rows: usize,
     context: &'static str,
-) -> Result<Array2<f32>, ort::Error> {
+) -> Result<Array2<f32>, InferenceError> {
     let (layout, data) = tensor.into_parts();
     embedding_batch(&layout, &data, model_rows, useful_rows, context)
 }
 
-pub(super) fn fbank_hw_from_shape(
-    shape: &[usize],
+fn fbank_hw_from_layout(
+    layout: &TensorLayout,
     context: &'static str,
-) -> Result<(usize, usize), ort::Error> {
-    let layout = TensorLayout::from_dims(shape, context).map_err(GeometryError::into_ort)?;
-    let (_, frames, features) = layout.try_rank3(context).map_err(GeometryError::into_ort)?;
+) -> Result<(usize, usize), InferenceError> {
+    let (_, frames, features) = layout.try_rank3(context)?;
     if features != FBANK_FEATURES {
-        return Err(ort::Error::new(format!(
-            "{context}: expected {FBANK_FEATURES} filterbank features, got {features}"
-        )));
+        return Err(TensorShapeError::AxisMismatch {
+            context,
+            axis: 2,
+            expected: FBANK_FEATURES,
+            actual: features,
+        }
+        .into());
     }
     Ok((frames, features))
 }
 
+#[cfg(any(test, feature = "coreml"))]
+pub(super) fn fbank_hw_from_shape(
+    shape: &[usize],
+    context: &'static str,
+) -> Result<(usize, usize), InferenceError> {
+    fbank_hw_from_layout(&TensorLayout::from_dims(shape, context)?, context)
+}
+
+#[cfg(feature = "_ort")]
 pub(super) fn fbank_hw_from_i64(
     shape: &[i64],
     context: &'static str,
-) -> Result<(usize, usize), ort::Error> {
-    if shape.iter().any(|dim| *dim < 0) {
-        return Err(ort::Error::new(format!(
-            "{context}: expected non-negative filterbank dimensions, got {shape:?}"
-        )));
-    }
-    let dims: Vec<usize> = shape.iter().map(|dim| *dim as usize).collect();
-    fbank_hw_from_shape(&dims, context)
+) -> Result<(usize, usize), InferenceError> {
+    fbank_hw_from_layout(&TensorLayout::from_ort_shape(shape, context)?, context)
 }
 
+/// Split a flat `[count, frames, features]` filterbank batch into one array per window
+pub(super) fn push_fbank_batch_results(
+    results: &mut Vec<Array2<f32>>,
+    data: &[f32],
+    frames: usize,
+    features: usize,
+    count: usize,
+) -> Result<(), InferenceError> {
+    let stride = frames * features;
+    for idx in 0..count {
+        let start = idx * stride;
+        let batch = array2_from_shape_vec(
+            frames,
+            features,
+            data[start..start + stride].to_vec(),
+            "batched fbank output",
+        )?;
+        results.push(batch);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "_ort")]
 pub(super) fn first_output<T>(
     outputs: impl IntoIterator<Item = T>,
     context: &'static str,
-) -> Result<T, ort::Error> {
+) -> Result<T, InferenceError> {
     outputs
         .into_iter()
         .next()
-        .ok_or_else(|| ort::Error::new(format!("{context}: missing output tensor")))
+        .ok_or(InferenceError::MissingOutput { context })
 }
 
+#[cfg(feature = "_ort")]
 pub(super) fn preallocated_run_options(
     rows: usize,
     cols: usize,
-    context: &'static str,
 ) -> Result<RunOptions<HasSelectedOutputs>, ort::Error> {
-    let output = Tensor::<f32>::new(&Allocator::default(), [rows, cols]).map_err(|error| {
-        ort::Error::new(format!(
-            "{context}: failed to allocate output tensor: {error}"
-        ))
-    })?;
-    RunOptions::new()
-        .map_err(|error| {
-            ort::Error::new(format!("{context}: failed to build run options: {error}"))
-        })
-        .map(|options| {
-            options.with_outputs(OutputSelector::default().preallocate("output", output))
-        })
+    let output = Tensor::<f32>::new(&Allocator::default(), [rows, cols])?;
+    RunOptions::new().map(|options| {
+        options.with_outputs(OutputSelector::default().preallocate("output", output))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        EMBEDDING_WIDTH, FBANK_FEATURES, embedding_batch_from_ort, embedding_vector_from_coreml,
-        embedding_vector_from_ort, fbank_hw_from_i64, fbank_hw_from_shape, first_output,
+        EMBEDDING_WIDTH, FBANK_FEATURES, embedding_vector_from_coreml, fbank_hw_from_shape,
+    };
+    #[cfg(feature = "_ort")]
+    use super::{
+        embedding_batch_from_ort, embedding_vector_from_ort, fbank_hw_from_i64, first_output,
     };
     use crate::inference::geometry::CoreMlTensor;
+    #[cfg(feature = "_ort")]
+    use crate::inference::{InferenceError, TensorShapeError};
 
+    #[cfg(feature = "_ort")]
     #[test]
     fn first_output_reports_missing_tensor() {
         let error = first_output(Vec::<()>::new(), "embedding test").unwrap_err();
@@ -241,6 +266,7 @@ mod tests {
         assert_eq!(error.to_string(), "embedding test: missing output tensor");
     }
 
+    #[cfg(feature = "_ort")]
     #[test]
     fn embedding_vector_from_ort_rejects_wrong_rank_and_width_with_matching_element_count() {
         let rank = ort::value::Shape::from([EMBEDDING_WIDTH as i64]);
@@ -263,6 +289,7 @@ mod tests {
         assert!(width_error.to_string().contains("got [2, 128]"));
     }
 
+    #[cfg(feature = "_ort")]
     #[test]
     fn embedding_vector_from_ort_rejects_short_and_excess_output() {
         let shape = ort::value::Shape::from([1_i64, EMBEDDING_WIDTH as i64]);
@@ -283,6 +310,7 @@ mod tests {
         assert!(excess.to_string().contains("expected 256 values, got 257"));
     }
 
+    #[cfg(feature = "_ort")]
     #[test]
     fn embedding_vector_from_ort_accepts_the_model_output_shape() {
         let shape = ort::value::Shape::from([1_i64, EMBEDDING_WIDTH as i64]);
@@ -343,6 +371,7 @@ mod tests {
         assert!(short_error.to_string().contains("expected shape [1, 256]"));
     }
 
+    #[cfg(feature = "_ort")]
     #[test]
     fn embedding_batch_rejects_short_and_excess_output() {
         let shape = ort::value::Shape::from([2_i64, EMBEDDING_WIDTH as i64]);
@@ -357,6 +386,7 @@ mod tests {
         assert!(excess.to_string().contains("expected 512 values, got 513"));
     }
 
+    #[cfg(feature = "_ort")]
     #[test]
     fn embedding_batch_rejects_wrong_rank_and_width_with_matching_element_count() {
         let rank = ort::value::Shape::from([1_i64, 2, EMBEDDING_WIDTH as i64]);
@@ -373,6 +403,7 @@ mod tests {
         assert!(width_error.to_string().contains("got [4, 128]"));
     }
 
+    #[cfg(feature = "_ort")]
     #[test]
     fn embedding_batch_selects_useful_rows_from_a_padded_model_output() {
         let shape = ort::value::Shape::from([4_i64, EMBEDDING_WIDTH as i64]);
@@ -389,6 +420,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "_ort")]
     #[test]
     fn embedding_batch_rejects_useful_rows_above_capacity_and_overflow() {
         let shape = ort::value::Shape::from([2_i64, EMBEDDING_WIDTH as i64]);
@@ -404,11 +436,12 @@ mod tests {
         let overflow =
             embedding_batch_from_ort(&shape, &[], usize::MAX, 0, "padded embedding output")
                 .unwrap_err();
-        assert!(
-            overflow
-                .to_string()
-                .contains("embedding batch size overflowed")
-        );
+        assert!(matches!(
+            overflow,
+            InferenceError::Shape(TensorShapeError::Overflow {
+                context: "padded embedding output"
+            })
+        ));
     }
 
     #[test]
@@ -416,13 +449,14 @@ mod tests {
         let rank = fbank_hw_from_shape(&[998, 80], "chunk fbank output").unwrap_err();
         assert!(rank.to_string().contains("expected rank 3"));
         let features = fbank_hw_from_shape(&[1, 998, 40], "chunk fbank output").unwrap_err();
-        assert!(
-            features
-                .to_string()
-                .contains(&format!("expected {FBANK_FEATURES} filterbank features"))
-        );
-        let negative = fbank_hw_from_i64(&[1, -1, 80], "chunk fbank output").unwrap_err();
-        assert!(negative.to_string().contains("non-negative"));
+        assert!(features.to_string().contains(&format!(
+            "expected axis 2 to have length {FBANK_FEATURES}, got 40"
+        )));
+        #[cfg(feature = "_ort")]
+        {
+            let negative = fbank_hw_from_i64(&[1, -1, 80], "chunk fbank output").unwrap_err();
+            assert!(negative.to_string().contains("non-negative"));
+        }
         assert_eq!(
             fbank_hw_from_shape(&[1, 998, 80], "chunk fbank output").unwrap(),
             (998, 80)

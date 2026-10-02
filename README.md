@@ -19,6 +19,8 @@ Runtime or native CoreML, and the rest of the pipeline stays in Rust.
 
 ## Usage
 
+No inference backend is enabled by default. Pick the one for your platform:
+
 ```toml
 # macOS (CoreML)
 speakrs = { version = "0.6", features = ["coreml"] }
@@ -26,12 +28,15 @@ speakrs = { version = "0.6", features = ["coreml"] }
 # NVIDIA GPU
 speakrs = { version = "0.6", features = ["cuda"] }
 
-# CPU only
-speakrs = "0.6"
+# CPU
+speakrs = { version = "0.6", features = ["cpu"] }
 
 # AMD GPU
 speakrs = { version = "0.6", features = ["migraphx"] }
 ```
+
+The `coreml` feature runs on native CoreML only, so a macOS build with just `coreml`
+does not compile, link, or download ONNX Runtime.
 
 ### Quick start
 
@@ -123,6 +128,10 @@ let result = pipeline.run(&audio)?;
 | `cuda` | ONNX Runtime CUDA | 1s | NVIDIA GPU |
 | `cuda-fast` | ONNX Runtime CUDA | 2s | NVIDIA GPU for higher throughput |
 | `migraphx` | ONNX Runtime MIGraphX | 1s | AMD GPU |
+
+Each mode needs its Cargo feature: `cpu`, `coreml` for both CoreML modes, `cuda` for both
+CUDA modes, or `migraphx`. Requesting a mode whose feature is off returns
+`ModelLoadError::UnsupportedExecutionMode`.
 
 The `*-fast` modes move the segmentation window every 2 seconds instead of
 every 1 second. That gives the pipeline fewer windows to score, so it can be much faster, but speaker changes
@@ -217,15 +226,21 @@ Set `SPEAKRS_MODELS_DIR` if you want to force a local bundle instead.
 
 ## Features and build notes
 
-Common features:
+Enable at least one inference backend; the build fails with a clear error otherwise:
 
-- `online` (default): model download via [`ModelManager`](https://docs.rs/speakrs/latest/speakrs/models/struct.ModelManager.html)
-- `coreml`: native CoreML backend on macOS
+- `coreml`: native CoreML backend on macOS, without ONNX Runtime
+- `cpu`: CPU backend via ONNX Runtime
 - `cuda`: NVIDIA CUDA backend via ONNX Runtime
 - `migraphx`: AMD GPU backend via ONNX Runtime MIGraphX
-- `load-dynamic`: load the ONNX Runtime library at startup instead of static linking
 
-The ONNX Runtime dependency (`ort` 2.0.0-rc.13) is still pre-release.
+Other features:
+
+- `online` (default): model download via [`ModelManager`](https://docs.rs/speakrs/latest/speakrs/models/struct.ModelManager.html)
+- `load-dynamic`: load the ONNX Runtime library at startup instead of static linking; use it
+  with `cpu`, `cuda`, or `migraphx`
+
+The ONNX Runtime dependency behind `cpu`, `cuda`, and `migraphx` (`ort` 2.0.0-rc.13) is still
+pre-release.
 
 ## Public API
 

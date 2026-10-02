@@ -2,11 +2,14 @@ use std::fs;
 
 use ndarray::{Array2, Array3};
 use ndarray_npy::ReadNpyExt;
+#[cfg(feature = "cpu")]
 use speakrs::OwnedDiarizationPipeline;
-use speakrs::inference::{EmbeddingModel, SegmentationModel};
-use speakrs::pipeline::{DiarizationPipeline, FRAME_STEP_SECONDS, SEGMENTATION_STEP_SECONDS};
+#[cfg(any(feature = "cpu", all(feature = "coreml", feature = "_metrics")))]
+use speakrs::inference::{EmbeddingModel, ExecutionMode, SegmentationModel};
+#[cfg(any(feature = "cpu", all(feature = "coreml", feature = "_metrics")))]
+use speakrs::pipeline::DiarizationPipeline;
+use speakrs::pipeline::{FRAME_STEP_SECONDS, SEGMENTATION_STEP_SECONDS};
 
-use speakrs::inference::ExecutionMode;
 #[cfg(all(feature = "coreml", feature = "_metrics"))]
 use speakrs::metrics::{compute_der, parse_rttm};
 #[cfg(all(feature = "coreml", feature = "_metrics"))]
@@ -16,7 +19,11 @@ use std::time::{Duration, Instant};
 
 mod support;
 
-use support::{build_pipeline_or_skip, fixture_path, load_model_or_skip, load_wav_samples};
+#[cfg(feature = "cpu")]
+use support::build_pipeline_or_skip;
+use support::fixture_path;
+#[cfg(any(feature = "cpu", all(feature = "coreml", feature = "_metrics")))]
+use support::{load_model_or_skip, load_wav_samples};
 
 #[test]
 fn pipeline_fixture_shapes_are_available() {
@@ -44,6 +51,7 @@ fn segmentation_step_matches_pyannote_fixture() {
     assert_eq!(FRAME_STEP_SECONDS, 0.016875);
 }
 
+#[cfg(feature = "cpu")]
 #[test]
 fn pipeline_runs_on_main_fixture_audio() {
     let models_dir = fixture_path("models");
@@ -80,7 +88,7 @@ fn pipeline_runs_on_main_fixture_audio() {
     assert!(result.rttm("fixture").contains("SPEAKER fixture 1"));
 }
 
-#[cfg(not(feature = "coreml"))]
+#[cfg(all(feature = "cpu", not(feature = "coreml")))]
 #[test]
 fn shared_pipeline_handles_match_when_run_concurrently() {
     let models_dir = fixture_path("models");
@@ -252,6 +260,7 @@ fn der_coreml_fast() {
     }
 }
 
+#[cfg(feature = "cpu")]
 #[test]
 fn pipeline_handles_short_audio_fixture() {
     let models_dir = fixture_path("models");
@@ -282,6 +291,7 @@ fn pipeline_handles_short_audio_fixture() {
     assert!(result.speaker_count.len() <= result.discrete_diarization.nrows());
 }
 
+#[cfg(feature = "cpu")]
 #[test]
 fn owned_pipeline_from_dir() {
     let models_dir = fixture_path("models");
@@ -308,10 +318,10 @@ fn owned_pipeline_from_dir() {
     assert!(result.rttm("file1").contains("SPEAKER file1 1"));
 }
 
+#[cfg(all(feature = "online", feature = "cpu"))]
 /// Requires models deployed to HF (`cargo xtask models deploy`)
 #[test]
 #[ignore]
-#[cfg(feature = "online")]
 fn online_pipeline_downloads_and_runs() {
     let Some(mut pipeline) = build_pipeline_or_skip(OwnedDiarizationPipeline::from_pretrained(
         ExecutionMode::Cpu,

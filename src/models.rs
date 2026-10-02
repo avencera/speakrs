@@ -15,7 +15,8 @@ const EMBEDDING_MIN_SAMPLES: &str = "wespeaker-voxceleb-resnet34.min_num_samples
 ///
 /// Captures the three root paths needed by [`SegmentationModel`], [`EmbeddingModel`],
 /// and `PldaTransform`. Variant models (batched, CoreML, split) are derived
-/// internally by each model constructor from the base ONNX path.
+/// internally by each model constructor from the base ONNX path. CoreML modes use only
+/// the file stem, so the ONNX files do not need to exist for them.
 ///
 /// [`SegmentationModel`]: crate::inference::segmentation::SegmentationModel
 /// [`EmbeddingModel`]: crate::inference::embedding::EmbeddingModel
@@ -50,12 +51,12 @@ impl ModelBundle {
         Self::from_dir(dir)
     }
 
-    /// Base ONNX path for the segmentation model
+    /// Base ONNX path for the segmentation model, which CoreML modes use only as a stem
     pub fn segmentation_path(&self) -> &Path {
         &self.segmentation_onnx
     }
 
-    /// Base ONNX path for the embedding model
+    /// Base ONNX path for the embedding model, which CoreML modes use only as a stem
     pub fn embedding_path(&self) -> &Path {
         &self.embedding_onnx
     }
@@ -112,7 +113,7 @@ impl PinnedModelRepository {
 #[cfg(feature = "online")]
 const PINNED_MODEL_REPOSITORY: PinnedModelRepository = PinnedModelRepository::speakrs_models();
 
-/// Manages downloading and caching speakrs ONNX models from HuggingFace
+/// Manages downloading and caching speakrs models from HuggingFace
 #[cfg(feature = "online")]
 #[cfg_attr(docsrs, doc(cfg(feature = "online")))]
 pub struct ModelManager {
@@ -449,40 +450,8 @@ fn catalog_assets(mode: ExecutionMode) -> Vec<ModelAsset> {
                 ModelFamily::Embedding,
             ));
         }
+        // compiled bundles only: CoreML modes never read the ONNX files
         ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => {
-            assets.push(onnx_asset(
-                "segmentation-3.0.onnx",
-                ModelFamily::Segmentation,
-            ));
-            assets.push(onnx_asset(
-                "wespeaker-voxceleb-resnet34.onnx",
-                ModelFamily::Embedding,
-            ));
-            assets.push(onnx_asset(
-                "wespeaker-voxceleb-resnet34.onnx.data",
-                ModelFamily::Embedding,
-            ));
-            assets.push(onnx_asset(
-                "segmentation-3.0-b32.onnx",
-                ModelFamily::Segmentation,
-            ));
-            assets.push(onnx_asset("wespeaker-fbank.onnx", ModelFamily::Filterbank));
-            assets.push(onnx_asset(
-                "wespeaker-fbank-b32.onnx",
-                ModelFamily::Filterbank,
-            ));
-            assets.push(onnx_asset(
-                "wespeaker-voxceleb-resnet34-tail.onnx",
-                ModelFamily::EmbeddingTail,
-            ));
-            assets.push(onnx_asset(
-                "wespeaker-voxceleb-resnet34-tail-b3.onnx",
-                ModelFamily::EmbeddingTail,
-            ));
-            assets.push(onnx_asset(
-                "wespeaker-voxceleb-resnet34-tail-b32.onnx",
-                ModelFamily::EmbeddingTail,
-            ));
             assets.extend(COREML_COMMON_MODEL_STEMS.iter().map(|&name| {
                 ModelAsset::new(
                     name,
@@ -630,6 +599,19 @@ mod tests {
         assert!(files.contains(&"wespeaker-fbank-30s.mlmodelc/model.mil".to_string()));
         assert!(files.contains(&"wespeaker-multimask-tail-b32.mlmodelc/model.mil".to_string()));
         assert!(files.contains(&"wespeaker-chunk-emb-p1s-w111.mlmodelc/model.mil".to_string()));
+    }
+
+    #[test]
+    fn coreml_modes_download_no_onnx_files() {
+        for mode in [ExecutionMode::CoreMl, ExecutionMode::CoreMlFast] {
+            let files = required_files(mode);
+            assert!(
+                files.iter().all(|path| !path.contains(".onnx")),
+                "{mode} downloads ONNX files: {files:?}"
+            );
+            assert!(files.contains(&EMBEDDING_MIN_SAMPLES.to_string()));
+            assert!(files.contains(&"wespeaker-fbank.mlmodelc/model.mil".to_string()));
+        }
     }
 
     #[test]

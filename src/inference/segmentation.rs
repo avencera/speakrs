@@ -1,29 +1,33 @@
 use std::path::{Path, PathBuf};
 
 use ndarray::Array2;
-use ort::session::Session;
 
 #[cfg(feature = "coreml")]
-use crate::inference::coreml::{CachedInputShape, SharedCoreMlModel};
-use crate::inference::{
-    ExecutionMode, ModelLoadError, SharedSession, ensure_ort_ready, with_execution_mode,
-};
+use crate::inference::CoreMlError;
+use crate::inference::{ExecutionMode, InferenceBackend, InferenceError, ModelLoadError};
+
 #[cfg(feature = "coreml")]
 mod native;
+#[cfg(feature = "_ort")]
+mod onnx;
 #[cfg(feature = "coreml")]
 mod parallel;
 mod run;
 mod tensor;
 
+#[cfg(feature = "coreml")]
+use native::CoreMlSegmentation;
+#[cfg(feature = "_ort")]
+use onnx::OrtSegmentation;
 pub(crate) use tensor::{InvalidWindowGeometry, WindowSpec, segmentation_window_count};
 
 /// Errors that can occur during segmentation inference
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SegmentationError {
-    /// ONNX Runtime error
+    /// The inference backend failed
     #[error(transparent)]
-    Ort(#[from] ort::Error),
+    Inference(#[from] InferenceError),
     /// Streaming channel was closed before all windows were sent
     #[error("receiver disconnected")]
     Disconnected(#[from] crossbeam_channel::SendError<Array2<f32>>),
@@ -51,6 +55,20 @@ pub enum SegmentationError {
     },
 }
 
+#[cfg(feature = "_ort")]
+impl From<ort::Error> for SegmentationError {
+    fn from(error: ort::Error) -> Self {
+        Self::Inference(error.into())
+    }
+}
+
+#[cfg(feature = "coreml")]
+impl From<CoreMlError> for SegmentationError {
+    fn from(error: CoreMlError) -> Self {
+        Self::Inference(error.into())
+    }
+}
+
 // seg models exported with EnumeratedShapes for batch 1-32 and b64
 const PRIMARY_BATCH_SIZE: usize = 32;
 #[cfg(feature = "coreml")]
@@ -59,44 +77,37 @@ const LARGE_BATCH_SIZE: usize = 64;
 /// Sliding-window segmentation model (pyannote segmentation-3.0)
 pub struct SegmentationModel {
     mode: ExecutionMode,
-    session: SharedSession,
-    primary_batched_session: Option<SharedSession>,
-    #[cfg(feature = "coreml")]
-    native_session: Option<SharedCoreMlModel>,
-    #[cfg(feature = "coreml")]
-    native_batched_session: Option<SharedCoreMlModel>,
-    #[cfg(feature = "coreml")]
-    native_large_batched_session: Option<SharedCoreMlModel>,
-    #[cfg(feature = "coreml")]
-    cached_single_input_shape: CachedInputShape,
-    #[cfg(feature = "coreml")]
-    cached_batch_input_shape: CachedInputShape,
-    input_buffer: ndarray::Array3<f32>,
-    primary_batch_input_buffer: ndarray::Array3<f32>,
+    backend: SegmentationBackend,
     window_spec: WindowSpec,
     sample_rate: usize,
 }
 
-// SAFETY: SegmentationModel is only used from one thread at a time via &mut self
-// SAFETY: the non-Send fields contain Objective-C objects that are only moved, not shared
-// SAFETY: SharedCoreMlModel is already Send + Sync
-#[cfg(feature = "coreml")]
-unsafe impl Send for SegmentationModel {}
+/// Sessions for the one runtime chosen from the execution mode at load time
+enum SegmentationBackend {
+    #[cfg(feature = "_ort")]
+    Ort(OrtSegmentation),
+    #[cfg(feature = "coreml")]
+    CoreMl(CoreMlSegmentation),
+}
 
 impl SegmentationModel {
-    /// Load a segmentation-3.0 ONNX model
+    /// Load a segmentation-3.0 ONNX model on the CPU
+    ///
+    /// Requires the `cpu` feature
     pub fn new(model_path: impl AsRef<Path>, step_duration: f32) -> Result<Self, ModelLoadError> {
         Self::with_mode(model_path, step_duration, ExecutionMode::Cpu)
     }
 
-    /// Load a segmentation-3.0 ONNX model with the requested execution mode
+    /// Load a segmentation-3.0 model with the requested execution mode
+    ///
+    /// `model_path` names the base `segmentation-3.0.onnx` file. CoreML modes load the
+    /// compiled bundles next to it and do not read the ONNX file
     pub fn with_mode(
         model_path: impl AsRef<Path>,
         step_duration: f32,
         mode: ExecutionMode,
     ) -> Result<Self, ModelLoadError> {
-        mode.validate()?;
-        ensure_ort_ready()?;
+        let backend = mode.backend()?;
 
         let model_path = model_path.as_ref();
         let sample_rate = 16000;
@@ -107,114 +118,24 @@ impl SegmentationModel {
         )?;
         let window_samples = window_spec.window_samples();
 
-        #[cfg(feature = "coreml")]
-        if matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
-            Self::validate_native_coreml_assets(model_path, mode)?;
-        }
-
-        macro_rules! timed {
-            ($expr:expr) => {{
-                let start = std::time::Instant::now();
-                let value = $expr;
-                (value, start.elapsed())
-            }};
-        }
-
-        let (session, session_elapsed) =
-            timed!(SharedSession::new(Self::build_session(model_path, mode)?));
-        let (primary_batched_session, primary_batched_elapsed) = timed!(
-            batched_model_path(model_path, PRIMARY_BATCH_SIZE)
-                .filter(|path| path.exists())
-                .map(|path| Self::build_session(&path, mode).map(SharedSession::new))
-                .transpose()?
-        );
-        #[cfg(feature = "coreml")]
-        let (native_session, native_session_elapsed) =
-            timed!(Self::load_native_coreml(model_path, mode)?);
-        #[cfg(feature = "coreml")]
-        let (native_batched_session, native_batched_elapsed) =
-            timed!(Self::load_native_coreml_batched(model_path, mode)?);
-        #[cfg(feature = "coreml")]
-        let (native_large_batched_session, native_large_batched_elapsed) =
-            timed!(Self::load_native_coreml_large_batched(model_path, mode)?);
-
-        #[cfg(feature = "coreml")]
-        if matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
-            if native_session.is_none() {
-                return Err(ModelLoadError::MissingNativeAsset {
-                    mode,
-                    path: Self::resolve_coreml_path(model_path, mode)
-                        .unwrap_or_else(|| model_path.to_path_buf()),
-                });
-            }
-            if native_batched_session.is_none() {
-                return Err(ModelLoadError::MissingNativeAsset {
-                    mode,
-                    path: Self::resolve_batched_coreml_path(model_path, mode, PRIMARY_BATCH_SIZE)
-                        .unwrap_or_else(|| model_path.to_path_buf()),
-                });
-            }
-            if native_large_batched_session.is_none() {
-                return Err(ModelLoadError::MissingNativeAsset {
-                    mode,
-                    path: Self::resolve_batched_coreml_path(model_path, mode, LARGE_BATCH_SIZE)
-                        .unwrap_or_else(|| model_path.to_path_buf()),
-                });
-            }
-        }
-
-        #[cfg(feature = "coreml")]
-        {
-            let total_ms = (session_elapsed
-                + primary_batched_elapsed
-                + native_session_elapsed
-                + native_batched_elapsed
-                + native_large_batched_elapsed)
-                .as_millis();
-            tracing::trace!(
-                ort_single_ms = session_elapsed.as_millis(),
-                ort_batched_ms = primary_batched_elapsed.as_millis(),
-                native_single_ms = native_session_elapsed.as_millis(),
-                native_b32_ms = native_batched_elapsed.as_millis(),
-                native_b64_ms = native_large_batched_elapsed.as_millis(),
-                total_ms,
-                "Segmentation model init",
-            );
-        }
-        #[cfg(not(feature = "coreml"))]
-        {
-            let total_ms = (session_elapsed + primary_batched_elapsed).as_millis();
-            tracing::trace!(
-                ort_single_ms = session_elapsed.as_millis(),
-                ort_batched_ms = primary_batched_elapsed.as_millis(),
-                total_ms,
-                "Segmentation model init",
-            );
-        }
+        let backend = match backend {
+            #[cfg(feature = "_ort")]
+            InferenceBackend::Ort(provider) => SegmentationBackend::Ort(OrtSegmentation::load(
+                model_path,
+                provider,
+                window_samples,
+            )?),
+            #[cfg(feature = "coreml")]
+            InferenceBackend::CoreMl => SegmentationBackend::CoreMl(CoreMlSegmentation::load(
+                model_path,
+                mode,
+                window_samples,
+            )?),
+        };
 
         Ok(Self {
             mode,
-            session,
-            primary_batched_session,
-            #[cfg(feature = "coreml")]
-            native_session,
-            #[cfg(feature = "coreml")]
-            native_batched_session,
-            #[cfg(feature = "coreml")]
-            native_large_batched_session,
-            #[cfg(feature = "coreml")]
-            cached_single_input_shape: CachedInputShape::new("input", &[1, 1, window_samples]),
-            #[cfg(feature = "coreml")]
-            cached_batch_input_shape: CachedInputShape::new(
-                "input",
-                &[PRIMARY_BATCH_SIZE, 1, window_samples],
-            ),
-            input_buffer: ndarray::Array3::zeros((1, 1, window_samples)),
-            primary_batch_input_buffer: ndarray::Array3::zeros((
-                PRIMARY_BATCH_SIZE,
-                1,
-                window_samples,
-            )),
+            backend,
             window_spec,
             sample_rate,
         })
@@ -223,22 +144,6 @@ impl SegmentationModel {
     #[cfg_attr(not(feature = "coreml"), allow(dead_code))]
     pub(crate) fn window_count(&self, audio_samples: usize) -> usize {
         segmentation_window_count(audio_samples, self.window_spec())
-    }
-
-    fn build_session(model_path: &Path, mode: ExecutionMode) -> Result<Session, ort::Error> {
-        let builder = Session::builder()?
-            .with_independent_thread_pool()?
-            .with_intra_threads(Self::available_threads().min(6))?
-            .with_inter_threads(1)?
-            .with_memory_pattern(true)?;
-        let mut builder = with_execution_mode(builder, mode)?;
-        builder.commit_from_file(model_path)
-    }
-
-    fn available_threads() -> usize {
-        std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(1)
     }
 
     /// Audio sample rate in Hz (16000)
@@ -274,22 +179,24 @@ impl SegmentationModel {
     ///
     /// Session weights and arenas are shared. Each inference call locks only the
     /// session that it uses.
-    #[cfg(not(feature = "coreml"))]
+    #[cfg(all(feature = "_ort", not(feature = "coreml")))]
     pub(crate) fn clone_shared(&self) -> Self {
-        let window_samples = self.window_samples();
+        let SegmentationBackend::Ort(backend) = &self.backend;
 
         Self {
             mode: self.mode,
-            session: self.session.clone(),
-            primary_batched_session: self.primary_batched_session.clone(),
-            input_buffer: ndarray::Array3::zeros((1, 1, window_samples)),
-            primary_batch_input_buffer: ndarray::Array3::zeros((
-                PRIMARY_BATCH_SIZE,
-                1,
-                window_samples,
-            )),
+            backend: SegmentationBackend::Ort(backend.clone_shared(self.window_samples())),
             window_spec: self.window_spec,
             sample_rate: self.sample_rate,
+        }
+    }
+
+    #[cfg(feature = "coreml")]
+    fn coreml_backend(&self) -> Option<&CoreMlSegmentation> {
+        match &self.backend {
+            SegmentationBackend::CoreMl(backend) => Some(backend),
+            #[cfg(feature = "_ort")]
+            SegmentationBackend::Ort(_) => None,
         }
     }
 }
@@ -301,7 +208,7 @@ fn batched_model_path(model_path: &Path, batch_size: usize) -> Option<PathBuf> {
     Some(path.with_file_name(format!("{stem}-b{batch_size}.onnx")))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cpu"))]
 mod tests {
     use super::SegmentationModel;
     use crate::inference::{ExecutionMode, ModelLoadError};

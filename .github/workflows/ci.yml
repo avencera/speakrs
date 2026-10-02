@@ -48,7 +48,7 @@ jobs:
           prefix-key: v1-rust-msrv
 
       - name: Check crate
-        run: cargo check -p speakrs
+        run: cargo check -p speakrs --features cpu
 
   clippy:
     name: Clippy (${{ matrix.name }})
@@ -82,6 +82,67 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy --workspace --all-targets --features "${{ matrix.features }}" -- -D warnings
+
+  backend-features:
+    name: Backend features (Linux x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          prefix-key: v1-rust-backend-features
+
+      - name: Check the CPU backend alone
+        run: cargo check -p speakrs --no-default-features --features "online cpu"
+
+      - name: Require a backend feature
+        shell: bash
+        run: |
+          set -euo pipefail
+          if cargo check -p speakrs --no-default-features --features "online" 2> no-backend.log; then
+            echo "a build without a backend feature compiled" >&2
+            exit 1
+          fi
+          grep -q "speakrs needs an inference backend" no-backend.log
+
+  coreml-only:
+    name: CoreML without ONNX Runtime (macOS arm64)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          prefix-key: v1-rust-coreml-only
+
+      - name: Keep ONNX Runtime out of the dependency tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          for package in ort ort-sys; do
+            if output="$(cargo tree -p speakrs --no-default-features --features "online coreml" -e normal -i "$package" 2>&1)"; then
+              echo "$output"
+              echo "$package is in the coreml-only dependency tree" >&2
+              exit 1
+            fi
+            grep -q "did not match any packages" <<<"$output"
+          done
+
+      - name: Run clippy
+        run: cargo clippy -p speakrs --all-targets --no-default-features --features "online coreml" -- -D warnings
 
   test:
     name: Test (${{ matrix.name }})
@@ -203,4 +264,4 @@ jobs:
           done
 
       - name: Run no-default-features runtime tests
-        run: cargo test -p speakrs --no-default-features --features "online"
+        run: cargo test -p speakrs --no-default-features --features "online,cpu"

@@ -194,7 +194,14 @@ impl OwnedDiarizationPipeline {
     /// The new handle has private scratch buffers and can run on another thread.
     /// Calls that use the same shared session are serialized through inference,
     /// output validation, and output copying.
-    #[cfg(not(feature = "coreml"))]
+    #[cfg(all(feature = "_ort", not(feature = "coreml")))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(all(
+            any(feature = "cpu", feature = "cuda", feature = "migraphx"),
+            not(feature = "coreml")
+        )))
+    )]
     pub fn clone_shared(&self) -> Result<Self, PipelineError> {
         Ok(Self {
             seg_model: self.seg_model.clone_shared(),

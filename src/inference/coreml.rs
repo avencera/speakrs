@@ -1,5 +1,4 @@
 use std::ffi::c_void;
-use std::fmt;
 use std::path::Path;
 use std::ptr::NonNull;
 
@@ -13,7 +12,7 @@ mod array;
 mod path;
 mod runtime;
 
-use crate::inference::geometry::{CoreMlTensor, GeometryError, TensorLayout};
+use crate::inference::geometry::{CoreMlTensor, TensorLayout, TensorShapeError};
 use array::{
     contiguous_strides, create_multi_array_cached_with_deallocator,
     create_multi_array_with_deallocator, extract_output, ns_number_array,
@@ -36,33 +35,25 @@ pub(crate) enum GpuPrecision {
     Full,
 }
 
-#[derive(Debug)]
-pub(crate) enum CoreMlError {
+/// Errors returned by the native CoreML runtime
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum CoreMlError {
+    /// A compiled `.mlmodelc` bundle could not be loaded
+    #[error("CoreML load failed: {0}")]
     LoadFailed(String),
+    /// CoreML rejected the inputs or failed while predicting
+    #[error("CoreML prediction failed: {0}")]
     PredictionFailed(String),
+    /// The prediction did not contain the named output
+    #[error("CoreML output '{0}' not found")]
     OutputNotFound(String),
+    /// An `MLMultiArray` could not be created for an input
+    #[error("CoreML array creation failed: {0}")]
     ArrayCreationFailed(String),
-    InvalidGeometry(GeometryError),
-}
-
-impl fmt::Display for CoreMlError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::LoadFailed(msg) => write!(f, "CoreML load failed: {msg}"),
-            Self::PredictionFailed(msg) => write!(f, "CoreML prediction failed: {msg}"),
-            Self::OutputNotFound(name) => write!(f, "CoreML output '{name}' not found"),
-            Self::ArrayCreationFailed(msg) => write!(f, "CoreML array creation failed: {msg}"),
-            Self::InvalidGeometry(error) => write!(f, "{error}"),
-        }
-    }
-}
-
-impl std::error::Error for CoreMlError {}
-
-impl From<GeometryError> for CoreMlError {
-    fn from(error: GeometryError) -> Self {
-        Self::InvalidGeometry(error)
-    }
+    /// An input or output tensor did not match its declared shape
+    #[error(transparent)]
+    InvalidShape(#[from] TensorShapeError),
 }
 
 /// Pre-computed NSArray<NSNumber> for shape and strides, avoiding per-call allocation
@@ -336,7 +327,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::{CachedInputShape, CoreMlModel, GpuPrecision, SharedCoreMlModel};
-    use crate::inference::geometry::GeometryError;
+    use crate::inference::geometry::TensorShapeError;
 
     #[test]
     fn bind_rejects_short_and_long_input_without_calling_coreml() {
@@ -351,7 +342,7 @@ mod tests {
         };
         assert!(matches!(
             short,
-            super::CoreMlError::InvalidGeometry(GeometryError::LengthMismatch {
+            super::CoreMlError::InvalidShape(TensorShapeError::LengthMismatch {
                 expected: 4,
                 actual: 3,
                 ..
@@ -359,7 +350,7 @@ mod tests {
         ));
         assert!(matches!(
             long,
-            super::CoreMlError::InvalidGeometry(GeometryError::LengthMismatch {
+            super::CoreMlError::InvalidShape(TensorShapeError::LengthMismatch {
                 expected: 4,
                 actual: 5,
                 ..
@@ -377,7 +368,7 @@ mod tests {
         };
         assert!(matches!(
             error,
-            super::CoreMlError::InvalidGeometry(GeometryError::Overflow { .. })
+            super::CoreMlError::InvalidShape(TensorShapeError::Overflow { .. })
         ));
     }
 

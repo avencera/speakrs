@@ -1,18 +1,18 @@
 #![cfg(feature = "coreml")]
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
-use ndarray::Array2;
-use objc2_core_ml::MLComputeUnits;
+use ndarray::{Array2, Array3};
 use tracing::info;
 
 use crate::inference::coreml::{
     CachedInputShape, CoreMlModel, GpuPrecision, SharedCoreMlModel, coreml_model_path,
     coreml_w8a16_model_path,
 };
-use crate::inference::{ExecutionMode, ModelLoadError};
+use crate::inference::{ExecutionMode, InferenceError, ModelLoadError};
 
-use super::{LARGE_BATCH_SIZE, PRIMARY_BATCH_SIZE, SegmentationModel, batched_model_path};
+use super::{LARGE_BATCH_SIZE, PRIMARY_BATCH_SIZE, SegmentationError, batched_model_path};
 
 fn parse_env_flag(value: &str) -> bool {
     matches!(
@@ -31,190 +31,201 @@ fn coreml_uses_w8a16_segmentation(mode: ExecutionMode) -> bool {
     }
 }
 
-impl SegmentationModel {
-    fn require_native_asset(path: PathBuf, mode: ExecutionMode) -> Result<PathBuf, ModelLoadError> {
-        if path.exists() {
-            Ok(path)
-        } else {
-            Err(ModelLoadError::MissingNativeAsset { mode, path })
-        }
-    }
+/// Compiled CoreML bundle paths derived from the base `segmentation-3.0.onnx` path
+///
+/// Only the file stem is used, so the ONNX file itself does not need to exist
+struct SegmentationAssetPaths {
+    single: PathBuf,
+    batched: PathBuf,
+    large_batched: PathBuf,
+}
 
-    pub(super) fn validate_native_coreml_assets(
-        model_path: &Path,
-        mode: ExecutionMode,
-    ) -> Result<(), ModelLoadError> {
-        let Some(single_path) = Self::resolve_coreml_path(model_path, mode) else {
-            return Ok(());
-        };
-        if matches!(mode, ExecutionMode::CoreMl) && coreml_uses_w8a16_segmentation(mode) {
+impl SegmentationAssetPaths {
+    fn resolve(model_path: &Path, mode: ExecutionMode) -> Result<Self, ModelLoadError> {
+        let use_w8a16 = coreml_uses_w8a16_segmentation(mode);
+        if matches!(mode, ExecutionMode::CoreMl) && use_w8a16 {
             info!("SPEAKRS_COREML_SEG_W8A16: using W8A16 segmentation on standard CoreML");
         }
-        Self::require_native_asset(single_path, mode)?;
 
-        let batched_path = Self::resolve_batched_coreml_path(model_path, mode, PRIMARY_BATCH_SIZE)
-            .ok_or(ModelLoadError::MissingNativeAsset {
-                mode,
-                path: model_path.to_path_buf(),
-            })?;
-        Self::require_native_asset(batched_path, mode)?;
-
-        let large_batched_path =
-            Self::resolve_batched_coreml_path(model_path, mode, LARGE_BATCH_SIZE).ok_or(
-                ModelLoadError::MissingNativeAsset {
+        let compiled_path = |onnx_path: &Path| {
+            if use_w8a16 {
+                coreml_w8a16_model_path(onnx_path)
+            } else {
+                coreml_model_path(onnx_path)
+            }
+        };
+        let batched_path = |batch_size: usize| {
+            batched_model_path(model_path, batch_size)
+                .map(|onnx_path| compiled_path(&onnx_path))
+                .ok_or_else(|| ModelLoadError::MissingNativeAsset {
                     mode,
                     path: model_path.to_path_buf(),
-                },
-            )?;
-        Self::require_native_asset(large_batched_path, mode)?;
-        Ok(())
-    }
+                })
+        };
 
-    pub(super) fn select_parallel_native_model(
-        &self,
-        total_windows: usize,
-    ) -> Option<(&SharedCoreMlModel, usize)> {
-        let min_batch_windows = PRIMARY_BATCH_SIZE * 6;
-        if total_windows < min_batch_windows {
-            return self.native_session.as_ref().map(|model| (model, 1));
-        }
-
-        self.native_large_batched_session
-            .as_ref()
-            .map(|model| (model, LARGE_BATCH_SIZE))
-            .or_else(|| {
-                self.native_batched_session
-                    .as_ref()
-                    .map(|model| (model, PRIMARY_BATCH_SIZE))
-            })
-            .or_else(|| self.native_session.as_ref().map(|model| (model, 1)))
-    }
-
-    pub(super) fn resolve_coreml_path(model_path: &Path, mode: ExecutionMode) -> Option<PathBuf> {
-        if coreml_uses_w8a16_segmentation(mode) {
-            return Some(coreml_w8a16_model_path(model_path));
-        }
-        match mode {
-            ExecutionMode::CoreMl => Some(coreml_model_path(model_path)),
-            _ => None,
-        }
-    }
-
-    fn compute_units_for_mode(_mode: ExecutionMode) -> MLComputeUnits {
-        CoreMlModel::default_compute_units()
-    }
-
-    pub(super) fn resolve_batched_coreml_path(
-        model_path: &Path,
-        mode: ExecutionMode,
-        batch_size: usize,
-    ) -> Option<PathBuf> {
-        if !matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
-            return None;
-        }
-
-        let batched_onnx = batched_model_path(model_path, batch_size)?;
-        Self::resolve_coreml_path(&batched_onnx, mode)
-    }
-
-    fn load_native_coreml_model(
-        coreml_path: &Path,
-        mode: ExecutionMode,
-        load_error_message: &str,
-    ) -> Result<SharedCoreMlModel, ModelLoadError> {
-        Self::require_native_asset(coreml_path.to_path_buf(), mode)?;
-
-        SharedCoreMlModel::load(
-            coreml_path,
-            Self::compute_units_for_mode(mode),
-            "output",
-            GpuPrecision::Low,
-        )
-        .map_err(|err| ModelLoadError::NativeAssetLoad {
-            mode,
-            path: coreml_path.to_path_buf(),
-            message: format!("{load_error_message}: {err}"),
+        Ok(Self {
+            single: compiled_path(model_path),
+            batched: batched_path(PRIMARY_BATCH_SIZE)?,
+            large_batched: batched_path(LARGE_BATCH_SIZE)?,
         })
     }
 
-    pub(super) fn load_native_coreml(
+    fn require_all(&self, mode: ExecutionMode) -> Result<(), ModelLoadError> {
+        for path in [&self.single, &self.batched, &self.large_batched] {
+            require_native_asset(path, mode)?;
+        }
+        Ok(())
+    }
+}
+
+fn require_native_asset(path: &Path, mode: ExecutionMode) -> Result<(), ModelLoadError> {
+    if path.exists() {
+        Ok(())
+    } else {
+        Err(ModelLoadError::MissingNativeAsset {
+            mode,
+            path: path.to_path_buf(),
+        })
+    }
+}
+
+fn load_native_model(
+    coreml_path: &Path,
+    mode: ExecutionMode,
+    load_error_message: &str,
+) -> Result<SharedCoreMlModel, ModelLoadError> {
+    require_native_asset(coreml_path, mode)?;
+
+    SharedCoreMlModel::load(
+        coreml_path,
+        CoreMlModel::default_compute_units(),
+        "output",
+        GpuPrecision::Low,
+    )
+    .map_err(|err| ModelLoadError::NativeAssetLoad {
+        mode,
+        path: coreml_path.to_path_buf(),
+        message: format!("{load_error_message}: {err}"),
+    })
+}
+
+/// Native CoreML segmentation models plus private input staging
+pub(super) struct CoreMlSegmentation {
+    single: SharedCoreMlModel,
+    batched: SharedCoreMlModel,
+    large_batched: SharedCoreMlModel,
+    cached_single_input_shape: CachedInputShape,
+    cached_batch_input_shape: CachedInputShape,
+    input_buffer: Array3<f32>,
+    primary_batch_input_buffer: Array3<f32>,
+}
+
+impl CoreMlSegmentation {
+    pub(super) fn load(
         model_path: &Path,
         mode: ExecutionMode,
-    ) -> Result<Option<SharedCoreMlModel>, ModelLoadError> {
-        let Some(coreml_path) = Self::resolve_coreml_path(model_path, mode) else {
-            return Ok(None);
-        };
-        Self::load_native_coreml_model(
-            &coreml_path,
+        window_samples: usize,
+    ) -> Result<Self, ModelLoadError> {
+        let paths = SegmentationAssetPaths::resolve(model_path, mode)?;
+        paths.require_all(mode)?;
+
+        let single_start = Instant::now();
+        let single = load_native_model(
+            &paths.single,
             mode,
             "Failed to load native CoreML segmentation",
-        )
-        .map(Some)
-    }
+        )?;
+        let single_elapsed = single_start.elapsed();
 
-    pub(super) fn load_native_coreml_batched(
-        model_path: &Path,
-        mode: ExecutionMode,
-    ) -> Result<Option<SharedCoreMlModel>, ModelLoadError> {
-        let Some(coreml_path) =
-            Self::resolve_batched_coreml_path(model_path, mode, PRIMARY_BATCH_SIZE)
-        else {
-            return Ok(None);
-        };
-        Self::load_native_coreml_model(
-            &coreml_path,
+        let batched_start = Instant::now();
+        let batched = load_native_model(
+            &paths.batched,
             mode,
             "Failed to load native CoreML batched segmentation",
-        )
-        .map(Some)
-    }
+        )?;
+        let batched_elapsed = batched_start.elapsed();
 
-    pub(super) fn load_native_coreml_large_batched(
-        model_path: &Path,
-        mode: ExecutionMode,
-    ) -> Result<Option<SharedCoreMlModel>, ModelLoadError> {
-        let Some(coreml_path) =
-            Self::resolve_batched_coreml_path(model_path, mode, LARGE_BATCH_SIZE)
-        else {
-            return Ok(None);
-        };
-        let model =
-            Self::load_native_coreml_model(&coreml_path, mode, "Failed to load b64 segmentation")?;
+        let large_batched_start = Instant::now();
+        let large_batched = load_native_model(
+            &paths.large_batched,
+            mode,
+            "Failed to load b64 segmentation",
+        )?;
         info!("Loaded b64 segmentation model");
-        Ok(Some(model))
+        let large_batched_elapsed = large_batched_start.elapsed();
+
+        tracing::trace!(
+            native_single_ms = single_elapsed.as_millis(),
+            native_b32_ms = batched_elapsed.as_millis(),
+            native_b64_ms = large_batched_elapsed.as_millis(),
+            total_ms = (single_elapsed + batched_elapsed + large_batched_elapsed).as_millis(),
+            "Segmentation model init",
+        );
+
+        Ok(Self {
+            single,
+            batched,
+            large_batched,
+            cached_single_input_shape: CachedInputShape::new("input", &[1, 1, window_samples]),
+            cached_batch_input_shape: CachedInputShape::new(
+                "input",
+                &[PRIMARY_BATCH_SIZE, 1, window_samples],
+            ),
+            input_buffer: Array3::zeros((1, 1, window_samples)),
+            primary_batch_input_buffer: Array3::zeros((PRIMARY_BATCH_SIZE, 1, window_samples)),
+        })
     }
 
-    pub(super) fn run_native_single(
-        native: &SharedCoreMlModel,
-        window: &[f32],
-        buffer: &mut ndarray::Array3<f32>,
-        cached_shape: &CachedInputShape,
-    ) -> Result<Array2<f32>, ort::Error> {
+    /// Model and batch size for the parallel streaming path
+    pub(super) fn select_parallel_model(
+        &self,
+        total_windows: usize,
+    ) -> (&SharedCoreMlModel, usize) {
+        let min_batch_windows = PRIMARY_BATCH_SIZE * 6;
+        if total_windows < min_batch_windows {
+            return (&self.single, 1);
+        }
+
+        (&self.large_batched, LARGE_BATCH_SIZE)
+    }
+
+    /// Batch-32 model used to warm-start the parallel path
+    pub(super) fn batched_model(&self) -> &SharedCoreMlModel {
+        &self.batched
+    }
+
+    pub(super) fn run_window(&mut self, window: &[f32]) -> Result<Array2<f32>, SegmentationError> {
+        let buffer = &mut self.input_buffer;
         buffer.fill(0.0);
         buffer
             .slice_mut(ndarray::s![0, 0, ..window.len()])
             .assign(&ndarray::ArrayView1::from(window));
-        let input_data = buffer.as_slice().ok_or_else(|| {
-            ort::Error::new("native segmentation single input was not contiguous")
-        })?;
+        let input_data = buffer
+            .as_slice()
+            .ok_or(InferenceError::NonContiguousBuffer {
+                context: "native segmentation single input",
+            })?;
 
-        let tensor = native
-            .predict_cached(&[(cached_shape, input_data)])
-            .map_err(|e| ort::Error::new(e.to_string()))?;
+        let tensor = self
+            .single
+            .predict_cached(&[(&self.cached_single_input_shape, input_data)])?;
         let (data, frames, classes) = tensor
             .rank3_hw("native segmentation single output")
-            .map_err(|error| ort::Error::new(error.to_string()))?;
-        Array2::from_shape_vec((frames, classes), data).map_err(|error| {
-            ort::Error::new(format!("native segmentation single output shape: {error}"))
+            .map_err(InferenceError::from)?;
+        Array2::from_shape_vec((frames, classes), data).map_err(|source| {
+            InferenceError::OutputArray {
+                context: "native segmentation single output",
+                source,
+            }
+            .into()
         })
     }
 
-    pub(super) fn run_native_batch(
-        native: &SharedCoreMlModel,
+    pub(super) fn run_batch(
+        &mut self,
         windows: &[&[f32]],
-        buffer: &mut ndarray::Array3<f32>,
-        cached_shape: &CachedInputShape,
-    ) -> Result<Vec<Array2<f32>>, ort::Error> {
+    ) -> Result<Vec<Array2<f32>>, SegmentationError> {
+        let buffer = &mut self.primary_batch_input_buffer;
         buffer.fill(0.0);
         for (batch_idx, window) in windows.iter().enumerate() {
             buffer
@@ -223,14 +234,16 @@ impl SegmentationModel {
         }
         let input_data = buffer
             .as_slice()
-            .ok_or_else(|| ort::Error::new("native segmentation batch input was not contiguous"))?;
+            .ok_or(InferenceError::NonContiguousBuffer {
+                context: "native segmentation batch input",
+            })?;
 
-        let tensor = native
-            .predict_cached(&[(cached_shape, input_data)])
-            .map_err(|e| ort::Error::new(e.to_string()))?;
+        let tensor = self
+            .batched
+            .predict_cached(&[(&self.cached_batch_input_shape, input_data)])?;
         let (batch, frames, classes) = tensor
             .try_rank3("native segmentation batch output")
-            .map_err(|error| ort::Error::new(error.to_string()))?;
+            .map_err(InferenceError::from)?;
         let data = tensor.into_data();
 
         (0..batch)
@@ -238,8 +251,12 @@ impl SegmentationModel {
                 let start = batch_idx * frames * classes;
                 let end = start + frames * classes;
                 Array2::from_shape_vec((frames, classes), data[start..end].to_vec()).map_err(
-                    |error| {
-                        ort::Error::new(format!("native segmentation batch output shape: {error}"))
+                    |source| {
+                        InferenceError::OutputArray {
+                            context: "native segmentation batch output",
+                            source,
+                        }
+                        .into()
                     },
                 )
             })
@@ -282,8 +299,8 @@ mod tests {
     #[test]
     fn load_native_coreml_errors_when_compiled_bundle_is_invalid() {
         let dir = TestDir::new("seg-coreml-invalid");
+        // the ONNX file is never read in CoreML modes, so it is absent here
         let model_path = dir.path().join("segmentation-3.0.onnx");
-        fs::write(&model_path, b"placeholder").unwrap();
 
         let compiled_path = dir.path().join("segmentation-3.0.mlmodelc");
         fs::create_dir_all(compiled_path.join("weights")).unwrap();
@@ -293,8 +310,9 @@ mod tests {
         fs::write(compiled_path.join("weights/weight.bin"), b"invalid").unwrap();
         fs::write(compiled_path.join("analytics/coremldata.bin"), b"invalid").unwrap();
 
-        let error = match SegmentationModel::load_native_coreml(&model_path, ExecutionMode::CoreMl)
-        {
+        let paths = SegmentationAssetPaths::resolve(&model_path, ExecutionMode::CoreMl).unwrap();
+        assert_eq!(paths.single, compiled_path);
+        let error = match load_native_model(&paths.single, ExecutionMode::CoreMl, "test load") {
             Ok(_) => panic!("invalid compiled bundle should error"),
             Err(error) => error,
         };
@@ -306,6 +324,25 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn load_reports_missing_native_bundle_without_onnx_file() {
+        let dir = TestDir::new("seg-coreml-missing");
+        let model_path = dir.path().join("segmentation-3.0.onnx");
+
+        let error = match CoreMlSegmentation::load(&model_path, ExecutionMode::CoreMl, 160_000) {
+            Ok(_) => panic!("missing bundles should error"),
+            Err(error) => error,
+        };
+
+        match error {
+            ModelLoadError::MissingNativeAsset { mode, path } => {
+                assert_eq!(mode, ExecutionMode::CoreMl);
+                assert_eq!(path, dir.path().join("segmentation-3.0.mlmodelc"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 
     #[test]

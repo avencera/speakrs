@@ -5,6 +5,9 @@ pub mod dstack;
 pub mod fixtures;
 pub mod mac_experiment;
 pub mod models;
+#[cfg(feature = "cpu")]
 pub mod profile_ort_embedding;
+#[cfg(feature = "cpu")]
 pub mod profile_stages;
+#[cfg(feature = "cpu")]
 pub(crate) mod profile_support;

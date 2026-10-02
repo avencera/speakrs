@@ -6,6 +6,7 @@ use crate::inference::ModelLoadError;
 #[cfg(feature = "coreml")]
 use crate::inference::coreml::coreml_model_path;
 
+#[cfg(feature = "_ort")]
 pub(super) fn batched_model_path(model_path: &Path, batch_size: usize) -> Option<PathBuf> {
     let file_name = model_path.file_name()?.to_str()?;
     let stem = file_name.strip_suffix(".onnx")?;
@@ -30,11 +31,12 @@ pub(super) fn split_tail_model_path(model_path: &Path, batch_size: usize) -> Pat
     }
 }
 
-pub(super) fn multi_mask_model_path(model_path: &Path, batch_size: usize) -> Option<PathBuf> {
+#[cfg(feature = "_ort")]
+pub(super) fn multi_mask_model_path(model_path: &Path, batch_size: usize) -> PathBuf {
     if batch_size == 1 {
-        Some(model_path.with_file_name("wespeaker-multimask-tail.onnx"))
+        model_path.with_file_name("wespeaker-multimask-tail.onnx")
     } else {
-        Some(model_path.with_file_name(format!("wespeaker-multimask-tail-b{batch_size}.onnx")))
+        model_path.with_file_name(format!("wespeaker-multimask-tail-b{batch_size}.onnx"))
     }
 }
 

@@ -692,6 +692,7 @@ impl FbankSessionPool {
         }
     }
 
+    #[cfg(feature = "_ort")]
     pub(crate) fn resolve(self, threads: OrtThreadCount) -> usize {
         match self {
             Self::Automatic => {
@@ -728,6 +729,9 @@ pub struct RuntimeConfig {
     /// Intra-operation threads used by each CPU filterbank session
     pub fbank_threads: OrtThreadCount,
     /// CoreML compute units for native embedding models (CoreML modes only)
+    ///
+    /// This also applies to [`EmbeddingModel::embed`](crate::inference::EmbeddingModel::embed)
+    /// and `embed_masked` in CoreML modes. `CpuOnly` gives the closest match to the CPU backend
     #[cfg(feature = "coreml")]
     #[cfg_attr(docsrs, doc(cfg(feature = "coreml")))]
     pub chunk_emb_compute_units: CoreMlComputeUnits,
@@ -888,6 +892,7 @@ mod clean_frame_duration_tests {
         );
     }
 
+    #[cfg(feature = "_ort")]
     #[test]
     fn fbank_pool_models_disabled_automatic_and_fixed_policies() {
         let threads = OrtThreadCount::new(i32::MAX as usize).unwrap();
@@ -924,18 +929,19 @@ mod clean_frame_duration_tests {
         assert_eq!(ClusteringConfig::default().speaker_keep_threshold(), 1e-7);
     }
 
+    fn gaussian_vbx(backend: ClusteringBackend) -> VbxConfig {
+        match backend {
+            ClusteringBackend::GaussianVbx(vbx) => vbx,
+            #[cfg(feature = "_metrics")]
+            _ => panic!("clustering must be gaussian"),
+        }
+    }
+
     #[test]
     fn pipeline_defaults_keep_gaussian_vbx_and_fixed_mode_steps() {
-        let standard = match PipelineConfig::default().clustering_backend() {
-            ClusteringBackend::GaussianVbx(vbx) => vbx,
-            #[cfg(feature = "_metrics")]
-            _ => panic!("default clustering must be gaussian"),
-        };
-        let fast = match PipelineConfig::for_mode(ExecutionMode::CoreMlFast).clustering_backend() {
-            ClusteringBackend::GaussianVbx(vbx) => vbx,
-            #[cfg(feature = "_metrics")]
-            _ => panic!("fast clustering must be gaussian"),
-        };
+        let standard = gaussian_vbx(PipelineConfig::default().clustering_backend());
+        let fast =
+            gaussian_vbx(PipelineConfig::for_mode(ExecutionMode::CoreMlFast).clustering_backend());
 
         assert_eq!(standard.max_iters(), 20);
         assert_eq!(fast.max_iters(), 3);
