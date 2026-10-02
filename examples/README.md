@@ -43,7 +43,8 @@ Output:
 
 ```text
 start   end     speaker
-4.705   46.690  SPEAKER_00
+0.031   9.802   SPEAKER_00
+10.375  11.843  SPEAKER_01
 ...
 ```
 
@@ -59,8 +60,8 @@ Output:
 
 ```text
 speaker     total_seconds
-SPEAKER_00  341.245
-...
+SPEAKER_00  16.841
+SPEAKER_01  9.517
 ```
 
 ## Assign speakers to transcript chunks
