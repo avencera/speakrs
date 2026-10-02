@@ -2,14 +2,27 @@
 
 ## [unreleased]
 
+## [0.6.0] - 2026-10-02
+
 - Add `QueueConfig` so queue channel capacity is configurable at construction (default 64; capacity 0 is rejected)
 - Add non-blocking `QueueSender::try_push`, which returns typed `QueueError::Full` with the rejected request when the queue is at capacity
 - Remove `QueueSender::push`; callers submit work with `try_push`
 - Remove `QueueError::Terminal`; a finished worker reports `Closed` or `WorkerPanicked`
-- Replace split `PipelineConfig` clustering and activity fields with checked `ClusteringConfig` and `ActivityCleanup`
+- Replace split `PipelineConfig` clustering and activity fields with checked `ClusteringConfig` and `ActivityCleanup`; `BinarizeConfig` and the free `binarize` function are removed
+- Make `AhcConfig` and `VbxConfig` fields private behind checked constructors and accessors
+- Return `Result` from `ModelBundle::from_dir` and `PipelineBuilder::from_dir`, and report `ModelBundle` loading failures as `ModelLoadError` instead of `hf_hub` errors
+- Remove the unused `RuntimeConfig::chunk_emb_workers` field
 - Add activation-aware `DiarizationResult::exclusive_segments` and remove the obsolete `DiscreteDiarization::make_exclusive` binary tie-breaker
+- Fix exclusive diarization so overlaps resolve by activation score instead of cluster index
 - Add checked filterbank session-pool and thread settings to `RuntimeConfig`
 - Add `OwnedDiarizationPipeline::clone_shared` for non-CoreML concurrent pipelines that share model sessions
+- Speed up the CUDA path with a pooled CPU filterbank, vectorized VBx, and bounded parallel AHC distances (`SPEAKRS_AHC_THREADS` overrides the worker count)
+- Use available cores for embedding ONNX session intra-op threads
+- Fix multi-mask embedding batching so the batched tail model loads at the multi-mask batch size
+- Fix chunk embedding returning all-zero filterbank features when the 30s filterbank model is absent
+- Pad non-empty audio shorter than one window into a single segmentation window instead of producing no output
+- Match CoreML diarization accuracy with CUDA by fixing chunk filterbank stitching and using a 1 second segmentation step
+- Validate tensor shapes, PLDA dimensions, and inference output geometry before computation
 
 ## [0.5.0] - 2026-07-07
 
