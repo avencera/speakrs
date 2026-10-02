@@ -66,24 +66,39 @@ for segment in result.discrete_diarization.to_segments() {
 ### Background queue
 
 [`QueueSender`](https://docs.rs/speakrs/latest/speakrs/pipeline/queued/struct.QueueSender.html) and [`QueueReceiver`](https://docs.rs/speakrs/latest/speakrs/pipeline/queued/struct.QueueReceiver.html) run a background worker. Use
-[`QueueSender::try_push`](https://docs.rs/speakrs/latest/speakrs/pipeline/queued/struct.QueueSender.html#method.try_push) to submit audio without blocking:
+[`QueueSender::try_push`](https://docs.rs/speakrs/latest/speakrs/pipeline/queued/struct.QueueSender.html#method.try_push) to submit audio without blocking. A full queue
+returns the request in [`QueueError::Full`](https://docs.rs/speakrs/latest/speakrs/pipeline/queued/enum.QueueError.html#variant.Full) so the sender can retry it:
 
 ```rust
-use speakrs::{ExecutionMode, OwnedDiarizationPipeline, QueuedDiarizationRequest};
+use std::time::Duration;
+
+use speakrs::{ExecutionMode, OwnedDiarizationPipeline, QueueError, QueuedDiarizationRequest};
 
 let pipeline = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::CoreMl)?;
 let (tx, rx) = pipeline.into_queued()?;
 
-std::thread::spawn(move || {
+let sender = std::thread::spawn(move || -> Result<(), QueueError> {
     for (file_id, audio) in receive_files() {
-        tx.try_push(QueuedDiarizationRequest::new(file_id, audio)).unwrap();
+        let mut request = QueuedDiarizationRequest::new(file_id, audio);
+        loop {
+            match tx.try_push(request) {
+                Err(QueueError::Full(rejected)) => {
+                    request = rejected;
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Ok(_) => break,
+                Err(error) => return Err(error),
+            }
+        }
     }
+    Ok(())
 });
 
 for result in rx {
     let result = result?;
     print!("{}", result.result?.rttm(&result.file_id));
 }
+sender.join().expect("sender thread panicked")?;
 ```
 
 ### Local models
