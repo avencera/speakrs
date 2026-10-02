@@ -13,19 +13,19 @@
 //!
 //! ```toml
 //! # macOS (CoreML)
-//! speakrs = { version = "0.5", features = ["coreml"] }
+//! speakrs = { version = "0.6", features = ["coreml"] }
 //!
 //! # NVIDIA GPU
-//! speakrs = { version = "0.5", features = ["cuda"] }
+//! speakrs = { version = "0.6", features = ["cuda"] }
 //!
 //! # CPU only
-//! speakrs = "0.5"
+//! speakrs = "0.6"
 //!
 //! # System OpenBLAS
-//! speakrs = { version = "0.5", default-features = false, features = ["online", "openblas-system"] }
+//! speakrs = { version = "0.6", default-features = false, features = ["online", "openblas-system"] }
 //!
 //! # AMD GPU
-//! speakrs = { version = "0.5", features = ["migraphx"] }
+//! speakrs = { version = "0.6", features = ["migraphx"] }
 //! ```
 //!
 //! ## Quick start
@@ -221,11 +221,11 @@
 //! - no-default builds must enable exactly one of `intel-mkl`, `openblas-static`, or `openblas-system`
 //!
 //! ```toml
-//! speakrs = { version = "0.5", default-features = false, features = ["online", "intel-mkl"] }
-//! speakrs = { version = "0.5", default-features = false, features = ["online", "openblas-system"] }
+//! speakrs = { version = "0.6", default-features = false, features = ["online", "intel-mkl"] }
+//! speakrs = { version = "0.6", default-features = false, features = ["online", "openblas-system"] }
 //! ```
 //!
-//! The ONNX Runtime dependency (`ort` 2.0.0-rc.12) is still pre-release.
+//! The ONNX Runtime dependency (`ort` 2.0.0-rc.13) is still pre-release.
 //!
 //! # Public API
 //!
