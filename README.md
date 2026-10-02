@@ -224,7 +224,7 @@ speakrs = { version = "0.6", default-features = false, features = ["online", "in
 speakrs = { version = "0.6", default-features = false, features = ["online", "openblas-system"] }
 ```
 
-The ONNX Runtime dependency (`ort` 2.0.0-rc.12) is still pre-release.
+The ONNX Runtime dependency (`ort` 2.0.0-rc.13) is still pre-release.
 
 ## Public API
 
