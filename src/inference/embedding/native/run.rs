@@ -201,6 +201,18 @@ impl CoreMlEmbedding {
         )
     }
 
+    /// Host filterbanks for `audios`, then the multi-mask model on them
+    pub(in crate::inference::embedding) fn embed_multi_mask_audio_batch(
+        &mut self,
+        meta: &EmbeddingMeta,
+        audios: &[&[f32]],
+        masks: &[&[f32]],
+    ) -> Result<Array2<f32>, InferenceError> {
+        let fbanks = self.compute_chunk_fbanks_batch(meta, audios)?;
+        let fbank_refs: Vec<_> = fbanks.iter().collect();
+        self.embed_multi_mask_batch(meta, &fbank_refs, masks)
+    }
+
     pub(in crate::inference::embedding) fn embed_multi_mask_batch(
         &mut self,
         meta: &EmbeddingMeta,

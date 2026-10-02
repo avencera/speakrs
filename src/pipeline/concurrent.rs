@@ -153,8 +153,7 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
 
         let mut total_recv_wait_us = 0u64;
         let mut total_decode_us = 0u64;
-        let mut total_fbank_us = 0u64;
-        let mut total_gpu_predict_us = 0u64;
+        let mut total_embed_us = 0u64;
         let mut flush_count = 0u32;
 
         loop {
@@ -215,10 +214,8 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
                     active_flags: &active_flags,
                     chunk_indices: &chunk_indices,
                 };
-                let (fbank_us, gpu_us) =
+                total_embed_us +=
                     self.flush_multi_mask_flat(embedding_model, &batch, &mut Array3Writer(emb))?;
-                total_fbank_us += fbank_us;
-                total_gpu_predict_us += gpu_us;
                 flush_count += 1;
                 audio_buffer.clear();
                 flat_masks.fill(0.0);
@@ -240,10 +237,8 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
                 active_flags: &active_flags,
                 chunk_indices: &chunk_indices,
             };
-            let (fbank_us, gpu_us) =
+            total_embed_us +=
                 self.flush_multi_mask_flat(embedding_model, &batch, &mut Array3Writer(emb))?;
-            total_fbank_us += fbank_us;
-            total_gpu_predict_us += gpu_us;
             flush_count += 1;
         }
 
@@ -252,8 +247,7 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
             chunks = chunk_idx,
             recv_wait_ms = total_recv_wait_us / 1000,
             decode_ms = total_decode_us / 1000,
-            fbank_ms = total_fbank_us / 1000,
-            gpu_predict_ms = total_gpu_predict_us / 1000,
+            embed_ms = total_embed_us / 1000,
             "Multi-mask embedding timing"
         );
 
@@ -265,12 +259,7 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
         embedding_model: &mut EmbeddingModel,
         batch: &MultiMaskBatch<'_>,
         storage: &mut S,
-    ) -> Result<(u64, u64), PipelineError> {
-        let fbank_start = std::time::Instant::now();
-        let fbanks = embedding_model.compute_chunk_fbanks_batch(batch.audio_slices)?;
-        let fbank_us = fbank_start.elapsed().as_micros() as u64;
-
-        let fbank_refs: Vec<_> = fbanks.iter().collect();
+    ) -> Result<u64, PipelineError> {
         let num_masks = batch.audio_slices.len() * self.num_speakers;
         let mask_refs: Vec<&[f32]> = batch
             .flat_masks
@@ -278,8 +267,9 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
             .take(num_masks)
             .collect();
 
-        let predict_start = std::time::Instant::now();
-        let batch_embeddings = embedding_model.embed_multi_mask_batch(&fbank_refs, &mask_refs)?;
+        let embed_start = std::time::Instant::now();
+        let batch_embeddings =
+            embedding_model.embed_multi_mask_audio_batch(batch.audio_slices, &mask_refs)?;
 
         for (fbank_idx, &chunk_idx) in batch.chunk_indices.iter().enumerate() {
             for speaker_idx in 0..self.num_speakers {
@@ -295,9 +285,8 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
                 );
             }
         }
-        let predict_us = predict_start.elapsed().as_micros() as u64;
 
-        Ok((fbank_us, predict_us))
+        Ok(embed_start.elapsed().as_micros() as u64)
     }
 
     pub fn run_masked(

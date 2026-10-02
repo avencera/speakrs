@@ -188,6 +188,7 @@ impl CoreMlOutputDType {
     }
 }
 
+#[cfg(any(test, feature = "_ort", feature = "coreml"))]
 /// Declared dimensions plus their checked element count
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TensorLayout {
@@ -195,6 +196,7 @@ pub(crate) struct TensorLayout {
     element_count: usize,
 }
 
+#[cfg(any(test, feature = "_ort", feature = "coreml"))]
 impl TensorLayout {
     /// Build a layout with a checked shape product
     pub(crate) fn from_dims(
@@ -266,6 +268,7 @@ impl TensorLayout {
     }
 
     /// Require dimensions to match a model's exact output contract
+    #[cfg(any(feature = "_ort", feature = "coreml"))]
     pub(crate) fn try_exact_dims(
         &self,
         expected: &[usize],
@@ -321,7 +324,7 @@ impl CoreMlTensor {
         self.data
     }
 
-    #[cfg(any(test, feature = "coreml"))]
+    #[cfg(any(feature = "coreml", all(test, feature = "_ort")))]
     pub(crate) fn into_parts(self) -> (TensorLayout, Vec<f32>) {
         (self.layout, self.data)
     }
@@ -336,6 +339,7 @@ impl CoreMlTensor {
     }
 }
 
+#[cfg(any(test, feature = "_ort", feature = "coreml"))]
 pub(crate) fn checked_element_count(
     dims: &[usize],
     context: &'static str,
@@ -349,6 +353,7 @@ pub(crate) fn checked_element_count(
     Ok(count)
 }
 
+#[cfg(any(test, feature = "_ort", feature = "coreml"))]
 pub(crate) fn require_exact_len(
     actual: usize,
     expected: usize,

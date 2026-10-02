@@ -1,7 +1,8 @@
-use ndarray::{Array2, Array3, ArrayView2, ArrayViewMut2, ArrayViewMut3, s};
+use ndarray::{Array2, Array3, ArrayView2, ArrayViewMut3, s};
 
 use crate::inference::{InferenceError, TensorShapeError};
 
+use super::prepare_weights;
 use super::tensor::array3_slice_mut;
 use super::{
     CHUNK_SPEAKER_BATCH_SIZE, FBANK_BATCH_SIZE, FBANK_FEATURES, FBANK_FRAMES, MASK_FRAMES,
@@ -262,25 +263,6 @@ pub(super) fn prepare_waveform(
             .slice_mut(s![batch_idx, 0, copy_len..])
             .fill(0.0);
     }
-}
-
-/// Copy one weight row, truncating or zero-padding to `mask_frames`
-pub(super) fn prepare_weights(
-    batch_idx: usize,
-    weights: &[f32],
-    mask_frames: usize,
-    weights_buffer: &mut ArrayViewMut2<f32>,
-) {
-    let mut row = weights_buffer.row_mut(batch_idx);
-    if weights.len() == mask_frames {
-        row.assign(&ndarray::ArrayView1::from(weights));
-        return;
-    }
-
-    let copy_len = weights.len().min(mask_frames);
-    row.fill(0.0);
-    row.slice_mut(s![..copy_len])
-        .assign(&ndarray::ArrayView1::from(&weights[..copy_len]));
 }
 
 #[cfg(test)]

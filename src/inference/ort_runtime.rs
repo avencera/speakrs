@@ -38,8 +38,6 @@ impl SharedSession {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OrtProvider {
     Cpu,
-    #[cfg(feature = "cuda")]
-    Cuda,
     #[cfg(feature = "migraphx")]
     MiGraphX,
 }
@@ -50,16 +48,6 @@ impl OrtProvider {
             Self::Cpu => Ok(builder.with_execution_providers([ep::CPU::default()
                 .with_arena_allocator(false)
                 .build()])?),
-            #[cfg(feature = "cuda")]
-            Self::Cuda => Ok(builder.with_execution_providers([ep::CUDA::default()
-                .with_device_id(0)
-                .with_tf32(true)
-                .with_conv_algorithm_search(ep::cuda::ConvAlgorithmSearch::Exhaustive)
-                .with_conv_max_workspace(true)
-                .with_arena_extend_strategy(ep::ArenaExtendStrategy::SameAsRequested)
-                .with_prefer_nhwc(true)
-                .build()
-                .error_on_failure()])?),
             #[cfg(feature = "migraphx")]
             Self::MiGraphX => Ok(builder.with_execution_providers([ep::MIGraphX::default()
                 .with_device_id(0)
@@ -72,9 +60,9 @@ impl OrtProvider {
 
 /// Map an execution mode to ORT execution providers
 ///
-/// speakrs never builds ONNX Runtime sessions for CoreML modes. When the `coreml` feature is
-/// enabled, this helper maps CoreML modes to the ORT CPU provider for callers that build their
-/// own sessions
+/// speakrs never builds ONNX Runtime sessions for CoreML or CUDA modes. When the `coreml` or
+/// `cuda` feature is enabled, this helper maps those modes to the ORT CPU provider for callers
+/// that build their own sessions
 #[cfg_attr(
     docsrs,
     doc(cfg(any(
@@ -91,12 +79,14 @@ pub fn with_execution_mode(
     Ok(session_provider(mode.backend()?).apply(builder)?)
 }
 
-/// Provider for a caller-built session, with CoreML modes mapped to the CPU provider
+/// Provider for a caller-built session, with native-backend modes mapped to the CPU provider
 fn session_provider(backend: InferenceBackend) -> OrtProvider {
     match backend {
         InferenceBackend::Ort(provider) => provider,
         #[cfg(feature = "coreml")]
         InferenceBackend::CoreMl => OrtProvider::Cpu,
+        #[cfg(feature = "cuda")]
+        InferenceBackend::Cuda => OrtProvider::Cpu,
     }
 }
 

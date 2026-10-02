@@ -14,8 +14,9 @@ If you want a small end-to-end app using it, see [avencera/smrze](https://github
 pipeline in Rust: segmentation, powerset decode, overlap-add aggregation,
 binarization, embedding, PLDA, and VBx clustering.
 
-There is no Python runtime in the library path. Inference runs on ONNX
-Runtime or native CoreML, and the rest of the pipeline stays in Rust.
+There is no Python runtime in the library path. Inference runs on native CUDA
+(NVIDIA), native CoreML (macOS), or ONNX Runtime (CPU, AMD), and the rest of the
+pipeline stays in Rust.
 
 ## Usage
 
@@ -35,8 +36,8 @@ speakrs = { version = "0.6", features = ["cpu"] }
 speakrs = { version = "0.6", features = ["migraphx"] }
 ```
 
-The `coreml` feature runs on native CoreML only, so a macOS build with just `coreml`
-does not compile, link, or download ONNX Runtime.
+The `coreml` and `cuda` features run native backends, so a build with only those
+features does not compile, link, or download ONNX Runtime.
 
 ### Quick start
 
@@ -125,8 +126,8 @@ let result = pipeline.run(&audio)?;
 | `cpu` | ONNX Runtime CPU | 1s | CPU runs and widest compatibility |
 | `coreml` | Native CoreML | 1s | macOS with CoreML acceleration |
 | `coreml-fast` | Native CoreML | 2s | macOS with CoreML acceleration and higher throughput |
-| `cuda` | ONNX Runtime CUDA | 1s | NVIDIA GPU |
-| `cuda-fast` | ONNX Runtime CUDA | 2s | NVIDIA GPU for higher throughput |
+| `cuda` | Native CUDA | 1s | NVIDIA GPU |
+| `cuda-fast` | Native CUDA | 2s | NVIDIA GPU for higher throughput |
 | `migraphx` | ONNX Runtime MIGraphX | 1s | AMD GPU |
 
 Each mode needs its Cargo feature: `cpu`, `coreml` for both CoreML modes, `cuda` for both
@@ -161,8 +162,9 @@ and runs at 50x realtime versus pyannote's 18x. See
 [benchmarks/](https://github.com/avencera/speakrs/tree/master/benchmarks) for
 the full tables across all datasets.
 
-CoreML and ONNX Runtime can differ slightly even in FP32 because the runtime
-graphs are not identical and floating-point reduction order changes rounding.
+The RTX 4090 rows were measured with the ONNX Runtime CUDA backend that the native
+CUDA backend replaced. CoreML, CUDA and ONNX Runtime can differ slightly even in FP32,
+because floating-point reduction order changes rounding.
 
 ## Why not pyannote-rs?
 
@@ -230,16 +232,29 @@ Enable at least one inference backend; the build fails with a clear error otherw
 
 - `coreml`: native CoreML backend on macOS, without ONNX Runtime
 - `cpu`: CPU backend via ONNX Runtime
-- `cuda`: NVIDIA CUDA backend via ONNX Runtime
+- `cuda`: native NVIDIA backend (cuBLAS, cuDNN and speakrs kernels), without ONNX
+  Runtime
 - `migraphx`: AMD GPU backend via ONNX Runtime MIGraphX
 
 Other features:
 
 - `online` (default): model download via [`ModelManager`](https://docs.rs/speakrs/latest/speakrs/models/struct.ModelManager.html)
 - `load-dynamic`: load the ONNX Runtime library at startup instead of static linking; use it
-  with `cpu`, `cuda`, or `migraphx`
+  with `cpu` or `migraphx`
+- `cuda-sm80`, `cuda-sm90`, `cuda-sm120`: also embed native CUDA kernels built for newer
+  NVIDIA GPUs (Ampere, Hopper, consumer Blackwell); each implies `cuda`. Without them the
+  native kernels target Turing (`sm_75`), and the driver compiles them for newer GPUs when
+  they load. At run time speakrs uses the highest compiled-in tier the GPU supports, and
+  `SPEAKRS_CUDA_PTX_TIER=sm75` forces a lower one
 
-The ONNX Runtime dependency behind `cpu`, `cuda`, and `migraphx` (`ort` 2.0.0-rc.13) is still
+The `cuda` feature compiles without a CUDA toolkit: it loads the NVIDIA driver, cuBLAS,
+cuDNN 9 and (only for the `PersistDynamic` LSTM algorithm) NVRTC at run time, and needs
+a Turing (compute capability 7.5) or newer GPU. CUDA modes load
+`segmentation-3.0.safetensors` and `wespeaker-multimask-tail.safetensors` instead of
+ONNX models. [`RuntimeConfig`](https://docs.rs/speakrs/latest/speakrs/pipeline/config/struct.RuntimeConfig.html) selects their precision (FP32 by default for segmentation,
+TF32 for embedding, always FP32 for the filterbank), the segmentation LSTM algorithm, and CUDA graphs.
+
+The ONNX Runtime dependency behind `cpu` and `migraphx` (`ort` 2.0.0-rc.13) is still
 pre-release.
 
 ## Public API

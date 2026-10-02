@@ -1,0 +1,34 @@
+[package]
+name = "speakrs-cuda-kernels"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "cuda-oxide device kernels for the speakrs native CUDA backend, compiled offline to PTX"
+license = "Apache-2.0"
+
+# standalone: cuda-oxide needs a pinned nightly and Linux with CUDA 13, so this crate
+# stays out of the speakrs workspace and is only built by `cargo xtask cuda-kernels build`
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+# one feature per area: `cargo xtask cuda-kernels build` compiles the crate once per
+# area, so each area gets its own PTX file and parallel work never shares generated output
+[features]
+probe = []
+fbank = []
+embedding = []
+segmentation = []
+
+# PTX tiers above the sm_75 baseline. The xtask builds each variant an area declares
+# with the matching feature on, and the sm75 baseline with none. They are cumulative,
+# so code behind `tier-sm80` also goes into the sm90 and sm120 variants
+tier-sm80 = []
+tier-sm90 = ["tier-sm80"]
+tier-sm120 = ["tier-sm90"]
+
+[dependencies]
+# keep the rev in sync with CUDA_OXIDE_REV in scripts/cuda/setup-gpu-box.sh and
+# xtask/src/commands/cuda_kernels.rs
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "918bbde123671153b29a89542f1781f1c7494c14" }

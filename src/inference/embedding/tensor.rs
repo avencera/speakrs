@@ -12,15 +12,6 @@ use crate::inference::geometry::CoreMlTensor;
 use crate::inference::geometry::TensorLayout;
 use crate::inference::{InferenceError, TensorShapeError};
 
-pub(super) fn array1_slice<'a>(
-    array: &'a Array1<f32>,
-    context: &'static str,
-) -> Result<&'a [f32], InferenceError> {
-    array
-        .as_slice()
-        .ok_or(InferenceError::NonContiguousBuffer { context })
-}
-
 pub(super) fn array2_from_shape_vec(
     rows: usize,
     cols: usize,

@@ -9,6 +9,8 @@ clippy:
     #!/usr/bin/env bash
     set -euo pipefail
     cargo clippy --all --all-targets --workspace --features "{{backend_features}} cuda load-dynamic _metrics" -- -D warnings
+    # the CUDA-only build has no ONNX Runtime either
+    cargo clippy -p speakrs --all-targets --no-default-features --features "online cuda" -- -D warnings
     if [[ "$(uname)" == "Darwin" ]]; then
         # the CoreML-only build has no ONNX Runtime, so check it for dead code separately
         cargo clippy -p speakrs --all-targets --no-default-features --features "online coreml" -- -D warnings

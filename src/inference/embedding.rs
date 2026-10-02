@@ -1,35 +1,41 @@
 use std::path::Path;
 
-use ndarray::{Array1, Array2, ArrayView2};
+use ndarray::{Array1, Array2, ArrayView2, ArrayViewMut2, s};
 
 use crate::inference::{ExecutionMode, InferenceError, ModelLoadError};
 
+#[cfg(any(feature = "_ort", feature = "coreml"))]
 mod buffers;
 #[cfg(feature = "coreml")]
 mod chunk;
+#[cfg(feature = "cuda")]
+mod cuda;
 mod load;
 #[cfg(feature = "coreml")]
 mod native;
 #[cfg(feature = "_ort")]
 mod onnx;
 mod paths;
+#[cfg(any(feature = "_ort", feature = "coreml"))]
 mod tensor;
 
 #[cfg(feature = "coreml")]
 use chunk::ChunkSessionSpec;
 #[cfg(feature = "coreml")]
 pub(crate) use chunk::{ChunkEmbeddingSession, ChunkResourceBundle, ChunkSessionInfo};
+#[cfg(feature = "cuda")]
+use cuda::CudaEmbedding;
 #[cfg(feature = "coreml")]
 use native::CoreMlEmbedding;
 #[cfg(feature = "_ort")]
 use onnx::OrtEmbedding;
 pub(crate) use paths::read_min_num_samples;
 use paths::select_mask;
-use tensor::array1_slice;
 
 const PRIMARY_BATCH_SIZE: usize = 64;
 pub(crate) const EMBEDDING_WIDTH: usize = 256;
 const MULTI_MASK_BATCH_SIZE: usize = 32;
+#[cfg(any(feature = "_ort", feature = "coreml"))]
 const FBANK_BATCH_SIZE: usize = 32;
 const CHUNK_SPEAKER_BATCH_SIZE: usize = 3;
 const NUM_SPEAKERS: usize = 3;
@@ -72,15 +78,17 @@ pub struct EmbeddingModel {
 
 /// Sessions for the one runtime chosen from the execution mode at load time
 ///
-/// A CoreML-mode model holds no ONNX Runtime sessions even when an ORT feature is also
-/// enabled, and an ORT-mode model holds no CoreML handles
+/// A CoreML- or CUDA-mode model holds no ONNX Runtime sessions even when an ORT feature
+/// is also enabled, and an ORT-mode model holds no native handles
 ///
-/// Both variants are boxed because the backends carry large inline staging state
+/// The variants are boxed because the backends carry large inline staging state
 enum EmbeddingBackend {
     #[cfg(feature = "_ort")]
     Ort(Box<OrtEmbedding>),
     #[cfg(feature = "coreml")]
     CoreMl(Box<CoreMlEmbedding>),
+    #[cfg(feature = "cuda")]
+    Cuda(Box<CudaEmbedding>),
 }
 
 /// Run the same expression against whichever backend the model loaded
@@ -91,6 +99,8 @@ macro_rules! with_backend {
             EmbeddingBackend::Ort($name) => $body,
             #[cfg(feature = "coreml")]
             EmbeddingBackend::CoreMl($name) => $body,
+            #[cfg(feature = "cuda")]
+            EmbeddingBackend::Cuda($name) => $body,
         }
     };
 }
@@ -106,7 +116,8 @@ impl EmbeddingModel {
     /// Load the WeSpeaker embedding model with the requested execution mode
     ///
     /// `model_path` names the base `wespeaker-voxceleb-resnet34.onnx` file. CoreML modes load
-    /// the compiled bundles next to it and do not read any ONNX file
+    /// the compiled bundles next to it, and CUDA modes load
+    /// `wespeaker-multimask-tail.safetensors` next to it; neither reads any ONNX file
     pub fn with_mode(
         model_path: impl AsRef<Path>,
         mode: ExecutionMode,
@@ -114,17 +125,25 @@ impl EmbeddingModel {
         Self::with_mode_and_config(model_path, mode, &crate::pipeline::RuntimeConfig::default())
     }
 
-    /// Create a handle that shares ORT sessions and owns new scratch buffers
+    /// Create a handle that can run on another thread and owns new scratch buffers
     ///
-    /// Session weights and arenas are shared. Staging buffers and preallocated
-    /// output state remain private to the new handle.
-    #[cfg(all(feature = "_ort", not(feature = "coreml")))]
+    /// ORT session weights and arenas are shared; staging buffers and preallocated output
+    /// state remain private to the new handle. A CUDA handle gets its own stream and
+    /// device copy of the weights, because CUDA state is used by one thread at a time
+    #[cfg(all(any(feature = "_ort", feature = "cuda"), not(feature = "coreml")))]
     pub(crate) fn clone_shared(&self) -> Result<Self, InferenceError> {
-        let EmbeddingBackend::Ort(backend) = &self.backend;
+        let backend = match &self.backend {
+            #[cfg(feature = "_ort")]
+            EmbeddingBackend::Ort(backend) => {
+                EmbeddingBackend::Ort(Box::new(backend.clone_shared()?))
+            }
+            #[cfg(feature = "cuda")]
+            EmbeddingBackend::Cuda(backend) => EmbeddingBackend::Cuda(Box::new(backend.reload()?)),
+        };
 
         Ok(Self {
             meta: self.meta,
-            backend: EmbeddingBackend::Ort(Box::new(backend.clone_shared()?)),
+            backend,
         })
     }
 
@@ -222,6 +241,8 @@ impl EmbeddingModel {
             }
             #[cfg(feature = "coreml")]
             EmbeddingBackend::CoreMl(_) => None,
+            #[cfg(feature = "cuda")]
+            EmbeddingBackend::Cuda(_) => None,
         };
         if let Some(batch) = primary_batch {
             return Ok(batch);
@@ -243,6 +264,21 @@ impl EmbeddingModel {
         with_backend!(
             &mut self.backend,
             backend => backend.embed_multi_mask_batch(&self.meta, fbanks, masks)
+        )
+    }
+
+    /// Filterbanks and multi-mask embeddings for up to one multi-mask batch of audio chunks
+    ///
+    /// `masks` holds three rows per chunk. The CUDA backend keeps the filterbanks on the
+    /// device; the others compute them with [`Self::compute_chunk_fbanks_batch`] first
+    pub(crate) fn embed_multi_mask_audio_batch(
+        &mut self,
+        audios: &[&[f32]],
+        masks: &[&[f32]],
+    ) -> Result<Array2<f32>, InferenceError> {
+        with_backend!(
+            &mut self.backend,
+            backend => backend.embed_multi_mask_audio_batch(&self.meta, audios, masks)
         )
     }
 
@@ -339,6 +375,8 @@ impl EmbeddingModel {
             EmbeddingBackend::CoreMl(backend) => Some(backend),
             #[cfg(feature = "_ort")]
             EmbeddingBackend::Ort(_) => None,
+            #[cfg(feature = "cuda")]
+            EmbeddingBackend::Cuda(_) => None,
         }
     }
 
@@ -356,6 +394,8 @@ impl EmbeddingModel {
             EmbeddingBackend::CoreMl(backend) => backend.chunk_window_capacity(),
             #[cfg(feature = "_ort")]
             EmbeddingBackend::Ort(_) => None,
+            #[cfg(feature = "cuda")]
+            EmbeddingBackend::Cuda(_) => None,
         }
     }
 
@@ -387,6 +427,34 @@ impl EmbeddingModel {
     ) -> Result<Array2<f32>, InferenceError> {
         CoreMlEmbedding::embed_chunk_session(session, full_fbank, masks)
     }
+}
+
+fn array1_slice<'a>(
+    array: &'a Array1<f32>,
+    context: &'static str,
+) -> Result<&'a [f32], InferenceError> {
+    array
+        .as_slice()
+        .ok_or(InferenceError::NonContiguousBuffer { context })
+}
+
+/// Copy one weight row, truncating or zero-padding to `mask_frames`
+fn prepare_weights(
+    batch_idx: usize,
+    weights: &[f32],
+    mask_frames: usize,
+    weights_buffer: &mut ArrayViewMut2<'_, f32>,
+) {
+    let mut row = weights_buffer.row_mut(batch_idx);
+    if weights.len() == mask_frames {
+        row.assign(&ndarray::ArrayView1::from(weights));
+        return;
+    }
+
+    let copy_len = weights.len().min(mask_frames);
+    row.fill(0.0);
+    row.slice_mut(s![..copy_len])
+        .assign(&ndarray::ArrayView1::from(&weights[..copy_len]));
 }
 
 /// Decide whether clean mask has enough weight, working directly on column views

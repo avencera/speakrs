@@ -16,7 +16,7 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
   # Keep in sync with HF_REVISION in src/models.rs
-  SPEAKRS_MODEL_FIXTURE_REV: a785ebdbe6313868088c36c93d9efa71c470bd34
+  SPEAKRS_MODEL_FIXTURE_REV: 67f963b6a1d94fcd4678948237b3cc8bd69bf1d8
 
 jobs:
   cargo-deny:
@@ -110,6 +110,52 @@ jobs:
             exit 1
           fi
           grep -q "speakrs needs an inference backend" no-backend.log
+
+      - name: Require an ONNX Runtime backend for load-dynamic
+        shell: bash
+        run: |
+          set -euo pipefail
+          if cargo check -p speakrs --no-default-features --features "online cuda load-dynamic" 2> load-dynamic.log; then
+            echo "load-dynamic compiled without an ONNX Runtime backend" >&2
+            exit 1
+          fi
+          grep -q "only applies to the \`cpu\` and" load-dynamic.log
+
+  cuda-only:
+    name: CUDA without ONNX Runtime (Linux x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Rust builds
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          prefix-key: v1-rust-cuda-only
+
+      - name: Keep ONNX Runtime out of the dependency tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          for package in ort ort-sys; do
+            if output="$(cargo tree -p speakrs --no-default-features --features "online cuda" -e normal -i "$package" 2>&1)"; then
+              echo "$output"
+              echo "$package is in the cuda-only dependency tree" >&2
+              exit 1
+            fi
+            grep -q "did not match any packages" <<<"$output"
+          done
+
+      # GPU tests skip without an NVIDIA GPU; this builds them and runs the host-only ones
+      - name: Run clippy and tests
+        run: |
+          cargo clippy -p speakrs --all-targets --no-default-features --features "online cuda" -- -D warnings
+          cargo test -p speakrs --no-default-features --features "online cuda"
 
   coreml-only:
     name: CoreML without ONNX Runtime (macOS arm64)
@@ -209,6 +255,11 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace
+
+      # hashes and PTX entry points only; the PTX itself is generated on a GPU box
+      - name: Check committed CUDA PTX against the kernel sources
+        if: matrix.name == 'Linux x86_64'
+        run: cargo xtask cuda-kernels check
 
   no-default-features:
     name: Test no-default features (Linux x86_64)

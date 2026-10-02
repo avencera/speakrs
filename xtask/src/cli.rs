@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::commands;
-use crate::commands::diarize::{ChunkEmbeddingComputeUnits, DiarizeMode};
+use crate::commands::diarize::{ChunkEmbeddingComputeUnits, CudaPrecision, DiarizeMode};
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::Result;
 
@@ -55,6 +55,11 @@ enum Command {
         #[command(subcommand)]
         cmd: DatasetCmd,
     },
+    /// cuda-oxide kernels for the native CUDA backend
+    CudaKernels {
+        #[command(subcommand)]
+        cmd: CudaKernelsCmd,
+    },
     /// Run speaker diarization on WAV files
     Diarize {
         #[arg(long, default_value = "cpu", value_parser = clap::value_parser!(DiarizeMode))]
@@ -65,6 +70,12 @@ enum Command {
         /// Compute units for native embedding: all, cpu-and-neural-engine, cpu-only
         #[arg(long, default_value = "all", value_enum)]
         chunk_emb_compute_units: ChunkEmbeddingComputeUnits,
+        /// Segmentation precision in CUDA modes; FP32 by default, matching `RuntimeConfig`
+        #[arg(long, default_value = "fp32", value_enum)]
+        cuda_segmentation_math: CudaPrecision,
+        /// Embedding precision in CUDA modes; the filterbank always runs in FP32
+        #[arg(long, default_value = "tf32", value_enum)]
+        cuda_embedding_math: CudaPrecision,
         /// WAV files to diarize
         wav_files: Vec<PathBuf>,
     },
@@ -113,12 +124,24 @@ impl Command {
             Self::MacExperiment { cmd } => cmd.run(),
             Self::Dstack { cmd } => cmd.run(),
             Self::Dataset { cmd } => cmd.run(),
+            Self::CudaKernels { cmd } => cmd.run(),
             Self::Diarize {
                 mode,
                 models_dir,
                 chunk_emb_compute_units,
+                cuda_segmentation_math,
+                cuda_embedding_math,
                 wav_files,
-            } => commands::diarize::run(mode, models_dir, chunk_emb_compute_units, wav_files),
+            } => commands::diarize::run(
+                mode,
+                models_dir,
+                commands::diarize::RuntimeOptions {
+                    chunk_emb_compute_units,
+                    cuda_segmentation_math,
+                    cuda_embedding_math,
+                },
+                wav_files,
+            ),
             #[cfg(feature = "cpu")]
             Self::ProfileOrtEmbedding {
                 mode,
@@ -152,6 +175,26 @@ impl Command {
                 iterations,
                 log_every,
             ),
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum CudaKernelsCmd {
+    /// Regenerate the committed PTX (GPU box only: needs cargo-oxide and CUDA 13)
+    Build {
+        /// Areas to rebuild; all areas when empty
+        areas: Vec<String>,
+    },
+    /// Fail when the committed PTX is stale against the kernel sources (runs anywhere)
+    Check,
+}
+
+impl CudaKernelsCmd {
+    fn run(self) -> Result<()> {
+        match self {
+            Self::Build { areas } => commands::cuda_kernels::build(&areas),
+            Self::Check => commands::cuda_kernels::check(),
         }
     }
 }

@@ -1,3 +1,5 @@
+#[cfg(feature = "cuda")]
+pub(crate) mod cuda;
 pub(crate) mod embedding;
 mod error;
 pub(crate) mod geometry;
@@ -21,6 +23,11 @@ pub(crate) mod coreml;
 #[cfg(feature = "coreml")]
 #[cfg_attr(docsrs, doc(cfg(feature = "coreml")))]
 pub use coreml::CoreMlError;
+#[cfg(feature = "cuda")]
+#[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
+pub use cuda::{
+    ComputeCapability, CudaError, CudaGraphs, CudaLibrary, CudaLstmAlgorithm, CudaMath, PtxTier,
+};
 
 /// CoreML compute unit selection for native embedding
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -58,10 +65,11 @@ pub enum ExecutionMode {
     /// Native CoreML with W8A16 segmentation and ~2s step
     #[cfg_attr(docsrs, doc(cfg(feature = "coreml")))]
     CoreMlFast,
-    /// NVIDIA GPU with concurrent fused seg+emb via crossbeam
+    /// Native NVIDIA GPU backend (cuBLAS, cuDNN and custom kernels, no ONNX Runtime)
+    /// with concurrent segmentation and embedding and ~1s step
     #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
     Cuda,
-    /// NVIDIA GPU with concurrent fused seg+emb and ~2s step
+    /// Native NVIDIA GPU backend with concurrent segmentation and embedding and ~2s step
     #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
     CudaFast,
     /// AMD GPU via ONNX Runtime's MIGraphX execution provider
@@ -75,7 +83,7 @@ impl ExecutionMode {
         matches!(self, Self::CoreMl | Self::CoreMlFast)
     }
 
-    /// Returns true when this mode uses CUDA execution
+    /// Returns true when this mode uses the native CUDA backend
     pub const fn is_cuda(self) -> bool {
         matches!(self, Self::Cuda | Self::CudaFast)
     }
@@ -107,7 +115,7 @@ impl ExecutionMode {
                 feature: "coreml",
             }),
             #[cfg(feature = "cuda")]
-            Self::Cuda | Self::CudaFast => Ok(InferenceBackend::Ort(OrtProvider::Cuda)),
+            Self::Cuda | Self::CudaFast => Ok(InferenceBackend::Cuda),
             #[cfg(not(feature = "cuda"))]
             Self::Cuda | Self::CudaFast => Err(ExecutionModeError {
                 mode: self,
@@ -144,7 +152,7 @@ impl fmt::Display for ExecutionMode {
 
 /// Inference runtime that owns a model's sessions for one execution mode
 ///
-/// A third, non-ORT accelerator backend adds a variant here and a matching model backend in
+/// Another accelerator backend adds a variant here and a matching model backend in
 /// `segmentation` and `embedding`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InferenceBackend {
@@ -154,6 +162,9 @@ pub(crate) enum InferenceBackend {
     /// Native CoreML models
     #[cfg(feature = "coreml")]
     CoreMl,
+    /// Native CUDA models (cudarc, cuBLAS, cuDNN and cuda-oxide kernels)
+    #[cfg(feature = "cuda")]
+    Cuda,
 }
 
 #[cfg(test)]

@@ -3,7 +3,8 @@ use ort::value::TensorRef;
 
 use crate::inference::InferenceError;
 
-use super::super::buffers::{prepare_waveform, prepare_weights};
+use super::super::buffers::prepare_waveform;
+use super::super::prepare_weights;
 use super::super::tensor::{
     array2_from_shape_vec, embedding_batch_from_ort, embedding_vector_from_ort, fbank_hw_from_i64,
     first_output, push_fbank_batch_results,
@@ -288,6 +289,18 @@ impl OrtEmbedding {
             inputs.len(),
             "primary tail batched output",
         )
+    }
+
+    /// Host filterbanks for `audios`, then the multi-mask model on them
+    pub(in crate::inference::embedding) fn embed_multi_mask_audio_batch(
+        &mut self,
+        meta: &EmbeddingMeta,
+        audios: &[&[f32]],
+        masks: &[&[f32]],
+    ) -> Result<Array2<f32>, InferenceError> {
+        let fbanks = self.compute_chunk_fbanks_batch(meta, audios)?;
+        let fbank_refs: Vec<_> = fbanks.iter().collect();
+        self.embed_multi_mask_batch(meta, &fbank_refs, masks)
     }
 
     pub(in crate::inference::embedding) fn embed_multi_mask_batch(

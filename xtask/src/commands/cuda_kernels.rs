@@ -1,0 +1,999 @@
+//! Build and check the committed cuda-oxide PTX for the native CUDA backend
+//!
+//! The kernel crate `crates/speakrs-cuda-kernels` needs a pinned nightly and CUDA 13,
+//! so its PTX is generated on a GPU box and committed under `src/inference/cuda/ptx`.
+//! Every area ships an `sm75` baseline variant and may add higher tiers, written as
+//! `<area>.<tier>.ptx`, plus one `<area>.manifest` that records, per variant, the
+//! target, the hash of the sources that produced it and the hash of the PTX itself.
+//! Parallel work on different areas never edits the same generated file. `check` only
+//! hashes and parses files, so it runs anywhere
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use color_eyre::eyre::{Context, Result, bail, eyre};
+use sha2::{Digest, Sha256};
+
+use crate::cmd::{project_root, run_cmd};
+
+/// A PTX target an area can ship
+///
+/// Only plain `sm_XY` targets: the driver JIT-compiles their PTX for every newer GPU,
+/// while `a`-suffixed targets run on one exact architecture only
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tier {
+    Sm75,
+    Sm80,
+    Sm90,
+    Sm120,
+}
+
+impl Tier {
+    /// Every area ships this variant; it covers Turing and everything newer
+    const BASELINE: Self = Self::Sm75;
+
+    /// The name used in file names, manifests and `SPEAKRS_CUDA_PTX_TIER`
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Sm75 => "sm75",
+            Self::Sm80 => "sm80",
+            Self::Sm90 => "sm90",
+            Self::Sm120 => "sm120",
+        }
+    }
+
+    /// The cuda-oxide `--arch` and PTX `.target`
+    const fn arch(self) -> &'static str {
+        match self {
+            Self::Sm75 => "sm_75",
+            Self::Sm80 => "sm_80",
+            Self::Sm90 => "sm_90",
+            Self::Sm120 => "sm_120",
+        }
+    }
+
+    /// The speakrs feature that embeds this tier's PTX; the baseline is always embedded
+    fn host_feature(self) -> Option<String> {
+        self.feature().map(|_| format!("cuda-{}", self.name()))
+    }
+
+    /// The kernel-crate feature that turns on tier-specific code
+    const fn feature(self) -> Option<&'static str> {
+        match self {
+            Self::Sm75 => None,
+            Self::Sm80 => Some("tier-sm80"),
+            Self::Sm90 => Some("tier-sm90"),
+            Self::Sm120 => Some("tier-sm120"),
+        }
+    }
+
+    /// Oldest PTX ISA that can target this architecture, used for stub modules
+    const fn min_ptx_isa(self) -> (u32, u32) {
+        match self {
+            Self::Sm75 => (6, 3),
+            Self::Sm80 => (7, 0),
+            Self::Sm90 => (7, 8),
+            Self::Sm120 => (8, 7),
+        }
+    }
+
+    fn parse(name: &str) -> Option<Self> {
+        [Self::Sm75, Self::Sm80, Self::Sm90, Self::Sm120]
+            .into_iter()
+            .find(|tier| tier.name() == name)
+    }
+}
+
+/// A kernel area: one module and feature in the kernel crate, one PTX file per tier
+#[derive(Debug, Clone, Copy)]
+pub struct Area {
+    name: &'static str,
+    tiers: &'static [Tier],
+}
+
+impl Area {
+    /// Rejects, at compile time, an area without the baseline or with unordered tiers
+    const fn new(name: &'static str, tiers: &'static [Tier]) -> Self {
+        assert!(
+            !tiers.is_empty() && tiers[0] as u8 == Tier::BASELINE as u8,
+            "every kernel area must ship the sm75 baseline as its first tier"
+        );
+        let mut index = 1;
+        while index < tiers.len() {
+            assert!(
+                (tiers[index - 1] as u8) < tiers[index] as u8,
+                "kernel area tiers must be strictly ascending"
+            );
+            index += 1;
+        }
+
+        Self { name, tiers }
+    }
+
+    fn variants(self) -> impl Iterator<Item = Variant> {
+        self.tiers
+            .iter()
+            .map(move |&tier| Variant { area: self, tier })
+    }
+}
+
+/// Kernel areas and the tiers each one ships
+///
+/// A tier above the baseline needs a measured win on the GPU box and parity with the
+/// baseline. Adding one also needs its `include_str!` in
+/// `src/inference/cuda/kernels.rs`, which `check` verifies
+pub const AREAS: &[Area] = &[
+    // the sm80 probe variant is the same kernel; it proves the runtime dispatch
+    Area::new("probe", &[Tier::Sm75, Tier::Sm80]),
+    Area::new("fbank", &[Tier::Sm75]),
+    Area::new("embedding", &[Tier::Sm75]),
+    Area::new("segmentation", &[Tier::Sm75]),
+];
+
+/// One PTX file: an area built for one tier
+#[derive(Debug, Clone, Copy)]
+struct Variant {
+    area: Area,
+    tier: Tier,
+}
+
+impl Variant {
+    fn file_name(self) -> String {
+        format!("{}.{}.ptx", self.area.name, self.tier.name())
+    }
+
+    fn features(self) -> String {
+        match self.tier.feature() {
+            Some(tier) => format!("{},{tier}", self.area.name),
+            None => self.area.name.to_string(),
+        }
+    }
+}
+
+/// cuda-oxide commit; keep in sync with the kernel crate's Cargo.toml and
+/// scripts/cuda/setup-gpu-box.sh
+const CUDA_OXIDE_REV: &str = "918bbde123671153b29a89542f1781f1c7494c14";
+/// Toolchain pinned by that cuda-oxide commit
+const CUDA_OXIDE_NIGHTLY: &str = "nightly-2026-08-28";
+/// Newest PTX ISA the oldest supported driver can JIT: CUDA 13.0 drivers (580.x)
+/// accept PTX ISA 9.0, and a newer `.version` fails to load there
+const MAX_PTX_ISA: (u32, u32) = (9, 0);
+
+const KERNEL_CRATE: &str = "crates/speakrs-cuda-kernels";
+const PTX_DIR: &str = "src/inference/cuda/ptx";
+/// The host file that embeds every variant with `include_str!`
+const HOST_KERNELS: &str = "src/inference/cuda/kernels.rs";
+/// Name cuda-oxide gives the PTX of the kernel crate
+const OXIDE_PTX_NAME: &str = "speakrs_cuda_kernels.ptx";
+
+/// Regenerate PTX for every variant of the given areas, or of every area when none
+/// are given
+pub fn build(areas: &[String]) -> Result<()> {
+    let root = project_root();
+    let areas = selected_areas(areas)?;
+    let crate_dir = root.join(KERNEL_CRATE);
+    let ptx_dir = root.join(PTX_DIR);
+    fs::create_dir_all(&ptx_dir)?;
+
+    for area in areas {
+        build_area(&crate_dir, &ptx_dir, area)?;
+    }
+
+    Ok(())
+}
+
+fn build_area(crate_dir: &Path, ptx_dir: &Path, area: Area) -> Result<()> {
+    let mut built = Vec::new();
+    for variant in area.variants() {
+        let ptx = compile_variant(crate_dir, variant)?;
+        let version = check_ptx_header(variant, &ptx)?;
+        built.push((variant, ptx, version));
+    }
+
+    // compare before writing anything, so a mismatch leaves the committed files alone
+    let modules: Vec<_> = built
+        .iter()
+        .map(|(variant, ptx, _)| (*variant, ptx.as_str()))
+        .collect();
+    check_entry_points(&modules)?;
+
+    remove_undeclared_variants(ptx_dir, area)?;
+    let mut manifest = Manifest::default();
+    for (variant, ptx, version) in built {
+        fs::write(ptx_dir.join(variant.file_name()), &ptx)?;
+        manifest.variants.push(ManifestVariant {
+            tier: variant.tier,
+            sources: sources_hash(crate_dir, variant)?,
+            ptx: sha256_hex(ptx.as_bytes()),
+        });
+        println!(
+            "{}: wrote {PTX_DIR}/{} (PTX ISA {}.{}, {})",
+            area.name,
+            variant.file_name(),
+            version.0,
+            version.1,
+            variant.tier.arch()
+        );
+    }
+
+    fs::write(
+        ptx_dir.join(format!("{}.manifest", area.name)),
+        manifest.render(),
+    )?;
+    Ok(())
+}
+
+/// Fail when any committed PTX is stale, edited by hand, missing, not embedded by the
+/// host, or exports different kernels than the other variants of its area
+pub fn check() -> Result<()> {
+    let root = project_root();
+    let crate_dir = root.join(KERNEL_CRATE);
+    let ptx_dir = root.join(PTX_DIR);
+    let mut problems = Vec::new();
+
+    for area in AREAS {
+        if let Err(error) = check_area(&crate_dir, &ptx_dir, *area) {
+            problems.push(format!("{}: {error:#}", area.name));
+        }
+    }
+
+    problems.extend(unexpected_ptx_files(&ptx_dir)?);
+    problems.extend(host_embed_problems(&root.join(HOST_KERNELS))?);
+    if !problems.is_empty() {
+        bail!(
+            "committed CUDA PTX failed its checks; regenerate it with `cargo xtask cuda-kernels build` on the GPU box\n  {}",
+            problems.join("\n  ")
+        );
+    }
+
+    let variants: Vec<_> = AREAS
+        .iter()
+        .flat_map(|area| area.variants())
+        .map(|variant| format!("{}.{}", variant.area.name, variant.tier.name()))
+        .collect();
+    println!("CUDA PTX is up to date for {}", variants.join(", "));
+    Ok(())
+}
+
+fn selected_areas(areas: &[String]) -> Result<Vec<Area>> {
+    if areas.is_empty() {
+        return Ok(AREAS.to_vec());
+    }
+
+    areas
+        .iter()
+        .map(|name| {
+            AREAS
+                .iter()
+                .copied()
+                .find(|area| area.name == name)
+                .ok_or_else(|| eyre!("unknown kernel area `{name}`; known: {}", area_names()))
+        })
+        .collect()
+}
+
+fn area_names() -> String {
+    AREAS
+        .iter()
+        .map(|area| area.name)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn compile_variant(crate_dir: &Path, variant: Variant) -> Result<String> {
+    let out_dir = tempfile::tempdir()?;
+    // a shared CARGO_TARGET_DIR is built by the stable toolchain; keep the nightly
+    // kernel build in its own subdirectory so the two never invalidate each other
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(|dir| PathBuf::from(dir).join("cuda-kernels"))
+        .unwrap_or_else(|| crate_dir.join("target"));
+
+    // cuda-oxide writes PTX only while rustc compiles the crate, and Cargo skips a
+    // crate it considers fresh, so clean it first to always get a new PTX file
+    run_cmd(nightly_cargo(crate_dir, &target_dir).args(["clean", "-p", "speakrs-cuda-kernels"]))?;
+    let mut cmd = nightly_cargo(crate_dir, &target_dir);
+    cmd.env("CUDA_OXIDE_PTX_DIR", out_dir.path())
+        .args([
+            "oxide",
+            "build",
+            "--arch",
+            variant.tier.arch(),
+            "--features",
+        ])
+        .arg(variant.features());
+    run_cmd(&mut cmd).wrap_err_with(|| {
+        format!(
+            "building the `{}` kernels for {}",
+            variant.area.name,
+            variant.tier.arch()
+        )
+    })?;
+
+    let ptx_path = out_dir.path().join(OXIDE_PTX_NAME);
+    if ptx_path.exists() {
+        return Ok(fs::read_to_string(&ptx_path)?);
+    }
+
+    // a crate without device code produces no PTX at all
+    if area_has_kernels(crate_dir, variant.area.name)? {
+        bail!(
+            "cuda-oxide did not write {} for `{}`",
+            ptx_path.display(),
+            variant.file_name()
+        );
+    }
+
+    Ok(empty_module_ptx(variant))
+}
+
+/// Cargo pinned to the cuda-oxide nightly, independent of the toolchain running xtask
+fn nightly_cargo(crate_dir: &Path, target_dir: &Path) -> Command {
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(crate_dir)
+        // `cargo xtask` runs under the stable toolchain, and rustup would pass that
+        // choice down through these variables instead of the pinned nightly
+        .env_remove("RUSTUP_TOOLCHAIN")
+        .env_remove("CARGO")
+        .env_remove("RUSTC")
+        .env("CARGO_TARGET_DIR", target_dir)
+        .arg(format!("+{CUDA_OXIDE_NIGHTLY}"));
+    cmd
+}
+
+fn area_has_kernels(crate_dir: &Path, area: &str) -> Result<bool> {
+    let mut files = Vec::new();
+    collect_files(crate_dir, &crate_dir.join("src"), &mut files)?;
+    for relative in files
+        .iter()
+        .filter(|relative| area_of(relative) == Some(area))
+    {
+        if fs::read_to_string(crate_dir.join(relative))?.contains("#[kernel]") {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+/// A loadable module with no entries, so the host can embed and load every area
+/// before the area has kernels
+fn empty_module_ptx(variant: Variant) -> String {
+    let (major, minor) = variant.tier.min_ptx_isa();
+    format!(
+        "//\n// speakrs: the `{}` area has no kernels yet\n//\n\n.version {major}.{minor}\n.target {}\n.address_size 64\n",
+        variant.area.name,
+        variant.tier.arch()
+    )
+}
+
+/// Deletes variant files of `area` that it no longer declares, including the
+/// untiered `<area>.ptx` from before tiers existed
+fn remove_undeclared_variants(ptx_dir: &Path, area: Area) -> Result<()> {
+    let declared: BTreeSet<_> = area.variants().map(Variant::file_name).collect();
+    for entry in fs::read_dir(ptx_dir)? {
+        let path = entry?.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+
+        let ours = name.ends_with(".ptx") && file_area(name) == Some(area.name);
+        if ours && !declared.contains(name) {
+            fs::remove_file(&path)?;
+            println!("{}: removed undeclared {PTX_DIR}/{name}", area.name);
+        }
+    }
+
+    Ok(())
+}
+
+fn check_area(crate_dir: &Path, ptx_dir: &Path, area: Area) -> Result<()> {
+    let manifest_path = ptx_dir.join(format!("{}.manifest", area.name));
+    let manifest = fs::read_to_string(&manifest_path)
+        .map_err(|_| eyre!("missing {}", manifest_path.display()))
+        .and_then(|text| Manifest::parse(&text))?;
+
+    let listed: Vec<_> = manifest.variants.iter().map(|entry| entry.tier).collect();
+    if listed != area.tiers {
+        bail!(
+            "manifest lists tiers {}, but the area declares {}",
+            tier_names(&listed),
+            tier_names(area.tiers)
+        );
+    }
+
+    let mut modules = Vec::new();
+    for (variant, entry) in area.variants().zip(&manifest.variants) {
+        let ptx_path = ptx_dir.join(variant.file_name());
+        let ptx =
+            fs::read_to_string(&ptx_path).map_err(|_| eyre!("missing {}", ptx_path.display()))?;
+
+        if sources_hash(crate_dir, variant)? != entry.sources {
+            bail!(
+                "kernel sources or build pins changed since {} was generated",
+                variant.file_name()
+            );
+        }
+
+        if sha256_hex(ptx.as_bytes()) != entry.ptx {
+            bail!(
+                "{} does not match its manifest; regenerate it instead of editing it",
+                variant.file_name()
+            );
+        }
+
+        check_ptx_header(variant, &ptx)?;
+        modules.push((variant, ptx));
+    }
+
+    let modules: Vec<_> = modules
+        .iter()
+        .map(|(variant, ptx)| (*variant, ptx.as_str()))
+        .collect();
+    check_entry_points(&modules)
+}
+
+fn tier_names(tiers: &[Tier]) -> String {
+    let names: Vec<_> = tiers.iter().map(|tier| tier.name()).collect();
+    format!("[{}]", names.join(", "))
+}
+
+/// The area a PTX directory file belongs to, from its first dot-separated part
+fn file_area(name: &str) -> Option<&'static str> {
+    let stem = name.split('.').next()?;
+    AREAS
+        .iter()
+        .map(|area| area.name)
+        .find(|area| *area == stem)
+}
+
+fn unexpected_ptx_files(ptx_dir: &Path) -> Result<Vec<String>> {
+    let expected: BTreeSet<String> = AREAS
+        .iter()
+        .flat_map(|area| {
+            area.variants()
+                .map(Variant::file_name)
+                .chain([format!("{}.manifest", area.name)])
+        })
+        .collect();
+
+    let mut problems = Vec::new();
+    for entry in fs::read_dir(ptx_dir)? {
+        let path = entry?.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+
+        if !expected.contains(name) {
+            problems.push(format!(
+                "{} is not a declared variant or manifest; declare its tier in AREAS or delete the file",
+                path.display()
+            ));
+        }
+    }
+
+    Ok(problems)
+}
+
+/// The host must embed exactly the declared variants: a variant that is built but
+/// not embedded would never load, and an embedded file that is not declared is never
+/// rebuilt or checked. The baseline is embedded unconditionally with `include_str!`;
+/// a higher tier goes through `tier_ptx!` with its own `cuda-<tier>` feature, so a
+/// default build carries only sm75 code
+fn host_embed_problems(host_kernels: &Path) -> Result<Vec<String>> {
+    let source = fs::read_to_string(host_kernels)
+        .wrap_err_with(|| format!("reading {}", host_kernels.display()))?;
+    let embedded = embedded_ptx_files(&source);
+    let declared: BTreeMap<String, Tier> = AREAS
+        .iter()
+        .flat_map(|area| area.variants())
+        .map(|variant| (variant.file_name(), variant.tier))
+        .collect();
+
+    let mut problems = Vec::new();
+    for (name, tier) in &declared {
+        let Some(feature) = embedded.get(name) else {
+            problems.push(format!("{HOST_KERNELS} does not embed ptx/{name}"));
+            continue;
+        };
+
+        let expected = tier.host_feature();
+        if feature.as_deref() != expected.as_deref() {
+            let how = |feature: Option<&str>| match feature {
+                Some(feature) => format!("`tier_ptx!(\"{feature}\", ..)`"),
+                None => "plain `include_str!`".to_string(),
+            };
+            problems.push(format!(
+                "{HOST_KERNELS} embeds ptx/{name} with {}, expected {}",
+                how(feature.as_deref()),
+                how(expected.as_deref())
+            ));
+        }
+    }
+
+    for name in embedded.keys().filter(|name| !declared.contains_key(*name)) {
+        problems.push(format!(
+            "{HOST_KERNELS} embeds ptx/{name}, which no area declares"
+        ));
+    }
+
+    Ok(problems)
+}
+
+/// Every PTX file a Rust source embeds, with the feature of its `tier_ptx!` call, or
+/// `None` for a plain `include_str!`
+fn embedded_ptx_files(source: &str) -> BTreeMap<String, Option<String>> {
+    const PLAIN: &str = "include_str!(\"ptx/";
+    const TIERED: &str = "tier_ptx!(";
+    let mut files = BTreeMap::new();
+    for (start, _) in source.match_indices(PLAIN) {
+        let rest = &source[start + PLAIN.len()..];
+        if let Some((name, _)) = rest.split_once('"') {
+            files.insert(name.to_string(), None);
+        }
+    }
+
+    for (start, _) in source.match_indices(TIERED) {
+        let Some((args, _)) = source[start + TIERED.len()..].split_once(')') else {
+            continue;
+        };
+
+        // the macro definition's own `$feature:literal` arguments are not quoted
+        let args: Vec<_> = args
+            .split(',')
+            .map(|arg| arg.trim().trim_matches('"'))
+            .collect();
+        if let [feature, path] = args[..]
+            && let Some(name) = path.strip_prefix("ptx/")
+        {
+            files.insert(name.to_string(), Some(feature.to_string()));
+        }
+    }
+
+    files
+}
+
+/// Checks `.version` and `.target` so a toolchain bump cannot silently produce PTX
+/// that older drivers or GPUs reject
+fn check_ptx_header(variant: Variant, ptx: &str) -> Result<(u32, u32)> {
+    let file = variant.file_name();
+    let directive = |name: &str| {
+        ptx.lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix(name))
+            .map(str::trim)
+    };
+
+    let version = directive(".version")
+        .and_then(|version| version.split_once('.'))
+        .and_then(|(major, minor)| Some((major.parse().ok()?, minor.parse().ok()?)))
+        .ok_or_else(|| eyre!("{file} has no readable `.version` directive"))?;
+    if version > MAX_PTX_ISA {
+        bail!(
+            "{file} uses PTX ISA {}.{}, newer than {}.{} that CUDA 13.0 drivers accept",
+            version.0,
+            version.1,
+            MAX_PTX_ISA.0,
+            MAX_PTX_ISA.1
+        );
+    }
+
+    let target = directive(".target").unwrap_or_default();
+    let arch = variant.tier.arch();
+    if target.split(',').next().map(str::trim) != Some(arch) {
+        bail!("{file} targets `{target}`, expected `{arch}`");
+    }
+
+    Ok(version)
+}
+
+/// Kernel entry points of a PTX module: each `.entry` name with its parameter
+/// declarations, minus the parameter names
+type EntryPoints = BTreeMap<String, Vec<String>>;
+
+fn entry_points(ptx: &str) -> Result<EntryPoints> {
+    // drop `//` comments, so a comment that mentions `.entry` cannot add a kernel
+    let code: String = ptx
+        .lines()
+        .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+        .fold(String::new(), |mut code, line| {
+            code.push_str(line);
+            code.push('\n');
+            code
+        });
+
+    let mut entries = EntryPoints::new();
+    let mut rest = code.as_str();
+    while let Some(start) = find_directive(rest, ".entry") {
+        let after = rest[start + ".entry".len()..].trim_start();
+        let name_end = after
+            .find(|c: char| c == '(' || c == '{' || c.is_whitespace())
+            .unwrap_or(after.len());
+        let name = &after[..name_end];
+        if name.is_empty() {
+            bail!("`.entry` without a kernel name");
+        }
+
+        let tail = after[name_end..].trim_start();
+        let (params, next) = match tail.strip_prefix('(') {
+            Some(list) => {
+                let (list, next) = list
+                    .split_once(')')
+                    .ok_or_else(|| eyre!("unterminated parameter list of `{name}`"))?;
+                (parse_params(list), next)
+            }
+            None => (Vec::new(), tail),
+        };
+
+        if entries.insert(name.to_string(), params).is_some() {
+            bail!("kernel `{name}` is defined twice");
+        }
+        rest = next;
+    }
+
+    Ok(entries)
+}
+
+/// Position of a directive token, so `.entry` does not match inside a longer word
+fn find_directive(text: &str, directive: &str) -> Option<usize> {
+    text.match_indices(directive)
+        .map(|(index, _)| index)
+        .find(|&index| {
+            let before = text[..index].chars().next_back();
+            let after = text[index + directive.len()..].chars().next();
+            before.is_none_or(char::is_whitespace) && after.is_some_and(char::is_whitespace)
+        })
+}
+
+/// `.param .u64 .ptr .align 4 k_param_1` becomes `.param .u64 .ptr .align 4`
+fn parse_params(list: &str) -> Vec<String> {
+    list.split(',')
+        .map(|param| {
+            let tokens: Vec<_> = param.split_whitespace().collect();
+            tokens[..tokens.len().saturating_sub(1)].join(" ")
+        })
+        .filter(|param| !param.is_empty())
+        .collect()
+}
+
+/// The host picks one variant per area at run time and looks kernels up by name, so
+/// every variant must export the baseline's kernels with the same parameters
+fn check_entry_points(modules: &[(Variant, &str)]) -> Result<()> {
+    let Some(((baseline, baseline_ptx), higher)) = modules.split_first() else {
+        return Ok(());
+    };
+
+    let expected =
+        entry_points(baseline_ptx).wrap_err_with(|| format!("parsing {}", baseline.file_name()))?;
+    let mut problems = Vec::new();
+    for (variant, ptx) in higher {
+        let actual =
+            entry_points(ptx).wrap_err_with(|| format!("parsing {}", variant.file_name()))?;
+        problems.extend(entry_point_differences(
+            &baseline.file_name(),
+            &expected,
+            &variant.file_name(),
+            &actual,
+        ));
+    }
+
+    if !problems.is_empty() {
+        bail!(
+            "variants export different kernels:\n    {}",
+            problems.join("\n    ")
+        );
+    }
+
+    Ok(())
+}
+
+fn entry_point_differences(
+    expected_file: &str,
+    expected: &EntryPoints,
+    actual_file: &str,
+    actual: &EntryPoints,
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (name, params) in expected {
+        match actual.get(name) {
+            None => problems.push(format!("{actual_file} lacks `{name}` from {expected_file}")),
+            Some(other) if other != params => {
+                let mut message = format!("`{name}` parameters differ:");
+                let _ = write!(message, " {expected_file} ({})", params.join(", "));
+                let _ = write!(message, " vs {actual_file} ({})", other.join(", "));
+                problems.push(message);
+            }
+            Some(_) => {}
+        }
+    }
+
+    for name in actual.keys().filter(|name| !expected.contains_key(*name)) {
+        problems.push(format!(
+            "{actual_file} adds `{name}`, absent from {expected_file}"
+        ));
+    }
+
+    problems
+}
+
+/// Hash of everything that determines one variant's PTX: the build pins, the target
+/// and features, the crate's shared files and this area's own module. Other areas'
+/// modules are left out, so a change in one area never marks another area stale
+fn sources_hash(crate_dir: &Path, variant: Variant) -> Result<String> {
+    let mut files = Vec::new();
+    collect_files(crate_dir, crate_dir, &mut files)?;
+    files.retain(|relative| belongs_to(relative, variant.area.name));
+    files.sort();
+
+    let mut digest = Sha256::new();
+    let pins = format!(
+        "cuda-oxide={CUDA_OXIDE_REV} toolchain={CUDA_OXIDE_NIGHTLY} arch={} features={}",
+        variant.tier.arch(),
+        variant.features()
+    );
+    hash_entry(&mut digest, "pins", pins.as_bytes());
+    for relative in files {
+        let contents = fs::read(crate_dir.join(&relative))?;
+        hash_entry(&mut digest, &relative, &contents);
+    }
+
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+/// Whether a crate file feeds the given area's PTX
+fn belongs_to(relative: &str, area: &str) -> bool {
+    let Some(module) = area_of(relative) else {
+        return true;
+    };
+
+    module == area
+}
+
+/// The area that owns `src/<area>.rs` or `src/<area>/...`, if any
+fn area_of(relative: &str) -> Option<&'static str> {
+    let rest = relative.strip_prefix("src/")?;
+    AREAS.iter().map(|area| area.name).find(|area| {
+        rest.strip_prefix(area)
+            .is_some_and(|tail| tail == ".rs" || tail.starts_with('/'))
+    })
+}
+
+fn collect_files(root: &Path, dir: &Path, files: &mut Vec<String>) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        // build output and editor or OS litter never feed the PTX
+        if name == "target" || name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+
+        if entry.file_type()?.is_dir() {
+            collect_files(root, &path, files)?;
+            continue;
+        }
+
+        let relative = path
+            .strip_prefix(root)?
+            .to_str()
+            .ok_or_else(|| eyre!("non UTF-8 path {}", path.display()))?
+            .replace('\\', "/");
+        files.push(relative);
+    }
+
+    Ok(())
+}
+
+/// Length-prefixed so that moving bytes between a name and its contents changes the hash
+fn hash_entry(digest: &mut Sha256, name: &str, contents: &[u8]) {
+    digest.update((name.len() as u64).to_le_bytes());
+    digest.update(name.as_bytes());
+    digest.update((contents.len() as u64).to_le_bytes());
+    digest.update(contents);
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Contents of `<area>.manifest`: one section per variant, baseline first
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Manifest {
+    variants: Vec<ManifestVariant>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ManifestVariant {
+    tier: Tier,
+    sources: String,
+    ptx: String,
+}
+
+impl Manifest {
+    const HEADER: &str = "# generated by `cargo xtask cuda-kernels build`; checked by `cargo xtask cuda-kernels check`";
+
+    fn render(&self) -> String {
+        let mut text = format!(
+            "{}\ncuda-oxide = {CUDA_OXIDE_REV}\ntoolchain = {CUDA_OXIDE_NIGHTLY}\n",
+            Self::HEADER
+        );
+        for variant in &self.variants {
+            let _ = write!(
+                text,
+                "\n[{}]\ntarget = {}\nsources = {}\nptx = {}\n",
+                variant.tier.name(),
+                variant.tier.arch(),
+                variant.sources,
+                variant.ptx
+            );
+        }
+
+        text
+    }
+
+    fn parse(text: &str) -> Result<Self> {
+        let mut sections: Vec<(&str, BTreeMap<&str, &str>)> = Vec::new();
+        for line in text.lines().map(str::trim) {
+            if let Some(name) = line
+                .strip_prefix('[')
+                .and_then(|line| line.strip_suffix(']'))
+            {
+                sections.push((name, BTreeMap::new()));
+                continue;
+            }
+
+            // the pins above the first section are covered by each variant's hash
+            let (Some((_, fields)), Some((key, value))) =
+                (sections.last_mut(), line.split_once('='))
+            else {
+                continue;
+            };
+            fields.insert(key.trim(), value.trim());
+        }
+
+        let variants = sections
+            .into_iter()
+            .map(|(name, fields)| ManifestVariant::parse(name, &fields))
+            .collect::<Result<_>>()?;
+        Ok(Self { variants })
+    }
+}
+
+impl ManifestVariant {
+    fn parse(name: &str, fields: &BTreeMap<&str, &str>) -> Result<Self> {
+        let tier =
+            Tier::parse(name).ok_or_else(|| eyre!("manifest has unknown tier `[{name}]`"))?;
+        let field = |key: &str| {
+            fields
+                .get(key)
+                .map(|value| value.to_string())
+                .ok_or_else(|| eyre!("manifest section `[{name}]` has no `{key}` field"))
+        };
+
+        let target = field("target")?;
+        if target != tier.arch() {
+            bail!(
+                "manifest section `[{name}]` has target `{target}`, expected `{}`",
+                tier.arch()
+            );
+        }
+
+        Ok(Self {
+            tier,
+            sources: field("sources")?,
+            ptx: field("ptx")?,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        AREAS, Manifest, ManifestVariant, Tier, Variant, area_of, belongs_to, check_entry_points,
+        check_ptx_header, embedded_ptx_files, entry_points,
+    };
+
+    const PROBE_PTX: &str = "//\n// Generated by LLVM\n//\n.version 6.3\n.target sm_75\n.address_size 64\n\n\t// .globl\tprobe_scale_add // .entry fake(\n.visible .entry probe_scale_add(\n\t.param .f32 probe_scale_add_param_0,\n\t.param .u64 .ptr .align 4 probe_scale_add_param_1,\n\t.param .u64 probe_scale_add_param_2\n)\n{\n\tret;\n}\n";
+
+    fn probe(tier: Tier) -> Variant {
+        Variant {
+            area: AREAS[0],
+            tier,
+        }
+    }
+
+    #[test]
+    fn area_files_only_feed_their_own_area() {
+        assert_eq!(area_of("src/fbank.rs"), Some("fbank"));
+        assert_eq!(area_of("src/embedding/pool.rs"), Some("embedding"));
+        assert_eq!(area_of("src/fbank_common.rs"), None);
+        assert!(belongs_to("src/lib.rs", "fbank"));
+        assert!(belongs_to("Cargo.lock", "probe"));
+        assert!(belongs_to("src/fbank.rs", "fbank"));
+        assert!(!belongs_to("src/fbank.rs", "probe"));
+    }
+
+    #[test]
+    fn ptx_header_rejects_isa_newer_than_cuda_13_0_and_wrong_targets() {
+        let ok = ".version 6.3\n.target sm_75\n.address_size 64\n";
+        assert_eq!(check_ptx_header(probe(Tier::Sm75), ok).ok(), Some((6, 3)));
+
+        let too_new = ".version 9.2\n.target sm_75\n";
+        assert!(check_ptx_header(probe(Tier::Sm75), too_new).is_err());
+
+        let wrong_target = ".version 8.0\n.target sm_80\n";
+        assert!(check_ptx_header(probe(Tier::Sm75), wrong_target).is_err());
+        assert!(check_ptx_header(probe(Tier::Sm80), wrong_target).is_ok());
+    }
+
+    #[test]
+    fn entry_points_ignore_comments_and_parameter_names() {
+        let entries = entry_points(PROBE_PTX).expect("parse");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries["probe_scale_add"],
+            [".param .f32", ".param .u64 .ptr .align 4", ".param .u64"]
+        );
+    }
+
+    #[test]
+    fn entry_points_must_match_across_variants() {
+        let same = PROBE_PTX.replace("sm_75", "sm_80");
+        assert!(
+            check_entry_points(&[(probe(Tier::Sm75), PROBE_PTX), (probe(Tier::Sm80), &same)])
+                .is_ok()
+        );
+
+        let renamed = same.replace("probe_scale_add", "probe_scale_add_v2");
+        assert!(
+            check_entry_points(&[
+                (probe(Tier::Sm75), PROBE_PTX),
+                (probe(Tier::Sm80), &renamed)
+            ])
+            .is_err()
+        );
+
+        let retyped = same.replace(".param .f32", ".param .f64");
+        assert!(
+            check_entry_points(&[
+                (probe(Tier::Sm75), PROBE_PTX),
+                (probe(Tier::Sm80), &retyped)
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn embedded_files_record_their_tier_feature() {
+        let source = "macro_rules! tier_ptx { ($feature:literal, $path:literal) => { include_str!($path) } }\nsm75: include_str!(\"ptx/probe.sm75.ptx\"),\nsm80: tier_ptx!(\"cuda-sm80\", \"ptx/probe.sm80.ptx\"),";
+        let files: Vec<_> = embedded_ptx_files(source).into_iter().collect();
+        assert_eq!(
+            files,
+            [
+                ("probe.sm75.ptx".to_string(), None),
+                ("probe.sm80.ptx".to_string(), Some("cuda-sm80".to_string()))
+            ]
+        );
+    }
+
+    #[test]
+    fn manifest_round_trips() {
+        let manifest = Manifest {
+            variants: vec![
+                ManifestVariant {
+                    tier: Tier::Sm75,
+                    sources: "abc".into(),
+                    ptx: "def".into(),
+                },
+                ManifestVariant {
+                    tier: Tier::Sm80,
+                    sources: "ghi".into(),
+                    ptx: "jkl".into(),
+                },
+            ],
+        };
+        assert_eq!(Manifest::parse(&manifest.render()).ok(), Some(manifest));
+    }
+}

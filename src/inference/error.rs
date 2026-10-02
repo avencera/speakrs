@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 #[cfg(feature = "coreml")]
 use super::CoreMlError;
+#[cfg(feature = "cuda")]
+use super::CudaError;
 use super::ExecutionMode;
 use super::TensorShapeError;
 #[cfg(feature = "_ort")]
@@ -29,6 +31,11 @@ pub enum InferenceError {
     #[cfg_attr(docsrs, doc(cfg(feature = "coreml")))]
     #[error(transparent)]
     CoreMl(#[from] CoreMlError),
+    /// The native CUDA backend returned an error
+    #[cfg(feature = "cuda")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
+    #[error(transparent)]
+    Cuda(#[from] CudaError),
     /// A model input or output did not match its tensor shape contract
     #[error(transparent)]
     Shape(#[from] TensorShapeError),
@@ -132,6 +139,11 @@ pub enum ModelLoadError {
     )]
     #[error(transparent)]
     Ort(#[from] ort::Error),
+    /// The native CUDA backend failed while loading a model
+    #[cfg(feature = "cuda")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
+    #[error(transparent)]
+    Cuda(#[from] CudaError),
     /// A required native model asset is missing for the selected execution mode
     #[error("{mode} requires native asset `{path}`")]
     MissingNativeAsset {
@@ -139,6 +151,31 @@ pub enum ModelLoadError {
         mode: ExecutionMode,
         /// The missing compiled CoreML bundle path
         path: PathBuf,
+    },
+    /// The safetensors weights that the CUDA modes load are missing
+    #[cfg(feature = "cuda")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
+    #[error(
+        "{mode} requires the CUDA weights `{path}`; export them with `scripts/cuda/export_weights.py --runtime-assets <dir>`"
+    )]
+    MissingCudaWeights {
+        /// The execution mode that requires the weights
+        mode: ExecutionMode,
+        /// The missing weights file
+        path: PathBuf,
+    },
+    /// The CUDA model assets could not be downloaded from Hugging Face
+    #[cfg(all(feature = "cuda", feature = "online"))]
+    #[cfg_attr(docsrs, doc(cfg(all(feature = "cuda", feature = "online"))))]
+    #[error(
+        "could not download the CUDA model assets for {mode} from Hugging Face: {source}; export them with `scripts/cuda/export_weights.py --runtime-assets <dir>` and load that directory with `from_dir`"
+    )]
+    CudaAssetsUnavailable {
+        /// The execution mode whose assets were requested
+        mode: ExecutionMode,
+        /// The Hugging Face Hub error
+        #[source]
+        source: hf_hub::api::sync::ApiError,
     },
     /// A required native model asset exists but failed to load
     #[error("{mode} failed to load native asset `{path}`: {message}")]
