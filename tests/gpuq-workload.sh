@@ -40,7 +40,7 @@ case "$command" in
         case "$source_arg" in
             s3://speakrs/models/*)
                 mkdir -p "$destination"
-                printf 'model\n' >"${destination}/segmentation-3.0.onnx"
+                printf 'model\n' >"${destination}/segmentation-3.0.safetensors"
                 ;;
             s3://speakrs/datasets/*)
                 mkdir -p "${destination}/wav" "${destination}/rttm"

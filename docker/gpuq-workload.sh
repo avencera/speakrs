@@ -72,8 +72,9 @@ s5cmd_run() {
 stage_models() {
     mkdir -p "$models_dir"
     s5cmd_run cp --concurrency 20 "${bucket}/models/*" "${models_dir}/"
-    [[ -s "${models_dir}/segmentation-3.0.onnx" ]] ||
-        die "model staging did not produce segmentation-3.0.onnx"
+    # the native CUDA modes load safetensors weights, not ONNX models
+    [[ -s "${models_dir}/segmentation-3.0.safetensors" ]] ||
+        die "model staging did not produce segmentation-3.0.safetensors"
 }
 
 stage_dataset() {
