@@ -29,9 +29,6 @@ speakrs = { version = "0.6", features = ["cuda"] }
 # CPU only
 speakrs = "0.6"
 
-# System OpenBLAS
-speakrs = { version = "0.6", default-features = false, features = ["online", "openblas-system"] }
-
 # AMD GPU
 speakrs = { version = "0.6", features = ["migraphx"] }
 ```
@@ -227,17 +224,6 @@ Common features:
 - `cuda`: NVIDIA CUDA backend via ONNX Runtime
 - `migraphx`: AMD GPU backend via ONNX Runtime MIGraphX
 - `load-dynamic`: load the ONNX Runtime library at startup instead of static linking
-
-BLAS backends matter if you disable default features:
-
-- `x86_64` defaults to statically linked Intel MKL
-- non-`x86_64` defaults to statically linked OpenBLAS and needs a C toolchain
-- no-default builds must enable exactly one of `intel-mkl`, `openblas-static`, or `openblas-system`
-
-```toml
-speakrs = { version = "0.6", default-features = false, features = ["online", "intel-mkl"] }
-speakrs = { version = "0.6", default-features = false, features = ["online", "openblas-system"] }
-```
 
 The ONNX Runtime dependency (`ort` 2.0.0-rc.13) is still pre-release.
 

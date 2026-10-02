@@ -16,14 +16,6 @@ allow = [
     "Unicode-3.0",
     "Zlib",
     "CDLA-Permissive-2.0",
-    "LicenseRef-Intel-Simplified-Software-License",
-]
-
-[[licenses.clarify]]
-name = "intel-mkl-src"
-expression = "LicenseRef-Intel-Simplified-Software-License"
-license-files = [
-    { path = "License.txt", hash = 0x3bf8c2d0 },
 ]
 
 [bans]

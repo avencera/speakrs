@@ -30,7 +30,7 @@ jobs:
         with:
           command: check
           rust-version: "1.89.0"
-          arguments: --no-default-features --features online,default-linalg,cuda,migraphx,load-dynamic,_metrics
+          arguments: --no-default-features --features online,cuda,migraphx,load-dynamic,_metrics
 
   msrv:
     name: MSRV Rust 1.89
@@ -203,4 +203,4 @@ jobs:
           done
 
       - name: Run no-default-features runtime tests
-        run: cargo test -p speakrs --no-default-features --features "online,intel-mkl"
+        run: cargo test -p speakrs --no-default-features --features "online"

@@ -2,6 +2,8 @@
 
 ## [unreleased]
 
+- Remove the `default-linalg`, `intel-mkl`, `openblas-static`, and `openblas-system` features: PLDA setup now uses a small built-in Rust solver, so builds no longer link MKL or OpenBLAS
+
 ## [0.6.0] - 2026-10-02
 
 - Add `QueueConfig` so queue channel capacity is configurable at construction (default 64; capacity 0 is rejected)

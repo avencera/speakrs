@@ -89,4 +89,3 @@ jobs:
 
           check_consumer default "{ path = \"$package_path\" }"
           check_consumer load-dynamic "{ path = \"$package_path\", features = [\"load-dynamic\"] }"
-          check_consumer custom-linalg "{ path = \"$package_path\", default-features = false, features = [\"online\", \"intel-mkl\"] }"

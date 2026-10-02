@@ -18,8 +18,7 @@ categories = ["multimedia::audio", "science"]
 include = ["/src/**", "/examples/**", "/README.md", "/LICENSE", "/Cargo.toml"]
 
 [features]
-default = ["online", "default-linalg"]
-default-linalg = ["dep:ndarray-linalg-default"]
+default = ["online"]
 online = ["dep:hf-hub", "hf-hub/ureq", "hf-hub/native-tls"]
 coreml = [
     "dep:block2",
@@ -30,10 +29,6 @@ coreml = [
 cuda = ["ort/cuda"]
 migraphx = ["ort/migraphx"]
 load-dynamic = ["ort/load-dynamic", "dep:libloading"]
-
-intel-mkl = ["dep:ndarray-linalg-mkl"]
-openblas-static = ["dep:ndarray-linalg-static"]
-openblas-system = ["dep:ndarray-linalg-system"]
 
 _metrics = []
 
@@ -46,9 +41,6 @@ hf-hub = { version = "0.5", optional = true, default-features = false }
 # math
 kodama = "0.3.0"
 ndarray = { version = "0.17.2", features = ["matrixmultiply-threading"] }
-ndarray-linalg-mkl = { package = "ndarray-linalg", version = "0.18.1", features = ["intel-mkl-static"], optional = true }
-ndarray-linalg-static = { package = "ndarray-linalg", version = "0.18.1", features = ["openblas-static"], optional = true }
-ndarray-linalg-system = { package = "ndarray-linalg", version = "0.18.1", features = ["openblas-system"], optional = true }
 ndarray-npy = "0.10.0"
 
 ort = { version = "2.0.0-rc.13", features = ["ndarray"] }
@@ -63,12 +55,6 @@ thiserror = "2.0.18"
 # concurrency
 crossbeam-channel = "0.5"
 rayon = "1.11.0"
-
-[target.'cfg(target_arch = "x86_64")'.dependencies]
-ndarray-linalg-default = { package = "ndarray-linalg", version = "0.18.1", features = ["intel-mkl-static"], optional = true }
-
-[target.'cfg(not(target_arch = "x86_64"))'.dependencies]
-ndarray-linalg-default = { package = "ndarray-linalg", version = "0.18.1", features = ["openblas-static"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6", optional = true }
