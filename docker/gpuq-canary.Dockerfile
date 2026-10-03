@@ -34,15 +34,12 @@ COPY xtask/build.rs xtask/build.rs
 RUN --mount=type=cache,target=/root/.cargo/registry,id=speakrs-gpuq-canary-registry \
     --mount=type=cache,target=/root/.cargo/git,id=speakrs-gpuq-canary-git \
     --mount=type=cache,target=/build/target,id=speakrs-gpuq-canary-target \
-    cargo build --locked --release -p xtask --features cuda --bin speakrs-bm \
+    cargo build --locked --release -p xtask --no-default-features --features cuda --bin speakrs-bm \
     && cp target/release/speakrs-bm /tmp/speakrs-bm
 
 # the cudnn-runtime image provides the cuBLAS, cuDNN 9 and NVRTC libraries that the native
 # CUDA backend loads at run time
 FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04@sha256:0bb88834d973ca1b450fcc2a05333c6fe45510bee289912a5391274c351c4a4d AS runtime
-
-ARG S5CMD_VERSION=2.3.0
-ARG S5CMD_SHA256=81d02a17a13797dc5949adb99734ad4217d005638a7827f36d435945527b2e69
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LD_LIBRARY_PATH=/usr/local/lib:/usr/local/cuda/lib64 \
@@ -53,14 +50,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         jq \
+        git \
+        unzip \
         libopenblas0 \
-    && rm -rf /var/lib/apt/lists/* \
-    && curl -fsSL \
-        "https://github.com/peak/s5cmd/releases/download/v${S5CMD_VERSION}/s5cmd_${S5CMD_VERSION}_linux_amd64.deb" \
-        -o /tmp/s5cmd.deb \
-    && echo "${S5CMD_SHA256}  /tmp/s5cmd.deb" | sha256sum -c - \
-    && dpkg -i /tmp/s5cmd.deb \
-    && rm /tmp/s5cmd.deb
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /tmp/speakrs-bm /usr/local/bin/speakrs-bm
 COPY docker/gpuq-workload.sh /usr/local/bin/speakrs-gpuq-workload

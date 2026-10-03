@@ -2,6 +2,8 @@
 
 ## [unreleased]
 
+- Run the GPU benchmark without S3 credentials: fetch public models and datasets, keep results locally, and print DER and RTFx in the captured log
+
 - Run `ExecutionMode::Cuda` and `CudaFast` on a native NVIDIA backend instead of ONNX Runtime (breaking): the `cuda` feature no longer enables ONNX Runtime, and builds without a CUDA toolkit because it loads the driver, cuBLAS, and cuDNN 9 at run time; it needs a Turing (compute capability 7.5) or newer GPU. The filterbank, ResNet34 embedding, and segmentation run on the GPU with cuBLAS, cuDNN, and speakrs kernels, and the filterbank features stay on the device
 - Load `segmentation-3.0.safetensors` and `wespeaker-multimask-tail.safetensors` in CUDA modes instead of ONNX models (breaking); `ModelManager` downloads only those, the PLDA files, and the embedding metadata for CUDA modes, `scripts/cuda/export_weights.py --runtime-assets <dir>` exports them, and a missing file is a `ModelLoadError::MissingCudaWeights` or `CudaAssetsUnavailable` that names the export command
 - Add CUDA options to `RuntimeConfig`: `cuda_segmentation_math` (`CudaMath::Fp32` by default; TF32 worsened one VoxConverse-dev file's DER by 4.5 points) and `cuda_embedding_math` (`CudaMath::Tf32` by default, DER-neutral on VoxConverse-dev), `cuda_lstm_algorithm` (`CudaLstmAlgorithm::PersistStaticSmallH` by default; `PersistDynamic` falls back to `Standard` with a warning when NVRTC is missing), and `cuda_graphs` (`CudaGraphs::Enabled` by default); the filterbank always runs in FP32
