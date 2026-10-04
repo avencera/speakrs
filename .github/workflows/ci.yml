@@ -2,9 +2,7 @@ name: CI
 
 on:
   workflow_dispatch: {}
-  push:
-    branches:
-      - master
+  push: {}
   pull_request:
     branches:
       - master
@@ -304,6 +302,12 @@ jobs:
       - name: Check committed CUDA PTX against the kernel sources
         if: matrix.name == 'Linux x86_64'
         run: cargo xtask cuda-kernels check
+
+      - name: Check production CUDA qualification
+        if: matrix.name == 'Linux x86_64'
+        run: |
+          python3 scripts/cuda/qualify/qualified.py check
+          python3 -m unittest discover -s tests/cuda_qualify -p 'test_qualified.py'
 
   no-default-features:
     name: Test no-default features (Linux x86_64)

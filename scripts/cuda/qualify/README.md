@@ -2,8 +2,9 @@
 
 The harness decides whether a custom kernel may replace a cuDNN or cuBLAS call at one of
 three boundaries: the 14 eligible ResNet 3x3 convolutions, the Sinc producer, and the
-complete four-layer bidirectional LSTM stack. Only `accepts_replacement: true` in a
-result authorizes a replacement.
+complete four-layer bidirectional LSTM stack. An accepted qualification record
+authorizes a replacement. The acceptance command below checks a normal pass or the
+strict Library-noise rule.
 
 ## Running
 
@@ -540,3 +541,60 @@ The runtime defaults are segmentation FP32, embedding TF32,
 `CudaLstmAlgorithm::PersistStaticSmallH`, and enabled CUDA graphs. The frozen control
 archive retains the exact source used for the original qualification; it is not
 rewritten during integration.
+
+## Production qualification manifest
+
+CI runs `python3 scripts/cuda/qualify/qualified.py check` on every push. This CPU-only
+check binds each `implementation::PRODUCTION` candidate area to `QUALIFIED.json`.
+It checks every shipped PTX tier, its area `.manifest`, all candidate host and
+kernel area source modules, the shared `candidate.rs` execution helpers, and the
+exact coverage declared in the code. Added or removed files and missing production entries fail. Unfamiliar coverage syntax fails
+closed and needs a checker update.
+
+A kernel change needs a new qualification record, then acceptance, then a manifest
+commit:
+
+```sh
+cargo xtask cuda-qualify <resnet|lstm|sincnet> Oxide
+python3 scripts/cuda/qualify/qualified.py accept /archive/qualify-<area>-Oxide-<run>.json
+python3 scripts/cuda/qualify/qualified.py check
+python3 scripts/cuda/qualify/lock.py
+git add scripts/cuda/qualify/QUALIFIED.json scripts/cuda/qualify/LOCK
+```
+
+The accept command also reads `.json.gz` archives. It verifies that the record's
+loaded candidate PTX hashes match every shipped tier and that recorded coverage
+matches the code. It stores the record filename and SHA-256 of its exact file bytes,
+the original qualification lock digest, source hashes, coverage and verdict basis.
+The original lock digest is historical evidence; it does not claim that the current
+harness has the same digest. A manifest update changes the current lock, so re-lock
+after acceptance. Do not rewrite the frozen Library control or the old records.
+
+Each tier must first contain complete phase evidence and a completed harness verdict.
+Acceptance then requires `accepts_replacement: true` with no failed checks, or this
+rule: all non-passing checks must be speed checks blocked only by Library process spread,
+with no hard failures. For each blocked case, the smaller of the two Library over
+candidate speedups must be at least `1 + 3 * max(Library spread, spread bound)`.
+The command recomputes the spread and both speedups from the four recorded medians.
+The manifest retains the table of blocked cases and their margins. The qualification
+measurement gates remain unchanged; this command records the acceptance decision.
+
+### Retained qualification records
+
+The initial entries use these outside-repository archives under
+`~/code/research/cuda-kernel-opportunities/speakrs-native-cuda-records-2026-10-04/qualification/`:
+
+| Area | Archive | Verdict basis | Original lock prefix |
+| --- | --- | --- | --- |
+| resnet | `k1/qualify-resnet-Oxide-20261004T064208.284837Z.json.gz` | Library-noise rule, 20 blocked cases | `368389d2` |
+| lstm | `k2/qualify-lstm-Oxide-20261004T095844.546766Z.json.gz` | Library-noise rule, 3 blocked cases | `4bb7818f` |
+| sincnet | `k3/qualify-sincnet-Oxide-20261004T093054.587886Z.json.gz` | `accepts_replacement` | `368389d2` |
+
+**Source evidence gap:** schema-3 records contain loaded PTX hashes and coverage, but
+not host-source, kernel-source, or PTX build-manifest hashes. The initial manifest
+captures these hashes at acceptance, including the device-capacity fallback change.
+These hashes prevent later unrecorded changes; they do not prove that the old run
+used the same source or build-manifest bytes. Keep this gap visible in each entry. Do not treat a source-only acceptance of
+an old record as a new qualification. Future host changes need a new run under the
+updated harness, as do kernel and PTX changes. The archived PTX hashes match the
+initial shipped files exactly.
