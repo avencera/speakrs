@@ -1,6 +1,7 @@
 pub mod benchmark;
 pub mod compare;
 pub mod cuda_kernels;
+pub mod cuda_qualify;
 pub mod diarize;
 pub mod dstack;
 pub mod fixtures;

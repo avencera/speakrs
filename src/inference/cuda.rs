@@ -17,10 +17,15 @@
 
 mod blas;
 mod buffer;
+// kernel workers' candidates consume this interface; until one lands, parts of it
+// and the candidate PTX areas are unused
+#[allow(dead_code)]
+mod candidate;
 mod dnn;
 mod embedding;
 mod error;
 mod fbank;
+mod implementation;
 mod kernels;
 mod math;
 mod options;
@@ -32,6 +37,8 @@ mod session;
 mod tier;
 mod weights;
 
+#[cfg(test)]
+mod test_support;
 #[cfg(test)]
 mod tests;
 

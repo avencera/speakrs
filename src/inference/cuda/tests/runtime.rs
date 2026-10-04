@@ -411,3 +411,40 @@ fn write_safetensors(name: &str, weight: &[f32]) -> PathBuf {
     std::fs::write(&path, bytes).expect("write safetensors fixture");
     path
 }
+
+#[test]
+fn cooperative_capacity_is_occupancy_times_sms() -> Result<(), CudaError> {
+    let Some(runtime) = runtime("cooperative_capacity_is_occupancy_times_sms") else {
+        return Ok(());
+    };
+    let kernels = runtime.load_kernels(super::super::KernelModule::Segmentation)?;
+    let function = kernels.function("segmentation_bias_leaky")?;
+    let sms = runtime.multiprocessor_count()?;
+    let per_sm = function.occupancy_max_active_blocks_per_multiprocessor(256, 0, None)?;
+    let capacity = runtime.cooperative_capacity(&function, 256, 0)?;
+    eprintln!("cooperative capacity: {capacity} blocks = {per_sm} per SM x {sms} SMs");
+
+    assert!(runtime.supports_cooperative_launch()?);
+    assert!(capacity > 0);
+    assert_eq!(capacity, per_sm as usize * sms);
+    Ok(())
+}
+
+#[test]
+fn concurrent_cooperative_capacity_fits_within_single_grid_capacity() -> Result<(), CudaError> {
+    let Some(runtime) = runtime("concurrent_cooperative_capacity_fits_within_single_grid_capacity")
+    else {
+        return Ok(());
+    };
+    let kernels = runtime.load_kernels(super::super::KernelModule::Segmentation)?;
+    let function = kernels.function("segmentation_bias_leaky")?;
+    let capacity = runtime.cooperative_capacity(&function, 256, 0)?;
+    let concurrent = runtime.concurrent_cooperative_capacity(&function, 256, 0)?;
+    eprintln!("concurrent cooperative capacity: {concurrent:?} of {capacity} blocks");
+
+    // an SM-count affinity can only lower the joint budget; without one, as on the
+    // qualification box, it equals the single-grid capacity
+    let concurrent = concurrent.expect("primary context reports its SM limit");
+    assert!(concurrent > 0 && concurrent <= capacity);
+    Ok(())
+}

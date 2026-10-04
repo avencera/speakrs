@@ -1,4 +1,5 @@
 use super::super::dnn::Conv2d;
+use super::super::implementation::{Choice, production};
 use super::super::{CudaError, CudaMath, CudaRuntime, DeviceTensor, SafetensorsFile};
 
 /// Channels of the stem convolution
@@ -56,7 +57,16 @@ pub(super) struct ConvLayer {
     shape: ConvShape,
     /// index of this layer's shape in [`Trunk::shapes`], which is also the index of
     /// its plan in an embedding batch
-    plan_slot: usize,
+    plan: LayerPlan,
+}
+
+/// Per-layer ownership is separate from the shared cuDNN shape plans
+#[derive(Debug)]
+struct LayerPlan {
+    library_slot: usize,
+    #[cfg(test)]
+    override_choice: Option<Choice>,
+    name: String,
 }
 
 impl ConvLayer {
@@ -96,7 +106,12 @@ impl ConvLayer {
             weight,
             bias,
             shape,
-            plan_slot,
+            plan: LayerPlan {
+                library_slot: plan_slot,
+                #[cfg(test)]
+                override_choice: None,
+                name: prefix.to_owned(),
+            },
         })
     }
 
@@ -106,7 +121,23 @@ impl ConvLayer {
     }
 
     pub(super) fn plan_slot(&self) -> usize {
-        self.plan_slot
+        self.plan.library_slot
+    }
+
+    pub(super) fn choice(&self, batch: usize, math: CudaMath) -> Choice {
+        #[cfg(test)]
+        if let Some(choice) = self.plan.override_choice {
+            return choice;
+        }
+
+        let choice = production(self.name(), batch, math);
+        #[cfg(test)]
+        let choice = super::super::test_support::default_choice(choice);
+        choice
+    }
+
+    pub(super) fn name(&self) -> &str {
+        &self.plan.name
     }
 
     pub(super) fn weight(&self) -> &DeviceTensor {
@@ -132,6 +163,9 @@ impl ConvLayer {
         self.shape.out_channels * h * w
     }
 }
+
+#[cfg(test)]
+mod test_support;
 
 /// A ResNet basic block: two 3x3 convolutions and a residual connection, with a
 /// strided 1x1 shortcut when the block changes resolution

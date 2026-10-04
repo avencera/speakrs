@@ -13,6 +13,7 @@
 //! shape it has run, so buffers, plans and captured graphs are allocated once per
 //! batch class and reused
 
+mod dispatch;
 mod graph;
 mod kernels;
 mod rnn;
@@ -28,8 +29,10 @@ use self::shape::{
     CONV_KERNEL, FEATURES, HIDDEN, LEAKY_SLOPE, LINEAR, NORM_EPSILON, POOL, SINC_CHANNELS,
     SINC_KERNEL, SINC_STRIDE,
 };
-use self::weights::SegmentationWeights;
+use self::weights::{LstmLayer, SegmentationWeights};
+use super::candidate::{LstmOxide, SincCandidate, SincOutput, SincOxide};
 use super::dnn::{Conv2d, ConvPlan, ConvPlanner};
+use super::implementation::{Choice, production};
 use super::{
     CudaError, CudaLstmAlgorithm, CudaMath, CudaRuntime, DeviceTensor, PtxTier, SafetensorsFile,
     Sgemm,
@@ -37,8 +40,6 @@ use super::{
 
 use self::shape::CLASSES;
 pub use self::shape::SegmentationShape;
-#[cfg(test)]
-use self::shape::WINDOW_SAMPLES;
 
 /// How the segmentation forward pass runs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -63,66 +64,38 @@ pub struct CudaSegmentation {
 }
 
 #[cfg(test)]
-/// A tensor of one forward pass, kept in its [`SegmentationWorkspace`]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SegmentationTensor {
-    /// `[batch, 1, samples]` waveforms
-    Input,
-    /// `[batch, 1, samples]` after the waveform instance normalization
-    WaveNorm,
-    /// `[batch, 80, sinc]` SincNet convolution output, before `abs`
-    SincConv,
-    /// `[batch, 80, pool0]` after pool, normalization and LeakyReLU
-    Stage0,
-    /// `[batch, 60, conv1]` first learned convolution, without its bias
-    Conv1,
-    /// `[batch, 60, pool1]` after bias, pool, normalization and LeakyReLU
-    Stage1,
-    /// `[batch, 60, conv2]` second learned convolution, without its bias
-    Conv2,
-    /// `[batch, frames, 60]` LSTM input
-    LstmInput,
-    /// `[batch, frames, 256]` output of the last LSTM layer
-    LstmOutput,
-    /// `[batch, frames, 128]` after the first linear layer and LeakyReLU
-    Linear0,
-    /// `[batch, frames, 128]` after the second linear layer and LeakyReLU
-    Linear1,
-    /// `[batch, frames, 7]` powerset log-probabilities
-    Output,
-}
-
-#[cfg(test)]
-impl SegmentationTensor {
-    /// Every tensor, in forward order
-    pub const ALL: [Self; 12] = [
-        Self::Input,
-        Self::WaveNorm,
-        Self::SincConv,
-        Self::Stage0,
-        Self::Conv1,
-        Self::Stage1,
-        Self::Conv2,
-        Self::LstmInput,
-        Self::LstmOutput,
-        Self::Linear0,
-        Self::Linear1,
-        Self::Output,
-    ];
-}
+pub use test_support::SegmentationTensor;
 
 /// Buffers, convolution plans, LSTM plan and captured graph for one batch shape
 #[derive(Debug)]
 pub struct SegmentationWorkspace {
     shape: SegmentationShape,
-    sinc: ConvPlan,
+    sinc: SincPlan,
     conv1: ConvPlan,
     conv2: ConvPlan,
     /// cuDNN workspace shared by the three convolutions, sized for the largest
     conv_workspace: CudaSlice<u8>,
-    lstm: LstmPlan,
+    lstm: LstmStage,
     tensors: Tensors,
     graph: Option<CapturedGraph>,
+}
+
+/// Implementation choice owned by the Sinc layer, not by its caller
+#[derive(Debug)]
+struct SincPlan {
+    library: ConvPlan,
+    choice: Choice,
+    /// the candidate plan when the `Oxide` coverage declares this batch and mode
+    candidate: Option<SincOxide>,
+}
+
+/// Implementation choice owned by the LSTM stack
+#[derive(Debug)]
+struct LstmStage {
+    library: LstmPlan,
+    choice: Choice,
+    /// the candidate plan when the `Oxide` coverage declares this batch and mode
+    candidate: Option<LstmOxide>,
 }
 
 #[derive(Debug)]
@@ -130,6 +103,8 @@ struct Tensors {
     input: DeviceTensor,
     wave_norm: DeviceTensor,
     sinc: DeviceTensor,
+    /// `[batch, 80, pool0]` written by a Sinc candidate that pools, allocated only for one
+    sinc_pooled: Option<DeviceTensor>,
     stage0: DeviceTensor,
     conv1: DeviceTensor,
     stage1: DeviceTensor,
@@ -160,12 +135,11 @@ struct Network {
     linear: [[CudaSlice<f32>; 2]; 3],
     /// Zero bias for the stages without a convolution bias
     zero_bias: CudaSlice<f32>,
+    /// Host LSTM weights for candidate plans
+    lstm_weights: Vec<LstmLayer>,
 }
 
 impl CudaSegmentation {
-    #[cfg(test)]
-    /// Samples in the 10 s, 16 kHz window speakrs segments
-    pub const WINDOW_SAMPLES: usize = WINDOW_SAMPLES;
     /// Powerset classes per output frame (3 speakers, at most 2 active)
     pub const CLASSES: usize = CLASSES;
 
@@ -187,12 +161,6 @@ impl CudaSegmentation {
         self.network.kernels.tier()
     }
 
-    #[cfg(test)]
-    /// The generated `[80, 1, 251]` SincNet filters, for parity checks
-    pub fn sinc_filters(&self) -> &CudaSlice<f32> {
-        &self.network.sinc_filters
-    }
-
     /// The workspace for `batch` windows of `samples` samples, allocated on first use
     pub fn workspace(
         &mut self,
@@ -202,15 +170,6 @@ impl CudaSegmentation {
     ) -> Result<&mut SegmentationWorkspace, CudaError> {
         let index = self.workspace_index(runtime, batch, samples)?;
         Ok(&mut self.workspaces[index])
-    }
-
-    #[cfg(test)]
-    /// The workspace for `batch` windows of `samples` samples, if one was allocated;
-    /// its tensors hold the last forward pass with that shape
-    pub fn find_workspace(&self, batch: usize, samples: usize) -> Option<&SegmentationWorkspace> {
-        self.workspaces
-            .iter()
-            .find(|workspace| workspace.matches(batch, samples))
     }
 
     /// Uploads `batch` windows (`[batch, samples]`, `samples = input.len() / batch`),
@@ -235,22 +194,6 @@ impl CudaSegmentation {
         workspace.upload_input(runtime, input)?;
         self.network.forward(runtime, workspace)?;
         workspace.download_output(runtime)
-    }
-
-    #[cfg(test)]
-    /// Runs the model on the input already uploaded to the `(batch, samples)`
-    /// workspace and leaves the result on the device
-    ///
-    /// With [`SegmentationOptions::cuda_graph`] the first call per workspace captures
-    /// a graph and later calls replay it
-    pub fn forward(
-        &mut self,
-        runtime: &CudaRuntime,
-        batch: usize,
-        samples: usize,
-    ) -> Result<(), CudaError> {
-        let index = self.workspace_index(runtime, batch, samples)?;
-        self.network.forward(runtime, &mut self.workspaces[index])
     }
 
     fn workspace_index(
@@ -309,6 +252,7 @@ impl Network {
                 pair(&linear2.weight, &linear2.bias)?,
             ],
             zero_bias: stream.alloc_zeros(SINC_CHANNELS)?,
+            lstm_weights: weights.lstm.to_vec(),
         })
     }
 
@@ -341,6 +285,7 @@ impl Network {
             input: tensor(&[batch, 1, shape.samples])?,
             wave_norm: tensor(&[batch, 1, shape.samples])?,
             sinc: tensor(&[batch, SINC_CHANNELS, shape.sinc])?,
+            sinc_pooled: None,
             stage0: tensor(&[batch, SINC_CHANNELS, shape.pool0])?,
             conv1: tensor(&[batch, FEATURES, shape.conv1])?,
             stage1: tensor(&[batch, FEATURES, shape.pool1])?,
@@ -361,14 +306,35 @@ impl Network {
             .max()
             .unwrap_or(0);
 
+        let sinc_choice = production(dispatch::SINC_LAYER, batch, math);
+        let lstm_choice = production(dispatch::LSTM_LAYER, batch, math);
+        #[cfg(test)]
+        let (sinc_choice, lstm_choice) = (
+            super::test_support::default_choice(sinc_choice),
+            super::test_support::default_choice(lstm_choice),
+        );
+        let mut tensors = tensors;
+        let sinc_candidate = self.plan_sinc(runtime, shape, sinc_choice)?;
+        if sinc_candidate.is_some() {
+            tensors.sinc_pooled = pooled_tensor(runtime, shape)?;
+        }
+
         Ok(SegmentationWorkspace {
             shape,
-            sinc,
+            sinc: SincPlan {
+                library: sinc,
+                choice: sinc_choice,
+                candidate: sinc_candidate,
+            },
             conv1,
             conv2,
             // at least one byte, because CUDA cannot allocate zero bytes
             conv_workspace: stream.alloc_zeros(workspace_bytes.max(1))?,
-            lstm: self.lstm.plan(runtime, batch, shape.frames)?,
+            lstm: LstmStage {
+                library: self.lstm.plan(runtime, batch, shape.frames)?,
+                choice: lstm_choice,
+                candidate: self.plan_lstm(runtime, shape, lstm_choice)?,
+            },
             tensors,
             graph: None,
         })
@@ -441,26 +407,17 @@ impl Network {
             t.wave_norm.data_mut(),
         )?;
 
-        // SincNet: abs of the band-pass outputs, then pool, normalize and activate
-        sinc.forward(
-            &mut conv_workspace,
-            &t.wave_norm.data().as_view(),
-            &self.sinc_filters.as_view(),
-            &mut t.sinc.data_mut().as_view_mut(),
-        )?;
-        let stage0 = PoolNorm {
-            abs_input: true,
-            ..norm(SINC_CHANNELS, shape.sinc, POOL)
-        };
-        let [gamma, beta] = &self.norms[0];
-        k.pool_norm(
+        self.sinc_forward(
             runtime,
-            stage0,
-            t.sinc.data(),
-            zero_bias,
-            gamma,
-            beta,
-            t.stage0.data_mut(),
+            shape,
+            sinc,
+            &mut conv_workspace,
+            dispatch::SincIo {
+                input: t.wave_norm.data(),
+                raw: t.sinc.data_mut(),
+                pooled: t.sinc_pooled.as_mut().map(DeviceTensor::data_mut),
+                stage0: t.stage0.data_mut(),
+            },
         )?;
 
         // the convolution bias is added inside the pooling kernel
@@ -506,8 +463,7 @@ impl Network {
             t.lstm_input.data_mut(),
         )?;
 
-        self.lstm
-            .forward(runtime, lstm, t.lstm_input.data(), t.lstm_output.data_mut())?;
+        self.lstm_forward(runtime, lstm, t.lstm_input.data(), t.lstm_output.data_mut())?;
 
         let rows = batch * shape.frames;
         let gemm = |index: usize| Sgemm {
@@ -529,12 +485,6 @@ impl Network {
 }
 
 impl SegmentationWorkspace {
-    #[cfg(test)]
-    /// The activation lengths of this workspace
-    pub fn shape(&self) -> SegmentationShape {
-        self.shape
-    }
-
     fn matches(&self, batch: usize, samples: usize) -> bool {
         self.shape.batch == batch && self.shape.samples == samples
     }
@@ -548,39 +498,21 @@ impl SegmentationWorkspace {
     pub fn download_output(&self, runtime: &CudaRuntime) -> Result<Vec<f32>, CudaError> {
         self.tensors.output.download(runtime.stream())
     }
+}
 
-    #[cfg(test)]
-    /// One tensor of the last forward pass, for parity checks
-    pub fn tensor(&self, tensor: SegmentationTensor) -> &DeviceTensor {
-        let t = &self.tensors;
-        match tensor {
-            SegmentationTensor::Input => &t.input,
-            SegmentationTensor::WaveNorm => &t.wave_norm,
-            SegmentationTensor::SincConv => &t.sinc,
-            SegmentationTensor::Stage0 => &t.stage0,
-            SegmentationTensor::Conv1 => &t.conv1,
-            SegmentationTensor::Stage1 => &t.stage1,
-            SegmentationTensor::Conv2 => &t.conv2,
-            SegmentationTensor::LstmInput => &t.lstm_input,
-            SegmentationTensor::LstmOutput => &t.lstm_output,
-            SegmentationTensor::Linear0 => &t.linear0,
-            SegmentationTensor::Linear1 => &t.linear1,
-            SegmentationTensor::Output => &t.output,
-        }
+#[cfg(test)]
+#[path = "../../../tests/cuda_qualify/segmentation.rs"]
+pub(crate) mod test_support;
+
+/// The pooled Sinc tensor, for a candidate whose declared output is pooled
+fn pooled_tensor(
+    runtime: &CudaRuntime,
+    shape: SegmentationShape,
+) -> Result<Option<DeviceTensor>, CudaError> {
+    if SincOxide::OUTPUT != SincOutput::Pooled {
+        return Ok(None);
     }
 
-    #[cfg(test)]
-    /// Device bytes of the activation buffers
-    pub fn activation_bytes(&self) -> usize {
-        SegmentationTensor::ALL
-            .into_iter()
-            .map(|tensor| self.tensor(tensor).len() * size_of::<f32>())
-            .sum()
-    }
-
-    #[cfg(test)]
-    /// Device bytes of the cuDNN RNN workspace
-    pub fn lstm_workspace_bytes(&self) -> usize {
-        self.lstm.workspace_bytes()
-    }
+    let dims = [shape.batch, SINC_CHANNELS, shape.pool0];
+    Ok(Some(DeviceTensor::zeros(runtime.stream(), &dims)?))
 }

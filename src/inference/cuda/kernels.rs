@@ -40,6 +40,17 @@ pub enum KernelModule {
     Embedding,
     /// Segmentation kernels
     Segmentation,
+    /// Candidate kernels for the ResNet convolutions, kept apart from the Library-owned
+    /// areas so the harness can tell them apart
+    // the candidate areas are unused until a candidate plan loads one
+    #[allow(dead_code)]
+    Resnet,
+    /// Candidate kernels for the LSTM stack
+    #[allow(dead_code)]
+    Lstm,
+    /// Candidate kernels for the Sinc producer
+    #[allow(dead_code)]
+    Sincnet,
 }
 
 impl KernelModule {
@@ -51,6 +62,9 @@ impl KernelModule {
             Self::Fbank => "fbank",
             Self::Embedding => "embedding",
             Self::Segmentation => "segmentation",
+            Self::Resnet => "resnet",
+            Self::Lstm => "lstm",
+            Self::Sincnet => "sincnet",
         }
     }
 
@@ -67,6 +81,9 @@ impl KernelModule {
             Self::Fbank => AreaPtx::baseline(include_str!("ptx/fbank.sm75.ptx")),
             Self::Embedding => AreaPtx::baseline(include_str!("ptx/embedding.sm75.ptx")),
             Self::Segmentation => AreaPtx::baseline(include_str!("ptx/segmentation.sm75.ptx")),
+            Self::Resnet => AreaPtx::baseline(include_str!("ptx/resnet.sm75.ptx")),
+            Self::Lstm => AreaPtx::baseline(include_str!("ptx/lstm.sm75.ptx")),
+            Self::Sincnet => AreaPtx::baseline(include_str!("ptx/sincnet.sm75.ptx")),
         }
     }
 }

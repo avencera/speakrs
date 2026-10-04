@@ -43,23 +43,11 @@ impl SafetensorsFile {
         })
     }
 
-    #[cfg(test)]
-    /// The file this was read from
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     /// Tensor names in the file, sorted
     pub fn names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.metadata.tensors().into_keys().collect();
         names.sort();
         names
-    }
-
-    #[cfg(test)]
-    /// The stored shape of a tensor, if the file has it
-    pub fn shape(&self, name: &str) -> Option<&[usize]> {
-        self.metadata.info(name).map(|info| info.shape.as_slice())
     }
 
     /// Uploads tensor `name` after checking that it is FP32 with exactly `expected_shape`
@@ -105,3 +93,9 @@ impl SafetensorsFile {
         Ok(chunks.iter().copied().map(f32::from_le_bytes).collect())
     }
 }
+
+#[cfg(test)]
+mod test_support;
+
+#[cfg(test)]
+pub(crate) use test_support::uniform;

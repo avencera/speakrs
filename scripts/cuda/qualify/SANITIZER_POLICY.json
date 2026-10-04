@@ -1,0 +1,12 @@
+{
+  "library_control": "numeric, timing, profile and the positive controls; no sanitizer on library kernels",
+  "exception": "LSTM input-projection GEMMs only: every shape the locked projection helper can issue at a harness batch (m = batch * 589 for batch 1, 7, 32, 33, 64; n = 128, 256, 384, 512; k = 60, 256), both math modes, unfiltered; completion, zero findings and every shape marker required",
+  "candidate": "memcheck, racecheck and initcheck with --kernel-name kne=<entry> for every .entry of the PTX bytes the candidate process loaded; declared batches (b7 and b33 when every batch is declared), both math modes; completion and zero findings required",
+  "include_filter": "exact mangled entry names from the loaded PTX bytes; vendor kernels are outside the filter by construction, not by a name denylist",
+  "positive_controls": "every Library control and candidate run proves the exact include filter: qualify_oob must report Invalid __global__ write under memcheck, qualify_race a shared-memory hazard under racecheck, and qualify_round on uninitialized memory an uninitialized global read under initcheck; each must exit 86",
+  "mutant": "not run; a mutant proves only that its exact intended check and reason reject a planted defect, and runs only the phases that check reads",
+  "shared_memory_initialization": "not covered by initcheck; the numeric phase poisons the largest dynamic shared allocation on every SM with NaN before candidate launches (best effort), and shared-memory initialization is an explicit kernel-audit item",
+  "timeout_seconds": 1200,
+  "timeout_kill_grace_seconds": 10,
+  "timeout_retry": "ResNet candidates only: one process per declared convolution and batch, both math modes, complete union required"
+}

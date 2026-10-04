@@ -83,3 +83,6 @@ impl Drop for EventTrackingPause<'_> {
         }
     }
 }
+
+#[cfg(test)]
+mod test_support;

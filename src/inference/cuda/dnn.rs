@@ -133,6 +133,8 @@ impl ConvPlan {
         w: &CudaView<'_, f32>,
         y: &mut CudaViewMut<'_, f32>,
     ) -> Result<(), CudaError> {
+        #[cfg(test)]
+        let _library = super::test_support::call("cudnn.conv");
         self.check(workspace, x, w, y)?;
         let forward = ConvForward {
             conv: &self.conv,
@@ -171,6 +173,8 @@ impl ConvPlan {
         residual: Residual<'_, '_>,
         y: &mut CudaViewMut<'_, f32>,
     ) -> Result<(), CudaError> {
+        #[cfg(test)]
+        let _library = super::test_support::call("cudnn.conv");
         self.check(workspace, x, w, y)?;
         check_len("conv2d bias", self.spec.out_channels, bias.len())?;
         let (z, scale) = match residual {

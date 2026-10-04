@@ -60,6 +60,14 @@ enum Command {
         #[command(subcommand)]
         cmd: CudaKernelsCmd,
     },
+    /// Qualify one CUDA layer target against the locked harness
+    CudaQualify {
+        /// Target: resnet, lstm or sincnet
+        #[arg(value_parser = ["resnet", "lstm", "sincnet"])]
+        target: String,
+        /// Internal implementation name; Library is the control
+        implementation: String,
+    },
     /// Run speaker diarization on WAV files
     Diarize {
         #[arg(long, default_value = "cpu", value_parser = clap::value_parser!(DiarizeMode))]
@@ -125,6 +133,10 @@ impl Command {
             Self::Dstack { cmd } => cmd.run(),
             Self::Dataset { cmd } => cmd.run(),
             Self::CudaKernels { cmd } => cmd.run(),
+            Self::CudaQualify {
+                target,
+                implementation,
+            } => commands::cuda_qualify::run(&target, &implementation),
             Self::Diarize {
                 mode,
                 models_dir,

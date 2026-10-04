@@ -2177,6 +2177,7 @@ dependencies = [
  "rayon",
  "safetensors",
  "serde_json",
+ "sha2",
  "thiserror",
  "tracing",
  "tracing-subscriber",

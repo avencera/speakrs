@@ -154,6 +154,9 @@ impl CudaRuntime {
             "Loading CUDA PTX variant"
         );
 
+        // the harness allow-list comes from the exact bytes handed to the driver
+        #[cfg(test)]
+        super::test_support::record_module(module.name(), &tier.to_string(), ptx);
         let loaded = self
             .context
             .load_module(Ptx::from_src(ptx))
@@ -165,11 +168,146 @@ impl CudaRuntime {
         Ok(LoadedKernels::new(module, tier, loaded))
     }
 
+    /// Streaming multiprocessors this context may use: the device's, or the client's
+    /// share under MPS active-thread limits
+    pub fn multiprocessor_count(&self) -> Result<usize, CudaError> {
+        // under per-context MPS partitioning the attribute follows the current context
+        self.context.bind_to_thread()?;
+        let count = self.context.attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+        )?;
+        Ok(usize::try_from(count).unwrap_or(0))
+    }
+
+    /// Whether the device supports cooperative kernel launches
+    pub fn supports_cooperative_launch(&self) -> Result<bool, CudaError> {
+        let supported = self.context.attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COOPERATIVE_LAUNCH,
+        )?;
+        Ok(supported != 0)
+    }
+
+    /// Blocks of `function` that one cooperative launch keeps resident at once: the
+    /// occupancy API's active blocks per SM for `block_threads` threads and
+    /// `dynamic_smem` bytes of dynamic shared memory, times the SM count, or 0 when the
+    /// device has no cooperative launch
+    ///
+    /// Grids that run concurrently, for example on a side stream, share this capacity,
+    /// so their sum must fit; size them with [`Self::concurrent_cooperative_capacity`]
+    pub fn cooperative_capacity(
+        &self,
+        function: &cudarc::driver::CudaFunction,
+        block_threads: u32,
+        dynamic_smem: usize,
+    ) -> Result<usize, CudaError> {
+        let per_sm = self.cooperative_blocks_per_sm(function, block_threads, dynamic_smem)?;
+        Ok(per_sm * self.multiprocessor_count()?)
+    }
+
+    /// Blocks of `function` that cooperative grids running at the same time can keep
+    /// resident together in this context, or `None` when the context's SM limit is
+    /// unknown, in which case grids must not run concurrently
+    ///
+    /// The driver checks co-residency per cooperative launch, not for grids launched on
+    /// different streams, and Ampere and Ada start a cooperative grid before all its
+    /// blocks fit. MPS active-thread limits already shrink the SM count attribute, but a
+    /// context created with an SM-count execution affinity is limited further, so the
+    /// joint budget also honors that limit. Green contexts, static MPS SM partitions and
+    /// other spinning work on the device, such as a second pipeline, are not covered
+    pub fn concurrent_cooperative_capacity(
+        &self,
+        function: &cudarc::driver::CudaFunction,
+        block_threads: u32,
+        dynamic_smem: usize,
+    ) -> Result<Option<usize>, CudaError> {
+        let per_sm = self.cooperative_blocks_per_sm(function, block_threads, dynamic_smem)?;
+        let device_sms = self.multiprocessor_count()?;
+        let budget_sms = match self.affinity_sm_limit()? {
+            SmLimit::Unlimited => device_sms,
+            SmLimit::Limited(sms) => sms.min(device_sms),
+            SmLimit::Unknown => return Ok(None),
+        };
+
+        Ok(Some(per_sm * budget_sms))
+    }
+
+    /// Active blocks per SM for a cooperative launch of `function`, or 0 when the device
+    /// has no cooperative launch
+    fn cooperative_blocks_per_sm(
+        &self,
+        function: &cudarc::driver::CudaFunction,
+        block_threads: u32,
+        dynamic_smem: usize,
+    ) -> Result<usize, CudaError> {
+        if !self.supports_cooperative_launch()? {
+            return Ok(0);
+        }
+
+        let per_sm = function.occupancy_max_active_blocks_per_multiprocessor(
+            block_threads,
+            dynamic_smem,
+            None,
+        )?;
+        Ok(usize::try_from(per_sm).unwrap_or(0))
+    }
+
+    /// The SM-count execution affinity of this context
+    fn affinity_sm_limit(&self) -> Result<SmLimit, CudaError> {
+        use cudarc::driver::sys::{
+            CUexecAffinityParam, CUexecAffinityParam_st__bindgen_ty_1, CUexecAffinitySmCount,
+            CUexecAffinityType, cuCtxGetExecAffinity,
+        };
+
+        self.context.bind_to_thread()?;
+        let mut param = CUexecAffinityParam {
+            type_: CUexecAffinityType::CU_EXEC_AFFINITY_TYPE_SM_COUNT,
+            param: CUexecAffinityParam_st__bindgen_ty_1 {
+                smCount: CUexecAffinitySmCount { val: 0 },
+            },
+        };
+
+        // SAFETY: `param` is a valid out-pointer for the call, and the context is bound
+        // to this thread above; the driver writes only `param`
+        let status = unsafe {
+            cuCtxGetExecAffinity(
+                &mut param,
+                CUexecAffinityType::CU_EXEC_AFFINITY_TYPE_SM_COUNT,
+            )
+        };
+
+        match status {
+            CUresult::CUDA_SUCCESS => {
+                // SAFETY: the SM-count query fills the `smCount` member
+                let count = unsafe { param.param.smCount.val };
+                Ok(usize::try_from(count)
+                    .ok()
+                    .filter(|count| *count > 0)
+                    .map_or(SmLimit::Unknown, SmLimit::Limited))
+            }
+            // affinity is an MPS feature, so a context without it has no extra limit
+            CUresult::CUDA_ERROR_UNSUPPORTED_EXEC_AFFINITY => Ok(SmLimit::Unlimited),
+            status => {
+                debug!(?status, "Context SM limit unavailable");
+                Ok(SmLimit::Unknown)
+            }
+        }
+    }
+
     /// Blocks until all work queued on [`Self::stream`] has finished
     pub fn synchronize(&self) -> Result<(), CudaError> {
         self.stream.synchronize()?;
         Ok(())
     }
+}
+
+/// An SM-count execution-affinity limit on a context
+enum SmLimit {
+    /// The context has no SM-count affinity
+    Unlimited,
+    /// The context may use this many SMs
+    Limited(usize),
+    /// The driver didn't report the limit
+    Unknown,
 }
 
 fn set_blas_math(blas: &CudaBlas, math: CudaMath) -> Result<(), CudaError> {

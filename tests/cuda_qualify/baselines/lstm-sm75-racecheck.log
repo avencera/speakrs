@@ -1,0 +1,89 @@
+========= COMPUTE-SANITIZER
+
+running 1 test
+projection baseline mode=fp32 batch=1 m=589 n=128 k=60
+projection baseline mode=fp32 batch=1 m=589 n=256 k=60
+projection baseline mode=fp32 batch=1 m=589 n=384 k=60
+projection baseline mode=fp32 batch=1 m=589 n=512 k=60
+projection baseline mode=fp32 batch=7 m=4123 n=128 k=60
+projection baseline mode=fp32 batch=7 m=4123 n=256 k=60
+projection baseline mode=fp32 batch=7 m=4123 n=384 k=60
+projection baseline mode=fp32 batch=7 m=4123 n=512 k=60
+projection baseline mode=fp32 batch=32 m=18848 n=128 k=60
+projection baseline mode=fp32 batch=32 m=18848 n=256 k=60
+projection baseline mode=fp32 batch=32 m=18848 n=384 k=60
+projection baseline mode=fp32 batch=32 m=18848 n=512 k=60
+projection baseline mode=fp32 batch=33 m=19437 n=128 k=60
+projection baseline mode=fp32 batch=33 m=19437 n=256 k=60
+projection baseline mode=fp32 batch=33 m=19437 n=384 k=60
+projection baseline mode=fp32 batch=33 m=19437 n=512 k=60
+projection baseline mode=fp32 batch=64 m=37696 n=128 k=60
+projection baseline mode=fp32 batch=64 m=37696 n=256 k=60
+projection baseline mode=fp32 batch=64 m=37696 n=384 k=60
+projection baseline mode=fp32 batch=64 m=37696 n=512 k=60
+projection baseline mode=fp32 batch=1 m=589 n=128 k=256
+projection baseline mode=fp32 batch=1 m=589 n=256 k=256
+projection baseline mode=fp32 batch=1 m=589 n=384 k=256
+projection baseline mode=fp32 batch=1 m=589 n=512 k=256
+projection baseline mode=fp32 batch=7 m=4123 n=128 k=256
+projection baseline mode=fp32 batch=7 m=4123 n=256 k=256
+projection baseline mode=fp32 batch=7 m=4123 n=384 k=256
+projection baseline mode=fp32 batch=7 m=4123 n=512 k=256
+projection baseline mode=fp32 batch=32 m=18848 n=128 k=256
+projection baseline mode=fp32 batch=32 m=18848 n=256 k=256
+projection baseline mode=fp32 batch=32 m=18848 n=384 k=256
+projection baseline mode=fp32 batch=32 m=18848 n=512 k=256
+projection baseline mode=fp32 batch=33 m=19437 n=128 k=256
+test inference::cuda::test_support::qualify::qualification_driver has been running for over 60 seconds
+projection baseline mode=fp32 batch=33 m=19437 n=256 k=256
+projection baseline mode=fp32 batch=33 m=19437 n=384 k=256
+projection baseline mode=fp32 batch=33 m=19437 n=512 k=256
+projection baseline mode=fp32 batch=64 m=37696 n=128 k=256
+projection baseline mode=fp32 batch=64 m=37696 n=256 k=256
+projection baseline mode=fp32 batch=64 m=37696 n=384 k=256
+projection baseline mode=fp32 batch=64 m=37696 n=512 k=256
+projection baseline mode=tf32 batch=1 m=589 n=128 k=60
+projection baseline mode=tf32 batch=1 m=589 n=256 k=60
+projection baseline mode=tf32 batch=1 m=589 n=384 k=60
+projection baseline mode=tf32 batch=1 m=589 n=512 k=60
+projection baseline mode=tf32 batch=7 m=4123 n=128 k=60
+projection baseline mode=tf32 batch=7 m=4123 n=256 k=60
+projection baseline mode=tf32 batch=7 m=4123 n=384 k=60
+projection baseline mode=tf32 batch=7 m=4123 n=512 k=60
+projection baseline mode=tf32 batch=32 m=18848 n=128 k=60
+projection baseline mode=tf32 batch=32 m=18848 n=256 k=60
+projection baseline mode=tf32 batch=32 m=18848 n=384 k=60
+projection baseline mode=tf32 batch=32 m=18848 n=512 k=60
+projection baseline mode=tf32 batch=33 m=19437 n=128 k=60
+projection baseline mode=tf32 batch=33 m=19437 n=256 k=60
+projection baseline mode=tf32 batch=33 m=19437 n=384 k=60
+projection baseline mode=tf32 batch=33 m=19437 n=512 k=60
+projection baseline mode=tf32 batch=64 m=37696 n=128 k=60
+projection baseline mode=tf32 batch=64 m=37696 n=256 k=60
+projection baseline mode=tf32 batch=64 m=37696 n=384 k=60
+projection baseline mode=tf32 batch=64 m=37696 n=512 k=60
+projection baseline mode=tf32 batch=1 m=589 n=128 k=256
+projection baseline mode=tf32 batch=1 m=589 n=256 k=256
+projection baseline mode=tf32 batch=1 m=589 n=384 k=256
+projection baseline mode=tf32 batch=1 m=589 n=512 k=256
+projection baseline mode=tf32 batch=7 m=4123 n=128 k=256
+projection baseline mode=tf32 batch=7 m=4123 n=256 k=256
+projection baseline mode=tf32 batch=7 m=4123 n=384 k=256
+projection baseline mode=tf32 batch=7 m=4123 n=512 k=256
+projection baseline mode=tf32 batch=32 m=18848 n=128 k=256
+projection baseline mode=tf32 batch=32 m=18848 n=256 k=256
+projection baseline mode=tf32 batch=32 m=18848 n=384 k=256
+projection baseline mode=tf32 batch=32 m=18848 n=512 k=256
+projection baseline mode=tf32 batch=33 m=19437 n=128 k=256
+projection baseline mode=tf32 batch=33 m=19437 n=256 k=256
+projection baseline mode=tf32 batch=33 m=19437 n=384 k=256
+projection baseline mode=tf32 batch=33 m=19437 n=512 k=256
+projection baseline mode=tf32 batch=64 m=37696 n=128 k=256
+projection baseline mode=tf32 batch=64 m=37696 n=256 k=256
+projection baseline mode=tf32 batch=64 m=37696 n=384 k=256
+projection baseline mode=tf32 batch=64 m=37696 n=512 k=256
+test inference::cuda::test_support::qualify::qualification_driver ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 164 filtered out; finished in 171.87s
+
+========= RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)

@@ -171,6 +171,14 @@ pub enum CudaError {
         /// The dimension that overflowed
         value: usize,
     },
+    /// An operation was asked for a shape or option it does not support
+    #[error("{context}: {reason}")]
+    Unsupported {
+        /// Which operation refused
+        context: &'static str,
+        /// What it does not support
+        reason: String,
+    },
 }
 
 impl CudaError {

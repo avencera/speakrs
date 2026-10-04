@@ -21,6 +21,7 @@
 //! live in an [`EmbeddingBatch`], allocated once per batch class and reused, which
 //! can also hold a CUDA graph of the whole forward pass
 
+mod dispatch;
 mod kernels;
 mod trunk;
 
@@ -32,6 +33,7 @@ use tracing::debug;
 
 use self::kernels::{ChannelBias, EmbeddingKernels, PoolShape};
 use self::trunk::{ConvLayer, STEM_SLOT, Trunk};
+use super::candidate::ConvOxide;
 use super::dnn::{ConvPlan, ConvPlanner, Residual};
 use super::error::{check_len, element_count};
 use super::fbank::{FBANK_FRAMES, FBANK_MEL_BINS};
@@ -170,6 +172,7 @@ impl ResNetEmbedding {
             "embedding stem input",
             &[chunks, FBANK_MEL_BINS, FBANK_FRAMES],
         )?;
+        let candidates = dispatch::plan_candidates(runtime, &model.trunk, chunks, model.math)?;
         Ok(EmbeddingBatch {
             model: Arc::clone(model),
             chunks,
@@ -187,6 +190,7 @@ impl ResNetEmbedding {
             output: DeviceTensor::zeros(stream, &[rows, EMBEDDING_DIM])?,
             plans,
             workspace: stream.alloc_zeros(workspace_bytes.max(1))?,
+            candidates,
             graph: None,
         })
     }
@@ -218,6 +222,8 @@ pub struct EmbeddingBatch {
     plans: Vec<ConvPlan>,
     /// cuDNN workspace shared by every plan, sized for the largest
     workspace: CudaSlice<u8>,
+    /// candidate plans for the declared layers at this batch size, by layer name
+    candidates: Vec<(String, ConvOxide)>,
     graph: Option<ForwardGraph>,
 }
 
@@ -243,20 +249,6 @@ impl EmbeddingBatch {
         }
 
         self.run(runtime, &mut |_, _| Ok(()))
-    }
-
-    #[cfg(test)]
-    /// Runs the forward pass eagerly and calls `tap` with every intermediate
-    /// activation listed in [`EmbeddingTap`], in execution order
-    ///
-    /// The view is only valid during the call; download it there if needed. This
-    /// never replays a captured graph
-    pub fn forward_with_taps(
-        &mut self,
-        runtime: &CudaRuntime,
-        tap: &mut EmbeddingTapFn<'_>,
-    ) -> Result<(), CudaError> {
-        self.run(runtime, tap)
     }
 
     /// Records the batch's forward pass as a CUDA graph, which [`Self::forward`]
@@ -306,25 +298,6 @@ impl EmbeddingBatch {
         Ok(())
     }
 
-    #[cfg(test)]
-    /// Copies host fbank and masks into the batch, runs the forward pass and
-    /// downloads the embeddings
-    ///
-    /// `fbank` is `[chunks, 998, 80]` and `masks` is `[chunks * 3, 589]`; the result
-    /// is `[chunks * 3, 256]`, all row-major
-    pub fn embed(
-        &mut self,
-        runtime: &CudaRuntime,
-        fbank: &[f32],
-        masks: &[f32],
-    ) -> Result<Vec<f32>, CudaError> {
-        let stream = runtime.stream();
-        self.fbank.copy_from_host(stream, fbank)?;
-        self.masks.copy_from_host(stream, masks)?;
-        self.forward(runtime)?;
-        self.download_output(runtime)
-    }
-
     fn run(
         &mut self,
         runtime: &CudaRuntime,
@@ -343,6 +316,7 @@ impl EmbeddingBatch {
             output,
             plans,
             workspace,
+            candidates,
             ..
         } = self;
         let model = &**model;
@@ -355,6 +329,7 @@ impl EmbeddingBatch {
             workspace,
             chunks,
             math,
+            candidates,
         };
 
         let mut stem_input = stem_input.as_view_mut();
@@ -466,24 +441,6 @@ impl EmbeddingBatch {
         Ok(())
     }
 
-    #[cfg(test)]
-    /// Embeddings per forward pass, `chunks * 3`
-    pub fn rows(&self) -> usize {
-        self.chunks * SPEAKERS_PER_CHUNK
-    }
-
-    #[cfg(test)]
-    /// Distinct convolution shapes, one cuDNN plan each
-    pub fn plan_count(&self) -> usize {
-        self.plans.len()
-    }
-
-    #[cfg(test)]
-    /// Whether [`Self::forward`] replays a captured CUDA graph
-    pub fn has_graph(&self) -> bool {
-        self.graph.is_some()
-    }
-
     /// The fbank input `[chunks, 998, 80]`, for the fbank stage to write into
     pub fn fbank_mut(&mut self) -> &mut DeviceTensor {
         &mut self.fbank
@@ -498,27 +455,6 @@ impl EmbeddingBatch {
     pub fn download_output(&self, runtime: &CudaRuntime) -> Result<Vec<f32>, CudaError> {
         self.output.download(runtime.stream())
     }
-
-    #[cfg(test)]
-    /// Bytes of the shared cuDNN workspace
-    pub fn workspace_bytes(&self) -> usize {
-        self.workspace.len()
-    }
-
-    #[cfg(test)]
-    /// Bytes held by this batch's activation, input and output buffers, excluding
-    /// the cuDNN workspace
-    pub fn buffer_bytes(&self) -> usize {
-        let floats = self.fbank.len()
-            + self.masks.len()
-            + self.stem_input.len()
-            + self.trunk.iter().map(CudaSlice::len).sum::<usize>()
-            + self.hidden.len()
-            + self.shortcut.len()
-            + self.pooled.len()
-            + self.output.len();
-        floats * size_of::<f32>()
-    }
 }
 
 /// Convolution plus epilogue launches for one forward pass
@@ -529,6 +465,7 @@ struct Convs<'a> {
     workspace: &'a mut CudaSlice<u8>,
     chunks: usize,
     math: CudaMath,
+    candidates: &'a [(String, ConvOxide)],
 }
 
 impl<'a> Convs<'a> {
@@ -553,25 +490,6 @@ impl<'a> Convs<'a> {
             &mut self.workspace.as_view_mut(),
             x,
             &layer.weight().data().as_view(),
-            y,
-        )
-    }
-
-    /// `y = relu(conv(x, layer.weight) + residual + layer.bias)` in one cuDNN call
-    fn conv_bias_relu(
-        &mut self,
-        layer: &ConvLayer,
-        x: &CudaView<'_, f32>,
-        residual: Residual<'_, '_>,
-        y: &mut CudaViewMut<'_, f32>,
-    ) -> Result<(), CudaError> {
-        let plan = self.plan(layer);
-        plan.forward_bias_relu(
-            &mut self.workspace.as_view_mut(),
-            x,
-            &layer.weight().data().as_view(),
-            &layer.bias().data().as_view(),
-            residual,
             y,
         )
     }
@@ -611,3 +529,7 @@ fn pool_columns(trunk: &Trunk) -> usize {
     let [channels, bins, _] = trunk.output_shape();
     channels * bins
 }
+
+#[cfg(test)]
+#[path = "../../../tests/cuda_qualify/embedding.rs"]
+pub(crate) mod test_support;
