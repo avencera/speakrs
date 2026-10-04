@@ -83,6 +83,16 @@ class Manifest(unittest.TestCase):
         ):
             qualified.check(self.root)
 
+    def test_removed_source_evidence_note(self):
+        path = self.root / "scripts/cuda/qualify/QUALIFIED.json"
+        manifest = json.loads(path.read_text())
+        del manifest["areas"]["lstm"]["source_evidence_gap"]
+        path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(
+            qualified.QualificationError, "missing source evidence note: lstm"
+        ):
+            qualified.check(self.root)
+
     def test_changed_candidate_source(self):
         path = self.root / "src/inference/cuda/candidate/sinc.rs"
         path.write_text(path.read_text() + "\n// changed host source\n")

@@ -128,12 +128,12 @@ impl LstmPhases<'_> {
         enqueue: impl FnOnce() -> Result<T, CudaError>) -> Result<T, CudaError>;
 }
 impl<T: DeviceRepr + ValidAsZeroBits> Scratch<T> {
-    fn zeros(runtime: &CudaRuntime, len: usize) -> Result<Self, PlanError>; // in plan
-    fn from_host(runtime: &CudaRuntime, values: &[T]) -> Result<Self, PlanError>;
+    fn zeros(runtime: &CudaRuntime, len: usize) -> Result<Self, CudaError>; // in plan
+    fn from_host(runtime: &CudaRuntime, values: &[T]) -> Result<Self, CudaError>;
     fn get(&self) -> RefMut<'_, CudaSlice<T>>; // read or write during enqueue
 }
 impl SideStream {
-    fn new(runtime: &CudaRuntime) -> Result<Self, PlanError>; // in plan
+    fn new(runtime: &CudaRuntime) -> Result<Self, CudaError>; // in plan
     fn stream(&self) -> &Arc<CudaStream>;
     fn split(&self, parent: &CudaStream) -> Result<(), CudaError>; // side waits for parent
     fn merge(&self, parent: &CudaStream) -> Result<(), CudaError>; // parent waits for side

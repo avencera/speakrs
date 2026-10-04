@@ -464,6 +464,10 @@ def check(root: Path) -> None:
             and bool(entry["record"]["name"]),
             f"invalid record name: {area}",
         )
+        require(
+            entry.get("source_evidence_gap") == SOURCE_GAP,
+            f"missing source evidence note: {area}",
+        )
         basis = entry["verdict_basis"]
         require(
             basis.get("rule") in ["accepts_replacement", "library_spread_noise"],
