@@ -4,5 +4,5 @@ toolchain = nightly-2026-08-28
 
 [sm75]
 target = sm_75
-sources = c6f53fa2737dd16b345d0cc3fa8cd397418a373e1846c9b0eba89e2e24307f5f
+sources = 815ee20f8e6c8d3652d3304a4283b6d710d0afcfd4cf6d53a26a6d98f4caeeea
 ptx = 9ebf472e97a997ecdd263a1474412c106eeca8762d448da6bbb7d6199166adb7

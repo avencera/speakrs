@@ -17,7 +17,13 @@
 pub mod embedding;
 #[cfg(feature = "fbank")]
 pub mod fbank;
+#[cfg(feature = "lstm")]
+pub mod lstm;
 #[cfg(feature = "probe")]
 pub mod probe;
+#[cfg(feature = "resnet")]
+pub mod resnet;
 #[cfg(feature = "segmentation")]
 pub mod segmentation;
+#[cfg(feature = "sincnet")]
+pub mod sincnet;

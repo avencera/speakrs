@@ -131,6 +131,11 @@ pub const AREAS: &[Area] = &[
     Area::new("fbank", &[Tier::Sm75]),
     Area::new("embedding", &[Tier::Sm75]),
     Area::new("segmentation", &[Tier::Sm75]),
+    // candidate areas: kernels that may replace a library call, qualified by
+    // `cargo xtask cuda-qualify` and kept apart from the Library-owned areas above
+    Area::new("resnet", &[Tier::Sm75]),
+    Area::new("lstm", &[Tier::Sm75]),
+    Area::new("sincnet", &[Tier::Sm75]),
 ];
 
 /// One PTX file: an area built for one tier
