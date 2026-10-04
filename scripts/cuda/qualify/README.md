@@ -188,9 +188,11 @@ const COVERAGE: Coverage = Coverage(&[
 
 Dispatch runs the candidate for exactly the union's triples and the Library path for
 every other one. Production selection uses the locked `implementation::PRODUCTION`
-table: a boundary listed there as `Oxide` runs the candidate for its declared
-triples. The table is empty, so production runs Library everywhere until the root
-enables accepted candidates at integration.
+table. The table selects the accepted ResNet, LSTM, and SincNet coverage for
+exactly their declared triples. Every other triple runs the Library path. The
+production-table test pins those triples independently of the declarations.
+Qualification starts all other boundaries on the Library path, so production
+defaults cannot change a Library control or another candidate's input.
 Layers must be boundary names of the target (`resnet.layer1.0.conv1` ...
 `resnet.layer2.3.conv2`, `sincnet.conv0.abs_pool`, `lstm.stack`). Batches must be
 harness batches: 1, 7, 32, 33 or 64, or `All`, which means exactly those five;

@@ -6,7 +6,9 @@
 //! candidate interface lives in `candidate.rs`
 
 use super::CudaMath;
-use super::candidate::Coverage;
+use super::candidate::{
+    ConvCandidate, ConvOxide, Coverage, LstmCandidate, LstmOxide, SincCandidate, SincOxide,
+};
 
 /// The implementation selected for one boundary
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +28,11 @@ pub(crate) enum Choice {
 ///
 /// Selection includes the boundary, batch class and math mode. Sharing coverage
 /// prevents production from selecting an unqualified triple
-const PRODUCTION: &[Coverage] = &[];
+const PRODUCTION: &[Coverage] = &[
+    ConvOxide::COVERAGE,
+    LstmOxide::COVERAGE,
+    SincOxide::COVERAGE,
+];
 
 /// The production choice for one boundary, batch class and math mode
 pub(crate) fn production(boundary: &str, batch: usize, math: CudaMath) -> Choice {
@@ -39,3 +45,6 @@ pub(crate) fn production(boundary: &str, batch: usize, math: CudaMath) -> Choice
         Choice::Library
     }
 }
+
+#[cfg(test)]
+mod tests;
