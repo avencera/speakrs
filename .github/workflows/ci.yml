@@ -151,6 +151,16 @@ jobs:
             grep -q "did not match any packages" <<<"$output"
           done
 
+      - name: Keep ONNX Runtime out of the GPU binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo tree -p xtask --no-default-features --features cuda -e normal > gpu-dependencies.log
+          if grep -E '(^|[^[:alnum:]_-])ort(-sys)? v' gpu-dependencies.log; then
+            echo "ONNX Runtime is in the GPU binary dependency tree" >&2
+            exit 1
+          fi
+
       # GPU tests skip without an NVIDIA GPU; this builds them and runs the host-only ones
       - name: Run clippy and tests
         run: |
