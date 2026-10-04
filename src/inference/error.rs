@@ -17,12 +17,7 @@ pub enum InferenceError {
     #[cfg(feature = "_ort")]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(
-            feature = "cpu",
-            feature = "cuda",
-            feature = "migraphx",
-            feature = "load-dynamic"
-        )))
+        doc(cfg(any(feature = "cpu", feature = "migraphx", feature = "load-dynamic")))
     )]
     #[error(transparent)]
     Ort(#[from] ort::Error),
@@ -117,12 +112,7 @@ pub enum ModelLoadError {
     #[cfg(feature = "_ort")]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(
-            feature = "cpu",
-            feature = "cuda",
-            feature = "migraphx",
-            feature = "load-dynamic"
-        )))
+        doc(cfg(any(feature = "cpu", feature = "migraphx", feature = "load-dynamic")))
     )]
     #[error(transparent)]
     Runtime(#[from] OrtRuntimeError),
@@ -130,12 +120,7 @@ pub enum ModelLoadError {
     #[cfg(feature = "_ort")]
     #[cfg_attr(
         docsrs,
-        doc(cfg(any(
-            feature = "cpu",
-            feature = "cuda",
-            feature = "migraphx",
-            feature = "load-dynamic"
-        )))
+        doc(cfg(any(feature = "cpu", feature = "migraphx", feature = "load-dynamic")))
     )]
     #[error(transparent)]
     Ort(#[from] ort::Error),

@@ -65,12 +65,7 @@ impl OrtProvider {
 /// that build their own sessions
 #[cfg_attr(
     docsrs,
-    doc(cfg(any(
-        feature = "cpu",
-        feature = "cuda",
-        feature = "migraphx",
-        feature = "load-dynamic"
-    )))
+    doc(cfg(any(feature = "cpu", feature = "migraphx", feature = "load-dynamic")))
 )]
 pub fn with_execution_mode(
     builder: SessionBuilder,
@@ -106,12 +101,7 @@ pub(crate) fn ensure_ort_ready() -> Result<(), ModelLoadError> {
 /// Errors that can occur while preparing the process-wide ONNX Runtime environment
 #[cfg_attr(
     docsrs,
-    doc(cfg(any(
-        feature = "cpu",
-        feature = "cuda",
-        feature = "migraphx",
-        feature = "load-dynamic"
-    )))
+    doc(cfg(any(feature = "cpu", feature = "migraphx", feature = "load-dynamic")))
 )]
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
@@ -130,12 +120,7 @@ pub enum OrtRuntimeError {
 /// Errors from locating or validating the dynamic ONNX Runtime library
 #[cfg_attr(
     docsrs,
-    doc(cfg(any(
-        feature = "cpu",
-        feature = "cuda",
-        feature = "migraphx",
-        feature = "load-dynamic"
-    )))
+    doc(cfg(any(feature = "cpu", feature = "migraphx", feature = "load-dynamic")))
 )]
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]

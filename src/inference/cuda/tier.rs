@@ -55,7 +55,7 @@ impl PtxTier {
     /// Every tier, lowest first
     pub const ALL: [Self; 4] = [Self::Sm75, Self::Sm80, Self::Sm90, Self::Sm120];
 
-    /// The name used in PTX file names and in [`PTX_TIER_ENV`], such as `sm75`
+    /// The name used in PTX file names and in `SPEAKRS_CUDA_PTX_TIER`, such as `sm75`
     pub const fn name(self) -> &'static str {
         match self {
             Self::Sm75 => "sm75",
@@ -90,7 +90,7 @@ impl PtxTier {
         Self::ALL.into_iter().filter(|tier| tier.is_compiled_in())
     }
 
-    /// Reads [`PTX_TIER_ENV`]; unset or empty means no override
+    /// Reads `SPEAKRS_CUDA_PTX_TIER`; unset or empty means no override
     pub fn from_env() -> Result<Option<Self>, CudaError> {
         match std::env::var(PTX_TIER_ENV) {
             Ok(value) if !value.trim().is_empty() => value.parse().map(Some),
