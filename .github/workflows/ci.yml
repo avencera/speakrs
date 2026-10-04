@@ -161,6 +161,40 @@ jobs:
             exit 1
           fi
 
+      # the host-only PLDA tests read these
+      - name: Cache PLDA fixtures
+        uses: actions/cache@v4
+        with:
+          path: fixtures/models
+          key: ${{ runner.os }}-speakrs-plda-fixtures-${{ env.SPEAKRS_MODEL_FIXTURE_REV }}
+
+      - name: Download PLDA fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          base_url="https://huggingface.co/avencera/speakrs-models/resolve/${SPEAKRS_MODEL_FIXTURE_REV}"
+          files=(
+            plda_lda.npy
+            plda_mean1.npy
+            plda_mean2.npy
+            plda_mu.npy
+            plda_psi.npy
+            plda_tr.npy
+          )
+
+          mkdir -p fixtures/models
+          for file in "${files[@]}"; do
+            path="fixtures/models/${file}"
+            if [[ ! -s "$path" ]]; then
+              curl --retry 3 --retry-delay 5 -LfsS "${base_url}/${file}" -o "$path"
+            fi
+          done
+
+          for file in "${files[@]}"; do
+            test -s "fixtures/models/${file}"
+          done
+
       # GPU tests skip without an NVIDIA GPU; this builds them and runs the host-only ones
       - name: Run clippy and tests
         run: |
