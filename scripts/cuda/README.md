@@ -107,3 +107,25 @@ and validates the file with the safetensors reader.
 uv run --group dev ruff format scripts/cuda
 uv run --group dev ty check --python .venv scripts/cuda
 ```
+
+## Qualified custom kernels
+
+The native CUDA backend uses the shipped sm75 cuda-oxide kernels only for qualified
+(layer, batch, math) combinations. Other combinations use the Library path. The
+qualified batch classes are 1, 7, 32, 33, and 64.
+
+| Boundary | FP32 | TF32 |
+| --- | --- | --- |
+| ResNet stage 1 C32 and stage 2 strided convolution | All qualified batches | All qualified batches |
+| ResNet stage 2 C64 convolutions | All qualified batches | 7, 32, 33, 64 |
+| Four-layer bidirectional LSTM stack | All qualified batches | Library |
+| SincNet convolution, absolute value, and pool | All qualified batches | Library |
+
+Segmentation defaults to FP32. Embedding defaults to TF32. CUDA graphs are enabled,
+and the Library LSTM default is `CudaLstmAlgorithm::PersistStaticSmallH`. The custom
+LSTM still uses cuBLAS for input projections. cuDNN and cuBLAS remain required.
+
+The shipped PTX targets Turing and newer. Qualification ran its sm75 image on an
+RTX 5070 Ti (sm120); performance on a real Turing GPU is not measured. See
+[the qualification guide](qualify/README.md) for the gates, cache setup, and lock
+checks.

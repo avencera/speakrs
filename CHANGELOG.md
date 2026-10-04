@@ -2,6 +2,9 @@
 
 ## [unreleased]
 
+- Use the qualified cuda-oxide ResNet, LSTM, and SincNet kernels at their tested layer, batch, and math combinations; keep cuDNN for every other combination and keep the existing CUDA runtime defaults
+- Add a locked CUDA qualification harness with content-addressed assets stored outside the source tree
+
 - Run the GPU benchmark without S3 credentials: fetch public models and datasets, keep results locally, and print DER and RTFx in the captured log
 
 - Run `ExecutionMode::Cuda` and `CudaFast` on a native NVIDIA backend instead of ONNX Runtime (breaking): the `cuda` feature no longer enables ONNX Runtime, and builds without a CUDA toolkit because it loads the driver, cuBLAS, and cuDNN 9 at run time; it needs a Turing (compute capability 7.5) or newer GPU. The filterbank, ResNet34 embedding, and segmentation run on the GPU with cuBLAS, cuDNN, and speakrs kernels, and the filterbank features stay on the device
