@@ -18,10 +18,27 @@ pub(crate) enum Choice {
     Library,
     /// The registered candidate, for the layer, batch and math triples its coverage
     /// declares; every other triple still runs the Library path
-    Oxide,
+    Oxide(Selection),
     /// Planted faults exist only in the qualification test binary
     #[cfg(test)]
     Mutant(super::test_support::Mutant),
+}
+
+/// Why the candidate was selected; explicit qualification cannot fall back
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Selection {
+    /// Selected from the qualified production coverage
+    Production,
+    /// Selected by the qualification harness
+    #[cfg(test)]
+    Explicit,
+}
+
+impl Choice {
+    /// Whether dispatch should plan a registered candidate
+    pub(crate) fn is_candidate(self) -> bool {
+        matches!(self, Self::Oxide(_))
+    }
 }
 
 /// Qualified production coverage, shared with the harness candidate declarations
@@ -40,7 +57,7 @@ pub(crate) fn production(boundary: &str, batch: usize, math: CudaMath) -> Choice
         .iter()
         .any(|coverage| coverage.covers(boundary, batch, math))
     {
-        Choice::Oxide
+        Choice::Oxide(Selection::Production)
     } else {
         Choice::Library
     }

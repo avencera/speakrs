@@ -43,7 +43,7 @@ impl Network {
     ) -> Result<(), CudaError> {
         match plan.choice {
             Choice::Library => self.sinc_library(runtime, shape, plan, workspace, io),
-            Choice::Oxide => self.sinc_oxide(runtime, shape, plan, workspace, io),
+            Choice::Oxide(_) => self.sinc_oxide(runtime, shape, plan, workspace, io),
             #[cfg(test)]
             Choice::Mutant(mutant) => {
                 super::super::test_support::poison(runtime)?;
@@ -186,7 +186,12 @@ impl Network {
         };
         #[cfg(test)]
         let _scope = super::super::test_support::plan(SINC_LAYER);
-        Ok(Some(SincOxide::plan(runtime, spec)?))
+        super::super::dispatch::candidate_plan(
+            choice,
+            SINC_LAYER,
+            shape.batch,
+            SincOxide::plan(runtime, spec),
+        )
     }
 
     /// The stack through its choice
@@ -199,7 +204,7 @@ impl Network {
     ) -> Result<(), CudaError> {
         match stage.choice {
             Choice::Library => self.lstm_library(runtime, stage, input, output),
-            Choice::Oxide => {
+            Choice::Oxide(_) => {
                 // an undeclared pair runs the Library path
                 let Some(candidate) = &stage.candidate else {
                     return self.lstm_library(runtime, stage, input, output);
@@ -281,7 +286,12 @@ impl Network {
         };
         #[cfg(test)]
         let _scope = super::super::test_support::plan(LSTM_LAYER);
-        Ok(Some(LstmOxide::plan(runtime, spec)?))
+        super::super::dispatch::candidate_plan(
+            choice,
+            LSTM_LAYER,
+            shape.batch,
+            LstmOxide::plan(runtime, spec),
+        )
     }
 }
 
@@ -292,5 +302,5 @@ fn declared(
     batch: usize,
     network: &Network,
 ) -> bool {
-    choice == Choice::Oxide && coverage.covers(layer, batch, network.options.math)
+    choice.is_candidate() && coverage.covers(layer, batch, network.options.math)
 }

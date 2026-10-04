@@ -20,6 +20,7 @@ use cudarc::driver::{
 
 use super::{
     Batches, ConvCandidate, ConvInputs, ConvLayerSpec, Coverage, CoverageEntry, Maths, Op, Phases,
+    PlanError,
 };
 use crate::inference::cuda::dnn::Conv2d;
 use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, KernelModule};
@@ -186,7 +187,7 @@ impl ConvCandidate for Oxide {
         },
     ]);
 
-    fn plan(runtime: &CudaRuntime, layer: ConvLayerSpec<'_>) -> Result<Self, CudaError> {
+    fn plan(runtime: &CudaRuntime, layer: ConvLayerSpec<'_>) -> Result<Self, PlanError> {
         let conv = layer.conv;
         let shape = Shape::of(&conv).ok_or_else(|| CudaError::Unsupported {
             context: "fused conv3x3 plan",

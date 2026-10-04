@@ -86,16 +86,24 @@ fn resnet_candidate_matches_cudnn_on_partial_tiles() -> Result<(), CudaError> {
                 .fold(1.0f32, |max, value| max.max(value.abs()));
 
             for math in [CudaMath::Fp32, CudaMath::Tf32] {
-                let fused = ConvOxide::plan(
-                    &runtime,
-                    ConvLayerSpec {
-                        name,
-                        conv: Conv2d { math, ..fp32 },
-                        residual: add,
-                        weight: &weight,
-                        bias: &bias,
-                    },
-                )?;
+                let fused = crate::inference::cuda::dispatch::candidate_plan(
+                    crate::inference::cuda::implementation::Choice::Oxide(
+                        crate::inference::cuda::implementation::Selection::Explicit,
+                    ),
+                    name,
+                    batch,
+                    ConvOxide::plan(
+                        &runtime,
+                        ConvLayerSpec {
+                            name,
+                            conv: Conv2d { math, ..fp32 },
+                            residual: add,
+                            weight: &weight,
+                            bias: &bias,
+                        },
+                    ),
+                )?
+                .expect("explicit candidate plan");
                 let mut actual = stream.alloc_zeros::<f32>(output_len)?;
                 fused.enqueue(
                     ConvInputs {
@@ -124,16 +132,24 @@ fn resnet_candidate_matches_cudnn_on_partial_tiles() -> Result<(), CudaError> {
         // a NaN at the first input element must reach the first output
         x[0] = f32::NAN;
         let x_device = stream.clone_htod(&x)?;
-        let fused = ConvOxide::plan(
-            &runtime,
-            ConvLayerSpec {
-                name,
-                conv: fp32,
-                residual: false,
-                weight: &weight,
-                bias: &bias,
-            },
-        )?;
+        let fused = crate::inference::cuda::dispatch::candidate_plan(
+            crate::inference::cuda::implementation::Choice::Oxide(
+                crate::inference::cuda::implementation::Selection::Explicit,
+            ),
+            name,
+            batch,
+            ConvOxide::plan(
+                &runtime,
+                ConvLayerSpec {
+                    name,
+                    conv: fp32,
+                    residual: false,
+                    weight: &weight,
+                    bias: &bias,
+                },
+            ),
+        )?
+        .expect("explicit candidate plan");
         let mut actual = stream.alloc_zeros::<f32>(output_len)?;
         fused.enqueue(
             ConvInputs {

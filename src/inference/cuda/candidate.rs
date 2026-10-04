@@ -34,9 +34,33 @@ mod conv;
 mod lstm;
 mod sinc;
 
+#[cfg(test)]
+#[path = "candidate_tests.rs"]
+mod tests;
+
 pub(crate) use conv::Oxide as ConvOxide;
 pub(crate) use lstm::Oxide as LstmOxide;
 pub(crate) use sinc::Oxide as SincOxide;
+
+/// A planning refusal that is distinct from a CUDA or model error
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PlanError {
+    /// The device cannot host this candidate; only production may fall back
+    #[error("{reason}")]
+    DeviceUnsupported {
+        /// The device constraint that prevents this plan
+        reason: String,
+    },
+    /// A real error, which dispatch must propagate in every selection mode
+    #[error(transparent)]
+    Cuda(#[from] CudaError),
+}
+
+impl From<cudarc::driver::DriverError> for PlanError {
+    fn from(error: cudarc::driver::DriverError) -> Self {
+        Self::Cuda(error.into())
+    }
+}
 
 /// The batch sizes the harness qualifies; production runs a candidate only at these
 pub(crate) const QUALIFIED_BATCHES: [usize; 5] = [1, 7, 32, 33, 64];
@@ -146,7 +170,7 @@ pub(crate) trait ConvCandidate: Sized {
     const COVERAGE: Coverage;
 
     /// Prepares one layer for one batch size; runs once per batch class, untimed
-    fn plan(runtime: &CudaRuntime, layer: ConvLayerSpec<'_>) -> Result<Self, CudaError>;
+    fn plan(runtime: &CudaRuntime, layer: ConvLayerSpec<'_>) -> Result<Self, PlanError>;
 
     /// Enqueues the layer on `stream`, writing every element of `y` `[n, k, p, q]`
     fn enqueue(
@@ -204,7 +228,7 @@ pub(crate) trait SincCandidate: Sized {
     const OUTPUT: SincOutput;
 
     /// Prepares one batch size; runs once per batch class, untimed
-    fn plan(runtime: &CudaRuntime, spec: SincSpec<'_>) -> Result<Self, CudaError>;
+    fn plan(runtime: &CudaRuntime, spec: SincSpec<'_>) -> Result<Self, PlanError>;
 
     /// Enqueues the producer on `stream`, writing every element of `output`
     fn enqueue(
@@ -249,7 +273,7 @@ pub(crate) trait LstmCandidate: Sized {
     const COVERAGE: Coverage;
 
     /// Prepares one batch size; runs once per batch class, untimed
-    fn plan(runtime: &CudaRuntime, spec: LstmSpec<'_>) -> Result<Self, CudaError>;
+    fn plan(runtime: &CudaRuntime, spec: LstmSpec<'_>) -> Result<Self, PlanError>;
 
     /// Enqueues the stack on `stream`, every input projection inside
     /// [`LstmPhases::input_proj`] and every recurrence inside [`LstmPhases::recurrence`]

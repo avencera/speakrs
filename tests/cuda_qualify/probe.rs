@@ -1365,7 +1365,9 @@ fn qualification_driver() -> Result<(), CudaError> {
     }
     // integration can enable production kernels, but this driver owns all choices
     assert_eq!(
-        super::default_choice(super::Choice::Oxide),
+        super::default_choice(super::Choice::Oxide(
+            crate::inference::cuda::implementation::Selection::Production
+        )),
         super::Choice::Library
     );
     let coverage = declared_coverage(&target, choice);

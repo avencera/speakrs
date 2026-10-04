@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::candidate::Direction;
-use super::implementation::Choice;
+use super::implementation::{Choice, Selection};
 use super::{CudaError, CudaRuntime, CudaSegmentation, ResNetEmbedding};
 
 /// The live planted faults share the real implementation seam
@@ -78,7 +78,7 @@ impl Mutant {
 pub(crate) fn choice(name: &str) -> Choice {
     match name {
         "Library" => Choice::Library,
-        "Oxide" => Choice::Oxide,
+        "Oxide" => Choice::Oxide(Selection::Explicit),
         other => Choice::Mutant(Mutant::parse(other).expect("fixed implementation inventory")),
     }
 }

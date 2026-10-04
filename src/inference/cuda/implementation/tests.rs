@@ -1,6 +1,6 @@
 //! Pin production to the triples accepted for integration, independent of declarations
 
-use super::{Choice, PRODUCTION, production};
+use super::{Choice, PRODUCTION, Selection, production};
 use crate::inference::cuda::CudaMath;
 
 #[test]
@@ -48,7 +48,7 @@ fn production_selects_exactly_the_qualified_triples() {
                         || ["lstm.stack", "sincnet.conv0.abs_pool"].contains(&layer)
                             && math == CudaMath::Fp32);
                 assert_eq!(
-                    production(layer, batch, math) == Choice::Oxide,
+                    production(layer, batch, math) == Choice::Oxide(Selection::Production),
                     expected,
                     "{layer} b{batch} {math:?}"
                 );

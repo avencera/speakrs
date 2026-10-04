@@ -166,7 +166,7 @@ impl CudaSegmentation {
         };
         match choice {
             Choice::Library => false,
-            Choice::Oxide => planned,
+            Choice::Oxide(_) => planned,
             Choice::Mutant(_) => true,
         }
     }
@@ -252,7 +252,7 @@ impl CudaSegmentation {
         let w = self
             .find_workspace(op.batch, WINDOW_SAMPLES)
             .expect("isolated workspace");
-        let pooled_by_candidate = w.sinc.choice == Choice::Oxide
+        let pooled_by_candidate = w.sinc.choice.is_candidate()
             && w.sinc.candidate.is_some()
             && SincOxide::OUTPUT == SincOutput::Pooled;
         if pooled_by_candidate {

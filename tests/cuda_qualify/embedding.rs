@@ -243,7 +243,9 @@ impl<'a> Operator<'a> {
     pub(crate) fn declared(&self) -> bool {
         match self.layer.choice(self.batch, self.model.0.math) {
             Choice::Library => false,
-            Choice::Oxide => ConvOxide::COVERAGE.covers(self.name(), self.batch, self.model.0.math),
+            Choice::Oxide(_) => {
+                ConvOxide::COVERAGE.covers(self.name(), self.batch, self.model.0.math)
+            }
             Choice::Mutant(_) => true,
         }
     }

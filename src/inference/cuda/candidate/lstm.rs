@@ -13,7 +13,7 @@
 //! projections read the previous layer's complete output before its recurrence
 //! overwrites it
 
-mod layout;
+pub(super) mod layout;
 
 use cudarc::driver::{
     CudaFunction, CudaSlice, CudaStream, CudaView, CudaViewMut, DevicePtrMut, LaunchConfig,
@@ -25,7 +25,7 @@ use self::layout::{
 };
 use super::{
     Batches, Coverage, CoverageEntry, Direction, LstmCandidate, LstmPhases, LstmSpec, Maths, Op,
-    ProjectionGemm, Scratch, SideStream,
+    PlanError, ProjectionGemm, Scratch, SideStream,
 };
 use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, KernelModule};
 
@@ -79,7 +79,7 @@ impl LstmCandidate for Oxide {
         maths: Maths::Only(&[CudaMath::Fp32]),
     }]);
 
-    fn plan(runtime: &CudaRuntime, spec: LstmSpec<'_>) -> Result<Self, CudaError> {
+    fn plan(runtime: &CudaRuntime, spec: LstmSpec<'_>) -> Result<Self, PlanError> {
         let kernels = runtime.load_kernels(KernelModule::Lstm)?;
         let recurrence = kernels.function(KERNEL)?;
         let clear = kernels.function("spk_lstm_clear")?;

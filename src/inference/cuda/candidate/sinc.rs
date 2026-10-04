@@ -11,8 +11,8 @@ use cudarc::driver::{
 };
 
 use super::{
-    Batches, Coverage, CoverageEntry, Maths, Phases, SincCandidate, SincInputs, SincOutput,
-    SincSpec,
+    Batches, Coverage, CoverageEntry, Maths, Phases, PlanError, SincCandidate, SincInputs,
+    SincOutput, SincSpec,
 };
 use crate::inference::cuda::error::check_len;
 use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, KernelModule};
@@ -60,7 +60,7 @@ impl SincCandidate for Oxide {
     }]);
     const OUTPUT: SincOutput = SincOutput::Pooled;
 
-    fn plan(runtime: &CudaRuntime, spec: SincSpec<'_>) -> Result<Self, CudaError> {
+    fn plan(runtime: &CudaRuntime, spec: SincSpec<'_>) -> Result<Self, PlanError> {
         check_len(CONTEXT, CHANNELS * TAPS, spec.filters.len())?;
         // every valid pooled output reads only samples of its own row when the pooled
         // length is the pooled length of a valid convolution

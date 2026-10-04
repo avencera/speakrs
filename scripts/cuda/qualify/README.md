@@ -38,6 +38,14 @@ A candidate is a plan type behind one trait per boundary, defined in the locked
 every timed and traced interval, then calls `enqueue` inside a harness scope it owns.
 The candidate never chooses its scope, its timing or its fallback.
 
+All three candidate traits return `PlanError`. `DeviceUnsupported` means that the
+device cannot host the plan. Shared dispatch uses the already planned Library path
+for a production selection and logs the boundary, batch and reason once per plan.
+An explicit harness selection fails for the same outcome. `PlanError::Cuda` always
+propagates, including ordinary `CudaError::Unsupported` errors. Coverage still
+selects the Library path for undeclared triples.
+
+
 ### Where candidate files go
 
 | What | Path |
@@ -71,7 +79,7 @@ pub(crate) struct Coverage(pub &'static [CoverageEntry]); // the union of the en
 
 pub(crate) trait ConvCandidate: Sized {
     const COVERAGE: Coverage;
-    fn plan(runtime: &CudaRuntime, layer: ConvLayerSpec<'_>) -> Result<Self, CudaError>;
+    fn plan(runtime: &CudaRuntime, layer: ConvLayerSpec<'_>) -> Result<Self, PlanError>;
     fn enqueue(
         &self,
         inputs: ConvInputs<'_, '_>,
@@ -84,7 +92,7 @@ pub(crate) trait ConvCandidate: Sized {
 pub(crate) trait SincCandidate: Sized {
     const COVERAGE: Coverage;
     const OUTPUT: SincOutput; // RawConv or Pooled
-    fn plan(runtime: &CudaRuntime, spec: SincSpec<'_>) -> Result<Self, CudaError>;
+    fn plan(runtime: &CudaRuntime, spec: SincSpec<'_>) -> Result<Self, PlanError>;
     fn enqueue(
         &self,
         inputs: SincInputs<'_, '_>,
@@ -96,7 +104,7 @@ pub(crate) trait SincCandidate: Sized {
 
 pub(crate) trait LstmCandidate: Sized {
     const COVERAGE: Coverage;
-    fn plan(runtime: &CudaRuntime, spec: LstmSpec<'_>) -> Result<Self, CudaError>;
+    fn plan(runtime: &CudaRuntime, spec: LstmSpec<'_>) -> Result<Self, PlanError>;
     fn enqueue(
         &self,
         input: &CudaView<'_, f32>,
@@ -119,12 +127,12 @@ impl LstmPhases<'_> {
         enqueue: impl FnOnce() -> Result<T, CudaError>) -> Result<T, CudaError>;
 }
 impl<T: DeviceRepr + ValidAsZeroBits> Scratch<T> {
-    fn zeros(runtime: &CudaRuntime, len: usize) -> Result<Self, CudaError>; // in plan
-    fn from_host(runtime: &CudaRuntime, values: &[T]) -> Result<Self, CudaError>;
+    fn zeros(runtime: &CudaRuntime, len: usize) -> Result<Self, PlanError>; // in plan
+    fn from_host(runtime: &CudaRuntime, values: &[T]) -> Result<Self, PlanError>;
     fn get(&self) -> RefMut<'_, CudaSlice<T>>; // read or write during enqueue
 }
 impl SideStream {
-    fn new(runtime: &CudaRuntime) -> Result<Self, CudaError>; // in plan
+    fn new(runtime: &CudaRuntime) -> Result<Self, PlanError>; // in plan
     fn stream(&self) -> &Arc<CudaStream>;
     fn split(&self, parent: &CudaStream) -> Result<(), CudaError>; // side waits for parent
     fn merge(&self, parent: &CudaStream) -> Result<(), CudaError>; // parent waits for side

@@ -25,7 +25,7 @@ impl Convs<'_> {
     ) -> Result<(), CudaError> {
         match layer.choice(self.chunks, self.math) {
             Choice::Library => self.library(layer, x, residual, y),
-            Choice::Oxide => self.oxide(layer, x, residual, y),
+            Choice::Oxide(_) => self.oxide(layer, x, residual, y),
             #[cfg(test)]
             Choice::Mutant(mutant) => {
                 super::super::test_support::poison(self.runtime)?;
@@ -121,7 +121,7 @@ pub(super) fn plan_candidates(
         .flat_map(|block| [(&block.conv1, false), (&block.conv2, true)]);
     let mut plans = Vec::new();
     for (layer, residual) in layers {
-        if layer.choice(batch, math) != Choice::Oxide
+        if !layer.choice(batch, math).is_candidate()
             || !ConvOxide::COVERAGE.covers(layer.name(), batch, math)
         {
             continue;
@@ -136,7 +136,14 @@ pub(super) fn plan_candidates(
         };
         #[cfg(test)]
         let _scope = super::super::test_support::plan(layer.name());
-        plans.push((layer.name().to_owned(), ConvOxide::plan(runtime, spec)?));
+        if let Some(plan) = super::super::dispatch::candidate_plan(
+            layer.choice(batch, math),
+            layer.name(),
+            batch,
+            ConvOxide::plan(runtime, spec),
+        )? {
+            plans.push((layer.name().to_owned(), plan));
+        }
     }
 
     Ok(plans)
