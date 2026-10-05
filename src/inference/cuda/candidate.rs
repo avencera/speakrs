@@ -414,23 +414,23 @@ impl<'a> LstmPhases<'a> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
 #[path = "candidate_test_support.rs"]
 mod test_support;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
 use test_support::{projection_scope, sub_scope};
 
 /// Production opens no harness scope
-#[cfg(not(test))]
+#[cfg(not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))))]
 struct NoScope;
 
-#[cfg(not(test))]
+#[cfg(not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))))]
 fn sub_scope(_name: impl FnOnce() -> String) -> NoScope {
     NoScope
 }
 
-#[cfg(not(test))]
+#[cfg(not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))))]
 fn projection_scope(_stream: &CudaStream, _layer: usize, _direction: Direction) -> NoScope {
     NoScope
 }
@@ -486,7 +486,7 @@ impl SideStream {
     pub(crate) fn new(runtime: &CudaRuntime) -> Result<Self, CudaError> {
         let context = runtime.context();
         let stream = context.new_stream()?;
-        #[cfg(test)]
+        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
         super::test_support::register_side_stream(&stream);
         Ok(Self {
             stream,
@@ -527,8 +527,10 @@ pub(crate) struct ProjectionGemm {
     pub beta: f32,
 }
 
-/// The locked cuBLAS input-projection call, the one library call an LSTM candidate may
-/// make, available only inside [`LstmPhases::input_proj`]
+/// The locked cuBLAS input projection, available inside [`LstmPhases::input_proj`]
+///
+/// Library controls and the pinned production stack use this helper. Fresh Oxide
+/// qualifications require custom projection launches instead of library calls
 ///
 /// It computes `c[m, n] = a[m, k] · w + beta * c` with `m = batch * frames`, `k` the
 /// layer's input size and the boundary's math mode, and refuses any other shape

@@ -8,6 +8,7 @@
 /// on an RTX 5070 Ti with CUDA graphs on
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
+#[cfg(feature = "cuda")]
 pub enum CudaLstmAlgorithm {
     /// One GEMM for the input projections of all steps, then a recurrent GEMM per step,
     /// as ONNX Runtime's CUDA execution provider runs it
@@ -30,8 +31,7 @@ pub enum CudaLstmAlgorithm {
     ///
     /// The fastest for a single window (3.6 ms) but by far the slowest for batch 32
     /// (85 ms), which the pipeline uses for most windows. It needs the NVRTC library;
-    /// when NVRTC cannot be loaded, the model logs a warning and uses
-    /// [`Self::Standard`] instead
+    /// when NVRTC cannot be loaded, construction returns a library error
     PersistDynamic,
 }
 

@@ -55,9 +55,9 @@ impl Tier {
         }
     }
 
-    /// The speakrs feature that embeds this tier's PTX; the baseline is always embedded
-    fn host_feature(self) -> Option<String> {
-        self.feature().map(|_| format!("cuda-{}", self.name()))
+    /// The speakrs feature that selects this GPU tier
+    fn host_feature(self) -> String {
+        format!("cuda-{}", self.name())
     }
 
     /// The kernel-crate feature that turns on tier-specific code
@@ -123,7 +123,7 @@ impl Area {
 /// Kernel areas and the tiers each one ships
 ///
 /// A tier above the baseline needs a measured win on the GPU box and parity with the
-/// baseline. Adding one also needs its `include_str!` in
+/// baseline. Adding one also needs its feature-masked `tier_ptx!` in
 /// `src/inference/cuda/kernels.rs`, which `check` verifies
 pub const AREAS: &[Area] = &[
     // the sm80 probe variant is the same kernel; it proves the runtime dispatch
@@ -169,7 +169,7 @@ const MAX_PTX_ISA: (u32, u32) = (9, 0);
 
 const KERNEL_CRATE: &str = "crates/speakrs-cuda-kernels";
 const PTX_DIR: &str = "src/inference/cuda/ptx";
-/// The host file that embeds every variant with `include_str!`
+/// The host file that embeds each variant for its selected GPU tiers
 const HOST_KERNELS: &str = "src/inference/cuda/kernels.rs";
 /// Name cuda-oxide gives the PTX of the kernel crate
 const OXIDE_PTX_NAME: &str = "speakrs_cuda_kernels.ptx";
@@ -482,39 +482,54 @@ fn unexpected_ptx_files(ptx_dir: &Path) -> Result<Vec<String>> {
     Ok(problems)
 }
 
-/// The host must embed exactly the declared variants: a variant that is built but
-/// not embedded would never load, and an embedded file that is not declared is never
-/// rebuilt or checked. The baseline is embedded unconditionally with `include_str!`;
-/// a higher tier goes through `tier_ptx!` with its own `cuda-<tier>` feature, so a
-/// default build carries only sm75 code
+/// The host must embed each declared variant only for tiers that select it
 fn host_embed_problems(host_kernels: &Path) -> Result<Vec<String>> {
     let source = fs::read_to_string(host_kernels)
         .wrap_err_with(|| format!("reading {}", host_kernels.display()))?;
-    let embedded = embedded_ptx_files(&source);
-    let declared: BTreeMap<String, Tier> = AREAS
+    Ok(host_embed_source_problems(&source))
+}
+
+fn host_embed_source_problems(source: &str) -> Vec<String> {
+    let embedded = embedded_ptx_files(source);
+    let declared: BTreeMap<String, Vec<String>> = AREAS
         .iter()
-        .flat_map(|area| area.variants())
-        .map(|variant| (variant.file_name(), variant.tier))
+        .flat_map(|area| {
+            area.variants().map(|variant| {
+                // each GPU tier uses the newest variant that this area ships
+                let features = [Tier::Sm75, Tier::Sm80, Tier::Sm90, Tier::Sm120]
+                    .into_iter()
+                    .filter(|tier| {
+                        area.tiers.iter().rev().find(|shipped| **shipped <= *tier)
+                            == Some(&variant.tier)
+                    })
+                    .map(Tier::host_feature)
+                    .collect();
+                (variant.file_name(), features)
+            })
+        })
         .collect();
 
     let mut problems = Vec::new();
-    for (name, tier) in &declared {
-        let Some(feature) = embedded.get(name) else {
+    for (name, expected) in &declared {
+        let Some(uses) = embedded.get(name) else {
             problems.push(format!("{HOST_KERNELS} does not embed ptx/{name}"));
             continue;
         };
 
-        let expected = tier.host_feature();
-        if feature.as_deref() != expected.as_deref() {
-            let how = |feature: Option<&str>| match feature {
-                Some(feature) => format!("`tier_ptx!(\"{feature}\", ..)`"),
-                None => "plain `include_str!`".to_string(),
-            };
-            problems.push(format!(
-                "{HOST_KERNELS} embeds ptx/{name} with {}, expected {}",
-                how(feature.as_deref()),
-                how(expected.as_deref())
-            ));
+        if uses.len() != 1 {
+            problems.push(format!("{HOST_KERNELS} embeds ptx/{name} more than once"));
+        }
+
+        for features in uses {
+            let mut actual = features.clone().unwrap_or_default();
+            actual.sort();
+            let mut expected = expected.clone();
+            expected.sort();
+            if features.is_none() || actual != expected {
+                problems.push(format!(
+                    "{HOST_KERNELS} embeds ptx/{name} with {features:?}, expected {expected:?}"
+                ));
+            }
         }
     }
 
@@ -524,19 +539,24 @@ fn host_embed_problems(host_kernels: &Path) -> Result<Vec<String>> {
         ));
     }
 
-    Ok(problems)
+    problems
 }
 
-/// Every PTX file a Rust source embeds, with the feature of its `tier_ptx!` call, or
-/// `None` for a plain `include_str!`
-fn embedded_ptx_files(source: &str) -> BTreeMap<String, Option<String>> {
-    const PLAIN: &str = "include_str!(\"ptx/";
+/// Every PTX inclusion, preserving duplicate calls and feature names for validation
+fn embedded_ptx_files(source: &str) -> BTreeMap<String, Vec<Option<Vec<String>>>> {
+    const PLAIN: &str = "include_str!(";
     const TIERED: &str = "tier_ptx!(";
-    let mut files = BTreeMap::new();
+    let mut files: BTreeMap<String, Vec<Option<Vec<String>>>> = BTreeMap::new();
     for (start, _) in source.match_indices(PLAIN) {
-        let rest = &source[start + PLAIN.len()..];
+        let Some(rest) = source[start + PLAIN.len()..]
+            .trim_start()
+            .strip_prefix("\"ptx/")
+        else {
+            continue;
+        };
+
         if let Some((name, _)) = rest.split_once('"') {
-            files.insert(name.to_string(), None);
+            files.entry(name.to_string()).or_default().push(None);
         }
     }
 
@@ -545,16 +565,32 @@ fn embedded_ptx_files(source: &str) -> BTreeMap<String, Option<String>> {
             continue;
         };
 
-        // the macro definition's own `$feature:literal` arguments are not quoted
-        let args: Vec<_> = args
-            .split(',')
-            .map(|arg| arg.trim().trim_matches('"'))
-            .collect();
-        if let [feature, path] = args[..]
-            && let Some(name) = path.strip_prefix("ptx/")
-        {
-            files.insert(name.to_string(), Some(feature.to_string()));
-        }
+        let Some((mask, path)) = args.trim().trim_end_matches(',').rsplit_once(',') else {
+            continue;
+        };
+
+        let path = path.trim().trim_matches('"');
+        let Some(name) = path.strip_prefix("ptx/") else {
+            continue;
+        };
+
+        let features = mask
+            .trim()
+            .strip_prefix('[')
+            .and_then(|mask| mask.strip_suffix(']'))
+            .and_then(|mask| {
+                mask.split(',')
+                    .map(str::trim)
+                    .filter(|feature| !feature.is_empty())
+                    .map(|feature| {
+                        feature
+                            .strip_prefix('"')
+                            .and_then(|feature| feature.strip_suffix('"'))
+                            .map(str::to_string)
+                    })
+                    .collect()
+            });
+        files.entry(name.to_string()).or_default().push(features);
     }
 
     files
@@ -897,7 +933,7 @@ impl ManifestVariant {
 mod tests {
     use super::{
         AREAS, Manifest, ManifestVariant, Tier, Variant, area_of, belongs_to, check_entry_points,
-        check_ptx_header, embedded_ptx_files, entry_points,
+        check_ptx_header, entry_points, host_embed_source_problems,
     };
 
     const PROBE_PTX: &str = "//\n// Generated by LLVM\n//\n.version 6.3\n.target sm_75\n.address_size 64\n\n\t// .globl\tprobe_scale_add // .entry fake(\n.visible .entry probe_scale_add(\n\t.param .f32 probe_scale_add_param_0,\n\t.param .u64 .ptr .align 4 probe_scale_add_param_1,\n\t.param .u64 probe_scale_add_param_2\n)\n{\n\tret;\n}\n";
@@ -970,17 +1006,68 @@ mod tests {
         );
     }
 
+    fn host_source() -> String {
+        AREAS
+            .iter()
+            .flat_map(|area| area.variants())
+            .map(|variant| {
+                let mask = [Tier::Sm75, Tier::Sm80, Tier::Sm90, Tier::Sm120]
+                    .into_iter()
+                    .filter(|tier| {
+                        variant
+                            .area
+                            .tiers
+                            .iter()
+                            .rev()
+                            .find(|shipped| **shipped <= *tier)
+                            == Some(&variant.tier)
+                    })
+                    .map(|tier| format!("{:?}", tier.host_feature()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("tier_ptx!([{mask}], \"ptx/{}\")", variant.file_name())
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
-    fn embedded_files_record_their_tier_feature() {
-        let source = "macro_rules! tier_ptx { ($feature:literal, $path:literal) => { include_str!($path) } }\nsm75: include_str!(\"ptx/probe.sm75.ptx\"),\nsm80: tier_ptx!(\"cuda-sm80\", \"ptx/probe.sm80.ptx\"),";
-        let files: Vec<_> = embedded_ptx_files(source).into_iter().collect();
-        assert_eq!(
-            files,
-            [
-                ("probe.sm75.ptx".to_string(), None),
-                ("probe.sm80.ptx".to_string(), Some("cuda-sm80".to_string()))
-            ]
-        );
+    fn host_masks_select_the_newest_shipped_variant() {
+        let source = host_source();
+        assert!(host_embed_source_problems(&source).is_empty());
+        assert!(source.contains("tier_ptx!([\"cuda-sm75\"], \"ptx/probe.sm75.ptx\")"));
+        assert!(source.contains(
+            "tier_ptx!([\"cuda-sm80\", \"cuda-sm90\", \"cuda-sm120\"], \"ptx/probe.sm80.ptx\")"
+        ));
+        assert!(source.contains("tier_ptx!([\"cuda-sm75\", \"cuda-sm80\", \"cuda-sm90\", \"cuda-sm120\"], \"ptx/fbank.sm75.ptx\")"));
+    }
+
+    #[test]
+    fn host_masks_reject_missing_extra_and_duplicate_features() {
+        for mask in [
+            "[\"cuda-sm75\", \"cuda-sm80\"]",
+            "[\"cuda-sm75\", \"unexpected\"]",
+            "[\"cuda-sm75\", \"cuda-sm75\"]",
+            "[]",
+            "\"cuda-sm75\"",
+        ] {
+            let source = host_source().replace("[\"cuda-sm75\"]", mask);
+            assert!(!host_embed_source_problems(&source).is_empty(), "{mask}");
+        }
+    }
+
+    #[test]
+    fn host_inclusions_reject_unconditional_duplicate_and_unknown_files() {
+        let source = host_source();
+        for extra in [
+            "include_str!(\"ptx/probe.sm75.ptx\")",
+            "include_str!(\n \"ptx/probe.sm75.ptx\")",
+            "tier_ptx!([\"cuda-sm75\"], \"ptx/probe.sm75.ptx\")",
+            "tier_ptx!([\"cuda-sm75\"], \"ptx/unknown.sm75.ptx\")",
+        ] {
+            assert!(!host_embed_source_problems(&format!("{source}\n{extra}")).is_empty());
+        }
+        assert!(!host_embed_source_problems("").is_empty());
     }
 
     #[test]

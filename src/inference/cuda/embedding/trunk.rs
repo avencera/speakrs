@@ -1,5 +1,6 @@
 use super::super::dnn::Conv2d;
-use super::super::implementation::{Choice, production};
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+use super::super::implementation::Choice;
 use super::super::{CudaError, CudaMath, CudaRuntime, DeviceTensor, SafetensorsFile};
 
 /// Channels of the stem convolution
@@ -55,16 +56,14 @@ pub(super) struct ConvLayer {
     weight: DeviceTensor,
     bias: DeviceTensor,
     shape: ConvShape,
-    /// index of this layer's shape in [`Trunk::shapes`], which is also the index of
-    /// its plan in an embedding batch
+    /// layer identity and qualification-only override
     plan: LayerPlan,
 }
 
 /// Per-layer ownership is separate from the shared cuDNN shape plans
 #[derive(Debug)]
 struct LayerPlan {
-    library_slot: usize,
-    #[cfg(test)]
+    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
     override_choice: Option<Choice>,
     name: String,
 }
@@ -72,14 +71,11 @@ struct LayerPlan {
 impl ConvLayer {
     /// Uploads `<prefix>.weight` and `<prefix>.weight_bias`, the names the ONNX export
     /// gives a convolution whose batch norm it folded
-    ///
-    /// Registers the layer's shape in `shapes` unless an earlier layer has it
     fn load(
         runtime: &CudaRuntime,
         weights: &SafetensorsFile,
         prefix: &str,
         shape: ConvShape,
-        shapes: &mut Vec<ConvShape>,
     ) -> Result<Self, CudaError> {
         let ConvShape {
             in_channels,
@@ -94,21 +90,12 @@ impl ConvLayer {
         )?;
         let bias = weights.upload(runtime, &format!("{prefix}.weight_bias"), &[out_channels])?;
 
-        let plan_slot = match shapes.iter().position(|known| *known == shape) {
-            Some(slot) => slot,
-            None => {
-                shapes.push(shape);
-                shapes.len() - 1
-            }
-        };
-
         Ok(Self {
             weight,
             bias,
             shape,
             plan: LayerPlan {
-                library_slot: plan_slot,
-                #[cfg(test)]
+                #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
                 override_choice: None,
                 name: prefix.to_owned(),
             },
@@ -120,20 +107,9 @@ impl ConvLayer {
         self.shape.conv(batch, math)
     }
 
-    pub(super) fn plan_slot(&self) -> usize {
-        self.plan.library_slot
-    }
-
-    pub(super) fn choice(&self, batch: usize, math: CudaMath) -> Choice {
-        #[cfg(test)]
-        if let Some(choice) = self.plan.override_choice {
-            return choice;
-        }
-
-        let choice = production(self.name(), batch, math);
-        #[cfg(test)]
-        let choice = super::super::test_support::default_choice(choice);
-        choice
+    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    pub(super) fn override_choice(&self) -> Option<Choice> {
+        self.plan.override_choice
     }
 
     pub(super) fn name(&self) -> &str {
@@ -164,7 +140,7 @@ impl ConvLayer {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
 mod test_support;
 
 /// A ResNet basic block: two 3x3 convolutions and a residual connection, with a
@@ -194,8 +170,6 @@ impl BasicBlock {
 pub(super) struct Trunk {
     pub(super) stem: ConvLayer,
     pub(super) blocks: Vec<BasicBlock>,
-    /// distinct convolution shapes, indexed by [`ConvLayer::plan_slot`]
-    shapes: Vec<ConvShape>,
 }
 
 impl Trunk {
@@ -214,8 +188,7 @@ impl Trunk {
             stride: 1,
             input: [bins, frames],
         };
-        let mut shapes = Vec::new();
-        let stem = ConvLayer::load(runtime, weights, "resnet.conv1", stem_shape, &mut shapes)?;
+        let stem = ConvLayer::load(runtime, weights, "resnet.conv1", stem_shape)?;
 
         let mut blocks = Vec::with_capacity(STAGES.iter().map(|(_, count)| count).sum());
         let mut channels = STEM_CHANNELS;
@@ -233,13 +206,8 @@ impl Trunk {
                     stride,
                     input: size,
                 };
-                let conv1 = ConvLayer::load(
-                    runtime,
-                    weights,
-                    &format!("{prefix}.conv1"),
-                    conv1_shape,
-                    &mut shapes,
-                )?;
+                let conv1 =
+                    ConvLayer::load(runtime, weights, &format!("{prefix}.conv1"), conv1_shape)?;
                 let block_output = conv1.output();
 
                 let conv2_shape = ConvShape {
@@ -249,13 +217,8 @@ impl Trunk {
                     stride: 1,
                     input: block_output,
                 };
-                let conv2 = ConvLayer::load(
-                    runtime,
-                    weights,
-                    &format!("{prefix}.conv2"),
-                    conv2_shape,
-                    &mut shapes,
-                )?;
+                let conv2 =
+                    ConvLayer::load(runtime, weights, &format!("{prefix}.conv2"), conv2_shape)?;
 
                 let shortcut = if stride != 1 || channels != out_channels {
                     let shortcut_shape = ConvShape {
@@ -270,7 +233,6 @@ impl Trunk {
                         weights,
                         &format!("{prefix}.shortcut.0"),
                         shortcut_shape,
-                        &mut shapes,
                     )?)
                 } else {
                     None
@@ -288,16 +250,20 @@ impl Trunk {
             }
         }
 
-        Ok(Self {
-            stem,
-            blocks,
-            shapes,
-        })
+        Ok(Self { stem, blocks })
     }
 
-    /// Distinct convolution shapes; a batch plans each once
-    pub(super) fn shapes(&self) -> &[ConvShape] {
-        &self.shapes
+    /// Every convolution and whether its epilogue adds a residual
+    pub(super) fn layers(&self) -> impl Iterator<Item = (&ConvLayer, bool)> {
+        std::iter::once((&self.stem, false)).chain(self.blocks.iter().flat_map(|block| {
+            [
+                Some((&block.conv1, false)),
+                Some((&block.conv2, true)),
+                block.shortcut.as_ref().map(|layer| (layer, false)),
+            ]
+            .into_iter()
+            .flatten()
+        }))
     }
 
     /// Elements per item each buffer must hold: the two trunk buffers, the hidden

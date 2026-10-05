@@ -510,7 +510,8 @@ fn embedding_conv_algorithms_b32() -> Result<(), CudaError> {
         return Ok(());
     };
     let stream = runtime.stream().clone();
-    let dnn = runtime.dnn().clone();
+    runtime.prepare_library(super::super::CudaLibrary::Cudnn)?;
+    let dnn = runtime.dnn()?.clone();
     // (in, out, h, w, kernel, stride) of the 11 distinct trunk shapes
     let shapes = [
         (1, 32, 80, 998, 3, 1),
@@ -629,7 +630,8 @@ fn embedding_fused_conv_b32() -> Result<(), CudaError> {
         return Ok(());
     };
     let stream = runtime.stream().clone();
-    let dnn = runtime.dnn().clone();
+    runtime.prepare_library(super::super::CudaLibrary::Cudnn)?;
+    let dnn = runtime.dnn()?.clone();
     let batch = 32;
     let timing = Some(CUevent_flags::CU_EVENT_DEFAULT);
     let shapes = [(32, 80, 998), (64, 40, 499), (128, 20, 250), (256, 10, 125)];

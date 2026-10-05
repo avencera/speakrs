@@ -80,13 +80,6 @@ MODES = ("fp32", "tf32")
 BATCHES = (1, 7, 32, 33, 64)
 FRAMES = 589
 PROJECTION_COLUMNS = (128, 256, 384, 512)
-# every shape the locked projection helper can issue at a harness batch size
-PROJECTION_SHAPES = frozenset(
-    (batch * FRAMES, n, k)
-    for batch in BATCHES
-    for n in PROJECTION_COLUMNS
-    for k in (60, 256)
-)
 # the candidate PTX area of each target
 AREAS = {"resnet": "resnet", "lstm": "lstm", "sincnet": "sincnet"}
 
@@ -1644,14 +1637,6 @@ def collect_tier(
                 lambda: fixed_reduction_order(exported, result["loaded_ptx"]),
             )
             declared = frozenset(layer for layer in coverage.layers)
-            baseline_shapes = (
-                PROJECTION_SHAPES
-                if target == "lstm"
-                and (
-                    ROOT / "tests/cuda_qualify/baselines" / f"lstm-{tier}.json"
-                ).exists()
-                else frozenset()
-            )
 
             def trace(library_control: bool) -> dict:
                 return attribute(
@@ -1660,7 +1645,6 @@ def collect_tier(
                     nonce,
                     allow,
                     declared,
-                    baseline_shapes,
                     library_control,
                 )
 

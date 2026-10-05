@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
 use crate::commands;
+#[cfg(feature = "cuda")]
+use crate::commands::diarize::CudaLstm;
 use crate::commands::diarize::{ChunkEmbeddingComputeUnits, CudaPrecision, DiarizeMode};
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::Result;
@@ -84,6 +86,10 @@ enum Command {
         /// Embedding precision in CUDA modes; the filterbank always runs in FP32
         #[arg(long, default_value = "tf32", value_enum)]
         cuda_embedding_math: CudaPrecision,
+        /// Algorithm for selected Library LSTM plans
+        #[cfg(feature = "cuda")]
+        #[arg(long, default_value = "persist-static-small-h", value_enum)]
+        cuda_lstm_algorithm: CudaLstm,
         /// WAV files to diarize
         wav_files: Vec<PathBuf>,
     },
@@ -143,6 +149,8 @@ impl Command {
                 chunk_emb_compute_units,
                 cuda_segmentation_math,
                 cuda_embedding_math,
+                #[cfg(feature = "cuda")]
+                cuda_lstm_algorithm,
                 wav_files,
             } => commands::diarize::run(
                 mode,
@@ -151,6 +159,8 @@ impl Command {
                     chunk_emb_compute_units,
                     cuda_segmentation_math,
                     cuda_embedding_math,
+                    #[cfg(feature = "cuda")]
+                    cuda_lstm_algorithm,
                 },
                 wav_files,
             ),

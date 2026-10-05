@@ -61,7 +61,7 @@ impl<T: DeviceRepr + ValidAsZeroBits + Clone + Default + Unpin> DeviceTensor<T> 
 }
 
 impl<T> DeviceTensor<T> {
-    #[cfg(test)]
+    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
     /// The row-major shape
     pub fn shape(&self) -> &[usize] {
         &self.shape

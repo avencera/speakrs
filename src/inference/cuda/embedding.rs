@@ -31,13 +31,15 @@ use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
 use cudarc::driver::{CudaGraph, CudaSlice, CudaView, CudaViewMut};
 use tracing::debug;
 
+use self::dispatch::Plan;
 use self::kernels::{ChannelBias, EmbeddingKernels, PoolShape};
 use self::trunk::{ConvLayer, STEM_SLOT, Trunk};
-use super::candidate::ConvOxide;
-use super::dnn::{ConvPlan, ConvPlanner, Residual};
+use super::dnn::Residual;
 use super::error::{check_len, element_count};
 use super::fbank::{FBANK_FRAMES, FBANK_MEL_BINS};
+use super::implementation::{LibraryNeed, MODEL_BATCHES, Selected, Target, select};
 use super::{CudaError, CudaMath, CudaRuntime, DeviceTensor, PtxTier, SafetensorsFile, Sgemm};
+use super::{CudaLibrary, KernelModule};
 
 /// Frames of one speaker mask, at the segmentation model's frame rate
 pub const MASK_FRAMES: usize = 589;
@@ -115,6 +117,52 @@ impl ResNetEmbedding {
         math: CudaMath,
     ) -> Result<Self, CudaError> {
         let trunk = Trunk::load(runtime, weights, FBANK_MEL_BINS, FBANK_FRAMES)?;
+        let target = Target::for_area(runtime, KernelModule::Resnet)?;
+        let mut needs = Vec::new();
+        for batch in MODEL_BATCHES {
+            for (layer, _) in trunk.layers() {
+                if matches!(
+                    select(layer.name(), batch, math, target).map_err(|error| {
+                        CudaError::Unsupported {
+                            context: "embedding selection",
+                            reason: error.to_string(),
+                        }
+                    })?,
+                    Selected::Library
+                ) {
+                    needs.push(LibraryNeed::new(
+                        KernelModule::Resnet,
+                        layer.name(),
+                        batch,
+                        math,
+                        target,
+                        CudaLibrary::Cudnn,
+                    ));
+                }
+            }
+            needs.push(LibraryNeed::new(
+                KernelModule::Embedding,
+                "resnet.seg_1",
+                batch,
+                math,
+                Target::for_area(runtime, KernelModule::Embedding)?,
+                CudaLibrary::Cublas,
+            ));
+        }
+        if super::driver_only() {
+            for need in &needs {
+                need.prepare(runtime)?;
+            }
+        }
+        LibraryNeed::new(
+            KernelModule::Embedding,
+            "resnet.seg_1",
+            1,
+            math,
+            Target::for_area(runtime, KernelModule::Embedding)?,
+            CudaLibrary::Cublas,
+        )
+        .prepare(runtime)?;
         let pooled = 2 * pool_columns(&trunk);
         let head_weight = weights.upload(runtime, HEAD_WEIGHT, &[EMBEDDING_DIM, pooled])?;
         let head_bias = weights.upload(runtime, HEAD_BIAS, &[EMBEDDING_DIM])?;
@@ -147,16 +195,10 @@ impl ResNetEmbedding {
         let columns = pool_columns(&model.trunk);
 
         let lens = model.trunk.buffer_lens();
-        let planner = ConvPlanner::new(runtime)?;
-        let plans = model
-            .trunk
-            .shapes()
-            .iter()
-            .map(|shape| planner.plan(shape.conv(chunks, model.math)))
-            .collect::<Result<Vec<_>, _>>()?;
+        let plans = dispatch::plan_layers(runtime, &model.trunk, chunks, model.math)?;
         let workspace_bytes = plans
             .iter()
-            .map(ConvPlan::workspace_bytes)
+            .map(|(_, plan)| plan.workspace_bytes())
             .max()
             .unwrap_or(0);
         debug!(
@@ -172,7 +214,6 @@ impl ResNetEmbedding {
             "embedding stem input",
             &[chunks, FBANK_MEL_BINS, FBANK_FRAMES],
         )?;
-        let candidates = dispatch::plan_candidates(runtime, &model.trunk, chunks, model.math)?;
         Ok(EmbeddingBatch {
             model: Arc::clone(model),
             chunks,
@@ -190,7 +231,6 @@ impl ResNetEmbedding {
             output: DeviceTensor::zeros(stream, &[rows, EMBEDDING_DIM])?,
             plans,
             workspace: stream.alloc_zeros(workspace_bytes.max(1))?,
-            candidates,
             graph: None,
         })
     }
@@ -219,11 +259,9 @@ pub struct EmbeddingBatch {
     shortcut: CudaSlice<f32>,
     pooled: CudaSlice<f32>,
     output: DeviceTensor,
-    plans: Vec<ConvPlan>,
+    plans: Vec<(String, Plan)>,
     /// cuDNN workspace shared by every plan, sized for the largest
     workspace: CudaSlice<u8>,
-    /// candidate plans for the declared layers at this batch size, by layer name
-    candidates: Vec<(String, ConvOxide)>,
     graph: Option<ForwardGraph>,
 }
 
@@ -316,20 +354,20 @@ impl EmbeddingBatch {
             output,
             plans,
             workspace,
-            candidates,
             ..
         } = self;
         let model = &**model;
+        #[cfg(not(feature = "cuda"))]
+        let _ = workspace;
         let chunks = *chunks;
         let math = model.math;
         let mut convs = Convs {
             runtime,
             kernels: &model.kernels,
             plans,
+            #[cfg(feature = "cuda")]
             workspace,
             chunks,
-            math,
-            candidates,
         };
 
         let mut stem_input = stem_input.as_view_mut();
@@ -347,11 +385,17 @@ impl EmbeddingBatch {
         // residual operand
         let (scratch_buffer, stem_buffer) = read_write(trunk, 1 - STEM_SLOT);
         let mut stem_out = stem_buffer.slice_mut(..stem_len);
+        #[cfg(feature = "cuda")]
         let scratch = scratch_buffer.slice(..stem_len);
+        #[cfg(not(feature = "cuda"))]
+        let _ = scratch_buffer;
         convs.conv_bias_relu(
             stem,
             &stem_input.as_view(),
-            Residual::None { scratch: &scratch },
+            Residual::None {
+                #[cfg(feature = "cuda")]
+                scratch: &scratch,
+            },
             &mut stem_out,
         )?;
         tap(EmbeddingTap::Stem, &stem_out.as_view())?;
@@ -369,11 +413,15 @@ impl EmbeddingBatch {
             // the block output buffer is free until the second convolution, so it
             // stands in as the first convolution's unused residual operand
             let mut hidden_out = hidden.slice_mut(..output_len);
+            #[cfg(feature = "cuda")]
             let scratch = block_out.as_view();
             convs.conv_bias_relu(
                 &block.conv1,
                 &input,
-                Residual::None { scratch: &scratch },
+                Residual::None {
+                    #[cfg(feature = "cuda")]
+                    scratch: &scratch,
+                },
                 &mut hidden_out,
             )?;
             tap(EmbeddingTap::Hidden { block: index }, &hidden_out.as_view())?;
@@ -461,21 +509,23 @@ impl EmbeddingBatch {
 struct Convs<'a> {
     runtime: &'a CudaRuntime,
     kernels: &'a EmbeddingKernels,
-    plans: &'a [ConvPlan],
+    plans: &'a [(String, Plan)],
+    #[cfg(feature = "cuda")]
     workspace: &'a mut CudaSlice<u8>,
     chunks: usize,
-    math: CudaMath,
-    candidates: &'a [(String, ConvOxide)],
 }
 
 impl<'a> Convs<'a> {
-    /// The plan for this layer's shape
-    fn plan(&self, layer: &ConvLayer) -> &'a ConvPlan {
-        // `run` checked that the batch has one plan per trunk shape, and every
-        // layer's slot indexes those shapes
-        let plan = &self.plans[layer.plan_slot()];
-        debug_assert_eq!(*plan.spec(), layer.conv(self.chunks, self.math));
-        plan
+    /// The owner selected when this batch was constructed
+    fn plan(&self, layer: &ConvLayer) -> Result<&'a Plan, CudaError> {
+        self.plans
+            .iter()
+            .find(|(name, _)| name == layer.name())
+            .map(|(_, plan)| plan)
+            .ok_or_else(|| CudaError::Unsupported {
+                context: "embedding plan",
+                reason: format!("no plan for {}", layer.name()),
+            })
     }
 
     /// `y = conv(x, layer.weight)`
@@ -485,13 +535,24 @@ impl<'a> Convs<'a> {
         x: &CudaView<'_, f32>,
         y: &mut CudaViewMut<'_, f32>,
     ) -> Result<(), CudaError> {
-        let plan = self.plan(layer);
-        plan.forward(
-            &mut self.workspace.as_view_mut(),
-            x,
-            &layer.weight().data().as_view(),
-            y,
-        )
+        #[cfg(feature = "cuda")]
+        {
+            let plan = self.plan(layer)?.library()?;
+            plan.forward(
+                &mut self.workspace.as_view_mut(),
+                x,
+                &layer.weight().data().as_view(),
+                y,
+            )
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            let _ = (layer, x, y);
+            Err(CudaError::Unsupported {
+                context: "embedding shortcut",
+                reason: "no qualified driver implementation".to_owned(),
+            })
+        }
     }
 
     /// `y = y + layer.bias` in place, for the shortcut convolutions
@@ -530,6 +591,6 @@ fn pool_columns(trunk: &Trunk) -> usize {
     channels * bins
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
 #[path = "../../../tests/cuda_qualify/embedding.rs"]
 pub(crate) mod test_support;

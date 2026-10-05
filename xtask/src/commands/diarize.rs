@@ -55,12 +55,33 @@ pub enum CudaPrecision {
     Fp32,
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda")]
 impl CudaPrecision {
     const fn into_runtime(self) -> speakrs::inference::CudaMath {
         match self {
             Self::Tf32 => speakrs::inference::CudaMath::Tf32,
             Self::Fp32 => speakrs::inference::CudaMath::Fp32,
+        }
+    }
+}
+
+/// Algorithm used only by selected Library LSTM plans
+#[cfg(feature = "cuda")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CudaLstm {
+    Standard,
+    PersistStaticSmallH,
+    PersistDynamic,
+}
+
+#[cfg(feature = "cuda")]
+impl CudaLstm {
+    fn into_runtime(self) -> speakrs::inference::CudaLstmAlgorithm {
+        use speakrs::inference::CudaLstmAlgorithm;
+        match self {
+            Self::Standard => CudaLstmAlgorithm::Standard,
+            Self::PersistStaticSmallH => CudaLstmAlgorithm::PersistStaticSmallH,
+            Self::PersistDynamic => CudaLstmAlgorithm::PersistDynamic,
         }
     }
 }
@@ -71,6 +92,8 @@ pub struct RuntimeOptions {
     pub chunk_emb_compute_units: ChunkEmbeddingComputeUnits,
     pub cuda_segmentation_math: CudaPrecision,
     pub cuda_embedding_math: CudaPrecision,
+    #[cfg(feature = "cuda")]
+    pub cuda_lstm_algorithm: CudaLstm,
 }
 
 impl ChunkEmbeddingComputeUnits {
@@ -159,6 +182,8 @@ pub fn run(
         chunk_emb_compute_units,
         cuda_segmentation_math,
         cuda_embedding_math,
+        #[cfg(feature = "cuda")]
+        cuda_lstm_algorithm,
     } = options;
     let command_start = Instant::now();
 
@@ -177,14 +202,16 @@ pub fn run(
             let runtime_config = RuntimeConfig {
                 #[cfg(feature = "coreml")]
                 chunk_emb_compute_units: compute_units,
-                #[cfg(feature = "cuda")]
+                #[cfg(feature = "_cuda")]
                 cuda_segmentation_math: cuda_segmentation_math.into_runtime(),
-                #[cfg(feature = "cuda")]
+                #[cfg(feature = "_cuda")]
                 cuda_embedding_math: cuda_embedding_math.into_runtime(),
+                #[cfg(feature = "cuda")]
+                cuda_lstm_algorithm: cuda_lstm_algorithm.into_runtime(),
                 experiment: None,
                 ..RuntimeConfig::default()
             };
-            #[cfg(not(feature = "cuda"))]
+            #[cfg(not(feature = "_cuda"))]
             let _ = (cuda_segmentation_math, cuda_embedding_math);
             if speakrs_mode.execution_mode().is_cuda() {
                 eprintln!(

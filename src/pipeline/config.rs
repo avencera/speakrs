@@ -1,8 +1,10 @@
 #[cfg(any(feature = "coreml", feature = "_metrics"))]
 use crate::inference::CoreMlComputeUnits;
-use crate::inference::ExecutionMode;
 #[cfg(feature = "cuda")]
-use crate::inference::{CudaGraphs, CudaLstmAlgorithm, CudaMath};
+use crate::inference::CudaLstmAlgorithm;
+use crate::inference::ExecutionMode;
+#[cfg(feature = "_cuda")]
+use crate::inference::{CudaGraphs, CudaMath};
 #[cfg(feature = "_metrics")]
 use crate::pipeline::SphereVbxPfConfig;
 use crate::pipeline::{ActivityCleanup, AhcConfig, VbxConfig};
@@ -726,7 +728,7 @@ pub enum FbankSessionPoolSizeError {
 /// Controls execution parameters that can affect numerical output and performance.
 #[derive(Debug, Clone)]
 // the CUDA modes need per-stage defaults that differ from their field types' defaults
-#[cfg_attr(not(feature = "cuda"), derive(Default))]
+#[cfg_attr(not(feature = "_cuda"), derive(Default))]
 pub struct RuntimeConfig {
     /// CPU filterbank session pool policy for the ONNX Runtime modes' split inference
     pub fbank_pool: FbankSessionPool,
@@ -745,8 +747,8 @@ pub struct RuntimeConfig {
     /// [`CudaMath::Fp32`] by default. [`CudaMath::Tf32`] is faster on Ampere and newer
     /// GPUs, but it moves the segmentation logits by up to about 0.23 and, on
     /// VoxConverse-dev, made one file's DER 4.5 points worse
-    #[cfg(feature = "cuda")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
+    #[cfg(feature = "_cuda")]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "cuda", feature = "cuda-driver-only"))))]
     pub cuda_segmentation_math: CudaMath,
     /// Precision of the embedding model's cuDNN convolutions and cuBLAS embedding layer
     /// (CUDA modes only)
@@ -757,16 +759,16 @@ pub struct RuntimeConfig {
     /// the references most closely, and is the choice to compare against if clustering
     /// looks off, since embedding drift can change PLDA/VBx clustering. The filterbank
     /// always runs in FP32, because TF32 moves its log-mel values by up to 2.7
-    #[cfg(feature = "cuda")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
+    #[cfg(feature = "_cuda")]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "cuda", feature = "cuda-driver-only"))))]
     pub cuda_embedding_math: CudaMath,
     /// cuDNN RNN algorithm for the segmentation model's LSTM layers (CUDA modes only)
     #[cfg(feature = "cuda")]
     #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
     pub cuda_lstm_algorithm: CudaLstmAlgorithm,
     /// Whether the CUDA modes capture and replay CUDA graphs (CUDA modes only)
-    #[cfg(feature = "cuda")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
+    #[cfg(feature = "_cuda")]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "cuda", feature = "cuda-driver-only"))))]
     pub cuda_graphs: CudaGraphs,
     /// Optional typed inference layout for metrics experiments
     #[cfg(feature = "_metrics")]
@@ -774,7 +776,7 @@ pub struct RuntimeConfig {
     pub experiment: Option<ExperimentInferenceConfig>,
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda")]
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
@@ -786,6 +788,7 @@ impl Default for RuntimeConfig {
             // embedding TF32 and the persistent LSTM passed, see the CUDA DER report
             cuda_segmentation_math: CudaMath::Fp32,
             cuda_embedding_math: CudaMath::Tf32,
+            #[cfg(feature = "cuda")]
             cuda_lstm_algorithm: CudaLstmAlgorithm::PersistStaticSmallH,
             cuda_graphs: CudaGraphs::Enabled,
             #[cfg(feature = "_metrics")]
@@ -808,16 +811,16 @@ impl RuntimeConfig {
     }
 
     /// Select the segmentation precision of the CUDA modes
-    #[cfg(feature = "cuda")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
+    #[cfg(feature = "_cuda")]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "cuda", feature = "cuda-driver-only"))))]
     pub const fn with_cuda_segmentation_math(mut self, math: CudaMath) -> Self {
         self.cuda_segmentation_math = math;
         self
     }
 
     /// Select the embedding precision of the CUDA modes
-    #[cfg(feature = "cuda")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
+    #[cfg(feature = "_cuda")]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "cuda", feature = "cuda-driver-only"))))]
     pub const fn with_cuda_embedding_math(mut self, math: CudaMath) -> Self {
         self.cuda_embedding_math = math;
         self
@@ -832,8 +835,8 @@ impl RuntimeConfig {
     }
 
     /// Turn CUDA graph capture on or off in the CUDA modes
-    #[cfg(feature = "cuda")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
+    #[cfg(feature = "_cuda")]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "cuda", feature = "cuda-driver-only"))))]
     pub const fn with_cuda_graphs(mut self, graphs: CudaGraphs) -> Self {
         self.cuda_graphs = graphs;
         self

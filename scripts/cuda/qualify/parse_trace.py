@@ -10,8 +10,8 @@ input-projection helper), `fixed` (a locked launch of a Library-owned kernel) an
 
 Inside a window every kernel, copy and memset must be launched inside one of those
 scopes, on the qualification stream. Inside a candidate scope a kernel must be an
-entry of the PTX bytes the process loaded, unless it is a cuBLAS kernel of the
-projection helper at a baseline shape. Library paths may not launch candidate kernels.
+entry of the PTX bytes the process loaded. Candidates may make no Library calls,
+including input projections. Library paths may not launch candidate kernels.
 """
 
 import re
@@ -112,7 +112,6 @@ def attribute(
     nonce: str,
     allow: AllowList,
     declared: frozenset[str] = frozenset(),
-    projection_shapes: frozenset[tuple[int, int, int]] = frozenset(),
     library_control: bool = False,
 ) -> dict:
     """Apply the window, scope, allow-list and stream rules to an eager trace.
@@ -136,7 +135,6 @@ def attribute(
             nonce,
             allow,
             declared,
-            projection_shapes,
             library_control,
         )
 
@@ -216,7 +214,6 @@ def _attribute(
     nonce: str,
     allow: AllowList,
     declared: frozenset[str],
-    projection_shapes: frozenset[tuple[int, int, int]],
     library_control: bool,
 ) -> dict:
     tables = {
@@ -307,13 +304,7 @@ def _attribute(
         elif not calls:
             streams[stream] += 1
         if candidate and calls:
-            projection = "projection" in kinds and all(
-                _projection_call(scope.name, projection_shapes) for scope in calls
-            )
-            if not projection:
-                violations["forbidden library kernels in a candidate scope"].append(
-                    label
-                )
+            violations["forbidden library kernels in a candidate scope"].append(label)
             continue
         if candidate and kind == "kernel" and not event_names <= allow.entries:
             violations["kernel is not on the loaded PTX allow-list"].append(label)
@@ -500,9 +491,3 @@ def _phase_rules(
         for index, phase in inner:
             if not phase_events[index]:
                 violations["LSTM phase scope without a launch"].append(phase.name)
-
-
-def _projection_call(name: str, shapes: frozenset[tuple[int, int, int]]) -> bool:
-    """A projection call must be cuBLAS at a shape the unfiltered baseline covers."""
-    match = re.fullmatch(r"cublas\.m(\d+)\.n(\d+)\.k(\d+)", name)
-    return match is not None and (int(match[1]), int(match[2]), int(match[3])) in shapes

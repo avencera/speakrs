@@ -536,11 +536,9 @@ class Trace(unittest.TestCase):
         ]
         return launches, ranges
 
-    def attribute(
-        self, path, declared=frozenset({LAYER}), library=False, shapes=frozenset()
-    ):
+    def attribute(self, path, declared=frozenset({LAYER}), library=False):
         return trace.attribute(
-            path, (self.LAYER,), NONCE, self.ALLOW, declared, shapes, library
+            path, (self.LAYER,), NONCE, self.ALLOW, declared, library
         )
 
     def run_case(self, change):
@@ -632,8 +630,15 @@ class Trace(unittest.TestCase):
         with self.assertRaisesRegex(trace.Rejected, "graph node"):
             self.run_case(change)
 
-    def lstm_trace(self, path, drop_phase=None, overlap=False, projection_phase=True):
-        """A candidate stack with all 16 phases; L0.forward projects through cuBLAS."""
+    def lstm_trace(
+        self,
+        path,
+        drop_phase=None,
+        overlap=False,
+        projection_phase=True,
+        library_projection=False,
+    ):
+        """A custom stack with an optional forbidden cuBLAS projection call."""
         layer = "lstm.stack"
         ranges = [(10, 1000, "window", "case"), (20, 900, "candidate", layer)]
         launches = []
@@ -643,7 +648,7 @@ class Trace(unittest.TestCase):
             if name != drop_phase:
                 ranges.append((start, end, "phase", name))
             launches.append((start + 2, "resnet_conv", 7, "kernel", None))
-            if name == "input_proj.L0.forward":
+            if name == "input_proj.L0.forward" and library_projection:
                 inner = (start + 3, start + 30) if projection_phase else (905, 940)
                 ranges.append((*inner, "projection", "L0.forward"))
                 ranges.append(
@@ -658,20 +663,21 @@ class Trace(unittest.TestCase):
         self.build(path, launches, ranges)
         return layer
 
-    def test_lstm_candidate_needs_its_phases_and_helper(self):
-        shapes = frozenset({(589, 512, 60)})
+    def test_lstm_candidate_requires_phases_and_zero_library_projections(self):
         stack = frozenset({"lstm.stack"})
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "good.sqlite"
             layer = self.lstm_trace(path)
-            trace.attribute(path, (layer,), NONCE, self.ALLOW, stack, shapes)
+            trace.attribute(path, (layer,), NONCE, self.ALLOW, stack)
+            path = Path(directory) / "library-projection.sqlite"
+            self.lstm_trace(path, library_projection=True)
             with self.assertRaisesRegex(trace.Rejected, "forbidden library kernels"):
-                trace.attribute(path, (layer,), NONCE, self.ALLOW, stack, frozenset())
+                trace.attribute(path, (layer,), NONCE, self.ALLOW, stack)
             cases = [
                 ({"drop_phase": "recurrence.L3.reverse"}, "lacks locked phase scopes"),
                 ({"overlap": True}, "overlapping LSTM phase scopes"),
                 (
-                    {"projection_phase": False},
+                    {"projection_phase": False, "library_projection": True},
                     "projection outside its input_proj phase",
                 ),
             ]
@@ -680,9 +686,7 @@ class Trace(unittest.TestCase):
                     path = Path(directory) / f"{reason}.sqlite"
                     self.lstm_trace(path, **options)
                     with self.assertRaisesRegex(trace.Rejected, reason):
-                        trace.attribute(
-                            path, (layer,), NONCE, self.ALLOW, stack, shapes
-                        )
+                        trace.attribute(path, (layer,), NONCE, self.ALLOW, stack)
 
     def test_library_control_has_no_candidate_scopes(self):
         launches, ranges = self.good()

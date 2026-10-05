@@ -1,6 +1,7 @@
 //! Isolated convolution qualification through the locked production dispatcher
 
-use super::{ConvLayer, ConvPlan, ConvPlanner, Convs, ResNetEmbedding, Residual};
+use super::dispatch::Plan;
+use super::{ConvLayer, Convs, ResNetEmbedding, Residual};
 use crate::inference::cuda::candidate::{ConvCandidate, ConvOxide};
 use crate::inference::cuda::implementation::Choice;
 use crate::inference::cuda::test_support::{self, Mutant};
@@ -44,7 +45,7 @@ pub(super) fn mutant_conv(
             Residual::None { scratch } => Residual::None { scratch },
             Residual::Add(value) => Residual::Add(value),
         };
-        convs.plan(layer).forward_bias_relu(
+        convs.plan(layer)?.library()?.forward_bias_relu(
             &mut convs.workspace.as_view_mut(),
             x,
             &weight,
@@ -96,9 +97,8 @@ pub(crate) struct Operator<'a> {
     model: &'a ResNetEmbedding,
     layer: &'a ConvLayer,
     batch: usize,
-    plans: Vec<ConvPlan>,
+    plans: Vec<(String, Plan)>,
     workspace: CudaSlice<u8>,
-    candidates: Vec<(String, ConvOxide)>,
     inputs: Vec<Inputs>,
     output: CudaSlice<f32>,
     adds_residual: bool,
@@ -167,7 +167,7 @@ impl<'a> Operator<'a> {
         let stream = runtime.stream();
         let (_, output_len) = Self::lens(model, batch, block, second);
         // only the precision mutant changes its input in place and needs a restore copy
-        let restores = layer.choice(batch, model.0.math) == Choice::Mutant(Mutant::Precision);
+        let restores = layer.override_choice() == Some(Choice::Mutant(Mutant::Precision));
         let mut inputs = Vec::new();
         for set in sets {
             inputs.push(Inputs {
@@ -184,29 +184,19 @@ impl<'a> Operator<'a> {
             });
         }
 
-        let planner = ConvPlanner::new(runtime)?;
-        let plans = model
-            .0
-            .trunk
-            .shapes()
-            .iter()
-            .map(|shape| planner.plan(shape.conv(batch, model.0.math)))
-            .collect::<Result<Vec<_>, _>>()?;
+        let plans = super::dispatch::plan_layers(runtime, &model.0.trunk, batch, model.0.math)?;
         let workspace_bytes = plans
             .iter()
-            .map(ConvPlan::workspace_bytes)
+            .map(|(_, plan)| plan.workspace_bytes())
             .max()
-            .unwrap_or(1)
+            .unwrap_or(0)
             .max(1);
-        let candidates =
-            super::dispatch::plan_candidates(runtime, &model.0.trunk, batch, model.0.math)?;
         Ok(Self {
             model,
             layer,
             batch,
             plans,
             workspace: stream.alloc_zeros(workspace_bytes)?,
-            candidates,
             output: stream.alloc_zeros(output_len)?,
             inputs,
             adds_residual: second,
@@ -241,7 +231,14 @@ impl<'a> Operator<'a> {
 
     /// Whether the candidate runs this pair; undeclared pairs run the Library path
     pub(crate) fn declared(&self) -> bool {
-        match self.layer.choice(self.batch, self.model.0.math) {
+        match self
+            .plans
+            .iter()
+            .find(|(name, _)| name == self.layer.name())
+            .expect("planned layer")
+            .1
+            .choice()
+        {
             Choice::Library => false,
             Choice::Oxide(_) => {
                 ConvOxide::COVERAGE.covers(self.name(), self.batch, self.model.0.math)
@@ -266,8 +263,6 @@ impl<'a> Operator<'a> {
             plans: &self.plans,
             workspace: &mut self.workspace,
             chunks: self.batch,
-            math: self.model.0.math,
-            candidates: &self.candidates,
         };
         let set = &self.inputs[which];
         let r = set.residual.as_view();

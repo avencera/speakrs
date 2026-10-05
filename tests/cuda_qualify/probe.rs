@@ -1457,6 +1457,7 @@ fn qualification_driver() -> Result<(), CudaError> {
 
 /// cuBLAS input projections at every shape the locked helper can issue in the harness
 fn projection_baseline(runtime: &CudaRuntime) -> Result<(), CudaError> {
+    runtime.prepare_library(crate::inference::cuda::CudaLibrary::Cublas)?;
     use crate::inference::cuda::blas::Sgemm;
     let mut shapes = Vec::new();
     for math in [CudaMath::Fp32, CudaMath::Tf32] {
@@ -1552,7 +1553,7 @@ fn sequential_capture_keeps_candidate_kernels() -> Result<(), CudaError> {
                 .as_array()
                 .expect("kernel names")
                 .len(),
-            9,
+            10,
             "batch={batch}"
         );
         // destruction permits the next capture to reuse node addresses

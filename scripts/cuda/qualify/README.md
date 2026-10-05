@@ -2,9 +2,8 @@
 
 The harness decides whether a custom kernel may replace a cuDNN or cuBLAS call at one of
 three boundaries: the 14 eligible ResNet 3x3 convolutions, the Sinc producer, and the
-complete four-layer bidirectional LSTM stack. An accepted qualification record
-authorizes a replacement. The acceptance command below checks a normal pass or the
-strict Library-noise rule.
+complete four-layer bidirectional LSTM stack. Only `accepts_replacement: true` in a
+result authorizes a replacement.
 
 ## Running
 
@@ -39,14 +38,6 @@ A candidate is a plan type behind one trait per boundary, defined in the locked
 every timed and traced interval, then calls `enqueue` inside a harness scope it owns.
 The candidate never chooses its scope, its timing or its fallback.
 
-All three candidate traits return `PlanError`. `DeviceUnsupported` means that the
-device cannot host the plan. Shared dispatch uses the already planned Library path
-for a production selection and logs the boundary, batch and reason once per plan.
-An explicit harness selection fails for the same outcome. `PlanError::Cuda` always
-propagates, including ordinary `CudaError::Unsupported` errors. Coverage still
-selects the Library path for undeclared triples.
-
-
 ### Where candidate files go
 
 | What | Path |
@@ -80,7 +71,7 @@ pub(crate) struct Coverage(pub &'static [CoverageEntry]); // the union of the en
 
 pub(crate) trait ConvCandidate: Sized {
     const COVERAGE: Coverage;
-    fn plan(runtime: &CudaRuntime, layer: ConvLayerSpec<'_>) -> Result<Self, PlanError>;
+    fn plan(runtime: &CudaRuntime, layer: ConvLayerSpec<'_>) -> Result<Self, CudaError>;
     fn enqueue(
         &self,
         inputs: ConvInputs<'_, '_>,
@@ -93,7 +84,7 @@ pub(crate) trait ConvCandidate: Sized {
 pub(crate) trait SincCandidate: Sized {
     const COVERAGE: Coverage;
     const OUTPUT: SincOutput; // RawConv or Pooled
-    fn plan(runtime: &CudaRuntime, spec: SincSpec<'_>) -> Result<Self, PlanError>;
+    fn plan(runtime: &CudaRuntime, spec: SincSpec<'_>) -> Result<Self, CudaError>;
     fn enqueue(
         &self,
         inputs: SincInputs<'_, '_>,
@@ -105,7 +96,7 @@ pub(crate) trait SincCandidate: Sized {
 
 pub(crate) trait LstmCandidate: Sized {
     const COVERAGE: Coverage;
-    fn plan(runtime: &CudaRuntime, spec: LstmSpec<'_>) -> Result<Self, PlanError>;
+    fn plan(runtime: &CudaRuntime, spec: LstmSpec<'_>) -> Result<Self, CudaError>;
     fn enqueue(
         &self,
         input: &CudaView<'_, f32>,
@@ -159,7 +150,7 @@ impl SideStream {
   the profile requires all eight of each, one per layer and direction, each with a
   launch, none overlapping on the host. `p.project(layer, direction, ProjectionGemm
   { n, weight_transposed, beta }, a, weight, c)` is the only library call a candidate
-  may make, and it exists only inside `input_proj`: cuBLAS with `m = batch * 589`,
+  can express, and it exists only inside `input_proj`: cuBLAS with `m = batch * 589`,
   `k = 60` for layer 0 and 256 above, `n` in 128, 256, 384, 512, `beta` 0 or 1, and
   the boundary's math mode. It refuses other shapes. Recurrence is library-free.
 - `phases.op(Op::Pack, || ...)` and the other `Op` names open optional locked
@@ -370,8 +361,8 @@ only to locked code. A range with another nonce is refused.
 - Kernels a candidate launches from `plan` (the `plan` scope) must be on the
   allow-list too.
 - In a candidate scope, a kernel's mangled and demangled names must both be entries
-  of the PTX bytes the process loaded. A library call is allowed only inside the
-  locked projection helper, as cuBLAS, at a shape the projection baseline covers.
+  of the PTX bytes the process loaded. Oxide candidates must make zero Library
+  calls, including calls inside the locked projection helper.
   Host-device copies are refused.
 - A Library path may not launch a candidate-area entry.
 - Every declared boundary must have a candidate scope with kernels.
@@ -379,17 +370,18 @@ only to locked code. A range with another nonce is refused.
 The numeric and timing processes also track library calls made while a candidate
 scope is open, and, during graph capture, enumerate the nodes each candidate scope
 adds to the captured graph, side-stream branches included, and resolve kernel names with `cuFuncGetName` /
-`cuKernelGetName`. Library kernels outside the projection helper, unlisted kernels,
+`cuKernelGetName`. Library kernels in any candidate scope, unlisted kernels,
 host copies and host or event nodes fail (`profile:captured_library_calls`,
 `profile:graph_nodes`). The driver labels every capture with its case, and
 `profile:graph_nodes` also fails unless each case's captured candidate-kernel set
 equals that case's eager-profile candidate-kernel set. Graph mode is set and verified
-by the locked driver. Projection-node permissions are reset when the driver capture
-ID changes, so node addresses reused after graph destruction cannot hide kernels.
+by the locked driver. Only Library controls use projection-node permissions. These
+permissions reset when the driver capture ID changes, so node addresses reused after
+graph destruction cannot hide kernels.
 The ignored `sequential_capture_keeps_candidate_kernels` regression runs fresh
 captures at b1, b1, b7, b32, b33, b64 and b7 in one process with scope tracking on.
-Every capture must report exactly nine candidate kernels, excluding its one
-projection kernel. The ignored `secret_library_algorithms` proof measures Standard and
+Every capture must report all ten candidate kernels, including the custom projection
+kernel. The ignored `secret_library_algorithms` proof measures Standard and
 PersistStaticSmallH separately against f64 on the same secret input. Both must have
 FP32 rounding-scale error (below 1e-4 relative L2), and a one-element, one-ULP nudge
 must change the SmallH error by at most 10%. The SmallH/Standard error ratio is
@@ -425,8 +417,8 @@ declares every batch), both math modes. Each tool must complete with zero findin
 within 20 minutes after lock acquisition. A ResNet timeout is split into one process
 per declared convolution and batch; LSTM and Sinc timeouts block.
 
-LSTM candidates may call cuBLAS projections, which the include filter does not
-instrument. The locked projection baseline runs all three tools, unfiltered, on every
+Oxide LSTM candidates must use custom input projections and make zero Library projection
+calls. The previous K2 record remains pinned in production, but K2 cannot pass this new profile rule. The locked projection baseline runs all three tools, unfiltered, on every
 shape the helper can issue at a harness batch (m = 589 x 1, 7, 32, 33, 64; n = 128 to
 512; k = 60 and 256; both modes) and is retained under `tests/cuda_qualify/baselines/`.
 The profile rule allows only those shapes.
@@ -542,59 +534,11 @@ The runtime defaults are segmentation FP32, embedding TF32,
 archive retains the exact source used for the original qualification; it is not
 rewritten during integration.
 
-## Production qualification manifest
+## Phase 2a ownership and production policy
 
-CI runs `python3 scripts/cuda/qualify/qualified.py check` on every push. This CPU-only
-check binds each `implementation::PRODUCTION` candidate area to `QUALIFIED.json`.
-It checks every shipped PTX tier, its area `.manifest`, all candidate host and
-kernel area source modules, the shared `candidate.rs` execution helpers, and the
-exact coverage declared in the code. Added or removed files and missing production entries fail. Unfamiliar coverage syntax fails
-closed and needs a checker update.
-
-A kernel change needs a new qualification record, then acceptance, then a manifest
-commit:
-
-```sh
-cargo xtask cuda-qualify <resnet|lstm|sincnet> Oxide
-python3 scripts/cuda/qualify/qualified.py accept /archive/qualify-<area>-Oxide-<run>.json
-python3 scripts/cuda/qualify/qualified.py check
-python3 scripts/cuda/qualify/lock.py
-git add scripts/cuda/qualify/QUALIFIED.json scripts/cuda/qualify/LOCK
-```
-
-The accept command also reads `.json.gz` archives. It verifies that the record's
-loaded candidate PTX hashes match every shipped tier and that recorded coverage
-matches the code. It stores the record filename and SHA-256 of its exact file bytes,
-the original qualification lock digest, source hashes, coverage and verdict basis.
-The original lock digest is historical evidence; it does not claim that the current
-harness has the same digest. A manifest update changes the current lock, so re-lock
-after acceptance. Do not rewrite the frozen Library control or the old records.
-
-Each tier must first contain complete phase evidence and a completed harness verdict.
-Acceptance then requires `accepts_replacement: true` with no failed checks, or this
-rule: all non-passing checks must be speed checks blocked only by Library process spread,
-with no hard failures. For each blocked case, the smaller of the two Library over
-candidate speedups must be at least `1 + 3 * max(Library spread, spread bound)`.
-The command recomputes the spread and both speedups from the four recorded medians.
-The manifest retains the table of blocked cases and their margins. The qualification
-measurement gates remain unchanged; this command records the acceptance decision.
-
-### Retained qualification records
-
-The initial entries use these outside-repository archives under
-`~/code/research/cuda-kernel-opportunities/speakrs-native-cuda-records-2026-10-04/qualification/`:
-
-| Area | Archive | Verdict basis | Original lock prefix |
-| --- | --- | --- | --- |
-| resnet | `k1/qualify-resnet-Oxide-20261004T064208.284837Z.json.gz` | Library-noise rule, 20 blocked cases | `368389d2` |
-| lstm | `k2/qualify-lstm-Oxide-20261004T095844.546766Z.json.gz` | Library-noise rule, 3 blocked cases | `4bb7818f` |
-| sincnet | `k3/qualify-sincnet-Oxide-20261004T093054.587886Z.json.gz` | `accepts_replacement` | `368389d2` |
-
-**Source evidence gap:** schema-3 records contain loaded PTX hashes and coverage, but
-not host-source, kernel-source, or PTX build-manifest hashes. The initial manifest
-captures these hashes at acceptance, including the device-capacity fallback change.
-These hashes prevent later unrecorded changes; they do not prove that the old run
-used the same source or build-manifest bytes. Keep this gap visible in each entry. Do not treat a source-only acceptance of
-an old record as a new qualification. Future host changes need a new run under the
-updated harness, as do kernel and PTX changes. The archived PTX hashes match the
-initial shipped files exactly.
+Qualification builds use `cuda`, never `cuda-driver-only`. Library controls construct
+Library plans; candidates construct Oxide plans from a test-only qualification token.
+Production selection uses the boundary, batch, math, actual area PTX tier, and exact
+device capability. Production model batches are 1 and 32; 7, 33 and 64 remain stress
+cases. The production table pins accepted record and integrated DER hashes. The
+tier/device recording and record validation gates are added in phase 2b.

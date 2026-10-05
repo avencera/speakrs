@@ -1,4 +1,4 @@
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda")]
 pub(crate) mod cuda;
 pub(crate) mod embedding;
 mod error;
@@ -23,11 +23,13 @@ pub(crate) mod coreml;
 #[cfg(feature = "coreml")]
 #[cfg_attr(docsrs, doc(cfg(feature = "coreml")))]
 pub use coreml::CoreMlError;
+#[cfg(feature = "_cuda")]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "cuda", feature = "cuda-driver-only"))))]
+pub use cuda::{ComputeCapability, CudaError, CudaGraphs, CudaLibrary, CudaMath, PtxTier};
+
 #[cfg(feature = "cuda")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
-pub use cuda::{
-    ComputeCapability, CudaError, CudaGraphs, CudaLibrary, CudaLstmAlgorithm, CudaMath, PtxTier,
-};
+pub use cuda::CudaLstmAlgorithm;
 
 /// CoreML compute unit selection for native embedding
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -67,10 +69,10 @@ pub enum ExecutionMode {
     CoreMlFast,
     /// Native NVIDIA GPU backend (cuBLAS, cuDNN and custom kernels, no ONNX Runtime)
     /// with concurrent segmentation and embedding and ~1s step
-    #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "cuda", feature = "cuda-driver-only"))))]
     Cuda,
     /// Native NVIDIA GPU backend with concurrent segmentation and embedding and ~2s step
-    #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "cuda", feature = "cuda-driver-only"))))]
     CudaFast,
     /// AMD GPU via ONNX Runtime's MIGraphX execution provider
     #[cfg_attr(docsrs, doc(cfg(feature = "migraphx")))]
@@ -114,9 +116,9 @@ impl ExecutionMode {
                 mode: self,
                 feature: "coreml",
             }),
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda")]
             Self::Cuda | Self::CudaFast => Ok(InferenceBackend::Cuda),
-            #[cfg(not(feature = "cuda"))]
+            #[cfg(not(feature = "_cuda"))]
             Self::Cuda | Self::CudaFast => Err(ExecutionModeError {
                 mode: self,
                 feature: "cuda",
@@ -163,7 +165,7 @@ pub(crate) enum InferenceBackend {
     #[cfg(feature = "coreml")]
     CoreMl,
     /// Native CUDA models (cudarc, cuBLAS, cuDNN and cuda-oxide kernels)
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda")]
     Cuda,
 }
 
@@ -172,7 +174,7 @@ mod tests {
     #[cfg(any(
         not(feature = "cpu"),
         not(feature = "coreml"),
-        not(feature = "cuda"),
+        not(feature = "_cuda"),
         not(feature = "migraphx")
     ))]
     use super::ExecutionMode;
@@ -200,7 +202,7 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "cuda"))]
+    #[cfg(not(feature = "_cuda"))]
     #[test]
     fn cuda_modes_require_feature() {
         let error = ExecutionMode::Cuda.validate().unwrap_err();

@@ -5,7 +5,7 @@ use crate::pipeline::RuntimeConfig;
 
 #[cfg(feature = "coreml")]
 use super::CoreMlEmbedding;
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda")]
 use super::CudaEmbedding;
 #[cfg(feature = "_ort")]
 use super::OrtEmbedding;
@@ -39,7 +39,7 @@ impl EmbeddingModel {
             InferenceBackend::CoreMl => {
                 EmbeddingBackend::CoreMl(Box::new(CoreMlEmbedding::load(model_path, mode, config)?))
             }
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda")]
             InferenceBackend::Cuda => {
                 EmbeddingBackend::Cuda(Box::new(CudaEmbedding::load(model_path, mode, config)?))
             }

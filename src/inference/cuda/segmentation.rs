@@ -2,10 +2,10 @@
 //! `segmentation-3.0-b32.onnx` compute, without ONNX Runtime
 //!
 //! - waveform instance normalization, then SincNet: 80 generated band-pass filters
-//!   (cuDNN convolution, stride 10), `abs`, max pool, instance normalization and
+//!   (selected convolution, stride 10), `abs`, max pool, instance normalization and
 //!   LeakyReLU, then two learned convolutions (cuDNN), each followed by max pool,
 //!   instance normalization and LeakyReLU (`segmentation_pool_norm`)
-//! - four bidirectional LSTM layers as one cuDNN RNN ([`CudaLstmAlgorithm`])
+//! - four bidirectional LSTM layers through one selected Oxide or Library stack
 //! - three linear layers in cuBLAS with LeakyReLU, then log-softmax over the 7
 //!   powerset classes
 //!
@@ -16,6 +16,7 @@
 mod dispatch;
 mod graph;
 mod kernels;
+#[cfg(feature = "cuda")]
 mod rnn;
 mod shape;
 mod weights;
@@ -24,19 +25,23 @@ use cudarc::driver::CudaSlice;
 
 use self::graph::CapturedGraph;
 use self::kernels::{PoolNorm, RowLayout, SegmentationKernels};
+#[cfg(feature = "cuda")]
 use self::rnn::{CudnnLstm, LstmPlan};
 use self::shape::{
     CONV_KERNEL, FEATURES, HIDDEN, LEAKY_SLOPE, LINEAR, NORM_EPSILON, POOL, SINC_CHANNELS,
-    SINC_KERNEL, SINC_STRIDE,
 };
+#[cfg(feature = "cuda")]
+use self::shape::{SINC_KERNEL, SINC_STRIDE};
 use self::weights::{LstmLayer, SegmentationWeights};
+#[cfg(feature = "cuda")]
+use super::CudaLstmAlgorithm;
 use super::candidate::{LstmOxide, SincCandidate, SincOutput, SincOxide};
-use super::dnn::{Conv2d, ConvPlan, ConvPlanner};
-use super::implementation::{Choice, production};
-use super::{
-    CudaError, CudaLstmAlgorithm, CudaMath, CudaRuntime, DeviceTensor, PtxTier, SafetensorsFile,
-    Sgemm,
-};
+use super::dnn::Conv2d;
+#[cfg(feature = "cuda")]
+use super::dnn::{ConvPlan, ConvPlanner};
+use super::implementation::{LibraryNeed, MODEL_BATCHES, Selected, Target, plan_selection, select};
+use super::{CudaError, CudaMath, CudaRuntime, DeviceTensor, PtxTier, SafetensorsFile, Sgemm};
+use super::{CudaLibrary, KernelModule};
 
 use self::shape::CLASSES;
 pub use self::shape::SegmentationShape;
@@ -47,6 +52,7 @@ pub struct SegmentationOptions {
     /// Precision of every cuBLAS, cuDNN convolution and cuDNN RNN call
     pub math: CudaMath,
     /// cuDNN RNN algorithm for the LSTM stack
+    #[cfg(feature = "cuda")]
     pub lstm_algo: CudaLstmAlgorithm,
     /// Capture the forward pass of each workspace as a CUDA graph on its first run and
     /// replay it afterwards
@@ -59,11 +65,11 @@ pub struct SegmentationOptions {
 /// Use it only with the runtime it was created on
 #[derive(Debug)]
 pub struct CudaSegmentation {
-    network: Network,
     workspaces: Vec<SegmentationWorkspace>,
+    network: Network,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
 pub use test_support::SegmentationTensor;
 
 /// Buffers, convolution plans, LSTM plan and captured graph for one batch shape
@@ -71,8 +77,8 @@ pub use test_support::SegmentationTensor;
 pub struct SegmentationWorkspace {
     shape: SegmentationShape,
     sinc: SincPlan,
-    conv1: ConvPlan,
-    conv2: ConvPlan,
+    conv1: ConvStage,
+    conv2: ConvStage,
     /// cuDNN workspace shared by the three convolutions, sized for the largest
     conv_workspace: CudaSlice<u8>,
     lstm: LstmStage,
@@ -80,22 +86,94 @@ pub struct SegmentationWorkspace {
     graph: Option<CapturedGraph>,
 }
 
-/// Implementation choice owned by the Sinc layer, not by its caller
+/// One owner for the Sinc producer
 #[derive(Debug)]
-struct SincPlan {
-    library: ConvPlan,
-    choice: Choice,
-    /// the candidate plan when the `Oxide` coverage declares this batch and mode
-    candidate: Option<SincOxide>,
+enum SincPlan {
+    #[cfg(feature = "cuda")]
+    Library(ConvPlan),
+    Oxide(SincOxide),
+    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    Mutant {
+        library: ConvPlan,
+        mutant: super::test_support::Mutant,
+    },
 }
 
-/// Implementation choice owned by the LSTM stack
+impl SincPlan {
+    fn workspace_bytes(&self) -> usize {
+        match self {
+            #[cfg(feature = "cuda")]
+            Self::Library(plan) => plan.workspace_bytes(),
+            Self::Oxide(_) => 0,
+            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            Self::Mutant { library, .. } => library.workspace_bytes(),
+        }
+    }
+}
+
+/// Learned convolutions have no qualified Oxide implementation yet
 #[derive(Debug)]
-struct LstmStage {
-    library: LstmPlan,
-    choice: Choice,
-    /// the candidate plan when the `Oxide` coverage declares this batch and mode
-    candidate: Option<LstmOxide>,
+enum ConvStage {
+    #[cfg(feature = "cuda")]
+    Library(ConvPlan),
+}
+
+impl ConvStage {
+    fn new(runtime: &CudaRuntime, boundary: &str, spec: Conv2d) -> Result<Self, CudaError> {
+        LibraryNeed::new(
+            KernelModule::Segmentation,
+            boundary,
+            spec.batch,
+            spec.math,
+            Target::for_area(runtime, KernelModule::Segmentation)?,
+            CudaLibrary::Cudnn,
+        )
+        .prepare(runtime)?;
+        #[cfg(feature = "cuda")]
+        return Ok(Self::Library(ConvPlanner::new(runtime)?.plan(spec)?));
+        #[cfg(not(feature = "cuda"))]
+        Err(CudaError::LibraryUnavailable {
+            library: CudaLibrary::Cudnn,
+        })
+    }
+
+    fn workspace_bytes(&self) -> usize {
+        match *self {
+            #[cfg(feature = "cuda")]
+            Self::Library(ref plan) => plan.workspace_bytes(),
+        }
+    }
+
+    fn forward(
+        &self,
+        workspace: &mut cudarc::driver::CudaViewMut<'_, u8>,
+        input: &cudarc::driver::CudaView<'_, f32>,
+        weight: &cudarc::driver::CudaView<'_, f32>,
+        output: &mut cudarc::driver::CudaViewMut<'_, f32>,
+    ) -> Result<(), CudaError> {
+        #[cfg(not(feature = "cuda"))]
+        let _ = (workspace, input, weight, output);
+        match *self {
+            #[cfg(feature = "cuda")]
+            Self::Library(ref plan) => plan.forward(workspace, input, weight, output),
+        }
+    }
+}
+
+/// One owner for the complete LSTM stack
+#[derive(Debug)]
+enum LstmStage {
+    #[cfg(feature = "cuda")]
+    Library(LstmPlan),
+    Oxide {
+        candidate: Box<LstmOxide>,
+        rows: usize,
+    },
+    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    Mutant {
+        library: LstmPlan,
+        mutant: super::test_support::Mutant,
+    },
 }
 
 #[derive(Debug)]
@@ -122,7 +200,8 @@ struct Tensors {
 struct Network {
     options: SegmentationOptions,
     kernels: SegmentationKernels,
-    lstm: CudnnLstm,
+    #[cfg(feature = "cuda")]
+    lstm: Option<CudnnLstm>,
     /// Waveform normalization scale and shift, one value each
     wav_norm: [CudaSlice<f32>; 2],
     /// `[80, 1, 1, 251]`
@@ -223,6 +302,83 @@ impl Network {
         weights: &SegmentationWeights,
         options: SegmentationOptions,
     ) -> Result<Self, CudaError> {
+        let mut needs = Vec::new();
+        for batch in MODEL_BATCHES {
+            for (area, boundary) in [
+                (KernelModule::Sincnet, dispatch::SINC_LAYER),
+                (KernelModule::Segmentation, "sincnet.conv1"),
+                (KernelModule::Segmentation, "sincnet.conv2"),
+                (KernelModule::Lstm, dispatch::LSTM_LAYER),
+            ] {
+                let target = Target::for_area(runtime, area)?;
+                let selected = select(boundary, batch, options.math, target).map_err(|error| {
+                    CudaError::Unsupported {
+                        context: "segmentation selection",
+                        reason: error.to_string(),
+                    }
+                })?;
+                if matches!(selected, Selected::Library) {
+                    needs.push(LibraryNeed::new(
+                        area,
+                        boundary,
+                        batch,
+                        options.math,
+                        target,
+                        CudaLibrary::Cudnn,
+                    ));
+                    #[cfg(feature = "cuda")]
+                    if boundary == dispatch::LSTM_LAYER
+                        && options.lstm_algo == CudaLstmAlgorithm::PersistDynamic
+                    {
+                        needs.push(LibraryNeed::new(
+                            area,
+                            boundary,
+                            batch,
+                            options.math,
+                            target,
+                            CudaLibrary::Nvrtc,
+                        ));
+                    }
+                } else if boundary == dispatch::LSTM_LAYER {
+                    needs.push(LibraryNeed::new(
+                        area,
+                        "lstm.stack.input_proj",
+                        batch,
+                        options.math,
+                        target,
+                        CudaLibrary::Cublas,
+                    ));
+                }
+            }
+            for boundary in ["linear0", "linear1", "linear2"] {
+                needs.push(LibraryNeed::new(
+                    KernelModule::Segmentation,
+                    boundary,
+                    batch,
+                    options.math,
+                    Target::for_area(runtime, KernelModule::Segmentation)?,
+                    CudaLibrary::Cublas,
+                ));
+            }
+        }
+        if super::driver_only() {
+            for need in &needs {
+                need.prepare(runtime)?;
+            }
+        }
+        LibraryNeed::new(
+            KernelModule::Segmentation,
+            "linear0",
+            1,
+            options.math,
+            Target::for_area(runtime, KernelModule::Segmentation)?,
+            CudaLibrary::Cublas,
+        )
+        .prepare(runtime)?;
+        // selected handles precede model buffers because their allocations affect recurrence locality
+        for need in &needs {
+            need.prepare_handle(runtime)?;
+        }
         let stream = runtime.stream();
         let upload = |values: &[f32]| stream.clone_htod(values);
         let pair = |first: &[f32], second: &[f32]| -> Result<[CudaSlice<f32>; 2], CudaError> {
@@ -234,7 +390,8 @@ impl Network {
         Ok(Self {
             options,
             kernels: SegmentationKernels::load(runtime)?,
-            lstm: CudnnLstm::new(runtime, &weights.lstm, options.math, options.lstm_algo)?,
+            #[cfg(feature = "cuda")]
+            lstm: None,
             wav_norm: pair(&weights.wav_norm.gamma, &weights.wav_norm.beta)?,
             sinc_filters: upload(&weights.sinc_filters)?,
             convs: [
@@ -258,27 +415,23 @@ impl Network {
 
     /// Allocates the buffers and plans for one batch shape
     fn workspace(
-        &self,
+        &mut self,
         runtime: &CudaRuntime,
         shape: SegmentationShape,
     ) -> Result<SegmentationWorkspace, CudaError> {
         let batch = shape.batch;
         let math = self.options.math;
-        let planner = ConvPlanner::new(runtime)?;
-        let conv = |[in_channels, out_channels]: [usize; 2], input, kernel, stride| {
-            planner.plan(Conv2d {
-                batch,
-                in_channels,
-                out_channels,
-                input: [1, input],
-                kernel: [1, kernel],
-                padding: [0, 0],
-                stride: [1, stride],
-                dilation: [1, 1],
-                math,
-            })
+        let conv = |[in_channels, out_channels]: [usize; 2], input, kernel, stride| Conv2d {
+            batch,
+            in_channels,
+            out_channels,
+            input: [1, input],
+            kernel: [1, kernel],
+            padding: [0, 0],
+            stride: [1, stride],
+            dilation: [1, 1],
+            math,
         };
-
         let stream = runtime.stream();
         let tensor = |dims: &[usize]| DeviceTensor::zeros(stream, dims);
         let tensors = Tensors {
@@ -297,44 +450,53 @@ impl Network {
             output: tensor(&[batch, shape.frames, CLASSES])?,
         };
 
-        let sinc = conv([1, SINC_CHANNELS], shape.samples, SINC_KERNEL, SINC_STRIDE)?;
-        let conv1 = conv([SINC_CHANNELS, FEATURES], shape.pool0, CONV_KERNEL, 1)?;
-        let conv2 = conv([FEATURES, FEATURES], shape.pool1, CONV_KERNEL, 1)?;
-        let workspace_bytes = [&sinc, &conv1, &conv2]
-            .map(ConvPlan::workspace_bytes)
-            .into_iter()
-            .max()
-            .unwrap_or(0);
-
-        let sinc_choice = production(dispatch::SINC_LAYER, batch, math);
-        let lstm_choice = production(dispatch::LSTM_LAYER, batch, math);
-        #[cfg(test)]
-        let (sinc_choice, lstm_choice) = (
-            super::test_support::default_choice(sinc_choice),
-            super::test_support::default_choice(lstm_choice),
-        );
+        let sinc_selected = plan_selection(
+            runtime,
+            KernelModule::Sincnet,
+            dispatch::SINC_LAYER,
+            batch,
+            math,
+            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            None,
+        )?;
+        let lstm_selected = plan_selection(
+            runtime,
+            KernelModule::Lstm,
+            dispatch::LSTM_LAYER,
+            batch,
+            math,
+            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            None,
+        )?;
+        let sinc = self.plan_sinc(runtime, shape, sinc_selected)?;
+        let conv1 = ConvStage::new(
+            runtime,
+            "sincnet.conv1",
+            conv([SINC_CHANNELS, FEATURES], shape.pool0, CONV_KERNEL, 1),
+        )?;
+        let conv2 = ConvStage::new(
+            runtime,
+            "sincnet.conv2",
+            conv([FEATURES, FEATURES], shape.pool1, CONV_KERNEL, 1),
+        )?;
+        let workspace_bytes = sinc
+            .workspace_bytes()
+            .max(conv1.workspace_bytes())
+            .max(conv2.workspace_bytes());
         let mut tensors = tensors;
-        let sinc_candidate = self.plan_sinc(runtime, shape, sinc_choice)?;
-        if sinc_candidate.is_some() {
+        if matches!(sinc, SincPlan::Oxide(_)) {
             tensors.sinc_pooled = pooled_tensor(runtime, shape)?;
         }
-
+        // keep convolution scratch before recurrence state; allocation order affects replay latency
+        let conv_workspace = stream.alloc_zeros(workspace_bytes.max(1))?;
+        let lstm = self.plan_lstm(runtime, shape, lstm_selected)?;
         Ok(SegmentationWorkspace {
             shape,
-            sinc: SincPlan {
-                library: sinc,
-                choice: sinc_choice,
-                candidate: sinc_candidate,
-            },
+            sinc,
             conv1,
             conv2,
-            // at least one byte, because CUDA cannot allocate zero bytes
-            conv_workspace: stream.alloc_zeros(workspace_bytes.max(1))?,
-            lstm: LstmStage {
-                library: self.lstm.plan(runtime, batch, shape.frames)?,
-                choice: lstm_choice,
-                candidate: self.plan_lstm(runtime, shape, lstm_choice)?,
-            },
+            conv_workspace,
+            lstm,
             tensors,
             graph: None,
         })
@@ -500,7 +662,7 @@ impl SegmentationWorkspace {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
 #[path = "../../../tests/cuda_qualify/segmentation.rs"]
 pub(crate) mod test_support;
 

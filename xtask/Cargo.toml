@@ -20,7 +20,9 @@ default = ["cpu"]
 # enables the ONNX Runtime CPU backend and the ORT-only profiling commands
 cpu = ["speakrs/cpu", "dep:ort"]
 coreml = ["speakrs/coreml"]
-cuda = ["speakrs/cuda"]
+cuda = ["_cuda", "speakrs/cuda"]
+cuda-driver-only = ["_cuda", "speakrs/cuda-driver-only"]
+_cuda = []
 load-dynamic = ["speakrs/load-dynamic", "ort?/load-dynamic"]
 _metrics = ["speakrs/_metrics"]
 

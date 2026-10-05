@@ -63,7 +63,11 @@ pub enum MelProjection {
     ///
     /// The measured alternative to the default; only the parity tests and the benchmark
     /// select it
-    #[cfg_attr(not(test), allow(dead_code))]
+    // the dense control is not used by production or driver-only tests
+    #[cfg_attr(
+        not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))),
+        allow(dead_code)
+    )]
     Gemm,
 }
 
@@ -105,6 +109,20 @@ impl CudaFbank {
         projection: MelProjection,
     ) -> Result<Self, CudaError> {
         let kernels = runtime.load_kernels(KernelModule::Fbank)?;
+        for batch in 1..=32 {
+            super::implementation::LibraryNeed::new(
+                KernelModule::Fbank,
+                "fbank.dft",
+                batch,
+                math,
+                super::implementation::Target {
+                    tier: kernels.tier(),
+                    device: runtime.compute_capability(),
+                },
+                super::CudaLibrary::Cublas,
+            )
+            .prepare(runtime)?;
+        }
         let constants = FbankConstants::new();
         let table = constants.mel_table();
         let stream = runtime.stream();
@@ -173,7 +191,7 @@ impl CudaFbank {
             .slice(..rows * FBANK_FRAMES * FBANK_MEL_BINS))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
     /// Computes features for waveform rows already on the device
     ///
     /// `waveform` is `[rows, FBANK_WINDOW_SAMPLES]` with shorter audio zero padded, at

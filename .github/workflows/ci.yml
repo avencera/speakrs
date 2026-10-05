@@ -199,7 +199,31 @@ jobs:
       - name: Run clippy and tests
         run: |
           cargo clippy -p speakrs --all-targets --no-default-features --features "online cuda" -- -D warnings
+          cargo clippy -p speakrs --all-targets --no-default-features --features cuda-sm75 -- -D warnings
+          cargo clippy -p speakrs --all-targets --no-default-features --features cuda-sm120 -- -D warnings
+          cargo clippy -p speakrs --all-targets --no-default-features --features cuda-driver-only -- -D warnings
+          cargo clippy -p speakrs --all-targets --no-default-features --features cuda,cuda-driver-only -- -D warnings
           cargo test -p speakrs --no-default-features --features "online cuda"
+      - name: Check minimal CUDA targets and feature errors
+        shell: bash
+        run: |
+          set -euo pipefail
+          for features in cuda-sm75 cuda-sm80 cuda-sm90 cuda-sm120 cuda-sm80,cuda-sm120 cuda-driver-only; do
+            cargo check -p speakrs --no-default-features --features "$features"
+            cargo test -p speakrs --no-default-features --features "$features" --lib inference::cuda::tier::tests
+            cargo test -p speakrs --no-default-features --features "$features" --lib inference::cuda::kernels::tests
+            cargo tree -p speakrs --no-default-features --features "$features" -e features > cuda-features.log
+            if rg 'cudarc feature "(cublas|cudnn)"' cuda-features.log; then
+              echo "optional CUDA library feature in a minimal backend" >&2
+              exit 1
+            fi
+          done
+          if cargo check -p speakrs --no-default-features --features _cuda 2> cuda-target.log; then
+            echo "internal CUDA backend compiled without a GPU target" >&2
+            exit 1
+          fi
+          rg 'CUDA requires a GPU target' cuda-target.log
+
 
   coreml-only:
     name: CoreML without ONNX Runtime (macOS arm64)

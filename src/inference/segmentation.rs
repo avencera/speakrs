@@ -9,7 +9,7 @@ use crate::inference::CoreMlError;
 use crate::inference::{ExecutionMode, InferenceBackend, InferenceError, ModelLoadError};
 use crate::pipeline::RuntimeConfig;
 
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda")]
 mod cuda;
 #[cfg(feature = "coreml")]
 mod native;
@@ -20,7 +20,7 @@ mod parallel;
 mod run;
 mod tensor;
 
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda")]
 use cuda::CudaSegmentationBackend;
 #[cfg(feature = "coreml")]
 use native::CoreMlSegmentation;
@@ -96,7 +96,7 @@ enum SegmentationBackend {
     #[cfg(feature = "coreml")]
     CoreMl(CoreMlSegmentation),
     // boxed because the CUDA backend carries its session and staging inline
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda")]
     Cuda(Box<CudaSegmentationBackend>),
 }
 
@@ -129,7 +129,7 @@ impl SegmentationModel {
         model_path: impl AsRef<Path>,
         step_duration: f32,
         mode: ExecutionMode,
-        #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] config: &RuntimeConfig,
+        #[cfg_attr(not(feature = "_cuda"), allow(unused_variables))] config: &RuntimeConfig,
     ) -> Result<Self, ModelLoadError> {
         let backend = mode.backend()?;
 
@@ -155,7 +155,7 @@ impl SegmentationModel {
                 mode,
                 window_samples,
             )?),
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda")]
             InferenceBackend::Cuda => SegmentationBackend::Cuda(Box::new(
                 CudaSegmentationBackend::load(model_path, mode, window_samples, config)?,
             )),
@@ -208,14 +208,14 @@ impl SegmentationModel {
     /// ORT session weights and arenas are shared, and each inference call locks only the
     /// session that it uses. A CUDA handle gets its own stream and device copy of the
     /// weights, because CUDA state is used by one thread at a time
-    #[cfg(all(any(feature = "_ort", feature = "cuda"), not(feature = "coreml")))]
+    #[cfg(all(any(feature = "_ort", feature = "_cuda"), not(feature = "coreml")))]
     pub(crate) fn clone_shared(&self) -> Result<Self, InferenceError> {
         let backend = match &self.backend {
             #[cfg(feature = "_ort")]
             SegmentationBackend::Ort(backend) => {
                 SegmentationBackend::Ort(backend.clone_shared(self.window_samples()))
             }
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda")]
             SegmentationBackend::Cuda(backend) => {
                 SegmentationBackend::Cuda(Box::new(backend.reload()?))
             }
@@ -235,7 +235,7 @@ impl SegmentationModel {
             SegmentationBackend::CoreMl(backend) => Some(backend),
             #[cfg(feature = "_ort")]
             SegmentationBackend::Ort(_) => None,
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda")]
             SegmentationBackend::Cuda(_) => None,
         }
     }

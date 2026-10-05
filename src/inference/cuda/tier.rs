@@ -33,8 +33,8 @@ impl fmt::Display for ComputeCapability {
 ///
 /// The driver JIT-compiles PTX for its target and every newer GPU, so a tier runs on
 /// any device at or above [`Self::min_capability`]. [`Self::Sm75`] is the baseline
-/// that every kernel area ships and the only tier compiled in by default; the others
-/// are compiled in only with the `cuda-sm80`, `cuda-sm90` and `cuda-sm120` features
+/// that every kernel area ships today. GPU target features embed each area's best
+/// shipped variant for the target; `cuda` enables all GPU targets
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum PtxTier {
@@ -51,6 +51,28 @@ pub enum PtxTier {
 impl PtxTier {
     /// The tier every area ships and every supported GPU runs
     pub const BASELINE: Self = Self::Sm75;
+
+    /// Tiers with shipped production kernels, independent of Cargo features
+    pub const SHIPPED: [Self; 1] = [Self::Sm75];
+
+    /// Highest shipped tier that the device can execute
+    pub fn native(device: ComputeCapability) -> Self {
+        Self::SHIPPED
+            .into_iter()
+            .filter(|tier| tier.min_capability() <= device)
+            .max()
+            .unwrap_or(Self::BASELINE)
+    }
+
+    /// Cargo feature for this GPU target
+    pub const fn feature(self) -> &'static str {
+        match self {
+            Self::Sm75 => "cuda-sm75",
+            Self::Sm80 => "cuda-sm80",
+            Self::Sm90 => "cuda-sm90",
+            Self::Sm120 => "cuda-sm120",
+        }
+    }
 
     /// Every tier, lowest first
     pub const ALL: [Self; 4] = [Self::Sm75, Self::Sm80, Self::Sm90, Self::Sm120];
@@ -75,17 +97,17 @@ impl PtxTier {
         }
     }
 
-    /// Whether this build embeds PTX for the tier
+    /// Whether this GPU target is enabled in this build
     pub const fn is_compiled_in(self) -> bool {
         match self {
-            Self::Sm75 => true,
+            Self::Sm75 => cfg!(feature = "cuda-sm75"),
             Self::Sm80 => cfg!(feature = "cuda-sm80"),
             Self::Sm90 => cfg!(feature = "cuda-sm90"),
             Self::Sm120 => cfg!(feature = "cuda-sm120"),
         }
     }
 
-    /// The tiers this build embeds, lowest first
+    /// The enabled GPU targets, lowest first
     pub fn compiled_in() -> impl Iterator<Item = Self> {
         Self::ALL.into_iter().filter(|tier| tier.is_compiled_in())
     }
@@ -116,11 +138,22 @@ impl PtxTier {
 
         let Some(tier) = requested else {
             let supported = Self::compiled_in().filter(|tier| tier.min_capability() <= capability);
-            return Ok(supported.max().unwrap_or(Self::BASELINE));
+            return supported.max().ok_or_else(|| {
+                let tier = Self::native(capability);
+                CudaError::TierNotCompiledIn {
+                    tier,
+                    device: capability,
+                    feature: tier.feature(),
+                }
+            });
         };
 
         if !tier.is_compiled_in() {
-            return Err(CudaError::PtxTierNotCompiled { tier });
+            return Err(CudaError::TierNotCompiledIn {
+                tier,
+                device: capability,
+                feature: tier.feature(),
+            });
         }
 
         if tier.min_capability() > capability {
@@ -148,5 +181,57 @@ impl FromStr for PtxTier {
             .ok_or_else(|| CudaError::InvalidPtxTier {
                 value: value.to_string(),
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ComputeCapability, CudaError, PtxTier};
+
+    #[test]
+    fn automatic_target_requires_an_enabled_tier_the_device_supports() {
+        for device in [
+            ComputeCapability::new(7, 5),
+            ComputeCapability::new(8, 0),
+            ComputeCapability::new(8, 6),
+            ComputeCapability::new(9, 0),
+            ComputeCapability::new(12, 0),
+        ] {
+            let expected = PtxTier::compiled_in()
+                .filter(|tier| tier.min_capability() <= device)
+                .max();
+            let selected = PtxTier::select(device, None);
+            match expected {
+                Some(tier) => assert_eq!(selected.unwrap(), tier),
+                None => assert!(matches!(selected, Err(CudaError::TierNotCompiledIn {
+                    device: actual, feature: "cuda-sm75", ..
+                }) if actual == device)),
+            }
+        }
+        assert!(matches!(
+            PtxTier::select(ComputeCapability::new(7, 0), None),
+            Err(CudaError::UnsupportedDevice { .. })
+        ));
+    }
+
+    #[test]
+    fn overrides_require_the_target_feature_and_device_capability() {
+        let device = ComputeCapability::new(12, 0);
+        for tier in PtxTier::ALL {
+            let selected = PtxTier::select(device, Some(tier));
+            if tier.is_compiled_in() {
+                assert_eq!(selected.unwrap(), tier);
+                if tier != PtxTier::Sm75 {
+                    assert!(matches!(
+                        PtxTier::select(ComputeCapability::new(7, 5), Some(tier)),
+                        Err(CudaError::PtxTierAboveDevice { .. })
+                    ));
+                }
+                continue;
+            }
+            assert!(matches!(selected, Err(CudaError::TierNotCompiledIn {
+                tier: actual, feature, device: actual_device
+            }) if actual == tier && feature == tier.feature() && actual_device == device));
+        }
     }
 }

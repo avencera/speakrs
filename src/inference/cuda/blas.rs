@@ -1,7 +1,10 @@
+#[cfg(feature = "cuda")]
 use cudarc::cublas::sys::cublasOperation_t;
+#[cfg(feature = "cuda")]
 use cudarc::cublas::{Gemm, GemmConfig};
 use cudarc::driver::{DevicePtr, DevicePtrMut};
 
+#[cfg(feature = "cuda")]
 use super::error::{check_len, to_c_int};
 use super::{CudaError, CudaMath, CudaRuntime};
 
@@ -52,6 +55,7 @@ impl Sgemm {
     /// `cᵀ = op(b)ᵀ · op(a)ᵀ` with `b` as its first operand. A row-major matrix read as
     /// column-major is already transposed, so an untransposed row-major operand maps
     /// to `N` and a transposed one to `T`
+    #[cfg(feature = "cuda")]
     fn column_major(&self) -> Result<GemmConfig<f32>, CudaError> {
         let context = "sgemm";
         let op = |transposed: bool| {
@@ -89,19 +93,35 @@ impl CudaRuntime {
         B: DevicePtr<f32>,
         C: DevicePtrMut<f32>,
     {
-        check_len("sgemm a", spec.m.saturating_mul(spec.k), a.len())?;
-        check_len("sgemm b", spec.k.saturating_mul(spec.n), b.len())?;
-        check_len("sgemm c", spec.m.saturating_mul(spec.n), c.len())?;
-        let config = spec.column_major()?;
-        let _math = self.lock_blas(spec.math)?;
-        #[cfg(test)]
-        let _library =
-            super::test_support::call(&format!("cublas.m{}.n{}.k{}", spec.m, spec.n, spec.k));
+        #[cfg(feature = "cuda")]
+        {
+            check_len("sgemm a", spec.m.saturating_mul(spec.k), a.len())?;
+            check_len("sgemm b", spec.k.saturating_mul(spec.n), b.len())?;
+            check_len("sgemm c", spec.m.saturating_mul(spec.n), c.len())?;
+            let config = spec.column_major()?;
+            let _math = self.lock_blas(spec.math)?;
+            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            let _library =
+                super::test_support::call(&format!("cublas.m{}.n{}.k{}", spec.m, spec.n, spec.k));
 
-        // SAFETY: the lengths match the dimensions and leading dimensions checked
-        // above, and all buffers are device allocations that cudarc orders on the
-        // handle's stream
-        unsafe { self.blas().gemm(config, b, a, c) }?;
-        Ok(())
+            // SAFETY: the lengths match the dimensions and leading dimensions checked
+            // above, and all buffers are device allocations that cudarc orders on the
+            // handle's stream
+            unsafe { self.blas()?.gemm(config, b, a, c) }?;
+            Ok(())
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            let _ = (a, b, c);
+            Err(super::implementation::LibraryNeed::new(
+                super::KernelModule::Lstm,
+                "sgemm",
+                spec.m,
+                spec.math,
+                super::implementation::Target::for_area(self, super::KernelModule::Lstm)?,
+                super::CudaLibrary::Cublas,
+            )
+            .error())
+        }
     }
 }

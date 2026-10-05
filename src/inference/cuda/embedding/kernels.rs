@@ -85,7 +85,7 @@ impl EmbeddingKernels {
         let bins = to_u32(bins)?;
 
         let len = len as u64;
-        #[cfg(test)]
+        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
         let _fixed = super::super::test_support::fixed("embedding_fbank_transpose");
         let mut launch = runtime.stream().launch_builder(&self.fbank_transpose);
         launch
@@ -135,7 +135,7 @@ impl EmbeddingKernels {
 
         let bias_len = bias.len() as u64;
         let y_len = y.len() as u64;
-        #[cfg(test)]
+        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
         let _fixed = super::super::test_support::fixed("embedding_bias");
         let mut launch = runtime.stream().launch_builder(&self.bias);
         launch
@@ -174,7 +174,7 @@ impl EmbeddingKernels {
 
         let bias_len = cols as u64;
         let out_len = out.len() as u64;
-        #[cfg(test)]
+        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
         let _fixed = super::super::test_support::fixed("embedding_broadcast_rows");
         let mut launch = runtime.stream().launch_builder(&self.broadcast_rows);
         launch
@@ -231,7 +231,7 @@ impl EmbeddingKernels {
         let features_len = features.len() as u64;
         let masks_len = masks.len() as u64;
         let pooled_len = pooled.len() as u64;
-        #[cfg(test)]
+        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
         let _fixed = super::super::test_support::fixed("embedding_mask_pool");
         let mut launch = runtime.stream().launch_builder(&self.mask_pool);
         launch

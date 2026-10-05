@@ -28,14 +28,18 @@ coreml = [
     "dep:objc2-foundation",
     "_backend",
 ]
-# native NVIDIA backend: cuBLAS, cuDNN and committed cuda-oxide PTX through cudarc, with
+# native NVIDIA backend: optional libraries and committed cuda-oxide PTX through cudarc, with
 # safetensors weights; no ONNX Runtime
-cuda = ["dep:cudarc", "dep:safetensors", "_backend"]
-# native CUDA kernels for newer GPUs, off by default: without them the binary carries
-# only sm_75 PTX, which the driver JIT-compiles for Turing and every newer GPU
-cuda-sm80 = ["cuda"]
-cuda-sm90 = ["cuda"]
-cuda-sm120 = ["cuda"]
+cuda = ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120", "cudarc/cublas", "cudarc/cudnn"]
+cuda-driver-only = ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120"]
+# internal: driver and committed PTX, without optional numerical libraries
+_cuda = ["dep:cudarc", "dep:safetensors", "_backend"]
+# each GPU target embeds every area's best shipped variant for that target
+# tier-only builds use the driver without optional numerical libraries
+cuda-sm75 = ["_cuda"]
+cuda-sm80 = ["_cuda"]
+cuda-sm90 = ["_cuda"]
+cuda-sm120 = ["_cuda"]
 migraphx = ["_ort", "ort/migraphx", "_backend"]
 # load ONNX Runtime at run time instead of linking it; only for the `cpu` and `migraphx`
 # backends
@@ -48,7 +52,7 @@ _backend = []
 _metrics = []
 
 [package.metadata.docs.rs]
-features = ["cpu", "cuda", "migraphx", "load-dynamic", "_metrics"]
+features = ["cpu", "cuda", "cuda-driver-only", "cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120", "migraphx", "load-dynamic", "_metrics"]
 
 [dependencies]
 hf-hub = { version = "0.5", optional = true, default-features = false }
@@ -66,11 +70,8 @@ ort = { version = "2.0.0-rc.13", features = ["ndarray"], optional = true }
 cudarc = { version = "0.19.10", optional = true, default-features = false, features = [
     "std",
     "driver",
-    # the `Ptx` type that module loading takes, and the probe for the NVRTC library that
-    # cuDNN's persistent-dynamic LSTM needs; speakrs itself never compiles with NVRTC
+    # the precompiled `Ptx` type requires this feature but does not load NVRTC
     "nvrtc",
-    "cublas",
-    "cudnn",
     "dynamic-loading",
     "cuda-12040",
 ] }

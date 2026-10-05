@@ -2,7 +2,9 @@
 
 use super::dispatch::{LSTM_LAYER, SINC_LAYER, SincIo};
 use super::shape::WINDOW_SAMPLES;
-use super::{CudaSegmentation, LstmPlan, Network, SINC_CHANNELS, SegmentationShape, SincPlan};
+use super::{
+    CudaSegmentation, LstmPlan, LstmStage, Network, SINC_CHANNELS, SegmentationShape, SincPlan,
+};
 use crate::inference::cuda::candidate::{
     LstmCandidate, LstmOxide, SincCandidate, SincOutput, SincOxide,
 };
@@ -31,7 +33,11 @@ pub(super) fn mutant_lstm(
     let input = table.as_ref().unwrap_or(input);
     let iterations = if mutant == Mutant::Slow { 3 } else { 1 };
     for _ in 0..iterations {
-        network.lstm.forward(runtime, plan, input, output)?;
+        network
+            .lstm
+            .as_ref()
+            .expect("mutant Library stack")
+            .forward(runtime, plan, input, output)?;
     }
     test_support::post(runtime, output, plan.batch(), mutant)
 }
@@ -42,7 +48,7 @@ pub(super) fn mutant_sinc(
     network: &Network,
     runtime: &CudaRuntime,
     shape: SegmentationShape,
-    plan: &SincPlan,
+    plan: &super::ConvPlan,
     workspace: &mut CudaViewMut<'_, u8>,
     input: &CudaSlice<f32>,
     raw: &mut CudaSlice<f32>,
@@ -63,7 +69,7 @@ pub(super) fn mutant_sinc(
     let input = table.as_ref().unwrap_or(input);
     let iterations = if mutant == Mutant::Slow { 3 } else { 1 };
     for _ in 0..iterations {
-        plan.library.forward(
+        plan.forward(
             workspace,
             &input.as_view(),
             &network.sinc_filters.as_view(),
@@ -149,7 +155,10 @@ impl CudaSegmentation {
         batch: usize,
     ) -> Vec<(usize, Vec<f32>)> {
         self.find_workspace(batch, WINDOW_SAMPLES)
-            .and_then(|workspace| workspace.lstm.candidate.as_ref())
+            .and_then(|workspace| match &workspace.lstm {
+                LstmStage::Oxide { candidate, .. } => Some(candidate),
+                _ => None,
+            })
             .map(|candidate| candidate.diagnostic_layers(runtime.stream()))
             .unwrap_or_default()
     }
@@ -159,16 +168,10 @@ impl CudaSegmentation {
         let Some(workspace) = self.find_workspace(batch, WINDOW_SAMPLES) else {
             return false;
         };
-        let (choice, planned) = if target == "lstm" {
-            (workspace.lstm.choice, workspace.lstm.candidate.is_some())
-        } else {
-            (workspace.sinc.choice, workspace.sinc.candidate.is_some())
-        };
-        match choice {
-            Choice::Library => false,
-            Choice::Oxide(_) => planned,
-            Choice::Mutant(_) => true,
+        if target == "lstm" {
+            return !matches!(workspace.lstm, LstmStage::Library(_));
         }
+        !matches!(workspace.sinc, SincPlan::Library(_))
     }
 
     pub(crate) fn isolated(
@@ -252,9 +255,8 @@ impl CudaSegmentation {
         let w = self
             .find_workspace(op.batch, WINDOW_SAMPLES)
             .expect("isolated workspace");
-        let pooled_by_candidate = w.sinc.choice.is_candidate()
-            && w.sinc.candidate.is_some()
-            && SincOxide::OUTPUT == SincOutput::Pooled;
+        let pooled_by_candidate =
+            matches!(w.sinc, SincPlan::Oxide(_)) && SincOxide::OUTPUT == SincOutput::Pooled;
         if pooled_by_candidate {
             return Ok(runtime.stream().clone_dtoh(&op.pooled)?);
         }
@@ -332,15 +334,30 @@ impl CudaSegmentation {
         choice: Choice,
     ) -> Result<(), CudaError> {
         let index = self.workspace_index(runtime, batch, samples)?;
-        let candidate = self
-            .network
-            .plan_sinc(runtime, self.workspaces[index].shape, choice)?;
+        let shape = self.workspaces[index].shape;
+        let selected = crate::inference::cuda::implementation::qualification_selection(
+            choice,
+            crate::inference::cuda::KernelModule::Sincnet,
+            SINC_LAYER,
+            batch,
+            self.network.options.math,
+            crate::inference::cuda::implementation::Target::for_area(
+                runtime,
+                crate::inference::cuda::KernelModule::Sincnet,
+            )?,
+        )?;
+        let plan = self.network.plan_sinc(runtime, shape, selected)?;
         let workspace = &mut self.workspaces[index];
-        if candidate.is_some() && workspace.tensors.sinc_pooled.is_none() {
+        if matches!(plan, SincPlan::Oxide(_)) && workspace.tensors.sinc_pooled.is_none() {
             workspace.tensors.sinc_pooled = pooled_tensor(runtime, workspace.shape)?;
         }
-        workspace.sinc.choice = choice;
-        workspace.sinc.candidate = candidate;
+        let bytes = plan
+            .workspace_bytes()
+            .max(workspace.conv1.workspace_bytes())
+            .max(workspace.conv2.workspace_bytes())
+            .max(1);
+        workspace.conv_workspace = runtime.stream().alloc_zeros(bytes)?;
+        workspace.sinc = plan;
         workspace.graph = None;
         Ok(())
     }
@@ -352,12 +369,21 @@ impl CudaSegmentation {
         choice: Choice,
     ) -> Result<(), CudaError> {
         let index = self.workspace_index(runtime, shape[0], shape[1])?;
-        let candidate = self
-            .network
-            .plan_lstm(runtime, self.workspaces[index].shape, choice)?;
+        let shape = self.workspaces[index].shape;
+        let selected = crate::inference::cuda::implementation::qualification_selection(
+            choice,
+            crate::inference::cuda::KernelModule::Lstm,
+            LSTM_LAYER,
+            shape.batch,
+            self.network.options.math,
+            crate::inference::cuda::implementation::Target::for_area(
+                runtime,
+                crate::inference::cuda::KernelModule::Lstm,
+            )?,
+        )?;
+        let plan = self.network.plan_lstm(runtime, shape, selected)?;
         let workspace = &mut self.workspaces[index];
-        workspace.lstm.choice = choice;
-        workspace.lstm.candidate = candidate;
+        workspace.lstm = plan;
         workspace.graph = None;
         Ok(())
     }
@@ -438,7 +464,12 @@ impl SegmentationWorkspace {
 
     /// Device bytes of the cuDNN RNN workspace
     pub fn lstm_workspace_bytes(&self) -> usize {
-        self.lstm.library.workspace_bytes()
+        match &self.lstm {
+            LstmStage::Library(plan) | LstmStage::Mutant { library: plan, .. } => {
+                plan.workspace_bytes()
+            }
+            LstmStage::Oxide { .. } => 0,
+        }
     }
 }
 
