@@ -129,6 +129,7 @@ class Processes(unittest.TestCase):
     def test_cpu_lock_evidence_must_be_unlocked_and_complete(self):
         def process(owner="child", sections=None, count=2):
             return {
+                "rows": [{"id": "secret", "secret": True}] if owner == "child" else [],
                 "gpu_lock": {
                     "path": qualify.GPU_LOCK,
                     "owner": owner,
@@ -136,7 +137,7 @@ class Processes(unittest.TestCase):
                     if sections is not None
                     else [{"work": "f64", "locked": False}],
                     "gpu_sections": count,
-                }
+                },
             }
 
         qualify.validate_gpu_ownership(process(), "numeric")
@@ -457,6 +458,29 @@ class Processes(unittest.TestCase):
         self.assertEqual(result["status"], "escaped")
         self.assertEqual(qualify.EXIT_CODES[result["status"]], 4)
         self.assertFalse(result["accepts_replacement"])
+
+    def test_numeric_truth_and_band_rows_require_unlocked_cpu_evidence(self):
+        process = {
+            "rows": [
+                {"id": "secret", "secret": True},
+                {"id": "tf32/stage/band", "layers": ["lstm.stack"]},
+            ],
+            "gpu_lock": {
+                "path": qualify.GPU_LOCK,
+                "owner": "child",
+                "cpu_sections": [],
+                "gpu_sections": 1,
+            },
+        }
+        with self.assertRaisesRegex(qualify.Rejected, "f64 truth"):
+            qualify.validate_gpu_ownership(process, "numeric")
+        sections = [{"work": "f64", "locked": False}]
+        process["gpu_lock"].update(cpu_sections=sections, gpu_sections=2)
+        with self.assertRaisesRegex(qualify.Rejected, "TF32 draw"):
+            qualify.validate_gpu_ownership(process, "numeric")
+        sections.extend({"work": "tf32_draws", "locked": False} for _ in range(8))
+        process["gpu_lock"]["gpu_sections"] = 10
+        qualify.validate_gpu_ownership(process, "numeric")
 
     def test_driver_uses_child_lock_only_for_numeric(self):
         mode = "fp32"

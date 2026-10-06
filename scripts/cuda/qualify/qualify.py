@@ -488,6 +488,18 @@ def validate_gpu_ownership(process: dict, phase: str) -> None:
     count = evidence.get("gpu_sections")
     if type(count) is not int or count != len(sections) + 1:
         raise Rejected("GPU lock: incomplete GPU ownership evidence")
+    if owner == "child":
+        rows = process.get("rows", [])
+        truth_count = sum(row.get("secret") is True for row in rows)
+        if sum(section["work"] == "f64" for section in sections) != truth_count:
+            raise Rejected("GPU lock: missing unlocked f64 truth work")
+        band_count = sum(
+            8
+            for row in rows
+            if row.get("id", "").endswith("/band") and row.get("layers")
+        )
+        if sum(section["work"] == "tf32_draws" for section in sections) < band_count:
+            raise Rejected("GPU lock: missing unlocked TF32 draw work")
 
 
 def driver(
