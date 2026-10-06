@@ -30,7 +30,7 @@ coreml = [
 ]
 # native NVIDIA backend: optional libraries and committed cuda-oxide PTX through cudarc, with
 # safetensors weights; no ONNX Runtime
-cuda = ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120", "cudarc/cublas", "cudarc/cudnn"]
+cuda = ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120", "cudarc/cublas", "cudarc/cudnn", "dep:libloading"]
 cuda-driver-only = ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120"]
 # internal: driver and committed PTX, without optional numerical libraries
 _cuda = ["dep:cudarc", "dep:safetensors", "_backend"]

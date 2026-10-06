@@ -95,6 +95,9 @@ impl CudaRuntime {
     {
         #[cfg(feature = "cuda")]
         {
+            if super::driver_only() {
+                return Err(Self::library_forbidden(super::CudaLibrary::Cublas));
+            }
             check_len("sgemm a", spec.m.saturating_mul(spec.k), a.len())?;
             check_len("sgemm b", spec.k.saturating_mul(spec.n), b.len())?;
             check_len("sgemm c", spec.m.saturating_mul(spec.n), c.len())?;
@@ -112,16 +115,8 @@ impl CudaRuntime {
         }
         #[cfg(not(feature = "cuda"))]
         {
-            let _ = (a, b, c);
-            Err(super::implementation::LibraryNeed::new(
-                super::KernelModule::Lstm,
-                "sgemm",
-                spec.m,
-                spec.math,
-                super::implementation::Target::for_area(self, super::KernelModule::Lstm)?,
-                super::CudaLibrary::Cublas,
-            )
-            .error())
+            let _ = (spec, a, b, c);
+            Err(Self::library_forbidden(super::CudaLibrary::Cublas))
         }
     }
 }

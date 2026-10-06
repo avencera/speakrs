@@ -151,7 +151,13 @@ pub enum ModelLoadError {
     },
     /// The CUDA model assets could not be downloaded from Hugging Face
     #[cfg(all(feature = "_cuda", feature = "online"))]
-    #[cfg_attr(docsrs, doc(cfg(all(feature = "_cuda", feature = "online"))))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(all(
+            any(feature = "cuda", feature = "cuda-driver-only"),
+            feature = "online"
+        )))
+    )]
     #[error(
         "could not download the CUDA model assets for {mode} from Hugging Face: {source}; export them with `scripts/cuda/export_weights.py --runtime-assets <dir>` and load that directory with `from_dir`"
     )]

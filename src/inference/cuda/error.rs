@@ -39,10 +39,16 @@ impl fmt::Display for CudaLibrary {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum CudaError {
-    /// A CUDA shared library could not be loaded
+    /// A CUDA shared library is absent or lacks a required symbol
     #[error("could not load the {library} shared library")]
     LibraryUnavailable {
         /// The library that failed to load
+        library: CudaLibrary,
+    },
+    /// A direct optional-library request is forbidden by the driver-only policy
+    #[error("driver-only CUDA prohibits a direct request for {library}")]
+    LibraryForbidden {
+        /// The library requested without a selected model boundary
         library: CudaLibrary,
     },
     /// A required PTX tier is absent from this build

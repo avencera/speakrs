@@ -139,18 +139,15 @@ impl CudaRuntime {
         &self.stream
     }
 
+    /// A direct request has no selected area, boundary, batch, math or loaded tier
+    pub(super) fn library_forbidden(library: CudaLibrary) -> CudaError {
+        CudaError::LibraryForbidden { library }
+    }
+
     #[cfg(feature = "cuda")]
     fn library_policy(&self, library: CudaLibrary) -> Result<(), CudaError> {
         if super::driver_only() {
-            return Err(CudaError::NotDriverOnly {
-                area: "runtime",
-                boundary: "library request".to_owned(),
-                batch: 1,
-                math: CudaMath::Fp32,
-                tier: self.ptx_tier,
-                device: self.capability,
-                library,
-            });
+            return Err(Self::library_forbidden(library));
         }
         Ok(())
     }
@@ -381,5 +378,26 @@ fn device_count() -> Result<usize, CudaError> {
         // a driver with no visible GPU fails initialization instead of reporting zero
         Err(DriverError(CUresult::CUDA_ERROR_NO_DEVICE)) => Ok(0),
         Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod direct_request_tests {
+    use super::{CudaError, CudaLibrary, CudaRuntime};
+
+    #[test]
+    fn forbidden_direct_requests_do_not_invent_model_selection_context() {
+        for library in [CudaLibrary::Cublas, CudaLibrary::Cudnn, CudaLibrary::Nvrtc] {
+            let error = CudaRuntime::library_forbidden(library);
+            assert!(matches!(
+                error,
+                CudaError::LibraryForbidden { library: requested } if requested == library
+            ));
+            let message = error.to_string();
+            assert!(message.contains(&library.to_string()));
+            for invented in ["runtime/", "b1", "Fp32", "PTX tier"] {
+                assert!(!message.contains(invented));
+            }
+        }
     }
 }
