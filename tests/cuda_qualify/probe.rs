@@ -1182,8 +1182,9 @@ fn segmentation_secret(
             model.isolated_run(runtime, &mut op, 0)?;
             model.isolated_output(runtime, &op)
         };
+        let case = lock::TruthCase::new(math, batch, layer);
         let snapshot = truth.f64_snapshot(runtime, target)?;
-        let f64_truth = lock::cpu(runtime, lock::CpuWork::F64, || {
+        let f64_truth = lock::cpu(runtime, lock::CpuWork::F64(&case), || {
             snapshot.evaluate(&input, batch, &mut state)
         })?;
         let expected = SecretReference {
@@ -1199,12 +1200,7 @@ fn segmentation_secret(
         candidate.isolated_restore(runtime, &mut op, 0)?;
         graph.launch()?;
         let replay = candidate.isolated_output(runtime, &op)?;
-        let mut row = expected.row(
-            format!("{}/secret/b{batch}/{layer}", math_name(math)),
-            seed,
-            &eager,
-            &replay,
-        );
+        let mut row = expected.row(case.id().to_owned(), seed, &eager, &replay);
         row["library_algorithm"] = json!(if target == "lstm" {
             "PersistStaticSmallH"
         } else {
@@ -1274,7 +1270,7 @@ fn secret(
                     .as_ref()
                     .map(|values| nudge(values, &mut state)),
             };
-            let snapshot = Operator::from_host(
+            let truth_op = Operator::from_host(
                 &truth,
                 runtime,
                 std::slice::from_ref(&input),
@@ -1282,9 +1278,11 @@ fn secret(
                 batch,
                 block,
                 second,
-            )?
-            .f64_snapshot(runtime)?;
-            let f64_truth = lock::cpu(runtime, lock::CpuWork::F64, || {
+            )?;
+            let case = lock::TruthCase::new(math, batch, truth_op.name());
+            let snapshot = truth_op.f64_snapshot(runtime)?;
+            drop(truth_op);
+            let f64_truth = lock::cpu(runtime, lock::CpuWork::F64(&case), || {
                 snapshot.evaluate(&input, &mut state)
             })?;
             let expected = SecretReference {
@@ -1312,12 +1310,7 @@ fn secret(
             op.restore(runtime, 0)?;
             graph.launch()?;
             let replay = op.output(runtime)?;
-            let mut row = expected.row(
-                format!("{}/secret/b{batch}/{}", math_name(math), op.name()),
-                seed,
-                &eager,
-                &replay,
-            );
+            let mut row = expected.row(case.id().to_owned(), seed, &eager, &replay);
             let output_name = format!("tensor/relu_{}", 2 * block + if second { 2 } else { 1 });
             row["library_algorithm"] = json!("cuDNN convolution planner");
             row["baked_answers"] = baked.errors(&expected, batch, &output_name)?;

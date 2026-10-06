@@ -480,18 +480,32 @@ def validate_gpu_ownership(process: dict, phase: str) -> None:
     for section in sections:
         if (
             not isinstance(section, dict)
-            or set(section) != {"work", "locked"}
             or section.get("work") not in ("f64", "tf32_draws")
             or section.get("locked") is not False
         ):
             raise Rejected("GPU lock: CPU qualification work held the shared lock")
+        fields = (
+            {"work", "locked", "case"}
+            if section["work"] == "f64"
+            else {"work", "locked"}
+        )
+        if set(section) != fields or (
+            section["work"] == "f64"
+            and (not isinstance(section["case"], str) or not section["case"])
+        ):
+            raise Rejected("GPU lock: missing or invalid CPU case evidence")
     count = evidence.get("gpu_sections")
     if type(count) is not int or count != len(sections) + 1:
         raise Rejected("GPU lock: incomplete GPU ownership evidence")
     if owner == "child":
         rows = process.get("rows", [])
-        truth_count = sum(row.get("secret") is True for row in rows)
-        if sum(section["work"] == "f64" for section in sections) != truth_count:
+        prepared = [section["case"] for section in sections if section["work"] == "f64"]
+        if len(set(prepared)) != len(prepared):
+            raise Rejected("GPU lock: duplicate prepared f64 case")
+        emitted = [row.get("id") for row in rows if row.get("secret") is True]
+        if any(not isinstance(case, str) or not case for case in emitted) or not set(
+            emitted
+        ) <= set(prepared):
             raise Rejected("GPU lock: missing unlocked f64 truth work")
         band_count = sum(
             8

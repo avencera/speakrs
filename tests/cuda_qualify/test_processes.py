@@ -135,7 +135,7 @@ class Processes(unittest.TestCase):
                     "owner": owner,
                     "cpu_sections": sections
                     if sections is not None
-                    else [{"work": "f64", "locked": False}],
+                    else [{"work": "f64", "locked": False, "case": "secret"}],
                     "gpu_sections": count,
                 },
             }
@@ -145,7 +145,7 @@ class Processes(unittest.TestCase):
         for evidence in (
             {},
             process("parent"),
-            process(sections=[{"work": "f64", "locked": True}]),
+            process(sections=[{"work": "f64", "locked": True, "case": "secret"}]),
             process(sections=[{"work": "unknown", "locked": False}]),
             process(count=1),
             process(sections=[], count=True),
@@ -459,6 +459,39 @@ class Processes(unittest.TestCase):
         self.assertEqual(qualify.EXIT_CODES[result["status"]], 4)
         self.assertFalse(result["accepts_replacement"])
 
+    def test_partial_resnet_coverage_binds_70_preparations_to_63_secret_rows(self):
+        cases = [
+            f"tf32/secret/b{batch}/resnet.layer{stage}.{block}.conv{conv}"
+            for batch in qualify.BATCHES
+            for stage, blocks in [(1, 3), (2, 4)]
+            for block in range(blocks)
+            for conv in (1, 2)
+        ]
+        omitted = {
+            f"tf32/secret/b1/resnet.layer2.{block}.conv{conv}"
+            for block in range(4)
+            for conv in (1, 2)
+        } - {"tf32/secret/b1/resnet.layer2.0.conv1"}
+        sections = [{"work": "f64", "locked": False, "case": case} for case in cases]
+        rows = [{"id": case, "secret": True} for case in cases if case not in omitted]
+        self.assertEqual((len(sections), len(rows)), (70, 63))
+        process = {
+            "rows": rows,
+            "gpu_lock": {
+                "path": qualify.GPU_LOCK,
+                "owner": "child",
+                "cpu_sections": sections,
+                "gpu_sections": 71,
+            },
+        }
+        qualify.validate_gpu_ownership(process, "numeric")
+        sections[0] = {"work": "f64", "locked": False, "case": "wrong case"}
+        with self.assertRaisesRegex(qualify.Rejected, "missing unlocked f64"):
+            qualify.validate_gpu_ownership(process, "numeric")
+        sections[0] = sections[1]
+        with self.assertRaisesRegex(qualify.Rejected, "duplicate prepared"):
+            qualify.validate_gpu_ownership(process, "numeric")
+
     def test_numeric_truth_and_band_rows_require_unlocked_cpu_evidence(self):
         process = {
             "rows": [
@@ -474,7 +507,7 @@ class Processes(unittest.TestCase):
         }
         with self.assertRaisesRegex(qualify.Rejected, "f64 truth"):
             qualify.validate_gpu_ownership(process, "numeric")
-        sections = [{"work": "f64", "locked": False}]
+        sections = [{"work": "f64", "locked": False, "case": "secret"}]
         process["gpu_lock"].update(cpu_sections=sections, gpu_sections=2)
         with self.assertRaisesRegex(qualify.Rejected, "TF32 draw"):
             qualify.validate_gpu_ownership(process, "numeric")

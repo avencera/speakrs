@@ -1,6 +1,6 @@
 //! Shared GPU ownership with unlocked, host-only qualification work
 
-use crate::inference::cuda::{CudaError, CudaRuntime};
+use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
@@ -10,17 +10,37 @@ use std::rc::Rc;
 
 const GPU_LOCK: &str = "/workspace/gpu-bench.lock";
 
+/// One prepared truth case, whether or not its candidate tuple is declared
+pub(crate) struct TruthCase(String);
+
+impl TruthCase {
+    /// Bind truth preparation and the emitted secret row to the same case
+    pub(crate) fn new(math: CudaMath, batch: usize, layer: &str) -> Self {
+        assert!(batch > 0 && !layer.is_empty(), "valid truth case");
+        let mode = match math {
+            CudaMath::Fp32 => "fp32",
+            CudaMath::Tf32 => "tf32",
+        };
+        Self(format!("{mode}/secret/b{batch}/{layer}"))
+    }
+
+    /// Return the shared truth-preparation and result-row identity
+    pub(crate) fn id(&self) -> &str {
+        &self.0
+    }
+}
+
 /// CPU work that must not hold the shared GPU lock
 #[derive(Clone, Copy)]
-pub(crate) enum CpuWork {
-    F64,
+pub(crate) enum CpuWork<'a> {
+    F64(&'a TruthCase),
     Tf32Draws,
 }
 
-impl CpuWork {
+impl CpuWork<'_> {
     fn name(self) -> &'static str {
         match self {
-            Self::F64 => "f64",
+            Self::F64(_) => "f64",
             Self::Tf32Draws => "tf32_draws",
         }
     }
@@ -137,7 +157,7 @@ impl Drop for Relock<'_> {
 /// Runs host-only work after all GPU streams are idle, and relocks before any unwind
 pub(crate) fn cpu<T>(
     runtime: &CudaRuntime,
-    work: CpuWork,
+    work: CpuWork<'_>,
     compute: impl FnOnce() -> T,
 ) -> Result<T, CudaError> {
     // cuDNN and candidates can use side streams, so the whole context must be idle
@@ -145,7 +165,7 @@ pub(crate) fn cpu<T>(
     Ok(unlocked(work, compute))
 }
 
-fn unlocked<T>(work: CpuWork, compute: impl FnOnce() -> T) -> T {
+fn unlocked<T>(work: CpuWork<'_>, compute: impl FnOnce() -> T) -> T {
     let result = STATE.with(|cell| {
         let state = cell.borrow();
         let state = state.as_ref().expect("CPU work requires a GPU lock owner");
@@ -161,9 +181,11 @@ fn unlocked<T>(work: CpuWork, compute: impl FnOnce() -> T) -> T {
     STATE.with(|cell| {
         let mut state = cell.borrow_mut();
         let state = state.as_mut().expect("live GPU lock owner");
-        state
-            .cpu_sections
-            .push(json!({"work": work.name(), "locked": false}));
+        let mut evidence = json!({"work": work.name(), "locked": false});
+        if let CpuWork::F64(case) = work {
+            evidence["case"] = json!(case.id());
+        }
+        state.cpu_sections.push(evidence);
         state.gpu_sections += 1;
     });
     result
@@ -171,7 +193,8 @@ fn unlocked<T>(work: CpuWork, compute: impl FnOnce() -> T) -> T {
 
 #[cfg(test)]
 mod tests {
-    use super::{CpuWork, GpuLock, open, unlocked};
+    use super::{CpuWork, GpuLock, TruthCase, open, unlocked};
+    use crate::inference::cuda::CudaMath;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
     #[test]
@@ -185,7 +208,8 @@ mod tests {
         let owner = GpuLock::acquire(&path);
         let competing = open(&path);
         assert!(competing.try_lock().is_err());
-        let value = unlocked(CpuWork::F64, || {
+        let case = TruthCase::new(CudaMath::Fp32, 1, "lstm.stack");
+        let value = unlocked(CpuWork::F64(&case), || {
             competing.try_lock().expect("CPU section does not own lock");
             competing.unlock().expect("release competing lock");
             73
@@ -193,6 +217,7 @@ mod tests {
         assert_eq!(value, 73);
         assert!(competing.try_lock().is_err());
         assert_eq!(owner.evidence()["cpu_sections"][0]["locked"], false);
+        assert_eq!(owner.evidence()["cpu_sections"][0]["case"], case.id());
         let panic = catch_unwind(AssertUnwindSafe(|| {
             unlocked(CpuWork::Tf32Draws, || panic!("CPU failure"));
         }));

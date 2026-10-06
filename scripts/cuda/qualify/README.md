@@ -483,8 +483,8 @@ and GPU lock. The ignored `f64_reference_matches_fixture_rounding` and
 exact architecture in 75, 80, 86, 89, 90 and 120 at or above that tier. The manifest
 pins the cubin hash, its source PTX hash, and the ptxas version and flags.
 `cargo xtask cuda-kernels check` checks these pins and the feature embed masks.
-`check --rebuild` also checks byte-identical PTX and cubin builds with the pinned
-CUDA 13.0.88 toolchain. A CPU test checks each host plan's possible kernel names
+`check --rebuild` checks committed PTX pins and byte-identical cubin rebuilds
+with the pinned CUDA 13.0.88 ptxas. It does not regenerate PTX. A CPU test checks each host plan's possible kernel names
 against every PTX tier that it can use. The PTX lint rejects generic shared
 addresses from `cvta.shared.u64` that reach `cvt.u32.u64`, including through
 64-bit add, subtract and move instructions.
