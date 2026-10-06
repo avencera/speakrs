@@ -97,42 +97,60 @@ impl Isolated {
     }
 }
 
-impl CudaSegmentation {
-    /// Independent f64 truth for the pooled Sinc output or full sampled LSTM rows
-    pub(crate) fn f64_reference(
+/// Exact Sinc or LSTM weights with no CUDA owner
+pub(crate) struct HostReference(ReferenceWeights);
+
+enum ReferenceWeights {
+    Sinc(Vec<f32>),
+    Lstm(Vec<super::weights::LstmLayer>),
+}
+
+impl HostReference {
+    /// Computes independent f64 truth using only host data
+    pub(crate) fn evaluate(
         &self,
-        runtime: &CudaRuntime,
         input: &[f32],
         batch: usize,
-        target: &str,
         state: &mut u64,
-    ) -> Result<super::super::test_support::qualify::reference::Sample, CudaError> {
+    ) -> super::super::test_support::qualify::reference::Sample {
         use super::super::test_support::qualify::reference;
-        if target == "lstm" {
-            let layers: Vec<_> = self
-                .network
-                .lstm_weights
-                .iter()
-                .map(|layer| reference::Lstm {
-                    input: layer.input,
-                    w: &layer.w,
-                    r: &layer.r,
-                    b: &layer.b,
-                })
-                .collect();
-            return Ok(reference::lstm(
+        match &self.0 {
+            ReferenceWeights::Lstm(weights) => {
+                let layers: Vec<_> = weights
+                    .iter()
+                    .map(|layer| reference::Lstm {
+                        input: layer.input,
+                        w: &layer.w,
+                        r: &layer.r,
+                        b: &layer.b,
+                    })
+                    .collect();
+                reference::lstm(input, 589, &layers, &reference::batch_rows(batch, state))
+            }
+            ReferenceWeights::Sinc(filters) => reference::sinc(
                 input,
-                589,
-                &layers,
-                &reference::batch_rows(batch, state),
-            ));
+                filters,
+                reference::indices(&[batch, 80, 5325], state),
+            ),
         }
-        let filters = runtime.stream().clone_dtoh(&self.network.sinc_filters)?;
-        Ok(reference::sinc(
-            input,
-            &filters,
-            reference::indices(&[batch, 80, 5325], state),
-        ))
+    }
+}
+
+impl CudaSegmentation {
+    /// Copies exact operator weights into a host-only f64 truth owner
+    pub(crate) fn f64_snapshot(
+        &self,
+        runtime: &CudaRuntime,
+        target: &str,
+    ) -> Result<HostReference, CudaError> {
+        if target == "lstm" {
+            return Ok(HostReference(ReferenceWeights::Lstm(
+                self.network.lstm_weights.clone(),
+            )));
+        }
+        Ok(HostReference(ReferenceWeights::Sinc(
+            runtime.stream().clone_dtoh(&self.network.sinc_filters)?,
+        )))
     }
 
     pub(crate) fn qualification_has_graph(&self, batch: usize) -> bool {

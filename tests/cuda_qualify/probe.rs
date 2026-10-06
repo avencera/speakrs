@@ -25,6 +25,8 @@ use cudarc::driver::sys::{CUevent_flags, CUgraphInstantiate_flags, CUstreamCaptu
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+#[path = "lock.rs"]
+pub(crate) mod lock;
 #[path = "paired.rs"]
 mod paired;
 #[path = "reference.rs"]
@@ -1180,8 +1182,12 @@ fn segmentation_secret(
             model.isolated_run(runtime, &mut op, 0)?;
             model.isolated_output(runtime, &op)
         };
+        let snapshot = truth.f64_snapshot(runtime, target)?;
+        let f64_truth = lock::cpu(runtime, lock::CpuWork::F64, || {
+            snapshot.evaluate(&input, batch, &mut state)
+        })?;
         let expected = SecretReference {
-            truth: truth.f64_reference(runtime, &input, batch, target, &mut state)?,
+            truth: f64_truth,
             library: output(&mut library, &input)?,
             nudged: output(&mut truth, &nudge(&input, &mut state))?,
         };
@@ -1268,17 +1274,21 @@ fn secret(
                     .as_ref()
                     .map(|values| nudge(values, &mut state)),
             };
+            let snapshot = Operator::from_host(
+                &truth,
+                runtime,
+                std::slice::from_ref(&input),
+                Vec::new(),
+                batch,
+                block,
+                second,
+            )?
+            .f64_snapshot(runtime)?;
+            let f64_truth = lock::cpu(runtime, lock::CpuWork::F64, || {
+                snapshot.evaluate(&input, &mut state)
+            })?;
             let expected = SecretReference {
-                truth: Operator::from_host(
-                    &truth,
-                    runtime,
-                    std::slice::from_ref(&input),
-                    Vec::new(),
-                    batch,
-                    block,
-                    second,
-                )?
-                .f64_reference(runtime, &input, &mut state)?,
+                truth: f64_truth,
                 library: conv_secret_output(runtime, &library, &input, batch, block, second)?,
                 nudged: conv_secret_output(runtime, &truth, &nudged, batch, block, second)?,
             };
@@ -1386,6 +1396,9 @@ fn write(result: &Value) {
 #[test]
 #[ignore = "locked CUDA qualification entry point"]
 fn qualification_driver() -> Result<(), CudaError> {
+    // declare ownership before CUDA values so it is dropped after them
+    let lock_phase = std::env::var("SPEAKRS_QUALIFY_PHASE").expect("phase");
+    let gpu_lock = lock::GpuLock::from_environment(&lock_phase);
     let target = std::env::var("SPEAKRS_QUALIFY_TARGET").expect("target");
     assert!(["resnet", "sincnet", "lstm"].contains(&target.as_str()));
     let implementation = std::env::var("SPEAKRS_QUALIFY_IMPL").expect("implementation");
@@ -1458,7 +1471,8 @@ fn qualification_driver() -> Result<(), CudaError> {
     };
     if phase == "coverage" {
         write(
-            &json!({"target":target,"implementation":implementation,"phase":phase,"coverage":coverage}),
+            &json!({"target":target,"implementation":implementation,"phase":phase,
+                "gpu_lock":gpu_lock.evidence(),"coverage":coverage}),
         );
         return Ok(());
     }
@@ -1533,6 +1547,7 @@ fn qualification_driver() -> Result<(), CudaError> {
         "phase": phase,
         "mode": mode,
         "pid": std::process::id(),
+        "gpu_lock": gpu_lock.evidence(),
         "rows": rows,
         "tier": runtime.ptx_tier().to_string(),
         "device_sm": runtime.compute_capability().to_string(),
@@ -1718,7 +1733,9 @@ fn secret_library_algorithms() -> Result<(), CudaError> {
             .expect("front-end workspace")
             .tensor(SegmentationTensor::LstmInput)
             .download(runtime.stream())?;
-        let truth = small.f64_reference(&runtime, &input, batch, "lstm", &mut state)?;
+        let truth = small
+            .f64_snapshot(&runtime, "lstm")?
+            .evaluate(&input, batch, &mut state);
         let run = |model: &mut CudaSegmentation, input: &[f32]| -> Result<Vec<f32>, CudaError> {
             let mut op = model.isolated(&runtime, batch, "lstm", [input, input])?;
             model.isolated_run(&runtime, &mut op, 0)?;

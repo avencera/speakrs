@@ -766,6 +766,13 @@ thread_local! {
 /// A kernel no recorded module contains; only the `Unlisted` mutant launches it
 const UNLISTED_PTX: &str = ".version 6.3\n.target sm_75\n.address_size 64\n\n.visible .entry qualify_unlisted()\n{\n\tret;\n}\n";
 
+/// Releases test CUDA owners before the qualification lock is dropped
+pub(crate) fn clear_device_state() {
+    DEVICE.with(|cell| *cell.borrow_mut() = None);
+    STASH.with(|cell| cell.borrow_mut().clear());
+    set_band(None);
+}
+
 /// Loads only the locked test PTX, with no path selected by candidate code
 pub(crate) fn prepare(runtime: &CudaRuntime) -> Result<(), CudaError> {
     DEVICE.with(|cell| {
@@ -901,6 +908,11 @@ pub(crate) fn perturb<Y: DevicePtrMut<f32>>(
         return Ok(());
     };
 
+    let count = output.len();
+    let draws = qualify::lock::cpu(runtime, qualify::lock::CpuWork::Tf32Draws, || {
+        band_draws(seed, count)
+    })?;
+    let draws = runtime.stream().clone_htod(&draws)?;
     DEVICE.with(|cell| {
         let state = cell.borrow();
         let k = state
@@ -910,11 +922,27 @@ pub(crate) fn perturb<Y: DevicePtrMut<f32>>(
         let count = u32::try_from(output.len()).expect("noise band output fits a grid");
         let (pointer, _record) = output.device_ptr_mut(runtime.stream());
         let mut launch = runtime.stream().launch_builder(&k.perturb);
-        launch.arg(&pointer).arg(&len).arg(&seed);
+        launch.arg(&pointer).arg(&len).arg(&draws);
         // SAFETY: one guarded thread per element of the exact output slice
         unsafe { launch.launch(LaunchConfig::for_num_elems(count)) }?;
         Ok(())
     })
+}
+
+/// Exact per-index integer draws of the original qualify_perturb PTX
+fn band_draws(seed: u32, len: usize) -> Vec<u8> {
+    assert!(u32::try_from(len).is_ok(), "noise band output fits a grid");
+    (0..len)
+        .map(|index| {
+            let mut hash = (index as u32).wrapping_mul(0x9e37_79b1) ^ seed;
+            hash ^= hash >> 16;
+            hash = hash.wrapping_mul(0x85eb_ca6b);
+            hash ^= hash >> 13;
+            hash = hash.wrapping_mul(0xc2b2_ae35);
+            hash ^= hash >> 16;
+            (hash % 3) as u8
+        })
+        .collect()
 }
 
 /// The precision mutant changes the real input in place; the driver restores it
@@ -1139,6 +1167,33 @@ pub(crate) fn sanitizer_control(runtime: &CudaRuntime, control: &str) -> Result<
 
 mod tests {
     use super::{CALL_VIOLATIONS, Frame, Kind, STACK, check_call, entries};
+
+    #[test]
+    fn host_band_draws_match_frozen_ptx_integer_hash() {
+        let expected = [
+            (0, [0, 0, 2, 1, 0, 2, 0, 0, 2, 0, 2, 1, 2, 2, 1, 2]),
+            (u32::MAX, [1, 1, 2, 2, 2, 1, 0, 2, 2, 0, 2, 0, 2, 2, 2, 2]),
+            (11, [1, 0, 0, 0, 1, 1, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0]),
+            (97, [2, 2, 1, 1, 1, 2, 1, 0, 0, 1, 2, 1, 2, 1, 0, 2]),
+        ];
+        for (seed, choices) in expected {
+            assert_eq!(super::band_draws(seed, choices.len()), choices);
+        }
+
+        // these signed constants are the mul.lo.s32 operands in the frozen PTX
+        for seed in [11, 23, 37, 41, 53, 67, 79, 97] {
+            let draws = super::band_draws(seed, 4096);
+            for (index, draw) in draws.into_iter().enumerate() {
+                let mut bits = (index as u32).wrapping_mul((-1_640_531_535i32) as u32) ^ seed;
+                bits ^= bits >> 16;
+                bits = bits.wrapping_mul((-2_048_144_789i32) as u32);
+                bits ^= bits >> 13;
+                bits = bits.wrapping_mul((-1_028_477_387i32) as u32);
+                bits ^= bits >> 16;
+                assert_eq!(u32::from(draw), bits % 3, "seed={seed} index={index}");
+            }
+        }
+    }
 
     #[test]
     fn entry_names_come_from_the_loaded_bytes() {

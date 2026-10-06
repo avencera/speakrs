@@ -208,7 +208,14 @@ def command(argv: list[str], env: dict[str, str], path: Path, steps: list[dict])
         or executable.name == "compute-sanitizer"
         or (executable.name == "nsys" and "profile" in argv[1:])
     )
-    if touches_gpu and not locked:
+    child_owned = (
+        not locked
+        and executable.is_relative_to(BOX / "target")
+        and argv[1:] == ["--exact", PROFILE_TEST, "--ignored", "--nocapture"]
+        and env.get("SPEAKRS_QUALIFY_PHASE") == "numeric"
+        and env.get("SPEAKRS_QUALIFY_LOCK_OWNER") == "child"
+    )
+    if touches_gpu and not (locked or child_owned):
         raise Rejected("GPU process refused: the shared GPU lock is required")
     with path.open("wb") as log:
         process = subprocess.run(
@@ -220,7 +227,8 @@ def command(argv: list[str], env: dict[str, str], path: Path, steps: list[dict])
             "returncode": process.returncode,
             "log": str(path),
             "sha256": sha(path),
-            "gpu_lock": GPU_LOCK if locked else None,
+            "gpu_lock": GPU_LOCK if locked or child_owned else None,
+            "gpu_lock_owner": "child" if child_owned else "parent" if locked else None,
         }
     )
     return process.returncode
@@ -230,7 +238,8 @@ def gpu_command(
     argv: list[str], env: dict[str, str], path: Path, steps: list[dict]
 ) -> int:
     """Hold the shared lock for the complete GPU process and its children."""
-    return command(["flock", GPU_LOCK, *argv], env, path, steps)
+    child = dict(env, SPEAKRS_QUALIFY_LOCK_OWNER="parent")
+    return command(["flock", GPU_LOCK, *argv], child, path, steps)
 
 
 def clean_environment() -> dict[str, str]:
@@ -455,6 +464,32 @@ def expected_ids(target: str, phase: str, mode: str) -> set[str]:
     return base
 
 
+def validate_gpu_ownership(process: dict, phase: str) -> None:
+    """Require completed evidence from the selected GPU lock owner."""
+    evidence = process.get("gpu_lock")
+    owner = "child" if phase == "numeric" else "parent"
+    if not isinstance(evidence, dict) or (
+        evidence.get("path") != GPU_LOCK or evidence.get("owner") != owner
+    ):
+        raise Rejected("GPU lock: missing or inconsistent ownership evidence")
+    sections = evidence.get("cpu_sections")
+    if not isinstance(sections, list):
+        raise Rejected("GPU lock: missing CPU ownership evidence")
+    if owner == "parent" and sections:
+        raise Rejected("GPU lock: parent-owned process ran CPU qualification work")
+    for section in sections:
+        if (
+            not isinstance(section, dict)
+            or set(section) != {"work", "locked"}
+            or section.get("work") not in ("f64", "tf32_draws")
+            or section.get("locked") is not False
+        ):
+            raise Rejected("GPU lock: CPU qualification work held the shared lock")
+    count = evidence.get("gpu_sections")
+    if type(count) is not int or count != len(sections) + 1:
+        raise Rejected("GPU lock: incomplete GPU ownership evidence")
+
+
 def driver(
     binary: Path,
     env: dict,
@@ -465,7 +500,7 @@ def driver(
     label: str,
     extra: dict | None = None,
 ) -> dict:
-    """Run one fresh test process under the lock and require its evidence file."""
+    """Run a fresh driver with explicit GPU ownership and require its evidence."""
     output = directory / f"{label}.json"
     child = dict(
         env,
@@ -475,16 +510,18 @@ def driver(
         **(extra or {}),
     )
     log = directory / f"{label}.log"
-    if gpu_command(
-        [str(binary), "--exact", PROFILE_TEST, "--ignored", "--nocapture"],
-        child,
-        log,
-        steps,
-    ):
+    argv = [str(binary), "--exact", PROFILE_TEST, "--ignored", "--nocapture"]
+    if phase == "numeric":
+        child["SPEAKRS_QUALIFY_LOCK_OWNER"] = "child"
+        code = command(argv, child, log, steps)
+    else:
+        code = gpu_command(argv, child, log, steps)
+    if code:
         raise Rejected(f"driver failed: {label}")
     if "1 passed; 0 failed" not in log.read_text() or not output.is_file():
         raise Rejected(f"driver missing completed GPU evidence: {label}")
     data = json.loads(output.read_text())
+    validate_gpu_ownership(data, phase)
     if (
         data["implementation"] != implementation
         or data["phase"] != phase

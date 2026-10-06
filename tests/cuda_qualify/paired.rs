@@ -19,6 +19,11 @@ thread_local! {
     static TAIL_KERNEL: RefCell<Option<CudaFunction>> = const { RefCell::new(None) };
 }
 
+/// Releases test CUDA functions while the shared GPU lock is held
+pub(super) fn clear_tail() {
+    TAIL_KERNEL.with(|cell| *cell.borrow_mut() = None);
+}
+
 /// Keep the recorded module inventory identical in every StageTail phase
 pub(super) fn prepare_tail(runtime: &CudaRuntime) -> Result<(), CudaError> {
     let module = super::super::load_recorded(

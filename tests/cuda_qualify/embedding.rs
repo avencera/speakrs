@@ -91,6 +91,32 @@ pub(crate) struct HostInputs {
     pub(crate) residual: Option<Vec<f32>>,
 }
 
+/// Exact convolution geometry and weights with no CUDA owner
+pub(crate) struct HostReference {
+    spec: crate::inference::cuda::dnn::Conv2d,
+    weight: Vec<f32>,
+    bias: Vec<f32>,
+}
+
+impl HostReference {
+    /// Computes independent f64 truth using only host data
+    pub(crate) fn evaluate(
+        &self,
+        input: &HostInputs,
+        state: &mut u64,
+    ) -> crate::inference::cuda::test_support::qualify::reference::Sample {
+        use crate::inference::cuda::test_support::qualify::reference;
+        reference::conv(
+            &self.spec,
+            &input.input,
+            &self.weight,
+            &self.bias,
+            input.residual.as_deref(),
+            reference::indices(&self.spec.output_shape(), state),
+        )
+    }
+}
+
 /// One layer with two reference input sets, separate from the full-stage buffers
 pub(crate) struct Operator<'a> {
     model: &'a ResNetEmbedding,
@@ -205,25 +231,13 @@ impl<'a> Operator<'a> {
         })
     }
 
-    /// Independent f64 truth from the same host inputs and uploaded folded weights
-    pub(crate) fn f64_reference(
-        &self,
-        runtime: &CudaRuntime,
-        input: &HostInputs,
-        state: &mut u64,
-    ) -> Result<super::super::test_support::qualify::reference::Sample, CudaError> {
-        use super::super::test_support::qualify::reference;
-        let spec = self.layer.conv(self.batch, self.model.0.math);
-        let weight = self.layer.weight().download(runtime.stream())?;
-        let bias = self.layer.bias().download(runtime.stream())?;
-        Ok(reference::conv(
-            &spec,
-            &input.input,
-            &weight,
-            &bias,
-            input.residual.as_deref(),
-            reference::indices(&spec.output_shape(), state),
-        ))
+    /// Copies the exact uploaded weights into a host-only f64 truth owner
+    pub(crate) fn f64_snapshot(&self, runtime: &CudaRuntime) -> Result<HostReference, CudaError> {
+        Ok(HostReference {
+            spec: self.layer.conv(self.batch, self.model.0.math),
+            weight: self.layer.weight().download(runtime.stream())?,
+            bias: self.layer.bias().download(runtime.stream())?,
+        })
     }
 
     pub(crate) fn name(&self) -> &str {

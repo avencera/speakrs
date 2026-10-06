@@ -126,6 +126,73 @@ class Processes(unittest.TestCase):
                     qualify.command(argv, {}, Path("unused.log"), [])
             run.assert_not_called()
 
+    def test_cpu_lock_evidence_must_be_unlocked_and_complete(self):
+        def process(owner="child", sections=None, count=2):
+            return {
+                "gpu_lock": {
+                    "path": qualify.GPU_LOCK,
+                    "owner": owner,
+                    "cpu_sections": sections
+                    if sections is not None
+                    else [{"work": "f64", "locked": False}],
+                    "gpu_sections": count,
+                }
+            }
+
+        qualify.validate_gpu_ownership(process(), "numeric")
+        qualify.validate_gpu_ownership(process("parent", [], 1), "profile")
+        for evidence in (
+            {},
+            process("parent"),
+            process(sections=[{"work": "f64", "locked": True}]),
+            process(sections=[{"work": "unknown", "locked": False}]),
+            process(count=1),
+            process(sections=[], count=True),
+        ):
+            with self.assertRaises(qualify.Rejected):
+                qualify.validate_gpu_ownership(evidence, "numeric")
+        with self.assertRaises(qualify.Rejected):
+            qualify.validate_gpu_ownership(process("parent"), "sanitize")
+
+    def test_child_lock_claim_cannot_unlock_other_gpu_commands(self):
+        binary = str(qualify.BOX / "target/release/driver")
+        env = {
+            "SPEAKRS_QUALIFY_PHASE": "numeric",
+            "SPEAKRS_QUALIFY_LOCK_OWNER": "child",
+        }
+        with patch.object(qualify.subprocess, "run") as run:
+            for argv in (
+                [binary, "--exact", "other_test", "--ignored", "--nocapture"],
+                ["nsys", "profile", binary],
+                ["compute-sanitizer", binary],
+                [binary, "--exact", qualify.PROFILE_TEST, "--ignored"],
+            ):
+                with self.assertRaisesRegex(qualify.Rejected, "shared GPU lock"):
+                    qualify.command(argv, env, Path("unused.log"), [])
+            run.assert_not_called()
+
+    def test_gpu_tool_owner_overrides_child_mode_without_nested_lock(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(
+                qualify.subprocess, "run", return_value=SimpleNamespace(returncode=0)
+            ) as run,
+        ):
+            steps = []
+            qualify.gpu_command(
+                ["nsys", "profile", "driver"],
+                {"SPEAKRS_QUALIFY_LOCK_OWNER": "child"},
+                Path(directory) / "tool.log",
+                steps,
+            )
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[:2], ["flock", qualify.GPU_LOCK])
+            self.assertEqual(argv.count("flock"), 1)
+            self.assertEqual(
+                run.call_args.kwargs["env"]["SPEAKRS_QUALIFY_LOCK_OWNER"], "parent"
+            )
+            self.assertEqual(steps[0]["gpu_lock_owner"], "parent")
+
     def test_every_positive_control_needs_its_live_fault(self):
         faults = {
             "oob": "Invalid __global__ write of size 4 in qualify_oob\nERROR SUMMARY: 1 errors",
@@ -391,11 +458,17 @@ class Processes(unittest.TestCase):
         self.assertEqual(qualify.EXIT_CODES[result["status"]], 4)
         self.assertFalse(result["accepts_replacement"])
 
-    def test_every_driver_process_holds_the_lock(self):
+    def test_driver_uses_child_lock_only_for_numeric(self):
         mode = "fp32"
 
         def run(argv, **kwargs):
-            self.assertEqual(argv[:2], ["flock", qualify.GPU_LOCK])
+            env = kwargs["env"]
+            if env["SPEAKRS_QUALIFY_PHASE"] == "numeric":
+                self.assertNotEqual(argv[0], "flock")
+                self.assertEqual(env["SPEAKRS_QUALIFY_LOCK_OWNER"], "child")
+            else:
+                self.assertEqual(argv[:2], ["flock", qualify.GPU_LOCK])
+                self.assertEqual(env["SPEAKRS_QUALIFY_LOCK_OWNER"], "parent")
             kwargs["stdout"].write(b"test result: ok. 1 passed; 0 failed\n")
             env = kwargs["env"]
             phase = env["SPEAKRS_QUALIFY_PHASE"]
@@ -404,6 +477,12 @@ class Processes(unittest.TestCase):
                     {
                         "implementation": env["SPEAKRS_QUALIFY_IMPL"],
                         "phase": phase,
+                        "gpu_lock": {
+                            "path": qualify.GPU_LOCK,
+                            "owner": env["SPEAKRS_QUALIFY_LOCK_OWNER"],
+                            "cpu_sections": [],
+                            "gpu_sections": 1,
+                        },
                         "target": env["SPEAKRS_QUALIFY_TARGET"],
                         "mode": env.get("SPEAKRS_QUALIFY_MODE"),
                         "pid": 1,
@@ -413,13 +492,20 @@ class Processes(unittest.TestCase):
                             "name": "test",
                             "compute_capability": "12.0",
                             "sm_count": 36,
+                            "l2_bytes": 33554432,
                             "driver_api_version": 12080,
                             "driver_version": "570.0",
                             "cuda_version": 12080,
                             "cudnn_version": 90000,
                             "cublas_version": 120800,
                         },
-                        "loaded_modules": [{"area": "segmentation", "tier": "sm75"}],
+                        "loaded_modules": [
+                            {
+                                "area": "segmentation",
+                                "tier": "sm75",
+                                "artifact": {"kind": "PtxJit", "sha256": "a" * 64},
+                            }
+                        ],
                         "observed_sm_clock": {
                             "samples": 2,
                             "min_mhz": 2400,
@@ -455,6 +541,10 @@ class Processes(unittest.TestCase):
                 self.assertEqual(data["phase"], phase)
             self.assertEqual(len(steps), 5)
             self.assertTrue(all(item["gpu_lock"] == qualify.GPU_LOCK for item in steps))
+            self.assertEqual(
+                [item["gpu_lock_owner"] for item in steps],
+                ["parent", "child", "parent", "parent", "parent"],
+            )
 
     def test_case_inventory_cannot_be_reduced(self):
         self.assertEqual(len(qualify.case_ids()), 16)
@@ -541,6 +631,8 @@ class Processes(unittest.TestCase):
                 "area": "lstm",
                 "tier": "sm75",
                 "sha256": qualify.sha(path),
+                "embedded_ptx_sha256": qualify.sha(path),
+                "artifact": {"kind": "PtxJit", "sha256": qualify.sha(path)},
                 "entries": ["lstm_step"],
             }
             allow, _ = qualify.verify_modules([module], root)
