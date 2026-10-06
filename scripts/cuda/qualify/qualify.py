@@ -41,6 +41,8 @@ from gates import (
     Error,
     ParityRejected,
     TruthRejected,
+    StageRejected,
+    StageBlocked,
     Rejected,
     Timing,
     embedding_parity,
@@ -133,6 +135,9 @@ MUTANT_GATES = {
         "floating-point atomic in launched custom entry",
     ),
     "StageSlow": Gate("paired_stage", "paired stage: stage regression"),
+    "StageTail": Gate(
+        "paired_stage", "paired stage: non-inferiority margin not established"
+    ),
     "StageAccuracy": Gate("stage_truth", "candidate less accurate than Library TF32"),
     "Slow": Gate("speed", "candidate slower than the faster Library process"),
     "PhaseCheat": Gate("timing_output", "final output differs"),
@@ -147,6 +152,7 @@ PHASES = ("numeric", "timing", "paired", "profile", "sanitize")
 # Library controls and candidates run every phase
 MUTANT_PHASES = {
     "StageSlow": ("numeric", "timing", "paired"),
+    "StageTail": ("numeric", "timing", "paired"),
     "StageAccuracy": ("numeric",),
     "Precision": ("numeric",),
     "Shape": ("numeric",),
@@ -160,6 +166,8 @@ MUTANT_PHASES = {
     "Lookup": ("numeric",),
     "UninitShared": ("numeric",),
 }
+# the unmutated pinned control runs the same protocol but grants no acceptance
+CONTROL_PHASES = {"StageTailControl": MUTANT_PHASES["StageTail"]}
 EXIT_CODES = {"passed": 0, "rejected": 1, "blocked": 3, "escaped": 4}
 
 
@@ -567,6 +575,16 @@ def check(result: dict, name: str, operation) -> None:
     try:
         evidence = operation()
         result["checks"].append({"check": name, "passed": True, "evidence": evidence})
+    except StageBlocked as error:
+        result["checks"].append(
+            {
+                "check": name,
+                "passed": False,
+                "blocked": True,
+                "reason": str(error),
+                "evidence": error.evidence,
+            }
+        )
     except Blocked as error:
         result["checks"].append(
             {"check": name, "passed": False, "blocked": True, "reason": str(error)}
@@ -581,7 +599,7 @@ def check(result: dict, name: str, operation) -> None:
                 "cases": error.cases,
             }
         )
-    except TruthRejected as error:
+    except (TruthRejected, StageRejected) as error:
         result["checks"].append(
             {
                 "check": name,
@@ -1284,6 +1302,15 @@ def paired_checks(
                     raise Rejected(
                         "paired stage: final output differs from numeric evidence"
                     )
+                if (
+                    side == 1
+                    and "stage_tail" in row
+                    and row["stage_tail"].get("delayed_output_sha256")
+                    != expected_hashes
+                ):
+                    raise Rejected(
+                        "paired stage: delayed output differs from numeric evidence"
+                    )
                 for op in row["operator_outputs"]:
                     operator_key = (
                         op.get("id") or key.removesuffix("stage") + op["layer"]
@@ -1351,19 +1378,11 @@ def paired_control(row: dict) -> dict:
     """Check the full paired estimator contract without imposing a win on Library."""
     try:
         return stage_speed(row, True)
-    except Blocked:
+    except (StageBlocked, StageRejected) as error:
         return {
+            **error.evidence,
             "control": True,
             "comparison": "Library vs Library",
-            "abba_blocks": len(row["stage_abba_ms"]),
-        }
-    except Rejected as error:
-        if "stage regression exceeds zero slowdown" not in str(error):
-            raise
-        return {
-            "control": True,
-            "comparison": "Library vs Library",
-            "abba_blocks": len(row["stage_abba_ms"]),
         }
 
 
@@ -1594,7 +1613,11 @@ def stable_modules(
                 if (layer, batch, mode) in coverage.triples
             )
         )
-        required = {target} if implementation == "Oxide" and ran else set()
+        required = (
+            {target}
+            if implementation in ("Oxide", "StageTail", "StageTailControl") and ran
+            else set()
+        )
         if required - loaded:
             raise Rejected(
                 f"process runs declared triples but did not load candidate area {target}"
@@ -1817,7 +1840,9 @@ def collect_tier(
             return {"modules": len(result["loaded_ptx"]["modules"])}
 
         check(result, "ptx:shared_initialization", shared_loads)
-    phases = MUTANT_PHASES.get(implementation, PHASES)
+    phases = CONTROL_PHASES.get(
+        implementation, MUTANT_PHASES.get(implementation, PHASES)
+    )
     result["phases_run"] = list(phases)
     if "timing" in phases:
         timing_cases = {}
@@ -2022,7 +2047,7 @@ def collect_tier(
     blocked_tools = []
     include = sorted(allow.entries) if allow is not None else []
     # positive controls prove the include filter for Library controls and candidates
-    if implementation not in MUTANTS and include:
+    if implementation not in (*MUTANTS, *CONTROL_PHASES) and include:
         for control_name in CONTROLS:
             check(
                 result,
@@ -2031,7 +2056,7 @@ def collect_tier(
                     binary, env, directory, steps, control_name, include
                 ),
             )
-    if target == "lstm" and implementation not in MUTANTS:
+    if target == "lstm" and implementation not in (*MUTANTS, *CONTROL_PHASES):
         for tool in TOOLS:
             record = library_tool_record(baseline, tool)
             if record is not None:
@@ -2088,7 +2113,7 @@ def collect_tier(
                     else f"ProjectionBaseline/{tool}"
                 )
     # mutants prove their intended gate; sanitizer completion adds no harness evidence
-    if implementation not in ("Library", *MUTANTS) and include:
+    if implementation not in ("Library", *MUTANTS, *CONTROL_PHASES) and include:
         for tool in TOOLS:
             child = dict(
                 env,
@@ -2251,7 +2276,7 @@ def collect(target: str, implementation: str, directory: Path, result: dict) -> 
                 reason=f"mutant escaped its intended check {gate['intended_check']} ({gate['intended_reason']})",
             )
     result["accepts_replacement"] = (
-        implementation not in ("Library", *MUTANTS) and result["status"] == "passed"
+        implementation == "Oxide" and result["status"] == "passed"
     )
     result["noise_floor_fraction"] = max(
         (child.get("noise_floor_fraction", 0.0) for child in result["tiers"].values()),
@@ -2388,8 +2413,17 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    if args.implementation not in ("Library", "Oxide", *MUTANTS):
+    if args.implementation not in ("Library", "Oxide", *MUTANTS, *CONTROL_PHASES):
         print("qualification refused: unknown implementation name", file=sys.stderr)
+        return 2
+    if (
+        args.implementation in ("StageTail", "StageTailControl")
+        and args.target == "lstm"
+    ):
+        print(
+            "qualification refused: LSTM StageTail awaits the Library-free candidate (phase 2c-2)",
+            file=sys.stderr,
+        )
         return 2
     now = datetime.now(UTC)
     stamp = now.strftime("%Y%m%dT%H%M%S.%fZ")

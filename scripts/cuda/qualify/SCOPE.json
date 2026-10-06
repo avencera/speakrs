@@ -20,6 +20,7 @@
     }
   ],
   "files": [
+    ".github/workflows/ci.yml",
     ".cargo/config.toml",
     "Cargo.lock",
     "Cargo.toml",

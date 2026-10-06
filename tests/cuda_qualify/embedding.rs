@@ -267,6 +267,9 @@ impl<'a> Operator<'a> {
             Choice::Library => false,
             Choice::Oxide(_) => true,
             Choice::Mutant(_) => true,
+            Choice::StageTail | Choice::StageTailControl => {
+                unreachable!("a selection request is resolved before the plan")
+            }
         }
     }
 

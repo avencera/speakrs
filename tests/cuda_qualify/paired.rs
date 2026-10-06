@@ -7,10 +7,91 @@ use crate::inference::cuda::{
     CudaError, CudaLstmAlgorithm, CudaRuntime, CudaSegmentation, ResNetEmbedding, SafetensorsFile,
     SegmentationOptions,
 };
+use cudarc::driver::{CudaFunction, LaunchConfig, PushKernelArg};
 use cudarc::driver::{CudaGraph, sys::CUevent_flags};
 use serde_json::{Value, json};
+use std::cell::RefCell;
 
 const BLOCKS: usize = 256;
+const TAIL_BLOCKS: usize = 16;
+
+thread_local! {
+    static TAIL_KERNEL: RefCell<Option<CudaFunction>> = const { RefCell::new(None) };
+}
+
+/// Keep the recorded module inventory identical in every StageTail phase
+pub(super) fn prepare_tail(runtime: &CudaRuntime) -> Result<(), CudaError> {
+    let module = super::super::load_recorded(
+        runtime,
+        "stage_tail",
+        include_str!("device/stage_tail.sm75.ptx"),
+    )?;
+    TAIL_KERNEL.with(|cell| {
+        *cell.borrow_mut() = Some(module.load_function("qualify_stage_tail")?);
+        Ok(())
+    })
+}
+
+/// A real candidate stage followed by a device delay, captured as one graph
+struct Tail {
+    graph: CudaGraph,
+    evidence: Value,
+}
+
+impl Tail {
+    fn capture(
+        runtime: &CudaRuntime,
+        library: &CudaGraph,
+        factor: f32,
+        mut candidate_stage: impl FnMut() -> Result<(), CudaError>,
+    ) -> Result<Self, CudaError> {
+        let mut calibration = Vec::new();
+        for _ in 0..WARMUP {
+            calibration.push(elapsed(runtime, || Ok(library.launch()?))?);
+        }
+        let stage_ms = super::median(&calibration);
+        assert!(stage_ms.is_finite() && stage_ms > 0.0);
+        let duration_ns = (f64::from(stage_ms) * f64::from(factor) * 1_000_000.0).ceil() as u64;
+        let kernel =
+            TAIL_KERNEL.with(|cell| cell.borrow().as_ref().expect("prepared tail").clone());
+        let spin = || -> Result<(), CudaError> {
+            let _scope = super::super::fixed("qualify_stage_tail");
+            let mut launch = runtime.stream().launch_builder(&kernel);
+            launch.arg(&duration_ns);
+            // SAFETY: one thread reads only a duration and the device timer, no pointers
+            unsafe {
+                launch.launch(LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                })
+            }?;
+            Ok(())
+        };
+        let spin_ms = elapsed(runtime, spin)?;
+        // event resolution can round down by a tick; the fault must still be real GPU work
+        assert!(f64::from(spin_ms) >= 0.99 * duration_ns as f64 / 1_000_000.0);
+        let graph = capture(runtime, || {
+            candidate_stage()?;
+            spin()
+        })?;
+        Ok(Self {
+            graph,
+            evidence: json!({"entry":"qualify_stage_tail", "timer":"globaltimer_ns",
+                "calibration_library_ms":calibration, "calibration_stage_ms":stage_ms,
+                "extra_stage_fraction":factor, "duration_ns":duration_ns,
+                "measured_spin_ms":spin_ms, "first_block":0, "group_abba_blocks":TAIL_BLOCKS,
+                "candidate_replays_per_block":2, "operators_delayed":false,
+                "captured_with_real_candidate_stage":true}),
+        })
+    }
+
+    fn for_block(&self, block: Option<usize>) -> Option<&CudaGraph> {
+        block
+            .filter(|index| *index < TAIL_BLOCKS)
+            .map(|_| &self.graph)
+    }
+}
 
 /// Each observation times exactly one replay, never a burst of one implementation
 fn elapsed(
@@ -31,12 +112,12 @@ fn elapsed(
 /// Warm-up and collection share the same alternating-input, replay-level schedule
 fn replay_set(
     blocks: usize,
-    mut observe: impl FnMut(usize) -> Result<([f32; 4], [f32; 4]), CudaError>,
+    mut observe: impl FnMut(usize, Option<usize>) -> Result<([f32; 4], [f32; 4]), CudaError>,
 ) -> Result<Value, CudaError> {
     let mut stage = Vec::with_capacity(blocks);
     let mut operator = Vec::with_capacity(blocks);
     for block in 0..WARMUP + blocks {
-        let (stage_ms, operator_ms) = observe(block % 2)?;
+        let (stage_ms, operator_ms) = observe(block % 2, block.checked_sub(WARMUP))?;
         if block >= WARMUP {
             stage.push(stage_ms);
             operator.push(operator_ms);
@@ -53,6 +134,7 @@ fn observe(
     operators: [&[[CudaGraph; 2]]; 2],
     which: usize,
     slow: bool,
+    tail: Option<&CudaGraph>,
 ) -> Result<([f32; 4], [f32; 4]), CudaError> {
     let mut stage_ms = [0.0; 4];
     let mut operator_ms = [0.0; 4];
@@ -64,7 +146,12 @@ fn observe(
             Ok(())
         })?;
         stage_ms[index] = elapsed(runtime, || {
-            stages[side].launch()?;
+            let graph = if side == 1 {
+                tail.unwrap_or(stages[side])
+            } else {
+                stages[side]
+            };
+            graph.launch()?;
             if side == 1 && slow {
                 stages[side].launch()?;
             }
@@ -145,6 +232,17 @@ impl Run<'_> {
         library_stage.capture_graph(runtime)?;
         candidate_stage.capture_graph(runtime)?;
         let mut stages = [library_stage, candidate_stage];
+        let tail = if self.choice == "StageTail" && self.id == "fp32/first/b1" {
+            let (library, candidate) = stages.split_at_mut(1);
+            Some(Tail::capture(
+                runtime,
+                library[0].graph().expect("Library graph"),
+                1.7,
+                || candidate[0].forward_with_taps(runtime, &mut |_, _| Ok(())),
+            )?)
+        } else {
+            None
+        };
         let mut stage_blocks = Vec::new();
         let mut operator_blocks = Vec::new();
         let mut operator_layers = Vec::new();
@@ -166,7 +264,8 @@ impl Run<'_> {
             };
             let library_graphs = capture_op(&mut library_op)?;
             let candidate_graphs = capture_op(&mut candidate_op)?;
-            let collected = replay_set(blocks_per_layer, |which| {
+            let offset = stage_blocks.len();
+            let collected = replay_set(blocks_per_layer, |which, block| {
                 for buffers in &mut stages {
                     upload(buffers, which)?;
                 }
@@ -182,6 +281,8 @@ impl Run<'_> {
                     ],
                     which,
                     self.choice == "StageSlow",
+                    tail.as_ref()
+                        .and_then(|tail| tail.for_block(block.map(|block| offset + block))),
                 )
             })?;
             stage_blocks.extend(
@@ -219,6 +320,11 @@ impl Run<'_> {
             "cuda_graph":true, "declared":true, "pid":std::process::id(),
         });
         row["id"] = json!(self.key("stage", 0));
+        if let Some(tail) = &tail {
+            row["stage_tail"] = tail.evidence.clone();
+            row["stage_tail"]["group_count"] =
+                json!(row["stage_abba_ms"].as_array().expect("blocks").len() / TAIL_BLOCKS);
+        }
         let mut hashes = [Vec::new(), Vec::new()];
         for which in 0..2 {
             for (side, buffers) in stages.iter_mut().enumerate() {
@@ -228,6 +334,15 @@ impl Run<'_> {
             }
         }
         row["output_sha256"] = json!(hashes);
+        if let Some(tail) = &tail {
+            let mut delayed = Vec::new();
+            for which in 0..2 {
+                upload(&mut stages[1], which)?;
+                tail.graph.launch()?;
+                delayed.push(sha(&stages[1].download_output(runtime)?));
+            }
+            row["stage_tail"]["delayed_output_sha256"] = json!(delayed);
+        }
         row["operator_outputs"] = json!(operator_outputs);
         rows.push(row);
         Ok(())
@@ -303,7 +418,19 @@ impl Run<'_> {
             model.forward(runtime, self.batch, WINDOW)?;
         }
         // graph objects are borrowed only after uploads; both sides use the same input
-        let mut row = replay_set(BLOCKS, |which| {
+        let tail = if self.choice == "StageTail" && self.id == "fp32/mixed/b32" {
+            Some(Tail::capture(
+                runtime,
+                library
+                    .qualification_graph(self.batch)
+                    .expect("Library graph"),
+                1.4,
+                || candidate.forward_eager(runtime, self.batch, WINDOW),
+            )?)
+        } else {
+            None
+        };
+        let mut row = replay_set(BLOCKS, |which, block| {
             for model in [&mut library, &mut candidate] {
                 model
                     .workspace(runtime, self.batch, WINDOW)?
@@ -325,6 +452,7 @@ impl Run<'_> {
                 ],
                 which,
                 self.choice == "StageSlow",
+                tail.as_ref().and_then(|tail| tail.for_block(block)),
             )
         })?;
         let mut hashes = [Vec::new(), Vec::new()];
@@ -354,7 +482,25 @@ impl Run<'_> {
             "sincnet.conv0.abs_pool"
         };
         row["id"] = json!(self.key("stage", 0));
+        if let Some(tail) = &tail {
+            row["stage_tail"] = tail.evidence.clone();
+            row["stage_tail"]["group_count"] = json!(BLOCKS / TAIL_BLOCKS);
+        }
         row["output_sha256"] = json!(hashes);
+        if let Some(tail) = &tail {
+            let mut delayed = Vec::new();
+            for audio in &audio {
+                candidate
+                    .workspace(runtime, self.batch, WINDOW)?
+                    .upload_input(runtime, audio)?;
+                tail.graph.launch()?;
+                delayed.push(sha(&candidate
+                    .find_workspace(self.batch, WINDOW)
+                    .expect("workspace")
+                    .download_output(runtime)?));
+            }
+            row["stage_tail"]["delayed_output_sha256"] = json!(delayed);
+        }
         row["operator_outputs"] = json!([{"id":self.key(layer,0),"output_sha256":op_hashes}]);
         rows.push(row);
         Ok(())

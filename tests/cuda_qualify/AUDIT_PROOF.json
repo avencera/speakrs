@@ -1,0 +1,1570 @@
+{
+  "schema": 1,
+  "purpose": "Phase 2b audit-fix proof; no production acceptance",
+  "audited_commit": "3b04e60b80816e17ad0a86b867cbca7c0ddf74e5",
+  "compiled_lock_digests": [
+    "5eb7754ee850446af6ca595cc623291189c180cd44130e364a47ce66944f1f7c",
+    "719aaa89f5d257d155d4d28a734fffdf03d119e334f0a3f9dc8126c53544cd55"
+  ],
+  "outside_tree_cache": "SPEAKRS_QUALIFY_CACHE/records/<sha256>",
+  "archive": {
+    "sha256": "e0f741f2ff57764fefd22624a5d144d1edd8292b249ff0182ce8f91953c9fb2c",
+    "bytes": 19525167,
+    "files": 149
+  },
+  "retained_evidence_sha256": {
+    "stage-tail-selector-proof.tar.gz": "e0f741f2ff57764fefd22624a5d144d1edd8292b249ff0182ce8f91953c9fb2c",
+    "stage-tail-selector-snapshot.json": "30b0a4373c33adf443e6e75ee800db91835c3606dcca1e3661a1c84424dd8b9c",
+    "stage-tail-matched-source.tar.gz": "e540212773f004d58a732d89b28f305a87c06d5eb792f1b2c8c4b2a993acd0d6",
+    "stage-tail-selector-source.tar.gz": "de9e29511ccf97581fd11af67a696babd2dd9650fb2d3a68343a9dc74179e4cd",
+    "stage-tail-evaluated-snapshot.json": "81ac50dbfbcc1b90fe077faf3b5abd069ea91cab8be7b4274c2673e6087d1071",
+    "selector-carry-forward.diff": "2fa08474d2010732295e9c0b7e789fc3deb58e879718fb5b455b90fab8194687",
+    "matched-stage-proof.py": "a1d45af868d70b4475dfe72f725e0d263ad4e6ee31f00216a4c2d330930145f0",
+    "gpu-stage-tail-selector.py": "f32d426de6438257527e6a2482efad66db4d5426dd0fd98b9c67d4147db572c9",
+    "offline-replay.json": "e5fdde2e8ed03c1fe971c0382226e66f9acfdd646a63eb0a5e962d60dcf2f05b",
+    "verified-mac-checks.json": "540ac71eafbe7785c79b4d0037bb2a52a6ddbd96aedeccf87745a03fb7ef3235",
+    "final-matched-spreads.csv": "accba7d8f9c70e2621a4a496ddc407dbf2178a9f564f314b401f944514b78a69",
+    "preflight-retry-proof.json": "f69876716561469bfd1be07bae9e9627bb40210f153220d1d583448ffd80ef2e"
+  },
+  "original_proof_sha256": "4b4a62e222c4c3bf9aa57ed05706a13e26cd855891613938c7dcae3920ad44e0",
+  "offline_replay": {
+    "records": 42,
+    "verdicts_unchanged": 42,
+    "intended_gates_caught": 39,
+    "paired_checks_recomputed": 96
+  },
+  "verification": {
+    "archive_files": 149,
+    "source_bindings": 592,
+    "command_logs": 72,
+    "timing_spread_rows": 544,
+    "local_hash_and_evaluated_comparison_checks": true
+  },
+  "records": [
+    {
+      "target": "resnet",
+      "implementation": "StageTailControl",
+      "record_sha256": "caae2262d1c4f85474df871fcd6816abd3094121e7b94970dccc9d8d15783ddb",
+      "bytes": 28626079,
+      "lock_digest": "5eb7754ee850446af6ca595cc623291189c180cd44130e364a47ce66944f1f7c",
+      "status": "blocked",
+      "reused_completed_record": true,
+      "failed_check_names": [
+        "sm75/speed:fp32/first/b1/resnet.layer1.0.conv2",
+        "sm75/speed:fp32/first/b1/resnet.layer1.1.conv1",
+        "sm75/speed:fp32/first/b1/resnet.layer1.1.conv2",
+        "sm75/speed:fp32/first/b1/resnet.layer1.2.conv1",
+        "sm75/speed:fp32/first/b1/resnet.layer1.2.conv2",
+        "sm75/speed:fp32/first/b1/resnet.layer2.0.conv1",
+        "sm75/speed:fp32/first/b1/resnet.layer2.0.conv2",
+        "sm75/speed:fp32/first/b1/resnet.layer2.2.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer1.0.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer1.1.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer1.1.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer1.2.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer1.2.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer2.0.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer2.1.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer2.2.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer2.3.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer1.0.conv1",
+        "sm75/speed:fp32/short/b1/resnet.layer2.0.conv1",
+        "sm75/speed:fp32/short/b1/resnet.layer2.0.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer2.1.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer2.2.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer2.3.conv1"
+      ],
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36,
+        "observed_sm_clock_range_mhz": [
+          300,
+          2287
+        ]
+      },
+      "accepts_replacement": false,
+      "source_bindings": 148,
+      "command_logs": 18
+    },
+    {
+      "target": "resnet",
+      "implementation": "StageTail",
+      "record_sha256": "c83a91ff94f758cf14da6d9a68d8a1b9b038cab8d7de578965a765d5e53b42eb",
+      "bytes": 28630961,
+      "lock_digest": "5eb7754ee850446af6ca595cc623291189c180cd44130e364a47ce66944f1f7c",
+      "status": "rejected",
+      "reused_completed_record": true,
+      "failed_check_names": [
+        "sm75/paired_stage:fp32/first/b1/stage",
+        "sm75/speed:fp32/first/b1/resnet.layer1.0.conv2",
+        "sm75/speed:fp32/first/b1/resnet.layer1.1.conv1",
+        "sm75/speed:fp32/first/b1/resnet.layer1.1.conv2",
+        "sm75/speed:fp32/first/b1/resnet.layer1.2.conv1",
+        "sm75/speed:fp32/first/b1/resnet.layer1.2.conv2",
+        "sm75/speed:fp32/first/b1/resnet.layer2.0.conv1",
+        "sm75/speed:fp32/first/b1/resnet.layer2.0.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer1.0.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer1.1.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer1.1.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer1.2.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer2.0.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer2.0.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer2.1.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer2.2.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer2.2.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer2.3.conv1",
+        "sm75/speed:fp32/short/b1/resnet.layer1.0.conv1",
+        "sm75/speed:fp32/short/b1/resnet.layer1.0.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer2.0.conv1",
+        "sm75/speed:fp32/short/b1/resnet.layer2.0.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer2.1.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer2.2.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer2.3.conv1"
+      ],
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36,
+        "observed_sm_clock_range_mhz": [
+          300,
+          2287
+        ]
+      },
+      "accepts_replacement": false,
+      "source_bindings": 148,
+      "command_logs": 18
+    },
+    {
+      "target": "sincnet",
+      "implementation": "StageTailControl",
+      "record_sha256": "3d6a2948e7defddb1ab2b2898e9f27ed8916e9a19be857aa1c00c209cdae7066",
+      "bytes": 2802170,
+      "lock_digest": "719aaa89f5d257d155d4d28a734fffdf03d119e334f0a3f9dc8126c53544cd55",
+      "status": "passed",
+      "reused_completed_record": false,
+      "failed_check_names": [],
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36,
+        "observed_sm_clock_range_mhz": [
+          2265,
+          2287
+        ]
+      },
+      "accepts_replacement": false,
+      "source_bindings": 148,
+      "command_logs": 18
+    },
+    {
+      "target": "sincnet",
+      "implementation": "StageTail",
+      "record_sha256": "9ffea0518f171cbd1b1c4759a08fc2dfdef30fa003161c23e10843366037645d",
+      "bytes": 2806355,
+      "lock_digest": "719aaa89f5d257d155d4d28a734fffdf03d119e334f0a3f9dc8126c53544cd55",
+      "status": "rejected",
+      "reused_completed_record": false,
+      "failed_check_names": [
+        "sm75/paired_stage:fp32/mixed/b32/stage"
+      ],
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36,
+        "observed_sm_clock_range_mhz": [
+          2257,
+          2287
+        ]
+      },
+      "accepts_replacement": false,
+      "source_bindings": 148,
+      "command_logs": 18
+    }
+  ],
+  "pairs": [
+    {
+      "target": "resnet",
+      "control_record_sha256": "caae2262d1c4f85474df871fcd6816abd3094121e7b94970dccc9d8d15783ddb",
+      "mutant_record_sha256": "c83a91ff94f758cf14da6d9a68d8a1b9b038cab8d7de578965a765d5e53b42eb",
+      "control_failed_checks": [
+        "sm75/speed:fp32/first/b1/resnet.layer1.0.conv2",
+        "sm75/speed:fp32/first/b1/resnet.layer1.1.conv1",
+        "sm75/speed:fp32/first/b1/resnet.layer1.1.conv2",
+        "sm75/speed:fp32/first/b1/resnet.layer1.2.conv1",
+        "sm75/speed:fp32/first/b1/resnet.layer1.2.conv2",
+        "sm75/speed:fp32/first/b1/resnet.layer2.0.conv1",
+        "sm75/speed:fp32/first/b1/resnet.layer2.0.conv2",
+        "sm75/speed:fp32/first/b1/resnet.layer2.2.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer1.0.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer1.1.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer1.1.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer1.2.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer1.2.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer2.0.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer2.1.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer2.2.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer2.3.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer1.0.conv1",
+        "sm75/speed:fp32/short/b1/resnet.layer2.0.conv1",
+        "sm75/speed:fp32/short/b1/resnet.layer2.0.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer2.1.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer2.2.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer2.3.conv1"
+      ],
+      "mutant_failed_checks": [
+        "sm75/paired_stage:fp32/first/b1/stage",
+        "sm75/speed:fp32/first/b1/resnet.layer1.0.conv2",
+        "sm75/speed:fp32/first/b1/resnet.layer1.1.conv1",
+        "sm75/speed:fp32/first/b1/resnet.layer1.1.conv2",
+        "sm75/speed:fp32/first/b1/resnet.layer1.2.conv1",
+        "sm75/speed:fp32/first/b1/resnet.layer1.2.conv2",
+        "sm75/speed:fp32/first/b1/resnet.layer2.0.conv1",
+        "sm75/speed:fp32/first/b1/resnet.layer2.0.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer1.0.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer1.1.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer1.1.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer1.2.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer2.0.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer2.0.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer2.1.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer2.2.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer2.2.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer2.3.conv1",
+        "sm75/speed:fp32/short/b1/resnet.layer1.0.conv1",
+        "sm75/speed:fp32/short/b1/resnet.layer1.0.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer2.0.conv1",
+        "sm75/speed:fp32/short/b1/resnet.layer2.0.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer2.1.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer2.2.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer2.3.conv1"
+      ],
+      "added": [
+        "sm75/paired_stage:fp32/first/b1/stage",
+        "sm75/speed:fp32/last/b1/resnet.layer2.0.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer2.2.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer2.3.conv1",
+        "sm75/speed:fp32/short/b1/resnet.layer1.0.conv2"
+      ],
+      "removed": [
+        "sm75/speed:fp32/first/b1/resnet.layer2.2.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer1.2.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer2.3.conv2"
+      ],
+      "expected_added": "sm75/paired_stage:fp32/first/b1/stage",
+      "passed": true,
+      "criterion": "root: locked-evaluated failures subset control plus margin; control margin passes; no new non-timing failure",
+      "raw_control_failed": [
+        "sm75/speed:fp32/first/b1/resnet.layer1.0.conv2",
+        "sm75/speed:fp32/first/b1/resnet.layer1.1.conv1",
+        "sm75/speed:fp32/first/b1/resnet.layer1.1.conv2",
+        "sm75/speed:fp32/first/b1/resnet.layer1.2.conv1",
+        "sm75/speed:fp32/first/b1/resnet.layer1.2.conv2",
+        "sm75/speed:fp32/first/b1/resnet.layer2.0.conv1",
+        "sm75/speed:fp32/first/b1/resnet.layer2.0.conv2",
+        "sm75/speed:fp32/first/b1/resnet.layer2.2.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer1.0.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer1.1.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer1.1.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer1.2.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer1.2.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer2.0.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer2.1.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer2.2.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer2.3.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer1.0.conv1",
+        "sm75/speed:fp32/short/b1/resnet.layer2.0.conv1",
+        "sm75/speed:fp32/short/b1/resnet.layer2.0.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer2.1.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer2.2.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer2.3.conv1"
+      ],
+      "raw_mutant_failed": [
+        "sm75/paired_stage:fp32/first/b1/stage",
+        "sm75/speed:fp32/first/b1/resnet.layer1.0.conv2",
+        "sm75/speed:fp32/first/b1/resnet.layer1.1.conv1",
+        "sm75/speed:fp32/first/b1/resnet.layer1.1.conv2",
+        "sm75/speed:fp32/first/b1/resnet.layer1.2.conv1",
+        "sm75/speed:fp32/first/b1/resnet.layer1.2.conv2",
+        "sm75/speed:fp32/first/b1/resnet.layer2.0.conv1",
+        "sm75/speed:fp32/first/b1/resnet.layer2.0.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer1.0.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer1.1.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer1.1.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer1.2.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer2.0.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer2.0.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer2.1.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer2.2.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer2.2.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer2.3.conv1",
+        "sm75/speed:fp32/short/b1/resnet.layer1.0.conv1",
+        "sm75/speed:fp32/short/b1/resnet.layer1.0.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer2.0.conv1",
+        "sm75/speed:fp32/short/b1/resnet.layer2.0.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer2.1.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer2.2.conv2",
+        "sm75/speed:fp32/short/b1/resnet.layer2.3.conv1"
+      ],
+      "raw_added": [
+        "sm75/paired_stage:fp32/first/b1/stage",
+        "sm75/speed:fp32/last/b1/resnet.layer2.0.conv2",
+        "sm75/speed:fp32/last/b1/resnet.layer2.2.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer2.3.conv1",
+        "sm75/speed:fp32/short/b1/resnet.layer1.0.conv2"
+      ],
+      "raw_removed": [
+        "sm75/speed:fp32/first/b1/resnet.layer2.2.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer1.2.conv1",
+        "sm75/speed:fp32/last/b1/resnet.layer2.3.conv2"
+      ],
+      "control_evaluation": {
+        "accepted": false,
+        "hard_failures": [],
+        "unresolved": [
+          {
+            "check": "speed:fp32/short/b1/resnet.layer2.0.conv1",
+            "reason": "noise rule: smaller pair speedup below threshold"
+          }
+        ],
+        "noise_rule": [
+          {
+            "check": "speed:fp32/first/b1/resnet.layer1.0.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.23091790080070496,
+              0.1593492478132248,
+              0.23453694581985474,
+              0.15932630002498627
+            ],
+            "pair_speedups": [
+              1.4491307864306122,
+              1.4720541792728106
+            ],
+            "library_spread_fraction": 0.015672431659047595,
+            "locked_bound": 0.01,
+            "threshold": 1.0470172949771428,
+            "min_pair_speedup": 1.4491307864306122,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/first/b1/resnet.layer1.1.conv1",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.21717680245637894,
+              0.14151660352945328,
+              0.2200123593211174,
+              0.14172323048114777
+            ],
+            "pair_speedups": [
+              1.534638318331169,
+              1.5524085823769291
+            ],
+            "library_spread_fraction": 0.013056444485170097,
+            "locked_bound": 0.01,
+            "threshold": 1.0391693334555103,
+            "min_pair_speedup": 1.534638318331169,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/first/b1/resnet.layer1.1.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.23162095248699188,
+              0.15954023599624634,
+              0.23523586243391037,
+              0.1594087854027748
+            ],
+            "pair_speedups": [
+              1.451802744559319,
+              1.4756769009910269
+            ],
+            "library_spread_fraction": 0.015607007518551265,
+            "locked_bound": 0.01,
+            "threshold": 1.0468210225556538,
+            "min_pair_speedup": 1.451802744559319,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/first/b1/resnet.layer1.2.conv1",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.21716026961803436,
+              0.14278580248355865,
+              0.21990061551332474,
+              0.1425459384918213
+            ],
+            "pair_speedups": [
+              1.520881389051546,
+              1.5426648969443753
+            ],
+            "library_spread_fraction": 0.012619002085926674,
+            "locked_bound": 0.01,
+            "threshold": 1.03785700625778,
+            "min_pair_speedup": 1.520881389051546,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/first/b1/resnet.layer1.2.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.23106227815151215,
+              0.15918545424938202,
+              0.23478685319423676,
+              0.15921560674905777
+            ],
+            "pair_speedups": [
+              1.4515288425130035,
+              1.4746472282977134
+            ],
+            "library_spread_fraction": 0.01611935566688359,
+            "locked_bound": 0.01,
+            "threshold": 1.0483580670006507,
+            "min_pair_speedup": 1.4515288425130035,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/first/b1/resnet.layer2.0.conv1",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.12945808470249176,
+              0.11891945451498032,
+              0.13257094472646713,
+              0.11887703835964203
+            ],
+            "pair_speedups": [
+              1.0886199001710346,
+              1.1151938722211143
+            ],
+            "library_spread_fraction": 0.024045311894804026,
+            "locked_bound": 0.01,
+            "threshold": 1.072135935684412,
+            "min_pair_speedup": 1.0886199001710346,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/first/b1/resnet.layer2.0.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.24917735159397125,
+              0.1750502809882164,
+              0.2529478371143341,
+              0.17507043480873108
+            ],
+            "pair_speedups": [
+              1.4234615916483149,
+              1.4448346883395022
+            ],
+            "library_spread_fraction": 0.015131734470421586,
+            "locked_bound": 0.01,
+            "threshold": 1.0453952034112648,
+            "min_pair_speedup": 1.4234615916483149,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/first/b1/resnet.layer2.2.conv1",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.24722790718078613,
+              0.1732022687792778,
+              0.25023340433835983,
+              0.17326442897319794
+            ],
+            "pair_speedups": [
+              1.4273941613076888,
+              1.4442283729054861
+            ],
+            "library_spread_fraction": 0.012156787604790593,
+            "locked_bound": 0.01,
+            "threshold": 1.0364703628143719,
+            "min_pair_speedup": 1.4273941613076888,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/last/b1/resnet.layer1.0.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.2318357601761818,
+              0.15980761498212814,
+              0.23535466194152832,
+              0.15972144156694412
+            ],
+            "pair_speedups": [
+              1.4507178534771876,
+              1.4735320419887645
+            ],
+            "library_spread_fraction": 0.015178425289836067,
+            "locked_bound": 0.01,
+            "threshold": 1.0455352758695082,
+            "min_pair_speedup": 1.4507178534771876,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/last/b1/resnet.layer1.1.conv1",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.21727460622787476,
+              0.14363587647676468,
+              0.22008593380451202,
+              0.14376412332057953
+            ],
+            "pair_speedups": [
+              1.512676439601232,
+              1.5308821750593682
+            ],
+            "library_spread_fraction": 0.012939052682892839,
+            "locked_bound": 0.01,
+            "threshold": 1.0388171580486785,
+            "min_pair_speedup": 1.512676439601232,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/last/b1/resnet.layer1.1.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.2318360060453415,
+              0.15982717275619507,
+              0.23533256351947784,
+              0.15997512638568878
+            ],
+            "pair_speedups": [
+              1.4505418699922243,
+              1.4710572126825991
+            ],
+            "library_spread_fraction": 0.015082029464622984,
+            "locked_bound": 0.01,
+            "threshold": 1.045246088393869,
+            "min_pair_speedup": 1.4505418699922243,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/last/b1/resnet.layer1.2.conv1",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.2172742486000061,
+              0.14435312151908875,
+              0.22031226754188538,
+              0.144142784178257
+            ],
+            "pair_speedups": [
+              1.5051579509576074,
+              1.5284307764544904
+            ],
+            "library_spread_fraction": 0.013982416054615627,
+            "locked_bound": 0.01,
+            "threshold": 1.041947248163847,
+            "min_pair_speedup": 1.5051579509576074,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/last/b1/resnet.layer1.2.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.23201637715101242,
+              0.15977877378463745,
+              0.23533714562654495,
+              0.16006170958280563
+            ],
+            "pair_speedups": [
+              1.452110137381218,
+              1.4702900914899741
+            ],
+            "library_spread_fraction": 0.01431264687566061,
+            "locked_bound": 0.01,
+            "threshold": 1.0429379406269819,
+            "min_pair_speedup": 1.452110137381218,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/last/b1/resnet.layer2.0.conv1",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.1302439048886299,
+              0.11868076398968697,
+              0.1330878809094429,
+              0.11883393675088882
+            ],
+            "pair_speedups": [
+              1.0974306240558727,
+              1.1199484301225715
+            ],
+            "library_spread_fraction": 0.021835770535633434,
+            "locked_bound": 0.01,
+            "threshold": 1.0655073116069003,
+            "min_pair_speedup": 1.0974306240558727,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/last/b1/resnet.layer2.1.conv1",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.24747278541326523,
+              0.17325890064239502,
+              0.2513786107301712,
+              0.1732339933514595
+            ],
+            "pair_speedups": [
+              1.428340965432114,
+              1.4510928592413779
+            ],
+            "library_spread_fraction": 0.01578284784075741,
+            "locked_bound": 0.01,
+            "threshold": 1.0473485435222722,
+            "min_pair_speedup": 1.428340965432114,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/last/b1/resnet.layer2.2.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.2554609924554825,
+              0.1750154346227646,
+              0.25839564204216003,
+              0.17491614818572998
+            ],
+            "pair_speedups": [
+              1.4596483619065572,
+              1.4772543571436847
+            ],
+            "library_spread_fraction": 0.011487662200282705,
+            "locked_bound": 0.01,
+            "threshold": 1.0344629866008481,
+            "min_pair_speedup": 1.4596483619065572,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/last/b1/resnet.layer2.3.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.25492343306541443,
+              0.17495228350162506,
+              0.25797416269779205,
+              0.17501943558454514
+            ],
+            "pair_speedups": [
+              1.457102633719248,
+              1.4739743722529302
+            ],
+            "library_spread_fraction": 0.011967238930109632,
+            "locked_bound": 0.01,
+            "threshold": 1.0359017167903288,
+            "min_pair_speedup": 1.457102633719248,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/short/b1/resnet.layer1.0.conv1",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.2172631025314331,
+              0.14211837947368622,
+              0.21986808627843857,
+              0.14167747646570206
+            ],
+            "pair_speedups": [
+              1.528747395910606,
+              1.5518916045322508
+            ],
+            "library_spread_fraction": 0.0119899960768929,
+            "locked_bound": 0.01,
+            "threshold": 1.0359699882306788,
+            "min_pair_speedup": 1.528747395910606,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/short/b1/resnet.layer2.0.conv1",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.11763117834925652,
+              0.11893635615706444,
+              0.12057168036699295,
+              0.11884697899222374
+            ],
+            "pair_speedups": [
+              0.9890262502570338,
+              1.0145119496464614
+            ],
+            "library_spread_fraction": 0.024997641433173828,
+            "locked_bound": 0.01,
+            "threshold": 1.0749929242995215,
+            "min_pair_speedup": 0.9890262502570338,
+            "accepted": false,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/short/b1/resnet.layer2.0.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.2555791586637497,
+              0.17510810494422913,
+              0.2583317905664444,
+              0.1750776618719101
+            ],
+            "pair_speedups": [
+              1.4595507086616586,
+              1.4755268479393133
+            ],
+            "library_spread_fraction": 0.010770173581783232,
+            "locked_bound": 0.01,
+            "threshold": 1.0323105207453498,
+            "min_pair_speedup": 1.4595507086616586,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/short/b1/resnet.layer2.1.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.2515137642621994,
+              0.17484460026025772,
+              0.2583538740873337,
+              0.175025574862957
+            ],
+            "pair_speedups": [
+              1.4384988949491089,
+              1.476092132761865
+            ],
+            "library_spread_fraction": 0.027195767377580032,
+            "locked_bound": 0.01,
+            "threshold": 1.08158730213274,
+            "min_pair_speedup": 1.4384988949491089,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/short/b1/resnet.layer2.2.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.2550622969865799,
+              0.17490661144256592,
+              0.25946757197380066,
+              0.174753837287426
+            ],
+            "pair_speedups": [
+              1.458277047865253,
+              1.4847603692217752
+            ],
+            "library_spread_fraction": 0.017271368756835697,
+            "locked_bound": 0.01,
+            "threshold": 1.051814106270507,
+            "min_pair_speedup": 1.458277047865253,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/short/b1/resnet.layer2.3.conv1",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.24791261553764343,
+              0.17337529361248016,
+              0.250740185379982,
+              0.1733894720673561
+            ],
+            "pair_speedups": [
+              1.4299189369609109,
+              1.4461096304773202
+            ],
+            "library_spread_fraction": 0.011405510107690423,
+            "locked_bound": 0.01,
+            "threshold": 1.0342165303230713,
+            "min_pair_speedup": 1.4299189369609109,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          }
+        ],
+        "stage_noise_rule_allowed": false
+      },
+      "mutant_evaluation": {
+        "accepted": false,
+        "hard_failures": [
+          "paired_stage:fp32/first/b1/stage"
+        ],
+        "unresolved": [],
+        "noise_rule": [
+          {
+            "check": "speed:fp32/first/b1/resnet.layer1.0.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.23097257316112518,
+              0.15938539057970047,
+              0.2346000000834465,
+              0.159227192401886
+            ],
+            "pair_speedups": [
+              1.449145196564472,
+              1.4733664303476581
+            ],
+            "library_spread_fraction": 0.01570501152009441,
+            "locked_bound": 0.01,
+            "threshold": 1.0471150345602833,
+            "min_pair_speedup": 1.449145196564472,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/first/b1/resnet.layer1.1.conv1",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.21716153621673584,
+              0.1417689248919487,
+              0.22007982432842255,
+              0.1416211649775505
+            ],
+            "pair_speedups": [
+              1.5317992739399606,
+              1.554003770293156
+            ],
+            "library_spread_fraction": 0.013438328732276692,
+            "locked_bound": 0.01,
+            "threshold": 1.0403149861968302,
+            "min_pair_speedup": 1.5317992739399606,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/first/b1/resnet.layer1.1.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.23166190087795258,
+              0.1594446301460266,
+              0.23526133596897125,
+              0.15952766686677933
+            ],
+            "pair_speedups": [
+              1.4529300903127695,
+              1.4747368941679357
+            ],
+            "library_spread_fraction": 0.015537449521814043,
+            "locked_bound": 0.01,
+            "threshold": 1.0466123485654422,
+            "min_pair_speedup": 1.4529300903127695,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/first/b1/resnet.layer1.2.conv1",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.21714293211698532,
+              0.1433262899518013,
+              0.21995344012975693,
+              0.14358080178499222
+            ],
+            "pair_speedups": [
+              1.5150251373283126,
+              1.5319139982177448
+            ],
+            "library_spread_fraction": 0.012943124537240065,
+            "locked_bound": 0.01,
+            "threshold": 1.0388293736117202,
+            "min_pair_speedup": 1.5150251373283126,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/first/b1/resnet.layer1.2.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.23105771839618683,
+              0.1589139848947525,
+              0.23469580709934235,
+              0.15894915908575058
+            ],
+            "pair_speedups": [
+              1.4539797648974353,
+              1.476546390363271
+            ],
+            "library_spread_fraction": 0.01574536755754426,
+            "locked_bound": 0.01,
+            "threshold": 1.047236102672633,
+            "min_pair_speedup": 1.4539797648974353,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/first/b1/resnet.layer2.0.conv1",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.12950898706912994,
+              0.11901794746518135,
+              0.13251513242721558,
+              0.11893360689282417
+            ],
+            "pair_speedups": [
+              1.0881467024712197,
+              1.1141941784934704
+            ],
+            "library_spread_fraction": 0.023211866806440214,
+            "locked_bound": 0.01,
+            "threshold": 1.0696356004193206,
+            "min_pair_speedup": 1.0881467024712197,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/first/b1/resnet.layer2.0.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.2526525557041168,
+              0.17508243024349213,
+              0.2557366192340851,
+              0.17516453564167023
+            ],
+            "pair_speedups": [
+              1.4430491703407686,
+              1.4599794318939034
+            ],
+            "library_spread_fraction": 0.01220673791077748,
+            "locked_bound": 0.01,
+            "threshold": 1.0366202137323324,
+            "min_pair_speedup": 1.4430491703407686,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/last/b1/resnet.layer1.0.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.23170629143714905,
+              0.15993507206439972,
+              0.23525358736515045,
+              0.15997159481048584
+            ],
+            "pair_speedups": [
+              1.4487522245517845,
+              1.4705959995200975
+            ],
+            "library_spread_fraction": 0.015309450192307866,
+            "locked_bound": 0.01,
+            "threshold": 1.0459283505769237,
+            "min_pair_speedup": 1.4487522245517845,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/last/b1/resnet.layer1.1.conv1",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.21718759089708328,
+              0.14336513727903366,
+              0.2200850397348404,
+              0.14287324994802475
+            ],
+            "pair_speedups": [
+              1.514926118156382,
+              1.5404215961693613
+            ],
+            "library_spread_fraction": 0.013340766043719775,
+            "locked_bound": 0.01,
+            "threshold": 1.0400222981311593,
+            "min_pair_speedup": 1.514926118156382,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/last/b1/resnet.layer1.1.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.2318306639790535,
+              0.1596391350030899,
+              0.23516247421503067,
+              0.15954452753067017
+            ],
+            "pair_speedups": [
+              1.4522169891146446,
+              1.473961394068023
+            ],
+            "library_spread_fraction": 0.014371740902567619,
+            "locked_bound": 0.01,
+            "threshold": 1.043115222707703,
+            "min_pair_speedup": 1.4522169891146446,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/last/b1/resnet.layer1.2.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.23179638385772705,
+              0.1600329428911209,
+              0.23528152704238892,
+              0.15936674922704697
+            ],
+            "pair_speedups": [
+              1.4484291775814602,
+              1.4763526782314391
+            ],
+            "library_spread_fraction": 0.015035364774288244,
+            "locked_bound": 0.01,
+            "threshold": 1.0451060943228647,
+            "min_pair_speedup": 1.4484291775814602,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/last/b1/resnet.layer2.0.conv1",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.1303827092051506,
+              0.11893107742071152,
+              0.133139505982399,
+              0.11888165026903152
+            ],
+            "pair_speedups": [
+              1.096287968063466,
+              1.1199331913806854
+            ],
+            "library_spread_fraction": 0.021143883219290237,
+            "locked_bound": 0.01,
+            "threshold": 1.0634316496578706,
+            "min_pair_speedup": 1.096287968063466,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/last/b1/resnet.layer2.0.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.25538888573646545,
+              0.17512980848550797,
+              0.2599780410528183,
+              0.17508409917354584
+            ],
+            "pair_speedups": [
+              1.4582833610395853,
+              1.484875224420719
+            ],
+            "library_spread_fraction": 0.01796928360104273,
+            "locked_bound": 0.01,
+            "threshold": 1.053907850803128,
+            "min_pair_speedup": 1.4582833610395853,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/last/b1/resnet.layer2.1.conv1",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.24708542972803116,
+              0.17345599830150604,
+              0.2513637989759445,
+              0.1732322797179222
+            ],
+            "pair_speedups": [
+              1.424484780852262,
+              1.4510217113418211
+            ],
+            "library_spread_fraction": 0.01731534414077995,
+            "locked_bound": 0.01,
+            "threshold": 1.0519460324223397,
+            "min_pair_speedup": 1.424484780852262,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/last/b1/resnet.layer2.2.conv1",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.2470499649643898,
+              0.17340785264968872,
+              0.25152379274368286,
+              0.1731163188815117
+            ],
+            "pair_speedups": [
+              1.4246757640409156,
+              1.452917866835169
+            ],
+            "library_spread_fraction": 0.018108999853280388,
+            "locked_bound": 0.01,
+            "threshold": 1.0543269995598412,
+            "min_pair_speedup": 1.4246757640409156,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/last/b1/resnet.layer2.2.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.251162588596344,
+              0.1749757081270218,
+              0.2578129917383194,
+              0.17487071454524994
+            ],
+            "pair_speedups": [
+              1.4354140428111035,
+              1.474306274831439
+            ],
+            "library_spread_fraction": 0.026478478260405253,
+            "locked_bound": 0.01,
+            "threshold": 1.0794354347812158,
+            "min_pair_speedup": 1.4354140428111035,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/last/b1/resnet.layer2.3.conv1",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.24618814885616302,
+              0.17332814633846283,
+              0.24986936897039413,
+              0.1730996072292328
+            ],
+            "pair_speedups": [
+              1.4203587475944293,
+              1.4435004964482472
+            ],
+            "library_spread_fraction": 0.014952872960517226,
+            "locked_bound": 0.01,
+            "threshold": 1.0448586188815516,
+            "min_pair_speedup": 1.4203587475944293,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/short/b1/resnet.layer1.0.conv1",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.21716925501823425,
+              0.14302576333284378,
+              0.2200293019413948,
+              0.14250870794057846
+            ],
+            "pair_speedups": [
+              1.51839256059656,
+              1.5439709272582833
+            ],
+            "library_spread_fraction": 0.013169667699603307,
+            "locked_bound": 0.01,
+            "threshold": 1.03950900309881,
+            "min_pair_speedup": 1.51839256059656,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/short/b1/resnet.layer1.0.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.23184460401535034,
+              0.1596580520272255,
+              0.23534781485795975,
+              0.16000456362962723
+            ],
+            "pair_speedups": [
+              1.4521322355593773,
+              1.4708818893611957
+            ],
+            "library_spread_fraction": 0.01511016768101042,
+            "locked_bound": 0.01,
+            "threshold": 1.0453305030430313,
+            "min_pair_speedup": 1.4521322355593773,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/short/b1/resnet.layer2.0.conv1",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.13050124794244766,
+              0.11884821951389313,
+              0.13335823267698288,
+              0.11882653459906578
+            ],
+            "pair_speedups": [
+              1.098049667687216,
+              1.1222933760287523
+            ],
+            "library_spread_fraction": 0.021892393977681928,
+            "locked_bound": 0.01,
+            "threshold": 1.0656771819330457,
+            "min_pair_speedup": 1.098049667687216,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/short/b1/resnet.layer2.0.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.25582440197467804,
+              0.18138368427753448,
+              0.2584547698497772,
+              0.1751718521118164
+            ],
+            "pair_speedups": [
+              1.4104047064301666,
+              1.4754355036721272
+            ],
+            "library_spread_fraction": 0.01028192719222907,
+            "locked_bound": 0.01,
+            "threshold": 1.0308457815766872,
+            "min_pair_speedup": 1.4104047064301666,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/short/b1/resnet.layer2.1.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.2540249079465866,
+              0.17512285709381104,
+              0.2589496821165085,
+              0.17476440221071243
+            ],
+            "pair_speedups": [
+              1.4505525558580212,
+              1.4817072518251992
+            ],
+            "library_spread_fraction": 0.019386973544174648,
+            "locked_bound": 0.01,
+            "threshold": 1.058160920632524,
+            "min_pair_speedup": 1.4505525558580212,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/short/b1/resnet.layer2.2.conv2",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.25249889492988586,
+              0.17490821331739426,
+              0.25737766921520233,
+              0.17465871572494507
+            ],
+            "pair_speedups": [
+              1.443607993820696,
+              1.4736033535281698
+            ],
+            "library_spread_fraction": 0.019321962920555394,
+            "locked_bound": 0.01,
+            "threshold": 1.057965888761666,
+            "min_pair_speedup": 1.443607993820696,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          },
+          {
+            "check": "speed:fp32/short/b1/resnet.layer2.3.conv1",
+            "raw_passed": false,
+            "raw_blocked": true,
+            "medians_ms": [
+              0.2470027357339859,
+              0.1734156459569931,
+              0.2500663623213768,
+              0.17342328280210495
+            ],
+            "pair_speedups": [
+              1.4243393920479488,
+              1.44194227142344
+            ],
+            "library_spread_fraction": 0.012403209131620017,
+            "locked_bound": 0.01,
+            "threshold": 1.0372096273948601,
+            "min_pair_speedup": 1.4243393920479488,
+            "accepted": true,
+            "rule": "min_pair_speedup >= 1 + 3 * max(library_spread, locked_bound)"
+          }
+        ],
+        "stage_noise_rule_allowed": false
+      },
+      "effective_control_failed": [
+        "speed:fp32/short/b1/resnet.layer2.0.conv1"
+      ],
+      "effective_mutant_failed": [
+        "paired_stage:fp32/first/b1/stage"
+      ],
+      "effective_added": [
+        "paired_stage:fp32/first/b1/stage"
+      ],
+      "effective_removed": [
+        "speed:fp32/short/b1/resnet.layer2.0.conv1"
+      ],
+      "new_non_timing_failed": [],
+      "control_margin_passed": true,
+      "caught": true,
+      "stage_estimate": {
+        "ratio": 1.0274386980064751,
+        "one_sided95_lower": 0.912270432750482,
+        "one_sided95_upper": 1.0974514275388654,
+        "ci95_diagnostic": [
+          0.9112518460095372,
+          1.097674092721443
+        ],
+        "non_inferiority_ratio_threshold": 0.9304672106830612,
+        "operator_saving_ms": 1.0178800038993359,
+        "operator_saving_by_layer_ms": {
+          "resnet.layer1.0.conv1": 0.07017549988813698,
+          "resnet.layer1.0.conv2": 0.07803300046361983,
+          "resnet.layer1.1.conv1": 0.08020350057631731,
+          "resnet.layer1.1.conv2": 0.07949400064535439,
+          "resnet.layer1.2.conv1": 0.07884400081820786,
+          "resnet.layer1.2.conv2": 0.08241250040009618,
+          "resnet.layer2.0.conv1": 0.01580800022929907,
+          "resnet.layer2.0.conv2": 0.07907450012862682,
+          "resnet.layer2.1.conv1": 0.07863149861805141,
+          "resnet.layer2.1.conv2": 0.07728349813260138,
+          "resnet.layer2.2.conv1": 0.07977700140327215,
+          "resnet.layer2.2.conv2": 0.07649550144560635,
+          "resnet.layer2.3.conv1": 0.06775000132620335,
+          "resnet.layer2.3.conv2": 0.07389749982394278
+        },
+        "stage_library_ms": 13.620969003864698,
+        "operator_saving_fraction": 0.0747288980402592,
+        "operator_gate_passed": true,
+        "pairs": 896,
+        "abba_blocks": 448,
+        "bootstrap_block_abba": 32,
+        "bootstrap_groups": 14,
+        "bootstrap_design": "whole strata",
+        "bootstrap_draws": 4096,
+        "gate": "stage: paired replay non-regression",
+        "acceptance_path": "margin"
+      },
+      "stage_tail": {
+        "calibration_library_ms": [
+          13.429344177246094,
+          13.390399932861328,
+          13.520000457763672,
+          13.322463989257812,
+          13.441920280456543
+        ],
+        "calibration_stage_ms": 13.429344177246094,
+        "candidate_replays_per_block": 2,
+        "captured_with_real_candidate_stage": true,
+        "delayed_output_sha256": [
+          "efa990e8c768c11e9553023c1f583393a99dfcc396fcdcd81c7a2150c48b8f7e",
+          "9c6b792f93f3e06fe2e4c0e2afbef8d1c3485f041c3dfaf291c49683dda724ad"
+        ],
+        "duration_ns": 22829886,
+        "entry": "qualify_stage_tail",
+        "extra_stage_fraction": 1.7000000476837158,
+        "first_block": 0,
+        "group_abba_blocks": 16,
+        "group_count": 28,
+        "measured_spin_ms": 22.858272552490234,
+        "operators_delayed": false,
+        "timer": "globaltimer_ns"
+      }
+    },
+    {
+      "target": "sincnet",
+      "control_record_sha256": "3d6a2948e7defddb1ab2b2898e9f27ed8916e9a19be857aa1c00c209cdae7066",
+      "mutant_record_sha256": "9ffea0518f171cbd1b1c4759a08fc2dfdef30fa003161c23e10843366037645d",
+      "control_failed_checks": [],
+      "mutant_failed_checks": [
+        "sm75/paired_stage:fp32/mixed/b32/stage"
+      ],
+      "added": [
+        "sm75/paired_stage:fp32/mixed/b32/stage"
+      ],
+      "removed": [],
+      "expected_added": "sm75/paired_stage:fp32/mixed/b32/stage",
+      "passed": true,
+      "criterion": "root: locked-evaluated failures subset control plus margin; control margin passes; no new non-timing failure",
+      "raw_control_failed": [],
+      "raw_mutant_failed": [
+        "sm75/paired_stage:fp32/mixed/b32/stage"
+      ],
+      "raw_added": [
+        "sm75/paired_stage:fp32/mixed/b32/stage"
+      ],
+      "raw_removed": [],
+      "control_evaluation": {
+        "accepted": true,
+        "hard_failures": [],
+        "unresolved": [],
+        "noise_rule": [],
+        "stage_noise_rule_allowed": false
+      },
+      "mutant_evaluation": {
+        "accepted": false,
+        "hard_failures": [
+          "paired_stage:fp32/mixed/b32/stage"
+        ],
+        "unresolved": [],
+        "noise_rule": [],
+        "stage_noise_rule_allowed": false
+      },
+      "effective_control_failed": [],
+      "effective_mutant_failed": [
+        "paired_stage:fp32/mixed/b32/stage"
+      ],
+      "effective_added": [
+        "paired_stage:fp32/mixed/b32/stage"
+      ],
+      "effective_removed": [],
+      "new_non_timing_failed": [],
+      "control_margin_passed": true,
+      "caught": true,
+      "stage_estimate": {
+        "ratio": 1.01189214896342,
+        "one_sided95_lower": 0.859438787838594,
+        "one_sided95_upper": 1.110451421822736,
+        "ci95_diagnostic": [
+          0.8593919538354967,
+          1.1104766622487694
+        ],
+        "non_inferiority_ratio_threshold": 0.9108271389521319,
+        "operator_saving_ms": 2.0197882568463683,
+        "operator_saving_by_layer_ms": {
+          "operator": 2.0197882568463683
+        },
+        "stage_library_ms": 20.630469154566526,
+        "operator_saving_fraction": 0.09790316651132923,
+        "operator_gate_passed": true,
+        "pairs": 512,
+        "abba_blocks": 256,
+        "bootstrap_block_abba": 32,
+        "bootstrap_groups": 8,
+        "bootstrap_design": "contiguous blocks",
+        "bootstrap_draws": 4096,
+        "gate": "stage: paired replay non-regression",
+        "acceptance_path": "margin"
+      },
+      "stage_tail": {
+        "calibration_library_ms": [
+          20.68070411682129,
+          20.65977668762207,
+          20.66912078857422,
+          20.666624069213867,
+          20.667776107788086
+        ],
+        "calibration_stage_ms": 20.667776107788086,
+        "candidate_replays_per_block": 2,
+        "captured_with_real_candidate_stage": true,
+        "delayed_output_sha256": [
+          "1832e13bb850c3a89c353224e0d5911624f934b83b868af0a536b41e6539d4a0",
+          "e0ea89497e48d8c8ab48bea542cd0042b5409ab8fc730dee7df88d3246253e85"
+        ],
+        "duration_ns": 28934887,
+        "entry": "qualify_stage_tail",
+        "extra_stage_fraction": 1.399999976158142,
+        "first_block": 0,
+        "group_abba_blocks": 16,
+        "group_count": 16,
+        "measured_spin_ms": 28.96303939819336,
+        "operators_delayed": false,
+        "timer": "globaltimer_ns"
+      }
+    }
+  ],
+  "carry_forward": {
+    "old_metadata_sha256": "81ac50dbfbcc1b90fe077faf3b5abd069ea91cab8be7b4274c2673e6087d1071",
+    "old_source_archive_sha256": "e540212773f004d58a732d89b28f305a87c06d5eb792f1b2c8c4b2a993acd0d6",
+    "changed_files": [
+      "scripts/cuda/qualify/LOCK",
+      "scripts/cuda/qualify/README.md",
+      "src/inference/cuda/implementation.rs",
+      "src/inference/cuda/implementation/tests.rs"
+    ],
+    "exact_diff_sha256": "2fa08474d2010732295e9c0b7e789fc3deb58e879718fb5b455b90fab8194687",
+    "resnet_execution_path_unchanged": true,
+    "reason": "ResNet StageTail returns from unchanged plan_selection before qualification_selection; only the direct SincNet selector changes. The added CPU unit is not called by the exact GPU qualification-driver test. All gates, plans, PTX, timings, fault parameters and proof evaluator are unchanged. Raw ResNet records retain their original compiled lock."
+  },
+  "deferred": {
+    "lstm_stage_tail": "phase 2c-2: integrate the peer Library-free candidate; no zero-library gate exception",
+    "table_embed_masks": "phase 2c-1: use production feature embed masks instead of PTX filenames"
+  },
+  "resnet_production_finding": {
+    "tuple": [
+      "resnet.layer2.0.conv1",
+      1,
+      "fp32",
+      "sm75"
+    ],
+    "input": "short",
+    "device_capability": "12.0",
+    "raw_check": "noise-blocked; no hard candidate-slower control check",
+    "min_pair_speedup": 0.9890262502570338,
+    "library_spread_fraction": 0.024997641433173828,
+    "locked_bound": 0.01,
+    "noise_threshold": 1.0749929242995215,
+    "in_production_table": true,
+    "table_action": "unchanged; root owns removal in a separate later commit"
+  }
+}

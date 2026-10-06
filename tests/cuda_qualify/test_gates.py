@@ -116,7 +116,9 @@ class Gates(unittest.TestCase):
 
     def test_stage_paired_guard_detects_regression_and_needs_pairs(self):
         row = self.paired_row()
-        self.assertGreater(gates.stage_speed(row, False)["ci95"][0], 1.0)
+        result = gates.stage_speed(row, False)
+        self.assertGreater(result["one_sided95_lower"], 1.0)
+        self.assertEqual(result["acceptance_path"], "primary")
         with self.assertRaisesRegex(gates.Rejected, "stage regression"):
             gates.stage_speed(self.paired_row(1.004), True)
         row["stage_abba_ms"].pop()
@@ -126,13 +128,69 @@ class Gates(unittest.TestCase):
     def test_tiny_operator_requires_resolving_its_saving_and_operator_gate(self):
         row = self.paired_row(1.0, 0.003)
         for i, block in enumerate(row["stage_abba_ms"]):
-            block[1] = block[2] = 0.999 + (0.004 if (i // 16) % 2 else -0.004)
-        self.assertGreater(gates.stage_speed(row, True)["ci_half_width"], 0)
+            block[1] = block[2] = 0.999 + (0.004 if (i // 32) % 2 else -0.004)
+        result = gates.stage_speed(row, True)
+        self.assertEqual(result["acceptance_path"], "margin")
+        self.assertLess(result["one_sided95_lower"], 1)
+        self.assertGreaterEqual(
+            result["one_sided95_lower"], result["non_inferiority_ratio_threshold"]
+        )
         with self.assertRaises(gates.Blocked):
             gates.stage_speed(row, False)
         row["operator_abba_ms"] = [[0.01, 0.00999, 0.00999, 0.01] for _ in range(256)]
-        with self.assertRaises(gates.Blocked):
+        with self.assertRaisesRegex(gates.StageRejected, "non-inferiority margin"):
             gates.stage_speed(row, True)
+
+    def test_grok_asymmetric_tail_does_not_fit_the_time_margin(self):
+        # one 16-replay group at 2.5x Library time, the rest at 9ms: exact mean 10ms
+        row = self.paired_row()
+        row["stage_abba_ms"] = [[10, 25, 25, 10]] * 16 + [[10, 9, 9, 10]] * 240
+        row["operator_abba_ms"] = [[2, 0.5, 0.5, 2]] * 256
+        with self.assertRaisesRegex(
+            gates.StageRejected, "non-inferiority margin"
+        ) as caught:
+            gates.stage_speed(row, True)
+        evidence = caught.exception.evidence
+        self.assertEqual(evidence["ratio"], 1)
+        self.assertAlmostEqual(evidence["operator_saving_fraction"], 0.15)
+        self.assertAlmostEqual(evidence["ci95_diagnostic"][0], 5 / 6)
+        self.assertAlmostEqual(evidence["ci95_diagnostic"][1], 10 / 9)
+        self.assertLess(evidence["one_sided95_lower"], 1 / 1.15)
+        self.assertEqual(evidence["acceptance_path"], "margin")
+
+    def test_bootstrap_does_not_split_measured_operator_strata(self):
+        row = self.paired_row(1)
+        row["operator_layers"] = ["one", "two", "three", "four"]
+        row["operator_layer_by_block"] = [
+            layer for layer in row["operator_layers"] for _ in range(64)
+        ]
+        result = gates.stage_speed(row, True)
+        self.assertEqual(result["bootstrap_design"], "whole strata")
+        self.assertEqual(result["bootstrap_block_abba"], 64)
+        self.assertEqual(result["bootstrap_groups"], 4)
+
+    def test_recorded_replay_fixture_with_one_scaled_group_fails_margin(self):
+        # this fixture scales recorded data only; it is not a measured GPU mutant
+        fixture = json.loads(
+            (Path(__file__).parent / "stage_margin_fixture.json").read_text()
+        )
+        row = fixture["row"]
+        start = fixture["group_start"]
+        for block in row["stage_abba_ms"][start : start + fixture["group_blocks"]]:
+            block[1] *= fixture["candidate_group_scale"]
+            block[2] *= fixture["candidate_group_scale"]
+        with self.assertRaisesRegex(
+            gates.StageRejected, "non-inferiority margin"
+        ) as caught:
+            gates.stage_speed(row, True)
+        evidence = caught.exception.evidence
+        self.assertGreaterEqual(evidence["ratio"], 1)
+        self.assertGreater(evidence["operator_saving_fraction"], 0)
+        self.assertLess(
+            evidence["one_sided95_lower"], evidence["non_inferiority_ratio_threshold"]
+        )
+        self.assertEqual(evidence["bootstrap_block_abba"], fixture["group_blocks"])
+        self.assertEqual(evidence["acceptance_path"], "margin")
 
     def test_stratified_saving_is_the_sum_not_the_mean_and_needs_each_layer(self):
         row = self.paired_row(1.0)

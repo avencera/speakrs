@@ -42,6 +42,10 @@ pub(crate) enum Choice {
     #[default]
     Library,
     Oxide(Selection),
+    /// The pinned FP32 production path with a stage-only timing fault
+    StageTail,
+    /// The same pinned FP32 production path without the timing fault
+    StageTailControl,
     Mutant(super::test_support::Mutant),
 }
 
@@ -321,6 +325,19 @@ pub(crate) fn tier_qualified(target: Target) -> bool {
         .any(|entry| entry.tier == target.tier && entry.devices.contains(&target.device))
 }
 
+/// Pinned coverage for test controls that must use the accepted production path
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+pub(crate) fn production_coverage(area: KernelModule, target: Target) -> Coverage {
+    PRODUCTION
+        .iter()
+        .find(|entry| {
+            entry.area == area
+                && entry.tier == target.tier
+                && entry.devices.contains(&target.device)
+        })
+        .map_or(Coverage::NONE, |entry| entry.coverage)
+}
+
 /// Selection for a concrete plan, with test controls kept outside production
 pub(crate) fn plan_selection(
     runtime: &CudaRuntime,
@@ -346,6 +363,14 @@ pub(crate) fn plan_selection(
                 _ => Choice::Library,
             })
         });
+        // the tail control uses real pinned plans, not the Library-backed fault seam
+        if matches!(choice, Choice::StageTail | Choice::StageTailControl) {
+            return Ok(if math == CudaMath::Fp32 {
+                selected
+            } else {
+                Selected::Library
+            });
+        }
         if choice == Choice::Oxide(Selection::Production) {
             return Ok(selected);
         }
@@ -383,7 +408,16 @@ pub(crate) fn qualification_selection(
             })
         }
         Choice::Mutant(mutant) => Selected::Mutant(mutant),
-        _ => Selected::Library,
+        Choice::StageTail | Choice::StageTailControl if math == CudaMath::Fp32 => {
+            // isolated segmentation selectors use this owner directly, without plan_selection
+            select(boundary, batch, math, target).map_err(|error| CudaError::Unsupported {
+                context: "CUDA selection",
+                reason: error.to_string(),
+            })?
+        }
+        Choice::Library | Choice::Oxide(_) | Choice::StageTail | Choice::StageTailControl => {
+            Selected::Library
+        }
     })
 }
 

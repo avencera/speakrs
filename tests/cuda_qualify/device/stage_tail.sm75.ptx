@@ -1,0 +1,19 @@
+// Harness-only device delay; no memory access and no change to model outputs
+// %globaltimer is a device nanosecond timer; event timings still measure all work
+.version 6.3
+.target sm_75
+.address_size 64
+
+.visible .entry qualify_stage_tail(.param .u64 duration_ns)
+{
+    .reg .pred %p;
+    .reg .u64 %duration, %start, %now, %elapsed;
+    ld.param.u64 %duration, [duration_ns];
+    mov.u64 %start, %globaltimer;
+tail_wait:
+    mov.u64 %now, %globaltimer;
+    sub.u64 %elapsed, %now, %start;
+    setp.lt.u64 %p, %elapsed, %duration;
+    @%p bra tail_wait;
+    ret;
+}

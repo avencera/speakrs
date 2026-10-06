@@ -85,6 +85,8 @@ pub(crate) fn choice(name: &str) -> Choice {
     match name {
         "Library" => Choice::Library,
         "Oxide" => Choice::Oxide(Selection::Explicit),
+        "StageTail" => Choice::StageTail,
+        "StageTailControl" => Choice::StageTailControl,
         other => Choice::Mutant(Mutant::parse(other).expect("fixed implementation inventory")),
     }
 }

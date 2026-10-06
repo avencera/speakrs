@@ -85,6 +85,122 @@ fn invalid_requests_cannot_make_tokens() {
 }
 
 #[test]
+fn stage_tail_base_coverage_is_pinned_not_candidate_declared() {
+    use crate::inference::cuda::KernelModule;
+    let target = Target {
+        tier: PtxTier::Sm75,
+        device: ComputeCapability::new(12, 0),
+    };
+    for area in [KernelModule::Resnet, KernelModule::Sincnet] {
+        let coverage = super::production_coverage(area, target);
+        assert!(!coverage.entries().is_empty());
+        for entry in coverage.entries() {
+            for layer in entry.layers {
+                for batch in [1, 32] {
+                    assert_eq!(
+                        coverage.covers(layer, batch, CudaMath::Fp32),
+                        matches!(
+                            select(layer, batch, CudaMath::Fp32, target).unwrap(),
+                            Selected::Oxide(_)
+                        )
+                    );
+                }
+                for batch in [7, 33, 64] {
+                    assert!(!coverage.covers(layer, batch, CudaMath::Fp32));
+                }
+            }
+        }
+        assert_eq!(
+            super::production_coverage(
+                area,
+                Target {
+                    device: ComputeCapability::new(8, 0),
+                    ..target
+                }
+            ),
+            crate::inference::cuda::candidate::Coverage::NONE
+        );
+        assert_eq!(
+            super::production_coverage(
+                area,
+                Target {
+                    tier: PtxTier::Sm80,
+                    ..target
+                }
+            ),
+            crate::inference::cuda::candidate::Coverage::NONE
+        );
+    }
+}
+
+#[test]
+fn direct_pinned_requests_use_the_production_token() {
+    use super::super::KernelModule;
+    use super::{Choice, Selection};
+    let target = Target {
+        tier: PtxTier::Sm75,
+        device: ComputeCapability::new(12, 0),
+    };
+    for choice in [Choice::StageTail, Choice::StageTailControl] {
+        for (area, layer) in [
+            (KernelModule::Resnet, "resnet.layer1.0.conv1"),
+            (KernelModule::Sincnet, "sincnet.conv0.abs_pool"),
+        ] {
+            for batch in [1, 32] {
+                let Selected::Oxide(token) = super::qualification_selection(
+                    choice,
+                    area,
+                    layer,
+                    batch,
+                    CudaMath::Fp32,
+                    target,
+                )
+                .unwrap() else {
+                    panic!("pinned request must not silently select Library")
+                };
+                let Selected::Oxide(expected) =
+                    select(layer, batch, CudaMath::Fp32, target).unwrap()
+                else {
+                    panic!("production token")
+                };
+                assert_eq!(token.record, expected.record);
+                assert_eq!(token.der, expected.der);
+                assert_eq!(token.boundary, layer);
+                assert_eq!(token.batch, batch);
+                assert_eq!(token.math, CudaMath::Fp32);
+                assert_eq!(token.selection, Selection::Production);
+                assert!(matches!(
+                    super::qualification_selection(
+                        choice,
+                        area,
+                        layer,
+                        batch,
+                        CudaMath::Tf32,
+                        target,
+                    )
+                    .unwrap(),
+                    Selected::Library
+                ));
+            }
+            for batch in [7, 33, 64] {
+                assert!(matches!(
+                    super::qualification_selection(
+                        choice,
+                        area,
+                        layer,
+                        batch,
+                        CudaMath::Fp32,
+                        target,
+                    )
+                    .unwrap(),
+                    Selected::Library
+                ));
+            }
+        }
+    }
+}
+
+#[test]
 fn records_and_integrated_evidence_are_pinned() {
     let pins = [
         "8f8fa3e3c158771e354aad83f4e42fca6fac998aa192b39a966067a4b0035758",

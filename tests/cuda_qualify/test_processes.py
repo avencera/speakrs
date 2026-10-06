@@ -43,6 +43,21 @@ class Processes(unittest.TestCase):
             qualify.collect("resnet", implementation, Path(directory), result)
         return result
 
+    def test_matched_pinned_control_can_never_accept_a_replacement(self):
+        def passed(target, implementation, directory, child, tier):
+            child.update(
+                status="passed", checks=[{"check": "speed:fixed", "passed": True}]
+            )
+
+        result = self.collect("StageTailControl", passed)
+        self.assertEqual(result["status"], "passed")
+        self.assertFalse(result["accepts_replacement"])
+        self.assertNotIn("mutant_gate", result)
+        self.assertEqual(
+            qualify.CONTROL_PHASES["StageTailControl"],
+            qualify.MUTANT_PHASES["StageTail"],
+        )
+
     def test_incomplete_tier_can_never_accept_a_replacement(self):
         def incomplete(target, implementation, directory, child, tier):
             child.update(status="blocked", reason="required sanitizer not run")
@@ -717,6 +732,82 @@ class Processes(unittest.TestCase):
     def test_declared_process_must_load_its_area(self):
         with self.assertRaisesRegex(qualify.Rejected, "did not load candidate area"):
             self.stable(self.module_process("fp32", False))
+
+    def test_stage_tail_keeps_real_candidate_module_requirements(self):
+        for implementation in ("StageTail", "StageTailControl"):
+            coverage = qualify.Coverage.product(
+                {"sincnet.conv0.abs_pool"}, {32}, {"fp32"}
+            )
+            with self.assertRaisesRegex(
+                qualify.Rejected, "did not load candidate area"
+            ):
+                qualify.stable_modules(
+                    [self.module_process("fp32", False)],
+                    coverage,
+                    "sincnet",
+                    implementation,
+                )
+            evidence = qualify.stable_modules(
+                [self.module_process("fp32"), self.module_process("tf32", False)],
+                coverage,
+                "sincnet",
+                implementation,
+            )
+            self.assertEqual(
+                evidence["processes"][0]["loaded_candidate_areas"], ["sincnet"]
+            )
+            self.assertEqual(evidence["processes"][1]["loaded_candidate_areas"], [])
+
+    def test_delayed_stage_graph_must_match_both_numeric_inputs(self):
+        key = "fp32/mixed/b32/stage"
+        op = "fp32/mixed/b32/sincnet.conv0.abs_pool"
+        coverage = qualify.Coverage.product({"sincnet.conv0.abs_pool"}, {32}, {"fp32"})
+        numeric = {
+            "rows": [
+                {"id": key, "first": {"sha256": "stage-first"}},
+                {"id": key + "/switched", "first": {"sha256": "stage-second"}},
+                {"id": op, "first": {"sha256": "op-first"}},
+                {"id": op + "/switched", "first": {"sha256": "op-second"}},
+            ]
+        }
+        row = {
+            "id": key,
+            "order": "ABBA",
+            "warmup": 5,
+            "stage_abba_ms": [[1, 0.99, 0.99, 1]] * 256,
+            "operator_abba_ms": [[0.1, 0.08, 0.08, 0.1]] * 256,
+            "output_sha256": [["stage-first", "stage-second"]] * 2,
+            "operator_outputs": [
+                {"id": op, "output_sha256": [["op-first", "op-second"]] * 2}
+            ],
+        }
+        for hashes in [None, ["stage-first", "wrong"], ["stage-first", "stage-second"]]:
+            with self.subTest(hashes=hashes):
+                row["stage_tail"] = {"delayed_output_sha256": hashes}
+                result: dict = {
+                    "target": "sincnet",
+                    "checks": [{"check": "speed:" + op, "passed": True}],
+                }
+                qualify.paired_checks(
+                    result,
+                    {"mode": "fp32", "rows": [row]},
+                    coverage,
+                    numeric,
+                    numeric,
+                    "StageTail",
+                )
+                output = next(
+                    check
+                    for check in result["checks"]
+                    if check["check"] == "paired_output:" + key
+                )
+                self.assertEqual(
+                    output["passed"], hashes == ["stage-first", "stage-second"]
+                )
+                if not output["passed"]:
+                    reason = output["reason"]
+                    assert isinstance(reason, str)
+                    self.assertIn("delayed output differs", reason)
 
     def test_undeclared_process_must_load_no_candidate_area(self):
         with self.assertRaisesRegex(qualify.Rejected, "no declared triple"):

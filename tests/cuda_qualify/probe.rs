@@ -1425,7 +1425,37 @@ fn qualification_driver() -> Result<(), CudaError> {
         .expect("requested tier")
         .parse()
         .expect("known tier");
-    let coverage = declared_coverage(&target, choice, tier);
+    let coverage = if matches!(choice, "StageTail" | "StageTailControl") {
+        assert!(matches!(target.as_str(), "resnet" | "sincnet"));
+        let runtime = CudaRuntime::new(0)?;
+        let area = if target == "resnet" {
+            KernelModule::Resnet
+        } else {
+            KernelModule::Sincnet
+        };
+        let target = crate::inference::cuda::implementation::Target::for_area(&runtime, area)?;
+        let pinned = crate::inference::cuda::implementation::production_coverage(area, target);
+        let entries: Vec<_> = pinned
+            .entries()
+            .iter()
+            .filter(|entry| match entry.maths {
+                Maths::All => true,
+                Maths::Only(maths) => maths.contains(&CudaMath::Fp32),
+            })
+            .map(|entry| {
+                let mut entry = entry_json(entry);
+                entry["maths"] = json!(["fp32"]);
+                entry
+            })
+            .collect();
+        assert!(
+            !entries.is_empty(),
+            "StageTail requires pinned FP32 production plans"
+        );
+        json!({"entries": entries})
+    } else {
+        declared_coverage(&target, choice, tier)
+    };
     if phase == "coverage" {
         write(
             &json!({"target":target,"implementation":implementation,"phase":phase,"coverage":coverage}),
@@ -1445,6 +1475,9 @@ fn qualification_driver() -> Result<(), CudaError> {
     }
 
     prepare(&runtime)?;
+    if matches!(choice, "StageTail" | "StageTailControl") {
+        paired::prepare_tail(&runtime)?;
+    }
     let device = crate::inference::cuda::candidate::test_support::device(&runtime)?;
     let clocks = matches!(phase.as_str(), "timing" | "paired")
         .then(crate::inference::cuda::candidate::test_support::Clocks::start);

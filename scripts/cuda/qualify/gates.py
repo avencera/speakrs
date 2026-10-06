@@ -35,6 +35,22 @@ class TruthRejected(Rejected):
         self.evidence = evidence
 
 
+class StageRejected(Rejected):
+    """A paired stage fails the ratio or time margin; retain its replay estimate."""
+
+    def __init__(self, message: str, evidence: dict):
+        super().__init__(message)
+        self.evidence = evidence
+
+
+class StageBlocked(Blocked):
+    """The operator gate cannot authorize a paired margin; retain the estimate."""
+
+    def __init__(self, message: str, evidence: dict):
+        super().__init__(message)
+        self.evidence = evidence
+
+
 @dataclass(frozen=True)
 class Error:
     """Reference-relative L2 error and maximum absolute error in FP64."""
@@ -263,8 +279,10 @@ def speed(runs: Sequence[Timing], candidate: str, bound: float) -> dict:
 
 
 MIN_STAGE_BLOCKS = 256
-STAGE_BOOTSTRAP_BLOCK = 16
+STAGE_BOOTSTRAP_BLOCK = 32
 STAGE_BOOTSTRAP_DRAWS = 4096
+# collection rounds operator strata to 16; bootstrap never splits a whole stratum
+OPERATOR_STRATUM_ALIGNMENT = 16
 
 
 def paired_operator_saving(row: dict) -> dict[str, float]:
@@ -289,8 +307,8 @@ def paired_operator_saving(row: dict) -> dict[str, float]:
         or len(labels) != len(blocks)
         or set(counts) != set(layers)
         or len(set(counts.values())) != 1
-        or min(counts.values()) < STAGE_BOOTSTRAP_BLOCK
-        or any(count % STAGE_BOOTSTRAP_BLOCK for count in counts.values())
+        or min(counts.values()) < OPERATOR_STRATUM_ALIGNMENT
+        or any(count % OPERATOR_STRATUM_ALIGNMENT for count in counts.values())
     ):
         raise Rejected("paired stage: incomplete operator strata")
     expected_labels = [layer for layer in layers for _ in range(counts[layer])]
@@ -310,8 +328,9 @@ def stage_speed(row: dict, operator_passed: bool) -> dict:
     """Decide stage non-regression from replay-level ABBA blocks in one process.
 
     Resample contiguous blocks, not independent adjacent replays, to retain local
-    clock-drift correlation. The fallback requires measured operator saving larger
-    than the CI half-width and the unchanged strict operator noise gate.
+    clock-drift correlation. ResNet resamples whole equal operator strata. The
+    margin is in time units: its ratio threshold is 1 / (1 + saving_fraction).
+    Both paths use the one-sided 95% lower confidence bound.
     """
     blocks = row["stage_abba_ms"]
     operators = row["operator_abba_ms"]
@@ -325,14 +344,22 @@ def stage_speed(row: dict, operator_passed: bool) -> dict:
         finite(block)
         if min(block) <= 0:
             raise Rejected("paired stage: non-positive timing")
-    if len(blocks) % STAGE_BOOTSTRAP_BLOCK:
+    layer_savings = paired_operator_saving(row)
+    block_length = (
+        len(blocks) // len(row["operator_layers"])
+        if "operator_layers" in row
+        else STAGE_BOOTSTRAP_BLOCK
+    )
+    if len(blocks) % block_length:
         raise Rejected("paired stage: incomplete bootstrap block")
     groups = []
-    for start in range(0, len(blocks), STAGE_BOOTSTRAP_BLOCK):
-        group = blocks[start : start + STAGE_BOOTSTRAP_BLOCK]
+    for start in range(0, len(blocks), block_length):
+        group = blocks[start : start + block_length]
         groups.append(
             (sum(b[0] + b[3] for b in group), sum(b[1] + b[2] for b in group))
         )
+    if len(groups) < 2:
+        raise Rejected("paired stage: insufficient independent bootstrap groups")
     library = sum(g[0] for g in groups)
     candidate = sum(g[1] for g in groups)
     point = library / candidate
@@ -342,18 +369,24 @@ def stage_speed(row: dict, operator_passed: bool) -> dict:
         sample = rng.choices(groups, k=len(groups))
         estimates.append(sum(g[0] for g in sample) / sum(g[1] for g in sample))
     estimates.sort()
-    low = estimates[int(0.025 * len(estimates))]
-    high = estimates[int(0.975 * len(estimates))]
-    half_width = (high - low) / 2
+    low = estimates[int(0.05 * len(estimates))]
+    high = estimates[int(0.95 * len(estimates))]
     # measure the eligible operators beside each stage block in the same replay set
-    layer_savings = paired_operator_saving(row)
     saving_ms = sum(layer_savings.values())
     stage_ms = library / (2 * len(blocks))
     saving_fraction = saving_ms / stage_ms
+    if saving_fraction <= -1:
+        raise Rejected("paired stage: non-positive time margin")
+    threshold = 1 / (1 + saving_fraction)
     evidence = {
         "ratio": point,
-        "ci95": [low, high],
-        "ci_half_width": half_width,
+        "one_sided95_lower": low,
+        "one_sided95_upper": high,
+        "ci95_diagnostic": [
+            estimates[int(0.025 * len(estimates))],
+            estimates[int(0.975 * len(estimates))],
+        ],
+        "non_inferiority_ratio_threshold": threshold,
         "operator_saving_ms": saving_ms,
         "operator_saving_by_layer_ms": layer_savings,
         "stage_library_ms": stage_ms,
@@ -361,17 +394,31 @@ def stage_speed(row: dict, operator_passed: bool) -> dict:
         "operator_gate_passed": operator_passed,
         "pairs": 2 * len(blocks),
         "abba_blocks": len(blocks),
-        "bootstrap_block_abba": STAGE_BOOTSTRAP_BLOCK,
+        "bootstrap_block_abba": block_length,
+        "bootstrap_groups": len(groups),
+        "bootstrap_design": "whole strata"
+        if "operator_layers" in row
+        else "contiguous blocks",
         "bootstrap_draws": STAGE_BOOTSTRAP_DRAWS,
         "gate": "stage: paired replay non-regression",
     }
     if low >= 1.0:
+        evidence["acceptance_path"] = "primary"
         return evidence
+    evidence["acceptance_path"] = "margin"
     if point < 1.0:
-        raise Rejected("paired stage: stage regression exceeds zero slowdown")
-    if operator_passed and half_width < saving_fraction:
+        raise StageRejected(
+            "paired stage: stage regression exceeds zero slowdown", evidence
+        )
+    if not operator_passed:
+        raise StageBlocked(
+            "paired stage: operator gate does not authorize the time margin", evidence
+        )
+    if low >= threshold:
         return evidence
-    raise Blocked("paired stage: CI cannot resolve the measured operator saving")
+    raise StageRejected(
+        "paired stage: non-inferiority margin not established", evidence
+    )
 
 
 def tf32_truth(candidate: dict, library: dict, draws: Sequence[dict]) -> dict:

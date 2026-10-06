@@ -394,19 +394,28 @@ for every block; the evaluator requires complete, equal, contiguous layer strata
 This uses the same process and stage replay set, not separate operator timings.
 
 The point estimate is the sum of Library stage times divided by the sum of candidate
-stage times. A 95% block-bootstrap CI uses contiguous groups of 16 ABBA blocks and
-4096 draws. These groups retain adjacent replay correlation from clock drift.
-The stage passes if the CI lower bound is at least 1.0. Otherwise it passes only if
-all three conditions hold:
+stage times. The bootstrap uses 4096 seeded draws. ResNet resamples whole, equal,
+contiguous operator strata (32 ABBA blocks per stratum for the full 14-layer set),
+never 16-block halves of a stratum. Unstratified stages resample contiguous groups
+of 32 ABBA blocks. At least two whole groups are required. This retains correlation
+within the measured stratum and adjacent replays instead of treating them as
+independent. The result records the actual block length, group count and design.
+
+Both acceptance paths use the one-sided 95% lower confidence bound (the bootstrap
+5th percentile). The 2.5th/97.5th percentiles remain a two-sided diagnostic only.
+The primary path passes if the one-sided lower bound is at least 1.0. Otherwise
+the time-unit non-inferiority margin path passes only if all three conditions hold:
 
 - the point estimate is at least 1.0;
-- the CI half-width is smaller than the eligible operators' absolute saving divided
-  by Library stage time, measured in this process and replay set;
+- the one-sided 95% lower speedup bound is at least `1 / (1 + delta)`, where
+  `delta = sum(operator saving_ms) / Library stage_ms`, measured in this process
+  and replay set;
 - every eligible operator passed the locked operator timing rule, including its
   noise-rule evaluation when applicable.
 
-A point estimate below 1.0 rejects. An unresolved interval blocks. Saving measured in
-a separate process cannot resolve this gate. The result keeps all stage and operator
+A point estimate below 1.0 rejects. A failed non-inferiority margin rejects. A margin
+without a passed operator gate blocks. No CI half-width comparison grants acceptance.
+Saving measured in a separate process cannot resolve this gate. The result keeps all stage and operator
 ABBA observations, bootstrap settings, CI and measured saving. Each paired output
 hash must match the numeric phase for the same input. Library controls validate this
 measurement contract without requiring Library to be faster than itself.
@@ -539,6 +548,7 @@ A mutant is caught only by its exact tier-stripped check name and reason:
 | `Atomic` | floating-point atomic accumulation | `determinism:fixed_reduction_order` with `floating-point atomic in launched custom entry` |
 | `Slow` | the library operation three times | `speed:` with `candidate slower than the faster Library process` |
 | `StageSlow` | replays the candidate stage twice, without adding isolated operator work | `paired_stage:` with `stage regression exceeds zero slowdown` |
+| `StageTail` | adds an intermittent captured GPU spin after a real pinned FP32 candidate stage, with unchanged operators | `paired_stage:` with `non-inferiority margin not established` |
 | `StageAccuracy` | rounds the real TF32 stage output to BF16, without changing isolated operators | `stage_truth:` with `candidate less accurate than Library TF32` |
 | `PhaseCheat` | skips its work in the timing phase | `timing_output:` with `final output differs` |
 | `Unscoped` | launches after its scope closes | `profile` with `outside a candidate or library range` |
@@ -549,7 +559,7 @@ A mutant is caught only by its exact tier-stripped check name and reason:
 An escaped mutant is written as `escaped` and exits 4. A mutant runs only the phases
 its gate reads (always numeric, which includes the secret-input and PTX checks;
 profile for `Fallback`, `Atomic`, `Unscoped` and `Unlisted`; timing for `Slow` and
-`PhaseCheat`; paired replay for `StageSlow`), and no sanitizer tools. Library
+`PhaseCheat`; paired replay for `StageSlow` and `StageTail`), and no sanitizer tools. Library
 controls run every phase plus the three positive sanitizer controls; candidates run
 every phase, the positive controls and the candidate sanitizer. The static scan has its own
 proof: `tests/cuda_qualify/scan_fixtures/phase_cheat.rs` reads `SPEAKRS_QUALIFY_PHASE`,
@@ -557,6 +567,32 @@ and `unscanned_call.rs` hands its work to code outside the candidate tree; both 
 refused, in the unit tests and live, copied over the LSTM candidate in a scratch tree.
 A new module elsewhere under `src/` fails the lock before Python starts. `PhaseCheat`
 is the phase cheat with the scan bypassed.
+
+`StageTail` differs from the Library-backed fault seam. It uses only the FP32
+tuples selected by the pinned production table on the actual tier and device.
+Other tuples, including stress batches and TF32, retain Library identity. The
+operators run the real accepted candidate, in both separate-process timing and
+paired replay. A failed margin requires the existing operator gate to have passed;
+neither planted timings nor a forced operator pass can authorize that branch.
+
+The fault applies only to `fp32/first/b1` on ResNet and `fp32/mixed/b32` on SincNet.
+The first 16 collected ABBA blocks use a second captured stage graph; every other
+block uses the normal candidate graph. The delayed graph runs the same real stage
+on the same buffers, then one thread spins on the [PTX device timer](https://docs.nvidia.com/cuda/parallel-thread-execution/#special-registers-globaltimer-globaltimer-lo-globaltimer-hi).
+CUDA events measure this GPU work. There is no host sleep or alteration of timing
+data. The extra duration is 1.7 times the median of five in-process Library stage
+replays for ResNet, and 1.4 times for SincNet. These fixed fault sizes keep the point
+at least 1 while testing the lower tail; they do not change a gate threshold.
+The record holds the calibration replays, requested duration, measured spin time,
+group size/count, and delayed output hashes on both inputs. Both normal and delayed
+hashes must match numeric evidence. ResNet still bootstraps whole operator strata;
+SincNet still uses whole 32-block bootstrap groups, not the shorter fault group.
+
+Hardware proof covers ResNet and SincNet. LSTM StageTail is refused until phase
+2c-2 integrates the Library-free LSTM candidate: the current pinned implementation
+uses cuBLAS projections inside Oxide. This deferral does not exempt those calls
+from the zero-library rule. Shared gate logic also has the exact asymmetric-tail
+regression case and a clearly labelled, altered recorded-data fixture.
 
 ## Production table and record cache
 
@@ -742,3 +778,54 @@ python3 scripts/cuda/qualify/qualify.py --check-table --records "$HOME/.local/sh
 
 The full tool logs and archive hash are retained with the proof report. Raw file
 hashes identify the original JSON bytes, not a reserialized copy.
+
+### Audit decisions for phase 2b
+
+The TF32 truth ceilings are componentwise: cosine, max-abs and relative L2 may take
+their maxima from different perturbation draws. This is an accepted residual of
+the root-decided max(unperturbed Library, eight draws) rule. The Grok audit measured
+a lift of at most 6.7% in cosine error and about 1.9% in SincNet max-abs. These lifts
+are not a new tolerance or a change to the gate.
+
+The owner lock includes `.github/workflows/ci.yml`. Offline CI validates the locked
+acceptance summaries and current shipped bindings; it does not open raw records.
+Full raw-record re-derivation (`qualify.py --check-table --records <cache>`) runs on
+the GPU box at every re-lock. No record publication or download URL is required.
+
+Production tier loadability currently follows shipped PTX filenames. Matching the
+actual feature embed masks is a phase 2c-1 item, with its loader/artifact-key rewrite.
+The current production areas ship only sm75, so their current table proof is not
+a claim that an unembedded future variant is production-loadable.
+
+### StageTail matched-candidate control
+
+`StageTailControl` is a test-only, non-accepting control. It selects exactly the
+same pinned FP32 production plans and coverage as `StageTail`, runs the same
+numeric, operator timing and paired stage phases, and loads the same recorded
+spin module. It does not capture or enqueue a delay. Neither choice grants
+production acceptance. In the same quiet device window, the proof requires the
+mutant to fail its intended paired-stage margin check and that same check to pass
+in the control. After the unchanged locked noise evaluator is applied to both
+records, the mutant must have no new failure except that margin. It must also
+have no new non-timing failure that the control passes. Raw blocked checks can
+change in both directions between runs of the same binary; the proof records
+these flips, both raw and evaluated failure sets, and every Library spread.
+The comparison changes no qualification gate, noise bound or record verdict.
+
+The locked `tests/cuda_qualify/AUDIT_PROOF.json` pins the two matched pairs and
+the offline replay of all 42 prior control and mutant verdicts. All 39 prior
+intended-gate catches are unchanged. ResNet and SincNet StageTail both reach the
+margin path with a point estimate above 1, positive measured operator saving,
+and a passed operator gate, then fail its one-sided lower-bound requirement.
+The same paired check passes in each no-fault control. Both pairs have no new
+non-timing failure. ResNet has raw operator noise flips; the receipt retains
+the raw sets, all noise evaluations, and a hash for every timing spread row.
+The receipt grants no production coverage.
+
+The ResNet pair keeps its original compiled lock. Its later direct-selector
+correction is used by the isolated SincNet test only: ResNet's unchanged
+`plan_selection` returns the pinned token before that branch. The receipt pins
+the exact source diff and both source snapshots. SincNet uses the corrected
+snapshot. Final receipt and documentation changes do not relabel either
+compiled digest or alter measured evidence. Large archives and raw records
+remain outside git in the SHA-addressed qualification cache.
