@@ -372,6 +372,86 @@ mod tests {
     use super::{AreaPtx, ComputeCapability, CudaError, KernelModule, PtxTier};
 
     #[test]
+    #[ignore = "GPU artifact proof; run under the shared GPU flock"]
+    fn driver_artifacts_resolve_every_ptx_entry() -> Result<(), CudaError> {
+        use super::{ArtifactHash, LoadedArtifact, LoadedKernels, load_artifact};
+        use crate::inference::cuda::CudaRuntime;
+        use cudarc::nvrtc::Ptx;
+        use std::fs::{OpenOptions, TryLockError};
+
+        // the proof process must be serialized, including context creation and drops
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/workspace/gpu-bench.lock")
+            .expect("proof runs under the shared GPU lock");
+        assert!(matches!(lock.try_lock(), Err(TryLockError::WouldBlock)));
+        let runtime = CudaRuntime::new(0)?;
+        let device = runtime.compute_capability();
+        let force_jit =
+            std::env::var_os(super::FORCE_PTX_JIT_ENV).is_some_and(|value| value == "1");
+        for area in [
+            KernelModule::Probe,
+            KernelModule::Fbank,
+            KernelModule::Embedding,
+            KernelModule::Segmentation,
+            KernelModule::Resnet,
+            KernelModule::Lstm,
+            KernelModule::Sincnet,
+        ] {
+            for (tier, ptx) in area.variants().iter() {
+                if tier.min_capability() > device {
+                    continue;
+                }
+                let embedded = area.variants().embedded(tier).expect("embedded variant");
+                let cubin = embedded
+                    .cubin(device)
+                    .expect("proof device has exact cubins");
+                let cubin_key = LoadedArtifact::Cubin {
+                    arch: device,
+                    sha256: ArtifactHash::of(cubin.bytes),
+                };
+                let ptx_hash = ArtifactHash::of(ptx.as_bytes());
+                let (module, artifact) = load_artifact(
+                    (!force_jit).then_some(cubin),
+                    ptx_hash,
+                    |bytes| {
+                        runtime
+                            .context()
+                            .load_module(Ptx::from_binary(bytes.to_vec()))
+                    },
+                    || runtime.context().load_module(Ptx::from_src(ptx)),
+                )?;
+                if force_jit {
+                    assert_eq!(artifact, LoadedArtifact::PtxJit { sha256: ptx_hash });
+                    assert_ne!(artifact, cubin_key);
+                } else {
+                    // this proof must fail, not silently qualify a rejected cubin's JIT
+                    assert_eq!(artifact, cubin_key);
+                }
+                let loaded = LoadedKernels::new(area, tier, module, artifact, ptx_hash);
+                let mut entries = 0;
+                for line in ptx.lines() {
+                    let Some(entry) = line.trim().strip_prefix(".visible .entry ") else {
+                        continue;
+                    };
+                    let name = entry.split(['(', ' ', '\t']).next().expect("entry name");
+                    loaded.function(name)?;
+                    entries += 1;
+                }
+                assert!(entries > 0, "proof requires declared entry points");
+                println!(
+                    "artifact_proof area={} tier={tier} device={device} artifact={artifact:?} embedded_ptx_sha256={ptx_hash} entries={entries}",
+                    area.name()
+                );
+            }
+            let loaded = runtime.load_kernels(area)?;
+            assert_eq!(loaded.artifact(), runtime.load_kernels(area)?.artifact());
+        }
+        runtime.synchronize()
+    }
+
+    #[test]
     fn binary_loading_uses_only_the_exact_architecture_and_keeps_jit_identity() {
         use super::{ArtifactHash, EmbeddedCubin, EmbeddedPtx, LoadedArtifact, load_artifact};
         let cubins = [
