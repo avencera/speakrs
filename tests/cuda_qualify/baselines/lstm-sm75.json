@@ -3,8 +3,8 @@
   "tier": "sm75",
   "scope": "LSTM input projections only",
   "device_sm": "12.0",
-  "control_archive_sha256": "f887b528597da82eabdb06d6e4e3ac0fae3417e7762e17bf408c264146edfabb",
-  "control_driver_sha256": "49154909a7a87691a9b6512c554ef3916e1be57fca2b1f1fd4c9eb9c7b63ea9d",
+  "control_archive_sha256": "930ad38ad208a77a06f4cd572e4a033fd95e424f3135aa27827381d1cc2d388c",
+  "control_driver_sha256": "b25eafe230be7a4dc3ed601d21cd1f1033c67108a6d73edb41ac3c658de52b3d",
   "control_toolchain": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1",
   "verified_inputs": {
     "/workspace/models-native/segmentation-3.0.safetensors": "88e7883cf56f679170e162419efddf970f929915281ebce80e351c42b5a7115d",
@@ -40,13 +40,13 @@
     "/usr/local/cuda-13.0/compute-sanitizer/x86/libTreeLauncherTargetUpdatePreloadInjection.so": "337eb9dcda99c78db3d2206d29b66e4423bf0241019ca38622e763de50440a4d",
     "/usr/local/cuda-13.0/targets/x86_64-linux/lib/libcudart.so.13.0.96": "96c42e418cec19054186b9429c321603cc190bf26a18104e19408117a2a817b0"
   },
-  "source_result_sha256": "919f51d4444265f681660271e277105fb9551124afbad9355a8433bcef450532",
-  "source_lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+  "source_result_sha256": "ea08d9b77c53688cf89269b21810ad36786e6fc83d3ba1ecaffeab39c218656d",
+  "source_lock_digest": "97a75cc4c2fd59404de81cf0fff8c01fcdc6943822b1d4650a17b89147c05a34",
   "tools": [
     {
       "tool": "memcheck",
       "log": "lstm-sm75-memcheck.log",
-      "sha256": "4065067cd2daf4ec9522050465dad20efe3ba1fb21cab37208f554273999e0db",
+      "sha256": "a2cff04a55d9f4579ebcf0458edcd875b0ed6305a7af5195ea4448500d528407",
       "returncode": 0,
       "command": [
         "flock",
@@ -62,20 +62,20 @@
         "16",
         "--error-exitcode",
         "86",
-        "/workspace/p2b-tierfix/target/control/f887b528597da82eabdb06d6e4e3ac0fae3417e7762e17bf408c264146edfabb/sm75/release/deps/speakrs-95614be541655ec9",
+        "/workspace/p2c1/target/control/930ad38ad208a77a06f4cd572e4a033fd95e424f3135aa27827381d1cc2d388c/sm75/release/deps/speakrs-95614be541655ec9",
         "--exact",
         "inference::cuda::test_support::qualify::qualification_driver",
         "--ignored",
         "--nocapture"
       ],
       "scope": "LSTM input projections only",
-      "source_result_sha256": "919f51d4444265f681660271e277105fb9551124afbad9355a8433bcef450532",
-      "source_lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783"
+      "source_result_sha256": "ea08d9b77c53688cf89269b21810ad36786e6fc83d3ba1ecaffeab39c218656d",
+      "source_lock_digest": "97a75cc4c2fd59404de81cf0fff8c01fcdc6943822b1d4650a17b89147c05a34"
     },
     {
       "tool": "racecheck",
       "log": "lstm-sm75-racecheck.log",
-      "sha256": "d1fae1c755c1855bde82b7c10595442f7f597d11c9709c4da2ca79686758921b",
+      "sha256": "7e5aee351f09775ad872f76ae44712721f01f6caf88d1e94ca949accbd19c670",
       "returncode": 0,
       "command": [
         "flock",
@@ -95,20 +95,20 @@
         "16",
         "--error-exitcode",
         "86",
-        "/workspace/p2b-tierfix/target/control/f887b528597da82eabdb06d6e4e3ac0fae3417e7762e17bf408c264146edfabb/sm75/release/deps/speakrs-95614be541655ec9",
+        "/workspace/p2c1/target/control/930ad38ad208a77a06f4cd572e4a033fd95e424f3135aa27827381d1cc2d388c/sm75/release/deps/speakrs-95614be541655ec9",
         "--exact",
         "inference::cuda::test_support::qualify::qualification_driver",
         "--ignored",
         "--nocapture"
       ],
       "scope": "LSTM input projections only",
-      "source_result_sha256": "919f51d4444265f681660271e277105fb9551124afbad9355a8433bcef450532",
-      "source_lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783"
+      "source_result_sha256": "ea08d9b77c53688cf89269b21810ad36786e6fc83d3ba1ecaffeab39c218656d",
+      "source_lock_digest": "97a75cc4c2fd59404de81cf0fff8c01fcdc6943822b1d4650a17b89147c05a34"
     },
     {
       "tool": "initcheck",
       "log": "lstm-sm75-initcheck.log",
-      "sha256": "29457d32ff7c12829dbff1b612b13ad17aafed46444e436a17859a062b7248d4",
+      "sha256": "ca846154a64ee2026201bf515351291cb9be4a75f2f125d88cc73e12b1ba245f",
       "returncode": 0,
       "command": [
         "flock",
@@ -124,15 +124,15 @@
         "16",
         "--error-exitcode",
         "86",
-        "/workspace/p2b-tierfix/target/control/f887b528597da82eabdb06d6e4e3ac0fae3417e7762e17bf408c264146edfabb/sm75/release/deps/speakrs-95614be541655ec9",
+        "/workspace/p2c1/target/control/930ad38ad208a77a06f4cd572e4a033fd95e424f3135aa27827381d1cc2d388c/sm75/release/deps/speakrs-95614be541655ec9",
         "--exact",
         "inference::cuda::test_support::qualify::qualification_driver",
         "--ignored",
         "--nocapture"
       ],
       "scope": "LSTM input projections only",
-      "source_result_sha256": "919f51d4444265f681660271e277105fb9551124afbad9355a8433bcef450532",
-      "source_lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783"
+      "source_result_sha256": "ea08d9b77c53688cf89269b21810ad36786e6fc83d3ba1ecaffeab39c218656d",
+      "source_lock_digest": "97a75cc4c2fd59404de81cf0fff8c01fcdc6943822b1d4650a17b89147c05a34"
     }
   ]
 }
