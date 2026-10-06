@@ -1,5 +1,9 @@
 //! Qualification-backed selection before any optional library state is created
 
+// runtime wiring is deferred until override policy and input ownership are defined
+#[allow(dead_code)]
+pub(crate) mod overrides;
+
 use super::kernels::{ArtifactHash, LoadedArtifact};
 
 use super::candidate::{
