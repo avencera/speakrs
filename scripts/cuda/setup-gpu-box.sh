@@ -109,8 +109,11 @@ export CUDA_TOOLKIT_PATH=\${CUDA13_HOME}
 export CUDA_OXIDE_LLC=/usr/bin/llc-${LLVM_MAJOR}
 export LIBCLANG_PATH=/usr/lib/llvm-${LLVM_MAJOR}/lib
 # CUDA 13 tools first so cuda-oxide never picks the 12.8 nvcc; the 12.8 runtime libraries
-# still come from the loader path, which this does not change
+# still come from the explicit CUDA 12 runtime loader path below
 export PATH=\${CARGO_HOME}/bin:\${CUDA13_HOME}/bin:/usr/lib/llvm-${LLVM_MAJOR}/bin:\${PATH}
+# restarts can drop the first-boot environment; retain its cuDNN directories and
+# set the CUDA 12.8 runtime path independently of the CUDA 13 compiler path
+export LD_LIBRARY_PATH=/usr/local/cuda-${CUDA12_DOTTED}/lib64:/usr/local/cuda-${CUDA12_DOTTED}/targets/x86_64-linux/lib:/usr/lib/x86_64-linux-gnu:/usr/local/lib:${LD_LIBRARY_PATH:-}\${LD_LIBRARY_PATH:+:\${LD_LIBRARY_PATH}}
 # the disk is small, so skip debug info in dev and test builds
 export CARGO_PROFILE_DEV_DEBUG=0
 export CARGO_PROFILE_TEST_DEBUG=0
