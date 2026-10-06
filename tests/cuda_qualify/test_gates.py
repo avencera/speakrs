@@ -271,7 +271,10 @@ class Gates(unittest.TestCase):
         )
         failed: dict = child["checks"][-1]
         self.assertFalse(failed["passed"])
-        self.assertEqual(failed["evidence"]["error_limits"]["max_abs"], 0.02)
+        evidence = failed["evidence"]
+        assert isinstance(evidence, dict)
+        limits: dict = evidence["error_limits"]
+        self.assertEqual(limits["max_abs"], 0.02)
         qualify.finish_tier(child, [])
         self.assertEqual(child["status"], "rejected")
         self.assertEqual(

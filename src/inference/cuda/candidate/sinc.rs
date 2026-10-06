@@ -21,7 +21,6 @@ const SPK_SINCNET_PACK_FILTERS: &str = "spk_sincnet_pack_filters";
 const SPK_SINCNET_CONV_ABS_POOL: &str = "spk_sincnet_conv_abs_pool";
 
 /// Kernel entries loaded by this host plan
-#[cfg(test)]
 pub(crate) const REQUIRED_KERNELS: [&str; 2] =
     [SPK_SINCNET_PACK_FILTERS, SPK_SINCNET_CONV_ABS_POOL];
 

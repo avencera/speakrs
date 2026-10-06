@@ -243,19 +243,26 @@ def valid_checks(checks: object) -> list[dict]:
     """Require complete boolean outcomes and unique, named checks"""
     if not isinstance(checks, list) or not checks:
         raise Rejected("table: missing qualification checks")
-    names = []
-    for check in checks:
+    names: list[str] = []
+    validated: list[dict] = []
+    for raw_check in checks:
+        if not isinstance(raw_check, dict):
+            raise Rejected("table: invalid qualification check")
+        check = dict(raw_check)
         if (
-            not isinstance(check, dict)
-            or type(check.get("passed")) is not bool
+            type(check.get("passed")) is not bool
             or not isinstance(check.get("check"), str)
             or not check["check"]
         ):
             raise Rejected("table: invalid qualification check")
-        names.append(check["check"])
+        name = check["check"]
+        if not isinstance(name, str):
+            raise Rejected("table: invalid qualification check")
+        names.append(name)
+        validated.append(check)
     if len(set(names)) != len(names):
         raise Rejected("table: duplicate qualification checks")
-    return checks
+    return validated
 
 
 def complete_collection(record: dict) -> None:

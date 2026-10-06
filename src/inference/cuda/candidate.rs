@@ -35,7 +35,27 @@ mod lstm;
 mod sinc;
 
 #[cfg(test)]
-pub(super) use conv::kernel_inventory as conv_kernel_inventory;
+pub(super) use kernel_inventory::conv_kernel_inventory;
+
+#[cfg(test)]
+mod kernel_inventory {
+    use super::conv::{REQUIRED_KERNELS, SMALL_BATCH_WAVES, Shape, select_tiling};
+
+    pub(crate) fn conv_kernel_inventory() -> Vec<&'static str> {
+        let mut entries = REQUIRED_KERNELS.to_vec();
+        // exercise both sides of the production device-dependent selection threshold
+        for shape in [Shape::C32, Shape::C64, Shape::C32Stride2] {
+            let (large, small) = shape.tilings();
+            let output = [16, 64];
+            let threshold = large.blocks(1, output).div_ceil(SMALL_BATCH_WAVES);
+            for multiprocessors in [1, threshold, threshold + 1] {
+                entries.push(select_tiling(large, small, 1, output, multiprocessors).entry);
+            }
+        }
+
+        entries
+    }
+}
 #[cfg(test)]
 pub(super) use lstm::REQUIRED_KERNELS as LSTM_KERNELS;
 #[cfg(test)]

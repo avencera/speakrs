@@ -770,7 +770,7 @@ class Processes(unittest.TestCase):
                 {"id": op + "/switched", "first": {"sha256": "op-second"}},
             ]
         }
-        row = {
+        row: dict = {
             "id": key,
             "order": "ABBA",
             "warmup": 5,

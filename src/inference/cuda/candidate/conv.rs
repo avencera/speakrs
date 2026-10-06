@@ -28,7 +28,6 @@ use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, KernelModule};
 const SPK_RESNET_PACK_WEIGHTS: &str = "spk_resnet_pack_weights";
 
 /// Kernel entries loaded by this host plan
-#[cfg(test)]
 pub(crate) const REQUIRED_KERNELS: [&str; 1] = [SPK_RESNET_PACK_WEIGHTS];
 
 /// The 32 -> 32 convolutions of `layer1` and the strided 32 -> 64 one of `layer2`
@@ -60,11 +59,11 @@ const TILE_COLS: usize = 64;
 const PACK_THREADS: u32 = 256;
 
 /// Below this many 256-thread blocks per SM, a shape with small blocks uses them
-const SMALL_BATCH_WAVES: usize = 2;
+pub(super) const SMALL_BATCH_WAVES: usize = 2;
 
 /// The convolution shapes that have a fused kernel: 3x3, padding 1, no dilation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Shape {
+pub(super) enum Shape {
     /// 32 -> 32 channels, stride 1
     C32,
     /// 64 -> 64 channels, stride 1
@@ -96,7 +95,7 @@ impl Shape {
     }
 
     /// The 256-thread kernel, and the small-block one where it exists
-    fn tilings(self) -> (Tiling, Option<Tiling>) {
+    pub(super) fn tilings(self) -> (Tiling, Option<Tiling>) {
         match self {
             Self::C32 => (Tiling::new("spk_resnet_conv3x3_c32", 256, 8), None),
             Self::C64 => (
@@ -114,8 +113,8 @@ impl Shape {
 /// One kernel entry with its fixed block: `threads` per block covering 64 output
 /// columns of `rows` output rows; both must match the kernel crate
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Tiling {
-    entry: &'static str,
+pub(super) struct Tiling {
+    pub(super) entry: &'static str,
     threads: u32,
     rows: usize,
 }
@@ -139,13 +138,13 @@ impl Tiling {
         ))
     }
 
-    fn blocks(self, batch: usize, output: [usize; 2]) -> usize {
+    pub(super) fn blocks(self, batch: usize, output: [usize; 2]) -> usize {
         let [h, w] = output;
         w.div_ceil(TILE_COLS) * h.div_ceil(self.rows) * batch
     }
 }
 
-fn select_tiling(
+pub(super) fn select_tiling(
     large: Tiling,
     small: Option<Tiling>,
     batch: usize,
@@ -368,28 +367,4 @@ fn to_u32(value: usize) -> Result<u32, CudaError> {
         context: "fused conv3x3 launch",
         value,
     })
-}
-
-#[cfg(test)]
-pub(crate) use test_support::kernel_inventory;
-
-#[cfg(test)]
-mod test_support {
-    use super::{REQUIRED_KERNELS, SMALL_BATCH_WAVES, Shape, select_tiling};
-
-    pub(crate) fn kernel_inventory() -> Vec<&'static str> {
-        let mut entries = REQUIRED_KERNELS.to_vec();
-        // each optional small tiling can be selected when a device has enough SMs
-        for shape in [Shape::C32, Shape::C64, Shape::C32Stride2] {
-            let (large, small) = shape.tilings();
-            let output = [16, 64];
-            let blocks = large.blocks(1, output);
-            let threshold = blocks.div_ceil(SMALL_BATCH_WAVES);
-            for multiprocessors in [1, threshold, threshold + 1] {
-                entries.push(select_tiling(large, small, 1, output, multiprocessors).entry);
-            }
-        }
-
-        entries
-    }
 }

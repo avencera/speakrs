@@ -32,7 +32,6 @@ use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, KernelModule};
 const SPK_LSTM_CLEAR: &str = "spk_lstm_clear";
 
 /// Kernel entries loaded by this host plan
-#[cfg(test)]
 pub(crate) const REQUIRED_KERNELS: [&str; 2] = [KERNEL, SPK_LSTM_CLEAR];
 
 /// Threads per block, `THREADS` in the kernel crate's `lstm` area
