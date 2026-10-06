@@ -1,0 +1,170 @@
+{
+  "schema": 1,
+  "audited_base_commit": "8952f419928d91ecb67fadd8715b3ef19ede63fe",
+  "collection_diff_end_commit": "cc9b225e7d66ef3bd2f486a700e478d1c66b329f",
+  "gate_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "collection_diff_sha256": "bd855bdc418c52795e03a579e62ccf9ef1f183c18a651dab287695006a266a7d",
+  "changed_collection_injection_files": [
+    "Cargo.toml",
+    "scripts/cuda/qualify/artifacts.py",
+    "scripts/cuda/qualify/qualify.py",
+    "scripts/cuda/qualify/records.py",
+    "scripts/cuda/setup-gpu-box.sh",
+    "src/inference/cuda.rs",
+    "src/inference/cuda/candidate.rs",
+    "src/inference/cuda/candidate/conv.rs",
+    "src/inference/cuda/candidate/lstm.rs",
+    "src/inference/cuda/candidate/sinc.rs",
+    "src/inference/cuda/candidate_test_support.rs",
+    "src/inference/cuda/candidate_tests.rs",
+    "src/inference/cuda/embedding.rs",
+    "src/inference/cuda/embedding/dispatch.rs",
+    "src/inference/cuda/embedding/kernels.rs",
+    "src/inference/cuda/fbank.rs",
+    "src/inference/cuda/implementation.rs",
+    "src/inference/cuda/implementation/overrides.rs",
+    "src/inference/cuda/implementation/tests.rs",
+    "src/inference/cuda/kernel_inventory_tests.rs",
+    "src/inference/cuda/kernels.rs",
+    "src/inference/cuda/probe.rs",
+    "src/inference/cuda/ptx/embedding.manifest",
+    "src/inference/cuda/ptx/fbank.manifest",
+    "src/inference/cuda/ptx/lstm.manifest",
+    "src/inference/cuda/ptx/probe.manifest",
+    "src/inference/cuda/ptx/resnet.manifest",
+    "src/inference/cuda/ptx/segmentation.manifest",
+    "src/inference/cuda/ptx/sincnet.manifest",
+    "src/inference/cuda/runtime.rs",
+    "src/inference/cuda/segmentation.rs",
+    "src/inference/cuda/segmentation/dispatch.rs",
+    "src/inference/cuda/segmentation/kernels.rs",
+    "src/inference/cuda/test_support.rs",
+    "tests/cuda_qualify/device/controls.sm75.ptx",
+    "tests/cuda_qualify/embedding.rs",
+    "tests/cuda_qualify/lock.rs",
+    "tests/cuda_qualify/paired.rs",
+    "tests/cuda_qualify/probe.rs",
+    "tests/cuda_qualify/segmentation.rs",
+    "tests/cuda_qualify/test_gates.py",
+    "tests/cuda_qualify/test_processes.py",
+    "tests/cuda_qualify/test_records.py",
+    "tests/cuda_qualify/test_target.py",
+    "xtask/src/cli.rs",
+    "xtask/src/commands/cuda_kernels.rs",
+    "xtask/src/commands/cuda_kernels/ptx_lint.rs",
+    "xtask/tests/fixtures/ptx/shared-truncation-lstm.ptx",
+    "xtask/tests/fixtures/ptx/shared-truncation-safe.ptx"
+  ],
+  "controls": [
+    {
+      "area": "lstm",
+      "device": "12.0",
+      "raw_sha256": "ea08d9b77c53688cf89269b21810ad36786e6fc83d3ba1ecaffeab39c218656d"
+    },
+    {
+      "area": "resnet",
+      "device": "12.0",
+      "raw_sha256": "470809f00e0db34b9365df876cf22aa0633f936271c50c81d8e7dd4e23c4315c"
+    },
+    {
+      "area": "sincnet",
+      "device": "8.9",
+      "raw_sha256": "12269a5536f6bf016da00a2a2743633a178d1aa293ab324bead4c11ee13945b5"
+    }
+  ],
+  "mutants": [
+    {
+      "area": "resnet",
+      "kind": "Lookup",
+      "box": "5060",
+      "changed_path_coverage": "Host weight snapshots and case-bound secret f64 truth in embedding.rs and probe.rs"
+    },
+    {
+      "area": "lstm",
+      "kind": "StageAccuracy",
+      "box": "4060",
+      "changed_path_coverage": "TF32 stage truth, cloned LSTM weights, and host-prepared perturbation draws"
+    },
+    {
+      "area": "lstm",
+      "kind": "Precision",
+      "box": "4060",
+      "changed_path_coverage": "Input restoration across isolated LSTM plan selection and unlocked truth work"
+    },
+    {
+      "area": "sincnet",
+      "kind": "Shape",
+      "box": "4060",
+      "changed_path_coverage": "Batch coverage and direct isolated SincNet selection through the shared plan owner"
+    },
+    {
+      "area": "sincnet",
+      "kind": "Tail",
+      "box": "4060",
+      "changed_path_coverage": "Partial-batch output path through Sinc producer and locked pool consumer"
+    },
+    {
+      "area": "lstm",
+      "kind": "UninitShared",
+      "box": "4060",
+      "changed_path_coverage": "Recorded PTX identity and shared-load inspection after the artifact evidence change"
+    },
+    {
+      "area": "lstm",
+      "kind": "Atomic",
+      "box": "4060",
+      "changed_path_coverage": "Launched entry/atomic evidence with changed module metadata and GPU ownership"
+    },
+    {
+      "area": "lstm",
+      "kind": "Fallback",
+      "box": "4060",
+      "changed_path_coverage": "Nested Library-call evidence in the changed segmentation selection owner"
+    },
+    {
+      "area": "sincnet",
+      "kind": "Unlisted",
+      "box": "4060",
+      "changed_path_coverage": "Artifact-aware loaded-entry allow-list and unrecorded launch evidence"
+    },
+    {
+      "area": "sincnet",
+      "kind": "Unscoped",
+      "box": "4060",
+      "changed_path_coverage": "Scope/launch evidence across the changed module cache and cleanup owner"
+    },
+    {
+      "area": "lstm",
+      "kind": "PhaseCheat",
+      "box": "4060",
+      "changed_path_coverage": "Numeric-to-timing output identity after case-bound CPU truth and lock release"
+    },
+    {
+      "area": "sincnet",
+      "kind": "Slow",
+      "box": "4060",
+      "changed_path_coverage": "Separate-process operator timing with the changed selection and lock owners"
+    },
+    {
+      "area": "sincnet",
+      "kind": "StageSlow",
+      "box": "4060",
+      "changed_path_coverage": "Same-process paired replay and GPU-state cleanup after CPU lock release"
+    }
+  ],
+  "matched_pairs": [
+    {
+      "area": "resnet",
+      "box": "5060",
+      "fault_case": "fp32/first/b1/stage"
+    },
+    {
+      "area": "sincnet",
+      "box": "5060",
+      "fault_case": "fp32/mixed/b32/stage"
+    }
+  ],
+  "final_phase2c_seal": "Run all 39 standard mutants at the end of phase 2c-2; do not infer area-specific qualification from this reduced infrastructure proof",
+  "collection_diff_file": "phase2c1-collection-injection.diff.gz",
+  "collection_diff_archive_sha256": "f98de8864268e63617dc213f7ec6894e84366b4716a172b3c53d4ec34dac2fc0"
+}

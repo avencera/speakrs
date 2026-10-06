@@ -586,6 +586,25 @@ not run the sanitizer tools.
 
 ## Mutation proof
 
+### Phase 2c infrastructure proof and final seal
+
+Phase 2c-1 requires three full Library controls (one per area), one live mutant
+per each of the 13 standard mutant kinds on the area with the most changed
+collection or injection path, and matched ResNet and SincNet StageTail pairs.
+Record each actual device and compiled lock. The exact unchanged gate-decision
+code and every changed collection/injection path are bound in
+`tests/cuda_qualify/PHASE2C1_CARRY_FORWARD.md` and its evidence files. This reduced
+infrastructure proof grants no new production acceptance. If any mutant fails to
+reach its intended gate, stop; do not change its gate, bounds, samples or seeds.
+
+Run all 39 standard mutants at the final phase 2c seal, after phase 2c-2. That
+full area matrix is required even when this infrastructure subset passes. Keep
+each completed run and its verification receipt, copy it off the GPU box at once,
+and skip only verified matching completed runs after a restart. Matched controls
+and faults must run on the same device in the same quiet window. Legacy StageTail
+production fixtures remain cc 12.0 PTX-JIT only.
+
+
 A mutant is caught only by its exact tier-stripped check name and reason:
 
 | Mutant | Planted defect | Caught by |
