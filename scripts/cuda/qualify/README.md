@@ -24,8 +24,10 @@ Implementations are `Library` (the sanity control, never a replacement), `Oxide`
 registered candidate) and the thirteen planted faults listed under
 [Mutation proof](#mutation-proof). Do not wrap the command in `flock`: the harness takes
 `/workspace/gpu-bench.lock` for every GPU child process and refuses unlocked ones, so
-an outer `flock` on the same file would deadlock. Each GPU process holds the lock for
-one phase and, for numeric, timing and paired replay, one math mode, so kernel workers interleave.
+an outer `flock` on the same file would deadlock. Numeric children own the lock.
+They release it for CPU f64 truth and TF32 draw preparation, then take it again for
+GPU replay. Other phases and tool launches use the parent lock. Each timing and
+paired process covers one math mode, so kernel workers can interleave.
 
 Exit codes: 0 pass, 1 rejected, 2 refused invocation, 3 blocked (the evidence cannot
 decide), 4 a mutant escaped its intended check. `cargo xtask` fails on anything but 0.
@@ -475,25 +477,66 @@ algorithm's gate. The capture and soundness tests need the qualification environ
 and GPU lock. The ignored `f64_reference_matches_fixture_rounding` and
 `conv_f64_matches_fixture_rounding` tests use fixture intermediates and run on CPU.
 
-### Loaded PTX
+### Loaded artifacts and embedded PTX
 
-The allow-list is built from the exact bytes the locked loader handed to the driver.
-Each loaded module must match a committed file under `src/inference/cuda/ptx/` or
-`tests/cuda_qualify/device/` byte for byte and by area name, and its parsed entries
-must match. Any PTX in a subdirectory of `ptx/` is refused. The result records the
-module hashes, actual PTX tier per area, and the areas loaded by each numeric,
-timing, paired and profile process. It also records the device name, compute
-capability, SM count, driver release and driver API version, cuDNN and cuBLAS
-versions, and `cuda_version` from `cublasGetCudartVersion` (the CUDA runtime version
-used to build that library, not the installed nvcc version). During timing and paired
-replay, a joined sampler observes the SM clock. Each process records minimum and
-maximum MHz and sample count; the tier result records the combined clock range.
-The sampler and its child processes end before the GPU lock is released.
-Non-candidate modules must have identical bytes in every process. Each candidate
-area must have identical bytes in every process that loads it. A process that runs
-at least one declared triple must load its candidate area. A process that runs no
-declared triple must load no candidate area. Thus FP32-only coverage loads candidate
-PTX in FP32 processes, but not in TF32 processes.
+`cargo xtask cuda-kernels build-cubins` builds each committed PTX tier for each
+exact architecture in 75, 80, 86, 89, 90 and 120 at or above that tier. The manifest
+pins the cubin hash, its source PTX hash, and the ptxas version and flags.
+`cargo xtask cuda-kernels check` checks these pins and the feature embed masks.
+`check --rebuild` also checks byte-identical PTX and cubin builds with the pinned
+CUDA 13.0.88 toolchain. A CPU test checks each host plan's possible kernel names
+against every PTX tier that it can use. The PTX lint rejects generic shared
+addresses from `cvta.shared.u64` that reach `cvt.u32.u64`, including through
+64-bit add, subtract and move instructions.
+
+The loader first selects the PTX tier for each area. It tries only the cubin for
+the device's exact compute capability. A missing cubin or a driver load failure
+uses PTX JIT instead. It never loads a cubin for another capability. The typed
+loaded artifact is `Cubin { arch, sha256 }` or `PtxJit { sha256 }`.
+`SPEAKRS_CUDA_FORCE_PTX_JIT=1` selects JIT for a diagnostic process. The harness
+sets this only for the explicit legacy StageTail fixture. Other proof runs prefer
+exact cubins. Records state the policy and the artifact that the driver accepted.
+
+The selection key includes the tier, exact device capability and loaded artifact.
+A cubin-qualified table entry cannot match JIT, another cubin architecture, or
+other bytes. A mismatch uses Library where allowed, or the typed driver-only
+error. The legacy PR #36 entries remain explicit sm75, cc 12.0, PTX-JIT entries.
+They do not authorize the new cubins.
+
+The allow-list uses the actual PTX text embedded in the running binary, not a
+source-tree hash assigned after the run. Each module records
+`embedded_ptx_sha256`. An accepting verdict requires it to match the pinned PTX
+file, the module hash, and the cubin's source PTX hash where applicable. A stale
+binary cannot accept. Parsed entries must also match the PTX. PTX in a
+subdirectory of `ptx/` is refused. Cubin records include exact architecture, actual
+binary hash, source PTX hash, and embedded ptxas version and flags.
+
+Schema-5 records include the device name, exact capability, positive SM count and
+L2 size, driver release and API version, cuDNN and cuBLAS versions, and
+`cuda_version` from `cublasGetCudartVersion`. Device name, SM count and L2 are
+physical-device evidence, not extra selection-key fields. All processes must
+report consistent device and artifact data. Timing and paired replay use a joined
+SM clock sampler. The sampler and its child processes stop before unlock.
+
+### CPU work and GPU ownership
+
+GPU preparation produces the exact FP32 front-end inputs and copies the operator
+weights under the lock. Host-only snapshots then compute f64 truth without the
+lock. Each TF32 draw uses the same seed, layer-name hash, per-index integer hash
+and one-ULP rule as before. The CPU prepares the draw choices without the lock;
+the GPU applies them after the lock is taken again. Gates, thresholds, samples
+and seeds are unchanged. A context-wide synchronization precedes each CPU section.
+A guard takes the lock again before normal return or panic unwind, so CUDA object
+drops remain locked. Records state lock ownership and each unlocked CPU section.
+
+### Override types
+
+The plan types can request Library or one configuration from an enumerated set
+per area. Each custom configuration has its own pinned accuracy and deterministic
+execution evidence for an exact boundary, batch, math mode and target artifact.
+A private token prevents reuse for another configuration or tuple. These overrides
+are marked **unqualified for speed** in logs and diagnostics. This phase provides
+types and tests only; it adds no CLI or file format.
 
 ### Sanitizer
 
@@ -647,8 +690,10 @@ New records retain source-file hashes. The three older records retain a driver
 binary hash, not source hashes. Their fixed source, manifest and PTX bindings were
 copied from PR #36's acceptance manifest into the explicit locked legacy mapping.
 Both the original shared candidate-interface hash and its amended hash are reported.
-The amendment covers `PlanError`, per-tier coverage and production/stress batches,
-not candidate arithmetic. It is not GPU evidence for a changed operator. Added,
+The original amendment covers `PlanError`, per-tier coverage and production/stress
+batches. Separate fixed old/new pins cover host kernel enumeration and cubin
+manifest metadata. Each pin states the reason. Neither amendment changes candidate
+arithmetic or claims new GPU evidence. It is not GPU evidence for a changed operator. Added,
 removed or changed bound files reject. The summary retains this source evidence gap.
 
 Owners generate summaries with `records.write_summaries` from the evaluated Rust
@@ -792,8 +837,9 @@ acceptance summaries and current shipped bindings; it does not open raw records.
 Full raw-record re-derivation (`qualify.py --check-table --records <cache>`) runs on
 the GPU box at every re-lock. No record publication or download URL is required.
 
-Production tier loadability currently follows shipped PTX filenames. Matching the
-actual feature embed masks is a phase 2c-1 item, with its loader/artifact-key rewrite.
+Production loadability follows the locked `AreaPtx` feature embed masks and each
+tier feature. A PTX file on disk with no matching embed mask cannot make a table
+entry loadable. The cubin/JIT artifact must also match the qualified entry.
 The current production areas ship only sm75, so their current table proof is not
 a claim that an unembedded future variant is production-loadable.
 

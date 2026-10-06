@@ -17,6 +17,10 @@
         "inference/cuda/ptx/lstm.*",
         "inference/cuda/ptx/sincnet.*"
       ]
+    },
+    {
+      "path": "xtask/tests/fixtures/ptx",
+      "exclude": []
     }
   ],
   "files": [
@@ -26,7 +30,10 @@
     "Cargo.toml",
     "xtask/src/cli.rs",
     "xtask/src/commands.rs",
-    "xtask/src/commands/cuda_qualify.rs"
+    "xtask/src/commands/cuda_qualify.rs",
+    "scripts/cuda/setup-gpu-box.sh",
+    "xtask/src/commands/cuda_kernels.rs",
+    "xtask/src/commands/cuda_kernels/ptx_lint.rs"
   ],
   "external_assets": {
     "tests/cuda_qualify/baselines/lstm-source-a7cd08c475bfc566819c15e8018eae8da1b44596e43b00168a1e3cfc4309a997.json": "a7cd08c475bfc566819c15e8018eae8da1b44596e43b00168a1e3cfc4309a997",
