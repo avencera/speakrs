@@ -129,9 +129,8 @@ impl CudaFbank {
                 "fbank.dft",
                 batch,
                 math,
-                super::implementation::Target {
+                super::implementation::AreaTarget {
                     tier: kernels.tier(),
-                    artifact: kernels.artifact(),
                     device: runtime.compute_capability(),
                 },
                 super::CudaLibrary::Cublas,

@@ -368,16 +368,13 @@ impl CudaSegmentation {
     ) -> Result<(), CudaError> {
         let index = self.workspace_index(runtime, batch, samples)?;
         let shape = self.workspaces[index].shape;
-        let selected = crate::inference::cuda::implementation::qualification_selection(
-            choice,
+        let selected = crate::inference::cuda::implementation::plan_selection(
+            runtime,
             crate::inference::cuda::KernelModule::Sincnet,
             SINC_LAYER,
             batch,
             self.network.options.math,
-            crate::inference::cuda::implementation::Target::for_area(
-                runtime,
-                crate::inference::cuda::KernelModule::Sincnet,
-            )?,
+            Some(choice),
         )?;
         let plan = self.network.plan_sinc(runtime, shape, selected)?;
         let workspace = &mut self.workspaces[index];
@@ -403,16 +400,13 @@ impl CudaSegmentation {
     ) -> Result<(), CudaError> {
         let index = self.workspace_index(runtime, shape[0], shape[1])?;
         let shape = self.workspaces[index].shape;
-        let selected = crate::inference::cuda::implementation::qualification_selection(
-            choice,
+        let selected = crate::inference::cuda::implementation::plan_selection(
+            runtime,
             crate::inference::cuda::KernelModule::Lstm,
             LSTM_LAYER,
             shape.batch,
             self.network.options.math,
-            crate::inference::cuda::implementation::Target::for_area(
-                runtime,
-                crate::inference::cuda::KernelModule::Lstm,
-            )?,
+            Some(choice),
         )?;
         let plan = self.network.plan_lstm(runtime, shape, selected)?;
         let workspace = &mut self.workspaces[index];

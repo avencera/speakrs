@@ -34,6 +34,23 @@ impl Target {
     }
 }
 
+/// An embedded variant and device, without claiming that an artifact was loaded
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AreaTarget {
+    pub tier: PtxTier,
+    pub device: ComputeCapability,
+}
+
+impl AreaTarget {
+    /// Resolve Library diagnostics without loading an unused candidate module
+    pub(crate) fn for_area(runtime: &CudaRuntime, area: KernelModule) -> Result<Self, CudaError> {
+        Ok(Self {
+            tier: runtime.area_ptx(area)?.0,
+            device: runtime.compute_capability(),
+        })
+    }
+}
+
 /// Why a candidate was selected; only production permits a device fallback
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Selection {
@@ -390,39 +407,98 @@ pub(crate) fn plan_selection(
         Choice,
     >,
 ) -> Result<Selected, CudaError> {
-    let target = Target::for_area(runtime, area)?;
-    let selected =
-        select(boundary, batch, math, target).map_err(|error| CudaError::Unsupported {
-            context: "CUDA selection",
-            reason: error.to_string(),
-        })?;
+    let request = PlanRequest::Production;
     #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
-    {
-        let choice = override_choice.unwrap_or_else(|| {
-            super::test_support::default_choice(match selected {
-                Selected::Oxide(_) => Choice::Oxide(Selection::Production),
-                _ => Choice::Library,
-            })
-        });
-        // the tail control uses real pinned plans, not the Library-backed fault seam
-        if matches!(choice, Choice::StageTail | Choice::StageTailControl) {
-            return Ok(if math == CudaMath::Fp32 {
-                selected
-            } else {
-                Selected::Library
+    let request = override_choice.map_or_else(
+        || match super::test_support::default_choice(Choice::Oxide(Selection::Production)) {
+            Choice::Oxide(Selection::Production) => request,
+            choice => PlanRequest::Qualification(choice),
+        },
+        PlanRequest::Qualification,
+    );
+    request.resolve(
+        area,
+        boundary,
+        batch,
+        math,
+        AreaTarget::for_area(runtime, area)?,
+        || Target::for_area(runtime, area),
+    )
+}
+
+/// Selection intent precedes artifact loading; only an Oxide token needs artifact identity
+#[derive(Debug, Clone, Copy)]
+enum PlanRequest {
+    Production,
+    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    Qualification(Choice),
+}
+
+impl PlanRequest {
+    fn resolve(
+        self,
+        area: KernelModule,
+        boundary: &str,
+        batch: usize,
+        math: CudaMath,
+        location: AreaTarget,
+        load: impl FnOnce() -> Result<Target, CudaError>,
+    ) -> Result<Selected, CudaError> {
+        if boundary.is_empty() || batch == 0 {
+            return Err(CudaError::Unsupported {
+                context: "CUDA selection",
+                reason: SelectionError.to_string(),
             });
         }
-        if choice == Choice::Oxide(Selection::Production) {
-            return Ok(selected);
+
+        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        if let Self::Qualification(choice) = self {
+            match choice {
+                Choice::Library => return Ok(Selected::Library),
+                Choice::Mutant(mutant) => return Ok(Selected::Mutant(mutant)),
+                Choice::StageTail | Choice::StageTailControl if math != CudaMath::Fp32 => {
+                    return Ok(Selected::Library);
+                }
+                Choice::Oxide(Selection::Explicit) => {
+                    if !candidate_coverage(area, location.tier).covers(boundary, batch, math) {
+                        return Ok(Selected::Library);
+                    }
+                    return qualification_selection(choice, area, boundary, batch, math, load()?);
+                }
+                _ => {}
+            }
         }
-        qualification_selection(choice, area, boundary, batch, math, target)
+
+        // uncovered production tuples cannot need a loaded artifact, even for diagnostics
+        let covered = PRODUCTION.iter().any(|entry| {
+            entry.area == area
+                && entry.tier == location.tier
+                && entry.devices.contains(&location.device)
+                && MODEL_BATCHES.contains(&batch)
+                && entry.coverage.covers(boundary, batch, math)
+        });
+        if !covered {
+            return Ok(Selected::Library);
+        }
+        select(boundary, batch, math, load()?).map_err(|error| CudaError::Unsupported {
+            context: "CUDA selection",
+            reason: error.to_string(),
+        })
     }
-    #[cfg(not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))))]
-    Ok(selected)
 }
 
 #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
-pub(crate) fn qualification_selection(
+fn candidate_coverage(area: KernelModule, tier: PtxTier) -> Coverage {
+    match area {
+        KernelModule::Resnet => ConvOxide::coverage(tier),
+        KernelModule::Lstm => LstmOxide::coverage(tier),
+        KernelModule::Sincnet => SincOxide::coverage(tier),
+        _ => Coverage::NONE,
+    }
+}
+
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+fn qualification_selection(
     choice: Choice,
     area: KernelModule,
     boundary: &str,
@@ -430,12 +506,7 @@ pub(crate) fn qualification_selection(
     math: CudaMath,
     target: Target,
 ) -> Result<Selected, CudaError> {
-    let coverage = match area {
-        KernelModule::Resnet => ConvOxide::coverage(target.tier),
-        KernelModule::Lstm => LstmOxide::coverage(target.tier),
-        KernelModule::Sincnet => SincOxide::coverage(target.tier),
-        _ => Coverage::NONE,
-    };
+    let coverage = candidate_coverage(area, target.tier);
     Ok(match choice {
         Choice::Oxide(selection) if coverage.covers(boundary, batch, math) => {
             Selected::Oxide(Qualified {
@@ -469,17 +540,18 @@ pub(crate) struct LibraryNeed {
     boundary: String,
     batch: usize,
     math: CudaMath,
-    target: Target,
+    target: AreaTarget,
     library: CudaLibrary,
 }
 
 impl LibraryNeed {
+    /// Describe required Library state without constructing a candidate artifact key
     pub(crate) fn new(
         area: KernelModule,
         boundary: &str,
         batch: usize,
         math: CudaMath,
-        target: Target,
+        target: AreaTarget,
         library: CudaLibrary,
     ) -> Self {
         Self {

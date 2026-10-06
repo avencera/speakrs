@@ -39,7 +39,7 @@ use self::trunk::{ConvLayer, STEM_SLOT, Trunk};
 use super::dnn::Residual;
 use super::error::{check_len, element_count};
 use super::fbank::{FBANK_FRAMES, FBANK_MEL_BINS};
-use super::implementation::{LibraryNeed, MODEL_BATCHES, Selected, Target, select};
+use super::implementation::{AreaTarget, LibraryNeed, MODEL_BATCHES, Selected, plan_selection};
 use super::{CudaError, CudaMath, CudaRuntime, DeviceTensor, PtxTier, SafetensorsFile, Sgemm};
 use super::{CudaLibrary, KernelModule};
 
@@ -119,17 +119,20 @@ impl ResNetEmbedding {
         math: CudaMath,
     ) -> Result<Self, CudaError> {
         let trunk = Trunk::load(runtime, weights, FBANK_MEL_BINS, FBANK_FRAMES)?;
-        let target = Target::for_area(runtime, KernelModule::Resnet)?;
+        let target = AreaTarget::for_area(runtime, KernelModule::Resnet)?;
         let mut needs = Vec::new();
         for batch in MODEL_BATCHES {
             for (layer, _) in trunk.layers() {
                 if matches!(
-                    select(layer.name(), batch, math, target).map_err(|error| {
-                        CudaError::Unsupported {
-                            context: "embedding selection",
-                            reason: error.to_string(),
-                        }
-                    })?,
+                    plan_selection(
+                        runtime,
+                        KernelModule::Resnet,
+                        layer.name(),
+                        batch,
+                        math,
+                        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+                        None,
+                    )?,
                     Selected::Library
                 ) {
                     needs.push(LibraryNeed::new(
@@ -147,7 +150,7 @@ impl ResNetEmbedding {
                 "resnet.seg_1",
                 batch,
                 math,
-                Target::for_area(runtime, KernelModule::Embedding)?,
+                AreaTarget::for_area(runtime, KernelModule::Embedding)?,
                 CudaLibrary::Cublas,
             ));
         }
@@ -161,7 +164,7 @@ impl ResNetEmbedding {
             "resnet.seg_1",
             1,
             math,
-            Target::for_area(runtime, KernelModule::Embedding)?,
+            AreaTarget::for_area(runtime, KernelModule::Embedding)?,
             CudaLibrary::Cublas,
         )
         .prepare(runtime)?;

@@ -2,6 +2,217 @@
 
 use super::{PRODUCTION, Selected, Target, select};
 use crate::inference::cuda::kernels::{ArtifactHash, LoadedArtifact};
+use crate::inference::cuda::{ComputeCapability, CudaMath, KernelModule, PtxTier};
+
+#[test]
+fn library_and_mutant_requests_do_not_load_candidate_artifacts() {
+    use super::{AreaTarget, Choice, PlanRequest};
+    use crate::inference::cuda::test_support::Mutant;
+    let location = AreaTarget {
+        tier: PtxTier::Sm75,
+        device: ComputeCapability::new(12, 0),
+    };
+    for (area, boundary) in [
+        (KernelModule::Resnet, "resnet.layer1.0.conv1"),
+        (KernelModule::Lstm, "lstm.stack"),
+        (KernelModule::Sincnet, "sincnet.conv0.abs_pool"),
+    ] {
+        for choice in [Choice::Library, Choice::Mutant(Mutant::Precision)] {
+            let selected = PlanRequest::Qualification(choice)
+                .resolve(area, boundary, 1, CudaMath::Fp32, location, || {
+                    panic!("Library-backed request must not load a candidate module")
+                })
+                .unwrap();
+            match (choice, selected) {
+                (Choice::Library, Selected::Library)
+                | (Choice::Mutant(Mutant::Precision), Selected::Mutant(Mutant::Precision)) => {}
+                other => panic!("wrong owner: {other:?}"),
+            }
+        }
+        assert!(
+            PlanRequest::Qualification(Choice::Library)
+                .resolve(area, "", 1, CudaMath::Fp32, location, || panic!(
+                    "invalid tuple"
+                ))
+                .is_err()
+        );
+        assert!(
+            PlanRequest::Qualification(Choice::Library)
+                .resolve(area, boundary, 0, CudaMath::Fp32, location, || panic!(
+                    "invalid tuple"
+                ))
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn uncovered_candidate_requests_do_not_load_artifacts() {
+    use super::{AreaTarget, Choice, PlanRequest, Selection};
+    let location = AreaTarget {
+        tier: PtxTier::Sm75,
+        device: ComputeCapability::new(12, 0),
+    };
+    for choice in [
+        Choice::Oxide(Selection::Explicit),
+        Choice::StageTail,
+        Choice::StageTailControl,
+    ] {
+        assert!(matches!(
+            PlanRequest::Qualification(choice)
+                .resolve(
+                    KernelModule::Lstm,
+                    "lstm.stack",
+                    1,
+                    CudaMath::Tf32,
+                    location,
+                    || panic!("uncovered request must not load an artifact")
+                )
+                .unwrap(),
+            Selected::Library
+        ));
+    }
+    for (batch, math, device) in [
+        (7, CudaMath::Fp32, ComputeCapability::new(12, 0)),
+        (1, CudaMath::Tf32, ComputeCapability::new(12, 0)),
+        (1, CudaMath::Fp32, ComputeCapability::new(8, 9)),
+    ] {
+        assert!(matches!(
+            PlanRequest::Production
+                .resolve(
+                    KernelModule::Lstm,
+                    "lstm.stack",
+                    batch,
+                    math,
+                    AreaTarget { device, ..location },
+                    || panic!("uncovered production tuple must not load an artifact")
+                )
+                .unwrap(),
+            Selected::Library
+        ));
+    }
+}
+
+#[test]
+fn covered_selection_loads_and_matches_the_actual_artifact() {
+    use super::{AreaTarget, PlanRequest};
+    use crate::inference::cuda::kernels::{ArtifactHash, LoadedArtifact};
+    let location = AreaTarget {
+        tier: PtxTier::Sm75,
+        device: ComputeCapability::new(12, 0),
+    };
+    for artifact in [
+        legacy_artifact("lstm"),
+        LoadedArtifact::Cubin {
+            arch: location.device,
+            sha256: ArtifactHash::from_hex(
+                "089961e8e8e2f97fae86947e1c5cd14ef422c4de6141b03ce729ad9949009f6e",
+            ),
+        },
+    ] {
+        let mut loads = 0;
+        let selected = PlanRequest::Production
+            .resolve(
+                KernelModule::Lstm,
+                "lstm.stack",
+                1,
+                CudaMath::Fp32,
+                location,
+                || {
+                    loads += 1;
+                    Ok(Target {
+                        tier: location.tier,
+                        device: location.device,
+                        artifact,
+                    })
+                },
+            )
+            .unwrap();
+        assert_eq!(loads, 1);
+        match artifact {
+            LoadedArtifact::PtxJit { .. } => {
+                let Selected::Oxide(token) = selected else {
+                    panic!("legacy JIT pin")
+                };
+                assert_eq!(token.target.artifact, artifact);
+            }
+            LoadedArtifact::Cubin { .. } => assert!(matches!(selected, Selected::Library)),
+        }
+    }
+}
+
+#[test]
+fn explicit_candidate_keeps_its_loaded_identity_and_library_errors_need_no_artifact() {
+    use super::{AreaTarget, Choice, LibraryNeed, PlanRequest, Selection};
+    use crate::inference::cuda::{CudaError, CudaLibrary};
+    let location = AreaTarget {
+        tier: PtxTier::Sm75,
+        device: ComputeCapability::new(8, 9),
+    };
+    let artifact = LoadedArtifact::Cubin {
+        arch: location.device,
+        sha256: ArtifactHash::from_hex(
+            "5b8e7918ea9d0fbfd556a3e08c21b841f70355ab7743779f483ec59289162c21",
+        ),
+    };
+    let mut loads = 0;
+    let selected = PlanRequest::Qualification(Choice::Oxide(Selection::Explicit))
+        .resolve(
+            KernelModule::Lstm,
+            "lstm.stack",
+            1,
+            CudaMath::Fp32,
+            location,
+            || {
+                loads += 1;
+                Ok(Target {
+                    tier: location.tier,
+                    device: location.device,
+                    artifact,
+                })
+            },
+        )
+        .unwrap();
+    assert_eq!(loads, 1);
+    let Selected::Oxide(token) = selected else {
+        panic!("covered explicit request")
+    };
+    assert_eq!(token.target.artifact, artifact);
+    assert_eq!(token.selection, Selection::Explicit);
+    let error = LibraryNeed::new(
+        KernelModule::Lstm,
+        "lstm.stack",
+        1,
+        CudaMath::Fp32,
+        location,
+        CudaLibrary::Cudnn,
+    )
+    .error();
+    let CudaError::NotDriverOnly {
+        area,
+        boundary,
+        batch,
+        math,
+        tier,
+        device,
+        library,
+    } = error
+    else {
+        panic!("typed Library refusal")
+    };
+    assert_eq!(
+        (area, boundary.as_str(), batch, math, tier, device, library),
+        (
+            "lstm",
+            "lstm.stack",
+            1,
+            CudaMath::Fp32,
+            location.tier,
+            location.device,
+            CudaLibrary::Cudnn
+        )
+    );
+}
 
 fn legacy_artifact(area: &str) -> LoadedArtifact {
     let ptx = match area {
@@ -13,9 +224,6 @@ fn legacy_artifact(area: &str) -> LoadedArtifact {
         sha256: ArtifactHash::of(ptx.as_bytes()),
     }
 }
-
-use crate::inference::cuda::CudaMath;
-use crate::inference::cuda::{ComputeCapability, PtxTier};
 
 #[test]
 fn production_selects_exactly_the_qualified_triples() {

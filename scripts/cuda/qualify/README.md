@@ -503,6 +503,12 @@ other bytes. A mismatch uses Library where allowed, or the typed driver-only
 error. The legacy PR #36 entries remain explicit sm75, cc 12.0, PTX-JIT entries.
 They do not authorize the new cubins.
 
+Selection intent and coverage come before artifact loading. Library controls,
+Library-backed faults, and uncovered tuples do not load a candidate module for
+selection or diagnostics. Library diagnostics use only the embedded tier and
+device context. A covered Oxide request loads its artifact before it can receive
+a qualification token. The exact candidate-area loading check remains required.
+
 The allow-list uses the actual PTX text embedded in the running binary, not a
 source-tree hash assigned after the run. Each module records
 `embedded_ptx_sha256`. An accepting verdict requires it to match the pinned PTX
