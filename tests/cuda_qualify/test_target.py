@@ -13,13 +13,14 @@ qualify = importlib.import_module("qualify")
 
 class TargetTier(unittest.TestCase):
     def process(self):
-        return {
+        process: dict = {
             "phase": "timing",
             "device_sm": "12.0",
             "device": {
                 "name": "RTX test",
                 "compute_capability": "12.0",
                 "sm_count": 36,
+                "l2_bytes": 33554432,
                 "driver_version": "570.0",
                 "driver_api_version": 12080,
                 "cuda_version": 12080,
@@ -34,6 +35,11 @@ class TargetTier(unittest.TestCase):
             ],
             "observed_sm_clock": {"samples": 4, "min_mhz": 2400, "max_mhz": 2700},
         }
+        process["loaded_modules"] = [
+            dict(module, artifact={"kind": "PtxJit", "sha256": "a" * 64})
+            for module in process["loaded_modules"]
+        ]
+        return process
 
     def test_candidate_tier_is_exact_but_other_areas_retain_lower_tiers(self):
         process = self.process()

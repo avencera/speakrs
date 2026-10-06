@@ -14,26 +14,55 @@
         ]
       ],
       "area": "lstm",
+      "artifact": {
+        "kind": "PtxJit",
+        "sha256": "72945743a3c1b915c05d8ea21b438dfd860fa9487401c447fb24fd48802916fa"
+      },
       "coverage_sha256": "202f2629dcc8400695eee43c7915ff5baa63fc5e8cf4472304570675eef34b25",
       "der": "8066268031afba058d93e305206d5b8225e40c6ab2ebb1052874d607e055646f",
+      "device": {
+        "compute_capability": "12.0",
+        "legacy_driver_sha256": "cd560e9db84633ac999a9e5d55bbf7c4a0326384088f78f043de00a7651b52a8",
+        "name": "NVIDIA GeForce RTX 5070 Ti"
+      },
       "device_capability": "12.0",
       "device_name": "NVIDIA GeForce RTX 5070 Ti",
       "files": {
         "host_sources": {
-          "src/inference/cuda/candidate.rs": "7ebccfee61ad72ad617addc5d7d32a78dc4895afbc4582383bdb2b1cc07fd2ee",
-          "src/inference/cuda/candidate/lstm.rs": "5306b541515451b80eeacc43bb922d68dec4601dcc9582292f4074ee91e0439a",
+          "src/inference/cuda/candidate.rs": "f3eebb5a137ae963d0d8258b13f99d4aa01786467eb9e4b73af6a3e5e11a5343",
+          "src/inference/cuda/candidate/lstm.rs": "cb62ccec56e3549db8b25ecd5c33c8a63adfbfefe5153329fc69d401f1c6b731",
           "src/inference/cuda/candidate/lstm/layout.rs": "478adba61b4c5f2b21d22147b7f0e73768164831559f711a4d8653f04de77e8c"
         },
         "kernel_sources": {
           "crates/speakrs-cuda-kernels/src/lstm.rs": "f37dc36973e1a751926bd36c110d2ac4849a3b94b43950ace81a19b6d7b0724b"
         },
         "manifests": {
-          "src/inference/cuda/ptx/lstm.manifest": "9346034eef96b3e54d679fcb2a721bf72437016c89505064276dcfb2af22f43b"
+          "src/inference/cuda/ptx/lstm.manifest": "09e6f3772953d81c57284baf88db917aea0a637e720b9a965e078ed0d634c3a4"
         },
         "ptx": {
           "src/inference/cuda/ptx/lstm.sm75.ptx": "72945743a3c1b915c05d8ea21b438dfd860fa9487401c447fb24fd48802916fa"
         }
       },
+      "infrastructure_amendments": [
+        {
+          "acceptance_sha256": "7ebccfee61ad72ad617addc5d7d32a78dc4895afbc4582383bdb2b1cc07fd2ee",
+          "infrastructure_sha256": "f3eebb5a137ae963d0d8258b13f99d4aa01786467eb9e4b73af6a3e5e11a5343",
+          "path": "src/inference/cuda/candidate.rs",
+          "reason": "Kernel inventory exposes the existing host choices to the locked entry test; no algorithm changes"
+        },
+        {
+          "acceptance_sha256": "5306b541515451b80eeacc43bb922d68dec4601dcc9582292f4074ee91e0439a",
+          "infrastructure_sha256": "cb62ccec56e3549db8b25ecd5c33c8a63adfbfefe5153329fc69d401f1c6b731",
+          "path": "src/inference/cuda/candidate/lstm.rs",
+          "reason": "Kernel inventory exposes the existing host choices to the locked entry test; no algorithm changes"
+        },
+        {
+          "acceptance_sha256": "9346034eef96b3e54d679fcb2a721bf72437016c89505064276dcfb2af22f43b",
+          "infrastructure_sha256": "09e6f3772953d81c57284baf88db917aea0a637e720b9a965e078ed0d634c3a4",
+          "path": "src/inference/cuda/ptx/lstm.manifest",
+          "reason": "Exact-architecture cubin build pins extend the PTX manifest; PTX bytes are unchanged"
+        }
+      ],
       "legacy": true,
       "lock_digest": "4bb7818f209cad9a3d841e3a71e0d9abee46f419479aeb9bf07ceaec277dfdf9",
       "raw_record_reason": "3 checks cannot be decided: ['speed:fp32/first/b1/stage', 'speed:fp32/last/b1/stage', 'speed:fp32/mixed/b32/stage']",
@@ -385,25 +414,54 @@
         ]
       ],
       "area": "resnet",
+      "artifact": {
+        "kind": "PtxJit",
+        "sha256": "dd6449c0129f9a03bf691c0338611b50b651ab714d5803caedea87de3c72b6b7"
+      },
       "coverage_sha256": "bb77656606952f05325946d17026dd29b7871d8b3519fa03dd65b0bd889765ca",
       "der": "8066268031afba058d93e305206d5b8225e40c6ab2ebb1052874d607e055646f",
+      "device": {
+        "compute_capability": "12.0",
+        "legacy_driver_sha256": "b63503edaf98c40040cf82c09d0533667ed347220139218a94fcf8815f881e2f",
+        "name": "NVIDIA GeForce RTX 5070 Ti"
+      },
       "device_capability": "12.0",
       "device_name": "NVIDIA GeForce RTX 5070 Ti",
       "files": {
         "host_sources": {
-          "src/inference/cuda/candidate.rs": "7ebccfee61ad72ad617addc5d7d32a78dc4895afbc4582383bdb2b1cc07fd2ee",
-          "src/inference/cuda/candidate/conv.rs": "b4755e8bdf919edd39d2da5e632da7af5a52fd48f3852bd17968cc29be6310a8"
+          "src/inference/cuda/candidate.rs": "f3eebb5a137ae963d0d8258b13f99d4aa01786467eb9e4b73af6a3e5e11a5343",
+          "src/inference/cuda/candidate/conv.rs": "0e9bc602a618dd1202df9e7cfc566461f6537c474bb2759e099c0c46165e8506"
         },
         "kernel_sources": {
           "crates/speakrs-cuda-kernels/src/resnet.rs": "9f2b5fd4c5c88236aad9829c8ef48c1c7b1b55169a8d82228edbd622c8184122"
         },
         "manifests": {
-          "src/inference/cuda/ptx/resnet.manifest": "0d9a2c625742b38f5bdb1fccb4a5465b45efb9c83830b1d1e5b51077ae574d1e"
+          "src/inference/cuda/ptx/resnet.manifest": "734d43a71f6958fce6cdac766723e4ffba6b32c584e2ebf5accfbdfafd019031"
         },
         "ptx": {
           "src/inference/cuda/ptx/resnet.sm75.ptx": "dd6449c0129f9a03bf691c0338611b50b651ab714d5803caedea87de3c72b6b7"
         }
       },
+      "infrastructure_amendments": [
+        {
+          "acceptance_sha256": "7ebccfee61ad72ad617addc5d7d32a78dc4895afbc4582383bdb2b1cc07fd2ee",
+          "infrastructure_sha256": "f3eebb5a137ae963d0d8258b13f99d4aa01786467eb9e4b73af6a3e5e11a5343",
+          "path": "src/inference/cuda/candidate.rs",
+          "reason": "Kernel inventory exposes the existing host choices to the locked entry test; no algorithm changes"
+        },
+        {
+          "acceptance_sha256": "b4755e8bdf919edd39d2da5e632da7af5a52fd48f3852bd17968cc29be6310a8",
+          "infrastructure_sha256": "0e9bc602a618dd1202df9e7cfc566461f6537c474bb2759e099c0c46165e8506",
+          "path": "src/inference/cuda/candidate/conv.rs",
+          "reason": "Kernel inventory exposes the existing host choices to the locked entry test; no algorithm changes"
+        },
+        {
+          "acceptance_sha256": "0d9a2c625742b38f5bdb1fccb4a5465b45efb9c83830b1d1e5b51077ae574d1e",
+          "infrastructure_sha256": "734d43a71f6958fce6cdac766723e4ffba6b32c584e2ebf5accfbdfafd019031",
+          "path": "src/inference/cuda/ptx/resnet.manifest",
+          "reason": "Exact-architecture cubin build pins extend the PTX manifest; PTX bytes are unchanged"
+        }
+      ],
       "legacy": true,
       "lock_digest": "368389d213c1c9c3ae32b0c9375d558efbd1d88f71eec063e67b8f14163bcb70",
       "raw_record_reason": "20 checks cannot be decided: ['speed:fp32/first/b1/resnet.layer1.1.conv1', 'speed:fp32/first/b1/resnet.layer1.2.conv1', 'speed:fp32/first/b1/resnet.layer2.2.conv1', 'speed:fp32/first/b1/resnet.layer2.3.conv1', 'speed:fp32/first/b1/stage', 'speed:fp32/last/b1/resnet.layer1.0.conv2']",
@@ -1112,25 +1170,54 @@
         ]
       ],
       "area": "sincnet",
+      "artifact": {
+        "kind": "PtxJit",
+        "sha256": "967bc6893f80da84d8d4d288f2cf1ca3336ca09c4386495cab722beb0ac87247"
+      },
       "coverage_sha256": "a8ac0fba42ff3351659f473397887a1156abe5cd23c8e00972d14cf98dbdb859",
       "der": "8066268031afba058d93e305206d5b8225e40c6ab2ebb1052874d607e055646f",
+      "device": {
+        "compute_capability": "12.0",
+        "legacy_driver_sha256": "2b7d53c10d790aca72744eb46dfa417ea4a4740dda682b8495d234234e326b0d",
+        "name": "NVIDIA GeForce RTX 5070 Ti"
+      },
       "device_capability": "12.0",
       "device_name": "NVIDIA GeForce RTX 5070 Ti",
       "files": {
         "host_sources": {
-          "src/inference/cuda/candidate.rs": "7ebccfee61ad72ad617addc5d7d32a78dc4895afbc4582383bdb2b1cc07fd2ee",
-          "src/inference/cuda/candidate/sinc.rs": "f0a95196f635a7fc25c45722f2df8f8c248d9d5e67ac2804b7cb45c0b4d91ded"
+          "src/inference/cuda/candidate.rs": "f3eebb5a137ae963d0d8258b13f99d4aa01786467eb9e4b73af6a3e5e11a5343",
+          "src/inference/cuda/candidate/sinc.rs": "96dac61ad53f015646b391a18febe024e5d2706c25075a9767caa8b5cd976d7e"
         },
         "kernel_sources": {
           "crates/speakrs-cuda-kernels/src/sincnet.rs": "600f1c3688e073e13b65a36b0fbe4917dde498218efba8c61fca912e6f9d6920"
         },
         "manifests": {
-          "src/inference/cuda/ptx/sincnet.manifest": "9b2eb3c3db1d60ddadf364c1eea8ff79ec23e5d368cb13ea4037253412bf6f39"
+          "src/inference/cuda/ptx/sincnet.manifest": "09a4a44ef930dee6fee351fe35fe6451cc316bf08da0bdf843bbb9f785531496"
         },
         "ptx": {
           "src/inference/cuda/ptx/sincnet.sm75.ptx": "967bc6893f80da84d8d4d288f2cf1ca3336ca09c4386495cab722beb0ac87247"
         }
       },
+      "infrastructure_amendments": [
+        {
+          "acceptance_sha256": "7ebccfee61ad72ad617addc5d7d32a78dc4895afbc4582383bdb2b1cc07fd2ee",
+          "infrastructure_sha256": "f3eebb5a137ae963d0d8258b13f99d4aa01786467eb9e4b73af6a3e5e11a5343",
+          "path": "src/inference/cuda/candidate.rs",
+          "reason": "Kernel inventory exposes the existing host choices to the locked entry test; no algorithm changes"
+        },
+        {
+          "acceptance_sha256": "f0a95196f635a7fc25c45722f2df8f8c248d9d5e67ac2804b7cb45c0b4d91ded",
+          "infrastructure_sha256": "96dac61ad53f015646b391a18febe024e5d2706c25075a9767caa8b5cd976d7e",
+          "path": "src/inference/cuda/candidate/sinc.rs",
+          "reason": "Kernel inventory exposes the existing host choices to the locked entry test; no algorithm changes"
+        },
+        {
+          "acceptance_sha256": "9b2eb3c3db1d60ddadf364c1eea8ff79ec23e5d368cb13ea4037253412bf6f39",
+          "infrastructure_sha256": "09a4a44ef930dee6fee351fe35fe6451cc316bf08da0bdf843bbb9f785531496",
+          "path": "src/inference/cuda/ptx/sincnet.manifest",
+          "reason": "Exact-architecture cubin build pins extend the PTX manifest; PTX bytes are unchanged"
+        }
+      ],
       "legacy": true,
       "lock_digest": "368389d213c1c9c3ae32b0c9375d558efbd1d88f71eec063e67b8f14163bcb70",
       "raw_record_reason": "all required checks passed",

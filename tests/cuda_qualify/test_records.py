@@ -66,12 +66,20 @@ class RecordsFixture(unittest.TestCase):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(name)
+        self.write_embed("sm75", ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120"])
         self.files = records.shipped_files(self.root, "lstm")
         self.child: dict = {
             "status": "passed",
             "checks": [{"check": "layer:fp32/lstm.stack", "passed": True}],
             "requested_tier": "sm75",
-            "device": {"compute_capability": "12.0", "name": "Fixture GPU"},
+            "device": {
+                "compute_capability": "12.0",
+                "name": "Fixture GPU",
+                "sm_count": 36,
+                "l2_bytes": 33554432,
+                "driver_version": "580.0",
+                "driver_api_version": 13000,
+            },
             "accepted_tuples": [["lstm.stack", 1, "fp32"]],
             "coverage_declared": {"triples": [["lstm.stack", 1, "fp32"]]},
             "code_sha256": {
@@ -93,6 +101,11 @@ class RecordsFixture(unittest.TestCase):
                 ]
             },
         }
+        module = self.child["loaded_ptx"]["modules"][0]
+        module.update(
+            embedded_ptx_sha256=module["sha256"],
+            artifact={"kind": "PtxJit", "sha256": module["sha256"]},
+        )
         self.child.update(
             target="lstm",
             implementation="Oxide",
@@ -105,7 +118,7 @@ class RecordsFixture(unittest.TestCase):
             for name in sorted(records.required_checks("lstm"))
         )
         self.record: dict = {
-            "schema": 4,
+            "schema": 5,
             "checks": [
                 {**check, "check": f"sm75/{check['check']}"}
                 for check in self.child["checks"]
@@ -121,6 +134,7 @@ class RecordsFixture(unittest.TestCase):
         complete_fixture(self.record)
         self.entry: dict = {
             "tier": "sm75",
+            "artifact": copy.deepcopy(module["artifact"]),
             "devices": ["12.0"],
             "record": self.store(self.record),
             "der": self.store({"configuration": "integrated", "der": 0.123}),
@@ -131,6 +145,18 @@ class RecordsFixture(unittest.TestCase):
             },
         }
         self.entry["candidate_coverage"] = copy.deepcopy(self.entry["coverage"])
+
+    def write_embed(self, tier, features):
+        path = self.root / "src/inference/cuda/kernels.rs"
+        previous = path.read_text() if path.exists() else ""
+        path.write_text(
+            previous
+            + "tier_ptx!("
+            + json.dumps(features)
+            + ', "ptx/lstm.'
+            + tier
+            + '", [75, 80, 86, 89, 90, 120])\n'
+        )
 
     def check(self, entries):
         return records.check_table_records(entries, self.root)
@@ -364,7 +390,7 @@ class Records(RecordsFixture):
         for name, raw in cases:
             with self.subTest(name=name), self.assertRaises(records.Rejected):
                 self.check([{**self.entry, "record": self.store(raw)}])
-        for schema in (2, 5, True):
+        for schema in (2, 6, True):
             with (
                 self.subTest(schema=schema),
                 self.assertRaisesRegex(records.Rejected, "schema"),
@@ -514,13 +540,20 @@ class Records(RecordsFixture):
                 "name": "RTX test",
                 "compute_capability": "12.0",
                 "sm_count": 36,
+                "l2_bytes": 33554432,
                 "driver_version": "570.0",
                 "driver_api_version": 12080,
                 "cuda_version": 12080,
                 "cudnn_version": 90000,
                 "cublas_version": 120800,
             },
-            "loaded_modules": [{"area": "lstm", "tier": "sm75"}],
+            "loaded_modules": [
+                {
+                    "area": "lstm",
+                    "tier": "sm75",
+                    "artifact": {"kind": "PtxJit", "sha256": "a" * 64},
+                }
+            ],
             "observed_sm_clock": {"samples": 4, "min_mhz": 2400, "max_mhz": 2700},
         }
         qualify.validate_target(process, "sm75", candidate_area="lstm")
@@ -531,7 +564,7 @@ class Records(RecordsFixture):
             del missing["device"][key]
             with (
                 self.subTest(key=key),
-                self.assertRaisesRegex(records.Rejected, "missing device"),
+                self.assertRaises(records.Rejected),
             ):
                 qualify.validate_target(missing, "sm75", candidate_area="lstm")
         process.pop("observed_sm_clock")
@@ -549,6 +582,8 @@ class Records(RecordsFixture):
                 "area": "probe",
                 "tier": tier,
                 "sha256": qualify.sha(path),
+                "embedded_ptx_sha256": qualify.sha(path),
+                "artifact": {"kind": "PtxJit", "sha256": qualify.sha(path)},
                 "entries": qualify.ENTRY.findall(path.read_text()),
             }
             allow, evidence = qualify.verify_modules([module], self.root)
@@ -590,6 +625,8 @@ class ProductionLoad(RecordsFixture):
     def variant(self, tier):
         path = self.root / f"src/inference/cuda/ptx/lstm.{tier}.ptx"
         path.write_text(f"fixture {tier}")
+        if tier in records.TIER_CAPABILITIES:
+            self.write_embed(tier, ["cuda-" + tier])
 
     def test_minimum_feature_can_select_lower_than_default(self):
         self.variant("sm80")
@@ -605,7 +642,17 @@ class ProductionLoad(RecordsFixture):
             )
             raw.update(requested_tier=tier, tiers={tier: child})
             complete_fixture(raw)
-            entry = {**self.entry, "tier": tier, "record": self.store(raw)}
+            module = child["loaded_ptx"]["modules"][0]
+            module.update(
+                embedded_ptx_sha256=module["sha256"],
+                artifact={"kind": "PtxJit", "sha256": module["sha256"]},
+            )
+            entry = {
+                **self.entry,
+                "tier": tier,
+                "artifact": module["artifact"],
+                "record": self.store(raw),
+            }
             with self.subTest(tier=tier):
                 result = self.check([entry])["entries"][0]
                 self.assertEqual(result["tier"], tier)
@@ -628,8 +675,8 @@ class ProductionLoad(RecordsFixture):
             with self.subTest(tier=tier), self.assertRaises(records.Rejected):
                 records.production_load("lstm", tier, "12.0", self.root)
         self.variant("sm86")
-        with self.assertRaisesRegex(records.Rejected, "invalid shipped"):
-            records.production_load("lstm", "sm75", "12.0", self.root)
+        # an unembedded disk file cannot change production loadability
+        records.production_load("lstm", "sm75", "12.0", self.root)
 
     def test_raw_gate_rejects_forced_tier_and_accepts_minimum_feature(self):
         self.variant("sm90")
@@ -657,6 +704,97 @@ class ProductionLoad(RecordsFixture):
         }
         with self.assertRaisesRegex(records.Rejected, "cannot realize"):
             records.check_table_records([bad], self.root)
+
+
+class ArtifactEvidence(RecordsFixture):
+    def cubin(self):
+        module = self.child["loaded_ptx"]["modules"][0]
+        path = self.root / "src/inference/cuda/ptx/lstm.sm75.sm_120.cubin"
+        path.write_bytes(b"exact device cubin fixture")
+        artifact = {
+            "kind": "Cubin",
+            "arch": "12.0",
+            "sha256": records.file_digest(path),
+            "ptx_sha256": module["sha256"],
+            "ptxas_version": "fixture ptxas",
+            "ptxas_flags": "-arch={arch} {input} -o {output}",
+        }
+        manifest = self.root / "src/inference/cuda/ptx/lstm.manifest"
+        manifest.write_text(
+            f"ptxas = {artifact['ptxas_version']}\nptxas-flags = {artifact['ptxas_flags']}\n[sm75]\nptx = {module['sha256']}\ncubin.sm_120 = {artifact['sha256']} {module['sha256']}\n"
+        )
+        self.child["code_sha256"]["src/inference/cuda/ptx/lstm.manifest"] = (
+            records.file_digest(manifest)
+        )
+        module["artifact"] = artifact
+        self.entry["artifact"] = {
+            name: artifact[name] for name in ("kind", "arch", "sha256")
+        }
+        self.entry["record"] = self.store(self.record)
+        return artifact
+
+    def test_cubin_metadata_is_pinned_and_jit_does_not_match(self):
+        artifact = self.cubin()
+        evidence = self.check([self.entry])["entries"][0]
+        self.assertEqual(evidence["artifact"], artifact)
+        self.assertEqual(evidence["device"]["sm_count"], 36)
+        self.assertEqual(evidence["device"]["l2_bytes"], 33554432)
+        self.assertEqual(evidence["device"]["driver_version"], "580.0")
+        jit = {"kind": "PtxJit", "sha256": artifact["ptx_sha256"]}
+        with self.assertRaisesRegex(records.Rejected, "selected artifact differs"):
+            self.check([{**self.entry, "artifact": jit}])
+        for field, bad in (
+            ("arch", "8.9"),
+            ("sha256", "b" * 64),
+            ("ptx_sha256", "b" * 64),
+            ("ptxas_version", "other assembler"),
+            ("ptxas_flags", "-different-flags"),
+            ("extra", "untrusted"),
+        ):
+            raw = copy.deepcopy(self.record)
+            raw["tiers"]["sm75"]["loaded_ptx"]["modules"][0]["artifact"][field] = bad
+            with self.subTest(field=field), self.assertRaises(records.Rejected):
+                self.check([{**self.entry, "record": self.store(raw)}])
+
+    def test_stale_embedded_ptx_and_missing_identity_cannot_accept(self):
+        for value in (None, "b" * 64):
+            raw = copy.deepcopy(self.record)
+            raw["tiers"]["sm75"]["loaded_ptx"]["modules"][0]["embedded_ptx_sha256"] = (
+                value
+            )
+            with self.subTest(value=value), self.assertRaises(records.Rejected):
+                self.check([{**self.entry, "record": self.store(raw)}])
+        raw = copy.deepcopy(self.record)
+        raw["schema"] = 4
+        with self.assertRaisesRegex(records.Rejected, "schema-5"):
+            self.check([{**self.entry, "record": self.store(raw)}])
+
+    def test_precise_device_and_driver_fields_fail_closed(self):
+        for field, value in (
+            ("name", ""),
+            ("sm_count", True),
+            ("sm_count", 0),
+            ("l2_bytes", 0),
+            ("l2_bytes", -1),
+            ("driver_version", None),
+            ("driver_api_version", 0),
+        ):
+            raw = copy.deepcopy(self.record)
+            raw["tiers"]["sm75"]["device"][field] = value
+            with (
+                self.subTest(field=field, value=value),
+                self.assertRaises(records.Rejected),
+            ):
+                self.check([{**self.entry, "record": self.store(raw)}])
+
+    def test_ptx_on_disk_without_a_feature_mask_is_not_loadable(self):
+        path = self.root / "src/inference/cuda/ptx/lstm.sm80.ptx"
+        path.write_text("not embedded")
+        with self.assertRaisesRegex(records.Rejected, "embed masks"):
+            records.production_load("lstm", "sm80", "12.0", self.root)
+        self.write_embed("sm80", ["cuda-sm75"])
+        with self.assertRaisesRegex(records.Rejected, "cannot realize"):
+            records.production_load("lstm", "sm80", "12.0", self.root)
 
 
 class Summaries(RecordsFixture):
@@ -705,7 +843,9 @@ class Summaries(RecordsFixture):
         with self.assertRaisesRegex(records.Rejected, "locked hash"):
             records.check_table([self.entry], self.root)
         self.refresh_lock()
-        with self.assertRaisesRegex(records.Rejected, "raw-record derivation"):
+        with self.assertRaisesRegex(
+            records.Rejected, "precise device|raw-record derivation"
+        ):
             records.check_table([self.entry], self.root, self.cache / "records")
 
     def test_missing_schema_and_canonical_summary_are_required(self):

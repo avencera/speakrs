@@ -57,6 +57,7 @@ from gates import (
     tf32_band,
     tf32_truth,
 )
+import artifacts
 from lock import ROOT, LockError, inventory, verify
 from assets import resolve
 from records import check_table
@@ -256,6 +257,7 @@ def clean_environment() -> dict[str, str]:
             "CARGO_ENCODED_RUSTFLAGS",
             "CARGO_INCREMENTAL",
             "SPEAKRS_QUALIFY_NVTX",
+            "SPEAKRS_CUDA_FORCE_PTX_JIT",
         )
     } | {"CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0"}
 
@@ -527,11 +529,12 @@ def validate_target(process: dict, tier: str, *, candidate_area: str | None) -> 
     The trusted caller identifies the candidate area. Library and glue areas use
     the production loader's tier limit, not a forced variant at that limit.
     """
-    device = process.get("device", {})
+    device = artifacts.device(process.get("device"))
     required = (
         "name",
         "compute_capability",
         "sm_count",
+        "l2_bytes",
         "driver_api_version",
         "driver_version",
         "cuda_version",
@@ -543,13 +546,20 @@ def validate_target(process: dict, tier: str, *, candidate_area: str | None) -> 
     if device["compute_capability"] != process.get("device_sm"):
         raise Rejected("target: inconsistent compute capability")
     minimum = {"sm75": (7, 5), "sm80": (8, 0), "sm90": (9, 0), "sm120": (12, 0)}[tier]
-    capability = tuple(map(int, device["compute_capability"].split(".")))
+    capability = artifacts.capability(device["compute_capability"])
     if capability < minimum:
         raise Rejected("target: device cannot execute requested tier")
     modules = process.get("loaded_modules", [])
     if not modules:
         raise Rejected("target: missing loaded area evidence")
     for module in modules:
+        pin = module.get("artifact", {})
+        if not isinstance(pin, dict):
+            raise Rejected("artifact: missing loaded artifact")
+        artifacts.key(
+            {name: pin[name] for name in ("kind", "arch", "sha256") if name in pin},
+            device_capability=device["compute_capability"],
+        )
         if module["area"] == candidate_area and module["tier"] != tier:
             raise Rejected(
                 f"target: loaded tier differs from requested tier: {module['area']} {module['tier']} != {tier}"
@@ -649,6 +659,7 @@ def verify_modules(modules: list[dict], root: Path = ROOT) -> tuple[AllowList, d
         names = ENTRY.findall(path.read_text())
         if names != module["entries"]:
             raise Rejected(f"loaded entries differ from {path.name}")
+        artifacts.module(module, root)
         harness = path.parent.name == "device"
         if not harness and not path.name.startswith(
             f"{module['area']}.{module['tier']}."
@@ -1705,6 +1716,12 @@ def collect_tier(
         SPEAKRS_QUALIFY_TARGET=target,
         SPEAKRS_QUALIFY_NONCE=nonce,
     )
+    # the paired fault fixture uses the archived JIT-qualified production plans
+    if implementation in ("StageTail", "StageTailControl"):
+        env["SPEAKRS_CUDA_FORCE_PTX_JIT"] = "1"
+        result["artifact_policy"] = "LegacyPtxJitFixture"
+    else:
+        result["artifact_policy"] = "ExactCubinPreferred"
     result["requested_tier"] = tier
     result["code_sha256"] = {
         name: sha(ROOT / name)
@@ -2431,7 +2448,7 @@ def main() -> int:
     directory = BOX / "results" / prefix
     directory.mkdir(parents=True, exist_ok=False)
     result = {
-        "schema": 4,
+        "schema": 5,
         "requested_tier": tier,
         "target": args.target,
         "implementation": args.implementation,

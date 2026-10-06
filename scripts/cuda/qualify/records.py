@@ -6,6 +6,7 @@ import json
 import re
 from pathlib import Path
 
+import artifacts
 from assets import cache_directory
 from gates import Rejected
 from lock import ROOT
@@ -93,6 +94,75 @@ LEGACY_BINDINGS: dict[str, dict] = {
         "lock_digest": "368389d213c1c9c3ae32b0c9375d558efbd1d88f71eec063e67b8f14163bcb70",
     },
 }
+
+
+# these exact infrastructure substitutions do not claim a new GPU qualification
+INFRASTRUCTURE_AMENDMENTS = [
+    {
+        "path": "src/inference/cuda/candidate.rs",
+        "acceptance_sha256": "7ebccfee61ad72ad617addc5d7d32a78dc4895afbc4582383bdb2b1cc07fd2ee",
+        "infrastructure_sha256": "f3eebb5a137ae963d0d8258b13f99d4aa01786467eb9e4b73af6a3e5e11a5343",
+        "reason": "Kernel inventory exposes the existing host choices to the locked entry test; no algorithm changes",
+    },
+    {
+        "path": "src/inference/cuda/candidate/lstm.rs",
+        "acceptance_sha256": "5306b541515451b80eeacc43bb922d68dec4601dcc9582292f4074ee91e0439a",
+        "infrastructure_sha256": "cb62ccec56e3549db8b25ecd5c33c8a63adfbfefe5153329fc69d401f1c6b731",
+        "reason": "Kernel inventory exposes the existing host choices to the locked entry test; no algorithm changes",
+    },
+    {
+        "path": "src/inference/cuda/candidate/conv.rs",
+        "acceptance_sha256": "b4755e8bdf919edd39d2da5e632da7af5a52fd48f3852bd17968cc29be6310a8",
+        "infrastructure_sha256": "0e9bc602a618dd1202df9e7cfc566461f6537c474bb2759e099c0c46165e8506",
+        "reason": "Kernel inventory exposes the existing host choices to the locked entry test; no algorithm changes",
+    },
+    {
+        "path": "src/inference/cuda/candidate/sinc.rs",
+        "acceptance_sha256": "f0a95196f635a7fc25c45722f2df8f8c248d9d5e67ac2804b7cb45c0b4d91ded",
+        "infrastructure_sha256": "96dac61ad53f015646b391a18febe024e5d2706c25075a9767caa8b5cd976d7e",
+        "reason": "Kernel inventory exposes the existing host choices to the locked entry test; no algorithm changes",
+    },
+    {
+        "path": "src/inference/cuda/ptx/lstm.manifest",
+        "acceptance_sha256": "9346034eef96b3e54d679fcb2a721bf72437016c89505064276dcfb2af22f43b",
+        "infrastructure_sha256": "09e6f3772953d81c57284baf88db917aea0a637e720b9a965e078ed0d634c3a4",
+        "reason": "Exact-architecture cubin build pins extend the PTX manifest; PTX bytes are unchanged",
+    },
+    {
+        "path": "src/inference/cuda/ptx/resnet.manifest",
+        "acceptance_sha256": "0d9a2c625742b38f5bdb1fccb4a5465b45efb9c83830b1d1e5b51077ae574d1e",
+        "infrastructure_sha256": "734d43a71f6958fce6cdac766723e4ffba6b32c584e2ebf5accfbdfafd019031",
+        "reason": "Exact-architecture cubin build pins extend the PTX manifest; PTX bytes are unchanged",
+    },
+    {
+        "path": "src/inference/cuda/ptx/sincnet.manifest",
+        "acceptance_sha256": "9b2eb3c3db1d60ddadf364c1eea8ff79ec23e5d368cb13ea4037253412bf6f39",
+        "infrastructure_sha256": "09a4a44ef930dee6fee351fe35fe6451cc316bf08da0bdf843bbb9f785531496",
+        "reason": "Exact-architecture cubin build pins extend the PTX manifest; PTX bytes are unchanged",
+    },
+]
+
+
+def amended_legacy_files(binding: dict) -> dict:
+    """Preserve original acceptance hashes and apply only explicit infrastructure pins"""
+    result = {group: dict(hashes) for group, hashes in binding["files"].items()}
+    for amendment in INFRASTRUCTURE_AMENDMENTS:
+        for hashes in result.values():
+            if hashes.get(amendment["path"]) == amendment["acceptance_sha256"]:
+                hashes[amendment["path"]] = amendment["infrastructure_sha256"]
+    return result
+
+
+def legacy_amendments(binding: dict) -> list[dict]:
+    """Expose every applied old/new pin without changing archived record provenance"""
+    return [
+        amendment
+        for amendment in INFRASTRUCTURE_AMENDMENTS
+        if any(
+            hashes.get(amendment["path"]) == amendment["acceptance_sha256"]
+            for hashes in binding["files"].values()
+        )
+    ]
 
 
 def digest(value: str) -> str:
@@ -269,10 +339,12 @@ def complete_collection(record: dict) -> None:
     """Reject interrupted or inconsistent collection before evaluating acceptance"""
     if (
         type(record.get("schema")) is not int
-        or record["schema"] not in (3, 4)
+        or record["schema"] not in (3, 4, 5)
         or record.get("implementation") != "Oxide"
     ):
-        raise Rejected("table: not a schema-3 or schema-4 Oxide qualification record")
+        raise Rejected(
+            "table: not a supported schema for an Oxide qualification record"
+        )
     if record.get("status") not in ("passed", "blocked"):
         raise Rejected("table: qualification record has an invalid status")
     checks = valid_checks(record.get("checks"))
@@ -414,33 +486,7 @@ def production_load(area: str, tier: str, capability: str, root: Path = ROOT) ->
     """Require a supported feature build that can load the pinned tier on the device"""
     if area not in AREA_HOST or tier not in TIER_CAPABILITIES:
         raise Rejected("table: invalid production area or tier")
-    if (
-        not isinstance(capability, str)
-        or re.fullmatch(r"[1-9][0-9]*\.[0-9]", capability) is None
-    ):
-        raise Rejected("table: invalid production device capability")
-    major, minor = capability.split(".")
-    device = (int(major), int(minor))
-    paths = sorted((root / "src/inference/cuda/ptx").glob(f"{area}.*.ptx"))
-    variants = set()
-    for path in paths:
-        variant = path.name.removeprefix(f"{area}.").removesuffix(".ptx")
-        if variant not in TIER_CAPABILITIES or path.is_symlink() or not path.is_file():
-            raise Rejected("table: invalid shipped production PTX tier")
-        variants.add(variant)
-    if tier not in variants:
-        raise Rejected("table: pinned production PTX tier is unavailable")
-    for build in TIER_CAPABILITIES.values():
-        if build > device:
-            continue
-        selectable = {
-            variant for variant in variants if TIER_CAPABILITIES[variant] <= build
-        }
-        if selectable and max(selectable, key=TIER_CAPABILITIES.__getitem__) == tier:
-            return
-    raise Rejected(
-        "table: production load cannot realize the pinned tier on the device"
-    )
+    artifacts.production_load(area, tier, capability, root)
 
 
 def shipped_files(root: Path, area: str) -> dict[str, dict[str, str]]:
@@ -495,7 +541,7 @@ def check_binding(
         binding = LEGACY_BINDINGS.get(record_hash)
         if not binding or binding.get("lock_digest") != digest(record["lock_digest"]):
             raise Rejected("table: invalid legacy acceptance binding")
-        expected = binding["files"]
+        expected = amended_legacy_files(binding)
         gap = SOURCE_EVIDENCE_GAP
     else:
         code = child.get("code_sha256", {})
@@ -599,18 +645,40 @@ def check_table_records(
                 or record.get("requested_tier") != tier
             ):
                 raise Rejected("table: requested tier mismatch")
-            device = child.get("device")
-            if (
-                not isinstance(device, dict)
-                or not isinstance(device.get("name"), str)
-                or not device["name"]
-            ):
-                raise Rejected("table: missing recorded device name")
+            if record["schema"] != 5:
+                raise Rejected(
+                    "table: modern acceptance requires schema-5 loader evidence"
+                )
+            device = artifacts.device(child.get("device"))
             capability = device["compute_capability"]
             code = child.get("code_sha256", {})
         if not entry["devices"] or set(entry["devices"]) != {capability}:
             raise Rejected("table: device capability mismatch")
         production_load(record["target"], tier, capability, root)
+        loaded = [
+            module
+            for module in child.get("loaded_ptx", {}).get("modules", [])
+            if module.get("area") == record["target"]
+        ]
+        if len(loaded) != 1:
+            raise Rejected("table: missing or duplicate loaded candidate artifact")
+        if legacy:
+            loaded_key = {"kind": "PtxJit", "sha256": digest(loaded[0].get("sha256"))}
+            recorded_artifact = loaded_key
+            recorded_device = {
+                "name": LEGACY_DEVICE_NAME,
+                "compute_capability": "12.0",
+                "legacy_driver_sha256": digest(child["driver_sha256"]),
+            }
+        else:
+            loaded_key = artifacts.module(loaded[0], root, device_capability=capability)
+            recorded_artifact = loaded[0]["artifact"]
+            recorded_device = device
+        if (
+            artifacts.key(entry.get("artifact"), device_capability=capability)
+            != loaded_key
+        ):
+            raise Rejected("table: selected artifact differs from qualified load")
         selected = triples(entry["coverage"])
         accepted = evaluation["accepted_tuples"]
         outside = selected - {tuple(row) for row in accepted}
@@ -643,9 +711,16 @@ def check_table_records(
                 "der": entry["der"],
                 "tier": tier,
                 "device_capability": capability,
+                "artifact": recorded_artifact,
+                "device": recorded_device,
                 "legacy": legacy,
                 "source_evidence_gap": gap,
                 "shared_source_amendment": SHARED_SOURCE_AMENDMENT if legacy else None,
+                "infrastructure_amendments": legacy_amendments(
+                    LEGACY_BINDINGS[entry["record"]]
+                )
+                if legacy
+                else [],
                 "raw_tier_status": child["status"],
                 "raw_tier_reason": child["reason"],
                 "raw_record_reason": record.get("reason"),
@@ -671,9 +746,12 @@ SUMMARY_FIELDS = {
     "der",
     "tier",
     "device_capability",
+    "artifact",
+    "device",
     "legacy",
     "source_evidence_gap",
     "shared_source_amendment",
+    "infrastructure_amendments",
     "raw_tier_status",
     "raw_tier_reason",
     "raw_record_reason",
@@ -838,7 +916,9 @@ def check_table(
         if summary["legacy"]:
             binding = LEGACY_BINDINGS[pin]
             if (
-                summary.get("files") != binding["files"]
+                summary.get("files") != amended_legacy_files(binding)
+                or summary.get("infrastructure_amendments")
+                != legacy_amendments(binding)
                 or summary["lock_digest"] != binding["lock_digest"]
                 or summary.get("source_evidence_gap") != SOURCE_EVIDENCE_GAP
                 or summary.get("shared_source_amendment") != SHARED_SOURCE_AMENDMENT
@@ -849,7 +929,8 @@ def check_table(
             ):
                 raise Rejected("table: invalid summary legacy acceptance binding")
         elif (
-            summary.get("source_evidence_gap") is not None
+            summary.get("infrastructure_amendments") != []
+            or summary.get("source_evidence_gap") is not None
             or summary.get("shared_source_amendment") is not None
         ):
             raise Rejected("table: invalid modern summary source evidence")
@@ -876,6 +957,47 @@ def check_table(
         current = shipped_files(root, area)
         if bound != current:
             raise Rejected("table: qualification files differ from acceptance summary")
+        artifact = summary.get("artifact")
+        if summary["legacy"]:
+            expected_hash = LEGACY_BINDINGS[pin]["files"]["ptx"][
+                f"src/inference/cuda/ptx/{area}.{tier}.ptx"
+            ]
+            loaded_key = {"kind": "PtxJit", "sha256": expected_hash}
+            if not isinstance(summary.get("device"), dict):
+                raise Rejected("table: missing explicit legacy device mapping")
+            if artifact != loaded_key or summary["device"] != {
+                "name": LEGACY_DEVICE_NAME,
+                "compute_capability": "12.0",
+                "legacy_driver_sha256": summary["device"].get("legacy_driver_sha256"),
+            }:
+                raise Rejected(
+                    "table: invalid explicit legacy artifact or device mapping"
+                )
+            digest(summary["device"].get("legacy_driver_sha256"))
+        else:
+            precise = artifacts.device(summary.get("device"))
+            if (
+                precise["name"] != summary["device_name"]
+                or precise["compute_capability"] != capability
+            ):
+                raise Rejected("table: inconsistent precise device evidence")
+            ptx_hash = bound["ptx"].get(f"src/inference/cuda/ptx/{area}.{tier}.ptx")
+            loaded_key = artifacts.module(
+                {
+                    "area": area,
+                    "tier": tier,
+                    "sha256": ptx_hash,
+                    "embedded_ptx_sha256": ptx_hash,
+                    "artifact": artifact,
+                },
+                root,
+                device_capability=capability,
+            )
+        if (
+            artifacts.key(entry.get("artifact"), device_capability=capability)
+            != loaded_key
+        ):
+            raise Rejected("table: selected artifact differs from qualified load")
         exported = entry.get("candidate_coverage")
         if not isinstance(exported, dict):
             raise Rejected("table: missing Rust candidate coverage export")
@@ -901,7 +1023,7 @@ def check_table(
         schema = summary.get("record_schema")
         if (
             type(schema) is not int
-            or schema not in (3, 4)
+            or schema not in (3, 5)
             or evaluation.get("stage_noise_rule_allowed") is not (schema == 3)
         ):
             raise Rejected("table: invalid summary record schema")
