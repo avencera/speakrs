@@ -131,6 +131,7 @@ impl CudaFbank {
                 math,
                 super::implementation::Target {
                     tier: kernels.tier(),
+                    artifact: kernels.artifact(),
                     device: runtime.compute_capability(),
                 },
                 super::CudaLibrary::Cublas,

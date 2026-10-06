@@ -1,5 +1,7 @@
 //! Qualification-backed selection before any optional library state is created
 
+use super::kernels::{ArtifactHash, LoadedArtifact};
+
 use super::candidate::{
     Batches, ConvCandidate, ConvLayerSpec, ConvOxide, Coverage, CoverageEntry, LstmCandidate,
     LstmOxide, LstmSpec, Maths, PlanError, SincCandidate, SincOxide, SincSpec,
@@ -13,13 +15,16 @@ use super::{
 pub(crate) struct Target {
     pub tier: PtxTier,
     pub device: ComputeCapability,
+    pub artifact: LoadedArtifact,
 }
 
 impl Target {
     /// Resolve the area's actual variant, not the runtime's upper tier limit
     pub(crate) fn for_area(runtime: &CudaRuntime, area: KernelModule) -> Result<Self, CudaError> {
+        let loaded = runtime.load_kernels(area)?;
         Ok(Self {
-            tier: runtime.area_ptx(area)?.0,
+            tier: loaded.tier(),
+            artifact: loaded.artifact(),
             device: runtime.compute_capability(),
         })
     }
@@ -65,8 +70,17 @@ struct Production {
     coverage: Coverage,
     tier: PtxTier,
     devices: &'static [ComputeCapability],
+    artifact: LoadedArtifact,
     record: &'static str,
     der: &'static str,
+}
+
+impl Production {
+    fn matches_target(&self, target: Target) -> bool {
+        self.tier == target.tier
+            && self.devices.contains(&target.device)
+            && self.artifact == target.artifact
+    }
 }
 
 /// SHA256 of qualify-resnet-Oxide-20261004T064208.284837Z.json.gz
@@ -137,6 +151,11 @@ const PRODUCTION: &[Production] = &[
         ]),
         tier: PtxTier::Sm75,
         devices: DEVICES,
+        artifact: LoadedArtifact::PtxJit {
+            sha256: ArtifactHash::from_hex(
+                "dd6449c0129f9a03bf691c0338611b50b651ab714d5803caedea87de3c72b6b7",
+            ),
+        },
         record: RESNET_RECORD,
         der: INTEGRATED_DER,
     },
@@ -149,6 +168,11 @@ const PRODUCTION: &[Production] = &[
         }]),
         tier: PtxTier::Sm75,
         devices: DEVICES,
+        artifact: LoadedArtifact::PtxJit {
+            sha256: ArtifactHash::from_hex(
+                "72945743a3c1b915c05d8ea21b438dfd860fa9487401c447fb24fd48802916fa",
+            ),
+        },
         record: LSTM_RECORD,
         der: INTEGRATED_DER,
     },
@@ -161,6 +185,11 @@ const PRODUCTION: &[Production] = &[
         }]),
         tier: PtxTier::Sm75,
         devices: DEVICES,
+        artifact: LoadedArtifact::PtxJit {
+            sha256: ArtifactHash::from_hex(
+                "967bc6893f80da84d8d4d288f2cf1ca3336ca09c4386495cab722beb0ac87247",
+            ),
+        },
         record: SINC_RECORD,
         der: INTEGRATED_DER,
     },
@@ -311,8 +340,7 @@ pub(crate) fn select(
         return Err(SelectionError);
     }
     let entry = PRODUCTION.iter().find(|entry| {
-        entry.tier == target.tier
-            && entry.devices.contains(&target.device)
+        entry.matches_target(target)
             && MODEL_BATCHES.contains(&batch)
             && entry.coverage.covers(boundary, batch, math)
             && boundary.split('.').next() == Some(entry.area.name())
@@ -332,10 +360,10 @@ pub(crate) fn select(
 }
 
 /// Whether a forced tier has any production evidence on this exact device
-pub(crate) fn tier_qualified(target: Target) -> bool {
+pub(crate) fn tier_qualified(area: KernelModule, target: Target) -> bool {
     PRODUCTION
         .iter()
-        .any(|entry| entry.tier == target.tier && entry.devices.contains(&target.device))
+        .any(|entry| entry.area == area && entry.matches_target(target))
 }
 
 /// Pinned coverage for test controls that must use the accepted production path
@@ -343,11 +371,7 @@ pub(crate) fn tier_qualified(target: Target) -> bool {
 pub(crate) fn production_coverage(area: KernelModule, target: Target) -> Coverage {
     PRODUCTION
         .iter()
-        .find(|entry| {
-            entry.area == area
-                && entry.tier == target.tier
-                && entry.devices.contains(&target.device)
-        })
+        .find(|entry| entry.area == area && entry.matches_target(target))
         .map_or(Coverage::NONE, |entry| entry.coverage)
 }
 

@@ -1,6 +1,19 @@
 //! Pin production to the triples accepted for integration, independent of declarations
 
 use super::{PRODUCTION, Selected, Target, select};
+use crate::inference::cuda::kernels::{ArtifactHash, LoadedArtifact};
+
+fn legacy_artifact(area: &str) -> LoadedArtifact {
+    let ptx = match area {
+        "lstm" => include_str!("../ptx/lstm.sm75.ptx"),
+        "sincnet" => include_str!("../ptx/sincnet.sm75.ptx"),
+        _ => include_str!("../ptx/resnet.sm75.ptx"),
+    };
+    LoadedArtifact::PtxJit {
+        sha256: ArtifactHash::of(ptx.as_bytes()),
+    }
+}
+
 use crate::inference::cuda::CudaMath;
 use crate::inference::cuda::{ComputeCapability, PtxTier};
 
@@ -40,6 +53,7 @@ fn production_selects_exactly_the_qualified_triples() {
         "unknown",
     ]);
     for layer in layers {
+        let artifact = legacy_artifact(layer.split('.').next().unwrap());
         for batch in (1..=66).chain([128, usize::MAX]) {
             for math in [CudaMath::Fp32, CudaMath::Tf32] {
                 for tier in PtxTier::ALL {
@@ -64,7 +78,17 @@ fn production_selects_exactly_the_qualified_triples() {
                             && !(layer == "resnet.layer2.0.conv1"
                                 && batch == 1
                                 && math == CudaMath::Fp32);
-                        let selected = select(layer, batch, math, Target { tier, device }).unwrap();
+                        let selected = select(
+                            layer,
+                            batch,
+                            math,
+                            Target {
+                                tier,
+                                device,
+                                artifact,
+                            },
+                        )
+                        .unwrap();
                         assert_eq!(
                             matches!(selected, Selected::Oxide(_)),
                             expected,
@@ -82,6 +106,7 @@ fn regressed_resnet_tuple_uses_library_without_dropping_siblings() {
     let target = Target {
         tier: PtxTier::Sm75,
         device: ComputeCapability::new(12, 0),
+        artifact: legacy_artifact("resnet"),
     };
     let layer = "resnet.layer2.0.conv1";
     assert!(matches!(
@@ -110,6 +135,7 @@ fn invalid_requests_cannot_make_tokens() {
     let target = Target {
         tier: PtxTier::Sm75,
         device: ComputeCapability::new(12, 0),
+        artifact: legacy_artifact("resnet"),
     };
     assert!(select("", 1, CudaMath::Fp32, target).is_err());
     assert!(select("lstm.stack", 0, CudaMath::Fp32, target).is_err());
@@ -121,8 +147,13 @@ fn stage_tail_base_coverage_is_pinned_not_candidate_declared() {
     let target = Target {
         tier: PtxTier::Sm75,
         device: ComputeCapability::new(12, 0),
+        artifact: legacy_artifact("resnet"),
     };
     for area in [KernelModule::Resnet, KernelModule::Sincnet] {
+        let target = Target {
+            artifact: legacy_artifact(area.name()),
+            ..target
+        };
         let coverage = super::production_coverage(area, target);
         assert!(!coverage.entries().is_empty());
         for entry in coverage.entries() {
@@ -171,12 +202,17 @@ fn direct_pinned_requests_use_the_production_token() {
     let target = Target {
         tier: PtxTier::Sm75,
         device: ComputeCapability::new(12, 0),
+        artifact: legacy_artifact("resnet"),
     };
     for choice in [Choice::StageTail, Choice::StageTailControl] {
         for (area, layer) in [
             (KernelModule::Resnet, "resnet.layer1.0.conv1"),
             (KernelModule::Sincnet, "sincnet.conv0.abs_pool"),
         ] {
+            let target = Target {
+                artifact: legacy_artifact(area.name()),
+                ..target
+            };
             for batch in [1, 32] {
                 let Selected::Oxide(token) = super::qualification_selection(
                     choice,
@@ -274,6 +310,7 @@ fn export_production_table() {
                 "coverage": super::super::test_support::qualify::coverage_json(entry.coverage),
                 "tier": entry.tier.to_string(),
                 "devices": entry.devices.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                "artifact": super::super::test_support::artifact_json(entry.artifact),
                 "record": entry.record,
                 "der": entry.der,
             })
@@ -297,6 +334,7 @@ fn planning_refusals_preserve_selection_and_policy() {
         Target {
             tier: PtxTier::Sm75,
             device: ComputeCapability::new(12, 0),
+            artifact: legacy_artifact("lstm"),
         },
     )
     .unwrap() else {
@@ -339,5 +377,51 @@ fn planning_refusals_preserve_selection_and_policy() {
                 })
             ));
         }
+    }
+}
+
+#[test]
+fn cubin_qualification_never_matches_jit_or_another_binary() {
+    let sha256 = ArtifactHash::of(b"qualified cubin");
+    let device = ComputeCapability::new(12, 0);
+    let artifact = LoadedArtifact::Cubin {
+        arch: device,
+        sha256,
+    };
+    let entry = super::Production {
+        area: super::KernelModule::Resnet,
+        coverage: PRODUCTION[0].coverage,
+        tier: PtxTier::Sm75,
+        devices: super::DEVICES,
+        artifact,
+        record: super::RESNET_RECORD,
+        der: super::INTEGRATED_DER,
+    };
+    let target = Target {
+        tier: PtxTier::Sm75,
+        device,
+        artifact,
+    };
+    assert!(entry.matches_target(target));
+    for artifact in [
+        LoadedArtifact::PtxJit { sha256 },
+        LoadedArtifact::Cubin {
+            arch: ComputeCapability::new(8, 9),
+            sha256,
+        },
+        LoadedArtifact::Cubin {
+            arch: device,
+            sha256: ArtifactHash::of(b"other cubin"),
+        },
+    ] {
+        assert!(!entry.matches_target(Target { artifact, ..target }));
+    }
+    for entry in PRODUCTION {
+        let target = Target {
+            artifact: entry.artifact,
+            ..target
+        };
+        assert!(entry.matches_target(target));
+        assert!(!entry.matches_target(Target { artifact, ..target }));
     }
 }

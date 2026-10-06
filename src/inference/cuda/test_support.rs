@@ -612,6 +612,7 @@ struct LoadedModule {
     tier: String,
     sha256: String,
     entries: Vec<String>,
+    artifact: Value,
 }
 
 fn modules() -> &'static Mutex<Vec<LoadedModule>> {
@@ -636,19 +637,66 @@ pub(crate) fn entries(ptx: &str) -> Vec<String> {
 
 /// Records the exact PTX bytes a locked loader hands to the driver
 pub(crate) fn record_module(area: &str, tier: &str, ptx: &str) {
+    let sha256 = super::kernels::ArtifactHash::of(ptx.as_bytes());
+    record_module_identity(
+        area,
+        tier,
+        ptx,
+        artifact_json(super::kernels::LoadedArtifact::PtxJit { sha256 }),
+    );
+}
+
+fn record_module_identity(area: &str, tier: &str, ptx: &str, artifact: Value) {
     let module = LoadedModule {
         area: area.to_owned(),
         tier: tier.to_owned(),
         sha256: format!("{:x}", Sha256::digest(ptx.as_bytes())),
         entries: entries(ptx),
+        artifact,
     };
     let mut loaded = modules().lock().unwrap_or_else(PoisonError::into_inner);
-    if !loaded
-        .iter()
-        .any(|known| known.area == module.area && known.sha256 == module.sha256)
-    {
+    if !loaded.iter().any(|known| {
+        known.area == module.area
+            && known.sha256 == module.sha256
+            && known.artifact == module.artifact
+    }) {
         loaded.push(module);
     }
+}
+
+/// Serialize the typed selection key without replacing its actual-byte identity
+pub(crate) fn artifact_json(artifact: super::kernels::LoadedArtifact) -> Value {
+    match artifact {
+        super::kernels::LoadedArtifact::Cubin { arch, sha256 } => {
+            json!({"kind": "Cubin", "arch": arch.to_string(), "sha256": sha256.to_string()})
+        }
+        super::kernels::LoadedArtifact::PtxJit { sha256 } => {
+            json!({"kind": "PtxJit", "sha256": sha256.to_string()})
+        }
+    }
+}
+
+/// Record loader bytes and the assembler metadata embedded in this binary
+pub(crate) fn record_artifact(
+    area: super::KernelModule,
+    tier: super::PtxTier,
+    ptx: &str,
+    artifact: super::kernels::LoadedArtifact,
+    ptx_sha256: super::kernels::ArtifactHash,
+) {
+    let mut pin = artifact_json(artifact);
+    if matches!(artifact, super::kernels::LoadedArtifact::Cubin { .. }) {
+        let field = |name: &str| {
+            area.manifest()
+                .lines()
+                .find_map(|line| line.strip_prefix(name))
+                .expect("embedded cubin build pin")
+        };
+        pin["ptx_sha256"] = json!(ptx_sha256.to_string());
+        pin["ptxas_version"] = json!(field("ptxas = "));
+        pin["ptxas_flags"] = json!(field("ptxas-flags = "));
+    }
+    record_module_identity(area.name(), tier.name(), ptx, pin);
 }
 
 /// Every recorded module, for the result and the harness allow-list
@@ -658,7 +706,7 @@ pub(crate) fn loaded_modules() -> Value {
         loaded
             .iter()
             .map(|module| {
-                json!({"area": module.area, "tier": module.tier, "sha256": module.sha256, "entries": module.entries})
+                json!({"area": module.area, "tier": module.tier, "sha256": module.sha256, "entries": module.entries, "artifact": module.artifact, "embedded_ptx_sha256": module.sha256})
             })
             .collect(),
     )
