@@ -4,6 +4,18 @@ use super::super::error::check_len;
 use super::super::{CudaError, CudaRuntime, KernelModule, PtxTier};
 use super::shape::CLASSES;
 
+const SEGMENTATION_POOL_NORM: &str = "segmentation_pool_norm";
+const SEGMENTATION_BIAS_LEAKY: &str = "segmentation_bias_leaky";
+const SEGMENTATION_BIAS_LOG_SOFTMAX: &str = "segmentation_bias_log_softmax";
+
+/// Kernel entries loaded by this host plan
+#[cfg(test)]
+pub(crate) const REQUIRED_KERNELS: [&str; 3] = [
+    SEGMENTATION_POOL_NORM,
+    SEGMENTATION_BIAS_LEAKY,
+    SEGMENTATION_BIAS_LOG_SOFTMAX,
+];
+
 /// Threads per block of the row reductions; multiples of 32
 const NORM_THREADS: u32 = 256;
 /// Long rows (the waveform normalization: one block per 160000-sample window) need
@@ -75,9 +87,9 @@ impl SegmentationKernels {
         let kernels = runtime.load_kernels(KernelModule::Segmentation)?;
         Ok(Self {
             tier: kernels.tier(),
-            pool_norm: kernels.function("segmentation_pool_norm")?,
-            bias_leaky: kernels.function("segmentation_bias_leaky")?,
-            bias_log_softmax: kernels.function("segmentation_bias_log_softmax")?,
+            pool_norm: kernels.function(SEGMENTATION_POOL_NORM)?,
+            bias_leaky: kernels.function(SEGMENTATION_BIAS_LEAKY)?,
+            bias_log_softmax: kernels.function(SEGMENTATION_BIAS_LOG_SOFTMAX)?,
         })
     }
 

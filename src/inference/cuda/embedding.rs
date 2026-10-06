@@ -23,6 +23,8 @@
 
 mod dispatch;
 mod kernels;
+#[cfg(test)]
+pub(super) use kernels::REQUIRED_KERNELS;
 mod trunk;
 
 use std::sync::Arc;

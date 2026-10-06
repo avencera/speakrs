@@ -34,6 +34,13 @@ mod conv;
 mod lstm;
 mod sinc;
 
+#[cfg(test)]
+pub(super) use conv::kernel_inventory as conv_kernel_inventory;
+#[cfg(test)]
+pub(super) use lstm::REQUIRED_KERNELS as LSTM_KERNELS;
+#[cfg(test)]
+pub(super) use sinc::REQUIRED_KERNELS as SINC_KERNELS;
+
 pub(crate) use conv::Oxide as ConvOxide;
 pub(crate) use lstm::Oxide as LstmOxide;
 pub(crate) use sinc::Oxide as SincOxide;

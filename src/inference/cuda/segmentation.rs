@@ -16,6 +16,8 @@
 mod dispatch;
 mod graph;
 mod kernels;
+#[cfg(test)]
+pub(super) use kernels::REQUIRED_KERNELS;
 #[cfg(feature = "cuda")]
 mod rnn;
 mod shape;

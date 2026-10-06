@@ -25,6 +25,12 @@ use super::{
 use crate::inference::cuda::dnn::Conv2d;
 use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, KernelModule};
 
+const SPK_RESNET_PACK_WEIGHTS: &str = "spk_resnet_pack_weights";
+
+/// Kernel entries loaded by this host plan
+#[cfg(test)]
+pub(crate) const REQUIRED_KERNELS: [&str; 1] = [SPK_RESNET_PACK_WEIGHTS];
+
 /// The 32 -> 32 convolutions of `layer1` and the strided 32 -> 64 one of `layer2`
 const C32_AND_STRIDED: [&str; 7] = [
     "resnet.layer1.0.conv1",
@@ -139,6 +145,19 @@ impl Tiling {
     }
 }
 
+fn select_tiling(
+    large: Tiling,
+    small: Option<Tiling>,
+    batch: usize,
+    output: [usize; 2],
+    multiprocessors: usize,
+) -> Tiling {
+    match small {
+        Some(small) if large.blocks(batch, output) < SMALL_BATCH_WAVES * multiprocessors => small,
+        _ => large,
+    }
+}
+
 /// One layer's fused convolution at one batch size: its kernel, its fixed sizes and
 /// its packed weights
 #[derive(Debug)]
@@ -203,19 +222,16 @@ impl ConvCandidate for Oxide {
         // a batch whose 256-thread grid would leave SMs idle or doubly loaded uses
         // the small blocks, which spread the same work evenly
         let (large, small) = shape.tilings();
-        let tiling = match small {
-            Some(small)
-                if large.blocks(conv.batch, output)
-                    < SMALL_BATCH_WAVES * runtime.multiprocessor_count()? =>
-            {
-                small
-            }
-            _ => large,
+        let multiprocessors = if small.is_some() {
+            runtime.multiprocessor_count()?
+        } else {
+            0
         };
+        let tiling = select_tiling(large, small, conv.batch, output, multiprocessors);
         let weight_len = conv.out_channels * conv.in_channels * 9;
         check_len("fused conv3x3 weights", weight_len, layer.weight.len())?;
         let kernels = runtime.load_kernels(KernelModule::Resnet)?;
-        let pack = kernels.function("spk_resnet_pack_weights")?;
+        let pack = kernels.function(SPK_RESNET_PACK_WEIGHTS)?;
         let mut packed = runtime.stream().alloc_zeros::<f32>(weight_len)?;
         pack_weights(
             runtime.stream(),
@@ -352,4 +368,28 @@ fn to_u32(value: usize) -> Result<u32, CudaError> {
         context: "fused conv3x3 launch",
         value,
     })
+}
+
+#[cfg(test)]
+pub(crate) use test_support::kernel_inventory;
+
+#[cfg(test)]
+mod test_support {
+    use super::{REQUIRED_KERNELS, SMALL_BATCH_WAVES, Shape, select_tiling};
+
+    pub(crate) fn kernel_inventory() -> Vec<&'static str> {
+        let mut entries = REQUIRED_KERNELS.to_vec();
+        // each optional small tiling can be selected when a device has enough SMs
+        for shape in [Shape::C32, Shape::C64, Shape::C32Stride2] {
+            let (large, small) = shape.tilings();
+            let output = [16, 64];
+            let blocks = large.blocks(1, output);
+            let threshold = blocks.div_ceil(SMALL_BATCH_WAVES);
+            for multiprocessors in [1, threshold, threshold + 1] {
+                entries.push(select_tiling(large, small, 1, output, multiprocessors).entry);
+            }
+        }
+
+        entries
+    }
 }

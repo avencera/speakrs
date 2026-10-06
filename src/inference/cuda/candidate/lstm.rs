@@ -29,6 +29,12 @@ use super::{
 };
 use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, KernelModule};
 
+const SPK_LSTM_CLEAR: &str = "spk_lstm_clear";
+
+/// Kernel entries loaded by this host plan
+#[cfg(test)]
+pub(crate) const REQUIRED_KERNELS: [&str; 2] = [KERNEL, SPK_LSTM_CLEAR];
+
 /// Threads per block, `THREADS` in the kernel crate's `lstm` area
 const THREADS: u32 = 128;
 /// LSTM input width of the first layer
@@ -82,7 +88,7 @@ impl LstmCandidate for Oxide {
     fn plan(runtime: &CudaRuntime, spec: LstmSpec<'_>) -> Result<Self, PlanError> {
         let kernels = runtime.load_kernels(KernelModule::Lstm)?;
         let recurrence = kernels.function(KERNEL)?;
-        let clear = kernels.function("spk_lstm_clear")?;
+        let clear = kernels.function(SPK_LSTM_CLEAR)?;
         let capacity = runtime.cooperative_capacity(&recurrence, THREADS, 0)?;
         let concurrent_capacity =
             runtime.concurrent_cooperative_capacity(&recurrence, THREADS, 0)?;
