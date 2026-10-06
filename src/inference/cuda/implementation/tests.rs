@@ -60,7 +60,10 @@ fn production_selects_exactly_the_qualified_triples() {
                             && (c32.contains(&layer)
                                 || c64.contains(&layer) && (batch != 1 || math == CudaMath::Fp32)
                                 || ["lstm.stack", "sincnet.conv0.abs_pool"].contains(&layer)
-                                    && math == CudaMath::Fp32);
+                                    && math == CudaMath::Fp32)
+                            && !(layer == "resnet.layer2.0.conv1"
+                                && batch == 1
+                                && math == CudaMath::Fp32);
                         let selected = select(layer, batch, math, Target { tier, device }).unwrap();
                         assert_eq!(
                             matches!(selected, Selected::Oxide(_)),
@@ -71,6 +74,34 @@ fn production_selects_exactly_the_qualified_triples() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn regressed_resnet_tuple_uses_library_without_dropping_siblings() {
+    let target = Target {
+        tier: PtxTier::Sm75,
+        device: ComputeCapability::new(12, 0),
+    };
+    let layer = "resnet.layer2.0.conv1";
+    assert!(matches!(
+        select(layer, 1, CudaMath::Fp32, target).unwrap(),
+        Selected::Library
+    ));
+    for (batch, math) in [
+        (1, CudaMath::Tf32),
+        (32, CudaMath::Fp32),
+        (32, CudaMath::Tf32),
+    ] {
+        let Selected::Oxide(token) = select(layer, batch, math, target).unwrap() else {
+            panic!("unaffected sibling must keep its production token")
+        };
+        assert_eq!(token.boundary, layer);
+        assert_eq!(token.batch, batch);
+        assert_eq!(token.math, math);
+        assert_eq!(token.target, target);
+        assert_eq!(token.record, super::RESNET_RECORD);
+        assert_eq!(token.selection, super::Selection::Production);
     }
 }
 

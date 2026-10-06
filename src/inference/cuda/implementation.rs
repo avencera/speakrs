@@ -90,7 +90,6 @@ const C32: &[&str] = &[
     "resnet.layer1.1.conv2",
     "resnet.layer1.2.conv1",
     "resnet.layer1.2.conv2",
-    "resnet.layer2.0.conv1",
 ];
 const C64: &[&str] = &[
     "resnet.layer2.0.conv2",
@@ -110,6 +109,20 @@ const PRODUCTION: &[Production] = &[
                 layers: C32,
                 batches: Batches::Only(&MODEL_BATCHES),
                 maths: Maths::All,
+            },
+            // the 36-SM RTX 5060 Ti control recorded a hard "candidate slower than the
+            // faster Library process" failure, then unresolved noise (min pair 0.989,
+            // spread 0.025); the legacy record used a 70-SM RTX 5070 Ti
+            // a recorded hard failure cannot be outweighed by a later pass
+            CoverageEntry {
+                layers: &["resnet.layer2.0.conv1"],
+                batches: Batches::Only(&[32]),
+                maths: Maths::All,
+            },
+            CoverageEntry {
+                layers: &["resnet.layer2.0.conv1"],
+                batches: Batches::Only(&[1]),
+                maths: Maths::Only(&[CudaMath::Tf32]),
             },
             CoverageEntry {
                 layers: C64,
