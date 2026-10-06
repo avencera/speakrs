@@ -21,6 +21,8 @@ use sha2::{Digest, Sha256};
 
 use crate::cmd::{project_root, run_cmd};
 
+mod ptx_lint;
+
 /// A PTX target an area can ship
 ///
 /// Only plain `sm_XY` targets: the driver JIT-compiles their PTX for every newer GPU,
@@ -303,6 +305,7 @@ fn build_area(crate_dir: &Path, ptx_dir: &Path, area: Area) -> Result<()> {
     for variant in area.variants() {
         let ptx = compile_variant(crate_dir, variant)?;
         let version = check_ptx_header(variant, &ptx)?;
+        ptx_lint::check_shared_truncation(&ptx)?;
         built.push((variant, ptx, version));
     }
 
@@ -680,6 +683,8 @@ fn check_area_ptx(crate_dir: &Path, ptx_dir: &Path, area: Area, manifest: &Manif
         }
 
         check_ptx_header(variant, &ptx)?;
+        ptx_lint::check_shared_truncation(&ptx)
+            .wrap_err_with(|| format!("linting {}", variant.file_name()))?;
         modules.push((variant, ptx));
     }
 
@@ -786,6 +791,51 @@ fn host_embed_source_problems(source: &str) -> Vec<String> {
         }
     }
 
+    // binary masks share the PTX invocation; an omitted or foreign architecture
+    // would silently force JIT and invalidate production artifact matching
+    for (start, _) in source.match_indices("tier_ptx!(") {
+        let Some((args, _)) = source[start + "tier_ptx!(".len()..].split_once(')') else {
+            continue;
+        };
+        let Some((_, tail)) = args.split_once(']') else {
+            continue;
+        };
+        let Some(stem) = tail
+            .split('"')
+            .nth(1)
+            .and_then(|path| path.strip_prefix("ptx/"))
+        else {
+            continue;
+        };
+        // old syntax occurs only in parser-negative fixtures
+        if stem.ends_with(".ptx") {
+            continue;
+        }
+        let Some(variant) = AREAS
+            .iter()
+            .flat_map(|area| area.variants())
+            .find(|variant| variant.file_name() == format!("{stem}.ptx"))
+        else {
+            continue;
+        };
+        let arches = tail
+            .rsplit_once('[')
+            .and_then(|(_, list)| list.split_once(']'))
+            .map(|(list, _)| {
+                list.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::parse::<u16>)
+                    .collect::<std::result::Result<Vec<_>, _>>()
+            });
+        let expected: Vec<_> = variant.cubins().map(|cubin| cubin.arch.0).collect();
+        if arches != Some(Ok(expected)) {
+            problems.push(format!(
+                "{HOST_KERNELS} cubin architecture mask differs for {stem}"
+            ));
+        }
+    }
+
     for name in embedded.keys().filter(|name| !declared.contains_key(*name)) {
         problems.push(format!(
             "{HOST_KERNELS} embeds ptx/{name}, which no area declares"
@@ -808,7 +858,9 @@ fn embedded_ptx_files(source: &str) -> BTreeMap<String, Vec<Option<Vec<String>>>
             continue;
         };
 
-        if let Some((name, _)) = rest.split_once('"') {
+        if let Some((name, _)) = rest.split_once('"')
+            && name.ends_with(".ptx")
+        {
             files.entry(name.to_string()).or_default().push(None);
         }
     }
@@ -818,13 +870,20 @@ fn embedded_ptx_files(source: &str) -> BTreeMap<String, Vec<Option<Vec<String>>>
             continue;
         };
 
-        let Some((mask, path)) = args.trim().trim_end_matches(',').rsplit_once(',') else {
+        let Some((mask, tail)) = args.split_once(']') else {
             continue;
         };
-
-        let path = path.trim().trim_matches('"');
-        let Some(name) = path.strip_prefix("ptx/") else {
+        let mask = format!("{mask}]");
+        let Some(path) = tail.split('"').nth(1) else {
             continue;
+        };
+        let Some(stem) = path.strip_prefix("ptx/") else {
+            continue;
+        };
+        let name = if stem.ends_with(".ptx") {
+            stem.to_string()
+        } else {
+            format!("{stem}.ptx")
         };
 
         let features = mask
@@ -843,7 +902,7 @@ fn embedded_ptx_files(source: &str) -> BTreeMap<String, Vec<Option<Vec<String>>>
                     })
                     .collect()
             });
-        files.entry(name.to_string()).or_default().push(features);
+        files.entry(name).or_default().push(features);
     }
 
     files
@@ -1382,6 +1441,25 @@ mod tests {
             assert!(!host_embed_source_problems(&format!("{source}\n{extra}")).is_empty());
         }
         assert!(!host_embed_source_problems("").is_empty());
+    }
+
+    #[test]
+    fn binary_masks_reject_missing_extra_and_foreign_architectures() {
+        let source = host_source().replace(
+            "\"ptx/probe.sm75.ptx\")",
+            "\"ptx/probe.sm75\", [75, 80, 86, 89, 90, 120])",
+        );
+        assert!(host_embed_source_problems(&source).is_empty());
+        for arches in [
+            "[75, 80, 86, 89, 90]",
+            "[75, 80, 86, 89, 90, 120, 121]",
+            "[75, 80, 86, 89, 90, 90]",
+        ] {
+            assert!(
+                !host_embed_source_problems(&source.replace("[75, 80, 86, 89, 90, 120]", arches))
+                    .is_empty()
+            );
+        }
     }
 
     #[test]
