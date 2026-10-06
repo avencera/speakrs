@@ -1,0 +1,383 @@
+//! Same-process replay-level ABBA evidence for the stage and its eligible operators
+
+use super::{Run, WARMUP, WINDOW, capture, read_batch, sha};
+use crate::inference::cuda::embedding::test_support::Operator;
+use crate::inference::cuda::test_support::{select_conv, select_lstm, select_sinc};
+use crate::inference::cuda::{
+    CudaError, CudaLstmAlgorithm, CudaRuntime, CudaSegmentation, ResNetEmbedding, SafetensorsFile,
+    SegmentationOptions,
+};
+use cudarc::driver::{CudaGraph, sys::CUevent_flags};
+use serde_json::{Value, json};
+
+const BLOCKS: usize = 256;
+
+/// Each observation times exactly one replay, never a burst of one implementation
+fn elapsed(
+    runtime: &CudaRuntime,
+    launch: impl FnOnce() -> Result<(), CudaError>,
+) -> Result<f32, CudaError> {
+    let start = runtime
+        .stream()
+        .record_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?;
+    launch()?;
+    let end = runtime
+        .stream()
+        .record_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?;
+    end.synchronize()?;
+    Ok(start.elapsed_ms(&end)?)
+}
+
+/// Warm-up and collection share the same alternating-input, replay-level schedule
+fn replay_set(
+    blocks: usize,
+    mut observe: impl FnMut(usize) -> Result<([f32; 4], [f32; 4]), CudaError>,
+) -> Result<Value, CudaError> {
+    let mut stage = Vec::with_capacity(blocks);
+    let mut operator = Vec::with_capacity(blocks);
+    for block in 0..WARMUP + blocks {
+        let (stage_ms, operator_ms) = observe(block % 2)?;
+        if block >= WARMUP {
+            stage.push(stage_ms);
+            operator.push(operator_ms);
+        }
+    }
+    Ok(json!({"order":"ABBA","warmup":WARMUP,"stage_abba_ms":stage,
+              "operator_abba_ms":operator,"cuda_graph":true,"declared":true,
+              "pid":std::process::id()}))
+}
+
+fn observe(
+    runtime: &CudaRuntime,
+    stages: [&CudaGraph; 2],
+    operators: [&[[CudaGraph; 2]]; 2],
+    which: usize,
+    slow: bool,
+) -> Result<([f32; 4], [f32; 4]), CudaError> {
+    let mut stage_ms = [0.0; 4];
+    let mut operator_ms = [0.0; 4];
+    for (index, side) in [0, 1, 1, 0].into_iter().enumerate() {
+        operator_ms[index] = elapsed(runtime, || {
+            for graph in operators[side] {
+                graph[which].launch()?;
+            }
+            Ok(())
+        })?;
+        stage_ms[index] = elapsed(runtime, || {
+            stages[side].launch()?;
+            if side == 1 && slow {
+                stages[side].launch()?;
+            }
+            Ok(())
+        })?;
+    }
+    Ok((stage_ms, operator_ms))
+}
+
+fn conv_choices(model: &mut ResNetEmbedding, choice: &str) {
+    for (stage, count) in [(1, 3), (2, 4)] {
+        for block in 0..count {
+            for conv in [1, 2] {
+                assert!(select_conv(
+                    model,
+                    &format!("resnet.layer{stage}.{block}.conv{conv}"),
+                    choice
+                ));
+            }
+        }
+    }
+}
+
+impl Run<'_> {
+    pub(super) fn paired(&self, rows: &mut Vec<Value>) -> Result<(), CudaError> {
+        if self.target == "resnet" {
+            self.paired_embedding(rows)
+        } else {
+            self.paired_segmentation(rows)
+        }
+    }
+
+    fn paired_embedding(&self, rows: &mut Vec<Value>) -> Result<(), CudaError> {
+        let runtime = self.runtime;
+        let weights =
+            SafetensorsFile::open("/workspace/models-native/wespeaker-multimask-tail.safetensors")?;
+        let library = ResNetEmbedding::load(runtime, &weights, self.math)?;
+        let mut candidate = ResNetEmbedding::load(runtime, &weights, self.math)?;
+        conv_choices(&mut candidate, self.choice);
+        let mut eligible = Vec::new();
+        for block in 0..7 {
+            for second in [false, true] {
+                if self.choice == "Library"
+                    || Operator::declared_at(&candidate, runtime, self.batch, block, second)?
+                {
+                    eligible.push((block, second));
+                }
+            }
+        }
+        if eligible.is_empty() {
+            return Ok(());
+        }
+        // equal strata preserve an unbiased sum of per-layer savings without keeping
+        // every layer's two input sets, outputs and workspaces live at batch 64
+        let blocks_per_layer = BLOCKS.div_ceil(16 * eligible.len()) * 16;
+        let mut library_stage = library.batch(runtime, self.batch)?;
+        let mut candidate_stage = candidate.batch(runtime, self.batch)?;
+        let inputs = self.files.map(|file| -> Result<_, CudaError> {
+            Ok((
+                read_batch(file, "input/fbank", self.batch)?,
+                read_batch(file, "input/masks", self.batch)?,
+            ))
+        });
+        let [first, second] = inputs;
+        let inputs = [first?, second?];
+        let upload = |buffers: &mut crate::inference::cuda::EmbeddingBatch,
+                      which: usize|
+         -> Result<(), CudaError> {
+            buffers
+                .fbank_mut()
+                .copy_from_host(runtime.stream(), &inputs[which].0)?;
+            buffers
+                .masks_mut()
+                .copy_from_host(runtime.stream(), &inputs[which].1)
+        };
+        upload(&mut library_stage, 0)?;
+        upload(&mut candidate_stage, 0)?;
+        library_stage.capture_graph(runtime)?;
+        candidate_stage.capture_graph(runtime)?;
+        let mut stages = [library_stage, candidate_stage];
+        let mut stage_blocks = Vec::new();
+        let mut operator_blocks = Vec::new();
+        let mut operator_layers = Vec::new();
+        let mut block_layers = Vec::new();
+        let mut operator_outputs = Vec::new();
+        for (block, second) in eligible {
+            let mut library_op =
+                Operator::new(&library, runtime, self.files, self.batch, block, second)?;
+            let mut candidate_op =
+                Operator::new(&candidate, runtime, self.files, self.batch, block, second)?;
+            assert!(candidate_op.declared() || self.choice == "Library");
+            let capture_op = |op: &mut Operator<'_>| -> Result<[CudaGraph; 2], CudaError> {
+                op.restore(runtime, 0)?;
+                op.restore(runtime, 1)?;
+                Ok([
+                    capture(runtime, || op.run(runtime, 0))?,
+                    capture(runtime, || op.run(runtime, 1))?,
+                ])
+            };
+            let library_graphs = capture_op(&mut library_op)?;
+            let candidate_graphs = capture_op(&mut candidate_op)?;
+            let collected = replay_set(blocks_per_layer, |which| {
+                for buffers in &mut stages {
+                    upload(buffers, which)?;
+                }
+                observe(
+                    runtime,
+                    [
+                        stages[0].graph().expect("Library graph"),
+                        stages[1].graph().expect("candidate graph"),
+                    ],
+                    [
+                        std::slice::from_ref(&library_graphs),
+                        std::slice::from_ref(&candidate_graphs),
+                    ],
+                    which,
+                    self.choice == "StageSlow",
+                )
+            })?;
+            stage_blocks.extend(
+                collected["stage_abba_ms"]
+                    .as_array()
+                    .expect("blocks")
+                    .clone(),
+            );
+            operator_blocks.extend(
+                collected["operator_abba_ms"]
+                    .as_array()
+                    .expect("blocks")
+                    .clone(),
+            );
+            let layer = candidate_op.name().to_owned();
+            block_layers.extend(std::iter::repeat_n(layer.clone(), blocks_per_layer));
+            operator_layers.push(layer);
+            operator_outputs.extend(
+                op_outputs(
+                    runtime,
+                    std::slice::from_ref(&library_graphs),
+                    std::slice::from_ref(&candidate_graphs),
+                    std::slice::from_ref(&library_op),
+                    std::slice::from_ref(&candidate_op),
+                )?
+                .as_array()
+                .expect("operator outputs")
+                .clone(),
+            );
+        }
+        let mut row = json!({
+            "order":"ABBA", "warmup":WARMUP, "warmup_per_operator":WARMUP,
+            "stage_abba_ms":stage_blocks, "operator_abba_ms":operator_blocks,
+            "operator_layers":operator_layers, "operator_layer_by_block":block_layers,
+            "cuda_graph":true, "declared":true, "pid":std::process::id(),
+        });
+        row["id"] = json!(self.key("stage", 0));
+        let mut hashes = [Vec::new(), Vec::new()];
+        for which in 0..2 {
+            for (side, buffers) in stages.iter_mut().enumerate() {
+                upload(buffers, which)?;
+                buffers.graph().expect("stage graph").launch()?;
+                hashes[side].push(sha(&buffers.download_output(runtime)?));
+            }
+        }
+        row["output_sha256"] = json!(hashes);
+        row["operator_outputs"] = json!(operator_outputs);
+        rows.push(row);
+        Ok(())
+    }
+
+    fn paired_segmentation(&self, rows: &mut Vec<Value>) -> Result<(), CudaError> {
+        let runtime = self.runtime;
+        let weights =
+            SafetensorsFile::open("/workspace/models-native/segmentation-3.0.safetensors")?;
+        let options = SegmentationOptions {
+            math: self.math,
+            lstm_algo: CudaLstmAlgorithm::PersistStaticSmallH,
+            cuda_graph: true,
+        };
+        let mut library = CudaSegmentation::new(runtime, &weights, options)?;
+        let mut candidate = CudaSegmentation::new(runtime, &weights, options)?;
+        if self.target == "lstm" {
+            select_lstm(&mut candidate, runtime, [self.batch, WINDOW], self.choice)?;
+        } else {
+            select_sinc(&mut candidate, runtime, [self.batch, WINDOW], self.choice)?;
+        }
+        if !candidate.isolated_declared(self.batch, self.target) && self.choice != "Library" {
+            return Ok(());
+        }
+        let isolated = |file: &SafetensorsFile| -> Result<Vec<f32>, CudaError> {
+            if self.target != "lstm" {
+                return read_batch(
+                    file,
+                    "tensor//sincnet/wav_norm1d/InstanceNormalization_output_0",
+                    self.batch,
+                );
+            }
+            let cf = read_batch(file, "tensor//sincnet/LeakyRelu_2_output_0", self.batch)?;
+            let mut input = vec![0.0; cf.len()];
+            for b in 0..self.batch {
+                for t in 0..589 {
+                    for c in 0..60 {
+                        input[(b * 589 + t) * 60 + c] = cf[(b * 60 + c) * 589 + t];
+                    }
+                }
+            }
+            Ok(input)
+        };
+        let inputs = [isolated(self.files[0])?, isolated(self.files[1])?];
+        let mut library_op =
+            library.isolated(runtime, self.batch, self.target, [&inputs[0], &inputs[1]])?;
+        let mut candidate_op =
+            candidate.isolated(runtime, self.batch, self.target, [&inputs[0], &inputs[1]])?;
+        let library_graphs = [
+            capture(runtime, || {
+                library.isolated_run(runtime, &mut library_op, 0)
+            })?,
+            capture(runtime, || {
+                library.isolated_run(runtime, &mut library_op, 1)
+            })?,
+        ];
+        let candidate_graphs = [
+            capture(runtime, || {
+                candidate.isolated_run(runtime, &mut candidate_op, 0)
+            })?,
+            capture(runtime, || {
+                candidate.isolated_run(runtime, &mut candidate_op, 1)
+            })?,
+        ];
+        let audio = [
+            read_batch(self.files[0], "input/input", self.batch)?,
+            read_batch(self.files[1], "input/input", self.batch)?,
+        ];
+        for model in [&mut library, &mut candidate] {
+            model
+                .workspace(runtime, self.batch, WINDOW)?
+                .upload_input(runtime, &audio[0])?;
+            model.forward(runtime, self.batch, WINDOW)?;
+        }
+        // graph objects are borrowed only after uploads; both sides use the same input
+        let mut row = replay_set(BLOCKS, |which| {
+            for model in [&mut library, &mut candidate] {
+                model
+                    .workspace(runtime, self.batch, WINDOW)?
+                    .upload_input(runtime, &audio[which])?;
+            }
+            observe(
+                runtime,
+                [
+                    library
+                        .qualification_graph(self.batch)
+                        .expect("Library graph"),
+                    candidate
+                        .qualification_graph(self.batch)
+                        .expect("candidate graph"),
+                ],
+                [
+                    std::slice::from_ref(&library_graphs),
+                    std::slice::from_ref(&candidate_graphs),
+                ],
+                which,
+                self.choice == "StageSlow",
+            )
+        })?;
+        let mut hashes = [Vec::new(), Vec::new()];
+        let mut op_hashes = [Vec::new(), Vec::new()];
+        for which in 0..2 {
+            for (side, model) in [&mut library, &mut candidate].into_iter().enumerate() {
+                model
+                    .workspace(runtime, self.batch, WINDOW)?
+                    .upload_input(runtime, &audio[which])?;
+                model
+                    .qualification_graph(self.batch)
+                    .expect("stage graph")
+                    .launch()?;
+                hashes[side].push(sha(&model
+                    .find_workspace(self.batch, WINDOW)
+                    .expect("workspace")
+                    .download_output(runtime)?));
+            }
+            library_graphs[which].launch()?;
+            op_hashes[0].push(sha(&library.isolated_output(runtime, &library_op)?));
+            candidate_graphs[which].launch()?;
+            op_hashes[1].push(sha(&candidate.isolated_output(runtime, &candidate_op)?));
+        }
+        let layer = if self.target == "lstm" {
+            "lstm.stack"
+        } else {
+            "sincnet.conv0.abs_pool"
+        };
+        row["id"] = json!(self.key("stage", 0));
+        row["output_sha256"] = json!(hashes);
+        row["operator_outputs"] = json!([{"id":self.key(layer,0),"output_sha256":op_hashes}]);
+        rows.push(row);
+        Ok(())
+    }
+}
+
+fn op_outputs(
+    runtime: &CudaRuntime,
+    library_graphs: &[[CudaGraph; 2]],
+    candidate_graphs: &[[CudaGraph; 2]],
+    library: &[Operator<'_>],
+    candidate: &[Operator<'_>],
+) -> Result<Value, CudaError> {
+    let mut rows = Vec::new();
+    for index in 0..candidate.len() {
+        let mut hashes = [Vec::new(), Vec::new()];
+        for which in 0..2 {
+            library_graphs[index][which].launch()?;
+            hashes[0].push(sha(&library[index].output(runtime)?));
+            candidate_graphs[index][which].launch()?;
+            hashes[1].push(sha(&candidate[index].output(runtime)?));
+        }
+        rows.push(json!({"layer":candidate[index].name(),"output_sha256":hashes}));
+    }
+    Ok(json!(rows))
+}

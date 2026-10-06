@@ -43,7 +43,7 @@ impl Plan {
         use super::super::implementation::Choice;
         match self {
             Self::Library(_) => Choice::Library,
-            Self::Oxide(_) => Choice::Oxide,
+            Self::Oxide(_) => Choice::Oxide(super::super::implementation::Selection::Explicit),
             Self::Mutant { mutant, .. } => Choice::Mutant(*mutant),
         }
     }
@@ -151,11 +151,11 @@ pub(super) fn plan_layers(
             #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
             layer.override_choice(),
         )?;
-        let plan = match selected {
+        let selected = match selected {
             Selected::Oxide(token) => {
                 #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
                 let _scope = super::super::test_support::plan(layer.name());
-                Plan::Oxide(token.conv(
+                if let Some(plan) = token.conv(
                     runtime,
                     ConvLayerSpec {
                         name: layer.name(),
@@ -164,53 +164,52 @@ pub(super) fn plan_layers(
                         weight: layer.weight().data(),
                         bias: layer.bias().data(),
                     },
-                )?)
-            }
-            library => {
-                LibraryNeed::new(
-                    KernelModule::Resnet,
-                    layer.name(),
-                    batch,
-                    math,
-                    Target::for_area(runtime, KernelModule::Resnet)?,
-                    CudaLibrary::Cudnn,
-                )
-                .prepare(runtime)?;
-                #[cfg(feature = "cuda")]
-                {
-                    if planner.is_none() {
-                        planner = Some(ConvPlanner::new(runtime)?);
-                    }
-                    let spec = layer.conv(batch, math);
-                    let existing = library_plans.iter().find(|plan| *plan.spec() == spec);
-                    let plan = match existing {
-                        Some(plan) => Rc::clone(plan),
-                        None => {
-                            let plan =
-                                Rc::new(planner.as_ref().expect("planner initialized").plan(spec)?);
-                            library_plans.push(Rc::clone(&plan));
-                            plan
-                        }
-                    };
-                    match library {
-                        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
-                        Selected::Mutant(mutant) => Plan::Mutant {
-                            library: plan,
-                            mutant,
-                        },
-                        _ => Plan::Library(plan),
-                    }
+                )? {
+                    plans.push((layer.name().to_owned(), Plan::Oxide(plan)));
+                    continue;
                 }
-                #[cfg(not(feature = "cuda"))]
-                {
-                    let _ = library;
-                    return Err(CudaError::LibraryUnavailable {
-                        library: CudaLibrary::Cudnn,
-                    });
-                }
+                Selected::Library
             }
+            other => other,
         };
-        plans.push((layer.name().to_owned(), plan));
+        LibraryNeed::new(
+            KernelModule::Resnet,
+            layer.name(),
+            batch,
+            math,
+            Target::for_area(runtime, KernelModule::Resnet)?,
+            CudaLibrary::Cudnn,
+        )
+        .prepare(runtime)?;
+        #[cfg(feature = "cuda")]
+        {
+            if planner.is_none() {
+                planner = Some(ConvPlanner::new(runtime)?);
+            }
+            let spec = layer.conv(batch, math);
+            let existing = library_plans.iter().find(|plan| *plan.spec() == spec);
+            let library = match existing {
+                Some(plan) => Rc::clone(plan),
+                None => {
+                    let plan = Rc::new(planner.as_ref().expect("planner initialized").plan(spec)?);
+                    library_plans.push(Rc::clone(&plan));
+                    plan
+                }
+            };
+            let plan = match selected {
+                #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+                Selected::Mutant(mutant) => Plan::Mutant { library, mutant },
+                _ => Plan::Library(library),
+            };
+            plans.push((layer.name().to_owned(), plan));
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            let _ = selected;
+            return Err(CudaError::LibraryUnavailable {
+                library: CudaLibrary::Cudnn,
+            });
+        }
     }
     Ok(plans)
 }

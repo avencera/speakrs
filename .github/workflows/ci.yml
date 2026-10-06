@@ -332,8 +332,8 @@ jobs:
       - name: Check production CUDA qualification
         if: matrix.name == 'Linux x86_64'
         run: |
-          python3 scripts/cuda/qualify/qualified.py check
-          python3 -m unittest discover -s tests/cuda_qualify -p 'test_qualified.py'
+          python3 scripts/cuda/qualify/qualify.py --check-table
+          python3 -m unittest discover -s tests/cuda_qualify -p 'test_*.py'
 
   no-default-features:
     name: Test no-default features (Linux x86_64)

@@ -15,8 +15,10 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts/cuda/qualify"))
 trace = importlib.import_module("parse_trace")
 gates = importlib.import_module("gates")
+qualify = importlib.import_module("qualify")
 snapshot = importlib.import_module("lock")
 scan = importlib.import_module("scan")
+verdict = importlib.import_module("verdict")
 
 NONCE = "0123456789abcdef0123456789abcdef"
 
@@ -102,15 +104,133 @@ class Gates(unittest.TestCase):
         self.assertEqual(gates.spread_bound("fp32/first/b1/stage"), 0.003)
         self.assertEqual(gates.spread_bound("fp32/first/b1/lstm.stack"), 0.010)
 
-    def test_stage_guard_allows_noise_but_not_regression(self):
-        within = [("Library", 1.0), ("c", 1.002), ("Library", 1.001), ("c", 0.997)]
-        self.assertGreater(gates.stage_speed(self.runs(within), "c", 0.003)["ratio"], 0)
-        slower = [("Library", 1.0), ("c", 1.004), ("Library", 1.0), ("c", 1.0)]
-        with self.assertRaisesRegex(gates.Rejected, "stage candidate slower"):
-            gates.stage_speed(self.runs(slower), "c", 0.003)
-        offset = [("Library", 1.0), ("c", 1.002), ("Library", 1.0), ("c", 1.0)]
-        with self.assertRaisesRegex(gates.Rejected, "slower on average"):
-            gates.stage_speed(self.runs(offset), "c", 0.003)
+    def paired_row(self, candidate=0.999, saving=0.003):
+        return {
+            "order": "ABBA",
+            "warmup": 5,
+            "stage_abba_ms": [[1.0, candidate, candidate, 1.0] for _ in range(256)],
+            "operator_abba_ms": [
+                [0.01, 0.01 - saving, 0.01 - saving, 0.01] for _ in range(256)
+            ],
+        }
+
+    def test_stage_paired_guard_detects_regression_and_needs_pairs(self):
+        row = self.paired_row()
+        self.assertGreater(gates.stage_speed(row, False)["ci95"][0], 1.0)
+        with self.assertRaisesRegex(gates.Rejected, "stage regression"):
+            gates.stage_speed(self.paired_row(1.004), True)
+        row["stage_abba_ms"].pop()
+        with self.assertRaisesRegex(gates.Rejected, "insufficient"):
+            gates.stage_speed(row, True)
+
+    def test_tiny_operator_requires_resolving_its_saving_and_operator_gate(self):
+        row = self.paired_row(1.0, 0.003)
+        for i, block in enumerate(row["stage_abba_ms"]):
+            block[1] = block[2] = 0.999 + (0.004 if (i // 16) % 2 else -0.004)
+        self.assertGreater(gates.stage_speed(row, True)["ci_half_width"], 0)
+        with self.assertRaises(gates.Blocked):
+            gates.stage_speed(row, False)
+        row["operator_abba_ms"] = [[0.01, 0.00999, 0.00999, 0.01] for _ in range(256)]
+        with self.assertRaises(gates.Blocked):
+            gates.stage_speed(row, True)
+
+    def test_stratified_saving_is_the_sum_not_the_mean_and_needs_each_layer(self):
+        row = self.paired_row(1.0)
+        row["operator_layers"] = ["one", "two"]
+        row["operator_layer_by_block"] = ["one"] * 128 + ["two"] * 128
+        row["operator_abba_ms"] = [[0.02, 0.01, 0.01, 0.02]] * 128 + [
+            [0.02, 0.019, 0.019, 0.02]
+        ] * 128
+        result = gates.stage_speed(row, True)
+        self.assertAlmostEqual(result["operator_saving_ms"], 0.011)
+        self.assertEqual(set(result["operator_saving_by_layer_ms"]), {"one", "two"})
+        row["operator_layer_by_block"][0] = "two"
+        with self.assertRaisesRegex(gates.Rejected, "operator strata"):
+            gates.stage_speed(row, True)
+
+    def test_tf32_truth_rejects_each_error_and_missing_draws(self):
+        library = {"minimum_cosine": 0.9999, "relative_l2": 0.001, "max_abs": 0.01}
+        gates.tf32_truth(library, library, [library] * 8)
+        better = {"minimum_cosine": 1.0, "relative_l2": 0.0, "max_abs": 0.0}
+        gates.tf32_truth(better, library, [library] * 8)
+        for key, value in [
+            ("minimum_cosine", 0.9998),
+            ("relative_l2", 0.0011),
+            ("max_abs", 0.011),
+        ]:
+            with (
+                self.subTest(key=key),
+                self.assertRaisesRegex(gates.Rejected, "less accurate"),
+            ):
+                gates.tf32_truth({**library, key: value}, library, [library] * 8)
+        with self.assertRaisesRegex(gates.Rejected, "8 independent"):
+            gates.tf32_truth(library, library, [library] * 7)
+
+    def test_tf32_candidate_equal_to_library_passes_when_draws_are_more_accurate(self):
+        library = {"minimum_cosine": 0.9998, "relative_l2": 0.002, "max_abs": 0.02}
+        draw = {"minimum_cosine": 0.9999, "relative_l2": 0.001, "max_abs": 0.01}
+        evidence = gates.tf32_truth(library, library, [draw] * 8)
+        for key in library:
+            component = evidence["bound_components"][key]
+            self.assertEqual(component["candidate"], component["unperturbed_library"])
+            self.assertEqual(component["maximum"], component["unperturbed_library"])
+            self.assertEqual(len(component["draws"]), 8)
+            self.assertLess(component["upper95_diagnostic"], component["maximum"])
+
+    def test_tf32_slightly_worse_than_maximum_draw_fails_and_retains_components(self):
+        library = {"minimum_cosine": 0.9999, "relative_l2": 0.001, "max_abs": 0.01}
+        draw = {**library, "relative_l2": 0.002}
+        candidate = {**draw, "relative_l2": 0.00200000001}
+        with self.assertRaises(gates.TruthRejected) as raised:
+            gates.tf32_truth(candidate, library, [library] * 7 + [draw])
+        evidence = raised.exception.evidence
+        self.assertEqual(evidence["error_limits"]["relative_l2"], 0.002)
+        self.assertEqual(
+            evidence["bound_components"]["relative_l2"]["draws"], [0.001] * 7 + [0.002]
+        )
+        result = {"checks": []}
+        qualify.check(
+            result,
+            "stage_truth:case",
+            lambda: gates.tf32_truth(candidate, library, [library] * 7 + [draw]),
+        )
+        self.assertFalse(result["checks"][0]["passed"])
+        self.assertEqual(result["checks"][0]["evidence"], evidence)
+
+    def test_stage_max_abs_only_failure_rejects_all_production_tuples(self):
+        library = {"minimum_cosine": 0.9999, "relative_l2": 0.001, "max_abs": 0.01}
+        draw = {**library, "max_abs": 0.02}
+        candidate = {**library, "max_abs": math.nextafter(0.02, math.inf)}
+        child: dict = {
+            "checks": [{"check": "all_other_checks", "passed": True}],
+            "coverage_declared": {"triples": [["boundary", 1, "tf32"]]},
+            "accepted_tuples": [["boundary", 1, "tf32"]],
+        }
+        qualify.check(
+            child,
+            "stage_truth:tf32/first/b1/stage",
+            lambda: gates.tf32_truth(candidate, library, [library] * 7 + [draw]),
+        )
+        failed: dict = child["checks"][-1]
+        self.assertFalse(failed["passed"])
+        self.assertEqual(failed["evidence"]["error_limits"]["max_abs"], 0.02)
+        qualify.finish_tier(child, [])
+        self.assertEqual(child["status"], "rejected")
+        self.assertEqual(
+            child["verdict_evaluation"]["hard_failures"],
+            ["stage_truth:tf32/first/b1/stage"],
+        )
+        # a forged passed label cannot turn the retained hard failure into coverage
+        record = {
+            "schema": 4,
+            "implementation": "Oxide",
+            "status": "passed",
+            "checks": [{"check": "static_scan", "passed": True}],
+            "tiers": {"sm75": {**child, "status": "passed"}},
+        }
+        decision = verdict.evaluate_record(record, "sm75")
+        self.assertFalse(decision["accepted"])
+        self.assertEqual(decision["accepted_tuples"], [])
 
     def test_speed_requires_fresh_processes_and_samples(self):
         runs = self.runs([("Library", 1), ("c", 0.99), ("Library", 1), ("c", 0.99)])
@@ -138,14 +258,6 @@ class Gates(unittest.TestCase):
     def test_tf32_band_is_the_largest_perturbed_drop(self):
         band = gates.tf32_band(self.band_rows([1e-7, 3e-7]), True)
         self.assertAlmostEqual(band["cosine"], 3e-7)
-        library = {"minimum_cosine": 0.9999, "mean_cosine": 0.99995}
-        gates.tf32_stage_case({"minimum_cosine": 0.9999 - 2e-7}, library, band, True)
-        with self.assertRaisesRegex(gates.Rejected, "exceeds band"):
-            gates.tf32_stage_case(
-                {"minimum_cosine": 0.9999 - 4e-7}, library, band, True
-            )
-        with self.assertRaisesRegex(gates.Rejected, "mean cosine"):
-            gates.tf32_stage_aggregate([{"mean_cosine": 0.9999}], [library], band, True)
         with self.assertRaisesRegex(gates.Rejected, "8 seeds"):
             rows = self.band_rows([1e-7])
             rows[0]["band"].pop()
@@ -163,23 +275,6 @@ class Gates(unittest.TestCase):
         band = gates.tf32_band(rows, False)
         self.assertEqual(band["flips"], 1)
         self.assertEqual(band["total_flips"], 1)
-        gates.tf32_stage_case(
-            {"relative_l2": 0.0105, "max_abs": 0.11, "argmax_flips": 3},
-            library,
-            band,
-            False,
-        )
-        with self.assertRaises(gates.Rejected):
-            gates.tf32_stage_case(
-                {"relative_l2": 0.0105, "max_abs": 0.11, "argmax_flips": 4},
-                library,
-                band,
-                False,
-            )
-        with self.assertRaisesRegex(gates.Rejected, "mean logits error"):
-            gates.tf32_stage_aggregate(
-                [{"relative_l2": 0.0105, "argmax_flips": 2}], [library], band, False
-            )
 
     def test_completed_sanitizer_required(self):
         gates.sanitizer("memcheck", 0, "========= ERROR SUMMARY: 0 errors")

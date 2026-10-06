@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,6 +40,7 @@ from gates import (
     Blocked,
     Error,
     ParityRejected,
+    TruthRejected,
     Rejected,
     Timing,
     embedding_parity,
@@ -52,11 +53,12 @@ from gates import (
     spread_bound,
     stage_speed,
     tf32_band,
-    tf32_stage_aggregate,
-    tf32_stage_case,
+    tf32_truth,
 )
-from lock import ROOT, LockError, verify
+from lock import ROOT, LockError, inventory, verify
 from assets import resolve
+from records import check_table
+from verdict import evaluate_checks, noise_timing
 from parse_trace import AllowList, attribute, window_kernels
 from ptx import shared_initialization
 from scan import cargo_home, scan
@@ -130,6 +132,8 @@ MUTANT_GATES = {
         "determinism:fixed_reduction_order",
         "floating-point atomic in launched custom entry",
     ),
+    "StageSlow": Gate("paired_stage", "paired stage: stage regression"),
+    "StageAccuracy": Gate("stage_truth", "candidate less accurate than Library TF32"),
     "Slow": Gate("speed", "candidate slower than the faster Library process"),
     "PhaseCheat": Gate("timing_output", "final output differs"),
     "Unscoped": Gate("profile", "outside a candidate or library range"),
@@ -138,10 +142,12 @@ MUTANT_GATES = {
     "UninitShared": Gate("ptx:shared_initialization", "shared load"),
 }
 MUTANTS = tuple(MUTANT_GATES)
-PHASES = ("numeric", "timing", "profile", "sanitize")
+PHASES = ("numeric", "timing", "paired", "profile", "sanitize")
 # a mutant proves only its intended check, so it runs the phases that check needs;
 # Library controls and candidates run every phase
 MUTANT_PHASES = {
+    "StageSlow": ("numeric", "timing", "paired"),
+    "StageAccuracy": ("numeric",),
     "Precision": ("numeric",),
     "Shape": ("numeric",),
     "Tail": ("numeric",),
@@ -254,7 +260,6 @@ def build(
 ) -> Path:
     """Build only this task's release test binary, outside the GPU lock."""
     log = directory / ("build.jsonl" if manifest is None else "control-build.jsonl")
-    tier = env.get("SPEAKRS_CUDA_PTX_TIER", "sm75")
     args = [
         "cargo",
         "test",
@@ -263,7 +268,7 @@ def build(
         "speakrs",
         "--no-default-features",
         "--features",
-        "cuda" if tier == "sm75" else f"cuda,cuda-{tier}",
+        "cuda",
         "--lib",
         "--no-run",
         "--message-format=json",
@@ -306,7 +311,6 @@ def toolchain(env: dict[str, str]) -> str:
 
 def build_library(env: dict[str, str], directory: Path, steps: list[dict]) -> None:
     """Build the non-test library from the same tree, so test-only code cannot pass."""
-    tier = env.get("SPEAKRS_CUDA_PTX_TIER", "sm75")
     args = [
         "cargo",
         "build",
@@ -315,7 +319,7 @@ def build_library(env: dict[str, str], directory: Path, steps: list[dict]) -> No
         "speakrs",
         "--no-default-features",
         "--features",
-        "cuda" if tier == "sm75" else f"cuda,cuda-{tier}",
+        "cuda",
         "--lib",
     ]
     if command(args, env, directory / "build-library.log", steps):
@@ -480,6 +484,8 @@ def driver(
     if phase == "coverage":
         return data
     mode = child.get("SPEAKRS_QUALIFY_MODE")
+    if phase == "paired" and (mode not in MODES or data.get("mode") != mode):
+        raise Rejected("driver math mode mismatch")
     if phase in ("numeric", "timing"):
         if mode not in MODES or data.get("mode") != mode:
             raise Rejected("driver math mode mismatch")
@@ -496,8 +502,59 @@ def driver(
             raise Rejected("graph replay timing is required")
     if data.get("tier") != env.get("SPEAKRS_CUDA_PTX_TIER"):
         raise Rejected("driver PTX tier mismatch")
+    validate_target(
+        data,
+        env["SPEAKRS_CUDA_PTX_TIER"],
+        candidate_area=AREAS[env["SPEAKRS_QUALIFY_TARGET"]]
+        if implementation != "Library"
+        else None,
+    )
     data["evidence_sha256"] = sha(output)
     return data
+
+
+def validate_target(process: dict, tier: str, *, candidate_area: str | None) -> dict:
+    """Require the selected candidate tier and retain every area's loaded tier.
+
+    The trusted caller identifies the candidate area. Library and glue areas use
+    the production loader's tier limit, not a forced variant at that limit.
+    """
+    device = process.get("device", {})
+    required = (
+        "name",
+        "compute_capability",
+        "sm_count",
+        "driver_api_version",
+        "driver_version",
+        "cuda_version",
+        "cudnn_version",
+        "cublas_version",
+    )
+    if any(not device.get(key) for key in required):
+        raise Rejected("target: missing device or library version evidence")
+    if device["compute_capability"] != process.get("device_sm"):
+        raise Rejected("target: inconsistent compute capability")
+    minimum = {"sm75": (7, 5), "sm80": (8, 0), "sm90": (9, 0), "sm120": (12, 0)}[tier]
+    capability = tuple(map(int, device["compute_capability"].split(".")))
+    if capability < minimum:
+        raise Rejected("target: device cannot execute requested tier")
+    modules = process.get("loaded_modules", [])
+    if not modules:
+        raise Rejected("target: missing loaded area evidence")
+    for module in modules:
+        if module["area"] == candidate_area and module["tier"] != tier:
+            raise Rejected(
+                f"target: loaded tier differs from requested tier: {module['area']} {module['tier']} != {tier}"
+            )
+    if process.get("phase") in ("timing", "paired"):
+        clocks = process.get("observed_sm_clock", {})
+        if (
+            not clocks
+            or clocks.get("samples", 0) < 1
+            or not 0 < clocks.get("min_mhz", 0) <= clocks.get("max_mhz", 0)
+        ):
+            raise Rejected("target: missing observed SM clocks during timing")
+    return {"device": device, "loaded_tiers": {m["area"]: m["tier"] for m in modules}}
 
 
 def fail(error: Rejected):
@@ -522,6 +579,15 @@ def check(result: dict, name: str, operation) -> None:
                 "reason": str(error),
                 "failing_cases": error.failing,
                 "cases": error.cases,
+            }
+        )
+    except TruthRejected as error:
+        result["checks"].append(
+            {
+                "check": name,
+                "passed": False,
+                "reason": str(error),
+                "evidence": error.evidence,
             }
         )
     except Rejected as error:
@@ -948,7 +1014,9 @@ def numeric(
                         )
 
                 check(result, f"library_dispatch:{key}", stage_identity)
-            elif mode == "tf32" and key in bands:
+                if mode == "tf32" and result.get("implementation") == "Library":
+                    band_rows.append((key, row, control))
+            elif mode == "tf32":
                 band_rows.append((key, row, control))
             else:
                 stage_check(result, key, row, control)
@@ -990,53 +1058,68 @@ def numeric(
     secret_checks(result, secrets, secret_coverage)
     if not band_rows:
         return
-    seeds = next(row["seeds"] for row in library if row["id"].endswith("/band"))
-    layers_used = sorted(
-        {
-            layer
-            for row in library
-            if row["id"].endswith("/band")
-            for layer in row["layers"]
-        }
-    )
     bands_by_case = {}
     for key, row, control in band_rows:
-        # each case's band is that case's own seed maximum
-        try:
-            band = tf32_band(
+        band_row = baseline.get(f"{key}/band")
+
+        def truth_gate(row=row, control=control, band_row=band_row):
+            if (
+                band_row is None
+                or row.get("truth") is None
+                or control.get("truth") is None
+            ):
+                raise Rejected(
+                    "TF32 truth: missing same-input FP32 truth or perturbation draws"
+                )
+            truth_hash = row.get("truth_sha256")
+            if (
+                not truth_hash
+                or truth_hash != control.get("truth_sha256")
+                or truth_hash != band_row.get("truth_sha256")
+            ):
+                raise Rejected(
+                    "TF32 truth: FP32 Library truth differs between processes"
+                )
+            seeds = band_row.get("seeds", [])
+            if len(seeds) < 8 or len(set(seeds)) != len(seeds):
+                raise Rejected("TF32 truth: independent perturbation seeds required")
+            if len(band_row.get("truth_draws", [])) != len(seeds):
+                raise Rejected("TF32 truth: missing perturbation draw")
+            return tf32_truth(row["truth"], control["truth"], band_row["truth_draws"])
+
+        check(result, f"stage_truth:{key}", truth_gate)
+        if key in bands:
+            bands_by_case[key] = tf32_band(
                 [{"metrics": control["first"], "band": bands[key]}], embedding
             )
-        except Rejected as error:
-            check(result, f"stage:{key}", lambda error=error: fail(error))
-            continue
-        bands_by_case[key] = band
-        check(
-            result,
-            f"stage:{key}",
-            lambda row=row, control=control, band=band: tf32_stage_case(
-                row["first"], control["first"], band, embedding
-            ),
-        )
+            if not embedding:
+
+                def stage_flips(row=row, control=control, band=bands_by_case[key]):
+                    if (
+                        row["first"]["argmax_flips"]
+                        > control["first"]["argmax_flips"] + band["flips"]
+                    ):
+                        raise Rejected(
+                            "stage: argmax flips above Library plus measured band"
+                        )
+
+                check(result, f"stage:{key}/argmax", stage_flips)
     result["tf32_band"] = {
+        "error_drift_diagnostic_only": True,
         "per_case": bands_by_case,
-        "seed_values": seeds,
-        "layers": layers_used,
     }
-    total = {
-        "total_flips": sum(
-            band.get("total_flips", 0) for band in bands_by_case.values()
-        )
-    }
-    check(
-        result,
-        "stage:tf32/aggregate",
-        lambda: tf32_stage_aggregate(
-            [row["first"] for _, row, _ in band_rows],
-            [control["first"] for _, _, control in band_rows],
-            total,
-            embedding,
-        ),
-    )
+    if not embedding:
+
+        def total_flips():
+            candidate = sum(row["first"]["argmax_flips"] for _, row, _ in band_rows)
+            library = sum(
+                control["first"]["argmax_flips"] for _, _, control in band_rows
+            )
+            band = sum(value.get("total_flips", 0) for value in bands_by_case.values())
+            if candidate > library + band:
+                raise Rejected("stage: total flips above Library plus measured band")
+
+        check(result, "stage:tf32/aggregate_argmax", total_flips)
 
 
 def secret_checks(result: dict, secrets: list[dict], coverage: Coverage) -> None:
@@ -1160,14 +1243,7 @@ def timing(
                     "undeclared stage: bitwise Library identity, no candidate kernels"
                 )
                 continue
-            detail["gate"] = "stage: regression guard within the stage bound"
-            check(
-                result,
-                f"speed:{key}",
-                lambda samples=samples, bound=bound: stage_speed(
-                    samples, implementation, bound
-                ),
-            )
+            detail["gate"] = "stage: paired replay guard in same-process phase"
     result["measurability"] = {
         kind: {"measurable": count, "cases": total}
         for kind, (count, total) in measurable.items()
@@ -1175,6 +1251,120 @@ def timing(
     result["noise_floor_fraction"] = max(
         row["library_process_spread_fraction"] for row in result["timing"]
     )
+
+
+def paired_checks(
+    result: dict,
+    process: dict,
+    coverage: Coverage,
+    library: dict,
+    candidate: dict,
+    implementation: str,
+) -> None:
+    """Require exact paired case coverage, numeric outputs and same-process saving."""
+    mode = process["mode"]
+    expected = {
+        f"{mode}/{case}/b{batch}/stage"
+        for case, batch in CASES
+        if coverage.layers_at(batch, mode) or implementation == "Library"
+    }
+    rows = {row["id"]: row for row in process["rows"]}
+    if set(rows) != expected or len(rows) != len(process["rows"]):
+        raise Rejected("paired stage: missing or duplicate case coverage")
+    numeric = [{row["id"]: row for row in p["rows"]} for p in (library, candidate)]
+    for key, row in rows.items():
+
+        def outputs(row=row, key=key):
+            for side in (0, 1):
+                expected_hashes = [
+                    numeric[side][key]["first"]["sha256"],
+                    numeric[side][f"{key}/switched"]["first"]["sha256"],
+                ]
+                if row["output_sha256"][side] != expected_hashes:
+                    raise Rejected(
+                        "paired stage: final output differs from numeric evidence"
+                    )
+                for op in row["operator_outputs"]:
+                    operator_key = (
+                        op.get("id") or key.removesuffix("stage") + op["layer"]
+                    )
+                    hashes = [
+                        numeric[side][operator_key]["first"]["sha256"],
+                        numeric[side][f"{operator_key}/switched"]["first"]["sha256"],
+                    ]
+                    if op["output_sha256"][side] != hashes:
+                        raise Rejected(
+                            "paired stage: operator output differs from numeric evidence"
+                        )
+
+        _, _, batch, _, _ = split_key(key)
+        expected_layers = (
+            set(layers(result["target"]))
+            if implementation == "Library"
+            else set(coverage.layers_at(batch, mode))
+        )
+        observed_layers = [
+            op.get("layer") or split_key(op["id"])[3] for op in row["operator_outputs"]
+        ]
+        if (
+            len(observed_layers) != len(set(observed_layers))
+            or set(observed_layers) != expected_layers
+        ):
+            raise Rejected("paired stage: missing or duplicate operator coverage")
+        if "operator_layers" in row and set(row["operator_layers"]) != expected_layers:
+            raise Rejected(
+                "paired stage: measured operator strata differ from coverage"
+            )
+        check(result, f"paired_output:{key}", outputs)
+        operator_keys = {
+            f"speed:{key.removesuffix('stage')}{layer}"
+            for layer in coverage.layers_at(batch, mode)
+        }
+        passed = {item["check"] for item in result["checks"] if item["passed"]}
+        details = {detail["id"]: detail for detail in result.get("timing", [])}
+        for item in result["checks"]:
+            if item["check"] not in operator_keys or not item.get("blocked"):
+                continue
+            try:
+                evaluation = noise_timing(
+                    item,
+                    details[item["check"].removeprefix("speed:")],
+                    allow_stage=False,
+                )
+                if evaluation["accepted"]:
+                    passed.add(item["check"])
+            except (Rejected, KeyError, ValueError):
+                pass
+        operator_passed = bool(operator_keys) and operator_keys <= passed
+        if implementation == "Library":
+            # a sanity control validates the estimator but never claims a speed improvement
+            check(result, f"paired_control:{key}", lambda row=row: paired_control(row))
+        else:
+            check(
+                result,
+                f"paired_stage:{key}",
+                lambda row=row, ok=operator_passed: stage_speed(row, ok),
+            )
+
+
+def paired_control(row: dict) -> dict:
+    """Check the full paired estimator contract without imposing a win on Library."""
+    try:
+        return stage_speed(row, True)
+    except Blocked:
+        return {
+            "control": True,
+            "comparison": "Library vs Library",
+            "abba_blocks": len(row["stage_abba_ms"]),
+        }
+    except Rejected as error:
+        if "stage regression exceeds zero slowdown" not in str(error):
+            raise
+        return {
+            "control": True,
+            "comparison": "Library vs Library",
+            "abba_blocks": len(row["stage_abba_ms"]),
+        }
 
 
 def timing_outputs(
@@ -1279,6 +1469,9 @@ def profile(
     steps: list,
     implementation: str,
     target: str,
+    *,
+    test: str = PROFILE_TEST,
+    label: str = "profile",
 ) -> Path:
     """Run the eager nsys trace with the locked NVTX shim and export it."""
     shim = directory / "nvtx.so"
@@ -1299,13 +1492,13 @@ def profile(
         steps,
     ):
         raise Rejected("NVTX shim build failed")
-    prefix = directory / "profile"
+    prefix = directory / label
     profile_env = dict(
         env,
         SPEAKRS_QUALIFY_NVTX=str(shim),
         SPEAKRS_QUALIFY_IMPL=implementation,
         SPEAKRS_QUALIFY_PHASE="profile",
-        SPEAKRS_QUALIFY_OUTPUT=str(directory / "profile-driver.json"),
+        SPEAKRS_QUALIFY_OUTPUT=str(directory / f"{label}-driver.json"),
     )
     if gpu_command(
         [
@@ -1319,12 +1512,12 @@ def profile(
             str(prefix),
             str(binary),
             "--exact",
-            PROFILE_TEST,
+            test,
             "--ignored",
             "--nocapture",
         ],
         profile_env,
-        directory / "profile.log",
+        directory / f"{label}.log",
         steps,
     ):
         raise Rejected("blocked: nsys stage trace did not complete")
@@ -1341,11 +1534,20 @@ def profile(
             str(prefix.with_suffix(".nsys-rep")),
         ],
         env,
-        directory / "export.log",
+        directory / f"{label}-export.log",
         steps,
     ):
         raise Rejected("blocked: nsys SQLite export failed")
-    result["profile"] = {"path": str(exported), "sha256": sha(exported)}
+    if test == PROFILE_TEST:
+        process = json.loads((directory / f"{label}-driver.json").read_text())
+        validate_target(
+            process,
+            env["SPEAKRS_CUDA_PTX_TIER"],
+            candidate_area=AREAS[env["SPEAKRS_QUALIFY_TARGET"]]
+            if implementation != "Library"
+            else None,
+        )
+    result[label] = {"path": str(exported), "sha256": sha(exported)}
     return exported
 
 
@@ -1381,8 +1583,10 @@ def stable_modules(
             candidate[area] = modules[area]
         # profile covers all cases; numeric and timing cover their recorded triples
         ran = (
-            coverage.triples
-            if process["phase"] == "profile"
+            frozenset(
+                t for t in coverage.triples if process.get("mode") in (None, t[2])
+            )
+            if process["phase"] in ("profile", "paired")
             else frozenset(
                 (layer, batch, mode)
                 for row in process["rows"]
@@ -1425,6 +1629,35 @@ def graph_kernels(processes: list[dict]) -> dict[str, set[str]]:
     return dict(found)
 
 
+def capture_multisets(
+    trace: Path, processes: list[dict], nonce: str, *, required: int | None = None
+) -> dict:
+    """Compare each captured plan's multiset with correlated eager launches, not declarations."""
+    eager = window_kernels(trace, nonce, multiset=True)
+    compared = 0
+    evidence = []
+    for process in processes:
+        found: dict[str, Counter] = defaultdict(Counter)
+        for capture in process.get("graph_evidence", []):
+            if capture.get("case") is not None:
+                found[capture["case"]]
+                if capture["scope"] == "candidate":
+                    found[capture["case"]].update(capture["kernels"])
+        for case, kernels in found.items():
+            expected = eager.get(case, Counter())
+            if kernels != expected:
+                raise Rejected(
+                    f"profile: capture != eager launch multiset for {case}: {dict(kernels)} != {dict(expected)}"
+                )
+            compared += 1
+            evidence.append({"case": case, "kernel_multiset": dict(expected)})
+    if required is not None and (
+        compared != required or len(eager) != required or not all(eager.values())
+    ):
+        raise Rejected("profile: incomplete same-plan sequential capture evidence")
+    return {"compared": compared, "eager": evidence}
+
+
 def band_layers(coverage: Coverage, implementation: str) -> str:
     """`<batch>:<layers>;...` for every batch with declared TF32 layers."""
     if implementation == "Library":
@@ -1448,6 +1681,29 @@ def collect_tier(
         SPEAKRS_CUDA_PTX_TIER=tier,
         SPEAKRS_QUALIFY_TARGET=target,
         SPEAKRS_QUALIFY_NONCE=nonce,
+    )
+    result["requested_tier"] = tier
+    result["code_sha256"] = {
+        name: sha(ROOT / name)
+        for name in inventory()
+        if name.endswith((".rs", ".manifest")) and (ROOT / name).is_file()
+    }
+    result["code_sha256"].update(
+        {
+            str(path.relative_to(ROOT)): sha(path)
+            for path in (ROOT / "src/inference/cuda/candidate").rglob("*.rs")
+        }
+    )
+    result["code_sha256"].update(
+        {
+            str(path.relative_to(ROOT)): sha(path)
+            for base in (
+                ROOT / "crates/speakrs-cuda-kernels/src",
+                ROOT / "src/inference/cuda/ptx",
+            )
+            for path in base.rglob("*")
+            if path.is_file() and path.suffix in (".rs", ".ptx", ".manifest")
+        }
     )
     result["verified_inputs"] = verify_inputs(target)
     steps = result["commands"]
@@ -1484,7 +1740,12 @@ def collect_tier(
 
     numeric_library, numeric_candidate = {}, {}
     candidate_processes = []
-    band = band_layers(coverage, implementation)
+    band_coverage = (
+        Coverage.product(layers(target), BATCHES, MODES)
+        if implementation == "Library"
+        else coverage
+    )
+    band = band_layers(band_coverage, "Oxide")
     for mode in MODES:
         extra = {"SPEAKRS_QUALIFY_MODE": mode}
         library = driver(
@@ -1507,7 +1768,10 @@ def collect_tier(
             f"numeric-{mode}-candidate",
             extra,
         )
+        if library["device"] != candidate["device"]:
+            raise Rejected("target: Library and candidate device identity differs")
         result.setdefault("device_sm", library["device_sm"])
+        result.setdefault("device", library["device"])
         numeric_library[mode] = library
         numeric_candidate[mode] = candidate
         candidate_processes.append(candidate)
@@ -1597,6 +1861,30 @@ def collect_tier(
             for run in runs
         ]
 
+    if "paired" in phases:
+        result["paired_processes"] = []
+        for mode in MODES:
+            paired = driver(
+                binary,
+                env,
+                directory,
+                steps,
+                implementation,
+                "paired",
+                f"paired-{mode}",
+                {"SPEAKRS_QUALIFY_MODE": mode},
+            )
+            candidate_processes.append(paired)
+            result["paired_processes"].append(paired)
+            paired_checks(
+                result,
+                paired,
+                coverage,
+                numeric_library[mode],
+                numeric_candidate[mode],
+                implementation,
+            )
+
     def captured_calls():
         violations = [
             v for p in candidate_processes for v in p["library_call_violations"]
@@ -1676,9 +1964,33 @@ def collect_tier(
                 raise Rejected(
                     f"profile: captured kernels differ from the eager profile: {dict(list(differences.items())[:4])}"
                 )
-            return {**evidence, "compared_cases": len(graphs)}
+            multisets = capture_multisets(exported, candidate_processes, nonce)
+            return {**evidence, "compared_cases": len(graphs), "multisets": multisets}
 
         check(result, "profile:graph_nodes", graph_matches_profile)
+
+    if "profile" in phases and implementation == "Oxide":
+        regression = profile(
+            result,
+            binary,
+            env,
+            directory,
+            steps,
+            implementation,
+            target,
+            test="inference::cuda::test_support::qualify::sequential_capture_keeps_candidate_kernels",
+            label="capture-regression",
+        )
+        regression_process = json.loads(
+            (directory / "capture-regression-driver.json").read_text()
+        )
+        check(
+            result,
+            "profile:sequential_capture",
+            lambda: capture_multisets(
+                regression, [regression_process], nonce, required=7
+            ),
+        )
 
     check(
         result,
@@ -1799,6 +2111,24 @@ def collect_tier(
             if record["returncode"] in (124, 137) or "1 passed; 0 failed" not in text:
                 blocked_tools.append(f"{implementation}/{tool}: incomplete bounded run")
     finish_tier(result, blocked_tools)
+    clocks = [
+        p["observed_sm_clock"]
+        for p in candidate_processes
+        if p.get("observed_sm_clock")
+    ]
+    if clocks:
+        result["device"]["observed_sm_clock_range_mhz"] = [
+            min(p["min_mhz"] for p in clocks),
+            max(p["max_mhz"] for p in clocks),
+        ]
+    result["loaded_tiers"] = {
+        m["area"]: m["tier"] for m in result.get("loaded_ptx", {}).get("modules", [])
+    }
+    result["accepted_tuples"] = (
+        [list(t) for t in sorted(coverage.triples) if t[1] in (1, 32)]
+        if result["status"] == "passed" and implementation == "Oxide"
+        else []
+    )
     result["coverage"] = {
         "math": list(MODES),
         "cases": CASES,
@@ -1809,25 +2139,30 @@ def collect_tier(
 
 def finish_tier(result: dict, blocked_tools: list[str]) -> None:
     """Hard failures reject; incomplete or unmeasurable evidence blocks; else pass."""
-    failed = [item for item in result["checks"] if not item["passed"]]
-    hard = [item for item in failed if not item.get("blocked")]
-    blocked = [item for item in failed if item.get("blocked")]
-    if blocked_tools:
-        result["status"] = "blocked"
-        result["reason"] = (
-            f"Compute Sanitizer drivers did not complete: {blocked_tools}"
+    evaluation = evaluate_checks(
+        result["checks"], result.get("timing", []), allow_stage=False
+    )
+    result["verdict_evaluation"] = evaluation
+    if evaluation["hard_failures"]:
+        result.update(
+            status="rejected",
+            reason=f"{len(evaluation['hard_failures'])} failed checks",
         )
-    elif hard:
-        result["status"] = "rejected"
-        result["reason"] = f"{len(hard)} failed checks"
-    elif blocked:
-        result["status"] = "blocked"
-        result["reason"] = (
-            f"{len(blocked)} checks cannot be decided: {[item['check'] for item in blocked[:6]]}"
+    elif blocked_tools:
+        result.update(
+            status="blocked",
+            reason=f"Compute Sanitizer drivers did not complete: {blocked_tools}",
+        )
+    elif not evaluation["accepted"]:
+        result.update(
+            status="blocked",
+            reason=f"{len(evaluation['unresolved'])} checks cannot be decided",
         )
     else:
-        result["status"] = "passed"
-        result["reason"] = "all required checks passed"
+        result.update(
+            status="passed",
+            reason="all required checks passed under locked verdict evaluation",
+        )
 
 
 def shipped_tiers(target: str, root: Path = ROOT) -> tuple[str, ...]:
@@ -1849,7 +2184,7 @@ def shipped_tiers(target: str, root: Path = ROOT) -> tuple[str, ...]:
 
 
 def collect(target: str, implementation: str, directory: Path, result: dict) -> None:
-    """A pass requires the scan and every shipped candidate tier to pass every check."""
+    """A pass requires the scan and the requested compiled tier to pass every check."""
     findings = scan(ROOT, cargo_home())
     result["static_scan"] = findings
     if findings["findings"]:
@@ -1869,7 +2204,9 @@ def collect(target: str, implementation: str, directory: Path, result: dict) -> 
         {"check": "static_scan", "passed": True, "evidence": findings}
     )
     result["tiers"] = {}
-    for tier in shipped_tiers(target):
+    for tier in (
+        result.get("requested_tier", os.environ.get("SPEAKRS_CUDA_PTX_TIER", "sm75")),
+    ):
         output = directory / tier
         output.mkdir()
         child = {
@@ -1878,6 +2215,7 @@ def collect(target: str, implementation: str, directory: Path, result: dict) -> 
             "checks": [],
             "commands": result["commands"],
             "status": "blocked",
+            "requested_tier": tier,
         }
         result["tiers"][tier] = child
         try:
@@ -1966,9 +2304,67 @@ def summary(result: dict) -> str:
 def main() -> int:
     """Refuse changed harnesses before GPU work and again before writing results."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("target", choices=("resnet", "lstm", "sincnet"))
-    parser.add_argument("implementation")
+    parser.add_argument("target", nargs="?", choices=("resnet", "lstm", "sincnet"))
+    parser.add_argument("implementation", nargs="?")
+    parser.add_argument("--tier", choices=("sm75", "sm80", "sm90", "sm120"))
+    parser.add_argument("--check-table", action="store_true")
+    parser.add_argument(
+        "--records",
+        type=Path,
+        help="re-derive summaries from this outside-tree cache's records/<sha256>",
+    )
+    parser.add_argument(
+        "--table", type=Path, help="check a scratch copy of the evaluated table"
+    )
     args = parser.parse_args()
+    if args.check_table:
+        try:
+            with tempfile.TemporaryDirectory(
+                prefix="speakrs-production-table-"
+            ) as output:
+                path = args.table or Path(output) / "table.json"
+                if args.table is None:
+                    env = dict(
+                        clean_environment(), SPEAKRS_QUALIFY_TABLE_OUTPUT=str(path)
+                    )
+                    run = subprocess.run(
+                        [
+                            "cargo",
+                            "test",
+                            "-p",
+                            "speakrs",
+                            "--no-default-features",
+                            "--features",
+                            "cuda",
+                            "--lib",
+                            "--",
+                            "--exact",
+                            "inference::cuda::implementation::tests::export_production_table",
+                        ],
+                        cwd=ROOT,
+                        env=env,
+                        check=False,
+                    )
+                    if run.returncode or not path.is_file():
+                        raise Rejected("table: Rust export failed")
+                print(
+                    json.dumps(
+                        check_table(
+                            json.loads(path.read_text()),
+                            records=args.records / "records" if args.records else None,
+                        ),
+                        indent=2,
+                    )
+                )
+            return 0
+        except (Rejected, LockError, OSError, KeyError, ValueError) as error:
+            print(f"table rejected: {error}", file=sys.stderr)
+            return 1
+    if args.target is None or args.implementation is None or args.table or args.records:
+        parser.error("target and implementation required, or --check-table")
+    tier = args.tier or os.environ.get("SPEAKRS_CUDA_PTX_TIER", "sm75")
+    if tier not in ("sm75", "sm80", "sm90", "sm120"):
+        parser.error("unknown requested PTX tier")
     expected = os.environ.get("SPEAKRS_QUALIFY_OWNER_DIGEST")
     if not expected:
         print(
@@ -2001,7 +2397,8 @@ def main() -> int:
     directory = BOX / "results" / prefix
     directory.mkdir(parents=True, exist_ok=False)
     result = {
-        "schema": 3,
+        "schema": 4,
+        "requested_tier": tier,
         "target": args.target,
         "implementation": args.implementation,
         "lock_digest": digest,

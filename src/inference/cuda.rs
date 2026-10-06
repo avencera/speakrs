@@ -25,7 +25,6 @@ mod buffer;
 // and the candidate PTX areas are unused
 #[allow(dead_code)]
 mod candidate;
-mod dispatch;
 mod dnn;
 mod embedding;
 mod error;

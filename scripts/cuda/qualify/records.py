@@ -1,0 +1,935 @@
+"""Validate evaluated production entries against immutable, outside-tree records."""
+
+import gzip
+import hashlib
+import json
+import re
+from pathlib import Path
+
+from assets import cache_directory
+from gates import Rejected
+from lock import ROOT
+from verdict import NOISE_REASON, evaluate_record, noise_timing
+
+# legacy PR #36 results forced sm75 on RTX 5070 Ti (12.0), not on Turing
+# sources: qualification/k1/REPORT-K1-requalify.md, k2/REPORT-final-lock.md,
+# and k3/REPORT-K3-requalify.md in the archived native-CUDA records
+LEGACY = {
+    "8f8fa3e3c158771e354aad83f4e42fca6fac998aa192b39a966067a4b0035758": "resnet",
+    "3badc1aec939b0e8f7312786d695bec6445de1dacb1f85e44124bf3ac20356f8": "lstm",
+    "a4d1a2692b78a814cd2da16f084801c3641bfd11c6d095d610f3a8182ad6f675": "sincnet",
+}
+
+
+SOURCE_EVIDENCE_GAP = (
+    "legacy record has no host-source, kernel-source, or PTX build-manifest hashes; "
+    "area bindings were captured at PR36 acceptance; shared candidate.rs uses the "
+    "explicit final structural baseline for PlanError, per-tier coverage, and batches; "
+    "that structural change was not measured by the archived GPU qualification"
+)
+SHARED_SOURCE_AMENDMENT = {
+    "path": "src/inference/cuda/candidate.rs",
+    "acceptance_sha256": "132ac95289a11c642740370987f9090e6720fadf406c0b82e823f7b73f639427",
+    "structural_baseline_sha256": "7ebccfee61ad72ad617addc5d7d32a78dc4895afbc4582383bdb2b1cc07fd2ee",
+}
+# device identity is recorded in the archived PR36 qualification reports
+LEGACY_DEVICE_NAME = "NVIDIA GeForce RTX 5070 Ti"
+AREA_HOST = {"resnet": "conv", "lstm": "lstm", "sincnet": "sinc"}
+# acceptance-time hashes migrated from QUALIFIED.json; this is not a writable manifest
+LEGACY_BINDINGS: dict[str, dict] = {
+    "3badc1aec939b0e8f7312786d695bec6445de1dacb1f85e44124bf3ac20356f8": {
+        "files": {
+            "host_sources": {
+                "src/inference/cuda/candidate.rs": "7ebccfee61ad72ad617addc5d7d32a78dc4895afbc4582383bdb2b1cc07fd2ee",
+                "src/inference/cuda/candidate/lstm.rs": "5306b541515451b80eeacc43bb922d68dec4601dcc9582292f4074ee91e0439a",
+                "src/inference/cuda/candidate/lstm/layout.rs": "478adba61b4c5f2b21d22147b7f0e73768164831559f711a4d8653f04de77e8c",
+            },
+            "kernel_sources": {
+                "crates/speakrs-cuda-kernels/src/lstm.rs": "f37dc36973e1a751926bd36c110d2ac4849a3b94b43950ace81a19b6d7b0724b"
+            },
+            "manifests": {
+                "src/inference/cuda/ptx/lstm.manifest": "9346034eef96b3e54d679fcb2a721bf72437016c89505064276dcfb2af22f43b"
+            },
+            "ptx": {
+                "src/inference/cuda/ptx/lstm.sm75.ptx": "72945743a3c1b915c05d8ea21b438dfd860fa9487401c447fb24fd48802916fa"
+            },
+        },
+        "lock_digest": "4bb7818f209cad9a3d841e3a71e0d9abee46f419479aeb9bf07ceaec277dfdf9",
+    },
+    "8f8fa3e3c158771e354aad83f4e42fca6fac998aa192b39a966067a4b0035758": {
+        "files": {
+            "host_sources": {
+                "src/inference/cuda/candidate.rs": "7ebccfee61ad72ad617addc5d7d32a78dc4895afbc4582383bdb2b1cc07fd2ee",
+                "src/inference/cuda/candidate/conv.rs": "b4755e8bdf919edd39d2da5e632da7af5a52fd48f3852bd17968cc29be6310a8",
+            },
+            "kernel_sources": {
+                "crates/speakrs-cuda-kernels/src/resnet.rs": "9f2b5fd4c5c88236aad9829c8ef48c1c7b1b55169a8d82228edbd622c8184122"
+            },
+            "manifests": {
+                "src/inference/cuda/ptx/resnet.manifest": "0d9a2c625742b38f5bdb1fccb4a5465b45efb9c83830b1d1e5b51077ae574d1e"
+            },
+            "ptx": {
+                "src/inference/cuda/ptx/resnet.sm75.ptx": "dd6449c0129f9a03bf691c0338611b50b651ab714d5803caedea87de3c72b6b7"
+            },
+        },
+        "lock_digest": "368389d213c1c9c3ae32b0c9375d558efbd1d88f71eec063e67b8f14163bcb70",
+    },
+    "a4d1a2692b78a814cd2da16f084801c3641bfd11c6d095d610f3a8182ad6f675": {
+        "files": {
+            "host_sources": {
+                "src/inference/cuda/candidate.rs": "7ebccfee61ad72ad617addc5d7d32a78dc4895afbc4582383bdb2b1cc07fd2ee",
+                "src/inference/cuda/candidate/sinc.rs": "f0a95196f635a7fc25c45722f2df8f8c248d9d5e67ac2804b7cb45c0b4d91ded",
+            },
+            "kernel_sources": {
+                "crates/speakrs-cuda-kernels/src/sincnet.rs": "600f1c3688e073e13b65a36b0fbe4917dde498218efba8c61fca912e6f9d6920"
+            },
+            "manifests": {
+                "src/inference/cuda/ptx/sincnet.manifest": "9b2eb3c3db1d60ddadf364c1eea8ff79ec23e5d368cb13ea4037253412bf6f39"
+            },
+            "ptx": {
+                "src/inference/cuda/ptx/sincnet.sm75.ptx": "967bc6893f80da84d8d4d288f2cf1ca3336ca09c4386495cab722beb0ac87247"
+            },
+        },
+        "lock_digest": "368389d213c1c9c3ae32b0c9375d558efbd1d88f71eec063e67b8f14163bcb70",
+    },
+}
+
+
+def digest(value: str) -> str:
+    """Require a canonical content hash, never a cache-relative path."""
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise Rejected("record: missing or invalid SHA-256")
+    return value
+
+
+def record_path(value: str, root: Path = ROOT, *, records: Path | None = None) -> Path:
+    """Map a SHA-256 to the record namespace in the outside-tree cache."""
+    directory = records if records is not None else cache_directory(root) / "records"
+    resolved = directory.resolve()
+    tree = root.resolve()
+    if resolved == tree or tree in resolved.parents:
+        raise Rejected("record: raw records directory must be outside the source tree")
+    return directory / digest(value)
+
+
+def load(value: str, root: Path = ROOT, *, records: Path | None = None) -> dict:
+    """Verify raw bytes first; accept JSON or gzip-compressed JSON."""
+    path = record_path(value, root, records=records)
+    if path.is_symlink() or not path.is_file():
+        raise Rejected(
+            f"record: unresolved hash {value}; provide an outside-tree raw records directory"
+        )
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != value:
+        raise Rejected(f"record: cache hash mismatch {value}")
+    if data.startswith(b"\x1f\x8b"):
+        data = gzip.decompress(data)
+    result = json.loads(data)
+    if not isinstance(result, dict):
+        raise Rejected("record: expected an object")
+    return result
+
+
+def triples(raw: dict) -> set[tuple[str, int, str]]:
+    """Expand an evaluated model entry without consulting candidate coverage."""
+    found = set()
+    for entry in raw["entries"]:
+        batches = [1, 32] if entry["batches"] == "all" else entry["batches"]
+        modes = ["fp32", "tf32"] if entry["maths"] == "all" else entry["maths"]
+        for layer in entry["layers"]:
+            for batch in batches:
+                for mode in modes:
+                    if (
+                        not isinstance(layer, str)
+                        or type(batch) is not int
+                        or batch not in (1, 32)
+                        or mode not in ("fp32", "tf32")
+                    ):
+                        raise Rejected(
+                            "table: invalid production tuple or stress batch"
+                        )
+                    found.add((layer, batch, mode))
+    if not found:
+        raise Rejected("table: empty production entry")
+    return found
+
+
+TEST_BATCHES = (1, 7, 32, 33, 64)
+LEGACY_PHASES = ["numeric", "timing", "profile", "sanitize"]
+CURRENT_PHASES = ["numeric", "timing", "paired", "profile", "sanitize"]
+
+
+def required_checks(target: str) -> set[str]:
+    """Identify collection markers that establish complete Oxide qualification"""
+    names = {
+        "ptx:loaded_bytes",
+        "ptx:loaded_bytes/stable",
+        "ptx:shared_initialization",
+        "determinism:fixed_reduction_order",
+        "profile",
+        "profile:graph_nodes",
+        "profile:captured_library_calls",
+        *(f"sanitizer:control/{fault}" for fault in ("oob", "race", "uninit")),
+        *(f"sanitizer:Oxide/{tool}" for tool in ("memcheck", "racecheck", "initcheck")),
+    }
+    if target == "lstm":
+        names.update(
+            f"sanitizer:ProjectionBaseline/{tool}"
+            for tool in ("memcheck", "racecheck", "initcheck")
+        )
+    return names
+
+
+TEST_CASES = (
+    ("first", 1),
+    ("last", 1),
+    ("short", 1),
+    ("mixed", 7),
+    ("mixed", 32),
+    ("mixed", 33),
+    ("mixed", 64),
+    ("short", 7),
+)
+
+
+def tuple_requirements(record: dict, child: dict) -> tuple[set[str], set[str]]:
+    """Derive required numeric, timing, and paired markers from tested coverage"""
+    declared = child.get("coverage_declared")
+    if not isinstance(declared, dict) or "triples" not in declared:
+        raise Rejected("table: missing recorded candidate coverage")
+    triples = tested_declaration(declared)
+    names, timing = set(), set()
+    for layer, batch, mode in triples:
+        names.add(f"layer:{mode}/{layer}")
+        names.add(f"secret:{mode}/secret/b{batch}/{layer}")
+        for case, sample in TEST_CASES:
+            if sample != batch:
+                continue
+            key = f"{mode}/{case}/b{batch}/{layer}"
+            names.update(
+                (f"determinism:{key}", f"determinism:{key}/switched", f"speed:{key}")
+            )
+            timing.add(key)
+    tf32 = False
+    for case, batch in TEST_CASES:
+        for mode in ("fp32", "tf32"):
+            if not any(sample == batch and math == mode for _, sample, math in triples):
+                continue
+            key = f"{mode}/{case}/b{batch}/stage"
+            names.update((f"determinism:{key}", f"determinism:{key}/switched"))
+            timing.add(key)
+            if mode == "fp32" or record["schema"] == 3:
+                names.update((f"stage:{key}", f"stage:{key}/switched"))
+            else:
+                names.update((f"stage_truth:{key}", f"stage_truth:{key}/switched"))
+                if record["target"] != "resnet":
+                    names.update(
+                        (f"stage:{key}/argmax", f"stage:{key}/switched/argmax")
+                    )
+            tf32 |= mode == "tf32"
+            if record["schema"] == 3:
+                names.add(f"speed:{key}")
+            else:
+                names.update((f"paired_output:{key}", f"paired_stage:{key}"))
+    if tf32:
+        if record["schema"] == 3:
+            names.add("stage:tf32/aggregate")
+        elif record["target"] != "resnet":
+            names.add("stage:tf32/aggregate_argmax")
+    return names, timing
+
+
+def valid_checks(checks: object) -> list[dict]:
+    """Require complete boolean outcomes and unique, named checks"""
+    if not isinstance(checks, list) or not checks:
+        raise Rejected("table: missing qualification checks")
+    names = []
+    for check in checks:
+        if (
+            not isinstance(check, dict)
+            or type(check.get("passed")) is not bool
+            or not isinstance(check.get("check"), str)
+            or not check["check"]
+        ):
+            raise Rejected("table: invalid qualification check")
+        names.append(check["check"])
+    if len(set(names)) != len(names):
+        raise Rejected("table: duplicate qualification checks")
+    return checks
+
+
+def complete_collection(record: dict) -> None:
+    """Reject interrupted or inconsistent collection before evaluating acceptance"""
+    if (
+        type(record.get("schema")) is not int
+        or record["schema"] not in (3, 4)
+        or record.get("implementation") != "Oxide"
+    ):
+        raise Rejected("table: not a schema-3 or schema-4 Oxide qualification record")
+    if record.get("status") not in ("passed", "blocked"):
+        raise Rejected("table: qualification record has an invalid status")
+    checks = valid_checks(record.get("checks"))
+    parent = {check["check"]: check for check in checks}
+    tiers = record.get("tiers")
+    if not isinstance(tiers, dict) or not tiers:
+        raise Rejected("table: missing qualification tiers")
+    prefixed = set()
+    for tier, child in tiers.items():
+        if (
+            not isinstance(child, dict)
+            or child.get("target") != record.get("target")
+            or child.get("implementation") != "Oxide"
+        ):
+            raise Rejected(f"table: wrong tier target or implementation: {tier}")
+        phases = LEGACY_PHASES if record["schema"] == 3 else CURRENT_PHASES
+        coverage = child.get("coverage")
+        if (
+            child.get("phases_run") != phases
+            or not isinstance(coverage, dict)
+            or coverage.get("tier") != tier
+            or coverage.get("cases") != [list(case) for case in TEST_CASES]
+            or coverage.get("math") != ["fp32", "tf32"]
+        ):
+            raise Rejected(f"table: incomplete tier collection: {tier}")
+        tier_checks = valid_checks(child.get("checks"))
+        names = {check["check"] for check in tier_checks}
+        tuple_checks, required_timing = tuple_requirements(record, child)
+        missing = (required_checks(record["target"]) | tuple_checks) - names
+        if missing:
+            raise Rejected(
+                f"table: missing required tier checks: {tier}: {sorted(missing)}"
+            )
+        timing = child.get("timing")
+        if not isinstance(timing, list) or not all(
+            isinstance(row, dict) and isinstance(row.get("id"), str) for row in timing
+        ):
+            raise Rejected(f"table: missing or invalid timing rows: {tier}")
+        timing_ids = [row["id"] for row in timing]
+        if len(set(timing_ids)) != len(timing_ids) or not required_timing <= set(
+            timing_ids
+        ):
+            raise Rejected(f"table: missing or duplicate required timing rows: {tier}")
+        failed = [check for check in tier_checks if not check["passed"]]
+        if any(check.get("blocked") is not True for check in failed):
+            raise Rejected(f"table: hard tier failure: {tier}")
+        if child.get("status") not in ("passed", "blocked"):
+            raise Rejected(f"table: invalid tier verdict: {tier}")
+        if record["schema"] == 3:
+            status = "blocked" if failed else "passed"
+            reason = (
+                f"{len(failed)} checks cannot be decided: {[check['check'] for check in failed[:6]]}"
+                if failed
+                else "all required checks passed"
+            )
+            if child.get("status") != status or child.get("reason") != reason:
+                raise Rejected(
+                    f"table: incomplete or inconsistent tier verdict: {tier}"
+                )
+        for check in tier_checks:
+            name = f"{tier}/{check['check']}"
+            prefixed.add(name)
+            if parent.get(name) != {**check, "check": name}:
+                raise Rejected(
+                    "table: tier checks missing or inconsistent in aggregate"
+                )
+    aggregate = {name for name in parent if name.partition("/")[0] in tiers}
+    if aggregate != prefixed:
+        raise Rejected("table: aggregate has checks absent from tiers")
+
+
+def complete_verdict(record: dict, tier: str, evaluation: dict) -> None:
+    """Match the modern final collection verdict to the shared evaluator"""
+    if record["schema"] == 3:
+        return
+    child = record["tiers"][tier]
+    if evaluation["hard_failures"]:
+        raise Rejected("table: record has hard failures")
+    if evaluation["accepted"]:
+        status = "passed"
+        reason = "all required checks passed under locked verdict evaluation"
+    else:
+        status = "blocked"
+        reason = f"{len(evaluation['unresolved'])} checks cannot be decided"
+    if child.get("status") != status or child.get("reason") != reason:
+        raise Rejected(f"table: incomplete or inconsistent tier verdict: {tier}")
+
+
+def coverage_digest(rows: set[tuple[str, int, str]]) -> str:
+    """Hash a canonical full tested declaration independently of raw JSON layout"""
+    return hashlib.sha256(
+        json.dumps(sorted(rows), separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def tested_declaration(raw: dict) -> set[tuple[str, int, str]]:
+    """Normalize a candidate declaration to every harness test batch"""
+    if "triples" in raw:
+        rows = raw["triples"]
+    else:
+        rows = []
+        for entry in raw["entries"]:
+            batches = TEST_BATCHES if entry["batches"] == "all" else entry["batches"]
+            modes = ["fp32", "tf32"] if entry["maths"] == "all" else entry["maths"]
+            rows.extend(
+                (layer, batch, mode)
+                for layer in entry["layers"]
+                for batch in batches
+                for mode in modes
+            )
+    found = set()
+    for row in rows:
+        if (
+            len(row) != 3
+            or not isinstance(row[0], str)
+            or type(row[1]) is not int
+            or row[1] <= 0
+            or row[2] not in ("fp32", "tf32")
+        ):
+            raise Rejected("table: invalid candidate declaration")
+        if row[1] in TEST_BATCHES:
+            found.add(tuple(row))
+    if not found:
+        raise Rejected("table: empty candidate declaration")
+    return found
+
+
+def file_digest(path: Path) -> str:
+    """Hash a shipped regular file, excluding symbolic links."""
+    if path.is_symlink() or not path.is_file():
+        raise Rejected(f"table: not a regular qualification file: {path}")
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+TIER_CAPABILITIES = {"sm75": (7, 5), "sm80": (8, 0), "sm90": (9, 0), "sm120": (12, 0)}
+
+
+def production_load(area: str, tier: str, capability: str, root: Path = ROOT) -> None:
+    """Require a supported feature build that can load the pinned tier on the device"""
+    if area not in AREA_HOST or tier not in TIER_CAPABILITIES:
+        raise Rejected("table: invalid production area or tier")
+    if (
+        not isinstance(capability, str)
+        or re.fullmatch(r"[1-9][0-9]*\.[0-9]", capability) is None
+    ):
+        raise Rejected("table: invalid production device capability")
+    major, minor = capability.split(".")
+    device = (int(major), int(minor))
+    paths = sorted((root / "src/inference/cuda/ptx").glob(f"{area}.*.ptx"))
+    variants = set()
+    for path in paths:
+        variant = path.name.removeprefix(f"{area}.").removesuffix(".ptx")
+        if variant not in TIER_CAPABILITIES or path.is_symlink() or not path.is_file():
+            raise Rejected("table: invalid shipped production PTX tier")
+        variants.add(variant)
+    if tier not in variants:
+        raise Rejected("table: pinned production PTX tier is unavailable")
+    for build in TIER_CAPABILITIES.values():
+        if build > device:
+            continue
+        selectable = {
+            variant for variant in variants if TIER_CAPABILITIES[variant] <= build
+        }
+        if selectable and max(selectable, key=TIER_CAPABILITIES.__getitem__) == tier:
+            return
+    raise Rejected(
+        "table: production load cannot realize the pinned tier on the device"
+    )
+
+
+def shipped_files(root: Path, area: str) -> dict[str, dict[str, str]]:
+    """Collect the complete area source, PTX, and build-manifest path sets."""
+    host = AREA_HOST.get(area)
+    if host is None:
+        raise Rejected(f"table: unknown candidate area: {area}")
+    ptx = root / "src/inference/cuda/ptx"
+    candidates = root / "src/inference/cuda/candidate"
+    kernels = root / "crates/speakrs-cuda-kernels/src"
+    groups = {
+        "ptx": sorted(ptx.glob(f"{area}.*.ptx")),
+        "manifests": sorted(ptx.glob(f"{area}*.manifest")),
+        "host_sources": [
+            root / "src/inference/cuda/candidate.rs",
+            candidates / f"{host}.rs",
+            *sorted((candidates / host).rglob("*.rs")),
+        ],
+        "kernel_sources": [
+            kernels / f"{area}.rs",
+            *sorted((kernels / area).rglob("*.rs")),
+        ],
+    }
+    if not groups["ptx"] or ptx / f"{area}.manifest" not in groups["manifests"]:
+        raise Rejected(f"table: missing candidate PTX or manifest: {area}")
+    return {
+        group: {path.relative_to(root).as_posix(): file_digest(path) for path in paths}
+        for group, paths in groups.items()
+    }
+
+
+def check_binding(
+    record_hash: str, record: dict, child: dict, tier: str, root: Path
+) -> tuple[dict, str | None]:
+    """Bind accepted evidence to all shipped files without trusting live baselines."""
+    area = record["target"]
+    current = shipped_files(root, area)
+    modules = [
+        module
+        for module in child.get("loaded_ptx", {}).get("modules", [])
+        if module.get("area") == area
+    ]
+    expected_path = f"src/inference/cuda/ptx/{area}.{tier}.ptx"
+    if len(modules) != 1 or modules[0].get("path") != expected_path:
+        raise Rejected("table: missing, duplicate, or invalid candidate PTX binding")
+    module = modules[0]
+    if module.get("tier") != tier:
+        raise Rejected("table: loaded PTX tier mismatch")
+    loaded = {expected_path: digest(module.get("sha256"))}
+    legacy = record_hash in LEGACY
+    if legacy:
+        binding = LEGACY_BINDINGS.get(record_hash)
+        if not binding or binding.get("lock_digest") != digest(record["lock_digest"]):
+            raise Rejected("table: invalid legacy acceptance binding")
+        expected = binding["files"]
+        gap = SOURCE_EVIDENCE_GAP
+    else:
+        code = child.get("code_sha256", {})
+        if not isinstance(code, dict) or not code:
+            raise Rejected("table: missing source code hashes")
+        for name, value in code.items():
+            if (
+                not isinstance(name, str)
+                or Path(name).is_absolute()
+                or ".." in Path(name).parts
+            ):
+                raise Rejected("table: invalid source binding path")
+            digest(value)
+        ptx_prefix = f"src/inference/cuda/ptx/{area}."
+        expected = {
+            "ptx": {
+                name: value
+                for name, value in code.items()
+                if name.startswith(ptx_prefix) and name.endswith(".ptx")
+            }
+        }
+        if (
+            expected_path in expected["ptx"]
+            and expected["ptx"][expected_path] != loaded[expected_path]
+        ):
+            raise Rejected("table: conflicting recorded PTX bindings")
+        expected["ptx"].update(loaded)
+        for group in ("host_sources", "kernel_sources", "manifests"):
+            # recorded additions and removals must remain visible, including nested modules
+            names = set(current[group])
+            if group == "host_sources":
+                prefix = f"src/inference/cuda/candidate/{AREA_HOST[area]}/"
+            elif group == "kernel_sources":
+                prefix = f"crates/speakrs-cuda-kernels/src/{area}/"
+            else:
+                prefix = f"src/inference/cuda/ptx/{area}"
+            names.update(
+                name
+                for name in code
+                if name.startswith(prefix)
+                and (group != "manifests" or name.endswith(".manifest"))
+            )
+            if any(name not in code for name in names):
+                raise Rejected(f"table: missing source or manifest hashes: {group}")
+            expected[group] = {name: code[name] for name in names}
+        gap = None
+    for group, hashes in current.items():
+        recorded = expected.get(group, {})
+        if not isinstance(recorded, dict):
+            raise Rejected("table: invalid acceptance binding")
+        for name in sorted(hashes.keys() | recorded.keys()):
+            if hashes.get(name) != recorded.get(name):
+                raise Rejected(f"table: qualification file differs: {name}")
+    if loaded[expected_path] != current["ptx"].get(expected_path):
+        raise Rejected("table: loaded candidate PTX differs from shipped files")
+    return current, gap
+
+
+def check_table_records(
+    entries: list[dict], root: Path = ROOT, *, records: Path | None = None
+) -> dict:
+    """Check provenance and current Rust-exported per-tier candidate coverage.
+
+    The caller must export coverage from the same source tree. Tests supply a
+    fixture export; source text parsing is not an authoritative coverage model
+    """
+    if not entries:
+        raise Rejected("table: no production entries")
+    evidence = []
+    for entry in entries:
+        record = load(entry["record"], root, records=records)
+        complete_collection(record)
+        tier = entry["tier"]
+        if tier not in record["tiers"]:
+            raise Rejected("table: tier not accepted by record")
+        if entry.get("area", record["target"]) != record["target"]:
+            raise Rejected("table: candidate area differs from record")
+        evaluations = {}
+        for recorded_tier in record["tiers"]:
+            evaluations[recorded_tier] = evaluate_record(record, recorded_tier)
+            complete_verdict(record, recorded_tier, evaluations[recorded_tier])
+        evaluation = evaluations[tier]
+        child = record["tiers"][tier]
+        if evaluation["hard_failures"]:
+            raise Rejected(
+                f"table: record has hard failures: {evaluation['hard_failures']}"
+            )
+        legacy = entry["record"] in LEGACY
+        if legacy:
+            if (
+                record["target"] != LEGACY[entry["record"]]
+                or tier != "sm75"
+                or child.get("device_sm") != "12.0"
+            ):
+                raise Rejected("table: legacy target/tier/device mismatch")
+            capability = "12.0"
+            code = {"legacy_driver_sha256": digest(child["driver_sha256"])}
+        else:
+            if (
+                child.get("requested_tier") != tier
+                or record.get("requested_tier") != tier
+            ):
+                raise Rejected("table: requested tier mismatch")
+            device = child.get("device")
+            if (
+                not isinstance(device, dict)
+                or not isinstance(device.get("name"), str)
+                or not device["name"]
+            ):
+                raise Rejected("table: missing recorded device name")
+            capability = device["compute_capability"]
+            code = child.get("code_sha256", {})
+        if not entry["devices"] or set(entry["devices"]) != {capability}:
+            raise Rejected("table: device capability mismatch")
+        production_load(record["target"], tier, capability, root)
+        selected = triples(entry["coverage"])
+        accepted = evaluation["accepted_tuples"]
+        outside = selected - {tuple(row) for row in accepted}
+        if outside:
+            raise Rejected(f"table: tuples outside accepted record: {sorted(outside)}")
+        exported = entry.get("candidate_coverage")
+        if exported is None:
+            raise Rejected("table: missing Rust candidate coverage export")
+        declared = child.get("coverage_declared", {}).get("triples")
+        if declared is None:
+            raise Rejected("table: missing recorded candidate coverage")
+        current_declaration = tested_declaration(exported)
+        recorded_declaration = tested_declaration({"triples": declared})
+        if current_declaration != recorded_declaration:
+            raise Rejected(
+                "table: candidate coverage differs from accepted declaration"
+            )
+        files, gap = check_binding(entry["record"], record, child, tier, root)
+        der = load(entry["der"], root, records=records)
+        if not der:
+            raise Rejected("table: empty DER evidence")
+        evidence.append(
+            {
+                "record": entry["record"],
+                "area": record["target"],
+                "device_name": LEGACY_DEVICE_NAME
+                if legacy
+                else child.get("device", {}).get("name"),
+                "record_schema": record["schema"],
+                "der": entry["der"],
+                "tier": tier,
+                "device_capability": capability,
+                "legacy": legacy,
+                "source_evidence_gap": gap,
+                "shared_source_amendment": SHARED_SOURCE_AMENDMENT if legacy else None,
+                "raw_tier_status": child["status"],
+                "raw_tier_reason": child["reason"],
+                "raw_record_reason": record.get("reason"),
+                "verdict_evaluation": evaluation,
+                "coverage_sha256": coverage_digest(current_declaration),
+                "recorded_coverage_sha256": coverage_digest(recorded_declaration),
+                "lock_digest": digest(record["lock_digest"]),
+                "code_sha256": code,
+                "files": files,
+                "ptx_sha256": files["ptx"],
+                "tuples": [list(row) for row in sorted(selected)],
+            }
+        )
+    return {"entries": evidence}
+
+
+ACCEPTANCE = "scripts/cuda/qualify/ACCEPTANCE.json"
+SUMMARY_FIELDS = {
+    "record",
+    "area",
+    "device_name",
+    "record_schema",
+    "der",
+    "tier",
+    "device_capability",
+    "legacy",
+    "source_evidence_gap",
+    "shared_source_amendment",
+    "raw_tier_status",
+    "raw_tier_reason",
+    "raw_record_reason",
+    "verdict_evaluation",
+    "coverage_sha256",
+    "recorded_coverage_sha256",
+    "lock_digest",
+    "files",
+    "accepted_tuples",
+}
+
+
+def canonical_summaries(value: dict) -> bytes:
+    """Serialize acceptance evidence with stable ordering and finite JSON values"""
+    return (
+        json.dumps(value, sort_keys=True, indent=2, allow_nan=False) + "\n"
+    ).encode()
+
+
+def derive_summaries(entries: list[dict], root: Path = ROOT, *, records: Path) -> dict:
+    """Derive complete per-record acceptance evidence from immutable raw bytes"""
+    checked = check_table_records(entries, root, records=records)
+    summaries: dict[str, dict] = {}
+    for evidence in checked["entries"]:
+        summary = {
+            name: value
+            for name, value in evidence.items()
+            if name not in ("tuples", "code_sha256", "ptx_sha256")
+        }
+        summary["accepted_tuples"] = evidence["verdict_evaluation"]["accepted_tuples"]
+        pin = evidence["record"]
+        if pin in summaries and summaries[pin] != summary:
+            raise Rejected("table: conflicting entries for one acceptance record")
+        summaries[pin] = summary
+    return {"schema": 1, "records": summaries}
+
+
+def write_summaries(entries: list[dict], root: Path = ROOT, *, records: Path) -> dict:
+    """Write canonical acceptance evidence after complete raw-record verification"""
+    result = derive_summaries(entries, root, records=records)
+    path = root / ACCEPTANCE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(canonical_summaries(result))
+    return result
+
+
+def acceptance_summary(root: Path) -> tuple[dict, bytes]:
+    """Read canonical acceptance evidence bound by the committed harness lock"""
+    path = root / ACCEPTANCE
+    raw = path.read_bytes() if path.is_file() and not path.is_symlink() else b""
+    if not raw:
+        raise Rejected("table: missing acceptance summary")
+    lock_path = root / "scripts/cuda/qualify/LOCK"
+    if lock_path.is_symlink() or not lock_path.is_file():
+        raise Rejected("table: missing summary lock")
+    snapshot = json.loads(lock_path.read_bytes())
+    if (
+        not isinstance(snapshot, dict)
+        or type(snapshot.get("schema")) is not int
+        or snapshot["schema"] != 1
+    ):
+        raise Rejected("table: invalid summary lock schema")
+    files = snapshot.get("files")
+    if (
+        not isinstance(files, dict)
+        or digest(files.get(ACCEPTANCE)) != hashlib.sha256(raw).hexdigest()
+    ):
+        raise Rejected("table: acceptance summary differs from locked hash")
+    result = json.loads(raw)
+    if (
+        not isinstance(result, dict)
+        or type(result.get("schema")) is not int
+        or result["schema"] != 1
+        or set(result) != {"schema", "records"}
+        or not isinstance(result["records"], dict)
+    ):
+        raise Rejected("table: unsupported acceptance summary schema")
+    if canonical_summaries(result) != raw:
+        raise Rejected("table: acceptance summary is not canonical JSON")
+    return result, raw
+
+
+def summary_tuples(value: object) -> set[tuple[str, int, str]]:
+    """Validate the exact production tuple representation stored in a summary"""
+    if not isinstance(value, list) or not value:
+        raise Rejected("table: missing accepted summary tuples")
+    found = set()
+    for row in value:
+        if (
+            not isinstance(row, list)
+            or len(row) != 3
+            or not isinstance(row[0], str)
+            or not row[0]
+            or type(row[1]) is not int
+            or row[1] not in (1, 32)
+            or row[2] not in ("fp32", "tf32")
+        ):
+            raise Rejected("table: invalid accepted summary tuple")
+        found.add(tuple(row))
+    if [list(row) for row in sorted(found)] != value:
+        raise Rejected("table: summary tuples must be sorted and unique")
+    return found
+
+
+def check_table(
+    entries: list[dict], root: Path = ROOT, records: Path | None = None
+) -> dict:
+    """Check locked acceptance summaries offline or against explicit raw records"""
+    if not entries:
+        raise Rejected("table: no production entries")
+    committed, raw = acceptance_summary(root)
+    summaries = committed["records"]
+    pins = {digest(entry["record"]) for entry in entries}
+    if set(summaries) != pins:
+        raise Rejected("table: acceptance summaries differ from production record pins")
+    evidence = []
+    for entry in entries:
+        pin = entry["record"]
+        summary = summaries[pin]
+        if (
+            not isinstance(summary, dict)
+            or set(summary) != SUMMARY_FIELDS
+            or summary.get("record") != pin
+        ):
+            raise Rejected("table: invalid acceptance record binding")
+        if summary.get("raw_tier_status") not in (
+            "passed",
+            "blocked",
+        ) or not isinstance(summary.get("raw_tier_reason"), str):
+            raise Rejected("table: invalid summary raw verdict")
+        if summary.get("raw_record_reason") is not None and not isinstance(
+            summary["raw_record_reason"], str
+        ):
+            raise Rejected("table: invalid summary raw record reason")
+        tier = entry["tier"]
+        area = entry.get("area", summary.get("area"))
+        if (
+            summary.get("tier") != tier
+            or summary.get("area") != area
+            or area not in AREA_HOST
+        ):
+            raise Rejected("table: summary area or tier mismatch")
+        capability = summary.get("device_capability")
+        if (
+            not isinstance(capability, str)
+            or not entry["devices"]
+            or set(entry["devices"]) != {capability}
+        ):
+            raise Rejected("table: summary device capability mismatch")
+        if (
+            not isinstance(summary.get("device_name"), str)
+            or not summary["device_name"]
+        ):
+            raise Rejected("table: invalid summary device name")
+        if digest(summary.get("der")) != digest(entry["der"]):
+            raise Rejected("table: summary DER evidence mismatch")
+        digest(summary.get("lock_digest"))
+        if type(summary.get("legacy")) is not bool or summary["legacy"] != (
+            pin in LEGACY
+        ):
+            raise Rejected("table: invalid summary legacy binding")
+        if summary["legacy"]:
+            binding = LEGACY_BINDINGS[pin]
+            if (
+                summary.get("files") != binding["files"]
+                or summary["lock_digest"] != binding["lock_digest"]
+                or summary.get("source_evidence_gap") != SOURCE_EVIDENCE_GAP
+                or summary.get("shared_source_amendment") != SHARED_SOURCE_AMENDMENT
+                or summary["device_name"] != LEGACY_DEVICE_NAME
+                or LEGACY[pin] != area
+                or tier != "sm75"
+                or capability != "12.0"
+            ):
+                raise Rejected("table: invalid summary legacy acceptance binding")
+        elif (
+            summary.get("source_evidence_gap") is not None
+            or summary.get("shared_source_amendment") is not None
+        ):
+            raise Rejected("table: invalid modern summary source evidence")
+        bound = summary.get("files")
+        if not isinstance(bound, dict) or set(bound) != {
+            "ptx",
+            "manifests",
+            "host_sources",
+            "kernel_sources",
+        }:
+            raise Rejected("table: missing summary file bindings")
+        for hashes in bound.values():
+            if not isinstance(hashes, dict) or not hashes:
+                raise Rejected("table: invalid summary file bindings")
+            for name, value in hashes.items():
+                if (
+                    not isinstance(name, str)
+                    or Path(name).is_absolute()
+                    or ".." in Path(name).parts
+                ):
+                    raise Rejected("table: invalid summary file path")
+                digest(value)
+        production_load(area, tier, capability, root)
+        current = shipped_files(root, area)
+        if bound != current:
+            raise Rejected("table: qualification files differ from acceptance summary")
+        exported = entry.get("candidate_coverage")
+        if not isinstance(exported, dict):
+            raise Rejected("table: missing Rust candidate coverage export")
+        coverage = digest(summary.get("coverage_sha256"))
+        recorded = digest(summary.get("recorded_coverage_sha256"))
+        if (
+            coverage != recorded
+            or coverage_digest(tested_declaration(exported)) != coverage
+        ):
+            raise Rejected("table: candidate coverage differs from acceptance summary")
+        accepted = summary_tuples(summary.get("accepted_tuples"))
+        evaluation = summary.get("verdict_evaluation")
+        if (
+            not isinstance(evaluation, dict)
+            or evaluation.get("accepted_tuples") != summary["accepted_tuples"]
+            or evaluation.get("hard_failures") != []
+            or not isinstance(evaluation.get("noise_rule"), list)
+            or type(evaluation.get("accepted")) is not bool
+            or not isinstance(evaluation.get("unresolved"), list)
+            or evaluation["accepted"] != (not evaluation["unresolved"])
+        ):
+            raise Rejected("table: invalid summary verdict evidence")
+        schema = summary.get("record_schema")
+        if (
+            type(schema) is not int
+            or schema not in (3, 4)
+            or evaluation.get("stage_noise_rule_allowed") is not (schema == 3)
+        ):
+            raise Rejected("table: invalid summary record schema")
+        for noise in evaluation["noise_rule"]:
+            try:
+                check = {
+                    "check": noise["check"],
+                    "passed": False,
+                    "blocked": True,
+                    "reason": NOISE_REASON,
+                }
+                timing = {
+                    "id": noise["check"].removeprefix("speed:"),
+                    "medians_ms": noise["medians_ms"],
+                    "speedups": noise["pair_speedups"],
+                    "library_process_spread_fraction": noise["library_spread_fraction"],
+                    "spread_bound": noise["locked_bound"],
+                }
+                if noise_timing(check, timing, allow_stage=schema == 3) != noise:
+                    raise Rejected(
+                        "table: summary noise verdict differs from its inputs"
+                    )
+            except (KeyError, TypeError, ValueError) as error:
+                raise Rejected(
+                    f"table: invalid summary noise evidence: {error}"
+                ) from error
+        if not triples(entry["coverage"]) <= accepted:
+            raise Rejected("table: tuples outside accepted summary")
+        evidence.append(summary)
+    if (
+        records is not None
+        and canonical_summaries(derive_summaries(entries, root, records=records)) != raw
+    ):
+        raise Rejected("table: acceptance summary differs from raw-record derivation")
+    return {
+        "entries": evidence,
+        "verification": "raw-records" if records is not None else "locked-summary",
+    }

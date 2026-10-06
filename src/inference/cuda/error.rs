@@ -97,6 +97,26 @@ pub enum CudaError {
         /// Required library
         library: CudaLibrary,
     },
+    /// A selected candidate cannot run on this device and fallback is forbidden
+    #[error(
+        "CUDA candidate {area}/{boundary} b{batch} {math:?}, PTX tier {tier}, device {device}: {reason}"
+    )]
+    CandidateDeviceUnsupported {
+        /// Kernel area that owns the candidate
+        area: &'static str,
+        /// Selected model boundary
+        boundary: String,
+        /// Selected batch class
+        batch: usize,
+        /// Configured precision
+        math: CudaMath,
+        /// Actual area PTX variant
+        tier: PtxTier,
+        /// Exact device capability
+        device: ComputeCapability,
+        /// Candidate's device constraint
+        reason: String,
+    },
     /// The requested device does not exist
     #[error("CUDA device {ordinal} is not available; {count} device(s) found")]
     NoDevice {

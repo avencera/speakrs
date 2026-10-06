@@ -1,10 +1,35 @@
 //! The fused ResNet convolution candidate against the cuDNN fused call, on seeded
 //! random tensors, so it runs on any GPU without the reference files
 
-use super::super::candidate::{ConvCandidate, ConvInputs, ConvLayerSpec, ConvOxide, Phases};
+use super::super::candidate::{
+    ConvCandidate, ConvInputs, ConvLayerSpec, ConvOxide, Phases, PlanError,
+};
 use super::super::dnn::{Conv2d, ConvPlanner, Residual};
 use super::super::{CudaError, CudaMath};
 use super::runtime;
+
+/// Synthetic shapes still require explicit refusals, never production fallback
+fn explicit_plan(
+    runtime: &super::super::CudaRuntime,
+    spec: ConvLayerSpec<'_>,
+) -> Result<ConvOxide, CudaError> {
+    let target = super::super::implementation::Target::for_area(
+        runtime,
+        super::super::KernelModule::Resnet,
+    )?;
+    ConvOxide::plan(runtime, spec).map_err(|error| match error {
+        PlanError::Cuda(error) => error,
+        PlanError::DeviceUnsupported { reason } => CudaError::CandidateDeviceUnsupported {
+            area: "resnet",
+            boundary: spec.name.to_owned(),
+            batch: spec.conv.batch,
+            math: spec.conv.math,
+            tier: target.tier,
+            device: target.device,
+            reason,
+        },
+    })
+}
 
 /// Seeded values in `[-1, 1)` from a 64-bit LCG, so failures reproduce
 fn values(seed: u64, len: usize) -> Vec<f32> {
@@ -22,9 +47,10 @@ fn values(seed: u64, len: usize) -> Vec<f32> {
 /// Every fused shape against `cudnnConvolutionBiasActivationForward`, with and without
 /// a residual, in both math modes, at sizes that leave partial tiles in both spatial
 /// directions over more than one batch item. Batch 3 runs the small-block kernels and
-/// batch 40 the 256-thread ones. The candidate computes FP32 in both
-/// modes, so it must match cuDNN's FP32 result closely; a NaN input must reach the
-/// output through the ReLU. Each plan packs the same fixed weights used by the Library
+/// batch 40 the 256-thread ones. FP32 must match cuDNN FP32 closely. TF32 must be
+/// no less accurate than cuDNN TF32 against the same-input cuDNN FP32 truth. A NaN
+/// input must reach the output through the ReLU. Each plan packs the same fixed
+/// weights used by the Library
 #[test]
 fn resnet_candidate_matches_cudnn_on_partial_tiles() -> Result<(), CudaError> {
     let Some(runtime) = runtime("resnet_candidate_matches_cudnn_on_partial_tiles") else {
@@ -86,24 +112,16 @@ fn resnet_candidate_matches_cudnn_on_partial_tiles() -> Result<(), CudaError> {
                 .fold(1.0f32, |max, value| max.max(value.abs()));
 
             for math in [CudaMath::Fp32, CudaMath::Tf32] {
-                let fused = crate::inference::cuda::dispatch::candidate_plan(
-                    crate::inference::cuda::implementation::Choice::Oxide(
-                        crate::inference::cuda::implementation::Selection::Explicit,
-                    ),
-                    name,
-                    batch,
-                    ConvOxide::plan(
-                        &runtime,
-                        ConvLayerSpec {
-                            name,
-                            conv: Conv2d { math, ..fp32 },
-                            residual: add,
-                            weight: &weight,
-                            bias: &bias,
-                        },
-                    ),
-                )?
-                .expect("explicit candidate plan");
+                let fused = explicit_plan(
+                    &runtime,
+                    ConvLayerSpec {
+                        name,
+                        conv: Conv2d { math, ..fp32 },
+                        residual: add,
+                        weight: &weight,
+                        bias: &bias,
+                    },
+                )?;
                 let mut actual = stream.alloc_zeros::<f32>(output_len)?;
                 fused.enqueue(
                     ConvInputs {
@@ -122,9 +140,37 @@ fn resnet_candidate_matches_cudnn_on_partial_tiles() -> Result<(), CudaError> {
                     .zip(&actual)
                     .map(|(e, a)| (e - a).abs())
                     .fold(0.0f32, f32::max);
+                if math == CudaMath::Fp32 {
+                    assert!(
+                        worst <= 1e-5 * scale,
+                        "{name} b{batch} residual={add} {math:?}: max difference {worst} at scale {scale}"
+                    );
+                    continue;
+                }
+
+                let tf32_plan = planner.plan(Conv2d { math, ..fp32 })?;
+                let mut tf32_workspace =
+                    stream.alloc_zeros::<u8>(tf32_plan.workspace_bytes().max(1))?;
+                let mut library = stream.alloc_zeros::<f32>(output_len)?;
+                let operand = if add {
+                    Residual::Add(&z)
+                } else {
+                    Residual::None { scratch: &z }
+                };
+                tf32_plan.forward_bias_relu(
+                    &mut tf32_workspace.as_view_mut(),
+                    &x_device.as_view(),
+                    &weight.as_view(),
+                    &bias.as_view(),
+                    operand,
+                    &mut library.as_view_mut(),
+                )?;
+                let library = stream.clone_dtoh(&library)?;
+                let candidate_error = truth_error(&actual, &expected);
+                let library_error = truth_error(&library, &expected);
                 assert!(
-                    worst <= 1e-5 * scale,
-                    "{name} b{batch} residual={add} {math:?}: max difference {worst} at scale {scale}"
+                    candidate_error.0 <= library_error.0 && candidate_error.1 <= library_error.1,
+                    "{name} b{batch} residual={add} TF32: candidate max-abs/L2 {candidate_error:?} exceeds Library {library_error:?} against FP32 truth"
                 );
             }
         }
@@ -132,24 +178,16 @@ fn resnet_candidate_matches_cudnn_on_partial_tiles() -> Result<(), CudaError> {
         // a NaN at the first input element must reach the first output
         x[0] = f32::NAN;
         let x_device = stream.clone_htod(&x)?;
-        let fused = crate::inference::cuda::dispatch::candidate_plan(
-            crate::inference::cuda::implementation::Choice::Oxide(
-                crate::inference::cuda::implementation::Selection::Explicit,
-            ),
-            name,
-            batch,
-            ConvOxide::plan(
-                &runtime,
-                ConvLayerSpec {
-                    name,
-                    conv: fp32,
-                    residual: false,
-                    weight: &weight,
-                    bias: &bias,
-                },
-            ),
-        )?
-        .expect("explicit candidate plan");
+        let fused = explicit_plan(
+            &runtime,
+            ConvLayerSpec {
+                name,
+                conv: fp32,
+                residual: false,
+                weight: &weight,
+                bias: &bias,
+            },
+        )?;
         let mut actual = stream.alloc_zeros::<f32>(output_len)?;
         fused.enqueue(
             ConvInputs {
@@ -169,4 +207,40 @@ fn resnet_candidate_matches_cudnn_on_partial_tiles() -> Result<(), CudaError> {
     }
 
     Ok(())
+}
+
+/// Max-abs and relative L2 errors have no tolerance floor; exact zero stays exact
+fn truth_error(actual: &[f32], truth: &[f32]) -> (f64, f64) {
+    assert_eq!(actual.len(), truth.len());
+    let mut max_abs = 0.0f64;
+    let mut squared_error = 0.0;
+    let mut squared_truth = 0.0;
+    for (&actual, &truth) in actual.iter().zip(truth) {
+        assert!(actual.is_finite() && truth.is_finite());
+        let actual = f64::from(actual);
+        let truth = f64::from(truth);
+        let difference = actual - truth;
+        max_abs = max_abs.max(difference.abs());
+        squared_error += difference * difference;
+        squared_truth += truth * truth;
+    }
+
+    let relative_l2 = if squared_truth == 0.0 {
+        if squared_error == 0.0 {
+            0.0
+        } else {
+            f64::INFINITY
+        }
+    } else {
+        (squared_error / squared_truth).sqrt()
+    };
+    (max_abs, relative_l2)
+}
+
+#[test]
+fn tf32_truth_error_keeps_zero_exact_and_detects_each_error() {
+    assert_eq!(truth_error(&[0.0], &[0.0]), (0.0, 0.0));
+    assert_eq!(truth_error(&[1.0], &[0.0]), (1.0, f64::INFINITY));
+    assert_eq!(truth_error(&[3.0, 0.0], &[2.0, 0.0]), (1.0, 0.5));
+    assert!(std::panic::catch_unwind(|| truth_error(&[f32::NAN], &[1.0])).is_err());
 }

@@ -28,15 +28,11 @@ use cudarc::driver::{
 };
 
 use super::dnn::Conv2d;
-use super::{CudaError, CudaMath, CudaRuntime, Sgemm};
+use super::{CudaError, CudaMath, CudaRuntime, PtxTier, Sgemm};
 
 mod conv;
 mod lstm;
 mod sinc;
-
-#[cfg(test)]
-#[path = "candidate_tests.rs"]
-mod tests;
 
 pub(crate) use conv::Oxide as ConvOxide;
 pub(crate) use lstm::Oxide as LstmOxide;
@@ -62,14 +58,16 @@ impl From<cudarc::driver::DriverError> for PlanError {
     }
 }
 
-/// The batch sizes the harness qualifies; production runs a candidate only at these
-pub(crate) const QUALIFIED_BATCHES: [usize; 5] = [1, 7, 32, 33, 64];
+/// Model batches that accepted records can authorize for production
+pub(crate) const QUALIFIED_BATCHES: [usize; 2] = [1, 32];
+/// Test samples, including stress batches that never grant production coverage
+pub(crate) const TEST_BATCHES: [usize; 5] = [1, 7, 32, 33, 64];
 
 /// Batch sizes a candidate implements
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Batches {
-    /// Every batch size the harness qualifies, [`QUALIFIED_BATCHES`]; any other batch
-    /// runs the Library path
+    /// Every positive batch size, tested at [`TEST_BATCHES`]; production remains
+    /// restricted by the independent accepted table
     All,
     /// Exactly these batch sizes; every other batch runs the Library path
     Only(&'static [usize]),
@@ -102,10 +100,8 @@ pub(crate) struct CoverageEntry {
 impl CoverageEntry {
     fn covers(&self, layer: &str, batch: usize, math: CudaMath) -> bool {
         let batch_covered = match self.batches {
-            Batches::All => QUALIFIED_BATCHES.contains(&batch),
-            Batches::Only(batches) => {
-                batches.contains(&batch) && QUALIFIED_BATCHES.contains(&batch)
-            }
+            Batches::All => batch > 0,
+            Batches::Only(batches) => batches.contains(&batch),
         };
         let math_covered = match self.maths {
             Maths::All => true,
@@ -169,6 +165,11 @@ pub(crate) trait ConvCandidate: Sized {
     /// Convolution names and batch sizes this candidate implements
     const COVERAGE: Coverage;
 
+    /// Coverage for the actual loaded tier; override when variants cover different tuples
+    fn coverage(_tier: PtxTier) -> Coverage {
+        Self::COVERAGE
+    }
+
     /// Prepares one layer for one batch size; runs once per batch class, untimed
     fn plan(runtime: &CudaRuntime, layer: ConvLayerSpec<'_>) -> Result<Self, PlanError>;
 
@@ -224,6 +225,11 @@ pub(crate) struct SincInputs<'a, 'b> {
 pub(crate) trait SincCandidate: Sized {
     /// `sincnet.conv0.abs_pool` and the batch sizes this candidate implements
     const COVERAGE: Coverage;
+
+    /// Coverage for the actual loaded tier; override when variants cover different tuples
+    fn coverage(_tier: PtxTier) -> Coverage {
+        Self::COVERAGE
+    }
     /// The tensor [`Self::enqueue`] writes
     const OUTPUT: SincOutput;
 
@@ -271,6 +277,11 @@ pub(crate) struct LstmSpec<'a> {
 pub(crate) trait LstmCandidate: Sized {
     /// `lstm.stack` and the batch sizes this candidate implements
     const COVERAGE: Coverage;
+
+    /// Coverage for the actual loaded tier; override when variants cover different tuples
+    fn coverage(_tier: PtxTier) -> Coverage {
+        Self::COVERAGE
+    }
 
     /// Prepares one batch size; runs once per batch class, untimed
     fn plan(runtime: &CudaRuntime, spec: LstmSpec<'_>) -> Result<Self, PlanError>;
@@ -416,7 +427,7 @@ impl<'a> LstmPhases<'a> {
 
 #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
 #[path = "candidate_test_support.rs"]
-mod test_support;
+pub(crate) mod test_support;
 
 #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
 use test_support::{projection_scope, sub_scope};
@@ -589,5 +600,64 @@ impl<'a> Projection<'a> {
             ..Sgemm::new(self.rows, gemm.n, k)
         };
         self.runtime.sgemm(spec, a, weight, c)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Batches, Coverage, CoverageEntry, CudaError, CudaMath, CudaRuntime, CudaStream,
+        CudaViewMut, Maths, Phases, PlanError, PtxTier, SincCandidate, SincInputs, SincOutput,
+        SincSpec,
+    };
+
+    struct TierFixture;
+
+    impl SincCandidate for TierFixture {
+        const COVERAGE: Coverage = Coverage::NONE;
+        const OUTPUT: SincOutput = SincOutput::Pooled;
+
+        fn coverage(tier: PtxTier) -> Coverage {
+            match tier {
+                PtxTier::Sm75 => Coverage(&[CoverageEntry {
+                    layers: &["sincnet.conv0.abs_pool"],
+                    batches: Batches::Only(&[1]),
+                    maths: Maths::Only(&[CudaMath::Fp32]),
+                }]),
+                PtxTier::Sm80 => Coverage(&[CoverageEntry {
+                    layers: &["sincnet.conv0.abs_pool"],
+                    batches: Batches::Only(&[32]),
+                    maths: Maths::Only(&[CudaMath::Tf32]),
+                }]),
+                _ => Coverage::NONE,
+            }
+        }
+
+        fn plan(_runtime: &CudaRuntime, _spec: SincSpec<'_>) -> Result<Self, PlanError> {
+            unreachable!("coverage-only fixture does not construct GPU plans")
+        }
+
+        fn enqueue(
+            &self,
+            _inputs: SincInputs<'_, '_>,
+            _output: &mut CudaViewMut<'_, f32>,
+            _phases: &Phases,
+            _stream: &CudaStream,
+        ) -> Result<(), CudaError> {
+            unreachable!("coverage-only fixture does not launch kernels")
+        }
+    }
+
+    #[test]
+    fn per_tier_coverage_is_not_the_static_default_or_another_tiers_triples() {
+        let layer = "sincnet.conv0.abs_pool";
+        let baseline = TierFixture::coverage(PtxTier::Sm75);
+        let higher = TierFixture::coverage(PtxTier::Sm80);
+        assert!(TierFixture::COVERAGE.entries().is_empty());
+        assert!(baseline.covers(layer, 1, CudaMath::Fp32));
+        assert!(!baseline.covers(layer, 32, CudaMath::Tf32));
+        assert!(higher.covers(layer, 32, CudaMath::Tf32));
+        assert!(!higher.covers(layer, 1, CudaMath::Fp32));
+        assert!(TierFixture::coverage(PtxTier::Sm120).entries().is_empty());
     }
 }

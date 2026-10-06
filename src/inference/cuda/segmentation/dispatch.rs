@@ -173,19 +173,25 @@ impl Network {
         shape: SegmentationShape,
         selected: Selected,
     ) -> Result<SincPlan, CudaError> {
-        if let Selected::Oxide(token) = selected {
-            let spec = SincSpec {
-                batch: shape.batch,
-                samples: shape.samples,
-                sinc: shape.sinc,
-                pooled: shape.pool0,
-                math: self.options.math,
-                filters: &self.sinc_filters,
-            };
-            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
-            let _scope = super::super::test_support::plan(SINC_LAYER);
-            return Ok(SincPlan::Oxide(token.sinc(runtime, spec)?));
-        }
+        let selected = match selected {
+            Selected::Oxide(token) => {
+                let spec = SincSpec {
+                    batch: shape.batch,
+                    samples: shape.samples,
+                    sinc: shape.sinc,
+                    pooled: shape.pool0,
+                    math: self.options.math,
+                    filters: &self.sinc_filters,
+                };
+                #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+                let _scope = super::super::test_support::plan(SINC_LAYER);
+                if let Some(candidate) = token.sinc(runtime, spec)? {
+                    return Ok(SincPlan::Oxide(candidate));
+                }
+                Selected::Library
+            }
+            other => other,
+        };
         LibraryNeed::new(
             KernelModule::Sincnet,
             SINC_LAYER,
@@ -216,9 +222,12 @@ impl Network {
             })
         }
         #[cfg(not(feature = "cuda"))]
-        Err(CudaError::LibraryUnavailable {
-            library: CudaLibrary::Cudnn,
-        })
+        {
+            let _ = selected;
+            Err(CudaError::LibraryUnavailable {
+                library: CudaLibrary::Cudnn,
+            })
+        }
     }
 
     /// The stack through its choice
@@ -285,29 +294,35 @@ impl Network {
         shape: SegmentationShape,
         selected: Selected,
     ) -> Result<LstmStage, CudaError> {
-        if let Selected::Oxide(token) = selected {
-            let layer = |index: usize| {
-                let layer = &self.lstm_weights[index];
-                LstmLayerWeights {
-                    input: layer.input,
-                    w: &layer.w,
-                    r: &layer.r,
-                    b: &layer.b,
+        let selected = match selected {
+            Selected::Oxide(token) => {
+                let layer = |index: usize| {
+                    let layer = &self.lstm_weights[index];
+                    LstmLayerWeights {
+                        input: layer.input,
+                        w: &layer.w,
+                        r: &layer.r,
+                        b: &layer.b,
+                    }
+                };
+                let spec = LstmSpec {
+                    batch: shape.batch,
+                    frames: shape.frames,
+                    math: self.options.math,
+                    layers: [layer(0), layer(1), layer(2), layer(3)],
+                };
+                #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+                let _scope = super::super::test_support::plan(LSTM_LAYER);
+                if let Some(candidate) = token.lstm(runtime, spec)? {
+                    return Ok(LstmStage::Oxide {
+                        candidate: Box::new(candidate),
+                        rows: shape.batch * shape.frames,
+                    });
                 }
-            };
-            let spec = LstmSpec {
-                batch: shape.batch,
-                frames: shape.frames,
-                math: self.options.math,
-                layers: [layer(0), layer(1), layer(2), layer(3)],
-            };
-            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
-            let _scope = super::super::test_support::plan(LSTM_LAYER);
-            return Ok(LstmStage::Oxide {
-                candidate: Box::new(token.lstm(runtime, spec)?),
-                rows: shape.batch * shape.frames,
-            });
-        }
+                Selected::Library
+            }
+            other => other,
+        };
         LibraryNeed::new(
             KernelModule::Lstm,
             LSTM_LAYER,
@@ -357,8 +372,11 @@ impl Network {
             })
         }
         #[cfg(not(feature = "cuda"))]
-        Err(CudaError::LibraryUnavailable {
-            library: CudaLibrary::Cudnn,
-        })
+        {
+            let _ = selected;
+            Err(CudaError::LibraryUnavailable {
+                library: CudaLibrary::Cudnn,
+            })
+        }
     }
 }

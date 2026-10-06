@@ -2,7 +2,7 @@
 
 use super::candidate::{
     Batches, ConvCandidate, ConvLayerSpec, ConvOxide, Coverage, CoverageEntry, LstmCandidate,
-    LstmOxide, LstmSpec, SincCandidate, SincOxide, SincSpec,
+    LstmOxide, LstmSpec, Maths, PlanError, SincCandidate, SincOxide, SincSpec,
 };
 use super::{
     ComputeCapability, CudaError, CudaLibrary, CudaMath, CudaRuntime, KernelModule, PtxTier,
@@ -25,13 +25,23 @@ impl Target {
     }
 }
 
+/// Why a candidate was selected; only production permits a device fallback
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Selection {
+    /// An accepted production-table entry
+    Production,
+    /// An explicit or qualification request
+    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    Explicit,
+}
+
 /// Implementation requests used only by the qualification controls
 #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Choice {
     #[default]
     Library,
-    Oxide,
+    Oxide(Selection),
     Mutant(super::test_support::Mutant),
 }
 
@@ -47,6 +57,7 @@ pub(crate) enum Selected {
 /// An accepted production record, separate from candidate implementation coverage
 #[derive(Debug)]
 struct Production {
+    area: KernelModule,
     coverage: Coverage,
     tier: PtxTier,
     devices: &'static [ComputeCapability],
@@ -67,23 +78,45 @@ const INTEGRATED_DER: &str = "8066268031afba058d93e305206d5b8225e40c6ab2ebb10528
 pub(crate) const MODEL_BATCHES: [usize; 2] = [1, 32];
 const DEVICES: &[ComputeCapability] = &[ComputeCapability::new(12, 0)];
 
-const fn production_entry(coverage: CoverageEntry) -> CoverageEntry {
-    CoverageEntry {
-        batches: Batches::Only(&MODEL_BATCHES),
-        ..coverage
-    }
-}
+// these layers and modes are pinned evidence, not candidate declarations
+const C32: &[&str] = &[
+    "resnet.layer1.0.conv1",
+    "resnet.layer1.0.conv2",
+    "resnet.layer1.1.conv1",
+    "resnet.layer1.1.conv2",
+    "resnet.layer1.2.conv1",
+    "resnet.layer1.2.conv2",
+    "resnet.layer2.0.conv1",
+];
+const C64: &[&str] = &[
+    "resnet.layer2.0.conv2",
+    "resnet.layer2.1.conv1",
+    "resnet.layer2.1.conv2",
+    "resnet.layer2.2.conv1",
+    "resnet.layer2.2.conv2",
+    "resnet.layer2.3.conv1",
+    "resnet.layer2.3.conv2",
+];
 
 const PRODUCTION: &[Production] = &[
     Production {
+        area: KernelModule::Resnet,
         coverage: Coverage(&[
-            production_entry(ConvOxide::COVERAGE.0[0]),
-            // b1 TF32 C64 was not accepted
             CoverageEntry {
-                batches: Batches::Only(&[32]),
-                ..ConvOxide::COVERAGE.0[1]
+                layers: C32,
+                batches: Batches::Only(&MODEL_BATCHES),
+                maths: Maths::All,
             },
-            ConvOxide::COVERAGE.0[2],
+            CoverageEntry {
+                layers: C64,
+                batches: Batches::Only(&[32]),
+                maths: Maths::All,
+            },
+            CoverageEntry {
+                layers: C64,
+                batches: Batches::Only(&[1]),
+                maths: Maths::Only(&[CudaMath::Fp32]),
+            },
         ]),
         tier: PtxTier::Sm75,
         devices: DEVICES,
@@ -91,14 +124,24 @@ const PRODUCTION: &[Production] = &[
         der: INTEGRATED_DER,
     },
     Production {
-        coverage: Coverage(&[production_entry(LstmOxide::COVERAGE.0[0])]),
+        area: KernelModule::Lstm,
+        coverage: Coverage(&[CoverageEntry {
+            layers: &["lstm.stack"],
+            batches: Batches::Only(&MODEL_BATCHES),
+            maths: Maths::Only(&[CudaMath::Fp32]),
+        }]),
         tier: PtxTier::Sm75,
         devices: DEVICES,
         record: LSTM_RECORD,
         der: INTEGRATED_DER,
     },
     Production {
-        coverage: Coverage(&[production_entry(SincOxide::COVERAGE.0[0])]),
+        area: KernelModule::Sincnet,
+        coverage: Coverage(&[CoverageEntry {
+            layers: &["sincnet.conv0.abs_pool"],
+            batches: Batches::Only(&MODEL_BATCHES),
+            maths: Maths::Only(&[CudaMath::Fp32]),
+        }]),
         tier: PtxTier::Sm75,
         devices: DEVICES,
         record: SINC_RECORD,
@@ -115,6 +158,7 @@ pub(crate) struct Qualified {
     target: Target,
     record: &'static str,
     der: &'static str,
+    selection: Selection,
 }
 
 impl Qualified {
@@ -140,12 +184,45 @@ impl Qualified {
         Ok(())
     }
 
+    /// Resolve a refusal without constructing a dormant Library plan
+    pub(super) fn finish<T>(
+        &self,
+        area: KernelModule,
+        driver_only: bool,
+        result: Result<T, PlanError>,
+    ) -> Result<Option<T>, CudaError> {
+        match result {
+            Ok(plan) => Ok(Some(plan)),
+            Err(PlanError::Cuda(error)) => Err(error),
+            Err(PlanError::DeviceUnsupported { reason }) => {
+                if self.selection == Selection::Production && !driver_only {
+                    tracing::warn!(
+                        boundary = self.boundary,
+                        batch = self.batch,
+                        "CUDA candidate unavailable reason={reason}; using Library"
+                    );
+                    return Ok(None);
+                }
+
+                Err(CudaError::CandidateDeviceUnsupported {
+                    area: area.name(),
+                    boundary: self.boundary.clone(),
+                    batch: self.batch,
+                    math: self.math,
+                    tier: self.target.tier,
+                    device: self.target.device,
+                    reason,
+                })
+            }
+        }
+    }
+
     /// Build exactly the accepted convolution
     pub(crate) fn conv(
         self,
         runtime: &CudaRuntime,
         spec: ConvLayerSpec<'_>,
-    ) -> Result<ConvOxide, CudaError> {
+    ) -> Result<Option<ConvOxide>, CudaError> {
         self.check(
             runtime,
             KernelModule::Resnet,
@@ -153,7 +230,11 @@ impl Qualified {
             spec.conv.batch,
             spec.conv.math,
         )?;
-        ConvOxide::plan(runtime, spec)
+        self.finish(
+            KernelModule::Resnet,
+            super::driver_only(),
+            ConvOxide::plan(runtime, spec),
+        )
     }
 
     /// Build exactly the accepted Sinc producer
@@ -161,7 +242,7 @@ impl Qualified {
         self,
         runtime: &CudaRuntime,
         spec: SincSpec<'_>,
-    ) -> Result<SincOxide, CudaError> {
+    ) -> Result<Option<SincOxide>, CudaError> {
         self.check(
             runtime,
             KernelModule::Sincnet,
@@ -169,15 +250,19 @@ impl Qualified {
             spec.batch,
             spec.math,
         )?;
-        SincOxide::plan(runtime, spec)
+        self.finish(
+            KernelModule::Sincnet,
+            super::driver_only(),
+            SincOxide::plan(runtime, spec),
+        )
     }
 
-    /// Build the accepted stack, including its required library projections
+    /// Build the accepted stack; qualification forbids nested library calls
     pub(crate) fn lstm(
         self,
         runtime: &CudaRuntime,
         spec: LstmSpec<'_>,
-    ) -> Result<LstmOxide, CudaError> {
+    ) -> Result<Option<LstmOxide>, CudaError> {
         self.check(
             runtime,
             KernelModule::Lstm,
@@ -185,16 +270,11 @@ impl Qualified {
             spec.batch,
             spec.math,
         )?;
-        LibraryNeed::new(
+        self.finish(
             KernelModule::Lstm,
-            "lstm.stack.input_proj",
-            spec.batch,
-            spec.math,
-            self.target,
-            CudaLibrary::Cublas,
+            super::driver_only(),
+            LstmOxide::plan(runtime, spec),
         )
-        .prepare(runtime)?;
-        LstmOxide::plan(runtime, spec)
     }
 }
 
@@ -218,6 +298,7 @@ pub(crate) fn select(
             && entry.devices.contains(&target.device)
             && MODEL_BATCHES.contains(&batch)
             && entry.coverage.covers(boundary, batch, math)
+            && boundary.split('.').next() == Some(entry.area.name())
     });
     Ok(match entry {
         Some(entry) => Selected::Oxide(Qualified {
@@ -227,6 +308,7 @@ pub(crate) fn select(
             target,
             record: entry.record,
             der: entry.der,
+            selection: Selection::Production,
         }),
         None => Selected::Library,
     })
@@ -260,10 +342,13 @@ pub(crate) fn plan_selection(
     {
         let choice = override_choice.unwrap_or_else(|| {
             super::test_support::default_choice(match selected {
-                Selected::Oxide(_) => Choice::Oxide,
+                Selected::Oxide(_) => Choice::Oxide(Selection::Production),
                 _ => Choice::Library,
             })
         });
+        if choice == Choice::Oxide(Selection::Production) {
+            return Ok(selected);
+        }
         qualification_selection(choice, area, boundary, batch, math, target)
     }
     #[cfg(not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))))]
@@ -280,20 +365,23 @@ pub(crate) fn qualification_selection(
     target: Target,
 ) -> Result<Selected, CudaError> {
     let coverage = match area {
-        KernelModule::Resnet => ConvOxide::COVERAGE,
-        KernelModule::Lstm => LstmOxide::COVERAGE,
-        KernelModule::Sincnet => SincOxide::COVERAGE,
+        KernelModule::Resnet => ConvOxide::coverage(target.tier),
+        KernelModule::Lstm => LstmOxide::coverage(target.tier),
+        KernelModule::Sincnet => SincOxide::coverage(target.tier),
         _ => Coverage::NONE,
     };
     Ok(match choice {
-        Choice::Oxide if coverage.covers(boundary, batch, math) => Selected::Oxide(Qualified {
-            boundary: boundary.to_owned(),
-            batch,
-            math,
-            target,
-            record: "qualification-control",
-            der: "qualification-control",
-        }),
+        Choice::Oxide(selection) if coverage.covers(boundary, batch, math) => {
+            Selected::Oxide(Qualified {
+                boundary: boundary.to_owned(),
+                batch,
+                math,
+                target,
+                record: "qualification-control",
+                der: "qualification-control",
+                selection,
+            })
+        }
         Choice::Mutant(mutant) => Selected::Mutant(mutant),
         _ => Selected::Library,
     })

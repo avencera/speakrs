@@ -68,8 +68,24 @@ def main() -> None:
     """Import an owner file without changing its scope or lock."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--import-file", type=Path, required=True)
-    parser.add_argument("--name", required=True)
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--name")
+    group.add_argument("--record-sha256")
     args = parser.parse_args()
+    if args.record_sha256:
+        from records import record_path, load
+
+        contents = args.import_file.read_bytes()
+        if hashlib.sha256(contents).hexdigest() != args.record_sha256:
+            raise LockError("record import does not match requested SHA-256")
+        path = record_path(args.record_sha256)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_symlink():
+            raise LockError("record cache symlink refused")
+        path.write_bytes(contents)
+        load(args.record_sha256)
+        print(path)
+        return
     digest = scope().get("external_assets", {}).get(args.name)
     if digest is None:
         raise LockError(f"unknown external asset: {args.name}")

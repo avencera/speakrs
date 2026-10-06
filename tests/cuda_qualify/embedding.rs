@@ -2,7 +2,6 @@
 
 use super::dispatch::Plan;
 use super::{ConvLayer, Convs, ResNetEmbedding, Residual};
-use crate::inference::cuda::candidate::{ConvCandidate, ConvOxide};
 use crate::inference::cuda::implementation::Choice;
 use crate::inference::cuda::test_support::{self, Mutant};
 use crate::inference::cuda::{CudaError, CudaRuntime, SafetensorsFile};
@@ -184,7 +183,9 @@ impl<'a> Operator<'a> {
             });
         }
 
-        let plans = super::dispatch::plan_layers(runtime, &model.0.trunk, batch, model.0.math)?;
+        let mut plans = super::dispatch::plan_layers(runtime, &model.0.trunk, batch, model.0.math)?;
+        // an isolated operator owns only its plan and that plan's workspace
+        plans.retain(|(name, _)| name == layer.name());
         let workspace_bytes = plans
             .iter()
             .map(|(_, plan)| plan.workspace_bytes())
@@ -229,6 +230,30 @@ impl<'a> Operator<'a> {
         self.layer.name()
     }
 
+    /// Select coverage before allocating buffers; paired tests keep only one layer live
+    pub(crate) fn declared_at(
+        model: &ResNetEmbedding,
+        runtime: &CudaRuntime,
+        batch: usize,
+        block: usize,
+        second: bool,
+    ) -> Result<bool, CudaError> {
+        use crate::inference::cuda::KernelModule;
+        use crate::inference::cuda::implementation::{Selected, plan_selection};
+
+        let block = &model.0.trunk.blocks[block];
+        let layer = if second { &block.conv2 } else { &block.conv1 };
+        let selected = plan_selection(
+            runtime,
+            KernelModule::Resnet,
+            layer.name(),
+            batch,
+            model.0.math,
+            layer.override_choice(),
+        )?;
+        Ok(!matches!(selected, Selected::Library))
+    }
+
     /// Whether the candidate runs this pair; undeclared pairs run the Library path
     pub(crate) fn declared(&self) -> bool {
         match self
@@ -240,9 +265,7 @@ impl<'a> Operator<'a> {
             .choice()
         {
             Choice::Library => false,
-            Choice::Oxide(_) => {
-                ConvOxide::COVERAGE.covers(self.name(), self.batch, self.model.0.math)
-            }
+            Choice::Oxide(_) => true,
             Choice::Mutant(_) => true,
         }
     }
@@ -332,6 +355,11 @@ impl EmbeddingBatch {
         self.masks.copy_from_host(stream, masks)?;
         self.forward(runtime)?;
         self.download_output(runtime)
+    }
+
+    /// Plant a stage-only accuracy defect in the actual device output
+    pub(crate) fn qualification_round_stage(&self, runtime: &CudaRuntime) -> Result<(), CudaError> {
+        test_support::round_input(runtime, self.output.data())
     }
 
     /// Embeddings per forward pass, `chunks * 3`

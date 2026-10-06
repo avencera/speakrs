@@ -148,6 +148,18 @@ impl CudaSegmentation {
             .map(|graph| graph.inner())
     }
 
+    /// Plant a stage-only accuracy defect in the actual device output
+    pub(crate) fn qualification_round_stage(
+        &self,
+        runtime: &CudaRuntime,
+        batch: usize,
+    ) -> Result<(), CudaError> {
+        let workspace = self
+            .find_workspace(batch, WINDOW_SAMPLES)
+            .expect("stage workspace");
+        test_support::round_input(runtime, workspace.tensors.output.data())
+    }
+
     /// Diagnostic per-layer stack taps from a candidate; never gated
     pub(crate) fn diagnostic_lstm_outputs(
         &self,
@@ -267,11 +279,14 @@ impl CudaSegmentation {
     }
 
     /// Reports the coverage a candidate declares, for the result
-    pub(crate) fn coverage(target: &str) -> crate::inference::cuda::candidate::Coverage {
+    pub(crate) fn coverage(
+        target: &str,
+        tier: crate::inference::cuda::PtxTier,
+    ) -> crate::inference::cuda::candidate::Coverage {
         if target == "lstm" {
-            LstmOxide::COVERAGE
+            LstmOxide::coverage(tier)
         } else {
-            SincOxide::COVERAGE
+            SincOxide::coverage(tier)
         }
     }
 }

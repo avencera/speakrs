@@ -397,7 +397,7 @@ def _attribute(
     }
 
 
-def window_kernels(path: Path, nonce: str) -> dict[str, set[str]]:
+def window_kernels(path: Path, nonce: str, *, multiset: bool = False) -> dict:
     """The candidate kernels each driver window launched, by window name.
 
     A kernel counts when a candidate scope and the window enclose its launch and no
@@ -419,7 +419,8 @@ def window_kernels(path: Path, nonce: str) -> dict[str, set[str]]:
         index = ContainmentIndex(ranges)
         launches = _launches(connection, tables)
         columns = _columns(connection, "CUPTI_ACTIVITY_KIND_KERNEL")
-        found: dict[str, set[str]] = defaultdict(set)
+        counts = defaultdict(Counter)
+        found = defaultdict(set)
         for row in connection.execute("SELECT * FROM CUPTI_ACTIVITY_KIND_KERNEL"):
             owners = set()
             for launch in launches.get((row["globalPid"], row["correlationId"]), []):
@@ -434,8 +435,11 @@ def window_kernels(path: Path, nonce: str) -> dict[str, set[str]]:
             ) or names.get(row["demangledName"])
             for owner in owners:
                 if ranges[owner].kind == "window" and name:
-                    found[ranges[owner].name].add(name)
-        return dict(found)
+                    if multiset:
+                        counts[ranges[owner].name][name] += 1
+                    else:
+                        found[ranges[owner].name].add(name)
+        return dict(counts) if multiset else dict(found)
 
 
 def _inside(inner: Range, outer: Range) -> bool:

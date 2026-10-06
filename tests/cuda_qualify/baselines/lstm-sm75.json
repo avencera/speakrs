@@ -3,8 +3,8 @@
   "tier": "sm75",
   "scope": "LSTM input projections only",
   "device_sm": "12.0",
-  "control_archive_sha256": "03fafa2c09c728393aa63a59a77f577068033d27208da8ea5a5d317a8ed8bb0d",
-  "control_driver_sha256": "66eef616174fb1f92a594e139d835c93e881a7a227fd1f62452a905fc33ed0a2",
+  "control_archive_sha256": "f887b528597da82eabdb06d6e4e3ac0fae3417e7762e17bf408c264146edfabb",
+  "control_driver_sha256": "49154909a7a87691a9b6512c554ef3916e1be57fca2b1f1fd4c9eb9c7b63ea9d",
   "control_toolchain": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1",
   "verified_inputs": {
     "/workspace/models-native/segmentation-3.0.safetensors": "88e7883cf56f679170e162419efddf970f929915281ebce80e351c42b5a7115d",
@@ -14,8 +14,8 @@
     "/workspace/ref/segmentation-3.0/test_short_partial_b1.safetensors": "b6cc0b5bcd3b6b9a72900346a4f130336a265f4580c8634033af8da8389e6b73"
   },
   "tool_fingerprint": {
-    "/usr/lib/x86_64-linux-gnu/libcuda.so.580.95.05": "f27223c58d4c0d2ead3c2d747eb30a530c449f89c42e16b23e9bef04f3e6dc2e",
-    "/usr/lib/x86_64-linux-gnu/libcudadebugger.so.580.95.05": "1b8e052c05e80fc1d3dcc0c3726663030ae6086d995b28c7f2ec74bbc6a75c1c",
+    "/usr/lib/x86_64-linux-gnu/libcuda.so.595.84": "c147185c80a0270d635db626537fc9223b2ad1764f86cb12fd116d26e08b175d",
+    "/usr/lib/x86_64-linux-gnu/libcudadebugger.so.595.84": "29937241be4f960d9af9e1dd6330289f44405bf5a2c7e363c92bacfb30283928",
     "/usr/lib/x86_64-linux-gnu/libcudnn.so.9.8.0": "72f74476dcdc074b9d56f8c5cf576ceff6a595989832b9b0798478dc48a4ffcd",
     "/usr/lib/x86_64-linux-gnu/libcudnn_adv.so.9.8.0": "fe1f1468f2af89ebb80446cbb822d823ebf01509111faed8c271131ef53f0db2",
     "/usr/lib/x86_64-linux-gnu/libcudnn_cnn.so.9.8.0": "39f017b44b7a1b17b2a8ce8d139b3b7e71e7c6f73eb2e3393b828edfc516753a",
@@ -40,13 +40,13 @@
     "/usr/local/cuda-13.0/compute-sanitizer/x86/libTreeLauncherTargetUpdatePreloadInjection.so": "337eb9dcda99c78db3d2206d29b66e4423bf0241019ca38622e763de50440a4d",
     "/usr/local/cuda-13.0/targets/x86_64-linux/lib/libcudart.so.13.0.96": "96c42e418cec19054186b9429c321603cc190bf26a18104e19408117a2a817b0"
   },
-  "source_result_sha256": "cda9b55e3986135e182bdbfa44df929a76b56b03f7ec2a1ad54ed732d4ad27ee",
-  "source_lock_digest": "ab7794eb5a62ab73cb22d2fd5065e5c6a879102cfeeaae0903de28151262c3c5",
+  "source_result_sha256": "919f51d4444265f681660271e277105fb9551124afbad9355a8433bcef450532",
+  "source_lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
   "tools": [
     {
       "tool": "memcheck",
       "log": "lstm-sm75-memcheck.log",
-      "sha256": "278297381c0dd3ebb901aa49300f481162d1e611f3a22b24cd420a1f6f680db2",
+      "sha256": "4065067cd2daf4ec9522050465dad20efe3ba1fb21cab37208f554273999e0db",
       "returncode": 0,
       "command": [
         "flock",
@@ -62,20 +62,20 @@
         "16",
         "--error-exitcode",
         "86",
-        "/workspace/kh4/target/control/03fafa2c09c728393aa63a59a77f577068033d27208da8ea5a5d317a8ed8bb0d/sm75/release/deps/speakrs-e9653d787dd04ca3",
+        "/workspace/p2b-tierfix/target/control/f887b528597da82eabdb06d6e4e3ac0fae3417e7762e17bf408c264146edfabb/sm75/release/deps/speakrs-95614be541655ec9",
         "--exact",
         "inference::cuda::test_support::qualify::qualification_driver",
         "--ignored",
         "--nocapture"
       ],
       "scope": "LSTM input projections only",
-      "source_result_sha256": "cda9b55e3986135e182bdbfa44df929a76b56b03f7ec2a1ad54ed732d4ad27ee",
-      "source_lock_digest": "ab7794eb5a62ab73cb22d2fd5065e5c6a879102cfeeaae0903de28151262c3c5"
+      "source_result_sha256": "919f51d4444265f681660271e277105fb9551124afbad9355a8433bcef450532",
+      "source_lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783"
     },
     {
       "tool": "racecheck",
       "log": "lstm-sm75-racecheck.log",
-      "sha256": "190424daf23362bb32c642c9007457f9907caeeae8390d2319784214fbf20467",
+      "sha256": "d1fae1c755c1855bde82b7c10595442f7f597d11c9709c4da2ca79686758921b",
       "returncode": 0,
       "command": [
         "flock",
@@ -95,20 +95,20 @@
         "16",
         "--error-exitcode",
         "86",
-        "/workspace/kh4/target/control/03fafa2c09c728393aa63a59a77f577068033d27208da8ea5a5d317a8ed8bb0d/sm75/release/deps/speakrs-e9653d787dd04ca3",
+        "/workspace/p2b-tierfix/target/control/f887b528597da82eabdb06d6e4e3ac0fae3417e7762e17bf408c264146edfabb/sm75/release/deps/speakrs-95614be541655ec9",
         "--exact",
         "inference::cuda::test_support::qualify::qualification_driver",
         "--ignored",
         "--nocapture"
       ],
       "scope": "LSTM input projections only",
-      "source_result_sha256": "cda9b55e3986135e182bdbfa44df929a76b56b03f7ec2a1ad54ed732d4ad27ee",
-      "source_lock_digest": "ab7794eb5a62ab73cb22d2fd5065e5c6a879102cfeeaae0903de28151262c3c5"
+      "source_result_sha256": "919f51d4444265f681660271e277105fb9551124afbad9355a8433bcef450532",
+      "source_lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783"
     },
     {
       "tool": "initcheck",
       "log": "lstm-sm75-initcheck.log",
-      "sha256": "c9b8070a35058f7d28682b63e0f0124a20fad738cccc8c9e2054dd2717749e41",
+      "sha256": "29457d32ff7c12829dbff1b612b13ad17aafed46444e436a17859a062b7248d4",
       "returncode": 0,
       "command": [
         "flock",
@@ -124,15 +124,15 @@
         "16",
         "--error-exitcode",
         "86",
-        "/workspace/kh4/target/control/03fafa2c09c728393aa63a59a77f577068033d27208da8ea5a5d317a8ed8bb0d/sm75/release/deps/speakrs-e9653d787dd04ca3",
+        "/workspace/p2b-tierfix/target/control/f887b528597da82eabdb06d6e4e3ac0fae3417e7762e17bf408c264146edfabb/sm75/release/deps/speakrs-95614be541655ec9",
         "--exact",
         "inference::cuda::test_support::qualify::qualification_driver",
         "--ignored",
         "--nocapture"
       ],
       "scope": "LSTM input projections only",
-      "source_result_sha256": "cda9b55e3986135e182bdbfa44df929a76b56b03f7ec2a1ad54ed732d4ad27ee",
-      "source_lock_digest": "ab7794eb5a62ab73cb22d2fd5065e5c6a879102cfeeaae0903de28151262c3c5"
+      "source_result_sha256": "919f51d4444265f681660271e277105fb9551124afbad9355a8433bcef450532",
+      "source_lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783"
     }
   ]
 }

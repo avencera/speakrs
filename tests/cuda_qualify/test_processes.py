@@ -320,6 +320,8 @@ class Processes(unittest.TestCase):
             "profile": "profile",
             "determinism:fixed_reduction_order": "profile",
             "speed": "timing",
+            "paired_stage": "paired",
+            "stage_truth": "numeric",
             "timing_output": "timing",
             "secret": "numeric",
             "ptx:shared_initialization": "numeric",
@@ -391,6 +393,23 @@ class Processes(unittest.TestCase):
                         "mode": env.get("SPEAKRS_QUALIFY_MODE"),
                         "pid": 1,
                         "tier": "sm75",
+                        "device_sm": "12.0",
+                        "device": {
+                            "name": "test",
+                            "compute_capability": "12.0",
+                            "sm_count": 36,
+                            "driver_api_version": 12080,
+                            "driver_version": "570.0",
+                            "cuda_version": 12080,
+                            "cudnn_version": 90000,
+                            "cublas_version": 120800,
+                        },
+                        "loaded_modules": [{"area": "segmentation", "tier": "sm75"}],
+                        "observed_sm_clock": {
+                            "samples": 2,
+                            "min_mhz": 2400,
+                            "max_mhz": 2600,
+                        },
                         "coverage": {"layers": [], "batches": [], "maths": []},
                         "rows": [
                             {"id": key, "cuda_graph": True}
@@ -550,33 +569,24 @@ class Processes(unittest.TestCase):
         gated = {item["check"]: item for item in result["checks"]}
         self.assertEqual(
             sorted(gated),
-            ["speed:fp32/mixed/b32/lstm.stack", "speed:fp32/mixed/b32/stage"],
+            ["speed:fp32/mixed/b32/lstm.stack"],
         )
         self.assertTrue(all(item.get("blocked") for item in gated.values()))
         self.assertEqual(result["measurability"]["stage"]["measurable"], 0)
         gates = {row["id"]: row["gate"] for row in result["timing"]}
         self.assertTrue(gates["fp32/first/b1/stage"].startswith("undeclared stage"))
-        self.assertTrue(gates["fp32/mixed/b32/stage"].startswith("stage: regression"))
+        self.assertTrue(gates["fp32/mixed/b32/stage"].startswith("stage: paired"))
 
-    def test_stage_within_its_bound_passes_while_the_operator_must_win(self):
+    def test_stage_guard_cannot_use_separate_process_timing(self):
         coverage = qualify.Coverage.product({"lstm.stack"}, {32}, {"fp32"})
-        result: dict = {"target": "lstm", "checks": []}
-        # the candidate is 0.1% slower: inside the stage bound, but slower on average
+        result = {"target": "lstm", "checks": []}
         qualify.timing(
             result, self.timing_runs([1.0, 1.001, 1.0, 1.001]), "Oxide", coverage
         )
-        gated = {item["check"]: item for item in result["checks"]}
-        self.assertIn(
-            "slower on average", gated["speed:fp32/mixed/b32/stage"]["reason"]
+        self.assertFalse(
+            any(item["check"].endswith("/stage") for item in result["checks"])
         )
-        self.assertFalse(gated["speed:fp32/mixed/b32/lstm.stack"]["passed"])
-        result = {"target": "lstm", "checks": []}
-        # inside the bound and faster on average: the stage passes
-        qualify.timing(
-            result, self.timing_runs([1.0, 1.002, 1.0, 0.997]), "Oxide", coverage
-        )
-        gated = {item["check"]: item for item in result["checks"]}
-        self.assertTrue(gated["speed:fp32/mixed/b32/stage"]["passed"])
+        self.assertFalse(result["checks"][0]["passed"])
 
     def test_library_control_reports_measurability(self):
         coverage = qualify.Coverage(frozenset())

@@ -32,6 +32,10 @@ use super::{CudaError, CudaRuntime, CudaSegmentation, ResNetEmbedding};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mutant {
     Precision,
+    /// Stage-only regression larger than any operator saving
+    StageSlow,
+    /// Stage-only TF32 error beyond Library truth error
+    StageAccuracy,
     Shape,
     Fallback,
     Tail,
@@ -53,6 +57,8 @@ impl Mutant {
     /// Parses only the fixed mutation inventory
     pub(crate) fn parse(name: &str) -> Option<Self> {
         match name {
+            "StageSlow" => Some(Self::StageSlow),
+            "StageAccuracy" => Some(Self::StageAccuracy),
             "Precision" => Some(Self::Precision),
             "Shape" => Some(Self::Shape),
             "Fallback" => Some(Self::Fallback),

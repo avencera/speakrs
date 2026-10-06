@@ -26,7 +26,7 @@ fn production_selects_exactly_the_qualified_triples() {
     ];
     assert_eq!(
         crate::inference::cuda::candidate::QUALIFIED_BATCHES,
-        [1, 7, 32, 33, 64]
+        [1, 32]
     );
     let declared = PRODUCTION
         .iter()
@@ -97,5 +97,100 @@ fn records_and_integrated_evidence_are_pinned() {
             entry.der,
             "8066268031afba058d93e305206d5b8225e40c6ab2ebb1052874d607e055646f"
         );
+    }
+}
+
+/// Export evaluated const entries, so Python never guesses what Rust expressions mean
+#[test]
+fn export_production_table() {
+    let Ok(path) = std::env::var("SPEAKRS_QUALIFY_TABLE_OUTPUT") else {
+        return;
+    };
+    let entries: Vec<_> = PRODUCTION
+        .iter()
+        .map(|entry| {
+            let candidate = match entry.area {
+                super::KernelModule::Resnet => {
+                    <super::ConvOxide as super::ConvCandidate>::coverage(entry.tier)
+                }
+                super::KernelModule::Lstm => {
+                    <super::LstmOxide as super::LstmCandidate>::coverage(entry.tier)
+                }
+                super::KernelModule::Sincnet => {
+                    <super::SincOxide as super::SincCandidate>::coverage(entry.tier)
+                }
+                _ => panic!("production area has no candidate coverage export"),
+            };
+            serde_json::json!({
+                "area": entry.area.name(),
+                "candidate_coverage": super::super::test_support::qualify::coverage_json(candidate),
+                "coverage": super::super::test_support::qualify::coverage_json(entry.coverage),
+                "tier": entry.tier.to_string(),
+                "devices": entry.devices.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                "record": entry.record,
+                "der": entry.der,
+            })
+        })
+        .collect();
+    std::fs::write(
+        path,
+        serde_json::to_vec_pretty(&entries).expect("finite table"),
+    )
+    .expect("table output");
+}
+
+#[test]
+fn planning_refusals_preserve_selection_and_policy() {
+    use super::super::{CudaError, KernelModule};
+    use super::{PlanError, Selection};
+    let Selected::Oxide(mut token) = select(
+        "lstm.stack",
+        1,
+        CudaMath::Fp32,
+        Target {
+            tier: PtxTier::Sm75,
+            device: ComputeCapability::new(12, 0),
+        },
+    )
+    .unwrap() else {
+        panic!("production token")
+    };
+    for selection in [Selection::Production, Selection::Explicit] {
+        token.selection = selection;
+        for driver_only in [false, true] {
+            assert_eq!(
+                token
+                    .finish(KernelModule::Lstm, driver_only, Ok(42))
+                    .unwrap(),
+                Some(42)
+            );
+            let refusal = || PlanError::DeviceUnsupported {
+                reason: "grid exceeds device capacity".to_owned(),
+            };
+            let result = token.finish::<()>(KernelModule::Lstm, driver_only, Err(refusal()));
+            if selection == Selection::Production && !driver_only {
+                assert!(result.unwrap().is_none());
+            } else {
+                assert!(matches!(result, Err(CudaError::CandidateDeviceUnsupported {
+                    area: "lstm", boundary, batch: 1, math: CudaMath::Fp32,
+                    tier: PtxTier::Sm75, device, reason,
+                }) if boundary == "lstm.stack" && device == ComputeCapability::new(12, 0)
+                    && reason == "grid exceeds device capacity"));
+            }
+            assert!(matches!(
+                token.finish::<()>(
+                    KernelModule::Lstm,
+                    driver_only,
+                    Err(PlanError::Cuda(CudaError::Unsupported {
+                        context: "invalid shape",
+                        reason: "not a device limit".to_owned(),
+                    }))
+                ),
+                Err(CudaError::Unsupported {
+                    context: "invalid shape",
+                    ..
+                })
+            ));
+        }
     }
 }

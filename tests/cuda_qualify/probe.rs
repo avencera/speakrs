@@ -25,8 +25,12 @@ use cudarc::driver::sys::{CUevent_flags, CUgraphInstantiate_flags, CUstreamCaptu
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+#[path = "paired.rs"]
+mod paired;
 #[path = "reference.rs"]
 pub(crate) mod reference;
+#[path = "truth.rs"]
+mod truth;
 
 const CASES: [(&str, usize); 8] = [
     ("first", 1),
@@ -261,7 +265,7 @@ fn math_name(math: CudaMath) -> &'static str {
     }
 }
 
-fn entry_json(entry: &CoverageEntry) -> Value {
+pub(super) fn entry_json(entry: &CoverageEntry) -> Value {
     let batches = match entry.batches {
         Batches::All => json!("all"),
         Batches::Only(batches) => json!(batches),
@@ -278,13 +282,17 @@ fn entry_json(entry: &CoverageEntry) -> Value {
     json!({"layers": entry.layers, "batches": batches, "maths": maths})
 }
 
-fn coverage_json(coverage: Coverage) -> Value {
+pub(crate) fn coverage_json(coverage: Coverage) -> Value {
     json!({"entries": coverage.entries().iter().map(entry_json).collect::<Vec<_>>()})
 }
 
 /// The coverage the selected implementation declares: everything for planted faults,
 /// nothing for Library
-fn declared_coverage(target: &str, implementation: &str) -> Value {
+fn declared_coverage(
+    target: &str,
+    implementation: &str,
+    tier: crate::inference::cuda::PtxTier,
+) -> Value {
     if implementation == "Library" {
         return coverage_json(Coverage::NONE);
     }
@@ -292,9 +300,9 @@ fn declared_coverage(target: &str, implementation: &str) -> Value {
         return json!({"entries": [{"layers": "all", "batches": "all", "maths": "all"}]});
     }
     if target == "resnet" {
-        return coverage_json(ConvOxide::COVERAGE);
+        return coverage_json(ConvOxide::coverage(tier));
     }
-    coverage_json(CudaSegmentation::coverage(target))
+    coverage_json(CudaSegmentation::coverage(target, tier))
 }
 
 fn lstm_diagnostics(
@@ -481,19 +489,35 @@ impl Run<'_> {
             return Ok(());
         }
 
+        let truth = (self.math == CudaMath::Tf32)
+            .then(|| self.truth())
+            .transpose()?;
         for (which, (_, _, reference)) in inputs.iter().enumerate() {
             upload(&mut buffers, which)?;
             let graph = buffers.graph().expect("captured stage graph");
             graph.launch()?;
+            if self.choice == "StageAccuracy" && self.math == CudaMath::Tf32 {
+                buffers.qualification_round_stage(runtime)?;
+            }
             let first = buffers.download_output(runtime)?;
             graph.launch()?;
+            if self.choice == "StageAccuracy" && self.math == CudaMath::Tf32 {
+                buffers.qualification_round_stage(runtime)?;
+            }
             let second = buffers.download_output(runtime)?;
+            let truth_metrics = truth
+                .as_ref()
+                .map(|outputs| metrics(&first, &outputs[which], 256));
             let key = self.key("stage", which);
             record(rows, &key, first, second, reference, 256, any_declared);
+            rows.last_mut().expect("stage row")["truth"] = json!(truth_metrics);
+            rows.last_mut().expect("stage row")["truth_sha256"] =
+                json!(truth.as_ref().map(|outputs| sha(&outputs[which])));
             let Some(layers) = &self.band else {
                 continue;
             };
             let mut band = Vec::new();
+            let mut truth_draws = Vec::new();
             for seed in BAND_SEEDS {
                 set_band(Some((seed, layers.clone())));
                 upload(&mut buffers, which)?;
@@ -501,8 +525,13 @@ impl Run<'_> {
                 let output = buffers.download_output(runtime)?;
                 set_band(None);
                 band.push(metrics(&output, reference, 256));
+                truth_draws.push(metrics(
+                    &output,
+                    &truth.as_ref().expect("TF32 truth")[which],
+                    256,
+                ));
             }
-            rows.push(json!({"id": format!("{key}/band"), "seeds": BAND_SEEDS, "layers": layers, "metrics": band}));
+            rows.push(json!({"id": format!("{key}/band"), "seeds": BAND_SEEDS, "layers": layers, "metrics": band, "truth_draws": truth_draws, "truth_sha256": sha(&truth.as_ref().expect("TF32 truth")[which])}));
         }
         Ok(())
     }
@@ -747,6 +776,9 @@ impl Run<'_> {
             return Ok(());
         }
 
+        let truth = (self.math == CudaMath::Tf32)
+            .then(|| self.truth())
+            .transpose()?;
         for (which, input) in inputs.iter().enumerate() {
             model
                 .workspace(runtime, batch, WINDOW)?
@@ -755,18 +787,31 @@ impl Run<'_> {
                 .qualification_graph(batch)
                 .expect("captured stage graph");
             graph.launch()?;
+            if self.choice == "StageAccuracy" && self.math == CudaMath::Tf32 {
+                model.qualification_round_stage(runtime, batch)?;
+            }
             let first = download(&model)?;
             let graph = model
                 .qualification_graph(batch)
                 .expect("captured stage graph");
             graph.launch()?;
+            if self.choice == "StageAccuracy" && self.math == CudaMath::Tf32 {
+                model.qualification_round_stage(runtime, batch)?;
+            }
             let second = download(&model)?;
+            let truth_metrics = truth
+                .as_ref()
+                .map(|outputs| metrics(&first, &outputs[which], 7));
             let key = self.key("stage", which);
             record(rows, &key, first, second, &references[which], 7, declared);
+            rows.last_mut().expect("stage row")["truth"] = json!(truth_metrics);
+            rows.last_mut().expect("stage row")["truth_sha256"] =
+                json!(truth.as_ref().map(|outputs| sha(&outputs[which])));
             let Some(layers) = &self.band else {
                 continue;
             };
             let mut band = Vec::new();
+            let mut truth_draws = Vec::new();
             for seed in BAND_SEEDS {
                 set_band(Some((seed, layers.clone())));
                 model
@@ -776,8 +821,13 @@ impl Run<'_> {
                 let output = download(&model)?;
                 set_band(None);
                 band.push(metrics(&output, &references[which], 7));
+                truth_draws.push(metrics(
+                    &output,
+                    &truth.as_ref().expect("TF32 truth")[which],
+                    7,
+                ));
             }
-            rows.push(json!({"id": format!("{key}/band"), "seeds": BAND_SEEDS, "layers": layers, "metrics": band}));
+            rows.push(json!({"id": format!("{key}/band"), "seeds": BAND_SEEDS, "layers": layers, "metrics": band, "truth_draws": truth_draws, "truth_sha256": sha(&truth.as_ref().expect("TF32 truth")[which])}));
         }
         Ok(())
     }
@@ -1298,7 +1348,7 @@ fn selected_cases(phase: &str) -> Vec<(CudaMath, &'static str, usize)> {
         .into_iter()
         .flat_map(|math| CASES.map(|(case, batch)| (math, case, batch)));
     match phase {
-        "numeric" | "timing" => {
+        "numeric" | "timing" | "paired" => {
             let mode = std::env::var("SPEAKRS_QUALIFY_MODE").expect("one math mode per process");
             let math = parse_mode(&mode);
             all.filter(|(item, _, _)| *item == math).collect()
@@ -1347,6 +1397,7 @@ fn qualification_driver() -> Result<(), CudaError> {
             "numeric",
             "timing",
             "profile",
+            "paired",
             "sanitize",
             "projection_baseline",
             "filter_proof"
@@ -1370,7 +1421,11 @@ fn qualification_driver() -> Result<(), CudaError> {
         )),
         super::Choice::Library
     );
-    let coverage = declared_coverage(&target, choice);
+    let tier = std::env::var("SPEAKRS_CUDA_PTX_TIER")
+        .expect("requested tier")
+        .parse()
+        .expect("known tier");
+    let coverage = declared_coverage(&target, choice, tier);
     if phase == "coverage" {
         write(
             &json!({"target":target,"implementation":implementation,"phase":phase,"coverage":coverage}),
@@ -1390,6 +1445,9 @@ fn qualification_driver() -> Result<(), CudaError> {
     }
 
     prepare(&runtime)?;
+    let device = crate::inference::cuda::candidate::test_support::device(&runtime)?;
+    let clocks = matches!(phase.as_str(), "timing" | "paired")
+        .then(crate::inference::cuda::candidate::test_support::Clocks::start);
     if target == "resnet" {
         // the secret front end needs fbank only in numeric, but fixed module bytes
         // must have the same inventory in timing and eager-profile processes
@@ -1422,7 +1480,9 @@ fn qualification_driver() -> Result<(), CudaError> {
                 .find(|(declared, _)| declared == batch && *math == CudaMath::Tf32)
                 .map(|(_, layers)| layers.clone()),
         };
-        if target == "resnet" {
+        if phase == "paired" {
+            run.paired(&mut rows)?;
+        } else if target == "resnet" {
             run.embedding(&mut rows)?;
         } else {
             run.segmentation(&mut rows)?;
@@ -1443,6 +1503,8 @@ fn qualification_driver() -> Result<(), CudaError> {
         "rows": rows,
         "tier": runtime.ptx_tier().to_string(),
         "device_sm": runtime.compute_capability().to_string(),
+        "device": device,
+        "observed_sm_clock": clocks.map(crate::inference::cuda::candidate::test_support::Clocks::finish),
         "library_call_violations": library_call_violations(),
         "graph_violations": graph_violations(),
         "graph_evidence": graph_evidence(),
@@ -1520,47 +1582,69 @@ fn sequential_capture_keeps_candidate_kernels() -> Result<(), CudaError> {
     );
     let runtime = CudaRuntime::new(0)?;
     prepare(&runtime)?;
+    // use a current library-free candidate; this tests shared scope tracking, not
+    // whether the old LSTM candidate qualifies under the new projection rule
+    let weights =
+        SafetensorsFile::open("/workspace/models-native/wespeaker-multimask-tail.safetensors")?;
+    let mut model = ResNetEmbedding::load(&runtime, &weights, CudaMath::Fp32)?;
+    assert!(select_conv(&mut model, "resnet.layer1.0.conv1", "Oxide"));
+    let file = reference("resnet", "mixed")?;
     for (position, batch) in [1, 1, 7, 32, 33, 64, 7].into_iter().enumerate() {
-        let input = runtime.stream().alloc_zeros::<f32>(batch * 256)?;
-        let before = graph_evidence().len();
-        let graph = capture(&runtime, || {
-            let _candidate = super::candidate(runtime.stream(), "capture-regression");
-            // changing projection position checks node ownership, not just address reuse
-            for index in 0..10 {
-                if index == position {
-                    let _projection = super::projection(
-                        runtime.stream(),
-                        0,
-                        crate::inference::cuda::candidate::Direction::Forward,
-                    );
-                    super::round_input(&runtime, &input)?;
-                    continue;
-                }
-                super::round_input(&runtime, &input)?;
-            }
-            Ok(())
-        })?;
-        graph.launch()?;
+        let mut op = Operator::new(&model, &runtime, [&file, &file], batch, 0, false)?;
+        let key = format!("capture-regression/{position}/b{batch}");
+        {
+            let _window = window(&key);
+            op.run(&runtime, 0)?;
+        }
         runtime.synchronize()?;
-        let evidence = graph_evidence();
-        let candidates: Vec<&Value> = evidence[before..]
-            .iter()
-            .filter(|row| row["scope"] == "candidate")
-            .collect();
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(
-            candidates[0]["kernels"]
-                .as_array()
-                .expect("kernel names")
-                .len(),
-            10,
-            "batch={batch}"
-        );
-        // destruction permits the next capture to reuse node addresses
-        drop(graph);
+        set_label(Some(key));
+        let graph = capture(&runtime, || op.run(&runtime, 0));
+        set_label(None);
+        graph?.launch()?;
+        runtime.synchronize()?;
+        // Python checks the complete launch multiset against this same plan's eager
+        // nsys window after export; no candidate declaration or fixed count is used
     }
-    write(&json!({"graph_evidence": graph_evidence(), "graph_violations": graph_violations()}));
+    let device = crate::inference::cuda::candidate::test_support::device(&runtime)?;
+    write(
+        &json!({"phase":"profile","requested_tier":runtime.ptx_tier().to_string(),
+                  "tier":runtime.ptx_tier().to_string(),"device_sm":runtime.compute_capability().to_string(),
+                  "device":device,"loaded_modules":loaded_modules(),
+                  "graph_evidence":graph_evidence(),"graph_violations":graph_violations()}),
+    );
     assert!(graph_violations().is_empty());
+    Ok(())
+}
+
+/// Exercise requested compiled tiers through real PTX, identity and clock evidence
+#[test]
+#[ignore = "requires the GPU lock and qualification environment"]
+fn compiled_tier_fixture() -> Result<(), CudaError> {
+    use crate::inference::cuda::DeviceTensor;
+    use crate::inference::cuda::probe::ProbeKernels;
+    let runtime = CudaRuntime::new(0)?;
+    let device = crate::inference::cuda::candidate::test_support::device(&runtime)?;
+    let clocks = crate::inference::cuda::candidate::test_support::Clocks::start();
+    let probe = ProbeKernels::load(&runtime)?;
+    assert_eq!(probe.tier(), runtime.ptx_tier());
+    let input: Vec<f32> = (0..1007).map(|i| i as f32).collect();
+    let x = DeviceTensor::upload(runtime.stream(), &input, &[input.len()])?;
+    let y = DeviceTensor::upload(runtime.stream(), &input, &[input.len()])?;
+    let mut output = DeviceTensor::<f32>::zeros(runtime.stream(), &[input.len()])?;
+    let graph = capture(&runtime, || {
+        probe.scale_add(&runtime, 2.0, x.data(), y.data(), output.data_mut())
+    })?;
+    let timing = bursts(&runtime, |_| Ok(()), |_| Ok(graph.launch()?))?;
+    let actual = output.download(runtime.stream())?;
+    let expected: Vec<f32> = input.iter().map(|x| 3.0 * x).collect();
+    assert_eq!(actual, expected);
+    write(
+        &json!({"phase":"timing","requested_tier":runtime.ptx_tier().to_string(),
+                  "tier":probe.tier().to_string(),"device_sm":runtime.compute_capability().to_string(),
+                  "device":device,"loaded_modules":loaded_modules(),"pid":std::process::id(),
+                  "observed_sm_clock":clocks.finish(),"output_sha256":sha(&actual),
+                  "warmup":WARMUP,"samples_ms":timing.per_launch_ms}),
+    );
     Ok(())
 }
 
