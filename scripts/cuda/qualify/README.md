@@ -1193,3 +1193,10 @@ FirstUseFallback prepares separate one-element cuBLAS operands before the profil
 warm-up. The first host replay hook issues one SGEMM under the selected boundary's
 candidate scope, without rerunning the operator or stage. A locked API-call counter
 requires exactly one call in that hook. Eager execution and capture never use it.
+
+The profile command pins `--cuda-graph-trace=graph`. Replay is recorded as a whole
+CUDA graph; eager kernel attribution remains unchanged. Capture's locked node
+inventory supplies the per-node graph checks. This is the documented default
+on supported drivers, now explicit to avoid a tool-default change. The box pilot
+must confirm that the installed tool accepts it. See the
+[NVIDIA Nsight Systems graph trace guide](https://docs.nvidia.com/nsight-systems/UserGuide/index.html#cuda-graph-trace).

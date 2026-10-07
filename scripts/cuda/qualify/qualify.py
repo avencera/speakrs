@@ -1644,6 +1644,7 @@ def profile(
     eager_only: bool = False,
 ) -> Path:
     """Trace plan, warm-up, eager, capture and one replay with the locked shim."""
+    result["profile_trace_mode"] = "graph"
     shim = directory / "nvtx.so"
     if command(
         [
@@ -1678,6 +1679,7 @@ def profile(
             "--sample=none",
             "--cpuctxsw=none",
             "--trace=cuda,nvtx,cublas,cudnn",
+            "--cuda-graph-trace=graph",
             "--force-overwrite=true",
             "-o",
             str(prefix),
