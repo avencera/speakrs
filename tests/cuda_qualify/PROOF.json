@@ -989,5 +989,15 @@
     "same_plan_captures": 7,
     "partial_tile_passes": 1,
     "partial_tile_ignored": 0
+  },
+  "phase2c1": {
+    "evidence": "evidence/phase2c1-results.json",
+    "sha256": "78ede54b926d4dea7fb39523084e7abd7491b0079db33df82931f640d16bce5c",
+    "purpose": "Phase 2c-1 infrastructure proof; no new production acceptance",
+    "full_library_controls": 3,
+    "standard_mutant_kinds_caught": 13,
+    "matched_pairs": 2,
+    "production_acceptance": false,
+    "full_39_required_at": "Final phase 2c seal after phase 2c-2"
   }
 }

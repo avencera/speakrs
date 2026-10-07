@@ -12,12 +12,12 @@ A mutant that does not reach its intended gate stops this phase.
 
 ## Exact source evidence
 
-The audited baseline is `8952f419928d91ecb67fadd8715b3ef19ede63fe`. The collection diff ends at `cc9b225e7d66ef3bd2f486a700e478d1c66b329f`.
+The audited baseline is `8952f419928d91ecb67fadd8715b3ef19ede63fe`. The collection diff ends at `2cf2cf75252114aeb509022e90a9d82642ecf62d`.
 `evidence/phase2c1-gate-decisions.diff` is empty: `gates.py` and `verdict.py`
 have no changed bytes. Its SHA256 is `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
 `evidence/phase2c1-collection-injection.diff.gz` holds every changed Rust, Python,
 PTX, manifest, shell and Cargo path that can collect or inject evidence, plus the
-changed loader, selection and kernel tooling. Its SHA256 is `bd855bdc418c52795e03a579e62ccf9ef1f183c18a651dab287695006a266a7d`.
+changed loader, selection and kernel tooling. Its SHA256 is `1403aa2eb0d7a9314f192d207fc3a1f06c12f7c9612737c9cbc68f2a36676c46`.
 Decompress it to inspect the exact diff. The JSON plan lists each exact path. The diff excludes no changed injection
 function. Production PTX and kernel arithmetic have no changes. The control PTX
 only receives the same host-prepared integer draw choices. Frozen vectors and
@@ -78,3 +78,57 @@ The exact diff and file list permit an audit of this mapping. A mapping is not a
 passed result. Final proof receipts must name each actual mutant record, its
 intended caught gate, and both matched comparisons. The old 39-run phase 2b
 records remain unchanged and are carried forward only for unchanged gate logic.
+
+## Completed live proof
+
+`evidence/phase2c1-results.json` pins three passed full Library controls, all 13
+caught standard mutant kinds, and both matched comparisons. It keeps each raw
+record hash, original compiled lock, exact device and artifact proof receipt.
+`PROOF.json` and `AUDIT_PROOF.json` link that receipt without changing their
+historical phase 2b results. Full command receipts, raw archives, comparison sets,
+noise flips and timing spreads remain in the hash-addressed outside-tree evidence
+store named by the receipt. Raw JSON records also remain in the qualification
+record cache. No record is relabelled with the final owner lock.
+
+The SincNet matched control now passes every check. Its fault fails only the
+intended mixed-b32 margin check. The earlier rejected control remains evidence:
+three b1 paired checks had tight intervals below 1, and its TF32 process loaded
+SincNet with no declared triple. These were real failures, not dismissed noise.
+The common selection owner already resolves tuple intent before module loading.
+The missed path was coverage discovery: it loaded PTX before that owner was
+called. The declaration now uses `AreaTarget` and the embedded PTX hash without
+loading an artifact or making a token. Actual plans still need the successfully
+loaded artifact and the exact production token. A Mac test calls the same Sinc
+plan owner for both fixtures, covered FP32, uncovered batches, TF32 and cc 8.9.
+
+The correction changed no stage graph, candidate code, PTX bytes or paired replay
+schedule. Both old and new Sinc controls used the same PTX-JIT hashes and the
+same 32 recorded graph scope/kernel sequences. Selection and key work happen
+before capture; timed replay only launches the captured graph. Paired processes
+hold the parent lock throughout. CPU unlocks occur in separate numeric children.
+The corrected b1 ratios are about 1.010, versus about 0.998 in the failed record.
+This isolates module-load initialization order as the changed execution path.
+The driver allocation/cache mechanism is not proved; retain this as an audit
+residual, not a claim that the old record passed.
+
+The ResNet pair keeps its real measured 292 lock. Both raw records have the same
+stable-module failure from the old coverage-discovery path. The unchanged matched
+criterion passes: the intended control margin passes, the fault margin fails,
+and no new effective or non-timing failure appears. This is a fault-injection
+proof, not a passing control verdict or new production qualification. The common
+coverage fix is exercised by the new Sinc pair and both-area host coverage tests;
+actual ResNet candidate arithmetic and the captured timing path are unchanged.
+
+The three approved Library controls run the unchanged Library choice, not this
+fixture-only branch. The 13 standard mutants also do not enter that branch.
+Their original hashes and compiled locks remain valid proof of those unchanged
+paths. The frozen 93 control and its LSTM projection baseline keep their original
+archive/device identity. The later 03 source archive is used for the corrected
+matched pair; no projection baseline is relabelled or assumed for that archive.
+Any later control that needs a different baseline identity must collect it.
+
+The exact cubin/JIT entry proofs keep their old f84 lock. PTX, cubin, manifest,
+runtime-loader and `load_artifact` source bytes have no changes since those
+proofs. The later changes concern unloaded intent and fixture declarations.
+Host tests cover their key checks; there is no new binary-load acceptance claim.
+Run the full 39 standard mutants at the final phase 2c seal after phase 2c-2.

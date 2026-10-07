@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "audited_base_commit": "8952f419928d91ecb67fadd8715b3ef19ede63fe",
-  "collection_diff_end_commit": "cc9b225e7d66ef3bd2f486a700e478d1c66b329f",
+  "collection_diff_end_commit": "2cf2cf75252114aeb509022e90a9d82642ecf62d",
   "gate_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-  "collection_diff_sha256": "bd855bdc418c52795e03a579e62ccf9ef1f183c18a651dab287695006a266a7d",
+  "collection_diff_sha256": "1403aa2eb0d7a9314f192d207fc3a1f06c12f7c9612737c9cbc68f2a36676c46",
   "changed_collection_injection_files": [
     "Cargo.toml",
     "scripts/cuda/qualify/artifacts.py",
@@ -166,5 +166,11 @@
   ],
   "final_phase2c_seal": "Run all 39 standard mutants at the end of phase 2c-2; do not infer area-specific qualification from this reduced infrastructure proof",
   "collection_diff_file": "phase2c1-collection-injection.diff.gz",
-  "collection_diff_archive_sha256": "f98de8864268e63617dc213f7ec6894e84366b4716a172b3c53d4ec34dac2fc0"
+  "collection_diff_archive_sha256": "5ecf836035c437445dbbe88a29f925a32739efb8e9fe7345d706606225276106",
+  "live_results_file": "phase2c1-results.json",
+  "live_results_sha256": "78ede54b926d4dea7fb39523084e7abd7491b0079db33df82931f640d16bce5c",
+  "collection_endpoint_amendment": {
+    "previous_commit": "cc9b225e7d66ef3bd2f486a700e478d1c66b329f",
+    "reason": "The endpoint now includes unloaded legacy fixture declarations and a direct Sinc StageTail plan-owner test; all gates, arithmetic, schedules, sample counts and seeds remain unchanged"
+  }
 }

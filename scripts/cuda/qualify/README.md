@@ -604,6 +604,17 @@ and skip only verified matching completed runs after a restart. Matched controls
 and faults must run on the same device in the same quiet window. Legacy StageTail
 production fixtures remain cc 12.0 PTX-JIT only.
 
+The phase 2c-1 results are pinned in
+`tests/cuda_qualify/evidence/phase2c1-results.json`, linked by `PROOF.json` and
+`AUDIT_PROOF.json`. They preserve the measured locks and full raw evidence; the
+final owner lock does not relabel a measured binary. Fixture coverage discovery
+reads embedded PTX identity without loading an unused module. The plan owner
+still requires actual loaded-artifact identity before it makes a production token.
+The SincNet matched control passes every check. The ResNet matched proof has a
+shared control/fault stable-module failure in its earlier records; its matched
+criterion passed, but those records grant no production acceptance. The exact
+carry-forward document states this limit and the unchanged paths.
+
 
 A mutant is caught only by its exact tier-stripped check name and reason:
 
