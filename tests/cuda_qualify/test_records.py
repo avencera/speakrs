@@ -383,9 +383,39 @@ class Records(RecordsFixture):
             ):
                 self.check([{**self.entry, "record": self.store(raw)}])
 
-    def test_same_device_entries_require_one_control_fingerprint(self):
+    def test_same_version_alternate_loaded_library_rejects_and_scan_is_not_evidence(
+        self,
+    ):
+        for fault in ("missing", "alternate"):
+            raw = copy.deepcopy(self.record)
+            process = raw["tiers"]["sm75"]["numeric"]["library"][0]
+            if fault == "missing":
+                process.pop("loaded_libraries")
+            else:
+                process["loaded_libraries"].pop("/lib/libcudnn.so.9")
+                process["loaded_libraries"]["/alternate/libcudnn.so.9"] = "4" * 64
+            with (
+                self.subTest(fault=fault),
+                self.assertRaisesRegex(records.Rejected, "loaded"),
+            ):
+                self.check([{**self.entry, "record": self.store(raw)}])
+        # sanitizer files are a separate tool policy, not the libraries comparisons loaded
         raw = copy.deepcopy(self.record)
         raw["tiers"]["sm75"]["sanitizer_fingerprint"]["/lib/libcudnn.so.9"] = "4" * 64
+        self.assertEqual(
+            self.check([{**self.entry, "record": self.store(raw)}])["entries"][0][
+                "environment"
+            ]["kind"],
+            "LoadedLibraries",
+        )
+
+    def test_same_device_entries_require_one_control_fingerprint(self):
+        raw = copy.deepcopy(self.record)
+        for process in (
+            raw["tiers"]["sm75"]["numeric"]["library"]
+            + raw["tiers"]["sm75"]["numeric"]["candidate"]
+        ):
+            process["loaded_libraries"]["/lib/libcudnn.so.9"] = "4" * 64
         other = {**self.entry, "record": self.store(raw)}
         with self.assertRaisesRegex(records.Rejected, "different Library fingerprints"):
             self.check([self.entry, other])

@@ -25,6 +25,9 @@ use cudarc::driver::sys::{CUevent_flags, CUgraphInstantiate_flags, CUstreamCaptu
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+#[path = "environment.rs"]
+mod environment;
+
 #[path = "cpu.rs"]
 pub(crate) mod cpu;
 
@@ -1711,6 +1714,7 @@ fn qualification_driver() -> Result<(), CudaError> {
         "graph_violations": graph_violations(),
         "graph_evidence": graph_evidence(),
         "loaded_modules": loaded_modules(),
+        "loaded_libraries": environment::loaded_libraries().map_err(|error| CudaError::Unsupported { context: "loaded Library evidence", reason: error.to_string() })?,
         "configurations": super::configuration::planned(),
         "side_streams": registered_side_streams(),
         "coverage": coverage,

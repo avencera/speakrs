@@ -47,9 +47,29 @@ def libraries(raw: object) -> dict:
     return result
 
 
+def loaded_libraries(raw: object) -> dict:
+    """Require the actual API-provider files, not an installed-directory scan"""
+    if not isinstance(raw, dict) or len(raw) != 3:
+        raise Rejected("table: missing loaded Library fingerprint")
+    value: dict = dict(raw)
+    found = {}
+    for family in ("libcuda.so", "libcudnn.so", "libcublas.so"):
+        matches = [
+            path
+            for path in value
+            if isinstance(path, str)
+            and PurePosixPath(path).is_absolute()
+            and PurePosixPath(path).name.startswith(family)
+        ]
+        if len(matches) != 1:
+            raise Rejected(f"table: missing or ambiguous loaded provider for {family}")
+        path = matches[0]
+        found[path] = sha256(value[path])
+    return found
+
+
 def collect(child: dict, *, legacy: bool, recorded_device: dict) -> dict:
     """Check every numeric control and candidate against the record's environment"""
-    fingerprint = libraries(child.get("sanitizer_fingerprint"))
     identity = {
         "name": recorded_device["name"],
         "compute_capability": recorded_device["compute_capability"],
@@ -59,7 +79,7 @@ def collect(child: dict, *, legacy: bool, recorded_device: dict) -> dict:
         return {
             "kind": "LegacyInstalledLibraries",
             "device": identity,
-            "libraries": fingerprint,
+            "libraries": libraries(child.get("sanitizer_fingerprint")),
         }
     expected = versions(recorded_device)
     numeric = child.get("numeric", {})
@@ -73,6 +93,7 @@ def collect(child: dict, *, legacy: bool, recorded_device: dict) -> dict:
         if not isinstance(phase_processes, list):
             raise Rejected("table: invalid comparison process environments")
         processes.extend(phase_processes)
+    fingerprint = loaded_libraries(controls[0].get("loaded_libraries"))
     for process in processes:
         precise = device(process.get("device"))
         if (
@@ -81,8 +102,10 @@ def collect(child: dict, *, legacy: bool, recorded_device: dict) -> dict:
             or precise["sm_count"] != recorded_device["sm_count"]
         ):
             raise Rejected("table: stale comparison control environment")
+        if loaded_libraries(process.get("loaded_libraries")) != fingerprint:
+            raise Rejected("table: comparison controls loaded different Library bytes")
     return {
-        "kind": "InstalledLibraries",
+        "kind": "LoadedLibraries",
         "device": identity,
         "versions": expected,
         "libraries": fingerprint,
@@ -95,7 +118,7 @@ def validate(raw: object, *, legacy: bool, recorded_device: dict) -> dict:
         raise Rejected("table: missing environment receipt")
     value: dict = dict(raw)
     expected_keys = {"kind", "device", "libraries", *([] if legacy else ["versions"])}
-    expected_kind = "LegacyInstalledLibraries" if legacy else "InstalledLibraries"
+    expected_kind = "LegacyInstalledLibraries" if legacy else "LoadedLibraries"
     identity = {name: recorded_device[name] for name in ("name", "compute_capability")}
     capability(identity["compute_capability"])
     if (
@@ -106,7 +129,8 @@ def validate(raw: object, *, legacy: bool, recorded_device: dict) -> dict:
         raise Rejected("table: invalid environment receipt")
     if not legacy and value.get("versions") != versions(recorded_device):
         raise Rejected("table: stale environment receipt")
-    if libraries(value.get("libraries")) != value["libraries"]:
+    parse = libraries if legacy else loaded_libraries
+    if parse(value.get("libraries")) != value["libraries"]:
         raise Rejected("table: invalid installed Library fingerprint")
     return value
 

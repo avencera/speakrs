@@ -1176,3 +1176,15 @@ That mapping is not read from the live production table. A fixed ResNet entry is
 not the legacy wave rule, even when it uses the same PTX artifact. The legacy map
 retains the original stride-2 B1 FP32 tuple, but does not restore its removed speed
 permission.
+
+### Loaded comparison Library bytes
+
+Modern comparison processes retain `loaded_libraries`: the exact file paths and
+SHA-256 hashes that provide cudarc's driver, cuDNN and cuBLAS API symbols. The
+locked driver finds each symbol in `/proc/self/maps` and hashes that provider,
+including providers selected by `LD_LIBRARY_PATH`. It does not infer these bytes
+from an installation directory or API version. All numeric controls/candidates,
+timing and paired processes must agree. Device-wide table checks compare the
+same fingerprints. `sanitizer_fingerprint` stays separate for the tool policy.
+Only exact PR #36 records use the explicit installed-file legacy receipt; its
+missing process-loaded evidence remains a historical gap.
