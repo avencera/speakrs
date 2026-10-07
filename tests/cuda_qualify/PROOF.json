@@ -992,13 +992,22 @@
   },
   "phase2c1": {
     "evidence": "evidence/phase2c1-results.json",
-    "sha256": "003bc22124cf13490c429fd04eed693bdc594ac9cdd2072f503a1fa6b750e146",
+    "sha256": "4ed374c4b9ee0e630cf3dd6e8f70a8a95e27e3aa3f8caa7ca2b9f3e88cfda151",
     "purpose": "Phase 2c-1 infrastructure proof; no new production acceptance",
     "full_library_controls": 3,
     "standard_mutant_kinds_caught": 13,
     "matched_pairs": 2,
     "production_acceptance": false,
     "full_39_required_at": "Final phase 2c seal after phase 2c-2",
-    "record_owned_production_artifact_loads": 2
+    "record_owned_production_artifact_loads": 2,
+    "grok_audit_followup": {
+      "file": "phase2c1-grok-fixes.json",
+      "sha256": "ce0afab2d720ade0460c452eea0132dad94d4a375c56f7f9b77cc777ef2d327a",
+      "purpose": "Grok audit fixes and strict infrastructure proof; no new production acceptance",
+      "full_library_controls": 2,
+      "default_jit_areas": 5,
+      "production_acceptance": false,
+      "evidence": "evidence/phase2c1-grok-fixes.json"
+    }
   }
 }

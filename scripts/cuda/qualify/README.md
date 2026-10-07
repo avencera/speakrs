@@ -493,7 +493,9 @@ addresses from generic `cvta.shared.u64` or `cvta.shared.u32`. Function-wide
 fixed-point taint follows every value instruction, including arithmetic, shifts,
 selection, bitwise operations, calls and vector moves. A tainted narrowing
 conversion or move fails. `cvta.to.shared` converts to a valid shared offset;
-register taint does not cross function boundaries.
+register taint does not cross function boundaries. Dollar-prefixed registers,
+wide arithmetic, vector load elements and narrowing below 32 bits are checked.
+Unknown result widths cannot suppress a tainted narrowing sink.
 
 The loader first selects the PTX tier for each area. The production table then
 owns the artifact request for that area, tier and exact device capability. A
@@ -575,6 +577,9 @@ the GPU applies them after the lock is taken again. Gates, thresholds, samples
 and seeds are unchanged. A context-wide synchronization precedes each CPU section.
 A guard takes the lock again before normal return or panic unwind, so CUDA object
 drops remain locked. Records state lock ownership and each unlocked CPU section.
+Each TF32 draw section binds its case, layer, original seed and output length.
+The CPU-evidence check requires the exact draw set for each emitted band row;
+a section from another case, seed or length cannot satisfy that row.
 
 ### Override types
 
@@ -961,3 +966,15 @@ No cubins are loaded for those areas. Host tests check all 52 current production
 tuples and exact cubin requests. A requested-artifact refusal does not try another
 format; production uses Library where allowed, and driver-only mode keeps the
 typed error. No new speed or accuracy qualification is claimed.
+
+
+The Grok audit-fix proof is pinned in
+`tests/cuda_qualify/evidence/phase2c1-grok-fixes.json`, linked from both proof
+indexes. A default-build shared-lock proof records all three always-on areas
+and both tested production areas as PTX JIT, with their embedded hashes and no
+cubin. New full SincNet and ResNet Library controls passed every check with the
+case-bound draws and pre-timing module preparation. Each raw record keeps its
+measured source, control archive, device and compiled lock. The final lock binds
+the receipts, not a new GPU measurement. The earlier LSTM projection baseline
+retains its old archive identity and cannot qualify a later control archive.
+Full 39-mutant proof remains required at the final phase 2c seal after phase 2c-2.

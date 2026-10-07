@@ -1892,5 +1892,13 @@
     "default_production_candidates_verified": 2,
     "first_seal_results_sha256": "78ede54b926d4dea7fb39523084e7abd7491b0079db33df82931f640d16bce5c",
     "historical_preflight_scope": "Older artifact_proofs carry_forward descriptions apply to the first seal only. This follow-up changes runtime-loader policy, not PTX/cubin/manifest bytes. The short default-production proof and host refusal tests cover the new policy"
+  },
+  "grok_audit_followup": {
+    "file": "phase2c1-grok-fixes.json",
+    "sha256": "ce0afab2d720ade0460c452eea0132dad94d4a375c56f7f9b77cc777ef2d327a",
+    "purpose": "Grok audit fixes and strict infrastructure proof; no new production acceptance",
+    "full_library_controls": 2,
+    "default_jit_areas": 5,
+    "production_acceptance": false
   }
 }

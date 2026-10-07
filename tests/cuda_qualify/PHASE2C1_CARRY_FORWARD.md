@@ -12,12 +12,13 @@ A mutant that does not reach its intended gate stops this phase.
 
 ## Exact source evidence
 
-The audited baseline is `8952f419928d91ecb67fadd8715b3ef19ede63fe`. The collection diff ends at `5a308be474853bc5e38eab3810993ae1b1641d9b`.
+The audited baseline is `8952f419928d91ecb67fadd8715b3ef19ede63fe`. The collection diff ends at `4fc0a5fac4297599151b1d1c8bc1df7859161151`.
 `evidence/phase2c1-gate-decisions.diff` is empty: `gates.py` and `verdict.py`
 have no changed bytes. Its SHA256 is `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
 `evidence/phase2c1-collection-injection.diff.gz` holds every changed Rust, Python,
 PTX, manifest, shell and Cargo path that can collect or inject evidence, plus the
-changed loader, selection and kernel tooling. Its SHA256 is `cde95fbc6ec68696718d29a6da124386acd1f64c3acd08f2a5c0e7bb0760ff15`.
+changed loader, selection and kernel tooling. The decompressed diff SHA256 is `a2506a7dbe2f949abdd2d386ae649969f4e3d42d7a81cfef37eb58c094737b17`.
+The gzip SHA256 is `94bbca2974d14e011e9db25c96bab7d5e6142f6729ddbabf082c0b5623d01669`.
 Decompress it to inspect the exact diff. The JSON plan lists each exact path. The diff excludes no changed injection
 function. Production PTX and kernel arithmetic have no changes. The control PTX
 only receives the same host-prepared integer draw choices. Frozen vectors and
@@ -164,3 +165,53 @@ logs and independent Mac receipt. The final owner lock does not relabel that bin
 The host test covers all 52 current production tuples, exact cubin requests, driver
 refusal without substitution, conflicting owners and the typed Library policy.
 Both table modes and all required Mac checks pass.
+
+## Grok audit fixes and new controls
+
+`evidence/phase2c1-grok-fixes.json` pins the five-area default-build functional
+proof and two new full Library controls. The cc 12.0 proof records PTX JIT for
+fbank, embedding and segmentation and the pinned PR #36 SincNet and ResNet
+candidates, with no cubin or force-JIT environment. Typed always-on owners keep
+PR #36 artifact policy on every device. Host tests cover cc 12.0 and cc 8.9;
+the owner does not branch on device beyond existing tier/capability resolution.
+The functional proof keeps its actual 39102c3 source and a2 development lock.
+Its exact carry-forward diff to the control source contains only lint, fixture,
+control archive pin and lock changes, not runtime or artifact bytes.
+
+The new SincNet and ResNet controls use 4fc0a5f and the real 1b development lock.
+Both passed all numeric, timing, paired, profile and sanitizer phases: 214 and
+1,159 checks, with no failed check and no replacement acceptance. Both ran on
+the 5060 Ti in the same root-granted quiet window. Each finished record and its
+logs were copied and independently checked before the next control started.
+The actual control archive is 1914adb9; the old d701, 03 and 93 archives keep
+their real identities. The final owner lock does not relabel any of these runs.
+
+These controls cover the changed gate-bearing evidence paths: TF32 draw sections
+now bind to case, layer, seed and length; each timed process prepares all required
+modules before clocks start. Runtime and harness module-load guards cover both
+clock and event intervals. The control record binds every candidate-area PTX,
+cubin and manifest even when no candidate module loads. The new table negatives
+reject stale unloaded artifacts and stale shipped cubin pins in both modes.
+
+No draw generation, f64 arithmetic, layer seeds, sample count, timing schedule,
+replay, injection arithmetic or numeric bound changes. `gates.py` and `verdict.py`
+still have the exact empty diff above. CPU-evidence validation and artifact
+binding are stricter, not waived. LSTM has concrete geometry and binding negatives
+and unchanged integer-draw golden vectors. Fresh review found no extra LSTM
+live-path gap; the root required new full controls for SincNet and ResNet only.
+A later full LSTM control needs a baseline measured with its actual archive; the
+93 archive projection baseline cannot be relabelled as the new control.
+
+Fresh review found three more taint-lint gaps: dollar register names, wide/vector
+result widths, and narrowing below 32 bits. The fix has a 12-site failing fixture,
+six passing lint tests, all 155 xtask tests, the unchanged safe fixture, and a
+successful check of every committed PTX and cubin. The original eight-site LSTM
+fixture is unchanged. This is static tooling proof, not new kernel qualification.
+
+The first new control staging used an extra directory level. The unchanged path
+guard refused it before GPU work, so it has no control verdict. Its failed logs
+remain pinned. The successful controls use a real `/workspace/<task>/tree` and
+real owned disk targets; the proof scripts check this path before qualification.
+The guard was not changed. No new full matrix is claimed: all 39 standard mutants
+remain required at the final phase 2c seal after phase 2c-2. Always-on cubin
+adoption remains phase 5, with end-to-end A/B startup, RTFx and bit-identical outputs.
