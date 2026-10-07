@@ -26,7 +26,10 @@ registered candidate) and the thirteen planted faults listed under
 `/workspace/gpu-bench.lock` for every GPU child process and refuses unlocked ones, so
 an outer `flock` on the same file would deadlock. Numeric children own the lock.
 They release it for CPU f64 truth and TF32 draw preparation, then take it again for
-GPU replay. Other phases and tool launches use the parent lock. Each timing and
+GPU replay. Each draw section binds its case, layer, original seed and length. The
+CPU-evidence check requires the exact draw set and the locked model output lengths;
+a draw for another case, seed or length cannot pass. Other phases and tool launches
+use the parent lock. Each timing and
 paired process covers one math mode, so kernel workers can interleave.
 
 Exit codes: 0 pass, 1 rejected, 2 refused invocation, 3 blocked (the evidence cannot
@@ -486,8 +489,11 @@ pins the cubin hash, its source PTX hash, and the ptxas version and flags.
 `check --rebuild` checks committed PTX pins and byte-identical cubin rebuilds
 with the pinned CUDA 13.0.88 ptxas. It does not regenerate PTX. A CPU test checks each host plan's possible kernel names
 against every PTX tier that it can use. The PTX lint rejects generic shared
-addresses from `cvta.shared.u64` that reach `cvt.u32.u64`, including through
-64-bit add, subtract and move instructions.
+addresses from generic `cvta.shared.u64` or `cvta.shared.u32`. Function-wide
+fixed-point taint follows every value instruction, including arithmetic, shifts,
+selection, bitwise operations, calls and vector moves. A tainted narrowing
+conversion or move fails. `cvta.to.shared` converts to a valid shared offset;
+register taint does not cross function boundaries.
 
 The loader first selects the PTX tier for each area. The production table then
 owns the artifact request for that area, tier and exact device capability. A
@@ -496,6 +502,13 @@ only that exact architecture and hash. A missing or driver-rejected requested
 artifact is a typed refusal, not a request to try the other format. Production
 uses the existing Library fallback where allowed; driver-only mode returns the
 typed refusal. Uncovered production tuples load no candidate module.
+
+The always-on fbank, embedding and segmentation areas have a typed
+`AlwaysOnPtxJit` owner next to the production table. It requests driver JIT of the
+actual embedded PTX on every device, as PR #36 did. No production path can request
+`EmbeddedExact`: that variant exists only in the CUDA qualification test build.
+Always-on cubin adoption is a phase 5 item. It requires end-to-end A/B evidence for
+startup, RTFx and bit-identical outputs before its production owner can change.
 
 An explicit qualification triple requests the exact embedded artifact it declares
 before loading: the device's exact cubin when embedded, otherwise PTX JIT. A
@@ -521,6 +534,21 @@ Library-backed faults, and uncovered tuples do not load a candidate module for
 selection or diagnostics. Library diagnostics use only the embedded tier and
 device context. A covered Oxide request loads its artifact before it can receive
 a qualification token. The exact candidate-area loading check remains required.
+
+Candidate sources, PTX, cubins and build manifests stay outside the harness lock
+so a new candidate can be measured by the same locked harness. A qualification
+record's `code_sha256` binds the complete candidate-area file sets, including
+unselected PTX tiers, cubin architectures and manifests. The loaded-artifact
+record separately binds the actual binary bytes, source PTX and build metadata.
+Both table checks reject file-set drift and a cubin production pin that differs
+from the shipped file. Legacy PR #36 records retain their explicit JIT mapping;
+they do not gain invented cubin evidence.
+
+Every process prepares its required modules through the same plan owner before
+timing clocks start. Library and uncovered choices still load no candidate module.
+A test-only interval guard covers the clock window and each event interval, and
+refuses driver module loading inside either one. This applies to runtime modules
+and harness PTX, including the unlisted mutant module.
 
 The allow-list uses the actual PTX text embedded in the running binary, not a
 source-tree hash assigned after the run. Each module records
