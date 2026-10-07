@@ -17,7 +17,15 @@ from lock import LockError, inventory
 
 CANDIDATE_HOST = "src/inference/cuda/candidate"
 KERNEL_CRATE = "crates/speakrs-cuda-kernels/src"
-CANDIDATE_AREAS = ("resnet", "lstm", "sincnet", "fbankdft", "segdense", "wideconv")
+CANDIDATE_AREAS = (
+    "resnet",
+    "lstm",
+    "lstmproj",
+    "sincnet",
+    "fbankdft",
+    "segdense",
+    "wideconv",
+)
 # a static item declaration, not the `'static` lifetime
 STATIC_ITEM = r"(?<!')\bstatic\s+(?:mut\s+)?[A-Za-z_][A-Za-z0-9_]*\s*:"
 
