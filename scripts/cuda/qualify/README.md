@@ -334,11 +334,13 @@ allocations.
   fail because neither the input nor the perturbed weights existed before the run.
   The LSTM Library plan for the layer and secret gates uses the production default,
   `PersistStaticSmallH`, recorded in the result.
-- **FP32 stage**: embedding minimum cosine may drop by at most 1e-9; segmentation
-  logits error ratios <= 1.10 and argmax flips may not increase.
-- **TF32 stage truth**: compare the candidate stage with an FP32 Library stage on
-  the same input. Record the FP32 truth hash and require it to match between the
-  candidate, Library and perturbation records. Compare relative L2, max-abs and
+- **FP32 stage**: embedding minimum cosine may drop by at most 1e-9;
+  segmentation relative L2 and max-abs must each be at most 1.10 times the
+  Library errors, with no extra argmax flips. Fbank uses independent complete
+  f64 truth. Other targets retain their existing FP32 fixture reference
+- **TF32 stage truth**: record the same-input FP32 Library truth hash and require
+  it to match between candidate, Library and perturbation records. Fbank instead
+  uses its complete CPU f64 truth. Compare relative L2, max-abs and
   minimum cosine error. Each candidate error must be no larger than the Library
   TF32 error bound: the maximum of its unperturbed error and the errors from the
   same 8 independent seeded 1-ulp perturbation draws. Perturb exactly the declared
@@ -583,7 +585,7 @@ SM clock sampler. The sampler and its child processes stop before unlock.
 ### CPU work and GPU ownership
 
 GPU preparation produces the exact FP32 front-end inputs and copies the operator
-weights under the lock. Host-only snapshots then compute f64 truth without the
+weights under the lock. The CPU then computes operator f64 truth without the
 lock. Each TF32 draw uses the same seed, layer-name hash, per-index integer hash
 and one-ULP rule as before. The CPU prepares the draw choices without the lock;
 the GPU applies them after the lock is taken again. Gates, thresholds, samples
@@ -1061,7 +1063,48 @@ select the same rows. The driver checks that the two audio hashes differ. The
 energy reference is the unique matrix-multiply output with shape `[32,998,80]`.
 The pinned snapshot calls it `tensor/matmul`; operation matching accepts lowercase
 PyTorch and capitalized ONNX names. An absent or ambiguous match is an error.
-The stage reference is `tensor/fbank`.
+The stage reference in FP32 and TF32 is independent CPU f64 truth for every
+`[B,998,80]` output. It uses the same waveform bytes as the candidate and Library.
+The definition is `fbank-stage-f64-direct-v1`: scale by 32768; remove the ordered
+400-sample frame mean; apply exact f64 pre-emphasis 0.97 and symmetric Hamming;
+compute direct 512-point DFT sums; accumulate built-in mel coefficients converted
+from f32 to f64; floor energies at `f64::from(f32::EPSILON)` and take the log;
+then subtract each row/mel ordered mean over 998 frames. Each frame computes 257
+powers once, then 80 ordered mel sums. No FFT or GPU output defines this truth.
+The exact Hamming coefficients are not replaced with model f32 coefficients.
+The emitted constants identity records their rounding difference.
+
+Both first and repeated stage errors, cosine and argmax diagnostics use these
+unrounded f64 values. Output SHA-256 still hashes actual candidate FP32 bytes.
+`tensor/fbank` comparisons remain under `fixture_diagnostic`, with
+`acceptance_bound: false`. They are not used by stage acceptance.
+
+FP32 uses the unchanged `segmentation_parity` rule: relative L2 and max-abs at
+most 1.10 times the Library errors, with no extra argmax flips. TF32 uses the
+unchanged maximum of unperturbed Library error and eight perturbation errors,
+all against this same f64 truth. The seeds remain 11, 23, 37, 41, 53, 67, 79, 97.
+The existing TF32 argmax rules remain unchanged.
+
+`lock::StageTruthCase` and `CpuWork::StageTruth` bind the unlocked `stage_f64`
+CPU section to the emitted `stage_truth` identity. It includes exact case and
+fixture row selection, waveform hash, actual input/output shapes and lengths,
+unrounded f64 truth hash, definition and constants hashes. Complete deterministic
+evaluation has no sampling seed. Python rejects missing, incomplete or mismatched
+bindings, wrong ownership and unequal candidate/Library/draw truth identities.
+Verify mode requires a complete serial/parallel byte proof for each stage case.
+
+The private CPU reference owns an exact-byte waveform row cache under one fixed
+constants owner. Candidates cannot access this cache. First-time rows are
+computed in both policies in verify mode; later cases assemble full outputs
+from the same immutable rows and get their own complete proof and binding.
+Input keys and truth arrays stay in memory. Direct DFT CPU cost can be high;
+cache reuse does not reduce the scored output set or alter a reduction.
+
+Other targets retain their existing full-stage references: FP32 fixtures and
+same-input FP32 Library output for TF32. Their independent operator f64 checks
+are not complete stage references. The all-stage f64 extension is not enabled.
+Historical records remain unchanged. New fbank stage proof must use the corrected
+reference; old ORT-based stage proof does not cover this path.
 
 The secret check transforms audio in memory and computes 4096 stratified f64
 energy samples. It uses direct DFT sums, exact f64 Hamming and pre-emphasis, and
@@ -1088,43 +1131,54 @@ producer and consumer with no extra device copy.
 | StageTail and StageTailControl | Not applicable yet | Require an accepted production plan; no such fbank plan exists |
 | WrongLayout | Not applicable | No padded segment or padded writer exists at this boundary |
 
-`FirstUseFallback` also applies. A locked one-shot host hook makes a real Library
-call inside a candidate scope immediately before the first profiled graph replay.
-Neither eager execution nor graph capture invokes that hook. Further invocations
-of the same hook do not repeat the call.
+The first-use faults have three names: `FirstUseFallbackEager`,
+`FirstUseFallbackCaptured`, and `FirstUseFallbackReplay`. Each makes one real
+cuBLAS call in a candidate scope at its selected position. `FirstUseFallback`
+is an alias for replay. Each variant must fail `profile` with `forbidden library
+kernels`. Failure at `profile:captured_library_calls` alone does not count.
 
 ### Short profile lifecycle
 
-The nsys process includes plan construction, five warm-up invocations, one eager
-window, capture, and one graph replay per input set and boundary or stage. Timing
-bursts stay in the separate timing process. Captured nodes do not represent eager
-launches: capture mutes only their nested NVTX launch/phase ranges. The CUDA trace
-and a `driver.capture` range remain. Graph-node evidence and forbidden Library-call
-tracking remain active. Replay has its own `driver.first_replay` range outside the
-eager window. Thus the eager launch multiset remains exactly one invocation.
+The nsys process includes plan construction, five warm-ups, one eager window,
+capture and graph instantiation, and one graph replay per input set and boundary
+or stage. Each warm-up, capture, and replay has a separate `lifecycle/` window.
+The parser checks plan kernels outside windows. It rejects an unowned kernel
+outside windows and candidate execution without a lifecycle window.
 
-If a process registers side streams, the harness retains an additional original
-eager-only trace for stream attribution and eager/capture multiset comparison.
-Graph replay correlations cannot reconstruct each captured node's owning scope.
-`short_profile` keeps the lifecycle trace and `profile_retained_checks` records the
-reason. This does not change the stream check or accept unowned work.
+Capture keeps its real candidate and API NVTX scopes. A call scope inside a
+candidate scope fails the profile gate even when capture produces no eager
+kernel event. Captured nodes remain separate evidence. A graph node cannot count
+as a correlated eager launch. The parser still rejects graph-node events without
+direct per-layer launch ownership; it does not hide graph attribution errors.
 
-| Existing profile check | Retained coverage |
+Every profile process also makes a fresh-input enqueue for each covered boundary
+and math mode. It uses the existing in-memory audio transformation and secret seed
+owner. Fresh weights, inputs, and output samples are not written to disk. Numeric
+sampling and numeric rules do not change. Fresh windows have the `lifecycle/`
+prefix and do not change the one-invocation eager kernel multiset. The receipt
+requires a correlated kernel in every expected fresh boundary/batch/math window.
+
+A process with side streams also produces an eager-only trace. The harness checks
+both traces. `short_profile` keeps the captured lifecycle trace. `profile_traces`
+lists every produced SQLite file, its hash, and its check receipt. An unread trace,
+a failed receipt, or changed trace bytes fail `profile:trace_receipts`.
+
+| Existing profile check | Coverage |
 | --- | --- |
-| `profile` | Every old eager operator and stage window, both input sets, all cases and modes; plans remain in the full trace |
-| `profile`: stream rules | Same correlated eager launches; original eager-only trace is retained for registered side streams |
-| `profile:captured_library_calls` | All previous numeric/timing/paired captures plus the new profile captures and first-replay hook |
-| `profile:graph_nodes` | Same node restrictions and eager set/multiset comparisons; profile captures add both input sets |
-| `profile:sequential_capture` | Original separate seven-case trace and same multiset check |
-| `determinism:fixed_reduction_order` | All custom entries launched by the same cases; each eager invocation remains, so no atomic entry loses coverage |
-| `ptx:loaded_bytes/stable` | Same complete loaded-module inventory across phases, including the profile process |
+| `profile` | All lifecycle traces, API scopes, plan kernels, warm-ups, eager calls, capture, replay, and fresh-input enqueues |
+| `profile`: stream rules | Correlated launches in both traces; side-stream ownership still uses the eager trace |
+| `profile:captured_library_calls` | Separate host call counter for all captures and typed first-use hooks |
+| `profile:graph_nodes` | Captured node restrictions and the unchanged eager set/multiset comparisons |
+| `profile:sequential_capture` | The separate seven-case trace and its multiset check; that trace also gets a profile receipt |
+| `determinism:fixed_reduction_order` | All custom entries in the retained profile trace |
+| `ptx:loaded_bytes/stable` | Module inventories from both the lifecycle and eager-only profile processes |
 
-No gate, threshold, sample count, seed or noise rule changes. GPU acceptance of
-this trace requires the pilot; host compilation alone is not that evidence.
+No threshold, bound, sample count, seed policy, numeric rule, timing rule, or noise
+rule changes. Host checks do not replace the box pilot.
 
 ### Ordered parallel CPU evidence
 
-CPU truth uses independent output samples or LSTM rows as work units. Each sum,
+CPU truth uses independent output samples, LSTM rows or complete fbank frames as work units. Each sum,
 DFT bin, gate sum and recurrence keeps its original reduction order. Sampling
 indices and RNG state are prepared serially. Worker chunks join in index order.
 TF32 draws use the same independent per-index integer hash as the frozen PTX.
@@ -1191,11 +1245,10 @@ same fingerprints. `sanitizer_fingerprint` stays separate for the tool policy.
 Only exact PR #36 records use the explicit installed-file legacy receipt; its
 missing process-loaded evidence remains a historical gap.
 
-FirstUseFallback prepares separate one-element cuBLAS operands before the profile
-warm-up. Its separate handle cannot change the normal stage handle's math mode.
-The first host replay hook issues one SGEMM under the selected boundary's
-candidate scope, without rerunning the operator or stage. A locked API-call counter
-requires exactly one call in that hook. Eager execution and capture never use it.
+Each first-use variant prepares its own cuBLAS handle and one-element operands
+before work starts, outside capture and timing. The handle does not change the
+stage handle's math mode. The typed hook checks exactly one API call. Eager
+warm-ups cannot consume a captured-enqueue or replay hook.
 
 The profile command pins `--cuda-graph-trace=graph`. Replay is recorded as a whole
 CUDA graph; eager kernel attribution remains unchanged. Capture's locked node
@@ -1203,3 +1256,129 @@ inventory supplies the per-node graph checks. This is the documented default
 on supported drivers, now explicit to avoid a tool-default change. The box pilot
 must confirm that the installed tool accepts it. See the
 [NVIDIA Nsight Systems graph trace guide](https://docs.nvidia.com/nsight-systems/UserGuide/index.html#cuda-graph-trace).
+
+### Segdense and Wideconv collection paths
+
+Each Segdense operation has its own collection path. Use
+`cuda-qualify segdense Library --collection NAME`, or the exact target below.
+`cuda-qualify wideconv Library` collects all 22 Wideconv boundaries. These
+record-owned areas have no candidate kernels or production entries yet. Oxide
+fails closed until the kernel ports provide a candidate and declared coverage.
+
+| Target | Boundary set | Stage |
+| --- | --- | --- |
+| `segdense-conv1` | `sincnet.conv1`, raw five-tap convolution | Segmentation |
+| `segdense-conv2` | `sincnet.conv2`, raw five-tap convolution | Segmentation |
+| `segdense-linear0` | `linear0`, GEMM with bias and leaky ReLU | Segmentation |
+| `segdense-linear1` | `linear1`, GEMM with bias and leaky ReLU | Segmentation |
+| `segdense-classifier` | `linear2`, GEMM with bias and log-softmax | Segmentation |
+| `segdense-embedding` | `resnet.seg_1`, broadcast bias and GEMM | Embedding |
+| `wideconv` | Stem, both convolutions in stages 3 and 4, and the three downsample shortcuts | Embedding |
+
+Each path keeps the model batch domain and both math modes. Numeric, secret,
+timing, paired, profile and sanitizer collection use the same path inventory.
+The full stage uses the original Library operation and its unchanged consumers.
+Wideconv shortcuts use bias without ReLU. The second block convolution includes
+the real residual. Wideconv has route precedence over the existing ResNet area
+when both areas have an explicit request for the same boundary.
+
+| Mutant | conv1 | conv2 | linear0 | linear1 | classifier | embedding | wideconv |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Precision | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| Shape | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| Fallback | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| FirstUseFallback | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| FirstUseFallbackEager | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| FirstUseFallbackCaptured | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| FirstUseFallbackReplay | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| Tail | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| Atomic | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| StageSlow | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| StageAccuracy | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| Slow | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| PhaseCheat | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| Unscoped | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| Unlisted | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| Lookup | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| UninitShared | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| StageTail | No plan | No plan | No plan | No plan | No plan | No plan | No plan |
+| StageTailControl | No plan | No plan | No plan | No plan | No plan | No plan | No plan |
+| WrongLayout | No layout | No layout | No layout | No layout | No layout | No layout | No layout |
+
+`No plan` means the fault needs an accepted production plan. None exists for
+these areas. `No layout` means the padded-layout boundary is outside this task.
+These cells are refused before GPU work. Lookup caches only the pinned mixed
+fixture output with the original model weights. It does not cache or compute a
+fresh secret input. All three first-use variants use the typed lifecycle hook.
+The old FirstUseFallback name remains a replay alias.
+No gate, bound, seed, sample count or noise rule changes.
+
+
+### Profile audit source checks
+
+The locked host scan refuses `load_kernels` and module, artifact, function, PTX,
+cubin, or driver-library loading in the candidate tree. Candidate plans use the
+`LoadedKernels` given by the locked owner. The candidate directory stays outside
+the source lock. The scan rules and regression tests stay inside it.
+
+Modern DER receipts must match the typed owner's `der_inventory`: input manifest,
+reference inventory, file count, pipeline configuration, and baseline control
+archive. A valid hash string and recomputed receipt hashes are not sufficient.
+The current owner exports `Missing` for all four DER source inventories. No
+integrated DER source pin is present. Modern receipts fail with the missing source
+names until real locked sources are added. Qualification tensor assets and the
+qualification control archive do not replace integrated DER sources. The exact
+legacy DER mapping and its stated evidence gaps do not change.
+
+Dense secret sampling keeps the existing stratified sampler. Dense output shape
+is `[B*rows, columns]`: each matrix row is a sampler row. At B64, the 589-row
+segmentation sites cover at least 37,696 rows. The 4096 sample rule is a minimum,
+not a cap. The embedding head has three rows per item. No dense sample count,
+seed, index order or reduction order is reduced to limit CPU work.
+
+Wideconv uses equal, contiguous operator strata in paired timing, with one live
+operator pair. Each isolated operator is released before the full stage is
+allocated. Stage input uploads precede each paired observation on both sides.
+Stage timing alternates input sets by sample; isolated operators alternate their
+independently owned input sets by replay. Uploads remain outside event timing.
+
+### H0b-2 prepared later-candidate seam
+
+`test_support::candidate_seam` is test-only. No Segdense or Wideconv port is
+registered by default. Real Oxide remains unavailable. The CPU fixtures do not
+supply production identities, coverage or artifacts.
+
+A port implements `DenseCandidate`, `SegConvCandidate` or `ConvCandidate`. Its pin
+implements `PinEvidence`: the evidence must include the complete entry, tile,
+splits, packing and layout. Dense and temporal plans receive the owner's
+`LoadedKernels`. Their enqueue methods accept views. Conv keeps its existing API.
+No candidate plan may resolve or load a module.
+
+Register the implementation once per process with `register_dense`,
+`register_temporal` or `register_spatial`, using the exact selected
+`ModuleRequest`. A context-aware port can use `register_factory<F>` and the typed
+`Factory`/`Executor` protocol when its complete pin needs device facts. Factory
+resources include the actual operation weights and bias, runtime and already
+loaded module. No new locked plan enum variant is needed.
+
+Both isolated Operator creation and Stage installation call `Owner::prepare`.
+The selected `Prepared<Executor, Pin>` keeps the fixed operation, full typed pin
+and loaded module identity. It checks family, module identity and implemented
+coverage at the loaded tier before plan construction. Each call checks the exact
+operation, buffer lengths and residual/epilogue match before any candidate work.
+Candidate owners do not call the Library producer. Full-stage hooks pass the
+actual weight, bias and residual views. Enqueue adds no staging allocation or
+output copy. The no-owner Library path keeps the original operations.
+
+The common probe connects `new_probe::declared_coverage`,
+`new_probe::preload_candidates` before Clocks starts, and
+`new_probe::configurations`. The prepared receipt query is
+`candidate_seam::planned`. A port still needs its registration call, real
+artifact and pin sources before it can run. Existing production selection is
+unchanged.
+
+Dense sampling keeps `[B * rows, columns]` and the existing stratified sampler.
+4096 is a minimum, limited only by total output length, not a cap. For CPU test
+seed 73, B64 Linear0 and Linear1 each select 37,824 values; the classifier selects
+37,701. These samples cover every row and column. Qualification seeds and f64
+reduction order are unchanged.
