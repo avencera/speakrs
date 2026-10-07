@@ -1074,3 +1074,24 @@ reason. This does not change the stream check or accept unowned work.
 
 No gate, threshold, sample count, seed or noise rule changes. GPU acceptance of
 this trace requires the pilot; host compilation alone is not that evidence.
+
+### Ordered parallel CPU evidence
+
+CPU truth uses independent output samples or LSTM rows as work units. Each sum,
+DFT bin, gate sum and recurrence keeps its original reduction order. Sampling
+indices and RNG state are prepared serially. Worker chunks join in index order.
+TF32 draws use the same independent per-index integer hash as the frozen PTX.
+This work remains inside the existing unlocked `lock::cpu` section.
+
+`qualify.py ... --cpu-mode serial|parallel|verify` selects the policy. Parallel is
+the default. Verify computes both policies in one process on one immutable
+in-memory snapshot. It compares evidence bytes, including sample indices, f64
+bit patterns, and draw bytes. It records a hash and the exact CPU section binding
+in `gpu_lock.cpu_byte_identity`. It adds no duplicate ownership section and writes
+no input snapshot to disk. The live proof must run on the GPU box before G0 ends.
+
+Each command records elapsed wall seconds. `phase_wall_seconds` separates build,
+CPU truth, CPU draws, numeric, timing, paired, profile and sanitizer work. CPU
+truth and draws are subsets of numeric wall time, not extra elapsed time. CPU
+work excludes GPU lock wait; command wall time includes it. A retained eager
+trace is included in profile time. No timing gate uses these wall-time fields.

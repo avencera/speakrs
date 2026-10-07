@@ -79,6 +79,8 @@ struct State {
     ownership: Ownership,
     cpu_sections: Vec<Value>,
     gpu_sections: usize,
+    cpu_wall_seconds: [f64; 2],
+    cpu_byte_identity: Vec<Value>,
 }
 
 thread_local! {
@@ -123,6 +125,8 @@ impl GpuLock {
                 ownership,
                 cpu_sections: Vec::new(),
                 gpu_sections: 1,
+                cpu_wall_seconds: [0.0; 2],
+                cpu_byte_identity: Vec::new(),
             });
         });
         Self(PhantomData)
@@ -137,7 +141,10 @@ impl GpuLock {
                 Ownership::Parent => "parent",
             };
             json!({"path": GPU_LOCK, "owner": owner,
-                "cpu_sections": state.cpu_sections, "gpu_sections": state.gpu_sections})
+                "cpu_sections": state.cpu_sections, "gpu_sections": state.gpu_sections,
+                "cpu_mode": super::cpu::Mode::from_environment().name(),
+                "cpu_wall_seconds": {"f64":state.cpu_wall_seconds[0], "tf32_draws":state.cpu_wall_seconds[1]},
+                "cpu_byte_identity":state.cpu_byte_identity})
         })
     }
 }
@@ -190,7 +197,7 @@ pub(crate) fn cpu<T>(
 }
 
 fn unlocked<T>(work: CpuWork<'_>, compute: impl FnOnce() -> T) -> T {
-    let result = STATE.with(|cell| {
+    let (result, wall_seconds, proofs) = STATE.with(|cell| {
         let state = cell.borrow();
         let state = state.as_ref().expect("CPU work requires a GPU lock owner");
         let Ownership::Child(file) = &state.ownership else {
@@ -198,9 +205,16 @@ fn unlocked<T>(work: CpuWork<'_>, compute: impl FnOnce() -> T) -> T {
         };
         file.unlock().expect("release GPU lock for host-only work");
         let relock = Relock(file);
+        assert!(
+            super::cpu::take_proofs().is_empty(),
+            "no unbound CPU evidence proof"
+        );
+        let start = std::time::Instant::now();
         let result = compute();
+        let wall_seconds = start.elapsed().as_secs_f64();
+        let proofs = super::cpu::take_proofs();
         drop(relock);
-        result
+        (result, wall_seconds, proofs)
     });
     STATE.with(|cell| {
         let mut state = cell.borrow_mut();
@@ -214,6 +228,15 @@ fn unlocked<T>(work: CpuWork<'_>, compute: impl FnOnce() -> T) -> T {
                 evidence["seed"] = json!(draw.seed);
                 evidence["length"] = json!(draw.length);
             }
+        }
+        let index = match work {
+            CpuWork::F64(_) => 0,
+            CpuWork::Tf32Draws(_) => 1,
+        };
+        state.cpu_wall_seconds[index] += wall_seconds;
+        for mut proof in proofs {
+            proof["binding"] = evidence.clone();
+            state.cpu_byte_identity.push(proof);
         }
         state.cpu_sections.push(evidence);
         state.gpu_sections += 1;
@@ -257,6 +280,27 @@ mod tests {
                 "work": "tf32_draws", "locked": false, "case": "tf32/first/b1/stage",
                 "layer": "lstm.stack", "seed": 11, "length": 589 * 256,
             })
+        );
+        let proof_case = TruthCase::new(CudaMath::Fp32, 7, "fbank.dft");
+        let value = unlocked(CpuWork::F64(&proof_case), || {
+            competing
+                .try_lock()
+                .expect("proof also runs outside GPU lock");
+            competing.unlock().expect("release competing lock");
+            super::super::cpu::evaluate_mode(super::super::cpu::Mode::Verify, |mode| {
+                super::super::cpu::ordered_map(mode, 31, |index| index as u8)
+            })
+        });
+        assert_eq!(value, (0..31).collect::<Vec<u8>>());
+        let proof = owner.evidence()["cpu_byte_identity"].clone();
+        assert_eq!(proof[0]["binding"], owner.evidence()["cpu_sections"][2]);
+        assert_eq!(proof[0]["binding"]["case"], proof_case.id());
+        assert_eq!(proof[0]["serial_parallel_equal"], true);
+        assert!(
+            owner.evidence()["cpu_wall_seconds"]["f64"]
+                .as_f64()
+                .unwrap()
+                > 0.0
         );
         let panic = catch_unwind(AssertUnwindSafe(|| {
             unlocked(CpuWork::Tf32Draws(&draw), || panic!("CPU failure"));

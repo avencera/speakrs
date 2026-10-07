@@ -1025,8 +1025,8 @@ pub(crate) fn perturb<Y: DevicePtrMut<f32>>(
 /// Exact per-index integer draws of the original qualify_perturb PTX
 fn band_draws(seed: u32, len: usize) -> Vec<u8> {
     assert!(u32::try_from(len).is_ok(), "noise band output fits a grid");
-    (0..len)
-        .map(|index| {
+    qualify::cpu::evaluate(|mode| {
+        qualify::cpu::ordered_map(mode, len, |index| {
             let mut hash = (index as u32).wrapping_mul(0x9e37_79b1) ^ seed;
             hash ^= hash >> 16;
             hash = hash.wrapping_mul(0x85eb_ca6b);
@@ -1035,7 +1035,7 @@ fn band_draws(seed: u32, len: usize) -> Vec<u8> {
             hash ^= hash >> 16;
             (hash % 3) as u8
         })
-        .collect()
+    })
 }
 
 /// The precision mutant changes the real input in place; the driver restores it

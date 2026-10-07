@@ -25,6 +25,9 @@ use cudarc::driver::sys::{CUevent_flags, CUgraphInstantiate_flags, CUstreamCaptu
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+#[path = "cpu.rs"]
+pub(crate) mod cpu;
+
 #[path = "fbank_probe.rs"]
 mod fbank_probe;
 

@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -248,6 +249,7 @@ def command(argv: list[str], env: dict[str, str], path: Path, steps: list[dict])
     )
     if touches_gpu and not (locked or child_owned):
         raise Rejected("GPU process refused: the shared GPU lock is required")
+    start = time.monotonic()
     with path.open("wb") as log:
         process = subprocess.run(
             argv, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT, check=False
@@ -255,6 +257,8 @@ def command(argv: list[str], env: dict[str, str], path: Path, steps: list[dict])
     steps.append(
         {
             "argv": argv,
+            "phase": env.get("SPEAKRS_QUALIFY_PHASE", "build"),
+            "wall_seconds": time.monotonic() - start,
             "returncode": process.returncode,
             "log": str(path),
             "sha256": sha(path),
@@ -629,6 +633,11 @@ def driver(
         raise Rejected(f"driver missing completed GPU evidence: {label}")
     data = json.loads(output.read_text())
     validate_gpu_ownership(data, phase)
+    if phase == "numeric":
+        steps[-1]["cpu_work_wall_seconds"] = data["gpu_lock"].get(
+            "cpu_wall_seconds", {}
+        )
+        steps[-1]["cpu_byte_identity"] = data["gpu_lock"].get("cpu_byte_identity", [])
     if (
         data["implementation"] != implementation
         or data["phase"] != phase
@@ -1711,7 +1720,7 @@ def profile(
             str(exported),
             str(prefix.with_suffix(".nsys-rep")),
         ],
-        env,
+        dict(env, SPEAKRS_QUALIFY_PHASE="profile"),
         directory / f"{label}-export.log",
         steps,
     ):
@@ -2356,11 +2365,46 @@ def collect_tier(
         if result["status"] == "passed" and implementation == "Oxide"
         else []
     )
+    result["phase_wall_seconds"] = phase_wall_times(steps)
     result["coverage"] = {
         "math": list(MODES),
         "cases": target_cases(target),
         "tier": tier,
         "real_turing_hardware": "untested",
+    }
+
+
+def phase_wall_times(steps: list[dict]) -> dict:
+    """Sum command wall times and expose unlocked CPU subsets without double counting."""
+    totals = dict.fromkeys(
+        (
+            "build",
+            "cpu_truth",
+            "cpu_draws",
+            "numeric",
+            "timing",
+            "paired",
+            "profile",
+            "sanitizer",
+        ),
+        0.0,
+    )
+    for step in steps:
+        phase = step.get("phase", "build")
+        phase = (
+            "sanitizer"
+            if phase in ("sanitize", "filter_proof", "projection_baseline")
+            else phase
+        )
+        if phase in totals:
+            totals[phase] += step.get("wall_seconds", 0.0)
+        cpu = step.get("cpu_work_wall_seconds", {})
+        totals["cpu_truth"] += cpu.get("f64", 0.0)
+        totals["cpu_draws"] += cpu.get("tf32_draws", 0.0)
+    return {
+        "seconds": totals,
+        "numeric_includes_cpu_work": True,
+        "cpu_work_excludes_lock_wait": True,
     }
 
 
@@ -2454,6 +2498,9 @@ def collect(target: str, implementation: str, directory: Path, result: dict) -> 
             result["checks"].extend(
                 {**item, "check": f"{tier}/{item['check']}"} for item in child["checks"]
             )
+    result["phase_wall_seconds"] = phase_wall_times(result["commands"])
+    for child in result["tiers"].values():
+        child["phase_wall_seconds"] = result["phase_wall_seconds"]
     failed = [item for item in result["checks"] if not item["passed"]]
     hard = [item for item in failed if not item.get("blocked")]
     blocked = [
@@ -2538,6 +2585,12 @@ def main() -> int:
     parser.add_argument("--tier", choices=("sm75", "sm80", "sm90", "sm120"))
     parser.add_argument("--check-table", action="store_true")
     parser.add_argument(
+        "--cpu-mode",
+        choices=("serial", "parallel", "verify"),
+        default="parallel",
+        help="CPU evidence policy; verify compares both modes on one in-memory snapshot",
+    )
+    parser.add_argument(
         "--records",
         type=Path,
         help="re-derive summaries from this outside-tree cache's records/<sha256>",
@@ -2591,6 +2644,7 @@ def main() -> int:
             return 1
     if args.target is None or args.implementation is None or args.table or args.records:
         parser.error("target and implementation required, or --check-table")
+    os.environ["SPEAKRS_QUALIFY_CPU_MODE"] = args.cpu_mode
     tier = args.tier or os.environ.get("SPEAKRS_CUDA_PTX_TIER", "sm75")
     if tier not in ("sm75", "sm80", "sm90", "sm120"):
         parser.error("unknown requested PTX tier")

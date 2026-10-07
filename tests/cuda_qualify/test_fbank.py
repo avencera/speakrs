@@ -129,5 +129,39 @@ class ShortTrace(unittest.TestCase):
         )
 
 
+class PhaseTimes(unittest.TestCase):
+    def test_wall_time_table_keeps_cpu_subsets_without_double_counting(self):
+        evidence = qualify.phase_wall_times(
+            [
+                {"phase": "build", "wall_seconds": 3.0},
+                {
+                    "phase": "numeric",
+                    "wall_seconds": 11.0,
+                    "cpu_work_wall_seconds": {"f64": 5.0, "tf32_draws": 2.0},
+                },
+                {"phase": "timing", "wall_seconds": 7.0},
+                {"phase": "paired", "wall_seconds": 13.0},
+                {"phase": "profile", "wall_seconds": 17.0},
+                {"phase": "sanitize", "wall_seconds": 19.0},
+                {"phase": "filter_proof", "wall_seconds": 23.0},
+            ]
+        )
+        self.assertEqual(
+            evidence["seconds"],
+            {
+                "build": 3.0,
+                "cpu_truth": 5.0,
+                "cpu_draws": 2.0,
+                "numeric": 11.0,
+                "timing": 7.0,
+                "paired": 13.0,
+                "profile": 17.0,
+                "sanitizer": 42.0,
+            },
+        )
+        self.assertTrue(evidence["numeric_includes_cpu_work"])
+        self.assertTrue(evidence["cpu_work_excludes_lock_wait"])
+
+
 if __name__ == "__main__":
     unittest.main()
