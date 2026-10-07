@@ -402,6 +402,28 @@ impl AreaPtx {
         }
     }
 
+    /// Resolve the best runnable driver-only module without loading it
+    pub(crate) fn driver_request(
+        self,
+        area: KernelModule,
+        limit: PtxTier,
+        device: ComputeCapability,
+    ) -> Option<ModuleRequest> {
+        [PtxTier::Sm120, PtxTier::Sm90, PtxTier::Sm80, PtxTier::Sm75]
+            .into_iter()
+            .filter(|tier| *tier <= limit && tier.min_capability() <= device)
+            .find_map(|tier| {
+                let ptx = self.embedded(tier)?;
+                Some(ModuleRequest::new(
+                    area,
+                    tier,
+                    LoadedArtifact::PtxJit {
+                        sha256: ArtifactHash::of(ptx.text.as_bytes()),
+                    },
+                ))
+            })
+    }
+
     /// The highest embedded variant at or below `limit`
     ///
     /// Production never resolves a tier this way: a binding names its tier. Only tests

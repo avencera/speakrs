@@ -83,6 +83,16 @@ pub enum CudaError {
         /// Exact device capability
         device: ComputeCapability,
     },
+    /// A model boundary has no complete library-free candidate for this tuple
+    #[error("driver-only CUDA missing kernel: {boundary} b{batch} {math:?}")]
+    MissingKernel {
+        /// The model operation without a complete candidate
+        boundary: String,
+        /// Requested batch class
+        batch: usize,
+        /// Requested arithmetic mode
+        math: CudaMath,
+    },
     /// A selected model boundary requires an optional library
     #[error(
         "driver-only CUDA: {area}/{boundary} b{batch} {math:?}, PTX tier {tier}, device {device} requires {library}"

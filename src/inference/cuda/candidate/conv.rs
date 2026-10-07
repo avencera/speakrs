@@ -445,3 +445,55 @@ fn to_u32(value: usize) -> Result<u32, CudaError> {
         value,
     })
 }
+
+impl super::DriverCandidate for Oxide {
+    const AREA: super::KernelModule = super::KernelModule::Resnet;
+
+    fn driver_coverage(tier: super::PtxTier) -> Coverage {
+        <Self as ConvCandidate>::coverage(tier)
+    }
+
+    fn driver_pin(
+        boundary: super::super::implementation::BoundaryId,
+        batch: usize,
+        _math: CudaMath,
+        device: &super::super::device::DeviceAttributes,
+        _tier: super::PtxTier,
+    ) -> Result<super::ConfigPin, PlanError> {
+        let name = boundary.name();
+        let shape = if name == "resnet.layer2.0.conv1" {
+            ConvShape::C32Stride2
+        } else if C32_AND_STRIDED.contains(&name) {
+            ConvShape::C32
+        } else if C64.contains(&name) {
+            ConvShape::C64
+        } else {
+            return Err(PlanError::Geometry(GeometryError::Unimplemented {
+                context: "driver convolution pin",
+                reason: name.to_owned(),
+            }));
+        };
+        // these are the fixed model outputs, not a shape supplied by the caller
+        let output = if shape == ConvShape::C32 {
+            [80, 998]
+        } else {
+            [40, 499]
+        };
+        let (large, small) = shape.tilings();
+        let tiling = select_tiling(
+            large,
+            small,
+            batch,
+            output,
+            device.multiprocessors().get() as usize,
+        );
+        let kernel = match (shape, tiling.threads) {
+            (ConvShape::C32, _) => ConvKernel::C32,
+            (ConvShape::C64, 128) => ConvKernel::C64Small,
+            (ConvShape::C64, _) => ConvKernel::C64,
+            (ConvShape::C32Stride2, 128) => ConvKernel::C32Stride2Small,
+            (ConvShape::C32Stride2, _) => ConvKernel::C32Stride2,
+        };
+        Ok(super::ConfigPin::Conv(ConvPin::Kernel(kernel)))
+    }
+}

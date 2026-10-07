@@ -39,6 +39,7 @@ pub struct CudaRuntime {
     device: DeviceAttributes,
     ptx_tier: PtxTier,
     modules: Mutex<HashMap<KernelModule, LoadedKernels>>,
+    force_library: bool,
 }
 
 impl CudaRuntime {
@@ -100,11 +101,8 @@ impl CudaRuntime {
             device,
             ptx_tier,
             modules: Mutex::new(HashMap::new()),
+            force_library: !super::driver_only() && force_library_from_env(),
         };
-        // a forced tier must leave every candidate area a binding, without JIT loading
-        if super::driver_only() && requested.is_some() {
-            Self::validate_forced_bindings(&runtime.device, ptx_tier)?;
-        }
         debug!(
             device_name = runtime.device.name(),
             sm_count = runtime.device.multiprocessors(),
@@ -115,21 +113,9 @@ impl CudaRuntime {
         Ok(runtime)
     }
 
-    /// Validate driver-only override coverage without a context or module loader
-    fn validate_forced_bindings(device: &DeviceAttributes, tier: PtxTier) -> Result<(), CudaError> {
-        for area in [
-            KernelModule::Resnet,
-            KernelModule::Lstm,
-            KernelModule::Sincnet,
-        ] {
-            super::implementation::production_module(area, device, tier, area.variants())?.ok_or(
-                CudaError::TierNotQualified {
-                    tier: PtxTier::BASELINE,
-                    device: device.capability(),
-                },
-            )?;
-        }
-        Ok(())
+    /// The model-load policy snapshot, shared by all boundary plans
+    pub(crate) fn force_library(&self) -> bool {
+        self.force_library
     }
 
     /// The device's compute capability
@@ -476,6 +462,11 @@ fn device_count() -> Result<usize, CudaError> {
     }
 }
 
+/// Read once per runtime so graph capture and execution do not consult the environment
+pub(super) fn force_library_from_env() -> bool {
+    std::env::var_os("SPEAKRS_CUDA_FORCE_LIBRARY").is_some_and(|value| value == "1")
+}
+
 #[cfg(test)]
 mod direct_request_tests {
     use super::{CudaError, CudaLibrary, CudaRuntime};
@@ -499,23 +490,8 @@ mod direct_request_tests {
 
 #[cfg(all(test, feature = "_cuda-libraries"))]
 mod module_policy_tests {
-    use super::{
-        ArtifactHash, ComputeCapability, CudaError, CudaRuntime, KernelModule, ModuleRequest,
-        PtxTier,
-    };
-    use crate::inference::cuda::device::test_support::Builder;
+    use super::{ArtifactHash, ComputeCapability, CudaError, KernelModule, ModuleRequest, PtxTier};
     use crate::inference::cuda::kernels::LoadedArtifact;
-
-    #[test]
-    fn forced_tier_checks_bindings_without_opening_or_loading_cuda() {
-        let qualified = Builder::new(ComputeCapability::new(12, 0)).build();
-        CudaRuntime::validate_forced_bindings(&qualified, PtxTier::Sm75).unwrap();
-        let uncovered = Builder::new(ComputeCapability::new(8, 0)).build();
-        assert!(matches!(
-            CudaRuntime::validate_forced_bindings(&uncovered, PtxTier::Sm75),
-            Err(CudaError::TierNotQualified { device, .. }) if device == uncovered.capability()
-        ));
-    }
 
     #[test]
     fn cached_module_must_match_every_part_of_the_production_request() {

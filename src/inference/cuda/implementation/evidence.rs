@@ -38,9 +38,102 @@ impl fmt::Debug for RecordHash {
     }
 }
 
+/// The worst measured speedup on one architecture, in thousandths
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ArchitectureSpeed {
+    pub(crate) capability: ComputeCapability,
+    pub(crate) minimum_speedup_milli: u32,
+}
+
+/// Structural speed evidence accepted for every supported device
+///
+/// Construction requires two distinct architectures and at least 1.2x in every
+/// measured case. The summary names the structural reason and the supporting reports
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BroadEvidence {
+    measurements: &'static [ArchitectureSpeed],
+    summary: &'static str,
+}
+
+// complete area ports provide production summaries; host tests exercise them now
+#[cfg_attr(not(test), allow(dead_code))]
+impl BroadEvidence {
+    pub(crate) const fn new(
+        measurements: &'static [ArchitectureSpeed],
+        summary: &'static str,
+    ) -> Self {
+        assert!(
+            measurements.len() >= 2 && !summary.is_empty(),
+            "broad evidence needs two architectures and a summary"
+        );
+        let mut distinct_architecture = false;
+        let mut index = 0;
+        while index < measurements.len() {
+            assert!(
+                measurements[index].minimum_speedup_milli >= 1200,
+                "every architecture must win by at least 1.2x"
+            );
+            let mut other = index + 1;
+            while other < measurements.len() {
+                assert!(
+                    !same_capability(
+                        measurements[index].capability,
+                        measurements[other].capability
+                    ),
+                    "broad evidence needs distinct architectures"
+                );
+                other += 1;
+            }
+            if !same_architecture(measurements[0].capability, measurements[index].capability) {
+                distinct_architecture = true;
+            }
+            index += 1;
+        }
+        assert!(
+            distinct_architecture,
+            "broad evidence needs two architectures, not two capabilities of one architecture"
+        );
+        Self {
+            measurements,
+            summary,
+        }
+    }
+
+    pub(crate) const fn measurements(self) -> &'static [ArchitectureSpeed] {
+        self.measurements
+    }
+    pub(crate) const fn summary(self) -> &'static str {
+        self.summary
+    }
+
+    const fn same(self, other: Self) -> bool {
+        if !same_text(self.summary, other.summary)
+            || self.measurements.len() != other.measurements.len()
+        {
+            return false;
+        }
+        let mut index = 0;
+        while index < self.measurements.len() {
+            let left = self.measurements[index];
+            let right = other.measurements[index];
+            if !same_capability(left.capability, right.capability)
+                || left.minimum_speedup_milli != right.minimum_speedup_milli
+            {
+                return false;
+            }
+            index += 1;
+        }
+        true
+    }
+}
+
 /// The devices one measurement, and the module binding built on it, covers
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SpeedScope {
+    /// A structural winner accepted on every supported GPU, with explicit evidence
+    // no complete broad-winner port is registered in this snapshot
+    #[cfg_attr(not(test), allow(dead_code))]
+    AllDevices(&'static BroadEvidence),
     /// One measured card: its capability, SM count and driver-reported name
     // the first new record adds a point binding; until then only tests construct one
     #[cfg_attr(not(all(test, feature = "_cuda-libraries")), allow(dead_code))]
@@ -57,6 +150,7 @@ pub(crate) enum SpeedScope {
 impl SpeedScope {
     pub(crate) const fn capability(self) -> ComputeCapability {
         match self {
+            Self::AllDevices(_) => ComputeCapability::new(7, 5),
             Self::Point { capability, .. } | Self::LegacyCapability { capability } => capability,
         }
     }
@@ -64,6 +158,7 @@ impl SpeedScope {
     /// Whether this exact device is inside the scope
     pub(crate) fn contains(self, device: &DeviceAttributes) -> bool {
         match self {
+            Self::AllDevices(_) => device.capability() >= ComputeCapability::new(7, 5),
             Self::Point {
                 capability,
                 multiprocessors,
@@ -77,8 +172,22 @@ impl SpeedScope {
         }
     }
 
+    /// Whether speed was measured on this capability, distinct from broad acceptance
+    pub(crate) fn measured_on_device(self, capability: ComputeCapability) -> bool {
+        match self {
+            Self::AllDevices(evidence) => evidence
+                .measurements()
+                .iter()
+                .any(|speed| speed.capability == capability),
+            _ => self.capability() == capability,
+        }
+    }
+
     /// Whether one device could be inside both scopes
     const fn overlaps(self, other: Self) -> bool {
+        if matches!(self, Self::AllDevices(_)) || matches!(other, Self::AllDevices(_)) {
+            return true;
+        }
         if !same_capability(self.capability(), other.capability()) {
             return false;
         }
@@ -101,6 +210,7 @@ impl SpeedScope {
 
     const fn same(self, other: Self) -> bool {
         match (self, other) {
+            (Self::AllDevices(left), Self::AllDevices(right)) => left.same(*right),
             (
                 Self::Point {
                     capability: left,
@@ -249,6 +359,10 @@ const fn validate_binding(
     );
     if let LoadedArtifact::Cubin { arch, .. } = module.artifact() {
         assert!(
+            !matches!(binding.scope, SpeedScope::AllDevices(_)),
+            "all-device bindings require portable PTX, not a device cubin"
+        );
+        assert!(
             same_capability(arch, capability),
             "a cubin binding must target its exact device"
         );
@@ -365,4 +479,9 @@ const fn same_artifact(left: LoadedArtifact, right: LoadedArtifact) -> bool {
         ) => same_capability(left_arch, right_arch) && left.const_eq(right),
         _ => false,
     }
+}
+
+// Ada (8.9) and Ampere (8.0/8.6/8.7) share a capability major but are separate architectures
+const fn same_architecture(left: ComputeCapability, right: ComputeCapability) -> bool {
+    left.major == right.major && (left.major != 8 || (left.minor == 9) == (right.minor == 9))
 }

@@ -62,6 +62,7 @@ struct Fixture {
     loader: Loader,
     loads: Vec<ModuleRequest>,
     explicit_artifact: Option<LoadedArtifact>,
+    force_library: bool,
 }
 
 impl Fixture {
@@ -72,6 +73,7 @@ impl Fixture {
             loader: Loader::Exact,
             loads: Vec::new(),
             explicit_artifact: None,
+            force_library: false,
         }
     }
 
@@ -92,6 +94,10 @@ impl Fixture {
 }
 
 impl Modules for &mut Fixture {
+    fn force_library(&self) -> bool {
+        self.force_library
+    }
+
     fn device(&self) -> &DeviceAttributes {
         &self.device
     }
@@ -664,6 +670,12 @@ fn export_production_table() {
                     "pin": super::super::test_support::configuration::pin_json(proof.pin),
                 })).collect();
             let scope = match speed.scope {
+                SpeedScope::AllDevices(evidence) => serde_json::json!({
+                    "kind": "AllDevices", "summary": evidence.summary(),
+                    "architectures": evidence.measurements().iter().map(|speed| serde_json::json!({
+                        "capability": speed.capability.to_string(), "minimum_speedup_milli": speed.minimum_speedup_milli,
+                    })).collect::<Vec<_>>(),
+                }),
                 SpeedScope::LegacyCapability { capability } => {
                     serde_json::json!({"kind": "LegacyCapability", "capability": capability.to_string()})
                 }
@@ -1567,4 +1579,141 @@ fn explicit_wideconv_route_wins_only_for_its_implemented_tuple() {
     assert_eq!(route(COVERAGE), KernelModule::Wideconv);
     assert_eq!(route(OTHER_BATCH), KernelModule::Resnet);
     assert_eq!(route(Coverage::NONE), KernelModule::Resnet);
+}
+
+#[test]
+fn broad_winner_selects_on_an_unmeasured_gpu() {
+    use super::evidence::{ArchitectureSpeed, BroadEvidence};
+    static SUMMARY: BroadEvidence = BroadEvidence::new(
+        &[
+            ArchitectureSpeed {
+                capability: ComputeCapability::new(8, 0),
+                minimum_speedup_milli: 1300,
+            },
+            ArchitectureSpeed {
+                capability: ComputeCapability::new(8, 9),
+                minimum_speedup_milli: 1700,
+            },
+        ],
+        "fixture: fused fbank producer avoids materialized DFT matrices on Ampere and Ada",
+    );
+    const SCOPE: SpeedScope = SpeedScope::AllDevices(&SUMMARY);
+    static PROOFS: [TupleProof; 1] = [fixture_proof(
+        "fbank.dft",
+        1,
+        ConfigPin::Fbank(crate::inference::cuda::candidate::FbankPin::FftMelAccurate),
+        measured(SCOPE),
+    )];
+    static BINDINGS: [Binding; 1] = [Binding {
+        scope: SCOPE,
+        module: ModuleRequest::new(
+            KernelModule::FbankDft,
+            PtxTier::Sm75,
+            LoadedArtifact::PtxJit {
+                sha256: ArtifactHash::from_hex(
+                    "1111111111111111111111111111111111111111111111111111111111111111",
+                ),
+            },
+        ),
+        proofs: &PROOFS,
+    }];
+    assert!(validate(&BINDINGS));
+    let device = device(ComputeCapability::new(9, 0));
+    let route = super::production_route(
+        &BINDINGS,
+        super::ROUTE_PRECEDENCE,
+        BoundaryId::named("fbank.dft"),
+        1,
+        CudaMath::Fp32,
+        &device,
+    )
+    .unwrap();
+    assert_eq!(route.module.area(), KernelModule::FbankDft);
+    assert!(route.speed.scope.contains(&device));
+    assert!(!route.speed.scope.measured_on_device(device.capability()));
+    assert!(!validate(&[Binding {
+        module: cubin(KernelModule::FbankDft, PtxTier::Sm75),
+        ..BINDINGS[0]
+    }]));
+}
+
+#[test]
+fn device_sensitive_tuple_uses_library_on_unmeasured_gpu() {
+    let mut fixture = Fixture::new(ComputeCapability::new(9, 0));
+    let selected = fixture
+        .resolve(
+            PlanRequest::Production,
+            "resnet.layer1.0.conv1",
+            1,
+            CudaMath::Fp32,
+        )
+        .unwrap();
+    assert!(matches!(selected, Selected::Library));
+    assert!(fixture.loads.is_empty());
+}
+
+#[test]
+fn force_library_environment_disables_production_candidates() {
+    const CHILD: &str = "SPEAKRS_FORCE_LIBRARY_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "inference::cuda::implementation::tests::force_library_environment_disables_production_candidates", "--nocapture"])
+            .env(CHILD, "1").env("SPEAKRS_CUDA_FORCE_LIBRARY", "1").output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
+    }
+    let mut fixture = Fixture::new(BLACKWELL);
+    fixture.force_library = crate::inference::cuda::runtime::force_library_from_env();
+    assert!(fixture.force_library);
+    for boundary in [
+        "resnet.layer1.0.conv1",
+        "lstm.stack",
+        "sincnet.conv0.abs_pool",
+    ] {
+        assert!(matches!(
+            fixture
+                .resolve(PlanRequest::Production, boundary, 1, CudaMath::Fp32)
+                .unwrap(),
+            Selected::Library
+        ));
+    }
+    assert!(fixture.loads.is_empty());
+}
+
+#[test]
+fn broad_evidence_rejects_weak_or_single_architecture_claims() {
+    use super::evidence::{ArchitectureSpeed, BroadEvidence};
+    for measurements in [
+        &[ArchitectureSpeed {
+            capability: ADA,
+            minimum_speedup_milli: 1500,
+        }][..],
+        &[
+            ArchitectureSpeed {
+                capability: ADA,
+                minimum_speedup_milli: 1199,
+            },
+            ArchitectureSpeed {
+                capability: BLACKWELL,
+                minimum_speedup_milli: 1500,
+            },
+        ][..],
+        &[
+            ArchitectureSpeed {
+                capability: ADA,
+                minimum_speedup_milli: 1500,
+            },
+            ArchitectureSpeed {
+                capability: ADA,
+                minimum_speedup_milli: 1500,
+            },
+        ][..],
+    ] {
+        assert!(std::panic::catch_unwind(|| BroadEvidence::new(measurements, "fixture")).is_err());
+    }
 }

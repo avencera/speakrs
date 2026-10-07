@@ -10,6 +10,7 @@
 pub(crate) mod overrides;
 
 mod boundary;
+mod driver;
 mod evidence;
 
 /// Accepted production bindings, one file per candidate area
@@ -61,7 +62,7 @@ mod production {
 
 pub(crate) use boundary::{BoundaryId, ProductionBatches};
 pub(crate) use evidence::{
-    Binding, RecordHash, SpeedEvidence, SpeedScope, SpeedStatus, TupleProof,
+    Binding, BroadEvidence, RecordHash, SpeedEvidence, SpeedScope, SpeedStatus, TupleProof,
 };
 
 #[cfg(all(test, feature = "_cuda-libraries"))]
@@ -108,6 +109,8 @@ impl AreaTarget {
 pub(crate) enum Selection {
     /// An accepted production-table entry
     Production,
+    /// Complete implemented coverage; speed is not a selection gate
+    DriverOnly,
     /// An explicit or qualification request
     #[cfg(all(test, feature = "_cuda-libraries"))]
     Explicit,
@@ -178,6 +181,9 @@ pub(crate) fn production_module(
     limit: PtxTier,
     variants: AreaPtx,
 ) -> Result<Option<ModuleRequest>, CudaError> {
+    if super::driver_only() || driver::is_broad(area) {
+        return Ok(variants.driver_request(area, limit, device.capability()));
+    }
     if !ALWAYS_ON.contains(&area) {
         return Ok(bound_module(PRODUCTION, area, device, limit));
     }
@@ -205,6 +211,12 @@ fn production_tier(
     device: &DeviceAttributes,
     limit: PtxTier,
 ) -> Option<PtxTier> {
+    if super::driver_only() || driver::is_broad(area) {
+        return area
+            .variants()
+            .driver_request(area, limit, device.capability())
+            .map(ModuleRequest::tier);
+    }
     if ALWAYS_ON.contains(&area) {
         return Some(PtxTier::BASELINE);
     }
@@ -286,6 +298,10 @@ pub(crate) enum TokenEvidence {
         accuracy: RecordHash,
         speed: SpeedEvidence,
     },
+    /// Implemented library-free coverage, without a speed claim
+    Implemented,
+    /// A complete broad-winner port, carrying its structural speed evidence
+    Broad { scope: SpeedScope },
     /// An explicit qualification control, which grants no production evidence
     #[cfg(all(test, feature = "_cuda-libraries"))]
     Qualification,
@@ -369,6 +385,16 @@ impl Qualified {
                 scope = ?speed.scope,
                 "CUDA production evidence"
             ),
+            TokenEvidence::Broad { scope } => {
+                if let SpeedScope::AllDevices(evidence) = scope {
+                    tracing::debug!(
+                        summary = evidence.summary(),
+                        ?scope,
+                        "CUDA broad-winner evidence"
+                    );
+                }
+            }
+            TokenEvidence::Implemented => {}
             #[cfg(all(test, feature = "_cuda-libraries"))]
             TokenEvidence::Qualification => {}
         }
@@ -388,7 +414,19 @@ impl Qualified {
     ) -> Result<Option<T>, CudaError> {
         let library_allowed = self.selection == Selection::Production && !driver_only;
         match result {
-            Ok(plan) => Ok(Some(plan)),
+            Ok(plan) => {
+                let measured = match self.evidence {
+                    TokenEvidence::Production { speed, .. } => {
+                        speed.scope.measured_on_device(self.target.device)
+                    }
+                    TokenEvidence::Broad { scope } => scope.measured_on_device(self.target.device),
+                    _ => false,
+                };
+                tracing::info!(boundary = self.boundary.name(), batch = self.batch,
+                    math = ?self.math, area = area.name(), speed_measured = measured,
+                    evidence = ?self.evidence, "CUDA route implementation=Oxide");
+                Ok(Some(plan))
+            }
             Err(PlanError::Cuda(error)) => Err(error),
             Err(PlanError::Geometry(error @ GeometryError::Invalid { .. })) => {
                 Err(self.geometry(area, error))
@@ -573,6 +611,11 @@ pub(crate) trait Modules {
     /// The runtime's PTX tier limit
     fn tier_limit(&self) -> PtxTier;
 
+    /// Whether model-load policy forces every replaceable boundary to Library
+    fn force_library(&self) -> bool {
+        false
+    }
+
     /// Load exactly `request` and return the identity the driver accepted
     fn load(&mut self, request: ModuleRequest) -> Result<ModuleRequest, CudaError>;
 
@@ -583,6 +626,10 @@ pub(crate) trait Modules {
 }
 
 impl Modules for &CudaRuntime {
+    fn force_library(&self) -> bool {
+        CudaRuntime::force_library(self)
+    }
+
     fn device(&self) -> &DeviceAttributes {
         CudaRuntime::device(self)
     }
@@ -625,6 +672,8 @@ pub(crate) fn plan_selection(
 #[derive(Debug, Clone, Copy)]
 enum PlanRequest {
     Production,
+    #[cfg(test)]
+    DriverOnly,
     #[cfg(all(test, feature = "_cuda-libraries"))]
     Qualification(Choice),
 }
@@ -642,6 +691,23 @@ impl PlanRequest {
                 context: "CUDA selection",
                 reason: SelectionError.to_string(),
             });
+        }
+
+        let driver = super::driver_only();
+        #[cfg(test)]
+        let driver = driver || matches!(self, Self::DriverOnly);
+        if driver {
+            return driver::select(boundary, batch, math, modules);
+        }
+        if modules.force_library() && matches!(self, Self::Production) {
+            return Ok(Selected::Library);
+        }
+
+        if matches!(self, Self::Production)
+            && let selected @ Selected::Oxide(_) =
+                driver::select_broad(boundary, batch, math, &mut modules)?
+        {
+            return Ok(selected);
         }
 
         #[cfg(all(test, feature = "_cuda-libraries"))]
@@ -871,6 +937,9 @@ impl LibraryNeed {
     }
 
     pub(crate) fn error(&self) -> CudaError {
+        if super::driver_only() {
+            return driver::missing(self.boundary, self.batch, self.math);
+        }
         CudaError::NotDriverOnly {
             area: self.boundary.area().name(),
             boundary: self.boundary.name().to_owned(),
@@ -888,7 +957,12 @@ impl LibraryNeed {
             return Err(self.error());
         }
         #[cfg(feature = "_cuda-libraries")]
-        return runtime.prepare_library(self.library);
+        {
+            runtime.prepare_library(self.library)?;
+            tracing::info!(boundary = self.boundary.name(), batch = self.batch,
+                math = ?self.math, speed_measured = false, "CUDA route implementation=Library");
+            Ok(())
+        }
         #[cfg(not(feature = "_cuda-libraries"))]
         {
             let _ = runtime;

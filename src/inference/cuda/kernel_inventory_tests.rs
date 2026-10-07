@@ -110,3 +110,27 @@ fn missing_entry_is_detected_in_an_in_memory_ptx_fixture() {
         }
     }
 }
+
+#[cfg(feature = "cuda")]
+#[test]
+fn full_cuda_embeds_all_targets_and_every_shipped_areas_kernels() {
+    assert_eq!(
+        PtxTier::compiled_in().collect::<Vec<_>>(),
+        [PtxTier::Sm75, PtxTier::Sm80, PtxTier::Sm90, PtxTier::Sm120]
+    );
+    for (area, required) in plans() {
+        let variants = area.variants();
+        for (_, ptx) in variants.iter() {
+            assert!(
+                missing(ptx, &required).is_empty(),
+                "{} is missing shipped kernels",
+                area.name()
+            );
+        }
+        assert!(
+            variants.iter().next().is_some(),
+            "{} has no shipped module",
+            area.name()
+        );
+    }
+}

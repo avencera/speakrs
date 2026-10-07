@@ -4,8 +4,8 @@ use std::error::Error;
 use std::path::PathBuf;
 
 use super::{
-    CudaError, CudaFbank, CudaLibrary, CudaMath, CudaRuntime, CudaSegmentation, PtxTier,
-    ResNetEmbedding, SafetensorsFile, SegmentationOptions,
+    CudaError, CudaFbank, CudaMath, CudaRuntime, CudaSegmentation, PtxTier, ResNetEmbedding,
+    SafetensorsFile, SegmentationOptions,
 };
 
 fn maps(stage: &str) -> Result<String, Box<dyn Error>> {
@@ -34,26 +34,19 @@ fn options(math: CudaMath) -> SegmentationOptions {
     }
 }
 
-fn rejected(error: CudaError, runtime: &CudaRuntime, math: CudaMath) {
+fn rejected(error: CudaError, _runtime: &CudaRuntime, math: CudaMath) {
     eprintln!("loader policy: {error}");
-    let CudaError::NotDriverOnly {
-        area,
+    let CudaError::MissingKernel {
         boundary,
         batch,
         math: actual_math,
-        tier,
-        device,
-        library,
     } = error
     else {
-        panic!("expected NotDriverOnly");
+        panic!("expected MissingKernel");
     };
     assert_eq!(batch, 1);
     assert_eq!(actual_math, math);
-    assert_eq!(tier, PtxTier::Sm75);
-    assert_eq!(device, runtime.compute_capability());
-    assert!(!area.is_empty() && !boundary.is_empty());
-    assert!(matches!(library, CudaLibrary::Cublas | CudaLibrary::Cudnn));
+    assert!(!boundary.is_empty());
 }
 
 #[test]
@@ -89,7 +82,6 @@ fn loader_proof() -> Result<(), Box<dyn Error>> {
     }
     assert_eq!(mode, "driver-only");
     assert!(super::driver_only());
-    assert_eq!(PtxTier::native(runtime.compute_capability()), PtxTier::Sm75);
     let embedding = SafetensorsFile::open(assets.join("wespeaker-multimask-tail.safetensors"))?;
     for math in [CudaMath::Fp32, CudaMath::Tf32] {
         rejected(
@@ -103,13 +95,6 @@ fn loader_proof() -> Result<(), Box<dyn Error>> {
             math,
         );
         rejected(CudaFbank::new(&runtime, math).unwrap_err(), &runtime, math);
-    }
-    #[cfg(feature = "_cuda-libraries")]
-    for library in [CudaLibrary::Cublas, CudaLibrary::Cudnn, CudaLibrary::Nvrtc] {
-        assert!(matches!(
-            runtime.prepare_library(library),
-            Err(CudaError::NotDriverOnly { .. })
-        ));
     }
     for area in [
         super::KernelModule::Fbank,

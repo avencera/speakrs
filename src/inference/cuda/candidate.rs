@@ -1307,3 +1307,26 @@ fn validate_fixed_batch(
         reason: format!("batch {batch} is zero or exceeds the buffer index range"),
     }))
 }
+
+/// Library-free coverage and a deterministic configuration chosen before module loading
+///
+/// Area ports implement this next to their candidate trait implementation and register
+/// it in `implementation::driver::areas`. Library-dependent legacy plans do not opt in
+pub(crate) trait DriverCandidate {
+    /// The kernel module that owns this candidate
+    const AREA: KernelModule;
+    /// Only tuples whose complete operation needs no numerical library
+    fn driver_coverage(tier: PtxTier) -> Coverage;
+    /// Structural speed evidence, if this complete port is accepted on all devices
+    fn broad_evidence() -> Option<&'static super::implementation::BroadEvidence> {
+        None
+    }
+    /// One complete pin, selected from cached device facts without GPU allocation
+    fn driver_pin(
+        boundary: super::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        device: &super::device::DeviceAttributes,
+        tier: PtxTier,
+    ) -> Result<ConfigPin, PlanError>;
+}
