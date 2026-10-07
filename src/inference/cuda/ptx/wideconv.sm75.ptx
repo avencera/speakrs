@@ -48191,6 +48191,39 @@ $L__BB36_94:                            // %bb65
 	// end inline asm
                                         // -- End function
 }
+	// .globl	spk_wideconv_wtc1_c128  // -- Begin function spk_wideconv_wtc1_c128
+.visible .entry spk_wideconv_wtc1_c128(
+	.param .u64 .ptr .align 4 spk_wideconv_wtc1_c128_param_0,
+	.param .u64 spk_wideconv_wtc1_c128_param_1,
+	.param .u64 .ptr .align 4 spk_wideconv_wtc1_c128_param_2,
+	.param .u64 spk_wideconv_wtc1_c128_param_3,
+	.param .u64 .ptr .align 4 spk_wideconv_wtc1_c128_param_4,
+	.param .u64 spk_wideconv_wtc1_c128_param_5,
+	.param .u64 .ptr .align 4 spk_wideconv_wtc1_c128_param_6,
+	.param .u64 spk_wideconv_wtc1_c128_param_7,
+	.param .u32 spk_wideconv_wtc1_c128_param_8,
+	.param .u32 spk_wideconv_wtc1_c128_param_9,
+	.param .u32 spk_wideconv_wtc1_c128_param_10,
+	.param .u32 spk_wideconv_wtc1_c128_param_11,
+	.param .u64 .ptr .align 1 spk_wideconv_wtc1_c128_param_12,
+	.param .u64 spk_wideconv_wtc1_c128_param_13,
+	.param .u64 .ptr .align 1 spk_wideconv_wtc1_c128_param_14,
+	.param .u64 spk_wideconv_wtc1_c128_param_15
+)
+.maxntid 256, 1, 1
+.minnctapersm 1                         // @spk_wideconv_wtc1_c128
+{
+
+
+// %bb.0:                               // %entry
+	// begin inline asm
+	trap;
+	// end inline asm
+	// begin inline asm
+	exit;
+	// end inline asm
+                                        // -- End function
+}
 	// .globl	spk_wideconv_wtc2_c256  // -- Begin function spk_wideconv_wtc2_c256
 .visible .entry spk_wideconv_wtc2_c256(
 	.param .u64 .ptr .align 4 spk_wideconv_wtc2_c256_param_0,

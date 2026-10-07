@@ -291,6 +291,7 @@ fn selection_follows_device_attributes() {
     let blackwell = device(12, 0, 36, PtxTier::Sm80);
     let a100 = device(8, 0, 108, PtxTier::Sm80);
     let a100_sm75 = device(8, 0, 108, PtxTier::Sm75);
+    let h100 = device(9, 0, 132, PtxTier::Sm80);
     let same = |batch, channels, input, math| Conv2d {
         batch,
         input,
@@ -340,7 +341,7 @@ fn selection_follows_device_attributes() {
     let c128s2 = |batch, math| strided(batch, 128, [20, 250], math);
     use Partition::{Four, Two, Whole};
     use SplitCells::{All, From};
-    use WinogradProducts::{Fp32, Fp32Sweep2, Tf32x2, Tf32x3};
+    use WinogradProducts::{Fp32, Fp32Sweep2, Tf32x1, Tf32x2, Tf32x3};
     let (f, t) = (CudaMath::Fp32, CudaMath::Tf32);
     // batch 1 has 80 (128 channels) or 40 (256 channels) CTAs: 34 or 36 SMs run the
     // 128-channel layers' whole waves and split the cells of the partial wave to fill
@@ -360,9 +361,11 @@ fn selection_follows_device_attributes() {
         (blackwell, c256(1, f), wino(Fp32, Four, All)),
         (a100, c128(1, f), wino(Tf32x3, Two, All)),
         (a100, c256(1, f), wino(Tf32x3, Two, All)),
-        (a100, c128(1, t), wino(Tf32x2, Whole, All)),
+        (a100, c128(1, t), wino(Tf32x1, Whole, All)),
         (a100, c128(32, f), wino(Tf32x3, Whole, All)),
-        (a100, c128(32, t), wino(Tf32x2, Whole, All)),
+        (a100, c128(32, t), wino(Tf32x1, Whole, All)),
+        // other TF32-rich parts keep two products until measured
+        (h100, c128(32, t), wino(Tf32x2, Whole, All)),
         (a100, c256(1, t), wino(Tf32x3, Two, All)),
         (a100, c256(32, t), tensor),
         (a100_sm75, c128(32, f), wino(Fp32Sweep2, Whole, All)),

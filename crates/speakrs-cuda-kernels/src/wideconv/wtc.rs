@@ -17,6 +17,10 @@
 //! - two products (`U` split, `V` rounded) round only the transformed input, which on
 //!   the 128-channel layers keeps the error at that of a direct TF32 convolution, and
 //!   serve TF32 mode there
+//! - one product (`U` and `V` rounded) is ordinary TF32 arithmetic in the Winograd
+//!   domain. It loads only the high weight fragments and accumulates straight into the
+//!   running sums, for TF32 mode where end-to-end DER, not per-layer parity with a
+//!   direct TF32 convolution, is the bar
 //!
 //! Tensor cores truncate while accumulating, which over 16 or more chained products
 //! left the 3xTF32 error 4x above cuDNN's FP32 error. Each chunk's products therefore
@@ -295,7 +299,7 @@ macro_rules! wtc3x3 {
                 const PRODUCTS: u32 = $products;
                 const RPT: usize = RAW_PASSES as usize;
                 const STAGE_V: u32 = 2 * RAW_WORDS;
-                const _: () = assert!(C % KB == 0 && C % CC == 0 && (PRODUCTS == 2 || PRODUCTS == 3));
+                const _: () = assert!(C % KB == 0 && C % CC == 0 && PRODUCTS >= 1 && PRODUCTS <= 3);
 
                 let len = batch * C * HW;
                 if len as usize > x.len()
@@ -400,7 +404,9 @@ macro_rules! wtc3x3 {
                         // safety: fragments of chunk 0 of this warp's elements
                         unsafe {
                             frag[e][m][0] = fragment(fragments.add(block as usize));
-                            frag[e][m][1] = fragment(fragments.add((block + FRAGMENT) as usize));
+                            if PRODUCTS > 1 {
+                                frag[e][m][1] = fragment(fragments.add((block + FRAGMENT) as usize));
+                            }
                         }
                         m += 1;
                     }
@@ -457,6 +463,11 @@ macro_rules! wtc3x3 {
                             };
                             let mut m = 0;
                             #[unroll]
+                            while m < 4 && PRODUCTS == 1 {
+                                acc[e][m][n] = mma(acc[e][m][n], frag[e][m][0], h0, h1);
+                                m += 1;
+                            }
+                            #[unroll]
                             while m < 4 {
                                 // tensor cores truncate while accumulating: the chunk's products
                                 // start from zero and join the running sum with rounded FADDs
@@ -485,7 +496,9 @@ macro_rules! wtc3x3 {
                             // safety: fragments of a chunk of this warp's elements
                             unsafe {
                                 frag[e][m][0] = fragment(fragments.add(block as usize));
-                                frag[e][m][1] = fragment(fragments.add((block + FRAGMENT) as usize));
+                                if PRODUCTS > 1 {
+                                    frag[e][m][1] = fragment(fragments.add((block + FRAGMENT) as usize));
+                                }
                             }
                             m += 1;
                         }
@@ -677,4 +690,14 @@ wtc3x3! {
     h = 10,
     w = 125,
     products = 2,
+}
+
+wtc3x3! {
+    /// One-product TF32 Winograd 128 -> 128 3x3 convolution for TF32 mode: weights and
+    /// transformed inputs rounded; launch as `spk_wideconv_wtc3_c128`
+    spk_wideconv_wtc1_c128,
+    channels = 128,
+    h = 20,
+    w = 250,
+    products = 1,
 }
