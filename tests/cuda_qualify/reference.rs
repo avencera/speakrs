@@ -1,6 +1,9 @@
 //! Independent textbook f64 definitions for the secret operator gate
 
 use super::cpu;
+
+#[path = "fbank_truth.rs"]
+pub(super) mod fbank_truth;
 use crate::inference::cuda::dnn::Conv2d;
 use crate::inference::cuda::weights::uniform;
 use std::collections::BTreeSet;
@@ -352,14 +355,18 @@ fn conv_f64_matches_fixture_rounding() -> Result<(), crate::inference::cuda::Cud
     Ok(())
 }
 
-/// Direct f64 DFT and mel energy, with a fixed sample, bin and reduction order
-pub(crate) fn fbank(input: &[f32], mel: &[f32], indices: Vec<usize>) -> Sample {
+/// Exact Hamming coefficients used by the independent producer and stage truth
+fn fbank_window() -> Vec<f64> {
     use std::f64::consts::TAU;
-    assert_eq!(mel.len(), 257 * 80);
-    let window: Vec<_> = (0..400)
+    (0..400)
         .map(|n| 0.54 - 0.46 * (TAU * n as f64 / 399.0).cos())
-        .collect();
-    let basis: Vec<_> = (0..257)
+        .collect()
+}
+
+/// Direct DFT basis with the original reduced-angle definition
+fn fbank_basis() -> Vec<Vec<(f64, f64)>> {
+    use std::f64::consts::TAU;
+    (0..257)
         .map(|bin| {
             (0..400)
                 .map(|sample| {
@@ -368,7 +375,26 @@ pub(crate) fn fbank(input: &[f32], mel: &[f32], indices: Vec<usize>) -> Sample {
                 })
                 .collect::<Vec<_>>()
         })
+        .collect()
+}
+
+/// Scale, remove the ordered frame mean, pre-emphasize and apply exact Hamming
+fn fbank_frame(input: &[f32], offset: usize, window: &[f64]) -> Vec<f64> {
+    let audio: Vec<_> = input[offset..offset + 400]
+        .iter()
+        .map(|&x| f64::from(x) * 32768.0)
         .collect();
+    let mean = audio.iter().sum::<f64>() / 400.0;
+    (0..400)
+        .map(|n| ((audio[n] - mean) - 0.97 * (audio[n.saturating_sub(1)] - mean)) * window[n])
+        .collect()
+}
+
+/// Direct f64 DFT and mel energy, with a fixed sample, bin and reduction order
+pub(crate) fn fbank(input: &[f32], mel: &[f32], indices: Vec<usize>) -> Sample {
+    assert_eq!(mel.len(), 257 * 80);
+    let window = fbank_window();
+    let basis = fbank_basis();
     cpu::evaluate(|mode| {
         let values = cpu::ordered_map(mode, indices.len(), |position| {
             let index = indices[position];
@@ -376,16 +402,7 @@ pub(crate) fn fbank(input: &[f32], mel: &[f32], indices: Vec<usize>) -> Sample {
             let frame = index / 80 % 998;
             let row = index / (998 * 80);
             let offset = row * 160_000 + frame * 160;
-            let audio: Vec<_> = input[offset..offset + 400]
-                .iter()
-                .map(|&x| f64::from(x) * 32768.0)
-                .collect();
-            let mean = audio.iter().sum::<f64>() / 400.0;
-            let samples: Vec<_> = (0..400)
-                .map(|n| {
-                    ((audio[n] - mean) - 0.97 * (audio[n.saturating_sub(1)] - mean)) * window[n]
-                })
-                .collect();
+            let samples = fbank_frame(input, offset, &window);
             let mut energy = 0.0;
             for k in 0..257 {
                 let weight = f64::from(mel[k * 80 + bin]);

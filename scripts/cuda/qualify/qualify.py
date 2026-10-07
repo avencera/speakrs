@@ -551,6 +551,183 @@ def draw_length(case: str, layer: str) -> int:
     return batch * (32 * 80 * 998 if conv[1] == "1" else 64 * 40 * 499)
 
 
+FBANK_STAGE_DEFINITION = "fbank-stage-f64-direct-v1"
+FBANK_STAGE_FIELDS = {
+    "case",
+    "evaluation",
+    "dtype",
+    "definition",
+    "constants",
+    "input_shape",
+    "shape",
+    "input_length",
+    "length",
+    "input_sha256",
+    "truth_sha256",
+    "fixture_rows",
+}
+
+
+def fbank_stage_binding(binding: dict, key: str) -> None:
+    """Require complete deterministic f64 truth for the exact locked input geometry."""
+    match = re.fullmatch(
+        r"(fp32|tf32)/(first|last|short|mixed)/b([1-9][0-9]*)/stage(/switched)?", key
+    )
+    if (
+        match is None
+        or not isinstance(binding, dict)
+        or set(binding) != FBANK_STAGE_FIELDS
+    ):
+        raise Rejected("fbank stage truth: missing or invalid f64 binding")
+    batch = int(match[3])
+    if (match[2], batch) not in target_cases("fbankdft"):
+        raise Rejected("fbank stage truth: invalid case")
+    source = match[2]
+    if match[4]:
+        source = "first" if source == "short" else "short"
+    fixture_rows = (
+        list(range(batch))
+        if source == "mixed"
+        else [{"first": 0, "last": 17, "short": 18}[source]] * batch
+    )
+    if (
+        binding.get("case") != key
+        or binding.get("evaluation") != "complete-deterministic"
+        or binding.get("dtype") != "f64"
+        or binding.get("definition") != FBANK_STAGE_DEFINITION
+        or binding.get("input_shape") != [batch, 160_000]
+        or binding.get("shape") != [batch, 998, 80]
+        or type(binding.get("input_length")) is not int
+        or binding["input_length"] != batch * 160_000
+        or type(binding.get("length")) is not int
+        or binding["length"] != batch * 998 * 80
+        or binding.get("fixture_rows") != fixture_rows
+    ):
+        raise Rejected(
+            "fbank stage truth: mismatched complete f64 geometry or definition"
+        )
+    for field in ("input_shape", "shape", "fixture_rows"):
+        if not isinstance(binding[field], list) or any(
+            type(value) is not int for value in binding[field]
+        ):
+            raise Rejected("fbank stage truth: invalid typed geometry")
+    constants = binding.get("constants")
+    if not isinstance(constants, dict) or set(constants) != {
+        "sha256",
+        "mel_sha256",
+        "window",
+        "mel",
+        "scale",
+        "preemphasis",
+        "energy_floor",
+        "window_f32_max_abs",
+    }:
+        raise Rejected("fbank stage truth: missing independent constants")
+    if (
+        constants["window"] != "exact-f64-Hamming"
+        or constants["mel"] != "built-in-f32-converted-to-f64"
+        or constants["scale"] != 32768.0
+        or constants["preemphasis"] != 0.97
+        or constants["energy_floor"] != 2.0**-23
+    ):
+        raise Rejected("fbank stage truth: wrong independent constants")
+    difference = constants["window_f32_max_abs"]
+    if type(difference) not in (int, float) or difference < 0:
+        raise Rejected("fbank stage truth: invalid Hamming diagnostic")
+    finite([difference])
+    for digest in (
+        binding["input_sha256"],
+        binding["truth_sha256"],
+        constants["sha256"],
+        constants["mel_sha256"],
+    ):
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise Rejected("fbank stage truth: missing f64 or input hash")
+
+
+def fbank_stage_row(row: dict, key: str) -> dict:
+    """Bind every scored output and draw to the same complete unrounded reference."""
+    binding = row.get("stage_truth")
+    if not isinstance(binding, dict):
+        raise Rejected("fbank stage truth: missing f64 binding")
+    fbank_stage_binding(binding, key)
+    if row.get("truth_sha256") != binding["truth_sha256"]:
+        raise Rejected("fbank stage truth: mismatched f64 identity")
+    if row.get("id") == key + "/band":
+        if row.get("seeds") != [11, 23, 37, 41, 53, 67, 79, 97]:
+            raise Rejected("fbank stage truth: fixed perturbation seeds required")
+        metrics = row.get("metrics", [])
+        if len(metrics) != 8 or metrics != row.get("truth_draws"):
+            raise Rejected("fbank stage truth: missing same-f64 draws")
+    else:
+        if row.get("id") != key or row.get("truth") != row.get("first"):
+            raise Rejected("fbank stage truth: missing same-f64 stage metrics")
+        metrics = [row.get("first"), row.get("second")]
+    for measured in metrics:
+        if not isinstance(measured, dict) or (
+            type(measured.get("elements")) is not int
+            or measured["elements"] != binding["length"]
+        ):
+            raise Rejected("fbank stage truth: incomplete output metrics")
+    return binding
+
+
+def fbank_stage_identity(key: str, *rows: dict) -> None:
+    """Candidate, Library and draws must identify the same input and f64 reference."""
+    bindings = [fbank_stage_row(row, key) for row in rows]
+    if not bindings or any(binding != bindings[0] for binding in bindings[1:]):
+        raise Rejected("fbank stage truth: f64 identity differs between processes")
+
+
+def fbank_stage_cpu_evidence(
+    process: dict, evidence: dict, sections: list[dict]
+) -> None:
+    """Require one unlocked CPU owner and complete byte proof for each stage output."""
+    rows = process.get("rows", [])
+    stage_sections = {
+        section["case"]: section
+        for section in sections
+        if section["work"] == "stage_f64"
+    }
+    if len(stage_sections) != sum(
+        section["work"] == "stage_f64" for section in sections
+    ):
+        raise Rejected("GPU lock: duplicate prepared f64 stage case")
+    stage_rows = [
+        row
+        for row in rows
+        if re.fullmatch(
+            r"(?:fp32|tf32)/(?:first|last|short|mixed)/b[1-9][0-9]*/stage(?:/switched)?",
+            row.get("id", ""),
+        )
+    ]
+    stage_keys = {row["id"] for row in stage_rows}
+    if len(stage_keys) != len(stage_rows):
+        raise Rejected("GPU lock: duplicate emitted f64 stage case")
+    if set(stage_sections) != stage_keys:
+        raise Rejected("GPU lock: missing or mismatched unlocked f64 stage truth")
+    for row in rows:
+        if row.get("id") not in stage_keys and not row.get("id", "").endswith("/band"):
+            continue
+        key = row["id"].removesuffix("/band")
+        binding = fbank_stage_row(row, key)
+        section = stage_sections.get(key)
+        if section != {"work": "stage_f64", "locked": False, **binding}:
+            raise Rejected("GPU lock: f64 stage row differs from CPU owner binding")
+    if evidence.get("cpu_mode") not in ("serial", "parallel", "verify"):
+        raise Rejected("GPU lock: missing f64 stage CPU policy")
+    if evidence.get("cpu_mode") == "verify":
+        proofs = evidence.get("cpu_byte_identity", [])
+        for section in stage_sections.values():
+            matching = [proof for proof in proofs if proof.get("binding") == section]
+            if len(matching) != 1 or (
+                matching[0].get("serial_parallel_equal") is not True
+                or matching[0].get("bytes") != 8 + section["length"] * 8
+                or re.fullmatch(r"[0-9a-f]{64}", str(matching[0].get("sha256"))) is None
+            ):
+                raise Rejected("GPU lock: missing complete f64 stage byte proof")
+
+
 def validate_gpu_ownership(process: dict, phase: str) -> None:
     """Require completed evidence from the selected GPU lock owner."""
     evidence = process.get("gpu_lock")
@@ -567,10 +744,20 @@ def validate_gpu_ownership(process: dict, phase: str) -> None:
     for section in sections:
         if (
             not isinstance(section, dict)
-            or section.get("work") not in ("f64", "tf32_draws")
+            or section.get("work") not in ("f64", "tf32_draws", "stage_f64")
             or section.get("locked") is not False
         ):
             raise Rejected("GPU lock: CPU qualification work held the shared lock")
+        if section["work"] == "stage_f64":
+            if process.get("target") != "fbankdft":
+                raise Rejected("GPU lock: f64 stage work requires the fbank owner")
+            binding = {
+                key: value
+                for key, value in section.items()
+                if key not in ("work", "locked")
+            }
+            fbank_stage_binding(binding, section.get("case", ""))
+            continue
         fields = (
             {"work", "locked", "case"}
             if section["work"] == "f64"
@@ -594,6 +781,8 @@ def validate_gpu_ownership(process: dict, phase: str) -> None:
             emitted
         ) <= set(prepared):
             raise Rejected("GPU lock: missing unlocked f64 truth work")
+        if process.get("target") == "fbankdft":
+            fbank_stage_cpu_evidence(process, evidence, sections)
         expected = Counter()
         for row in rows:
             if not row.get("id", "").endswith("/band") or not row.get("layers"):
@@ -655,6 +844,11 @@ def driver(
         raise Rejected(f"driver missing completed GPU evidence: {label}")
     data = json.loads(output.read_text())
     validate_gpu_ownership(data, phase)
+    if phase == "numeric" and data.get("target") == "fbankdft":
+        if data["gpu_lock"].get("cpu_mode") != child.get(
+            "SPEAKRS_QUALIFY_CPU_MODE", "parallel"
+        ):
+            raise Rejected("GPU lock: f64 stage CPU policy differs from requested mode")
     if phase == "numeric":
         steps[-1]["cpu_work_wall_seconds"] = data["gpu_lock"].get(
             "cpu_wall_seconds", {}
@@ -1167,16 +1361,18 @@ def stage_check(result: dict, key: str, row: dict, control: dict) -> None:
             lambda: embedding_parity(a["minimum_cosine"], b["minimum_cosine"]),
         )
         return
-    check(
-        result,
-        f"stage:{key}",
-        lambda: segmentation_parity(
+
+    def parity():
+        if result["target"] == "fbankdft":
+            fbank_stage_identity(key, row, control)
+        segmentation_parity(
             Error(a["relative_l2"], a["max_abs"]),
             Error(b["relative_l2"], b["max_abs"]),
             a["argmax_flips"],
             b["argmax_flips"],
-        ),
-    )
+        )
+
+    check(result, f"stage:{key}", parity)
 
 
 def numeric(
@@ -1209,6 +1405,14 @@ def numeric(
 
         check(result, f"determinism:{key}", repeat)
         if boundary == "stage":
+            if result["target"] == "fbankdft":
+                check(
+                    result,
+                    f"stage_reference:{key}",
+                    lambda row=row, control=control, key=key: fbank_stage_identity(
+                        key, row, control
+                    ),
+                )
             if not coverage.layers_at(batch, mode):
 
                 def stage_identity(row=row, control=control):
@@ -1269,6 +1473,10 @@ def numeric(
         band_row = baseline.get(f"{key}/band")
 
         def truth_gate(row=row, control=control, band_row=band_row):
+            if result["target"] == "fbankdft":
+                if band_row is None:
+                    raise Rejected("TF32 truth: missing complete CPU f64 stage draws")
+                fbank_stage_identity(row["id"], row, control, band_row)
             if (
                 band_row is None
                 or row.get("truth") is None
@@ -1291,7 +1499,23 @@ def numeric(
                 raise Rejected("TF32 truth: independent perturbation seeds required")
             if len(band_row.get("truth_draws", [])) != len(seeds):
                 raise Rejected("TF32 truth: missing perturbation draw")
-            return tf32_truth(row["truth"], control["truth"], band_row["truth_draws"])
+            if result["target"] != "fbankdft":
+                return tf32_truth(
+                    row["truth"], control["truth"], band_row["truth_draws"]
+                )
+            try:
+                evidence = tf32_truth(
+                    row["truth"], control["truth"], band_row["truth_draws"]
+                )
+            except TruthRejected as error:
+                error.evidence["truth"] = (
+                    "independent CPU f64, complete stage, same input"
+                )
+                error.evidence["stage_truth"] = row["stage_truth"]
+                raise
+            evidence["truth"] = "independent CPU f64, complete stage, same input"
+            evidence["stage_truth"] = row["stage_truth"]
+            return evidence
 
         check(result, f"stage_truth:{key}", truth_gate)
         if key in bands:

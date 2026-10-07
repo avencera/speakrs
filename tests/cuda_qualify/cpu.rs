@@ -50,6 +50,17 @@ impl Evidence for Sample {
     }
 }
 
+impl Evidence for Vec<f64> {
+    fn bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(8 + self.len() * 8);
+        bytes.extend_from_slice(&(self.len() as u64).to_le_bytes());
+        for value in self {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes
+    }
+}
+
 impl Evidence for Vec<u8> {
     fn bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(8 + self.len());

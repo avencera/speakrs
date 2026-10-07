@@ -165,7 +165,17 @@ class ShortTrace(unittest.TestCase):
                 self.assertEqual(
                     path.name, "profile-eager.sqlite" if streams else "profile.sqlite"
                 )
-                self.assertEqual("short_profile" in result, bool(streams))
+                self.assertNotIn("short_profile", result)
+                self.assertEqual(
+                    bool(result["profile_traces"][0].get("retained_for_eager")),
+                    bool(streams),
+                )
+                self.assertEqual(
+                    [item["label"] for item in result["profile_traces"]],
+                    ["profile", "profile-eager"] if streams else ["profile"],
+                )
+                with self.assertRaisesRegex(qualify.Rejected, "not checked"):
+                    qualify.profile_trace_receipts(result)
 
     def test_first_use_fault_requires_the_existing_profile_reason(self):
         gate = qualify.MUTANT_GATES["FirstUseFallback"]
@@ -222,6 +232,287 @@ class PhaseTimes(unittest.TestCase):
         )
         self.assertTrue(evidence["numeric_includes_cpu_work"])
         self.assertTrue(evidence["cpu_work_excludes_lock_wait"])
+
+
+class StageTruthRegression(unittest.TestCase):
+    def binding(self, key="fp32/first/b1/stage"):
+        import hashlib
+        import struct
+
+        mode, case, batch, *_ = key.split("/")
+        count = int(batch[1:])
+        source = case
+        if key.endswith("/switched"):
+            source = "first" if case == "short" else "short"
+        truth = [1.0, -1.0] * (count * 998 * 40)
+        return {
+            "case": key,
+            "evaluation": "complete-deterministic",
+            "dtype": "f64",
+            "definition": qualify.FBANK_STAGE_DEFINITION,
+            "constants": {
+                "sha256": "c" * 64,
+                "mel_sha256": "d" * 64,
+                "window": "exact-f64-Hamming",
+                "mel": "built-in-f32-converted-to-f64",
+                "scale": 32768.0,
+                "preemphasis": 0.97,
+                "energy_floor": 2.0**-23,
+                "window_f32_max_abs": 2e-8,
+            },
+            "input_shape": [count, 160_000],
+            "shape": [count, 998, 80],
+            "fixture_rows": list(range(count))
+            if source == "mixed"
+            else [{"first": 0, "last": 17, "short": 18}[source]] * count,
+            "input_length": count * 160_000,
+            "length": len(truth),
+            "input_sha256": "e" * 64,
+            "truth_sha256": hashlib.sha256(
+                struct.pack(f"<{len(truth)}d", *truth)
+            ).hexdigest(),
+        }
+
+    def row(self, offset=0.0, key="fp32/first/b1/stage"):
+        import hashlib
+        import math
+        import struct
+
+        binding = self.binding(key)
+        truth = [1.0, -1.0] * (binding["length"] // 2)
+        actual = [value + offset for value in truth]
+        error = sum((a - b) ** 2 for a, b in zip(actual, truth))
+        norm = sum(value**2 for value in truth)
+        metrics = {
+            "relative_l2": math.sqrt(error / norm),
+            "max_abs": max(abs(a - b) for a, b in zip(actual, truth)),
+            "minimum_cosine": 1 / math.sqrt(1 + offset**2),
+            "mean_cosine": 1 / math.sqrt(1 + offset**2),
+            "argmax_flips": 0,
+            "sha256": hashlib.sha256(
+                struct.pack(f"<{len(actual)}f", *actual)
+            ).hexdigest(),
+            "elements": len(actual),
+        }
+        return {
+            "id": key,
+            "first": dict(metrics),
+            "second": dict(metrics),
+            "truth": dict(metrics),
+            "truth_sha256": binding["truth_sha256"],
+            "stage_truth": binding,
+            "bitwise_equal": True,
+            "declared": True,
+            "fixture_diagnostic": {
+                "reference": "ORT FP32 tensor/fbank",
+                "acceptance_bound": False,
+                "max_abs": abs(offset - 0.5),
+            },
+        }
+
+    def test_exact_candidate_passes_and_ort_closer_but_worse_candidate_fails(self):
+        control = self.row(0.125)
+        exact = self.row()
+        worse = self.row(0.25)
+        self.assertLess(
+            worse["fixture_diagnostic"]["max_abs"],
+            control["fixture_diagnostic"]["max_abs"],
+        )
+        for candidate, passed in ((exact, True), (worse, False)):
+            result = {"target": "fbankdft", "checks": []}
+            qualify.stage_check(result, candidate["id"], candidate, control)
+            self.assertEqual(result["checks"][0]["passed"], passed)
+            if not passed:
+                self.assertEqual(
+                    result["checks"][0]["reason"], "segmentation stage parity: logits"
+                )
+        self.assertEqual(exact["first"]["max_abs"], 0.0)
+
+    def test_missing_mismatched_or_incomplete_f64_identity_fails_closed(self):
+        import copy
+
+        control = self.row(0.125)
+        for fault in (
+            "missing",
+            "truth_hash",
+            "input_hash",
+            "constants",
+            "length",
+            "shape",
+            "seed",
+            "definition",
+            "fixture_rows",
+            "metrics_length",
+            "metrics_owner",
+            "shape_type",
+        ):
+            candidate = copy.deepcopy(control)
+            binding = candidate["stage_truth"]
+            if fault == "missing":
+                candidate.pop("stage_truth")
+            elif fault == "truth_hash":
+                candidate["truth_sha256"] = "f" * 64
+            elif fault == "input_hash":
+                binding["input_sha256"] = "f" * 64
+            elif fault == "constants":
+                binding["constants"]["sha256"] = "f" * 64
+            elif fault == "length":
+                binding["length"] -= 1
+            elif fault == "shape":
+                binding["shape"] = [1, 80, 998]
+            elif fault == "seed":
+                binding["seed"] = 11
+            elif fault == "definition":
+                binding["definition"] = "ORT"
+            elif fault == "fixture_rows":
+                binding["fixture_rows"] = [17]
+            elif fault == "shape_type":
+                binding["shape"][0] = True
+            elif fault == "metrics_length":
+                candidate["second"]["elements"] -= 1
+            else:
+                candidate["truth"]["max_abs"] = 0.0
+            with self.subTest(fault=fault):
+                result = {"target": "fbankdft", "checks": []}
+                qualify.stage_check(result, candidate["id"], candidate, control)
+                self.assertFalse(result["checks"][0]["passed"])
+                self.assertIn("fbank stage truth", result["checks"][0]["reason"])
+
+    def process(self, row, *, verify=False):
+        section = {"work": "stage_f64", "locked": False, **row["stage_truth"]}
+        return {
+            "target": "fbankdft",
+            "rows": [row],
+            "gpu_lock": {
+                "path": qualify.GPU_LOCK,
+                "owner": "child",
+                "gpu_sections": 2,
+                "cpu_sections": [section],
+                "cpu_mode": "verify" if verify else "parallel",
+                "cpu_byte_identity": [
+                    {
+                        "serial_parallel_equal": True,
+                        "bytes": 8 + row["stage_truth"]["length"] * 8,
+                        "sha256": "a" * 64,
+                        "binding": dict(section),
+                    }
+                ]
+                if verify
+                else [],
+            },
+        }
+
+    def test_stage_owner_and_full_byte_proof_fail_closed(self):
+        import copy
+
+        original = self.process(self.row(), verify=True)
+        qualify.validate_gpu_ownership(original, "numeric")
+        for fault in (
+            "missing",
+            "locked",
+            "parent",
+            "case",
+            "hash",
+            "target",
+            "duplicate",
+            "proof_missing",
+            "proof_length",
+            "proof_owner",
+            "secret_missing",
+            "draw_missing",
+            "duplicate_row",
+            "proof_extra",
+            "cpu_mode",
+        ):
+            process = copy.deepcopy(original)
+            lock = process["gpu_lock"]
+            section = lock["cpu_sections"][0]
+            if fault == "missing":
+                lock["cpu_sections"] = []
+                lock["gpu_sections"] = 1
+            elif fault == "locked":
+                section["locked"] = True
+            elif fault == "parent":
+                lock["owner"] = "parent"
+            elif fault == "case":
+                section["case"] = "fp32/last/b1/stage"
+            elif fault == "hash":
+                section["truth_sha256"] = "b" * 64
+            elif fault == "target":
+                process["target"] = "resnet"
+            elif fault == "duplicate":
+                lock["cpu_sections"].append(dict(section))
+                lock["gpu_sections"] += 1
+            elif fault == "proof_missing":
+                lock["cpu_byte_identity"] = []
+            elif fault == "proof_length":
+                lock["cpu_byte_identity"][0]["bytes"] -= 8
+            elif fault == "proof_extra":
+                lock["cpu_byte_identity"].append(
+                    copy.deepcopy(lock["cpu_byte_identity"][0])
+                )
+            elif fault == "cpu_mode":
+                lock["cpu_mode"] = "unknown"
+            elif fault == "proof_owner":
+                lock["cpu_byte_identity"][0]["binding"]["case"] = "wrong"
+            elif fault == "duplicate_row":
+                process["rows"].append(copy.deepcopy(process["rows"][0]))
+            elif fault == "secret_missing":
+                process["rows"].append(
+                    {"id": "fp32/secret/b1/fbank.dft", "secret": True}
+                )
+            else:
+                band = self.band(self.row(key="tf32/first/b1/stage"))
+                process["rows"] = [self.row(key="tf32/first/b1/stage"), band]
+                lock["cpu_sections"] = [
+                    {"work": "stage_f64", "locked": False, **band["stage_truth"]}
+                ]
+                lock["cpu_mode"] = "parallel"
+            with self.subTest(fault=fault), self.assertRaises(qualify.Rejected):
+                qualify.validate_gpu_ownership(process, "numeric")
+
+    def band(self, row):
+        import copy
+
+        return {
+            "id": row["id"] + "/band",
+            "layers": ["fbank.dft"],
+            "seeds": [11, 23, 37, 41, 53, 67, 79, 97],
+            "metrics": [dict(row["first"]) for _ in range(8)],
+            "truth_draws": [dict(row["first"]) for _ in range(8)],
+            "truth_sha256": row["truth_sha256"],
+            "stage_truth": copy.deepcopy(row["stage_truth"]),
+        }
+
+    def test_tf32_uses_the_same_f64_identity_and_fixed_draws(self):
+        import copy
+
+        control = self.row(0.125, "tf32/first/b1/stage")
+        band = self.band(control)
+        coverage = qualify.Coverage.product(["fbank.dft"], [1], ["tf32"])
+        for fault in (None, "worse", "input", "seed", "draw"):
+            candidate, draws = copy.deepcopy(control), copy.deepcopy(band)
+            if fault == "worse":
+                candidate = self.row(0.25, control["id"])
+            elif fault == "input":
+                draws["stage_truth"]["input_sha256"] = "f" * 64
+            elif fault == "seed":
+                draws["seeds"][0] = 12
+            elif fault == "draw":
+                draws["truth_draws"].pop()
+            result = {"target": "fbankdft", "implementation": "Oxide", "checks": []}
+            qualify.numeric(result, [control, draws], [candidate], coverage)
+            checked = next(
+                row
+                for row in result["checks"]
+                if row["check"].startswith("stage_truth:")
+            )
+            self.assertEqual(checked["passed"], fault is None)
+            if fault in (None, "worse"):
+                self.assertEqual(
+                    checked["evidence"]["truth"],
+                    "independent CPU f64, complete stage, same input",
+                )
 
 
 if __name__ == "__main__":

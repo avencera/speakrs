@@ -2,7 +2,7 @@
 
 use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime};
 use serde_json::{Value, json};
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::fs::{File, OpenOptions};
 use std::marker::PhantomData;
 use std::path::Path;
@@ -28,6 +28,98 @@ impl TruthCase {
     pub(crate) fn id(&self) -> &str {
         &self.0
     }
+}
+
+/// One complete deterministic fbank stage reference, bound before any GPU replay
+pub(crate) struct StageTruthCase<'a> {
+    case: String,
+    batch: usize,
+    input: &'a [f32],
+    binding: OnceCell<Value>,
+}
+
+impl<'a> StageTruthCase<'a> {
+    /// Own an immutable view of the exact case input, without a sampling seed
+    pub(crate) fn new(case: &str, batch: usize, input: &'a [f32]) -> Self {
+        assert!((1..=32).contains(&batch));
+        assert_eq!(input.len(), batch * 160_000);
+        assert!(case.ends_with("/stage") || case.ends_with("/stage/switched"));
+        let parts: Vec<_> = case.split('/').collect();
+        assert!(parts.len() == 4 || (parts.len() == 5 && parts[4] == "switched"));
+        assert!(matches!(parts[0], "fp32" | "tf32"));
+        assert_eq!(parts[2], format!("b{batch}"));
+        assert_eq!(parts[3], "stage");
+        assert!(match parts[1] {
+            "first" | "last" => batch == 1,
+            "short" => matches!(batch, 1 | 7),
+            "mixed" => batch >= 2,
+            _ => false,
+        });
+        Self {
+            case: case.to_owned(),
+            batch,
+            input,
+            binding: OnceCell::new(),
+        }
+    }
+
+    /// Return the completed unrounded f64 reference identity for the emitted row
+    pub(crate) fn binding(&self) -> &Value {
+        self.binding
+            .get()
+            .expect("complete stage truth prepared under CPU ownership")
+    }
+
+    fn bind(&self, values: &[f64], constants: Value) {
+        assert_eq!(values.len(), self.batch * 998 * 80);
+        assert!(values.iter().all(|value| value.is_finite()));
+        let parts: Vec<_> = self.case.split('/').collect();
+        assert!(matches!(parts[0], "fp32" | "tf32"));
+        assert_eq!(parts[2], format!("b{}", self.batch));
+        let source = if self.case.ends_with("/switched") {
+            if parts[1] == "short" {
+                "first"
+            } else {
+                "short"
+            }
+        } else {
+            parts[1]
+        };
+        let fixture_rows: Vec<_> = (0..self.batch)
+            .map(|row| match source {
+                "first" => 0,
+                "last" => 17,
+                "short" => 18,
+                "mixed" => row,
+                _ => panic!("fixed fbank stage input set"),
+            })
+            .collect();
+        self.binding
+            .set(json!({
+                "case": self.case, "evaluation": "complete-deterministic", "dtype": "f64",
+                "definition": super::reference::fbank_truth::DEFINITION, "constants": constants,
+                "input_shape": [self.batch, 160_000], "shape": [self.batch, 998, 80],
+                "fixture_rows":fixture_rows,
+                "input_length": self.batch * 160_000, "length": values.len(),
+                "input_sha256": super::sha(self.input),
+                "truth_sha256": super::reference::fbank_truth::sha(values),
+            }))
+            .expect("stage truth is prepared once per case");
+    }
+}
+
+/// Prepare a complete stage reference only while the shared GPU lock is released
+pub(crate) fn stage_truth(
+    runtime: &CudaRuntime,
+    case: &StageTruthCase<'_>,
+    compute: impl FnOnce() -> (Vec<f64>, Value),
+) -> Result<Vec<f64>, CudaError> {
+    cpu(runtime, CpuWork::StageTruth(case), || {
+        assert!(case.input.iter().all(|value| value.is_finite()));
+        let (values, constants) = compute();
+        case.bind(&values, constants);
+        values
+    })
 }
 
 /// One host draw preparation, bound to the replay that consumes it
@@ -58,6 +150,7 @@ impl DrawCase {
 #[derive(Clone, Copy)]
 pub(crate) enum CpuWork<'a> {
     F64(&'a TruthCase),
+    StageTruth(&'a StageTruthCase<'a>),
     Tf32Draws(&'a DrawCase),
 }
 
@@ -65,6 +158,7 @@ impl CpuWork<'_> {
     fn name(self) -> &'static str {
         match self {
             Self::F64(_) => "f64",
+            Self::StageTruth(_) => "stage_f64",
             Self::Tf32Draws(_) => "tf32_draws",
         }
     }
@@ -222,6 +316,12 @@ fn unlocked<T>(work: CpuWork<'_>, compute: impl FnOnce() -> T) -> T {
         let mut evidence = json!({"work": work.name(), "locked": false});
         match work {
             CpuWork::F64(case) => evidence["case"] = json!(case.id()),
+            CpuWork::StageTruth(case) => {
+                evidence
+                    .as_object_mut()
+                    .expect("CPU section")
+                    .extend(case.binding().as_object().expect("stage binding").clone());
+            }
             CpuWork::Tf32Draws(draw) => {
                 evidence["case"] = json!(draw.case);
                 evidence["layer"] = json!(draw.layer);
@@ -230,7 +330,7 @@ fn unlocked<T>(work: CpuWork<'_>, compute: impl FnOnce() -> T) -> T {
             }
         }
         let index = match work {
-            CpuWork::F64(_) => 0,
+            CpuWork::F64(_) | CpuWork::StageTruth(_) => 0,
             CpuWork::Tf32Draws(_) => 1,
         };
         state.cpu_wall_seconds[index] += wall_seconds;
@@ -246,7 +346,7 @@ fn unlocked<T>(work: CpuWork<'_>, compute: impl FnOnce() -> T) -> T {
 
 #[cfg(test)]
 mod tests {
-    use super::{CpuWork, DrawCase, GpuLock, TruthCase, open, unlocked};
+    use super::{CpuWork, DrawCase, GpuLock, StageTruthCase, TruthCase, open, unlocked};
     use crate::inference::cuda::CudaMath;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -302,6 +402,44 @@ mod tests {
                 .unwrap()
                 > 0.0
         );
+        let audio = vec![0.25; 160_000];
+        let stage = StageTruthCase::new("fp32/short/b1/stage/switched", 1, &audio);
+        assert!(catch_unwind(AssertUnwindSafe(|| stage.binding())).is_err());
+        assert!(
+            catch_unwind(AssertUnwindSafe(
+                || stage.bind(&[0.0], serde_json::json!({}))
+            ))
+            .is_err()
+        );
+        let values = unlocked(CpuWork::StageTruth(&stage), || {
+            competing
+                .try_lock()
+                .expect("stage truth runs without GPU ownership");
+            competing.unlock().expect("release competing lock");
+            let values =
+                super::super::cpu::evaluate_mode(super::super::cpu::Mode::Verify, |mode| {
+                    super::super::cpu::ordered_map(mode, 998 * 80, |index| index as f64 * 0.125)
+                });
+            stage.bind(&values, super::super::reference::fbank_truth::constants());
+            values
+        });
+        let binding = stage.binding();
+        assert_eq!(binding["fixture_rows"], serde_json::json!([0]));
+        assert_eq!(binding["input_sha256"], super::super::sha(&audio));
+        assert_eq!(
+            binding["truth_sha256"],
+            super::super::reference::fbank_truth::sha(&values)
+        );
+        assert_eq!(binding["length"], 998 * 80);
+        assert_eq!(binding["evaluation"], "complete-deterministic");
+        let evidence = owner.evidence();
+        assert_eq!(evidence["cpu_sections"][3]["work"], "stage_f64");
+        assert_eq!(
+            evidence["cpu_byte_identity"][1]["binding"],
+            evidence["cpu_sections"][3]
+        );
+        assert_eq!(evidence["cpu_byte_identity"][1]["bytes"], 8 + 998 * 80 * 8);
+        assert!(competing.try_lock().is_err());
         let panic = catch_unwind(AssertUnwindSafe(|| {
             unlocked(CpuWork::Tf32Draws(&draw), || panic!("CPU failure"));
         }));

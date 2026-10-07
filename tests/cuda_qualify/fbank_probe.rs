@@ -2,7 +2,9 @@
 
 use std::cell::RefCell;
 
-use super::{BAND_SEEDS, Run, bursts, capture, metrics, paired, record, sha, timing_row};
+use super::{
+    BAND_SEEDS, Run, bursts, capture, metrics, metrics_f64, paired, record, sha, timing_row,
+};
 use crate::inference::cuda::candidate::{FbankCandidate, FbankSpec, Phases};
 use crate::inference::cuda::fbank::test_support::Library;
 use crate::inference::cuda::test_support::{self, Mutant};
@@ -414,13 +416,16 @@ impl Run<'_> {
         if self.phase == "paired" {
             return self.paired_fbank(rows, &mut op, spec, audio);
         }
-        let truth = if self.phase == "numeric" && self.math == CudaMath::Tf32 {
-            let spec = FbankSpec::new(self.batch, CudaMath::Fp32).map_err(plan_error)?;
-            let mut control = Operator::<Library>::new(self.runtime, spec, "Library", audio)?;
+        let truth = if self.phase == "numeric" {
             let mut values = Vec::new();
-            for which in 0..2 {
-                control.run(self.runtime, which, true)?;
-                values.push(control.output(self.runtime, true)?);
+            for (which, input) in audio.iter().enumerate() {
+                let case =
+                    super::lock::StageTruthCase::new(&self.key("stage", which), self.batch, input);
+                let full = super::lock::stage_truth(self.runtime, &case, || {
+                    let full = super::reference::fbank_truth::stage(input);
+                    (full, super::reference::fbank_truth::constants())
+                })?;
+                values.push((full, case.binding().clone()));
             }
             Some(values)
         } else {
@@ -507,10 +512,6 @@ impl Run<'_> {
                     test_support::round_input(self.runtime, &op.features)?;
                 }
                 let first = op.output(self.runtime, stage)?;
-                let truth_metrics = truth
-                    .as_ref()
-                    .filter(|_| stage)
-                    .map(|values| metrics(&first, &values[which], 80));
                 op.restore(self.runtime, which)?;
                 graphs[which].launch()?;
                 if stage && self.choice == "StageAccuracy" && self.math == CudaMath::Tf32 {
@@ -518,19 +519,21 @@ impl Run<'_> {
                 }
                 let second = op.output(self.runtime, stage)?;
                 let key = self.key(layer, which);
-                record(
-                    rows,
-                    &key,
-                    first,
-                    second,
-                    &expected,
-                    if stage { 80 } else { 1 },
-                    op.declared(),
-                );
                 if stage {
-                    let row = rows.last_mut().expect("stage row");
-                    row["truth"] = json!(truth_metrics);
-                    row["truth_sha256"] = json!(truth.as_ref().map(|values| sha(&values[which])));
+                    let (full, binding) =
+                        &truth.as_ref().expect("numeric CPU f64 stage truth")[which];
+                    let first_truth = metrics_f64(&first, full, 80);
+                    let second_truth = metrics_f64(&second, full, 80);
+                    rows.push(json!({
+                        "id":key, "first":first_truth, "second":second_truth,
+                        "truth":first_truth, "stage_truth":binding,
+                        "truth_sha256":binding["truth_sha256"], "declared":op.declared(),
+                        "bitwise_equal":first.iter().zip(&second).all(|(x,y)| x.to_bits()==y.to_bits()),
+                        "fixture_diagnostic": {"reference":"ORT FP32 tensor/fbank", "acceptance_bound":false,
+                            "first":metrics(&first, &expected, 80), "second":metrics(&second, &expected, 80)},
+                    }));
+                } else {
+                    record(rows, &key, first, second, &expected, 1, op.declared());
                 }
                 if stage && let Some(layers) = &self.band {
                     let mut band = Vec::new();
@@ -542,14 +545,12 @@ impl Run<'_> {
                         test_support::set_band(None);
                         result?;
                         let output = op.output(self.runtime, true)?;
-                        band.push(metrics(&output, &expected, 80));
-                        draws.push(metrics(
-                            &output,
-                            &truth.as_ref().expect("TF32 truth")[which],
-                            80,
-                        ));
+                        let full = &truth.as_ref().expect("CPU f64 stage truth")[which].0;
+                        let measured = metrics_f64(&output, full, 80);
+                        band.push(measured.clone());
+                        draws.push(measured);
                     }
-                    rows.push(json!({"id":format!("{key}/band"),"seeds":BAND_SEEDS,"layers":layers,"metrics":band,"truth_draws":draws,"truth_sha256":sha(&truth.as_ref().expect("TF32 truth")[which])}));
+                    rows.push(json!({"id":format!("{key}/band"),"seeds":BAND_SEEDS,"layers":layers,"metrics":band,"truth_draws":draws,"truth_sha256":truth.as_ref().expect("CPU f64 stage truth")[which].1["truth_sha256"],"stage_truth":truth.as_ref().expect("CPU f64 stage truth")[which].1}));
                 }
             }
         }

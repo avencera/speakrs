@@ -167,6 +167,72 @@ fn metrics(actual: &[f32], expected: &[f32], width: usize) -> Value {
     json!({"relative_l2":(numerator/denominator).sqrt(),"max_abs":max_abs,"minimum_cosine":cosine,"mean_cosine":mean_cosine,"argmax_flips":flips,"sha256":sha(actual),"elements":actual.len()})
 }
 
+/// Full-stage diagnostics against unrounded independent f64 values
+fn metrics_f64(actual: &[f32], expected: &[f64], width: usize) -> Value {
+    assert!(!actual.is_empty());
+    assert_eq!(actual.len(), expected.len());
+    assert!(actual.iter().all(|x| x.is_finite()) && expected.iter().all(|x| x.is_finite()));
+    let mut numerator = 0.0f64;
+    let mut denominator = 0.0f64;
+    let mut max_abs = 0.0f64;
+    for (&a, &r) in actual.iter().zip(expected) {
+        let (x, y) = (f64::from(a), r);
+        numerator += (x - y).powi(2);
+        denominator += y.powi(2);
+        max_abs = max_abs.max((x - y).abs());
+    }
+    assert!(denominator > 0.0);
+    let mut cosine = 1.0f64;
+    let mut cosine_sum = 0.0f64;
+    let mut flips = 0;
+    let mut rows = 0;
+    if width > 1 {
+        for (a, r) in actual.chunks_exact(width).zip(expected.chunks_exact(width)) {
+            let dot = a
+                .iter()
+                .zip(r)
+                .map(|(&x, &y)| f64::from(x) * y)
+                .sum::<f64>();
+            let norm = a.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>().sqrt()
+                * r.iter().map(|&x| x.powi(2)).sum::<f64>().sqrt();
+            let row = if norm > 0.0 { dot / norm } else { -1.0 };
+            cosine = cosine.min(row);
+            cosine_sum += row;
+            rows += 1;
+            let argmax = |v: &[f32]| {
+                v.iter()
+                    .enumerate()
+                    .fold(0, |best, (i, x)| if *x > v[best] { i } else { best })
+            };
+            let expected_argmax = r
+                .iter()
+                .enumerate()
+                .fold(0, |best, (i, x)| if *x > r[best] { i } else { best });
+            flips += usize::from(argmax(a) != expected_argmax);
+        }
+    }
+    let mean_cosine = if rows > 0 {
+        cosine_sum / rows as f64
+    } else {
+        1.0
+    };
+    json!({"relative_l2":(numerator/denominator).sqrt(),"max_abs":max_abs,"minimum_cosine":cosine,"mean_cosine":mean_cosine,"argmax_flips":flips,"sha256":sha(actual),"elements":actual.len()})
+}
+
+#[test]
+fn stage_metrics_keep_f64_errors_and_actual_f32_output_hash() {
+    let actual = [1.0f32, 2.0];
+    let delta = 2.0f64.powi(-30);
+    let expected = [1.0 + delta, 2.0];
+    let measured = metrics_f64(&actual, &expected, 2);
+    assert_eq!(measured["max_abs"], delta);
+    assert_eq!(measured["sha256"], sha(&actual));
+    assert_eq!(measured["elements"], 2);
+    assert_eq!(measured["argmax_flips"], 0);
+    let l2 = delta / ((1.0 + delta).powi(2) + 4.0).sqrt();
+    assert_eq!(measured["relative_l2"], l2);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn record(
     rows: &mut Vec<Value>,
