@@ -30,8 +30,8 @@ lint: clippy python-lint
 test *args:
     cargo test --workspace {{args}}
     cargo test -p speakrs --features "cpu load-dynamic" {{args}}
-    cargo test -p speakrs --no-default-features --features "cuda" {{args}}
-    cargo test -p speakrs --no-default-features --features "cuda-rtx50" {{args}}
+    cargo test -p speakrs --no-default-features --features "online cuda" {{args}}
+    cargo test -p speakrs --no-default-features --features "online cuda-rtx50" {{args}}
 
 test-gpuq-workload:
     tests/gpuq-workload.sh

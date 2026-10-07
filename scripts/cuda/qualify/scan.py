@@ -238,6 +238,10 @@ CANDIDATE_MODULE = ("crate", "inference", "cuda", "candidate")
 # locked items a candidate may name outside its own tree; `Name::*` items allow
 # variants and associated items, the others only the name itself
 CRATE_ITEMS = {
+    ("crate", "inference", "cuda", "implementation", "BoundaryId"): True,
+    ("crate", "inference", "cuda", "implementation", "BroadEvidence"): True,
+    ("crate", "inference", "cuda", "implementation", "ArchitectureSpeed"): True,
+    ("crate", "inference", "cuda", "implementation", "SpeedScope"): True,
     ("crate", "inference", "cuda", "CudaError"): True,
     ("crate", "inference", "cuda", "CudaMath"): True,
     ("crate", "inference", "cuda", "KernelModule"): True,
@@ -246,7 +250,7 @@ CRATE_ITEMS = {
     ("crate", "inference", "cuda", "device", "DeviceAttributes"): True,
     ("crate", "inference", "cuda", "CudaRuntime"): False,
     ("crate", "inference", "cuda", "LoadedKernels"): False,
-    ("crate", "inference", "cuda", "dnn", "Conv2d"): True,
+    ("crate", "inference", "cuda", "geometry", "Conv2d"): True,
     ("crate", "inference", "cuda", "error", "check_len"): False,
     ("crate", "inference", "cuda", "error", "element_count"): False,
     ("crate", "inference", "cuda", "error", "to_c_int"): False,

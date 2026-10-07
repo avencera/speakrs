@@ -544,7 +544,7 @@ class Scan(unittest.TestCase):
             "use crate::inference::cuda::ComputeCapability as CC; let cc = CC::new(12, 0);",
             "use crate::inference::cuda::device::DeviceAttributes as Device; fn sm(d: &Device) { d.multiprocessors(); }",
             "use crate::inference::cuda::candidate::{ConfigPin, ConvPin, ConvKernel, FbankSpec}; let pin = ConfigPin::Conv(ConvPin::Kernel(ConvKernel::C64));",
-            "use crate::inference::cuda::dnn::Conv2d;\nuse crate::inference::cuda::error::check_len;",
+            "use crate::inference::cuda::geometry::Conv2d;\nuse crate::inference::cuda::error::check_len;",
             'let e = crate::inference::cuda::CudaError::Unsupported { context: "x", reason: r };',
             "use cudarc::driver::{CudaStream, LaunchConfig, PushKernelArg};",
             "use cudarc::driver::sys::CUfunction_attribute;",
