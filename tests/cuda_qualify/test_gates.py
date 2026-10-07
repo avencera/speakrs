@@ -1,5 +1,6 @@
 """Gate regression checks. These do not substitute for GPU mutation proof."""
 
+import copy
 import importlib
 import json
 import math
@@ -871,6 +872,91 @@ class Trace(unittest.TestCase):
                 trace.Rejected, "declared boundary has no candidate"
             ):
                 self.attribute(path)
+
+
+class Tf32NegativeEvidence(unittest.TestCase):
+    def fixture(self):
+        truth = {"minimum_cosine": 0.9999, "relative_l2": 0.001, "max_abs": 0.01}
+        metrics = {
+            "minimum_cosine": 1.0,
+            "mean_cosine": 1.0,
+            "relative_l2": 0.0,
+            "max_abs": 0.0,
+            "sha256": "a" * 64,
+        }
+        row = {
+            "id": "tf32/first/b1/stage",
+            "first": dict(metrics),
+            "second": dict(metrics),
+            "bitwise_equal": True,
+            "truth": dict(truth),
+            "truth_sha256": "b" * 64,
+        }
+        band = {
+            "id": row["id"] + "/band",
+            "metrics": [dict(metrics) for _ in range(8)],
+            "truth_sha256": row["truth_sha256"],
+            "seeds": list(range(8)),
+            "truth_draws": [dict(truth) for _ in range(8)],
+        }
+        return row, copy.deepcopy(row), band
+
+    def evaluate(self, candidate, control, band, *, same_fp32=False):
+        result = {"target": "resnet", "implementation": "Oxide", "checks": []}
+        candidates, controls = [candidate], [control, band]
+        if same_fp32:
+            candidates.append({**candidate, "id": "fp32/first/b1/stage"})
+            controls.append({**control, "id": "fp32/first/b1/stage"})
+            self.assertEqual(
+                candidates[0]["first"]["sha256"], candidates[1]["first"]["sha256"]
+            )
+        coverage = qualify.Coverage.product(
+            ["resnet.layer1.0.conv1"], [1], ["fp32", "tf32"]
+        )
+        qualify.numeric(result, controls, candidates, coverage)
+        return next(
+            row
+            for row in result["checks"]
+            if row["check"] == "stage_truth:tf32/first/b1/stage"
+        )
+
+    def test_equal_fp32_and_tf32_outputs_do_not_prove_accuracy(self):
+        candidate, control, band = self.fixture()
+        candidate["truth"]["relative_l2"] = 0.002
+        check = self.evaluate(candidate, control, band, same_fp32=True)
+        self.assertFalse(check["passed"])
+        self.assertIn("less accurate", check["reason"])
+        self.assertEqual(
+            check["evidence"]["bound_components"]["relative_l2"]["candidate"], 0.002
+        )
+
+    def test_fixture_accuracy_cannot_replace_same_input_truth(self):
+        candidate, control, band = self.fixture()
+        self.assertEqual(candidate["first"]["minimum_cosine"], 1.0)
+        candidate.pop("truth")
+        check = self.evaluate(candidate, control, band)
+        self.assertFalse(check["passed"])
+        self.assertIn("missing same-input", check["reason"])
+
+    def test_invalid_truth_identity_metrics_and_draws_fail_closed(self):
+        for fault in ("hash", "nan", "negative", "cosine", "seeds", "draws"):
+            candidate, control, band = self.fixture()
+            if fault == "hash":
+                candidate["truth_sha256"] = "c" * 64
+            elif fault == "nan":
+                candidate["truth"]["max_abs"] = math.nan
+            elif fault == "negative":
+                candidate["truth"]["relative_l2"] = -0.1
+            elif fault == "cosine":
+                candidate["truth"]["minimum_cosine"] = 2.0
+            elif fault == "seeds":
+                band["seeds"] = [0] * 8
+            else:
+                band["truth_draws"].pop()
+            with self.subTest(fault=fault):
+                check = self.evaluate(candidate, control, band)
+                self.assertFalse(check["passed"])
+                self.assertTrue(check["reason"])
 
 
 if __name__ == "__main__":

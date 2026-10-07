@@ -80,6 +80,9 @@ class RecordsFixture(unittest.TestCase):
                 "l2_bytes": 33554432,
                 "driver_version": "580.0",
                 "driver_api_version": 13000,
+                "cuda_version": 12080,
+                "cudnn_version": 90800,
+                "cublas_version": 120804,
             },
             "accepted_tuples": [["lstm.stack", 1, "fp32"]],
             "coverage_declared": {"triples": [["lstm.stack", 1, "fp32"]]},
@@ -106,6 +109,15 @@ class RecordsFixture(unittest.TestCase):
             embedded_ptx_sha256=module["sha256"],
             artifact={"kind": "PtxJit", "sha256": module["sha256"]},
         )
+        self.child["sanitizer_fingerprint"] = {
+            "/lib/libcuda.so.580.0": "1" * 64,
+            "/lib/libcudnn.so.9": "2" * 64,
+            "/lib/libcublas.so.12": "3" * 64,
+        }
+        self.child["numeric"] = {
+            "library": [{"device": copy.deepcopy(self.child["device"])}],
+            "candidate": [{"device": copy.deepcopy(self.child["device"])}],
+        }
         self.child.update(
             target="lstm",
             implementation="Oxide",
@@ -226,6 +238,40 @@ class Records(RecordsFixture):
         other["tier"] = "sm80"
         with self.assertRaisesRegex(records.Rejected, "conflicting production"):
             records.unique_artifact_owners([legacy, other])
+
+    def test_stale_control_environment_cannot_authorize_production(self):
+        for field, value in (
+            ("driver_version", "581.0"),
+            ("cudnn_version", 90900),
+            ("cublas_version", 120805),
+        ):
+            raw = copy.deepcopy(self.record)
+            raw["tiers"]["sm75"]["numeric"]["library"][0]["device"][field] = value
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(records.Rejected, "stale comparison"),
+            ):
+                self.check([{**self.entry, "record": self.store(raw)}])
+
+    def test_same_device_entries_require_one_control_fingerprint(self):
+        raw = copy.deepcopy(self.record)
+        raw["tiers"]["sm75"]["sanitizer_fingerprint"]["/lib/libcudnn.so.9"] = "4" * 64
+        other = {**self.entry, "record": self.store(raw)}
+        with self.assertRaisesRegex(records.Rejected, "different Library fingerprints"):
+            self.check([self.entry, other])
+        summary = records.derive_summaries(
+            [self.entry], self.root, records=self.cache / "records"
+        )
+        other_summary = records.derive_summaries(
+            [other], self.root, records=self.cache / "records"
+        )
+        summary["records"].update(other_summary["records"])
+        path = self.root / records.ACCEPTANCE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(records.canonical_summaries(summary))
+        self.refresh_lock()
+        with self.assertRaisesRegex(records.Rejected, "different Library fingerprints"):
+            records.check_table([self.entry, other], self.root)
 
     def test_positive_and_four_required_negative_cases(self):
         self.assertFalse(self.check([self.entry])["entries"][0]["legacy"])

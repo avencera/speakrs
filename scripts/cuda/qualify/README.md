@@ -1095,3 +1095,22 @@ CPU truth, CPU draws, numeric, timing, paired, profile and sanitizer work. CPU
 truth and draws are subsets of numeric wall time, not extra elapsed time. CPU
 work excludes GPU lock wait; command wall time includes it. A retained eager
 trace is included in profile time. No timing gate uses these wall-time fields.
+
+### Comparison environment receipts
+
+Both table modes require one driver/cuDNN/cuBLAS file fingerprint for all entries
+on one device. New acceptance receipts also bind the queried driver, CUDA,
+cuDNN and cuBLAS versions. Every retained numeric, timing and paired process must
+match the record's device and versions, including the frozen Library controls.
+The locked-summary mode checks the derived receipt; raw-record mode derives it
+again from the immutable record.
+
+The three exact PR #36 record hashes use an explicit legacy receipt. Those records
+have installed Library file hashes but no per-process version query. Their receipt
+retains those file hashes and this evidence gap. It does not invent version fields
+or extend the mapping to other records.
+
+TF32 negative tests cover equal FP32/TF32 outputs with worse candidate accuracy,
+a max-absolute-error-only failure, fixture-only accuracy, invalid truth identity,
+invalid metrics or draws, and stale comparison environments. The truth rule remains
+`max(unperturbed Library error, maximum draw error)` for each metric.

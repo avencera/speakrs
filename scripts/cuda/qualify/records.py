@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 import artifacts
+import environment
 from assets import cache_directory
 from gates import Rejected
 from lock import ROOT
@@ -168,6 +169,12 @@ INFRASTRUCTURE_AMENDMENTS = [
         "acceptance_sha256": "96dac61ad53f015646b391a18febe024e5d2706c25075a9767caa8b5cd976d7e",
         "infrastructure_sha256": "bea5240a8503e375116533eac1237659182c109e78c34baf5e1c6be7b1652aa6",
         "reason": "Typed selection domain: plans build from the fixed producer pin; no algorithm changes",
+    },
+    {
+        "path": "src/inference/cuda/candidate.rs",
+        "acceptance_sha256": "abb8ecaef15c5771a4c058203e48d47b80845b55f6bd17672f348faf4e59e110",
+        "infrastructure_sha256": "00206550965eee79ec7a5669d1f36b512056a8f9c5e0ddb17f1d7ab8cb61e39c",
+        "reason": "Filterbank producer interface and compiled host candidate tests; existing candidate algorithms are unchanged",
     },
 ]
 
@@ -804,6 +811,9 @@ def check_table_records(
                 "device_capability": capability,
                 "artifact": recorded_artifact,
                 "device": recorded_device,
+                "environment": environment.collect(
+                    child, legacy=legacy, recorded_device=recorded_device
+                ),
                 "legacy": legacy,
                 "source_evidence_gap": gap,
                 "shared_source_amendment": SHARED_SOURCE_AMENDMENT if legacy else None,
@@ -825,6 +835,7 @@ def check_table_records(
                 "tuples": [list(row) for row in sorted(selected)],
             }
         )
+    environment.consistent(evidence)
     return {"entries": evidence}
 
 
@@ -839,6 +850,7 @@ SUMMARY_FIELDS = {
     "device_capability",
     "artifact",
     "device",
+    "environment",
     "legacy",
     "source_evidence_gap",
     "shared_source_amendment",
@@ -1155,6 +1167,7 @@ def check_table(
         if not triples(entry["coverage"]) <= accepted:
             raise Rejected("table: tuples outside accepted summary")
         evidence.append(summary)
+    environment.consistent(evidence)
     if (
         records is not None
         and canonical_summaries(derive_summaries(entries, root, records=records)) != raw

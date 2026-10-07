@@ -27,9 +27,29 @@
       },
       "device_capability": "12.0",
       "device_name": "NVIDIA GeForce RTX 5070 Ti",
+      "environment": {
+        "device": {
+          "compute_capability": "12.0",
+          "name": "NVIDIA GeForce RTX 5070 Ti"
+        },
+        "kind": "LegacyInstalledLibraries",
+        "libraries": {
+          "/usr/lib/x86_64-linux-gnu/libcuda.so.580.95.05": "f27223c58d4c0d2ead3c2d747eb30a530c449f89c42e16b23e9bef04f3e6dc2e",
+          "/usr/lib/x86_64-linux-gnu/libcudnn.so.9.8.0": "72f74476dcdc074b9d56f8c5cf576ceff6a595989832b9b0798478dc48a4ffcd",
+          "/usr/lib/x86_64-linux-gnu/libcudnn_adv.so.9.8.0": "fe1f1468f2af89ebb80446cbb822d823ebf01509111faed8c271131ef53f0db2",
+          "/usr/lib/x86_64-linux-gnu/libcudnn_cnn.so.9.8.0": "39f017b44b7a1b17b2a8ce8d139b3b7e71e7c6f73eb2e3393b828edfc516753a",
+          "/usr/lib/x86_64-linux-gnu/libcudnn_engines_precompiled.so.9.8.0": "ea76b125b1f43d123d8501339578af615af71765d7cb586dbdcb231ed338ce06",
+          "/usr/lib/x86_64-linux-gnu/libcudnn_engines_runtime_compiled.so.9.8.0": "7304751cddcc95e7a30b1cb8fe9ce82c9146862ed5882f245c2572994db58f9f",
+          "/usr/lib/x86_64-linux-gnu/libcudnn_graph.so.9.8.0": "8adf356b5509ee8b5f28846a81387ebca6de12ea6b19858f9b2f43c0f0e3fe2b",
+          "/usr/lib/x86_64-linux-gnu/libcudnn_heuristic.so.9.8.0": "7a6044a3df8e5642cc7356aff57c856fcc06ff37c8dd932de4540b47325050a0",
+          "/usr/lib/x86_64-linux-gnu/libcudnn_ops.so.9.8.0": "3d50a4f59aeb54dfc01ef66489e48925156c083e20e1ece423eb388f9e60d013",
+          "/usr/local/cuda-12.8/targets/x86_64-linux/lib/libcublas.so.12.8.4.1": "031ce6c2cbfbb9468f040527cab5c599069ce5609e73e28f87503881063eac21",
+          "/usr/local/cuda-12.8/targets/x86_64-linux/lib/libcublasLt.so.12.8.4.1": "10b5e6631cf8115c661eb895ed1533826308b58f7956466f53d236a40c9b622c"
+        }
+      },
       "files": {
         "host_sources": {
-          "src/inference/cuda/candidate.rs": "abb8ecaef15c5771a4c058203e48d47b80845b55f6bd17672f348faf4e59e110",
+          "src/inference/cuda/candidate.rs": "00206550965eee79ec7a5669d1f36b512056a8f9c5e0ddb17f1d7ab8cb61e39c",
           "src/inference/cuda/candidate/lstm.rs": "8a52b696bc9a46059509cdeddd669e92921f3d960df2098860bd85ba0810d6f2",
           "src/inference/cuda/candidate/lstm/layout.rs": "478adba61b4c5f2b21d22147b7f0e73768164831559f711a4d8653f04de77e8c"
         },
@@ -73,6 +93,12 @@
           "infrastructure_sha256": "8a52b696bc9a46059509cdeddd669e92921f3d960df2098860bd85ba0810d6f2",
           "path": "src/inference/cuda/candidate/lstm.rs",
           "reason": "Typed selection domain: plans build from the legacy cooperative pin; no algorithm changes"
+        },
+        {
+          "acceptance_sha256": "abb8ecaef15c5771a4c058203e48d47b80845b55f6bd17672f348faf4e59e110",
+          "infrastructure_sha256": "00206550965eee79ec7a5669d1f36b512056a8f9c5e0ddb17f1d7ab8cb61e39c",
+          "path": "src/inference/cuda/candidate.rs",
+          "reason": "Filterbank producer interface and compiled host candidate tests; existing candidate algorithms are unchanged"
         }
       ],
       "legacy": true,
@@ -439,9 +465,29 @@
       },
       "device_capability": "12.0",
       "device_name": "NVIDIA GeForce RTX 5070 Ti",
+      "environment": {
+        "device": {
+          "compute_capability": "12.0",
+          "name": "NVIDIA GeForce RTX 5070 Ti"
+        },
+        "kind": "LegacyInstalledLibraries",
+        "libraries": {
+          "/usr/lib/x86_64-linux-gnu/libcuda.so.580.95.05": "f27223c58d4c0d2ead3c2d747eb30a530c449f89c42e16b23e9bef04f3e6dc2e",
+          "/usr/lib/x86_64-linux-gnu/libcudnn.so.9.8.0": "72f74476dcdc074b9d56f8c5cf576ceff6a595989832b9b0798478dc48a4ffcd",
+          "/usr/lib/x86_64-linux-gnu/libcudnn_adv.so.9.8.0": "fe1f1468f2af89ebb80446cbb822d823ebf01509111faed8c271131ef53f0db2",
+          "/usr/lib/x86_64-linux-gnu/libcudnn_cnn.so.9.8.0": "39f017b44b7a1b17b2a8ce8d139b3b7e71e7c6f73eb2e3393b828edfc516753a",
+          "/usr/lib/x86_64-linux-gnu/libcudnn_engines_precompiled.so.9.8.0": "ea76b125b1f43d123d8501339578af615af71765d7cb586dbdcb231ed338ce06",
+          "/usr/lib/x86_64-linux-gnu/libcudnn_engines_runtime_compiled.so.9.8.0": "7304751cddcc95e7a30b1cb8fe9ce82c9146862ed5882f245c2572994db58f9f",
+          "/usr/lib/x86_64-linux-gnu/libcudnn_graph.so.9.8.0": "8adf356b5509ee8b5f28846a81387ebca6de12ea6b19858f9b2f43c0f0e3fe2b",
+          "/usr/lib/x86_64-linux-gnu/libcudnn_heuristic.so.9.8.0": "7a6044a3df8e5642cc7356aff57c856fcc06ff37c8dd932de4540b47325050a0",
+          "/usr/lib/x86_64-linux-gnu/libcudnn_ops.so.9.8.0": "3d50a4f59aeb54dfc01ef66489e48925156c083e20e1ece423eb388f9e60d013",
+          "/usr/local/cuda-12.8/targets/x86_64-linux/lib/libcublas.so.12.8.4.1": "031ce6c2cbfbb9468f040527cab5c599069ce5609e73e28f87503881063eac21",
+          "/usr/local/cuda-12.8/targets/x86_64-linux/lib/libcublasLt.so.12.8.4.1": "10b5e6631cf8115c661eb895ed1533826308b58f7956466f53d236a40c9b622c"
+        }
+      },
       "files": {
         "host_sources": {
-          "src/inference/cuda/candidate.rs": "abb8ecaef15c5771a4c058203e48d47b80845b55f6bd17672f348faf4e59e110",
+          "src/inference/cuda/candidate.rs": "00206550965eee79ec7a5669d1f36b512056a8f9c5e0ddb17f1d7ab8cb61e39c",
           "src/inference/cuda/candidate/conv.rs": "fec622a1dcfa08cec6a313975a288eef70fc1c5d1e13e4736815dff8eca2253b"
         },
         "kernel_sources": {
@@ -484,6 +530,12 @@
           "infrastructure_sha256": "fec622a1dcfa08cec6a313975a288eef70fc1c5d1e13e4736815dff8eca2253b",
           "path": "src/inference/cuda/candidate/conv.rs",
           "reason": "Typed selection domain: plans build from the legacy wave-rule pin with the same tiling choice; no algorithm changes"
+        },
+        {
+          "acceptance_sha256": "abb8ecaef15c5771a4c058203e48d47b80845b55f6bd17672f348faf4e59e110",
+          "infrastructure_sha256": "00206550965eee79ec7a5669d1f36b512056a8f9c5e0ddb17f1d7ab8cb61e39c",
+          "path": "src/inference/cuda/candidate.rs",
+          "reason": "Filterbank producer interface and compiled host candidate tests; existing candidate algorithms are unchanged"
         }
       ],
       "legacy": true,
@@ -1207,9 +1259,29 @@
       },
       "device_capability": "12.0",
       "device_name": "NVIDIA GeForce RTX 5070 Ti",
+      "environment": {
+        "device": {
+          "compute_capability": "12.0",
+          "name": "NVIDIA GeForce RTX 5070 Ti"
+        },
+        "kind": "LegacyInstalledLibraries",
+        "libraries": {
+          "/usr/lib/x86_64-linux-gnu/libcuda.so.580.95.05": "f27223c58d4c0d2ead3c2d747eb30a530c449f89c42e16b23e9bef04f3e6dc2e",
+          "/usr/lib/x86_64-linux-gnu/libcudnn.so.9.8.0": "72f74476dcdc074b9d56f8c5cf576ceff6a595989832b9b0798478dc48a4ffcd",
+          "/usr/lib/x86_64-linux-gnu/libcudnn_adv.so.9.8.0": "fe1f1468f2af89ebb80446cbb822d823ebf01509111faed8c271131ef53f0db2",
+          "/usr/lib/x86_64-linux-gnu/libcudnn_cnn.so.9.8.0": "39f017b44b7a1b17b2a8ce8d139b3b7e71e7c6f73eb2e3393b828edfc516753a",
+          "/usr/lib/x86_64-linux-gnu/libcudnn_engines_precompiled.so.9.8.0": "ea76b125b1f43d123d8501339578af615af71765d7cb586dbdcb231ed338ce06",
+          "/usr/lib/x86_64-linux-gnu/libcudnn_engines_runtime_compiled.so.9.8.0": "7304751cddcc95e7a30b1cb8fe9ce82c9146862ed5882f245c2572994db58f9f",
+          "/usr/lib/x86_64-linux-gnu/libcudnn_graph.so.9.8.0": "8adf356b5509ee8b5f28846a81387ebca6de12ea6b19858f9b2f43c0f0e3fe2b",
+          "/usr/lib/x86_64-linux-gnu/libcudnn_heuristic.so.9.8.0": "7a6044a3df8e5642cc7356aff57c856fcc06ff37c8dd932de4540b47325050a0",
+          "/usr/lib/x86_64-linux-gnu/libcudnn_ops.so.9.8.0": "3d50a4f59aeb54dfc01ef66489e48925156c083e20e1ece423eb388f9e60d013",
+          "/usr/local/cuda-12.8/targets/x86_64-linux/lib/libcublas.so.12.8.4.1": "031ce6c2cbfbb9468f040527cab5c599069ce5609e73e28f87503881063eac21",
+          "/usr/local/cuda-12.8/targets/x86_64-linux/lib/libcublasLt.so.12.8.4.1": "10b5e6631cf8115c661eb895ed1533826308b58f7956466f53d236a40c9b622c"
+        }
+      },
       "files": {
         "host_sources": {
-          "src/inference/cuda/candidate.rs": "abb8ecaef15c5771a4c058203e48d47b80845b55f6bd17672f348faf4e59e110",
+          "src/inference/cuda/candidate.rs": "00206550965eee79ec7a5669d1f36b512056a8f9c5e0ddb17f1d7ab8cb61e39c",
           "src/inference/cuda/candidate/sinc.rs": "bea5240a8503e375116533eac1237659182c109e78c34baf5e1c6be7b1652aa6"
         },
         "kernel_sources": {
@@ -1252,6 +1324,12 @@
           "infrastructure_sha256": "bea5240a8503e375116533eac1237659182c109e78c34baf5e1c6be7b1652aa6",
           "path": "src/inference/cuda/candidate/sinc.rs",
           "reason": "Typed selection domain: plans build from the fixed producer pin; no algorithm changes"
+        },
+        {
+          "acceptance_sha256": "abb8ecaef15c5771a4c058203e48d47b80845b55f6bd17672f348faf4e59e110",
+          "infrastructure_sha256": "00206550965eee79ec7a5669d1f36b512056a8f9c5e0ddb17f1d7ab8cb61e39c",
+          "path": "src/inference/cuda/candidate.rs",
+          "reason": "Filterbank producer interface and compiled host candidate tests; existing candidate algorithms are unchanged"
         }
       ],
       "legacy": true,
