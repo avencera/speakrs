@@ -185,7 +185,7 @@ fn fixture(
 
 enum Route {
     Library,
-    Candidate(FbankOxide),
+    Candidate(Box<FbankOxide>),
     Lookup(LookupPlan<CudaSlice<f32>>),
     Mutant(Mutant),
 }
@@ -262,7 +262,7 @@ impl Operator {
                 let candidate = token
                     .fbank(runtime, spec)?
                     .expect("qualification refusals are typed errors, never Library");
-                Route::Candidate(candidate)
+                Route::Candidate(Box::new(candidate))
             }
             name => Route::Mutant(Mutant::parse(name).expect("applicable fbank mutant")),
         };
