@@ -37,6 +37,9 @@ pub(crate) fn pin_json(pin: ConfigPin) -> Value {
         ConfigPin::Fbank(FbankPin::FftMelAccurate) => {
             json!({"kind":"Fbank", "selection":"FftMelAccurate"})
         }
+        ConfigPin::Segdense(pin) => {
+            json!({"kind":"Segdense", "kernel": pin.config().kernel, "splits": pin.splits()})
+        }
     }
 }
 

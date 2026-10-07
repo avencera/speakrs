@@ -149,6 +149,7 @@ pub const AREAS: &[Area] = &[
     Area::new("resnet", &[Tier::Sm75]),
     Area::new("lstm", &[Tier::Sm75]),
     Area::new("sincnet", &[Tier::Sm75]),
+    Area::new("segdense", &[Tier::Sm75, Tier::Sm80]),
 ];
 
 /// One PTX file: an area built for one tier

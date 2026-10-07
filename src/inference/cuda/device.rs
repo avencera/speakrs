@@ -108,6 +108,11 @@ pub(crate) mod test_support {
             self
         }
 
+        pub(crate) fn shared_optin_bytes(mut self, bytes: u32) -> Self {
+            self.0.shared_optin_bytes = bytes;
+            self
+        }
+
         pub(crate) fn name(mut self, name: &str) -> Self {
             self.0.name = name.into();
             self

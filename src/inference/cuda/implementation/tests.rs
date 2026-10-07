@@ -1410,6 +1410,10 @@ fn plan_from_pin(
             context: "fbank.dft production proof",
             reason: "no candidate or production entry exists before the kernel port".to_owned(),
         }),
+        ConfigPin::Segdense(_) => Err(CudaError::Unsupported {
+            context: "segdense production proof",
+            reason: "no production entry exists before the routing port".to_owned(),
+        }),
         ConfigPin::Conv(pin) => {
             let trunk = [FBANK_MEL_BINS, FBANK_FRAMES];
             let ([in_channels, out_channels], stride, input) = match pin.shape() {

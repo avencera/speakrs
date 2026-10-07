@@ -34,12 +34,14 @@ use cudarc::driver::{
     CudaEvent, CudaSlice, CudaStream, CudaView, CudaViewMut, DeviceRepr, ValidAsZeroBits,
 };
 
+use super::device::DeviceAttributes;
 pub(crate) use super::error::{GeometryError, WeightFault};
 use super::geometry::Conv2d;
 use super::{CudaError, CudaMath, CudaRuntime, KernelModule, LoadedKernels, PtxTier, Sgemm};
 
 mod conv;
 mod lstm;
+mod segdense;
 mod sinc;
 
 #[cfg(test)]
@@ -68,10 +70,16 @@ mod kernel_inventory {
 #[cfg(test)]
 pub(super) use lstm::REQUIRED_KERNELS as LSTM_KERNELS;
 #[cfg(test)]
+pub(super) use segdense::REQUIRED_KERNELS as SEGDENSE_KERNELS;
+#[cfg(test)]
 pub(super) use sinc::REQUIRED_KERNELS as SINC_KERNELS;
 
 pub(crate) use conv::Oxide as ConvOxide;
 pub(crate) use lstm::Oxide as LstmOxide;
+// the routing port selects these plans
+pub(crate) use segdense::SegdensePin;
+#[allow(unused_imports)]
+pub(crate) use segdense::{DenseOxide, SegConvOxide};
 pub(crate) use sinc::Oxide as SincOxide;
 
 /// A planning refusal that is distinct from a CUDA or model error
@@ -127,6 +135,8 @@ pub(crate) enum ConfigPin {
     Sinc(SincPin),
     /// The filterbank energy producer before log and temporal normalization
     Fbank(FbankPin),
+    /// A segmentation convolution, dense head or the embedding projection
+    Segdense(SegdensePin),
 }
 
 impl ConfigPin {
@@ -137,6 +147,7 @@ impl ConfigPin {
             Self::Lstm(_) => KernelModule::Lstm,
             Self::Sinc(_) => KernelModule::Sincnet,
             Self::Fbank(_) => KernelModule::FbankDft,
+            Self::Segdense(_) => KernelModule::Segdense,
         }
     }
 
@@ -1151,22 +1162,27 @@ pub(crate) trait DenseCandidate: Sized {
     fn coverage(_tier: PtxTier) -> Coverage {
         Self::COVERAGE
     }
-    /// Configuration used by qualification
-    fn implemented_pin(spec: DenseSpec) -> Result<Self::Pin, PlanError>;
-    /// Build outside measured intervals from the owner-supplied loaded module
+    /// The configuration a deterministic rule picks for the loaded module's `tier`
+    /// and `device`
+    fn implemented_pin(
+        spec: DenseSpec,
+        tier: PtxTier,
+        device: &DeviceAttributes,
+    ) -> Result<Self::Pin, PlanError>;
+    /// Build a plan outside measured intervals; weights may be packed here once
     fn plan(
         runtime: &CudaRuntime,
         kernels: &LoadedKernels,
         spec: DenseSpec,
+        weight: &CudaSlice<f32>,
+        bias: &CudaSlice<f32>,
         pin: Self::Pin,
     ) -> Result<Self, PlanError>;
-    /// Write the complete output on the runtime stream
+    /// Write the complete output on the runtime stream, with the planned weights
     fn enqueue(
         &self,
-        x: &CudaView<'_, f32>,
-        weight: &CudaView<'_, f32>,
-        bias: &CudaView<'_, f32>,
-        output: &mut CudaViewMut<'_, f32>,
+        x: &CudaSlice<f32>,
+        output: &mut CudaSlice<f32>,
         phases: &Phases,
         runtime: &CudaRuntime,
     ) -> Result<(), CudaError>;
@@ -1267,21 +1283,27 @@ pub(crate) trait SegConvCandidate: Sized {
     fn coverage(_tier: PtxTier) -> Coverage {
         Self::COVERAGE
     }
-    /// Configuration used by qualification
-    fn implemented_pin(spec: SegConvSpec) -> Result<Self::Pin, PlanError>;
-    /// Build outside measured intervals from the owner-supplied loaded module
+    /// The configuration a deterministic rule picks for the loaded module's `tier`
+    /// and `device`
+    fn implemented_pin(
+        spec: SegConvSpec,
+        tier: PtxTier,
+        device: &DeviceAttributes,
+    ) -> Result<Self::Pin, PlanError>;
+    /// Build a plan outside measured intervals; weights may be packed here once
     fn plan(
         runtime: &CudaRuntime,
         kernels: &LoadedKernels,
         spec: SegConvSpec,
+        weight: &CudaSlice<f32>,
         pin: Self::Pin,
     ) -> Result<Self, PlanError>;
-    /// Write every raw NCW output value, without bias, on the runtime stream
+    /// Write every raw NCW output value, without bias, on the runtime stream, with
+    /// the planned weights
     fn enqueue(
         &self,
-        x: &CudaView<'_, f32>,
-        weight: &CudaView<'_, f32>,
-        output: &mut CudaViewMut<'_, f32>,
+        x: &CudaSlice<f32>,
+        output: &mut CudaSlice<f32>,
         phases: &Phases,
         runtime: &CudaRuntime,
     ) -> Result<(), CudaError>;

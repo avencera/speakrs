@@ -15,6 +15,7 @@ mod embedding;
 mod fbank;
 mod resnet;
 mod runtime;
+mod segdense;
 mod segmentation;
 
 use std::path::PathBuf;
