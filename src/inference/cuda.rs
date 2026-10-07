@@ -14,11 +14,12 @@
 //!
 //! Only the option and error types are public; everything else is internal
 
-/// Tier-only builds and the explicit driver-only feature reject optional libraries
+/// Target-only builds contain no optional numerical libraries
 const fn driver_only() -> bool {
-    !cfg!(feature = "cuda") || cfg!(feature = "cuda-driver-only")
+    !cfg!(feature = "_cuda-libraries")
 }
 
+#[cfg(feature = "_cuda-libraries")]
 mod blas;
 mod buffer;
 // kernel workers' candidates consume this interface; until one lands, parts of it
@@ -26,21 +27,24 @@ mod buffer;
 #[allow(dead_code)]
 mod candidate;
 mod device;
+#[cfg(feature = "_cuda-libraries")]
 mod dnn;
 mod embedding;
 mod error;
 mod fbank;
+mod gemm;
+mod geometry;
 mod implementation;
 #[cfg(test)]
 mod kernel_inventory_tests;
 mod kernels;
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 mod libraries;
 #[cfg(all(test, target_os = "linux"))]
 mod loader_tests;
 mod math;
 mod options;
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 mod probe;
 mod runtime;
 mod segmentation;
@@ -48,24 +52,26 @@ mod session;
 mod tier;
 mod weights;
 
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 mod test_support;
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 mod tests;
 
-use blas::Sgemm;
 pub(crate) use buffer::DeviceTensor;
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
-use dnn::{Conv2d, ConvPlanner};
+#[cfg(all(test, feature = "_cuda-libraries"))]
+use dnn::ConvPlanner;
 pub(crate) use embedding::{EMBEDDING_DIM, EmbeddingBatch, ResNetEmbedding, SPEAKERS_PER_CHUNK};
 pub use error::{CudaError, CudaLibrary, GeometryError, WeightFault};
 pub(crate) use fbank::{
     CudaFbank, FBANK_FRAMES, FBANK_MEL_BINS, FBANK_WINDOW_SAMPLES, FbankBuffers,
 };
+use gemm::Sgemm;
+#[cfg(all(test, feature = "_cuda-libraries"))]
+use geometry::Conv2d;
 use kernels::{KernelModule, LoadedKernels};
 pub use math::CudaMath;
 pub use options::CudaGraphs;
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 pub use options::CudaLstmAlgorithm;
 pub(crate) use runtime::CudaRuntime;
 pub(crate) use segmentation::{CudaSegmentation, SegmentationOptions};

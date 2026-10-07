@@ -11,7 +11,7 @@ use crate::inference::cuda::candidate::{
     ConvCandidate, ConvInputs, ConvLayerSpec, Coverage, DenseCandidate, DenseSite, DenseSpec,
     Epilogue, Phases, SegConvCandidate, SegConvSite, SegConvSpec,
 };
-use crate::inference::cuda::dnn::Conv2d;
+use crate::inference::cuda::geometry::Conv2d;
 use crate::inference::cuda::implementation::BoundaryId;
 use crate::inference::cuda::kernels::{LoadedArtifact, ModuleRequest};
 use crate::inference::cuda::{

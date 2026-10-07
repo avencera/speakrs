@@ -1,11 +1,11 @@
 use std::collections::HashMap;
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 use std::sync::MutexGuard;
 use std::sync::{Arc, Mutex};
 
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 use cudarc::cublas::CudaBlas;
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 use cudarc::cudnn::Cudnn;
 use cudarc::driver::sys::CUresult;
 use cudarc::driver::{CudaContext, CudaStream, DriverError};
@@ -14,11 +14,11 @@ use tracing::debug;
 
 use super::device::DeviceAttributes;
 use super::error::CudaLibrary;
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 use super::kernels::LoadedArtifact;
 use super::kernels::{ArtifactHash, ArtifactLoadError, ModuleRequest};
 use super::{ComputeCapability, CudaError, KernelModule, LoadedKernels, PtxTier};
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 use super::{CudaMath, libraries::Libraries};
 
 /// One CUDA device context and stream, with optional libraries prepared by plans
@@ -32,7 +32,7 @@ use super::{CudaMath, libraries::Libraries};
 #[derive(Debug)]
 pub struct CudaRuntime {
     // plans live in the session state; library handles must drop before driver state
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     libraries: Libraries,
     stream: Arc<CudaStream>,
     context: Arc<CudaContext>,
@@ -93,7 +93,7 @@ impl CudaRuntime {
         let stream = context.new_stream()?;
 
         let runtime = Self {
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda-libraries")]
             libraries: Libraries::default(),
             context,
             stream,
@@ -162,7 +162,7 @@ impl CudaRuntime {
         CudaError::LibraryForbidden { library }
     }
 
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     fn library_policy(&self, library: CudaLibrary) -> Result<(), CudaError> {
         if super::driver_only() {
             return Err(Self::library_forbidden(library));
@@ -171,28 +171,28 @@ impl CudaRuntime {
     }
 
     /// Prepare a library during construction, never during forward or capture
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     pub(super) fn prepare_library(&self, library: CudaLibrary) -> Result<(), CudaError> {
         self.library_policy(library)?;
         self.libraries.prepare(library, &self.stream)
     }
 
     /// The already prepared cuBLAS handle
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     pub fn blas(&self) -> Result<&CudaBlas, CudaError> {
         self.library_policy(CudaLibrary::Cublas)?;
         self.libraries.blas()
     }
 
     /// Keep cuBLAS mode selection and enqueue atomic
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     pub(super) fn lock_blas(&self, math: CudaMath) -> Result<MutexGuard<'_, CudaMath>, CudaError> {
         self.library_policy(CudaLibrary::Cublas)?;
         self.libraries.lock_blas(math)
     }
 
     /// The already prepared cuDNN handle
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     pub fn dnn(&self) -> Result<&Arc<Cudnn>, CudaError> {
         self.library_policy(CudaLibrary::Cudnn)?;
         self.libraries.dnn()
@@ -215,7 +215,7 @@ impl CudaRuntime {
     /// The best embedded artifact an explicit qualification asks for: the highest
     /// embedded variant within the tier limit, as the device's exact cubin when
     /// embedded, otherwise PTX JIT
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     pub(crate) fn embedded_exact_request(
         &self,
         module: KernelModule,
@@ -283,7 +283,7 @@ impl CudaRuntime {
             request.check_cached(loaded.request())?;
             return Ok(loaded.clone());
         }
-        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        #[cfg(all(test, feature = "_cuda-libraries"))]
         super::test_support::assert_module_load_allowed();
         let (inner, artifact) = super::kernels::load_artifact(
             requested,
@@ -307,7 +307,7 @@ impl CudaRuntime {
             ptx_sha256,
         );
         debug!(embedded_ptx_sha256 = %loaded.ptx_sha256(), "CUDA embedded PTX identity");
-        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        #[cfg(all(test, feature = "_cuda-libraries"))]
         super::test_support::record_artifact(
             module,
             tier,
@@ -497,7 +497,7 @@ mod direct_request_tests {
     }
 }
 
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 mod module_policy_tests {
     use super::{
         ArtifactHash, ComputeCapability, CudaError, CudaRuntime, KernelModule, ModuleRequest,

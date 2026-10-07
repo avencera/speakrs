@@ -28,18 +28,26 @@ coreml = [
     "dep:objc2-foundation",
     "_backend",
 ]
-# native NVIDIA backend: optional libraries and committed cuda-oxide PTX through cudarc, with
-# safetensors weights; no ONNX Runtime
-cuda = ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120", "cudarc/cublas", "cudarc/cudnn", "dep:libloading"]
-cuda-driver-only = ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120"]
+# Linux-only native NVIDIA backend; CUDA is never part of default
+# cuda includes all target kernels plus cuDNN and cuBLAS for hybrid selection
+cuda = ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120", "_cuda-libraries"]
+# internal: optional numerical libraries, added only by cuda
+_cuda-libraries = ["_cuda", "cudarc/cublas", "cudarc/cudnn", "dep:libloading"]
 # internal: driver and committed PTX, without optional numerical libraries
 _cuda = ["dep:cudarc", "dep:safetensors", "dep:sha2", "_backend"]
-# each GPU target embeds every area's best shipped variant for that target
-# tier-only builds use the driver without optional numerical libraries
+# each target embeds every area's best shipped variant for that target
+# default-features = false with cuda-rtx50 alone is a driver-only build
 cuda-sm75 = ["_cuda"]
 cuda-sm80 = ["_cuda"]
 cuda-sm90 = ["_cuda"]
 cuda-sm120 = ["_cuda"]
+# RTX 20: Turing; RTX 30: Ampere; RTX 40: Ada; A100: Ampere
+cuda-rtx20 = ["cuda-sm75"]
+cuda-rtx30 = ["cuda-sm80"]
+cuda-rtx40 = ["cuda-sm80"]
+cuda-a100 = ["cuda-sm80"]
+# RTX 50: consumer Blackwell
+cuda-rtx50 = ["cuda-sm120"]
 migraphx = ["_ort", "ort/migraphx", "_backend"]
 # load ONNX Runtime at run time instead of linking it; only for the `cpu` and `migraphx`
 # backends
@@ -52,7 +60,7 @@ _backend = []
 _metrics = []
 
 [package.metadata.docs.rs]
-features = ["cpu", "cuda", "cuda-driver-only", "cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120", "migraphx", "load-dynamic", "_metrics"]
+features = ["cpu", "cuda", "cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120", "migraphx", "load-dynamic", "_metrics"]
 
 [dependencies]
 sha2 = { version = "0.10", optional = true }

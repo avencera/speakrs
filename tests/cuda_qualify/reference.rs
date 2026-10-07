@@ -4,7 +4,7 @@ use super::cpu;
 
 #[path = "fbank_truth.rs"]
 pub(super) mod fbank_truth;
-use crate::inference::cuda::dnn::Conv2d;
+use crate::inference::cuda::geometry::Conv2d;
 use crate::inference::cuda::weights::uniform;
 use std::collections::BTreeSet;
 

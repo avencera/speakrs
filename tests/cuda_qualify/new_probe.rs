@@ -8,7 +8,7 @@ use crate::inference::cuda::candidate::{
     ConvCandidate, ConvInputs, ConvLayerSpec, DenseSite, DenseSpec, Epilogue, Phases, SegConvSite,
     SegConvSpec,
 };
-use crate::inference::cuda::dnn::Conv2d;
+use crate::inference::cuda::geometry::Conv2d;
 use crate::inference::cuda::implementation::BoundaryId;
 use crate::inference::cuda::segmentation::harness::{DenseLibrary, SegConvLibrary};
 use crate::inference::cuda::test_support::{

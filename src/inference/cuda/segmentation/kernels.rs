@@ -146,7 +146,7 @@ impl SegmentationKernels {
         ]
         .map(|len| len as u64);
 
-        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        #[cfg(all(test, feature = "_cuda-libraries"))]
         let _fixed = super::super::test_support::fixed("segmentation_pool_norm");
         let mut launch = runtime.stream().launch_builder(&self.pool_norm);
         launch
@@ -209,7 +209,7 @@ impl SegmentationKernels {
         let threads = to_u32(context, x.len())?;
         let bias_len = bias.len() as u64;
         let x_len = x.len() as u64;
-        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        #[cfg(all(test, feature = "_cuda-libraries"))]
         let _fixed = super::super::test_support::fixed("segmentation_bias_leaky");
         let mut launch = runtime.stream().launch_builder(&self.bias_leaky);
         launch
@@ -247,7 +247,7 @@ impl SegmentationKernels {
         let bias_len = bias.len() as u64;
         // the kernel takes `[f32; 7]` elements, so its length counts rows
         let rows_len = rows as u64;
-        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        #[cfg(all(test, feature = "_cuda-libraries"))]
         let _fixed = super::super::test_support::fixed("segmentation_bias_log_softmax");
         let mut launch = runtime.stream().launch_builder(&self.bias_log_softmax);
         launch.arg(bias).arg(&bias_len).arg(logits).arg(&rows_len);

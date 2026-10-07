@@ -10,7 +10,7 @@ use crate::inference::cuda::candidate::{
     Batches, CoverageEntry, FiniteContract, InfinityContract, Maths, NanContract, PlanError,
     SignedZeroContract, SpecialValues,
 };
-use crate::inference::cuda::dnn::Conv2d;
+use crate::inference::cuda::geometry::Conv2d;
 use crate::inference::cuda::implementation::BoundaryId;
 use crate::inference::cuda::kernels::{ArtifactHash, LoadedArtifact};
 use std::cell::Cell;

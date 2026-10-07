@@ -80,7 +80,7 @@ impl DeviceAttributes {
     }
 }
 
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 pub(crate) mod test_support {
     use std::num::NonZeroU32;
 

@@ -8,7 +8,7 @@
 /// on an RTX 5070 Ti with CUDA graphs on
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 pub enum CudaLstmAlgorithm {
     /// One GEMM for the input projections of all steps, then a recurrent GEMM per step,
     /// as ONNX Runtime's CUDA execution provider runs it

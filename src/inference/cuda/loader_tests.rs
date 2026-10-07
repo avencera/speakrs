@@ -28,7 +28,7 @@ fn no_libraries(maps: &str) {
 fn options(math: CudaMath) -> SegmentationOptions {
     SegmentationOptions {
         math,
-        #[cfg(feature = "cuda")]
+        #[cfg(feature = "_cuda-libraries")]
         lstm_algo: super::CudaLstmAlgorithm::PersistStaticSmallH,
         cuda_graph: true,
     }
@@ -104,7 +104,7 @@ fn loader_proof() -> Result<(), Box<dyn Error>> {
         );
         rejected(CudaFbank::new(&runtime, math).unwrap_err(), &runtime, math);
     }
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     for library in [CudaLibrary::Cublas, CudaLibrary::Cudnn, CudaLibrary::Nvrtc] {
         assert!(matches!(
             runtime.prepare_library(library),

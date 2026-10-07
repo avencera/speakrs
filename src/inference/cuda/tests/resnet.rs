@@ -4,7 +4,8 @@
 use super::super::candidate::{
     ConvCandidate, ConvInputs, ConvLayerSpec, ConvOxide, Phases, PlanError,
 };
-use super::super::dnn::{Conv2d, ConvPlanner, Residual};
+use super::super::dnn::ConvPlanner;
+use super::super::geometry::{Conv2d, Residual};
 use super::super::{CudaError, CudaMath};
 use super::runtime;
 

@@ -1925,7 +1925,7 @@ fn qualification_driver() -> Result<(), CudaError> {
 /// cuBLAS input projections at every shape the locked helper can issue in the harness
 fn projection_baseline(runtime: &CudaRuntime) -> Result<(), CudaError> {
     runtime.prepare_library(crate::inference::cuda::CudaLibrary::Cublas)?;
-    use crate::inference::cuda::blas::Sgemm;
+    use crate::inference::cuda::gemm::Sgemm;
     let mut shapes = Vec::new();
     for math in [CudaMath::Fp32, CudaMath::Tf32] {
         for k in [60, 256] {

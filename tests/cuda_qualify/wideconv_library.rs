@@ -4,7 +4,8 @@ use crate::inference::cuda::candidate::{
     ConvCandidate, ConvInputs, ConvLayerSpec, Coverage, Epilogue, FiniteContract, InfinityContract,
     NanContract, Phases, PlanError, SignedZeroContract, SpecialValues,
 };
-use crate::inference::cuda::dnn::{Conv2d, ConvPlan, ConvPlanner, Residual};
+use crate::inference::cuda::dnn::{ConvPlan, ConvPlanner};
+use crate::inference::cuda::geometry::{Conv2d, Residual};
 use crate::inference::cuda::{CudaError, CudaRuntime, KernelModule, LoadedKernels};
 use cudarc::driver::{
     CudaFunction, CudaSlice, CudaStream, CudaViewMut, LaunchConfig, PushKernelArg,

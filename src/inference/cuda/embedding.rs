@@ -36,9 +36,9 @@ use tracing::debug;
 use self::dispatch::Plan;
 use self::kernels::{ChannelBias, EmbeddingKernels, PoolShape};
 use self::trunk::{ConvLayer, STEM_SLOT, Trunk};
-use super::dnn::Residual;
 use super::error::{check_len, element_count};
 use super::fbank::{FBANK_FRAMES, FBANK_MEL_BINS};
+use super::geometry::Residual;
 use super::implementation::{
     AreaTarget, BoundaryId, LibraryNeed, MODEL_BATCHES, Selected, plan_selection,
 };
@@ -133,7 +133,7 @@ impl ResNetEmbedding {
                         layer.boundary(),
                         batch,
                         math,
-                        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+                        #[cfg(all(test, feature = "_cuda-libraries"))]
                         None,
                     )?,
                     Selected::Library
@@ -236,7 +236,7 @@ impl ResNetEmbedding {
             output: DeviceTensor::zeros(stream, &[rows, EMBEDDING_DIM])?,
             plans,
             workspace: stream.alloc_zeros(workspace_bytes.max(1))?,
-            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            #[cfg(all(test, feature = "_cuda-libraries"))]
             qualification: std::collections::BTreeMap::new(),
             graph: None,
         })
@@ -269,7 +269,7 @@ pub struct EmbeddingBatch {
     plans: Vec<(String, Plan)>,
     /// cuDNN workspace shared by every plan, sized for the largest
     workspace: CudaSlice<u8>,
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     qualification: std::collections::BTreeMap<&'static str, super::test_support::boundaries::Owner>,
     graph: Option<ForwardGraph>,
 }
@@ -363,12 +363,12 @@ impl EmbeddingBatch {
             output,
             plans,
             workspace,
-            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            #[cfg(all(test, feature = "_cuda-libraries"))]
             qualification,
             ..
         } = self;
         let model = &**model;
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(feature = "_cuda-libraries"))]
         let _ = workspace;
         let chunks = *chunks;
         let math = model.math;
@@ -376,12 +376,12 @@ impl EmbeddingBatch {
             runtime,
             kernels: &model.kernels,
             plans,
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda-libraries")]
             workspace,
             chunks,
-            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            #[cfg(all(test, feature = "_cuda-libraries"))]
             qualification: Some(qualification),
-            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            #[cfg(all(test, feature = "_cuda-libraries"))]
             math: model.math,
         };
 
@@ -400,15 +400,15 @@ impl EmbeddingBatch {
         // residual operand
         let (scratch_buffer, stem_buffer) = read_write(trunk, 1 - STEM_SLOT);
         let mut stem_out = stem_buffer.slice_mut(..stem_len);
-        #[cfg(feature = "cuda")]
+        #[cfg(feature = "_cuda-libraries")]
         let scratch = scratch_buffer.slice(..stem_len);
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(feature = "_cuda-libraries"))]
         let _ = scratch_buffer;
         convs.conv_bias_relu(
             stem,
             &stem_input.as_view(),
             Residual::None {
-                #[cfg(feature = "cuda")]
+                #[cfg(feature = "_cuda-libraries")]
                 scratch: &scratch,
             },
             &mut stem_out,
@@ -428,13 +428,13 @@ impl EmbeddingBatch {
             // the block output buffer is free until the second convolution, so it
             // stands in as the first convolution's unused residual operand
             let mut hidden_out = hidden.slice_mut(..output_len);
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda-libraries")]
             let scratch = block_out.as_view();
             convs.conv_bias_relu(
                 &block.conv1,
                 &input,
                 Residual::None {
-                    #[cfg(feature = "cuda")]
+                    #[cfg(feature = "_cuda-libraries")]
                     scratch: &scratch,
                 },
                 &mut hidden_out,
@@ -446,9 +446,9 @@ impl EmbeddingBatch {
             let mut shortcut_out = shortcut.slice_mut(..output_len.min(shortcut.len()));
             let residual = match &block.shortcut {
                 Some(layer) => {
-                    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+                    #[cfg(all(test, feature = "_cuda-libraries"))]
                     convs.conv_bias(layer, &input, &mut shortcut_out)?;
-                    #[cfg(not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))))]
+                    #[cfg(not(all(test, feature = "_cuda-libraries")))]
                     {
                         convs.conv(layer, &input, &mut shortcut_out)?;
                         convs.bias(layer, &mut shortcut_out)?;
@@ -499,7 +499,7 @@ impl EmbeddingBatch {
             math,
             ..Sgemm::new(rows, EMBEDDING_DIM, 2 * columns)
         };
-        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        #[cfg(all(test, feature = "_cuda-libraries"))]
         super::test_support::boundaries::run(
             qualification.get("resnet.seg_1"),
             runtime,
@@ -528,7 +528,7 @@ impl EmbeddingBatch {
                 runtime.sgemm(gemm, &pooled, model.head_weight.data(), output)
             },
         )?;
-        #[cfg(not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))))]
+        #[cfg(not(all(test, feature = "_cuda-libraries")))]
         {
             model.kernels.broadcast_rows(
                 runtime,
@@ -560,16 +560,16 @@ impl EmbeddingBatch {
 
 /// Convolution plus epilogue launches for one forward pass
 struct Convs<'a> {
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     qualification: Option<
         &'a std::collections::BTreeMap<&'static str, super::test_support::boundaries::Owner>,
     >,
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     math: CudaMath,
     runtime: &'a CudaRuntime,
     kernels: &'a EmbeddingKernels,
     plans: &'a [(String, Plan)],
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     workspace: &'a mut CudaSlice<u8>,
     chunks: usize,
 }
@@ -588,7 +588,7 @@ impl<'a> Convs<'a> {
     }
 
     /// `y = conv(x, layer.weight)`
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     fn conv_bias(
         &mut self,
         layer: &ConvLayer,
@@ -645,7 +645,7 @@ impl<'a> Convs<'a> {
         x: &CudaView<'_, f32>,
         y: &mut CudaViewMut<'_, f32>,
     ) -> Result<(), CudaError> {
-        #[cfg(feature = "cuda")]
+        #[cfg(feature = "_cuda-libraries")]
         {
             let plan = self.plan(layer)?.library()?;
             plan.forward(
@@ -655,7 +655,7 @@ impl<'a> Convs<'a> {
                 y,
             )
         }
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(feature = "_cuda-libraries"))]
         {
             let _ = (layer, x, y);
             Err(CudaError::Unsupported {
@@ -701,10 +701,10 @@ fn pool_columns(trunk: &Trunk) -> usize {
     channels * bins
 }
 
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 #[path = "../../../tests/cuda_qualify/embedding.rs"]
 pub(crate) mod test_support;
 
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 #[path = "../../../tests/cuda_qualify/wideconv_library.rs"]
 pub(crate) mod wideconv_library;

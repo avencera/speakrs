@@ -93,7 +93,7 @@ pub(crate) struct HostInputs {
 
 /// Exact convolution geometry and weights with no CUDA owner
 pub(crate) struct HostReference {
-    spec: crate::inference::cuda::dnn::Conv2d,
+    spec: crate::inference::cuda::geometry::Conv2d,
     weight: Vec<f32>,
     bias: Vec<f32>,
 }

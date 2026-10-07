@@ -43,10 +43,7 @@ impl fmt::Debug for RecordHash {
 pub(crate) enum SpeedScope {
     /// One measured card: its capability, SM count and driver-reported name
     // the first new record adds a point binding; until then only tests construct one
-    #[cfg_attr(
-        not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))),
-        allow(dead_code)
-    )]
+    #[cfg_attr(not(all(test, feature = "_cuda-libraries")), allow(dead_code))]
     Point {
         capability: ComputeCapability,
         multiprocessors: u32,
@@ -144,10 +141,7 @@ pub(crate) enum SpeedStatus {
     Measured(SpeedEvidence),
     /// Accuracy-qualified only; production uses Library while libraries exist
     // no accepted proof is speed-unmeasured yet; tests construct one
-    #[cfg_attr(
-        not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))),
-        allow(dead_code)
-    )]
+    #[cfg_attr(not(all(test, feature = "_cuda-libraries")), allow(dead_code))]
     Unmeasured,
 }
 

@@ -3,7 +3,8 @@
 use super::kernels::SegmentationKernels;
 use super::shape::LEAKY_SLOPE;
 use crate::inference::cuda::candidate::{DenseEpilogue, DenseSpec, Phases, PlanError, SegConvSpec};
-use crate::inference::cuda::dnn::{Conv2d, ConvPlan, ConvPlanner};
+use crate::inference::cuda::dnn::{ConvPlan, ConvPlanner};
+use crate::inference::cuda::geometry::Conv2d;
 use crate::inference::cuda::{CudaError, CudaRuntime, Sgemm};
 use cudarc::driver::CudaSlice;
 use std::cell::RefCell;

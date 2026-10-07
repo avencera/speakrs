@@ -23,7 +23,7 @@ use super::{
     CoverageEntry, FiniteContract, GeometryError, InfinityContract, Maths, NanContract, Op, Phases,
     PlanError, SignedZeroContract, SpecialValues,
 };
-use crate::inference::cuda::dnn::Conv2d;
+use crate::inference::cuda::geometry::Conv2d;
 use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, LoadedKernels};
 
 const SPK_RESNET_PACK_WEIGHTS: &str = "spk_resnet_pack_weights";

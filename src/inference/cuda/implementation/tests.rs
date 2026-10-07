@@ -1388,7 +1388,7 @@ fn plan_from_pin(
     token: super::Qualified,
 ) -> Result<bool, CudaError> {
     use crate::inference::cuda::candidate::{ConvLayerSpec, LstmLayerWeights, LstmSpec, SincSpec};
-    use crate::inference::cuda::dnn::Conv2d;
+    use crate::inference::cuda::geometry::Conv2d;
     use crate::inference::cuda::{FBANK_FRAMES, FBANK_MEL_BINS};
 
     let stream = runtime.stream();

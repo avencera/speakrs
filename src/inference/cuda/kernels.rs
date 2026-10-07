@@ -223,7 +223,7 @@ pub(super) fn load_artifact<T, E>(
 /// `cargo xtask cuda-kernels build` regenerates `ptx/<area>.<tier>.ptx` on a GPU box,
 /// and `cargo xtask cuda-kernels check` fails when that PTX is stale. Each GPU tier
 /// feature embeds the best shipped variant of each area for that target. The `cuda`
-/// and `cuda-driver-only` features enable all four targets and embed all variants
+/// feature enables all four targets and embeds all shipped variants
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum KernelModule {
@@ -274,7 +274,7 @@ impl KernelModule {
     }
 
     /// The build metadata embedded beside this area's artifact bytes
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     pub(crate) const fn manifest(self) -> &'static str {
         match self {
             #[cfg(test)]
@@ -355,7 +355,7 @@ pub struct AreaPtx {
 
 impl AreaPtx {
     /// Embedded variants without cubins, for host-only tests such as a fake higher tier
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     pub(crate) fn fixture(variants: &[(PtxTier, &'static str)]) -> Self {
         let mut area = Self::baseline(None);
         for (tier, text) in variants {

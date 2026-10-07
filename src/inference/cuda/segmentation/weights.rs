@@ -5,7 +5,7 @@ use super::shape::{
 
 /// ONNX LSTM gates are stored `[i, o, f, c]`; cuDNN gate `g` is ONNX gate
 /// `ONNX_GATE[g]`, because cuDNN orders them `[i, f, c, o]`
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 pub(super) const ONNX_GATE: [usize; 4] = [0, 2, 3, 1];
 
 /// Half the SincNet filter length; the filters are symmetric around one center tap

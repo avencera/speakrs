@@ -201,14 +201,13 @@ jobs:
           cargo clippy -p speakrs --all-targets --no-default-features --features "online cuda" -- -D warnings
           cargo clippy -p speakrs --all-targets --no-default-features --features cuda-sm75 -- -D warnings
           cargo clippy -p speakrs --all-targets --no-default-features --features cuda-sm120 -- -D warnings
-          cargo clippy -p speakrs --all-targets --no-default-features --features cuda-driver-only -- -D warnings
-          cargo clippy -p speakrs --all-targets --no-default-features --features cuda,cuda-driver-only -- -D warnings
+          cargo clippy -p speakrs --all-targets --no-default-features --features cuda-rtx50 -- -D warnings
           cargo test -p speakrs --no-default-features --features "online cuda"
       - name: Check minimal CUDA targets and feature errors
         shell: bash
         run: |
           set -euo pipefail
-          for features in cuda-sm75 cuda-sm80 cuda-sm90 cuda-sm120 cuda-sm80,cuda-sm120 cuda-driver-only; do
+          for features in cuda-sm75 cuda-sm80 cuda-sm90 cuda-sm120 cuda-sm80,cuda-sm120 cuda-rtx20 cuda-rtx30 cuda-rtx40 cuda-a100 cuda-rtx50; do
             cargo check -p speakrs --no-default-features --features "$features"
             cargo test -p speakrs --no-default-features --features "$features" --lib inference::cuda::tier::tests
             cargo test -p speakrs --no-default-features --features "$features" --lib inference::cuda::kernels::tests

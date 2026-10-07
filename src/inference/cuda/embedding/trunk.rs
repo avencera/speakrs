@@ -1,6 +1,6 @@
-use super::super::dnn::Conv2d;
+use super::super::geometry::Conv2d;
 use super::super::implementation::BoundaryId;
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 use super::super::implementation::Choice;
 use super::super::{CudaError, CudaMath, CudaRuntime, DeviceTensor, SafetensorsFile};
 
@@ -64,7 +64,7 @@ pub(super) struct ConvLayer {
 /// Per-layer ownership is separate from the shared cuDNN shape plans
 #[derive(Debug)]
 struct LayerPlan {
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     override_choice: Option<Choice>,
     boundary: BoundaryId,
 }
@@ -100,7 +100,7 @@ impl ConvLayer {
             bias,
             shape,
             plan: LayerPlan {
-                #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+                #[cfg(all(test, feature = "_cuda-libraries"))]
                 override_choice: None,
                 boundary,
             },
@@ -112,7 +112,7 @@ impl ConvLayer {
         self.shape.conv(batch, math)
     }
 
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     pub(super) fn override_choice(&self) -> Option<Choice> {
         self.plan.override_choice
     }
@@ -163,7 +163,7 @@ impl ConvLayer {
     }
 }
 
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 mod test_support;
 
 /// A ResNet basic block: two 3x3 convolutions and a residual connection, with a

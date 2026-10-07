@@ -64,7 +64,7 @@ impl ConvPlan {
         w: &CudaView<'_, f32>,
         y: &mut CudaViewMut<'_, f32>,
     ) -> Result<(), CudaError> {
-        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        #[cfg(all(test, feature = "_cuda-libraries"))]
         let _library = super::super::test_support::call("cudnn.conv");
         self.check(workspace, x, w, y)?;
         let forward = ConvForward {
@@ -104,7 +104,7 @@ impl ConvPlan {
         residual: Residual<'_, '_>,
         y: &mut CudaViewMut<'_, f32>,
     ) -> Result<(), CudaError> {
-        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        #[cfg(all(test, feature = "_cuda-libraries"))]
         let _library = super::super::test_support::call("cudnn.conv");
         self.check(workspace, x, w, y)?;
         check_len("conv2d bias", self.spec.out_channels, bias.len())?;

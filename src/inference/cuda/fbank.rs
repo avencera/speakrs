@@ -21,7 +21,7 @@
 
 mod constants;
 
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 #[path = "../../../tests/cuda_qualify/fbank.rs"]
 pub(crate) mod test_support;
 
@@ -82,10 +82,7 @@ pub enum MelProjection {
     /// The measured alternative to the default; only the parity tests and the benchmark
     /// select it
     // the dense control is not used by production or driver-only tests
-    #[cfg_attr(
-        not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))),
-        allow(dead_code)
-    )]
+    #[cfg_attr(not(all(test, feature = "_cuda-libraries")), allow(dead_code))]
     Gemm,
 }
 
@@ -212,7 +209,7 @@ impl CudaFbank {
             .slice(..rows * FBANK_FRAMES * FBANK_MEL_BINS))
     }
 
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     /// Computes features for waveform rows already on the device
     ///
     /// `waveform` is `[rows, FBANK_WINDOW_SAMPLES]` with shorter audio zero padded, at
@@ -330,7 +327,7 @@ impl CudaFbank {
         let window_len = self.window.len() as u64;
         let frames_len = frames.len() as u64;
 
-        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        #[cfg(all(test, feature = "_cuda-libraries"))]
         let _scope = super::test_support::fixed(FBANK_FRAME_WINDOW);
         let mut launch = runtime.stream().launch_builder(&self.frame_window);
         launch
@@ -368,7 +365,7 @@ impl CudaFbank {
         let spectrum_len = spectrum.len() as u64;
         let power_len = power.len() as u64;
 
-        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        #[cfg(all(test, feature = "_cuda-libraries"))]
         let _scope = super::test_support::fixed(FBANK_POWER);
         let mut launch = runtime.stream().launch_builder(&self.power);
         launch
@@ -398,7 +395,7 @@ impl CudaFbank {
         let weights_len = self.mel_weights.len() as u64;
         let energies_len = energies.len() as u64;
 
-        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        #[cfg(all(test, feature = "_cuda-libraries"))]
         let _scope = super::test_support::fixed(FBANK_MEL_SPARSE);
         let mut launch = runtime.stream().launch_builder(&self.mel_sparse);
         launch
@@ -440,7 +437,7 @@ impl CudaFbank {
         let energies_len = energies.len() as u64;
         let features_len = features.len() as u64;
 
-        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        #[cfg(all(test, feature = "_cuda-libraries"))]
         let _scope = super::test_support::fixed(FBANK_LOG_CMN);
         let mut launch = runtime.stream().launch_builder(&self.log_cmn);
         launch

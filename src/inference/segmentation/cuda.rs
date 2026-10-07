@@ -56,7 +56,7 @@ impl CudaSegmentationBackend {
 
         let options = SegmentationOptions {
             math: config.cuda_segmentation_math,
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda-libraries")]
             lstm_algo: config.cuda_lstm_algorithm,
             cuda_graph: config.cuda_graphs.enabled(),
         };

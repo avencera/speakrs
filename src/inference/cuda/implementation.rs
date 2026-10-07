@@ -64,7 +64,7 @@ pub(crate) use evidence::{
     Binding, RecordHash, SpeedEvidence, SpeedScope, SpeedStatus, TupleProof,
 };
 
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 use super::candidate::{Batches, Coverage, CoverageEntry, Maths};
 use super::candidate::{
     ConfigPin, ConvCandidate, ConvLayerSpec, ConvOxide, LstmCandidate, LstmOxide, LstmSpec,
@@ -109,12 +109,12 @@ pub(crate) enum Selection {
     /// An accepted production-table entry
     Production,
     /// An explicit or qualification request
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     Explicit,
 }
 
 /// Implementation requests used only by the qualification controls
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Choice {
     #[default]
@@ -132,7 +132,7 @@ pub(crate) enum Choice {
 pub(crate) enum Selected {
     Library,
     Oxide(Qualified),
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     Mutant(super::test_support::Mutant),
 }
 
@@ -274,7 +274,7 @@ enum PlanPin {
     /// The pin an accepted proof names
     Pinned(ConfigPin),
     /// The candidate's own implemented configuration, for qualification only
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     Implemented,
 }
 
@@ -287,7 +287,7 @@ pub(crate) enum TokenEvidence {
         speed: SpeedEvidence,
     },
     /// An explicit qualification control, which grants no production evidence
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     Qualification,
 }
 
@@ -369,7 +369,7 @@ impl Qualified {
                 scope = ?speed.scope,
                 "CUDA production evidence"
             ),
-            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            #[cfg(all(test, feature = "_cuda-libraries"))]
             TokenEvidence::Qualification => {}
         }
         Ok(loaded)
@@ -457,12 +457,12 @@ impl Qualified {
         let pin = match self.pin {
             PlanPin::Pinned(ConfigPin::Conv(pin)) => Ok(pin),
             PlanPin::Pinned(other) => return Err(self.foreign_pin(other)),
-            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            #[cfg(all(test, feature = "_cuda-libraries"))]
             PlanPin::Implemented => ConvOxide::implemented_pin(&spec),
         };
         let plan = pin.and_then(|pin| {
             let plan = ConvOxide::plan(runtime, &kernels, spec, pin)?;
-            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            #[cfg(all(test, feature = "_cuda-libraries"))]
             super::test_support::configuration::record(
                 self.boundary.name(),
                 self.batch,
@@ -491,12 +491,12 @@ impl Qualified {
         let pin = match self.pin {
             PlanPin::Pinned(ConfigPin::Sinc(pin)) => Ok(pin),
             PlanPin::Pinned(other) => return Err(self.foreign_pin(other)),
-            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            #[cfg(all(test, feature = "_cuda-libraries"))]
             PlanPin::Implemented => SincOxide::implemented_pin(&spec),
         };
         let plan = pin.and_then(|pin| {
             let plan = SincOxide::plan(runtime, &kernels, spec, pin)?;
-            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            #[cfg(all(test, feature = "_cuda-libraries"))]
             super::test_support::configuration::record(
                 self.boundary.name(),
                 self.batch,
@@ -519,12 +519,12 @@ impl Qualified {
         let pin = match self.pin {
             PlanPin::Pinned(ConfigPin::Lstm(pin)) => Ok(pin),
             PlanPin::Pinned(other) => return Err(self.foreign_pin(other)),
-            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            #[cfg(all(test, feature = "_cuda-libraries"))]
             PlanPin::Implemented => LstmOxide::implemented_pin(&spec),
         };
         let plan = pin.and_then(|pin| {
             let plan = LstmOxide::plan(runtime, &kernels, spec, pin)?;
-            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            #[cfg(all(test, feature = "_cuda-libraries"))]
             super::test_support::configuration::record(
                 self.boundary.name(),
                 self.batch,
@@ -543,7 +543,7 @@ impl Qualified {
 pub(crate) struct SelectionError;
 
 /// Select a pinned tuple for an already loaded module; uncovered tuples use Library
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 pub(crate) fn select(
     boundary: BoundaryId,
     batch: usize,
@@ -578,7 +578,7 @@ pub(crate) trait Modules {
 
     /// The best embedded artifact an explicit qualification request asks for,
     /// resolved without loading
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     fn embedded_exact(&self, area: KernelModule) -> Result<ModuleRequest, CudaError>;
 }
 
@@ -595,7 +595,7 @@ impl Modules for &CudaRuntime {
         Ok(self.load_module(request)?.request())
     }
 
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     fn embedded_exact(&self, area: KernelModule) -> Result<ModuleRequest, CudaError> {
         self.embedded_exact_request(area)
     }
@@ -607,12 +607,10 @@ pub(crate) fn plan_selection(
     boundary: BoundaryId,
     batch: usize,
     math: CudaMath,
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))] override_choice: Option<
-        Choice,
-    >,
+    #[cfg(all(test, feature = "_cuda-libraries"))] override_choice: Option<Choice>,
 ) -> Result<Selected, CudaError> {
     let request = PlanRequest::Production;
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     let request = override_choice.map_or_else(
         || match super::test_support::default_choice(Choice::Oxide(Selection::Production)) {
             Choice::Oxide(Selection::Production) => request,
@@ -627,7 +625,7 @@ pub(crate) fn plan_selection(
 #[derive(Debug, Clone, Copy)]
 enum PlanRequest {
     Production,
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     Qualification(Choice),
 }
 
@@ -646,7 +644,7 @@ impl PlanRequest {
             });
         }
 
-        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        #[cfg(all(test, feature = "_cuda-libraries"))]
         if let Self::Qualification(choice) = self {
             match choice {
                 Choice::Library => return Ok(Selected::Library),
@@ -718,7 +716,7 @@ fn artifact_refusal(error: CudaError, library_allowed: bool) -> Result<Selected,
     Err(error)
 }
 
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 fn candidate_coverage(area: KernelModule, tier: PtxTier) -> Coverage {
     match area {
         KernelModule::Resnet => ConvOxide::coverage(tier),
@@ -730,7 +728,7 @@ fn candidate_coverage(area: KernelModule, tier: PtxTier) -> Coverage {
 
 /// The explicit request of the highest-precedence candidate whose implemented
 /// coverage declares this tuple at its best embedded tier, resolved before loading
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 fn explicit_request(
     modules: &impl Modules,
     boundary: BoundaryId,
@@ -751,7 +749,7 @@ fn explicit_request(
 }
 
 /// Resolve explicit routes from implemented coverage before loading an artifact
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 fn explicit_route(
     boundary: BoundaryId,
     batch: usize,
@@ -769,7 +767,7 @@ fn explicit_route(
     Ok(None)
 }
 
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 fn qualification_selection(
     choice: Choice,
     boundary: BoundaryId,
@@ -815,7 +813,7 @@ fn qualification_selection(
 /// This only enumerates the speed-accepted tuples of a binding whose PTX JIT pin is the
 /// embedded PTX of its tier. Actual plans still need the successful loaded artifact to
 /// obtain a production token through `plan_selection`
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 pub(crate) fn legacy_fixture_coverage(
     area: KernelModule,
     device: &DeviceAttributes,
@@ -889,9 +887,9 @@ impl LibraryNeed {
         if super::driver_only() {
             return Err(self.error());
         }
-        #[cfg(feature = "cuda")]
+        #[cfg(feature = "_cuda-libraries")]
         return runtime.prepare_library(self.library);
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(feature = "_cuda-libraries"))]
         {
             let _ = runtime;
             Err(self.error())
@@ -907,7 +905,7 @@ impl LibraryNeed {
     }
 }
 
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 mod golden_tests;
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 mod tests;

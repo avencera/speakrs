@@ -35,7 +35,7 @@ fn plans() -> Vec<(KernelModule, Vec<&'static str>)> {
         (KernelModule::Lstm, candidate::LSTM_KERNELS.to_vec()),
         (KernelModule::Sincnet, candidate::SINC_KERNELS.to_vec()),
     ];
-    #[cfg(all(feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(feature = "_cuda-libraries")]
     let plans = {
         let mut plans = plans;
         plans.push((KernelModule::Probe, super::probe::REQUIRED_KERNELS.to_vec()));

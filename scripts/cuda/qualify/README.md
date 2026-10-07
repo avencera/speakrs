@@ -930,7 +930,7 @@ locked Rust harness changes, before collecting a new baseline.
 
 ## Phase 2a ownership and production policy
 
-Qualification builds use `cuda`, never `cuda-driver-only`. Library controls construct
+Qualification builds use `cuda` (which enables `_cuda-libraries`), never a target-only feature. Library controls construct
 Library plans; candidates construct Oxide plans from a test-only qualification token.
 Production selection uses the boundary, batch, math, actual area PTX tier, and exact
 device capability. Production model batches are 1 and 32; 7, 33 and 64 remain stress

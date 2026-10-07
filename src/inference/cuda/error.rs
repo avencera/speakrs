@@ -1,9 +1,9 @@
 use std::fmt;
 use std::path::PathBuf;
 
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 use cudarc::cublas::result::CublasError;
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 use cudarc::cudnn::CudnnError;
 use cudarc::driver::DriverError;
 use safetensors::SafeTensorError;
@@ -200,11 +200,11 @@ pub enum CudaError {
     Driver(#[from] DriverError),
     /// cuBLAS returned an error
     #[error("cuBLAS: {0}")]
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     Cublas(#[from] CublasError),
     /// cuDNN returned an error
     #[error("cuDNN: {0}")]
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     Cudnn(#[from] CudnnError),
     /// The driver could not load an embedded PTX module
     #[error("loading PTX module `{module}`: {source}")]
@@ -378,7 +378,7 @@ impl CudaError {
 }
 
 /// Converts a dimension for a cuBLAS or cuDNN call
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 pub(super) fn to_c_int(context: &'static str, value: usize) -> Result<i32, CudaError> {
     i32::try_from(value).map_err(|_| CudaError::DimensionOverflow { context, value })
 }

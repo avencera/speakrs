@@ -34,8 +34,8 @@ use cudarc::driver::{
     CudaEvent, CudaSlice, CudaStream, CudaView, CudaViewMut, DeviceRepr, ValidAsZeroBits,
 };
 
-use super::dnn::Conv2d;
 pub(crate) use super::error::{GeometryError, WeightFault};
+use super::geometry::Conv2d;
 use super::{CudaError, CudaMath, CudaRuntime, KernelModule, LoadedKernels, PtxTier, Sgemm};
 
 mod conv;
@@ -783,23 +783,23 @@ impl<'a> LstmPhases<'a> {
     }
 }
 
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 #[path = "candidate_test_support.rs"]
 pub(crate) mod test_support;
 
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 use test_support::{projection_scope, sub_scope};
 
 /// Production opens no harness scope
-#[cfg(not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))))]
+#[cfg(not(all(test, feature = "_cuda-libraries")))]
 struct NoScope;
 
-#[cfg(not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))))]
+#[cfg(not(all(test, feature = "_cuda-libraries")))]
 fn sub_scope(_name: impl FnOnce() -> String) -> NoScope {
     NoScope
 }
 
-#[cfg(not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))))]
+#[cfg(not(all(test, feature = "_cuda-libraries")))]
 fn projection_scope(_stream: &CudaStream, _layer: usize, _direction: Direction) -> NoScope {
     NoScope
 }
@@ -855,7 +855,7 @@ impl SideStream {
     pub(crate) fn new(runtime: &CudaRuntime) -> Result<Self, CudaError> {
         let context = runtime.context();
         let stream = context.new_stream()?;
-        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        #[cfg(all(test, feature = "_cuda-libraries"))]
         super::test_support::register_side_stream(&stream);
         Ok(Self {
             stream,
@@ -1036,7 +1036,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 #[path = "candidate_tests.rs"]
 mod candidate_tests;
 
