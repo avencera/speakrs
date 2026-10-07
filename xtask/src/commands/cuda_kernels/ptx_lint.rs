@@ -13,7 +13,7 @@ pub(super) fn check_shared_truncation(ptx: &str) -> Result<()> {
     let sites = shared_truncations(ptx);
     if !sites.is_empty() {
         bail!(
-            "generic shared address reaches a 32-bit truncation; use cvta.to.shared before narrowing:\n    {}",
+            "generic shared address reaches a narrowing conversion; use cvta.to.shared before narrowing:\n    {}",
             sites.join("\n    ")
         );
     }
@@ -86,8 +86,8 @@ fn shared_truncations(ptx: &str) -> Vec<String> {
                 let width = instruction.destination_width();
                 widths
                     .entry(register)
-                    .and_modify(|previous: &mut Option<usize>| {
-                        *previous = (*previous).max(width);
+                    .and_modify(|previous: &mut Width| {
+                        *previous = previous.join(width);
                     })
                     .or_insert(width);
             }
@@ -125,17 +125,17 @@ fn shared_truncations(ptx: &str) -> Vec<String> {
                 );
                 continue;
             }
-            if instruction.truncates() {
+            if let Some(destination_width) = instruction.narrowing_width() {
                 sites.extend(
                     instruction
                         .sources()
                         .filter(|source| {
                             tainted.contains(source)
-                                && widths
-                                    .get(source)
-                                    .copied()
-                                    .flatten()
-                                    .is_none_or(|width| width > 32)
+                                && instruction
+                                    .conversion_source_width()
+                                    .or_else(|| widths.get(source).copied())
+                                    .unwrap_or(Width::Unknown)
+                                    .can_exceed(destination_width)
                         })
                         .map(|source| format!("{name}: {source}")),
                 );
@@ -182,6 +182,7 @@ impl<'a> Instruction<'a> {
                     .split(|c: char| c.is_whitespace() || "{}(),[]|+-".contains(c))
                     .filter(|word| {
                         word.starts_with('%')
+                            || word.starts_with('$')
                             || word.starts_with('_')
                             || word.starts_with(|c: char| c.is_ascii_alphabetic())
                     })
@@ -219,41 +220,72 @@ impl<'a> Instruction<'a> {
         self.operands.iter().skip(1).flatten().copied()
     }
 
-    fn destination_width(&self) -> Option<usize> {
-        let width = self.opcode.split('.').find_map(|part| {
+    fn scalar_widths(&self) -> impl Iterator<Item = usize> + '_ {
+        self.opcode.split('.').filter_map(|part| {
             let (kind, digits) = part.split_at_checked(1)?;
             matches!(kind, "u" | "s" | "b" | "f")
                 .then(|| digits.parse::<usize>().ok())
                 .flatten()
-        })?;
-        Some(
-            width
-                / self
-                    .operands
-                    .first()
-                    .map_or(1, |registers| registers.len().max(1)),
-        )
+        })
     }
 
-    fn truncates(&self) -> bool {
-        if self.sanitizes() {
-            return false;
+    fn destination_width(&self) -> Width {
+        let Some(mut width) = self.scalar_widths().next() else {
+            return Width::Unknown;
+        };
+        let operation = self.opcode.split('.').next();
+        if matches!(operation, Some("mul" | "mad"))
+            && self.opcode.split('.').any(|part| part == "wide")
+        {
+            width *= 2;
         }
-        let mut parts = self.opcode.split('.');
-        if !matches!(parts.next(), Some("cvt" | "mov")) {
-            return false;
-        }
-        let destination_type = parts.find(|part| {
-            matches!(
-                *part,
-                "u32" | "s32" | "b32" | "f32" | "u64" | "s64" | "b64" | "f64"
-            )
-        });
-        matches!(destination_type, Some("u32" | "s32" | "b32" | "f32"))
-            || self
+        // packed moves split a scalar; vector loads give each register the full width
+        if operation == Some("mov") {
+            width /= self
                 .operands
                 .first()
-                .is_some_and(|registers| registers.len() > 1)
+                .map_or(1, |registers| registers.len().max(1));
+        }
+
+        Width::Bits(width)
+    }
+
+    fn conversion_source_width(&self) -> Option<Width> {
+        (self.opcode.split('.').next() == Some("cvt"))
+            .then(|| self.scalar_widths().nth(1).map(Width::Bits))
+            .flatten()
+    }
+
+    fn narrowing_width(&self) -> Option<usize> {
+        if !matches!(self.opcode.split('.').next(), Some("cvt" | "mov")) {
+            return None;
+        }
+        match self.destination_width() {
+            Width::Bits(width) => Some(width),
+            Width::Unknown => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Width {
+    Bits(usize),
+    Unknown,
+}
+
+impl Width {
+    fn join(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Bits(left), Self::Bits(right)) => Self::Bits(left.max(right)),
+            _ => Self::Unknown,
+        }
+    }
+
+    fn can_exceed(self, destination: usize) -> bool {
+        match self {
+            Self::Bits(source) => source > destination,
+            Self::Unknown => true,
+        }
     }
 }
 
@@ -335,6 +367,29 @@ mod tests {
             .map(str::to_owned),
         );
         assert_eq!(shared_truncations(fixture), expected);
+        assert!(check_shared_truncation(fixture).is_err());
+    }
+
+    #[test]
+    fn dollar_wide_vector_and_subword_paths_are_rejected() {
+        let fixture = include_str!("../../../tests/fixtures/ptx/shared-truncation-review.ptx");
+        assert_eq!(
+            shared_truncations(fixture),
+            [
+                "dollar_origin: $base",
+                "dollar_copy: $copy",
+                "wide_mad: %wide",
+                "wide_mul: %base",
+                "wide_mul: %wide",
+                "vector_load: %first",
+                "vector_load: %second",
+                "unsigned16: %base",
+                "signed16: %base",
+                "unsigned8: %base",
+                "packed16: %base",
+                "unknown_reuse: %value",
+            ]
+        );
         assert!(check_shared_truncation(fixture).is_err());
     }
 
