@@ -236,6 +236,7 @@ impl ResNetEmbedding {
                         reason: error.to_string(),
                     }
                 })?,
+                SPEAKERS_PER_CHUNK,
                 model.head_weight.data(),
                 model.head_bias.data(),
             )?,

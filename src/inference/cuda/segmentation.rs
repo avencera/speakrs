@@ -169,7 +169,7 @@ impl ConvStage {
                     reason: error.to_string(),
                 }
             })?;
-            if let Some(plan) = token.segconv(runtime, shape, weight)? {
+            if let Some(plan) = token.segconv(runtime, shape, spec, weight)? {
                 return Ok(Self::Oxide(plan));
             }
         }
@@ -563,6 +563,7 @@ impl Network {
             DensePlan::new(
                 runtime,
                 spec,
+                shape.frames,
                 &self.linear[index][0],
                 &self.linear[index][1],
             )

@@ -614,6 +614,7 @@ impl Qualified {
         self,
         runtime: &CudaRuntime,
         spec: DenseSpec,
+        rows: usize,
         weight: &cudarc::driver::CudaSlice<f32>,
         bias: &cudarc::driver::CudaSlice<f32>,
     ) -> Result<Option<DenseOxide>, CudaError> {
@@ -633,7 +634,10 @@ impl Qualified {
                 DenseOxide::implemented_pin(spec, kernels.tier(), runtime.device())
             }
         };
-        let plan = pin.and_then(|pin| DenseOxide::plan(runtime, &kernels, spec, weight, bias, pin));
+        let plan = spec
+            .check_rows(rows)
+            .and(pin)
+            .and_then(|pin| DenseOxide::plan(runtime, &kernels, spec, weight, bias, pin));
         self.finish(area, super::driver_only(), plan)
     }
 
@@ -642,6 +646,7 @@ impl Qualified {
         self,
         runtime: &CudaRuntime,
         spec: SegConvSpec,
+        conv: super::geometry::Conv2d,
         weight: &cudarc::driver::CudaSlice<f32>,
     ) -> Result<Option<SegConvOxide>, CudaError> {
         let area = KernelModule::Segdense;
@@ -660,7 +665,10 @@ impl Qualified {
                 SegConvOxide::implemented_pin(spec, kernels.tier(), runtime.device())
             }
         };
-        let plan = pin.and_then(|pin| SegConvOxide::plan(runtime, &kernels, spec, weight, pin));
+        let plan = spec
+            .check_conv(conv)
+            .and(pin)
+            .and_then(|pin| SegConvOxide::plan(runtime, &kernels, spec, weight, pin));
         self.finish(area, super::driver_only(), plan)
     }
 

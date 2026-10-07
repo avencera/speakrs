@@ -1186,6 +1186,21 @@ impl DenseSpec {
         Ok(spec)
     }
 
+    /// Refuse a valid variable-length window that this fixed kernel does not implement
+    pub(crate) fn check_rows(self, rows: usize) -> Result<(), PlanError> {
+        if rows == self.dimensions().0 {
+            return Ok(());
+        }
+        Err(PlanError::Geometry(GeometryError::Unimplemented {
+            context: "dense plan",
+            reason: format!(
+                "{} requires {} rows per item, got {rows}",
+                self.site.boundary(),
+                self.dimensions().0
+            ),
+        }))
+    }
+
     /// The fixed model boundary
     pub(crate) const fn site(self) -> DenseSite {
         self.site
@@ -1323,6 +1338,26 @@ impl SegConvSpec {
         )?;
         Ok(spec)
     }
+    /// Verify that the model's temporal shape is the fixed kernel shape
+    pub(crate) fn check_conv(self, conv: Conv2d) -> Result<(), PlanError> {
+        if conv.batch == self.batch
+            && conv.math == self.math
+            && conv.in_channels == self.in_channels()
+            && conv.out_channels == self.out_channels()
+            && conv.input == [1, self.input_steps()]
+            && conv.kernel == [1, self.kernel()]
+            && conv.padding == [0, 0]
+            && conv.stride == [1, 1]
+            && conv.dilation == [1, 1]
+        {
+            return Ok(());
+        }
+        Err(PlanError::Geometry(GeometryError::Unimplemented {
+            context: "temporal plan",
+            reason: format!("{} does not implement shape {conv:?}", self.site.boundary()),
+        }))
+    }
+
     /// The fixed model boundary
     pub(crate) const fn site(self) -> SegConvSite {
         self.site

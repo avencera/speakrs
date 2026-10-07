@@ -17,6 +17,7 @@ impl DensePlan {
     pub(super) fn new(
         runtime: &CudaRuntime,
         spec: DenseSpec,
+        rows: usize,
         weight: &CudaSlice<f32>,
         bias: &CudaSlice<f32>,
     ) -> Result<Self, CudaError> {
@@ -30,7 +31,7 @@ impl DensePlan {
             None,
         )?;
         if let Selected::Oxide(token) = selected
-            && let Some(plan) = token.dense(runtime, spec, weight, bias)?
+            && let Some(plan) = token.dense(runtime, spec, rows, weight, bias)?
         {
             return Ok(Self::Oxide(Box::new(plan)));
         }
