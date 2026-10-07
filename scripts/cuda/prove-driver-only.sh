@@ -8,7 +8,7 @@ case "$feature" in
     cuda-sm75|cuda-sm80|cuda-sm90|cuda-sm120|cuda-rtx20|cuda-rtx30|cuda-rtx40|cuda-a100|cuda-rtx50) ;;
     *) echo "expected one driver-only target feature" >&2; exit 2 ;;
 esac
-for tool in cargo ldd nm strace rg; do
+for tool in cargo ldd nm strace rg flock; do
     command -v "$tool" >/dev/null || { echo "missing tool: $tool" >&2; exit 2; }
 done
 repo=$(cd "$(dirname "$0")/../.." && pwd)
@@ -27,7 +27,7 @@ if rg -i 'lib(cudnn|cublas|cublasLt)|\b(cudnn|cublas)[A-Z_]' "$evidence/ldd.txt"
     exit 1
 fi
 set +e
-RUST_LOG=speakrs=info strace -f -e trace=openat -o "$evidence/openat.txt" \
+RUST_LOG=speakrs=info flock "${SPEAKRS_GPU_LOCK:-/workspace/gpu-bench.lock}" strace -f -e trace=openat -o "$evidence/openat.txt" \
     "$binary" diarize --mode cuda --models-dir "$models" "$wav" \
     > "$evidence/run.txt" 2>&1
 status=$?
