@@ -17,6 +17,8 @@
 pub mod embedding;
 #[cfg(feature = "fbank")]
 pub mod fbank;
+#[cfg(feature = "fbankdft")]
+pub mod fbankdft;
 #[cfg(feature = "lstm")]
 pub mod lstm;
 #[cfg(feature = "probe")]

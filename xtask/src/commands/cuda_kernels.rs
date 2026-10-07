@@ -149,6 +149,7 @@ pub const AREAS: &[Area] = &[
     Area::new("resnet", &[Tier::Sm75]),
     Area::new("lstm", &[Tier::Sm75]),
     Area::new("sincnet", &[Tier::Sm75]),
+    Area::new("fbankdft", &[Tier::Sm75]),
 ];
 
 /// One PTX file: an area built for one tier
@@ -1327,6 +1328,11 @@ mod tests {
         assert!(belongs_to("Cargo.lock", "probe"));
         assert!(belongs_to("src/fbank.rs", "fbank"));
         assert!(!belongs_to("src/fbank.rs", "probe"));
+        // the record-owned area shares a name prefix with the always-on area, so an
+        // fbankdft edit must never mark the pinned fbank PTX stale
+        assert_eq!(area_of("src/fbankdft.rs"), Some("fbankdft"));
+        assert!(!belongs_to("src/fbankdft.rs", "fbank"));
+        assert!(!belongs_to("src/fbank.rs", "fbankdft"));
     }
 
     #[test]
