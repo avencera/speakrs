@@ -14,7 +14,7 @@
 //! cuDNN's implicit GEMM, which gives the same bits wherever cuDNN picks that
 //! algorithm and fewer rounding errors where it picks Winograd or TF32
 //!
-//! The sm80 tier adds single-product TF32 tensor-core kernels for the stride-1 shapes,
+//! The sm80 tier adds single-product TF32 tensor-core kernels for the three shapes,
 //! with weights packed in `mma.sync` fragment order. Driver-only routing selects them
 //! only in TF32 mode on capability 8.0, whose TF32 rate is eight times its FP32 rate:
 //! on the A100 the FP32 kernels left these 13 layers at 4.3 s of a 4.4 s gap to cuDNN
@@ -135,12 +135,16 @@ impl ConvKernel {
             Self::C32Stride2Small => Tiling::new("spk_resnet_conv3x3_c32s2_small", 128, 2),
             Self::C32Tensor => Tiling::tensor("spk_resnet_tc_c32", 112, 45_568),
             Self::C64Tensor => Tiling::tensor("spk_resnet_tc_c64", 56, 23_040),
+            Self::C32Stride2Tensor => Tiling::tensor("spk_resnet_tc_c32s2", 32, 39_424),
         }
     }
 
     /// Whether the entry runs TF32 `mma.sync`, which only the sm80 tier exports
     fn tensor(self) -> bool {
-        matches!(self, Self::C32Tensor | Self::C64Tensor)
+        matches!(
+            self,
+            Self::C32Tensor | Self::C64Tensor | Self::C32Stride2Tensor
+        )
     }
 }
 
@@ -582,7 +586,7 @@ impl super::DriverCandidate for Oxide {
     }
 }
 
-/// The TF32 tensor-core entry of a stride-1 shape where it is the measured choice
+/// The TF32 tensor-core entry of a shape where it is the measured choice
 ///
 /// Only capability 8.0 selects it: other sm80-tier parts keep the FP32 kernels until
 /// they are measured
@@ -599,9 +603,5 @@ fn tensor_kernel(
         return None;
     }
 
-    match shape {
-        ConvShape::C32 => Some(ConvKernel::C32Tensor),
-        ConvShape::C64 => Some(ConvKernel::C64Tensor),
-        ConvShape::C32Stride2 => None,
-    }
+    Some(shape.tensor_kernel())
 }

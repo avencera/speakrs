@@ -383,7 +383,24 @@ impl Candidate {
             };
             return Ok(Self::Wide(plan));
         }
-        let kernels = tier(KernelModule::Resnet)?;
+        let kernels = if std::env::var("TRUNK_RESNET").as_deref() == Ok("tensor") {
+            // the capability 12.0 binding pins resnet sm75, so tensor timing loads the
+            // newest runnable tier directly
+            let area = KernelModule::Resnet;
+            let device = runtime.device().capability();
+            let request = area
+                .variants()
+                .driver_request(area, runtime.ptx_tier(), device)
+                .ok_or(CudaError::AreaTierNotCompiledIn {
+                    area: area.name(),
+                    tier: runtime.ptx_tier(),
+                    device,
+                    feature: runtime.ptx_tier().feature(),
+                })?;
+            runtime.load_module(request)?
+        } else {
+            tier(KernelModule::Resnet)?
+        };
         let pin = Self::resnet_pin(runtime, &spec, kernels.tier())?;
         Ok(Self::Resnet(
             ConvOxide::plan(runtime, &kernels, spec, pin)?,
@@ -392,7 +409,7 @@ impl Candidate {
     }
 
     /// The driver-only pin on this device, or the one `TRUNK_RESNET` forces: `legacy`
-    /// for the PR #36 rule, `tensor` for the TF32 tensor-core entry of a stride-1 layer
+    /// for the PR #36 rule, `tensor` for the layer's TF32 tensor-core entry
     fn resnet_pin(
         runtime: &CudaRuntime,
         spec: &ConvLayerSpec<'_>,
@@ -401,13 +418,11 @@ impl Candidate {
         let conv = spec.conv;
         match std::env::var("TRUNK_RESNET").ok().as_deref() {
             Some("legacy") => ConvOxide::implemented_pin(spec),
-            Some("tensor") if conv.stride == [1, 1] => {
-                Ok(ConvPin::Kernel(if conv.in_channels == 32 {
-                    ConvKernel::C32Tensor
-                } else {
-                    ConvKernel::C64Tensor
-                }))
-            }
+            Some("tensor") => Ok(ConvPin::Kernel(match (conv.in_channels, conv.stride) {
+                (32, [1, 1]) => ConvKernel::C32Tensor,
+                (64, _) => ConvKernel::C64Tensor,
+                _ => ConvKernel::C32Stride2Tensor,
+            })),
             _ => {
                 let boundary = super::super::implementation::BoundaryId::named(spec.name);
                 match ConvOxide::driver_pin(

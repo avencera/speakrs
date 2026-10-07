@@ -32,6 +32,7 @@ pub(crate) fn pin_json(pin: ConfigPin) -> Value {
                 crate::inference::cuda::candidate::ConvKernel::C32Stride2Small => "C32Stride2Small",
                 crate::inference::cuda::candidate::ConvKernel::C32Tensor => "C32Tensor",
                 crate::inference::cuda::candidate::ConvKernel::C64Tensor => "C64Tensor",
+                crate::inference::cuda::candidate::ConvKernel::C32Stride2Tensor => "C32Stride2Tensor",
             }})
         }
         ConfigPin::Lstm(LstmPin::LegacyCooperative) => {

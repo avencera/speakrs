@@ -473,17 +473,19 @@ fn tensor_core_trunk_kernels_are_selected_only_for_tf32_on_capability_8_0() {
             kernel(ConvKernel::C64Tensor)
         );
     }
-    // the strided layer, FP32 mode and the sm75 tier keep the FP32 kernels
-    assert_eq!(
-        pin(
-            "resnet.layer2.0.conv1",
-            32,
-            CudaMath::Tf32,
-            &a100,
-            PtxTier::Sm80
-        ),
-        kernel(ConvKernel::C32Stride2)
-    );
+    for batch in [1, 32] {
+        assert_eq!(
+            pin(
+                "resnet.layer2.0.conv1",
+                batch,
+                CudaMath::Tf32,
+                &a100,
+                PtxTier::Sm80
+            ),
+            kernel(ConvKernel::C32Stride2Tensor)
+        );
+    }
+    // FP32 mode and the sm75 tier keep the FP32 kernels
     assert_eq!(
         pin(
             "resnet.layer1.0.conv1",
@@ -509,13 +511,19 @@ fn tensor_core_trunk_kernels_are_selected_only_for_tf32_on_capability_8_0() {
         let device = Builder::new(ComputeCapability::new(major, minor))
             .multiprocessors(sms)
             .build();
-        for name in ["resnet.layer1.0.conv1", "resnet.layer2.1.conv1"] {
+        for name in [
+            "resnet.layer1.0.conv1",
+            "resnet.layer2.0.conv1",
+            "resnet.layer2.1.conv1",
+        ] {
             let selected = pin(name, 32, CudaMath::Tf32, &device, PtxTier::Sm80);
             assert!(
                 !matches!(
                     selected,
                     ConfigPin::Conv(ConvPin::Kernel(
-                        ConvKernel::C32Tensor | ConvKernel::C64Tensor
+                        ConvKernel::C32Tensor
+                            | ConvKernel::C64Tensor
+                            | ConvKernel::C32Stride2Tensor
                     ))
                 ),
                 "{major}.{minor} {name}: {selected:?}"

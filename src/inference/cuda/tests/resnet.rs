@@ -2,7 +2,8 @@
 //! random tensors, so it runs on any GPU without the reference files
 
 use super::super::candidate::{
-    ConvCandidate, ConvInputs, ConvKernel, ConvLayerSpec, ConvOxide, ConvPin, Phases, PlanError,
+    ConvCandidate, ConvInputs, ConvKernel, ConvLayerSpec, ConvOxide, ConvPin, ConvShape, Phases,
+    PlanError,
 };
 use super::super::dnn::ConvPlanner;
 use super::super::geometry::{Conv2d, Residual};
@@ -203,8 +204,15 @@ fn resnet_candidate_matches_cudnn_on_partial_tiles() -> Result<(), CudaError> {
                 let library = stream.clone_dtoh(&library)?;
                 let candidate_error = truth_error(&actual, &expected);
                 let library_error = truth_error(&library, &expected);
+                // cuDNN may run an FP32 algorithm for a TF32 request, as for the strided
+                // layer on the 4060 Ti; the FP32 kernel then only has to meet the FP32 bound
+                let within = if library_error == (0.0, 0.0) {
+                    candidate_error.0 <= 1e-5 * f64::from(scale)
+                } else {
+                    candidate_error.0 <= library_error.0 && candidate_error.1 <= library_error.1
+                };
                 assert!(
-                    candidate_error.0 <= library_error.0 && candidate_error.1 <= library_error.1,
+                    within,
                     "{name} b{batch} residual={add} TF32: candidate max-abs/L2 {candidate_error:?} exceeds Library {library_error:?} against FP32 truth"
                 );
 
@@ -295,8 +303,8 @@ fn resnet_candidate_matches_cudnn_on_partial_tiles() -> Result<(), CudaError> {
     Ok(())
 }
 
-/// The TF32 tensor-core entry of a stride-1 case where the loaded resnet module is the
-/// sm80 tier or newer
+/// The TF32 tensor-core entry of a case where the loaded resnet module is the sm80 tier
+/// or newer
 fn tensor_kernel(
     runtime: &super::super::CudaRuntime,
     channels: usize,
@@ -305,14 +313,15 @@ fn tensor_kernel(
     let tier = runtime
         .load_kernels(super::super::KernelModule::Resnet)?
         .tier();
-    if stride != 1 || tier < super::super::PtxTier::Sm80 {
+    if tier < super::super::PtxTier::Sm80 {
         return Ok(None);
     }
-    Ok(Some(if channels == 32 {
-        ConvKernel::C32Tensor
-    } else {
-        ConvKernel::C64Tensor
-    }))
+    let shape = match (channels, stride) {
+        (32, 1) => ConvShape::C32,
+        (64, 1) => ConvShape::C64,
+        _ => ConvShape::C32Stride2,
+    };
+    Ok(Some(shape.tensor_kernel()))
 }
 
 /// Max-abs and relative L2 errors have no tolerance floor; exact zero stays exact

@@ -1,5 +1,5 @@
-//! TF32 tensor-core implicit GEMM for the stride-1 32- and 64-channel layers, for
-//! parts whose TF32 rate is a large multiple of their FP32 rate
+//! TF32 tensor-core implicit GEMM for the 32- and 64-channel trunk layers, for parts
+//! whose TF32 rate is a large multiple of their FP32 rate
 //!
 //! One product per term: weights arrive rounded to TF32, activations are rounded with
 //! `cvt.rna` as they leave shared memory, and `mma.sync` m16n8k8 accumulates in FP32
@@ -8,9 +8,9 @@
 //!
 //! A CTA has four warps and covers four output rows of one item by `8 * tiles`
 //! columns. Warp `w` owns output row `w` of the tile and every output channel, so each
-//! B fragment it loads feeds `channels / 16` products. Activations stay NCHW: each
-//! stage stages eight input channels of the tile's six input rows with their one-pixel
-//! halo through `cp.async`, which zero-fills padding, into a two-stage ring. A
+//! B fragment it loads feeds `cout / 16` products. Activations stay NCHW: each stage
+//! stages eight input channels of the input rows behind the tile, with their one-pixel
+//! halo, through `cp.async`, which zero-fills padding, into a two-stage ring. A
 //! channel stride of 8 mod 32 words puts the four `t` lanes of a B fragment on
 //! disjoint bank octets. Weights come from [`spk_resnet_pack_tc`] in fragment order and
 //! go straight from global memory into registers two MMA steps ahead
@@ -200,13 +200,19 @@ macro_rules! fragment_at {
     };
 }
 
-/// Expands to one stride-1 3x3 TF32 convolution with `channels` input and output
-/// channels and `tiles` 8-column MMA tiles per warp
+/// Expands to one 3x3, padding-1 TF32 convolution from `cin` to `cout` channels at
+/// `stride`, with `tiles` 8-column MMA tiles per warp
+///
+/// At stride 2 each staged row keeps its even input columns ahead of its odd ones, so
+/// the eight output columns of a B fragment read eight consecutive words, as at stride
+/// 1, and the same channel stride keeps the fragment conflict-free
 macro_rules! tc_conv3x3 {
     (
         $(#[$doc:meta])*
         $name:ident,
-        channels = $channels:expr,
+        cin = $cin:expr,
+        cout = $cout:expr,
+        stride = $stride:expr,
         tiles = $tiles:expr $(,)?
     ) => {
         $(#[$doc])*
@@ -218,35 +224,47 @@ macro_rules! tc_conv3x3 {
             bias: &[f32],
             residual: &[f32],
             add_residual: u32,
-            h: u32,
-            w: u32,
+            h_in: u32,
+            w_in: u32,
             mut y: DisjointSlice<f32>,
         ) {
-            const C: u32 = $channels;
-            const MT: usize = (C / 16) as usize;
+            const CIN: u32 = $cin;
+            const COUT: u32 = $cout;
+            const S: u32 = $stride;
+            const MT: usize = (COUT / 16) as usize;
             const NT: usize = $tiles;
             const COLS: u32 = NT as u32 * 8;
-            // staged words per input row: the tile's columns and a one-pixel halo
-            const RS: u32 = COLS + 2;
-            const ELEMS: u32 = (TC_ROWS + 2) * RS;
-            const CS: u32 = (ELEMS + 23) / 32 * 32 + 8;
+            // input rows and columns behind the tile, with the one-pixel halo
+            const IN_ROWS: u32 = (TC_ROWS - 1) * S + 3;
+            const IN_COLS: u32 = (COLS - 1) * S + 3;
+            // staged words per column phase and per input row
+            const PH: u32 = IN_COLS.div_ceil(S);
+            const RS: u32 = S * PH;
+            const ELEMS: u32 = IN_ROWS * IN_COLS;
+            const CS: u32 = (IN_ROWS * RS + 23) / 32 * 32 + 8;
             const SLOTS: u32 = ELEMS.div_ceil(THREADS);
-            const CHUNKS: u32 = C / 8;
+            const CHUNKS: u32 = CIN / 8;
             const STEPS: u32 = CHUNKS * 9;
             const STAGE_BYTES: u32 = 8 * CS * 4;
-            const _: () = assert!(CS % 32 == 8 && CS >= ELEMS && C % 16 == 0);
+            const _: () = assert!(
+                CS % 32 == 8 && CS >= IN_ROWS * RS && CIN % 8 == 0 && COUT % 16 == 0
+            );
 
+            let h = (h_in - 1) / S + 1;
+            let w = (w_in - 1) / S + 1;
+            let plane_in = h_in * w_in;
             let plane = h * w;
             let item = thread::blockIdx_z();
             let oy0 = thread::blockIdx_y() * TC_ROWS;
             let ox0 = thread::blockIdx_x() * COLS;
-            let x_base = item * C * plane;
+            let x_base = item * CIN * plane_in;
+            let y_base = item * COUT * plane;
             // the host sizes every buffer; a mismatch must not touch other memory
-            if (x_base + C * plane) as usize > x.len()
-                || (x_base + C * plane) as usize > y.len()
-                || (add_residual != 0 && (x_base + C * plane) as usize > residual.len())
-                || (C * C * 9) as usize > weight.len()
-                || C as usize > bias.len()
+            if (x_base + CIN * plane_in) as usize > x.len()
+                || (y_base + COUT * plane) as usize > y.len()
+                || (add_residual != 0 && (y_base + COUT * plane) as usize > residual.len())
+                || (CIN * COUT * 9) as usize > weight.len()
+                || COUT as usize > bias.len()
                 || oy0 >= h
                 || ox0 >= w
             {
@@ -261,9 +279,9 @@ macro_rules! tc_conv3x3 {
             // safety: the dynamic shared base of this CTA; only its address is taken
             let smem = unsafe { cvta_generic_to_shared_u32(DynamicSharedArray::<f32, 16>::get() as *const u8) };
             let x_ptr = x.as_ptr();
-            // this lane's B word of tap (0, 0) and tile 0: channel `t`, input row `warp`
-            // of the tile, column `g`
-            let lane_offset = (t * CS + warp * RS + g) * 4;
+            // this lane's B word of tap (0, 0) and tile 0: channel `t`, the first input row
+            // of output row `warp`, output column `g`
+            let lane_offset = (t * CS + warp * S * RS + g) * 4;
             // safety: offsets below stay inside the checked packed weights
             let wp = unsafe { weight.as_ptr().add((lane * 4) as usize) };
 
@@ -289,28 +307,29 @@ macro_rules! tc_conv3x3 {
                 }
                 if i_stage < CHUNKS {
                     let dst0 = smem + (i_stage % 2) * STAGE_BYTES;
-                    let channels = x_base + i_stage * 8 * plane;
+                    let channels = x_base + i_stage * 8 * plane_in;
                     let tid = opaque(tid);
                     let mut k = 0;
                     #[unroll]
                     while k < SLOTS {
                         let e = tid + k * THREADS;
                         if e < ELEMS {
-                            let r = e / RS;
-                            let column = e - r * RS;
+                            let r = e / IN_COLS;
+                            let column = e - r * IN_COLS;
+                            let word = r * RS + column % S * PH + column / S;
                             // padded coordinates, one above and left of the input's
-                            let iy = oy0 + r;
-                            let ix = ox0 + column;
-                            let inside = iy >= 1 && iy <= h && ix >= 1 && ix <= w;
-                            let offset = if inside { channels + (iy - 1) * w + ix - 1 } else { 0 };
+                            let iy = oy0 * S + r;
+                            let ix = ox0 * S + column;
+                            let inside = iy >= 1 && iy <= h_in && ix >= 1 && ix <= w_in;
+                            let offset = if inside { channels + (iy - 1) * w_in + ix - 1 } else { 0 };
                             let mut ci = 0;
                             #[unroll]
                             while ci < 8 {
                                 // safety: valid copies stay inside the checked input; zero
                                 // fills read nothing
                                 unsafe {
-                                    let src = if inside { x_ptr.add((offset + ci * plane) as usize) } else { x_ptr };
-                                    copy4(dst0 + (ci * CS + e) * 4, src, inside);
+                                    let src = if inside { x_ptr.add((offset + ci * plane_in) as usize) } else { x_ptr };
+                                    copy4(dst0 + (ci * CS + word) * 4, src, inside);
                                 }
                                 ci += 1;
                             }
@@ -336,7 +355,8 @@ macro_rules! tc_conv3x3 {
                         ring[(tap + 2) % 3][i] = fragment_at!(wp, step, i as u32);
                         i += 1;
                     }
-                    let tap_offset = ((tap as u32 / 3) * RS + tap as u32 % 3) * 4;
+                    let (ky, kx) = (tap as u32 / 3, tap as u32 % 3);
+                    let tap_offset = (ky * RS + kx % S * PH + kx / S) * 4;
                     let mut j = 0;
                     #[unroll]
                     while j < NT {
@@ -360,43 +380,58 @@ macro_rules! tc_conv3x3 {
             if oy >= h {
                 return;
             }
+            let row = y_base + oy * w;
+            // the residual may alias the output, so reading it all before any store lets
+            // the loads overlap instead of each waiting behind the previous store; the
+            // sum still goes in before the bias, as cuDNN's fused call adds them
+            if add_residual != 0 {
+                let residual_ptr = residual.as_ptr();
+                let mut i = 0;
+                #[unroll]
+                while i < MT {
+                    let mut slot = 0;
+                    #[unroll]
+                    while slot < 4 {
+                        let channel = i as u32 * 16 + g + slot as u32 / 2 * 8;
+                        let channel_row = row + channel * plane;
+                        let mut j = 0;
+                        #[unroll]
+                        while j < NT {
+                            let ox = ox0 + j as u32 * 8 + 2 * t + slot as u32 % 2;
+                            if ox < w {
+                                // safety: inside the checked residual
+                                acc[i][j][slot] += unsafe { *residual_ptr.add((channel_row + ox) as usize) };
+                            }
+                            j += 1;
+                        }
+                        slot += 1;
+                    }
+                    i += 1;
+                }
+            }
+
             let bias_ptr = bias.as_ptr();
-            let residual_ptr = residual.as_ptr();
-            let row = x_base + oy * w;
             let mut i = 0;
             #[unroll]
             while i < MT {
-                let mut u = 0;
+                let mut slot = 0;
                 #[unroll]
-                while u < 2 {
-                    let channel = i as u32 * 16 + g + u as u32 * 8;
-                    // safety: `channel < C`, inside the checked bias
+                while slot < 4 {
+                    let channel = i as u32 * 16 + g + slot as u32 / 2 * 8;
+                    // safety: `channel < COUT`, inside the checked bias
                     let b = unsafe { *bias_ptr.add(channel as usize) };
                     let channel_row = row + channel * plane;
                     let mut j = 0;
                     #[unroll]
                     while j < NT {
-                        let ox = ox0 + j as u32 * 8 + 2 * t;
-                        let mut half = 0;
-                        #[unroll]
-                        while half < 2 {
-                            if ox + (half as u32) < w {
-                                let index = (channel_row + ox + half as u32) as usize;
-                                let mut value = acc[i][j][2 * u + half];
-                                // the residual goes in before the bias, as cuDNN's fused call
-                                // adds them
-                                if add_residual != 0 {
-                                    // safety: inside the checked residual
-                                    value += unsafe { *residual_ptr.add(index) };
-                                }
-                                // safety: inside the checked output; this lane is its only writer
-                                unsafe { *y.get_unchecked_mut(index) = relu(value + b) };
-                            }
-                            half += 1;
+                        let ox = ox0 + j as u32 * 8 + 2 * t + slot as u32 % 2;
+                        if ox < w {
+                            // safety: inside the checked output; this lane is its only writer
+                            unsafe { *y.get_unchecked_mut((channel_row + ox) as usize) = relu(acc[i][j][slot] + b) };
                         }
                         j += 1;
                     }
-                    u += 1;
+                    slot += 1;
                 }
                 i += 1;
             }
@@ -412,7 +447,9 @@ tc_conv3x3! {
     /// [`spk_resnet_pack_tc`]. Launch 128 threads with
     /// `grid = (ceil(w / 112), ceil(h / 4), b)` and 45568 dynamic shared bytes
     spk_resnet_tc_c32,
-    channels = 32,
+    cin = 32,
+    cout = 32,
+    stride = 1,
     tiles = 14,
 }
 
@@ -424,6 +461,23 @@ tc_conv3x3! {
     /// [`spk_resnet_pack_tc`]. Launch 128 threads with
     /// `grid = (ceil(w / 56), ceil(h / 4), b)` and 23040 dynamic shared bytes
     spk_resnet_tc_c64,
-    channels = 64,
+    cin = 64,
+    cout = 64,
+    stride = 1,
     tiles = 7,
+}
+
+tc_conv3x3! {
+    /// TF32 `y = relu(conv3x3(x, weight) + bias [+ residual])` for 32 -> 64 channels,
+    /// stride 2, padding 1
+    ///
+    /// `x` is `[b, 32, h_in, w_in]`; `y` and `residual` are `[b, 64, h, w]` with
+    /// `h = (h_in + 1) / 2` and `w = (w_in + 1) / 2`; `weight` comes from
+    /// [`spk_resnet_pack_tc`]. Launch 128 threads with
+    /// `grid = (ceil(w / 32), ceil(h / 4), b)` and 39424 dynamic shared bytes
+    spk_resnet_tc_c32s2,
+    cin = 32,
+    cout = 64,
+    stride = 2,
+    tiles = 4,
 }
