@@ -611,9 +611,11 @@ impl super::DriverCandidate for Oxide {
         Self::coverage(tier)
     }
     fn speed_scope(
+        _boundary: crate::inference::cuda::implementation::BoundaryId,
         batch: usize,
         _math: CudaMath,
         device: &DeviceAttributes,
+        _tier: PtxTier,
     ) -> Option<crate::inference::cuda::implementation::SpeedScope> {
         let capability = device.capability();
         ([1, 32].contains(&batch)

@@ -1413,9 +1413,11 @@ pub(crate) trait DriverCandidate {
     }
     /// Speed policy of the complete port, separate from implemented coverage
     fn speed_scope(
+        _boundary: super::implementation::BoundaryId,
         _batch: usize,
         _math: CudaMath,
         _device: &DeviceAttributes,
+        _tier: PtxTier,
     ) -> Option<super::implementation::SpeedScope> {
         Self::broad_evidence().map(super::implementation::SpeedScope::AllDevices)
     }

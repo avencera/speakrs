@@ -332,9 +332,11 @@ impl super::DriverCandidate for Oxide {
         Some(&EVIDENCE)
     }
     fn speed_scope(
+        _boundary: crate::inference::cuda::implementation::BoundaryId,
         _batch: usize,
         math: CudaMath,
         device: &crate::inference::cuda::device::DeviceAttributes,
+        _tier: PtxTier,
     ) -> Option<crate::inference::cuda::implementation::SpeedScope> {
         use crate::inference::cuda::implementation::SpeedScope;
         match math {

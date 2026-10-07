@@ -12,7 +12,7 @@ use crate::inference::cuda::{CudaError, CudaMath, KernelModule, PtxTier};
 pub(super) struct Area {
     area: KernelModule,
     coverage: fn(PtxTier) -> Coverage,
-    scope: fn(usize, CudaMath, &DeviceAttributes) -> Option<super::SpeedScope>,
+    scope: fn(BoundaryId, usize, CudaMath, &DeviceAttributes, PtxTier) -> Option<super::SpeedScope>,
     summary: fn(CudaMath) -> &'static str,
     pin:
         fn(BoundaryId, usize, CudaMath, &DeviceAttributes, PtxTier) -> Result<ConfigPin, PlanError>,
@@ -117,7 +117,7 @@ pub(super) fn select_from(
         if !(candidate.coverage)(request.tier()).covers(boundary.name(), batch, math) {
             continue;
         }
-        let scope = (candidate.scope)(batch, math, modules.device())
+        let scope = (candidate.scope)(boundary, batch, math, modules.device(), request.tier())
             .filter(|scope| scope.contains(modules.device()) && scope.allows_tier(request.tier()));
         if selection == Selection::Production && scope.is_none() {
             // a complete port owns its covered tuple even when speed is unmeasured
