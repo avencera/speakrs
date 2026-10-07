@@ -3,10 +3,10 @@
 //!
 //! - waveform instance normalization, then SincNet: 80 generated band-pass filters
 //!   (selected convolution, stride 10), `abs`, max pool, instance normalization and
-//!   LeakyReLU, then two learned convolutions (cuDNN), each followed by max pool,
+//!   LeakyReLU, then two selected kernel or cuDNN convolutions, each followed by max pool,
 //!   instance normalization and LeakyReLU (`segmentation_pool_norm`)
 //! - four bidirectional LSTM layers through one selected Oxide or Library stack
-//! - three linear layers in cuBLAS with LeakyReLU, then log-softmax over the 7
+//! - three selected dense kernel or cuBLAS layers with LeakyReLU, then log-softmax over the 7
 //!   powerset classes
 //!
 //! [`CudaSegmentation`] holds the weights and one [`SegmentationWorkspace`] per batch

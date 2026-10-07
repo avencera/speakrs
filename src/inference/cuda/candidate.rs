@@ -10,14 +10,14 @@
 //! sub-scopes only through the locked [`Phases`] and [`LstmPhases`] handles
 //!
 //! Each trait declares a [`Coverage`]: the layer and batch pairs the candidate
-//! implements, per math mode. This is implemented coverage only. Accuracy and speed
-//! acceptance live in the production table's tuple proofs, so dispatch runs the
-//! candidate only for accepted triples and the Library path for every other triple.
-//! The harness qualifies exactly the declared triples
+//! implements, per math mode. Driver-only routing uses this implemented coverage.
+//! Hybrid routing requires a port speed scope or a qualified production tuple;
+//! unmeasured device-sensitive tuples use Library. The harness qualifies exactly
+//! the declared triples
 //!
 //! A plan is built from a [`ConfigPin`] that names its complete execution choice.
-//! Production passes the pin its accepted record names; qualification passes the
-//! candidate's own implemented pin. Each trait also states its [`SpecialValues`]
+//! A qualified tuple supplies its record pin; a complete port supplies its fixed
+//! device rule result. Qualification uses the candidate's implemented pin. Each trait also states its [`SpecialValues`]
 //! contract. The locked owner passes the exact loaded module from the selection
 //! token; a plan never resolves production module policy again
 //!

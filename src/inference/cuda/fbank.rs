@@ -3,7 +3,8 @@
 //!
 //! A batch of 10 s waveform rows becomes `[rows, FBANK_FRAMES, FBANK_MEL_BINS]` log-mel
 //! features with temporal mean normalization, the `fbank` input layout of the
-//! multi-mask embedding tail. Per batch:
+//! multi-mask embedding tail. A selected FFT/mel candidate writes the energies
+//! directly, then uses the same log/CMN consumer. The Library route runs these steps:
 //!
 //! 1. `fbank_frame_window` scales to 16-bit range, frames (400 samples, hop 160),
 //!    removes each frame's mean, pre-emphasizes (0.97) and applies the Hamming window
