@@ -64,8 +64,8 @@ enum Command {
     },
     /// Qualify one CUDA layer target against the locked harness
     CudaQualify {
-        /// Target: resnet, lstm or sincnet
-        #[arg(value_parser = ["resnet", "lstm", "sincnet"])]
+        /// Target: resnet, lstm, sincnet or fbankdft
+        #[arg(value_parser = ["resnet", "lstm", "sincnet", "fbankdft"])]
         target: String,
         /// Internal implementation name; Library is the control
         implementation: String,

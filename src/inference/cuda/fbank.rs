@@ -330,6 +330,8 @@ impl CudaFbank {
         let window_len = self.window.len() as u64;
         let frames_len = frames.len() as u64;
 
+        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        let _scope = super::test_support::fixed(FBANK_FRAME_WINDOW);
         let mut launch = runtime.stream().launch_builder(&self.frame_window);
         launch
             .arg(&samples_per_row)
@@ -366,6 +368,8 @@ impl CudaFbank {
         let spectrum_len = spectrum.len() as u64;
         let power_len = power.len() as u64;
 
+        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        let _scope = super::test_support::fixed(FBANK_POWER);
         let mut launch = runtime.stream().launch_builder(&self.power);
         launch
             .arg(&bins)
@@ -394,6 +398,8 @@ impl CudaFbank {
         let weights_len = self.mel_weights.len() as u64;
         let energies_len = energies.len() as u64;
 
+        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        let _scope = super::test_support::fixed(FBANK_MEL_SPARSE);
         let mut launch = runtime.stream().launch_builder(&self.mel_sparse);
         launch
             .arg(&self.mel_width)
@@ -434,6 +440,8 @@ impl CudaFbank {
         let energies_len = energies.len() as u64;
         let features_len = features.len() as u64;
 
+        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        let _scope = super::test_support::fixed(FBANK_LOG_CMN);
         let mut launch = runtime.stream().launch_builder(&self.log_cmn);
         launch
             .arg(&frames_per_row)

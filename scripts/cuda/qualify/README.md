@@ -993,3 +993,52 @@ measured source, control archive, device and compiled lock. The final lock binds
 the receipts, not a new GPU measurement. The earlier LSTM projection baseline
 retains its old archive identity and cannot qualify a later control archive.
 Full 39-mutant proof remains required at the final phase 2c seal after phase 2c-2.
+
+### Filterbank DFT producer target
+
+`cuda-qualify fbankdft Library` measures `fbank.dft`. The producer accepts waveform
+`[B,160000]` and writes energies `[B,998,80]` before the unchanged log/CMN consumer.
+Its batch domain is 1 through 32 in each math mode. Cases are first, last and short
+at B1, mixed at every B2 through B32, and short at B7. Existing targets retain their
+cases, including the B33 and B64 stress cases.
+
+The Library producer implements `FbankCandidate`. The generic locked operator can
+plan a candidate through that same trait. No candidate implementation, candidate
+artifact or production entry exists yet. `FbankDft` is a record-owned module area;
+it does not replace the always-on `Fbank` module. The `Oxide` choice fails closed
+until the later kernel port supplies artifacts and declared coverage. Library and
+fault runs need no fictitious candidate artifact.
+
+Both input sets use the hash-pinned B32 WeSpeaker fbank snapshot. First, last and
+short select rows 0, 17 and 18. Mixed selects its first B rows. The alternate set is
+first for a short case and short for every other case. Audio, energies and features
+select the same rows. The driver checks that the two audio hashes differ. The
+energy reference is the unique ONNX MatMul output with shape `[32,998,80]`; an
+absent or ambiguous match is an error. The stage reference is `tensor/fbank`.
+
+The secret check transforms audio in memory and computes 4096 stratified f64
+energy samples. It uses direct DFT sums, exact f64 Hamming and pre-emphasis, and
+the fixed built-in mel coefficients converted to f64. No Library output defines
+the truth. The numeric, timing, paired, profile and sanitizer checks use the
+existing gate functions and constants. The full Library stage uses the original
+producer and consumer with no extra device copy.
+
+| Fault | Filterbank path | Reason or affected evidence |
+| --- | --- | --- |
+| Precision | Applies | Rounds waveform inputs before the producer |
+| Shape | Applies | Omits outputs outside B32 |
+| Fallback | Applies | Real cuBLAS DFT call in a candidate scope |
+| Tail | Applies | Omits the partial output tile |
+| Atomic | Applies | Launched FP32 atomic reduction |
+| StageSlow | Applies | Extra full stage replay in paired timing |
+| StageAccuracy | Applies | TF32 log/CMN output rounding |
+| Slow | Applies | Three producer runs per invocation |
+| PhaseCheat | Applies | Skips the producer in the timing process |
+| Unscoped | Applies | Extra launch after the candidate scope |
+| Unlisted | Applies | Launch from an unrecorded module |
+| Lookup | Applies | Reuses the first waveform instead of fresh audio |
+| UninitShared | Applies | Launched entry with an unstored shared load |
+| StageTail and StageTailControl | Not applicable yet | Require an accepted production plan; no such fbank plan exists |
+| WrongLayout | Not applicable | No padded segment or padded writer exists at this boundary |
+
+`FirstUseFallback` and the short trace are added in the next shared harness change.

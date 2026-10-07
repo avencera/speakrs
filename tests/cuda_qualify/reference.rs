@@ -329,3 +329,57 @@ fn conv_f64_matches_fixture_rounding() -> Result<(), crate::inference::cuda::Cud
     }
     Ok(())
 }
+
+/// Direct f64 DFT and mel energy, with a fixed sample, bin and reduction order
+pub(crate) fn fbank(input: &[f32], mel: &[f32], indices: Vec<usize>) -> Sample {
+    use std::f64::consts::TAU;
+    assert_eq!(mel.len(), 257 * 80);
+    let window: Vec<_> = (0..400)
+        .map(|n| 0.54 - 0.46 * (TAU * n as f64 / 399.0).cos())
+        .collect();
+    let basis: Vec<_> = (0..257)
+        .map(|bin| {
+            (0..400)
+                .map(|sample| {
+                    let angle = TAU * ((bin * sample) % 512) as f64 / 512.0;
+                    (angle.cos(), angle.sin())
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let values = indices
+        .iter()
+        .map(|&index| {
+            let bin = index % 80;
+            let frame = index / 80 % 998;
+            let row = index / (998 * 80);
+            let offset = row * 160_000 + frame * 160;
+            let audio: Vec<_> = input[offset..offset + 400]
+                .iter()
+                .map(|&x| f64::from(x) * 32768.0)
+                .collect();
+            let mean = audio.iter().sum::<f64>() / 400.0;
+            let samples: Vec<_> = (0..400)
+                .map(|n| {
+                    ((audio[n] - mean) - 0.97 * (audio[n.saturating_sub(1)] - mean)) * window[n]
+                })
+                .collect();
+            let mut energy = 0.0;
+            for k in 0..257 {
+                let weight = f64::from(mel[k * 80 + bin]);
+                if weight == 0.0 {
+                    continue;
+                }
+                let mut real = 0.0;
+                let mut imaginary = 0.0;
+                for (sample, &(cosine, sine)) in samples.iter().zip(&basis[k]) {
+                    real += sample * cosine;
+                    imaginary += sample * sine;
+                }
+                energy += (real * real + imaginary * imaginary) * weight;
+            }
+            energy
+        })
+        .collect();
+    Sample { indices, values }
+}

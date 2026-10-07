@@ -86,7 +86,12 @@ BATCHES = (1, 7, 32, 33, 64)
 FRAMES = 589
 PROJECTION_COLUMNS = (128, 256, 384, 512)
 # the candidate PTX area of each target
-AREAS = {"resnet": "resnet", "lstm": "lstm", "sincnet": "sincnet"}
+AREAS = {
+    "resnet": "resnet",
+    "lstm": "lstm",
+    "sincnet": "sincnet",
+    "fbankdft": "fbankdft",
+}
 
 
 @dataclass(frozen=True)
@@ -185,12 +190,36 @@ def layers(target: str) -> tuple[str, ...]:
         return ("lstm.stack",)
     if target == "sincnet":
         return ("sincnet.conv0.abs_pool",)
+    if target == "fbankdft":
+        return ("fbank.dft",)
     raise Rejected("unknown target")
 
 
-def case_ids() -> list[str]:
+def target_batches(target: str) -> tuple[int, ...]:
+    """Use the batch domain owned by the selected boundary."""
+    return tuple(range(1, 33)) if target == "fbankdft" else BATCHES
+
+
+def target_cases(target: str) -> tuple[tuple[str, int], ...]:
+    """Retain the existing cases and select only valid filterbank batch plans."""
+    if target == "fbankdft":
+        return (
+            ("first", 1),
+            ("last", 1),
+            ("short", 1),
+            *[("mixed", batch) for batch in range(2, 33)],
+            ("short", 7),
+        )
+    return CASES
+
+
+def case_ids(target: str = "resnet") -> list[str]:
     """Every math mode and case, in a fixed order."""
-    return [f"{mode}/{case}/b{batch}" for mode in MODES for case, batch in CASES]
+    return [
+        f"{mode}/{case}/b{batch}"
+        for mode in MODES
+        for case, batch in target_cases(target)
+    ]
 
 
 def sha(path: Path) -> str:
@@ -372,6 +401,8 @@ def verify_inputs(target: str) -> dict[str, str]:
         required.add(
             "/workspace/ref/wespeaker-fbank-b32/test_and_short_b32.safetensors"
         )
+    if target == "fbankdft":
+        required = {"/workspace/ref/wespeaker-fbank-b32/test_and_short_b32.safetensors"}
     files = manifest["files"]
     if not required <= files.keys():
         raise Rejected("input manifest omits a required asset")
@@ -429,15 +460,19 @@ def parse_coverage(raw: dict, target: str) -> Coverage:
     triples: set[tuple[str, int, str]] = set()
     for entry in raw["entries"]:
         names = inventory if entry["layers"] == "all" else tuple(entry["layers"])
-        batches = BATCHES if entry["batches"] == "all" else tuple(entry["batches"])
+        batches = (
+            target_batches(target)
+            if entry["batches"] == "all"
+            else tuple(entry["batches"])
+        )
         modes = MODES if entry["maths"] == "all" else tuple(entry["maths"])
         if not set(names) <= set(inventory):
             raise Rejected(
                 f"coverage names unknown layers: {sorted(set(names) - set(inventory))}"
             )
-        if not set(batches) <= set(BATCHES):
+        if not set(batches) <= set(target_batches(target)):
             raise Rejected(
-                f"coverage names batches the harness cannot test: {sorted(set(batches) - set(BATCHES))}"
+                f"coverage names batches the harness cannot test: {sorted(set(batches) - set(target_batches(target)))}"
             )
         if not set(modes) <= set(MODES):
             raise Rejected("coverage names an unknown math mode")
@@ -456,7 +491,7 @@ def expected_ids(target: str, phase: str, mode: str) -> set[str]:
     """The rows one per-mode process must produce, without trusting device output."""
     base = {
         f"{mode}/{case}/b{batch}/{layer}"
-        for case, batch in CASES
+        for case, batch in target_cases(target)
         for layer in (*layers(target), "stage")
     }
     if phase == "numeric":
@@ -467,11 +502,17 @@ def expected_ids(target: str, phase: str, mode: str) -> set[str]:
 def draw_length(case: str, layer: str) -> int:
     """Bind draw lengths to the locked model geometry, not a reported CPU section."""
     match = re.fullmatch(
-        r"tf32/(first|last|short|mixed)/b(1|7|32|33|64)/stage(/switched)?", case
+        r"tf32/(first|last|short|mixed)/b([1-9][0-9]*)/stage(/switched)?", case
     )
     if match is None:
         raise Rejected("GPU lock: invalid TF32 draw case")
     batch = int(match[2])
+    if layer == "fbank.dft":
+        if batch not in target_batches("fbankdft"):
+            raise Rejected("GPU lock: invalid TF32 draw batch")
+        return batch * 998 * 80
+    if batch not in BATCHES:
+        raise Rejected("GPU lock: invalid TF32 draw batch")
     if layer == "lstm.stack":
         return batch * FRAMES * 256
     if layer == "sincnet.conv0.abs_pool":
@@ -1181,7 +1222,9 @@ def numeric(
         check(result, f"layer:{mode}/{layer}", lambda cases=cases: layer_parity(cases))
 
     secret_coverage = (
-        Coverage.product(layers(result["target"]), BATCHES, MODES)
+        Coverage.product(
+            layers(result["target"]), target_batches(result["target"]), MODES
+        )
         if result.get("implementation") == "Library"
         else coverage
     )
@@ -1395,7 +1438,7 @@ def paired_checks(
     mode = process["mode"]
     expected = {
         f"{mode}/{case}/b{batch}/stage"
-        for case, batch in CASES
+        for case, batch in target_cases(result["target"])
         if coverage.layers_at(batch, mode) or implementation == "Library"
     }
     rows = {row["id"]: row for row in process["rows"]}
@@ -1682,7 +1725,7 @@ def profile(
     return exported
 
 
-CANDIDATE_AREAS = frozenset({"resnet", "lstm", "sincnet"})
+CANDIDATE_AREAS = frozenset({"resnet", "lstm", "sincnet", "fbankdft"})
 
 
 def stable_modules(
@@ -1799,7 +1842,7 @@ def band_layers(coverage: Coverage, implementation: str) -> str:
         return ""
     return ";".join(
         f"{batch}:{','.join(coverage.layers_at(batch, 'tf32'))}"
-        for batch in BATCHES
+        for batch in sorted(coverage.batches)
         if coverage.layers_at(batch, "tf32")
     )
 
@@ -1817,6 +1860,10 @@ def collect_tier(
         SPEAKRS_QUALIFY_TARGET=target,
         SPEAKRS_QUALIFY_NONCE=nonce,
     )
+    if target == "fbankdft" and implementation in ("StageTail", "StageTailControl"):
+        raise Rejected(
+            "fbankdft: StageTail requires an accepted production plan; none exists before the port"
+        )
     # the paired fault fixture uses the archived JIT-qualified production plans
     if implementation in ("StageTail", "StageTailControl"):
         env["SPEAKRS_CUDA_FORCE_PTX_JIT"] = "1"
@@ -1848,8 +1895,10 @@ def collect_tier(
     )
     # candidate artifacts sit outside the harness lock and must be pinned in full,
     # including unselected tiers and architectures, not just the loaded module
-    for hashes in shipped_files(ROOT, AREAS[target]).values():
-        result["code_sha256"].update(hashes)
+    candidate_manifest = ROOT / "src/inference/cuda/ptx" / f"{AREAS[target]}.manifest"
+    if candidate_manifest.is_file() or implementation == "Oxide":
+        for hashes in shipped_files(ROOT, AREAS[target]).values():
+            result["code_sha256"].update(hashes)
     result["verified_inputs"] = verify_inputs(target)
     steps = result["commands"]
     binary = build(env, directory, steps)
@@ -1886,7 +1935,7 @@ def collect_tier(
     numeric_library, numeric_candidate = {}, {}
     candidate_processes = []
     band_coverage = (
-        Coverage.product(layers(target), BATCHES, MODES)
+        Coverage.product(layers(target), target_batches(target), MODES)
         if implementation == "Library"
         else coverage
     )
@@ -2272,13 +2321,17 @@ def collect_tier(
         m["area"]: m["tier"] for m in result.get("loaded_ptx", {}).get("modules", [])
     }
     result["accepted_tuples"] = (
-        [list(t) for t in sorted(coverage.triples) if t[1] in (1, 32)]
+        [
+            list(t)
+            for t in sorted(coverage.triples)
+            if t[1] in (target_batches(target) if target == "fbankdft" else (1, 32))
+        ]
         if result["status"] == "passed" and implementation == "Oxide"
         else []
     )
     result["coverage"] = {
         "math": list(MODES),
-        "cases": CASES,
+        "cases": target_cases(target),
         "tier": tier,
         "real_turing_hardware": "untested",
     }
@@ -2451,7 +2504,9 @@ def summary(result: dict) -> str:
 def main() -> int:
     """Refuse changed harnesses before GPU work and again before writing results."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("target", nargs="?", choices=("resnet", "lstm", "sincnet"))
+    parser.add_argument(
+        "target", nargs="?", choices=("resnet", "lstm", "sincnet", "fbankdft")
+    )
     parser.add_argument("implementation", nargs="?")
     parser.add_argument("--tier", choices=("sm75", "sm80", "sm90", "sm120"))
     parser.add_argument("--check-table", action="store_true")

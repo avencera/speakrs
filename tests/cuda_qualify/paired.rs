@@ -12,7 +12,7 @@ use cudarc::driver::{CudaGraph, sys::CUevent_flags};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 
-const BLOCKS: usize = 256;
+pub(super) const BLOCKS: usize = 256;
 const TAIL_BLOCKS: usize = 16;
 
 thread_local! {
@@ -116,7 +116,7 @@ fn elapsed(
 }
 
 /// Warm-up and collection share the same alternating-input, replay-level schedule
-fn replay_set(
+pub(super) fn replay_set(
     blocks: usize,
     mut observe: impl FnMut(usize, Option<usize>) -> Result<([f32; 4], [f32; 4]), CudaError>,
 ) -> Result<Value, CudaError> {
@@ -134,7 +134,7 @@ fn replay_set(
               "pid":std::process::id()}))
 }
 
-fn observe(
+pub(super) fn observe(
     runtime: &CudaRuntime,
     stages: [&CudaGraph; 2],
     operators: [&[[CudaGraph; 2]]; 2],

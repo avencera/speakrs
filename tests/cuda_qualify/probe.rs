@@ -25,6 +25,9 @@ use cudarc::driver::sys::{CUevent_flags, CUgraphInstantiate_flags, CUstreamCaptu
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+#[path = "fbank_probe.rs"]
+mod fbank_probe;
+
 #[path = "lock.rs"]
 pub(crate) mod lock;
 #[path = "paired.rs"]
@@ -80,6 +83,11 @@ pub(crate) fn read_batch(
 }
 
 fn reference(target: &str, case: &str) -> Result<SafetensorsFile, CudaError> {
+    if target == "fbankdft" {
+        return SafetensorsFile::open(
+            "/workspace/ref/wespeaker-fbank-b32/test_and_short_b32.safetensors",
+        );
+    }
     let model = if target == "resnet" {
         "wespeaker-multimask-tail"
     } else {
@@ -302,6 +310,9 @@ fn declared_coverage(
     }
     if implementation != "Oxide" {
         return json!({"entries": [{"layers": "all", "batches": "all", "maths": "all"}]});
+    }
+    if target == "fbankdft" {
+        return coverage_json(Coverage::NONE);
     }
     if target == "resnet" {
         return coverage_json(ConvOxide::coverage(tier));
@@ -1223,6 +1234,9 @@ fn secret(
     math: CudaMath,
     rows: &mut Vec<Value>,
 ) -> Result<(), CudaError> {
+    if target == "fbankdft" {
+        return fbank_probe::secret(runtime, choice, math, rows);
+    }
     if target != "resnet" {
         return segmentation_secret(
             runtime,
@@ -1333,13 +1347,21 @@ fn parse_mode(text: &str) -> CudaMath {
 /// `<batch>:<layer>,<layer>;<batch>:...`, the declared layers the TF32 noise band
 /// perturbs at each batch size
 fn parse_band(text: &str) -> Vec<(usize, Vec<String>)> {
+    parse_band_for("resnet", text)
+}
+
+fn parse_band_for(target: &str, text: &str) -> Vec<(usize, Vec<String>)> {
     text.split(';')
         .filter(|item| !item.is_empty())
         .map(|item| {
             let (batch, layers) = item.split_once(':').expect("batch:layers");
             let batch = batch.parse().expect("band batch");
             assert!(
-                BATCHES.contains(&batch),
+                if target == "fbankdft" {
+                    (1..=32).contains(&batch)
+                } else {
+                    BATCHES.contains(&batch)
+                },
                 "band batch from the fixed inventory"
             );
             (batch, layers.split(',').map(str::to_owned).collect())
@@ -1354,6 +1376,10 @@ fn prepare_process_modules(
     choice_name: &str,
     cases: &[(CudaMath, &str, usize)],
 ) -> Result<(), CudaError> {
+    if target == "fbankdft" {
+        runtime.load_kernels(KernelModule::Fbank)?;
+        return Ok(());
+    }
     let area = match target {
         "resnet" => {
             runtime.load_kernels(KernelModule::Embedding)?;
@@ -1406,10 +1432,19 @@ fn prepare_process_modules(
 }
 
 /// The mode, case and batch triples this process measures
-fn selected_cases(phase: &str) -> Vec<(CudaMath, &'static str, usize)> {
+fn selected_cases(phase: &str, target: &str) -> Vec<(CudaMath, &'static str, usize)> {
+    let cases = if target == "fbankdft" {
+        [("first", 1), ("last", 1), ("short", 1)]
+            .into_iter()
+            .chain((2..=32).map(|batch| ("mixed", batch)))
+            .chain([("short", 7)])
+            .collect::<Vec<_>>()
+    } else {
+        CASES.to_vec()
+    };
     let all = [CudaMath::Fp32, CudaMath::Tf32]
         .into_iter()
-        .flat_map(|math| CASES.map(|(case, batch)| (math, case, batch)));
+        .flat_map(|math| cases.iter().map(move |&(case, batch)| (math, case, batch)));
     match phase {
         "numeric" | "timing" | "paired" => {
             let mode = std::env::var("SPEAKRS_QUALIFY_MODE").expect("one math mode per process");
@@ -1422,7 +1457,11 @@ fn selected_cases(phase: &str) -> Vec<(CudaMath, &'static str, usize)> {
                 .split(',')
                 .map(|batch| batch.parse().expect("sanitizer batch"))
                 .collect();
-            assert!(batches.iter().all(|batch| BATCHES.contains(batch)));
+            assert!(batches.iter().all(|batch| if target == "fbankdft" {
+                (1..=32).contains(batch)
+            } else {
+                BATCHES.contains(batch)
+            }));
             let only = std::env::var("SPEAKRS_QUALIFY_SANITIZER_BATCH")
                 .ok()
                 .map(|batch| batch.parse::<usize>().expect("sanitizer batch"));
@@ -1453,7 +1492,7 @@ fn qualification_driver() -> Result<(), CudaError> {
     let lock_phase = std::env::var("SPEAKRS_QUALIFY_PHASE").expect("phase");
     let gpu_lock = lock::GpuLock::from_environment(&lock_phase);
     let target = std::env::var("SPEAKRS_QUALIFY_TARGET").expect("target");
-    assert!(["resnet", "sincnet", "lstm"].contains(&target.as_str()));
+    assert!(["resnet", "sincnet", "lstm", "fbankdft"].contains(&target.as_str()));
     let implementation = std::env::var("SPEAKRS_QUALIFY_IMPL").expect("implementation");
     let choice = implementation.as_str();
     let phase = std::env::var("SPEAKRS_QUALIFY_PHASE").expect("phase");
@@ -1556,11 +1595,11 @@ fn qualification_driver() -> Result<(), CudaError> {
     }
 
     let band = std::env::var("SPEAKRS_QUALIFY_BAND_LAYERS")
-        .map(|text| parse_band(&text))
+        .map(|text| parse_band_for(&target, &text))
         .unwrap_or_default();
     assert!(band.is_empty() || (phase == "numeric" && choice == "Library"));
     let mut rows = Vec::new();
-    let cases = selected_cases(&phase);
+    let cases = selected_cases(&phase, &target);
     assert!(!cases.is_empty(), "the process measures at least one case");
     // the same plan owner resolves declared coverage before loading candidate bytes
     // preload in every phase so the stable inventory gate remains unchanged
@@ -1586,7 +1625,9 @@ fn qualification_driver() -> Result<(), CudaError> {
                 .find(|(declared, _)| declared == batch && *math == CudaMath::Tf32)
                 .map(|(_, layers)| layers.clone()),
         };
-        if phase == "paired" {
+        if target == "fbankdft" {
+            run.fbank(&mut rows)?;
+        } else if phase == "paired" {
             run.paired(&mut rows)?;
         } else if target == "resnet" {
             run.embedding(&mut rows)?;

@@ -915,6 +915,15 @@ pub(crate) fn set_band(band: Option<(String, u32, Vec<String>)>) {
     BAND.with(|cell| *cell.borrow_mut() = band);
 }
 
+/// Whether the active TF32 draw includes this producer
+pub(crate) fn band_enabled(layer: &str) -> bool {
+    BAND.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|(_, _, layers)| layers.iter().any(|name| name == layer))
+    })
+}
+
 /// Moves a seeded random two thirds of a Library output by one unit in the last place,
 /// when the noise band is on and lists `layer`
 pub(crate) fn perturb<Y: DevicePtrMut<f32>>(

@@ -35,7 +35,12 @@ SHARED_SOURCE_AMENDMENT = {
 }
 # device identity is recorded in the archived PR36 qualification reports
 LEGACY_DEVICE_NAME = "NVIDIA GeForce RTX 5070 Ti"
-AREA_HOST = {"resnet": "conv", "lstm": "lstm", "sincnet": "sinc"}
+AREA_HOST = {
+    "resnet": "conv",
+    "lstm": "lstm",
+    "sincnet": "sinc",
+    "fbankdft": "fbankdft",
+}
 # acceptance-time hashes migrated from QUALIFIED.json; this is not a writable manifest
 LEGACY_BINDINGS: dict[str, dict] = {
     "3badc1aec939b0e8f7312786d695bec6445de1dacb1f85e44124bf3ac20356f8": {
