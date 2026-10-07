@@ -24,6 +24,8 @@ segmentation = []
 resnet = []
 lstm = []
 sincnet = []
+# record-owned wide convolution operators
+wideconv = []
 
 # PTX tiers above the sm_75 baseline. The xtask builds each variant an area declares
 # with the matching feature on, and the sm75 baseline with none. They are cumulative,

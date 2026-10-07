@@ -149,6 +149,8 @@ pub const AREAS: &[Area] = &[
     Area::new("resnet", &[Tier::Sm75]),
     Area::new("lstm", &[Tier::Sm75]),
     Area::new("sincnet", &[Tier::Sm75]),
+    // the sm80 variant adds the tensor-core kernels; sm75 traps in those entries
+    Area::new("wideconv", &[Tier::Sm75, Tier::Sm80]),
 ];
 
 /// One PTX file: an area built for one tier

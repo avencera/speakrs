@@ -27,3 +27,5 @@ pub mod resnet;
 pub mod segmentation;
 #[cfg(feature = "sincnet")]
 pub mod sincnet;
+#[cfg(feature = "wideconv")]
+pub mod wideconv;
