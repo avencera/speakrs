@@ -992,12 +992,13 @@
   },
   "phase2c1": {
     "evidence": "evidence/phase2c1-results.json",
-    "sha256": "78ede54b926d4dea7fb39523084e7abd7491b0079db33df82931f640d16bce5c",
+    "sha256": "003bc22124cf13490c429fd04eed693bdc594ac9cdd2072f503a1fa6b750e146",
     "purpose": "Phase 2c-1 infrastructure proof; no new production acceptance",
     "full_library_controls": 3,
     "standard_mutant_kinds_caught": 13,
     "matched_pairs": 2,
     "production_acceptance": false,
-    "full_39_required_at": "Final phase 2c seal after phase 2c-2"
+    "full_39_required_at": "Final phase 2c seal after phase 2c-2",
+    "record_owned_production_artifact_loads": 2
   }
 }

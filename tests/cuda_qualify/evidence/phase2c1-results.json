@@ -13,7 +13,9 @@
     "01a112a9-6e7c-774f-ba98-707ce1b78df4",
     "01a112e6-82e9-748e-91f1-f94fa1a6afdc",
     "01a112e6-82fc-768c-961c-be25294057f3",
-    "01a113ae-3c51-774b-a357-05cddee789da"
+    "01a113ae-3c51-774b-a357-05cddee789da",
+    "01a113d4-efbb-71b0-8823-cc83cff3b72f",
+    "01a113d7-0011-74d7-8cd8-ba9750a9e786"
   ],
   "library_controls": [
     {
@@ -1855,7 +1857,17 @@
       "Paired replay holds the parent GPU lock throughout; f64/draw lock release occurs only in separate numeric children",
       "The executable change removes module load/unload during coverage discovery, before the measuring runtime is constructed"
     ],
-    "residual": "The evidence isolates initialization/module-load order as the changed execution path but does not prove the driver allocation/cache mechanism that caused the b1 timing change; failed record remains rejected"
+    "residual": "The evidence isolates initialization/module-load order as the changed execution path but does not prove the driver allocation/cache mechanism that caused the b1 timing change; failed record remains rejected",
+    "root_attribution": {
+      "message_id": "01a113b8-7bbf-7682-806e-8ff19feb0874",
+      "conclusion": "The earlier b1 slowdown was the eager-loading fault and is fixed by 79de5eb; corrected StageTailControl passes every check and StageTail fails only the intended mixed-b32 margin",
+      "no_cubin_attribution_run_required": true,
+      "lower_bounds_corrected_b1": {
+        "first": 1.0096969435545784,
+        "last": 1.0095789954479402,
+        "short": 1.009236102942999
+      }
+    }
   },
   "verification_tools": {
     "verify-one-proof.py": "6e92a28f93539f8cf44927e432890e01c29867dcf8d75b34326e91c130a14a5e",
@@ -1872,5 +1884,13 @@
     "log_sha256": "53e0489bfe62e7a4b3539ffba4084da631d44053253c9cc77e7da5b934066f7d",
     "formatter_log_sha256": "f3fbdf46778d18f6747bbfd77017085dbc5ffd7567fa102543b4be0faa064937",
     "clippy_log_sha256": "ad39d356f4ea1a6f23e0c53645466409afde5d6fe3095a104604855170473a16"
+  },
+  "production_artifact_ownership": {
+    "evidence": "phase2c1-production-artifacts.json",
+    "sha256": "7524c069aaf510ded6a331f944ed85533980d7a075f34f1245b28bd8cb6b27a8",
+    "resolved": true,
+    "default_production_candidates_verified": 2,
+    "first_seal_results_sha256": "78ede54b926d4dea7fb39523084e7abd7491b0079db33df82931f640d16bce5c",
+    "historical_preflight_scope": "Older artifact_proofs carry_forward descriptions apply to the first seal only. This follow-up changes runtime-loader policy, not PTX/cubin/manifest bytes. The short default-production proof and host refusal tests cover the new policy"
   }
 }

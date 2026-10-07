@@ -924,3 +924,12 @@ the exact source diff and both source snapshots. SincNet uses the corrected
 snapshot. Final receipt and documentation changes do not relabel either
 compiled digest or alter measured evidence. Large archives and raw records
 remain outside git in the SHA-addressed qualification cache.
+
+The production artifact follow-up is pinned in
+`tests/cuda_qualify/evidence/phase2c1-production-artifacts.json`. A short shared-lock
+proof of the default CUDA build on cc 12.0 selects a SincNet tuple and a ResNet
+tuple with their PR #36 PTX-JIT artifacts, without a force-JIT environment override.
+No cubins are loaded for those areas. Host tests check all 52 current production
+tuples and exact cubin requests. A requested-artifact refusal does not try another
+format; production uses Library where allowed, and driver-only mode keeps the
+typed error. No new speed or accuracy qualification is claimed.

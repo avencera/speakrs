@@ -12,12 +12,12 @@ A mutant that does not reach its intended gate stops this phase.
 
 ## Exact source evidence
 
-The audited baseline is `8952f419928d91ecb67fadd8715b3ef19ede63fe`. The collection diff ends at `2cf2cf75252114aeb509022e90a9d82642ecf62d`.
+The audited baseline is `8952f419928d91ecb67fadd8715b3ef19ede63fe`. The collection diff ends at `5a308be474853bc5e38eab3810993ae1b1641d9b`.
 `evidence/phase2c1-gate-decisions.diff` is empty: `gates.py` and `verdict.py`
 have no changed bytes. Its SHA256 is `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
 `evidence/phase2c1-collection-injection.diff.gz` holds every changed Rust, Python,
 PTX, manifest, shell and Cargo path that can collect or inject evidence, plus the
-changed loader, selection and kernel tooling. Its SHA256 is `1403aa2eb0d7a9314f192d207fc3a1f06c12f7c9612737c9cbc68f2a36676c46`.
+changed loader, selection and kernel tooling. Its SHA256 is `cde95fbc6ec68696718d29a6da124386acd1f64c3acd08f2a5c0e7bb0760ff15`.
 Decompress it to inspect the exact diff. The JSON plan lists each exact path. The diff excludes no changed injection
 function. Production PTX and kernel arithmetic have no changes. The control PTX
 only receives the same host-prepared integer draw choices. Frozen vectors and
@@ -27,8 +27,10 @@ The full controls cover all numeric, timing, paired, profile and sanitizer paths
 LSTM and ResNet on cc 12.0; SincNet on cc 8.9. Their raw hashes are pinned in the
 JSON plan. They prove device/artifact evidence and unlocked f64/draw sections on
 both devices. The actual cc 12.0 and cc 8.9 cubin/JIT all-entry proofs cover the
-unchanged loader bytes. Host tests cover all embedded kernel names, exact artifact
-key refusal, requested-artifact refusal without format substitution, record negatives and typed overrides.
+unchanged artifact bytes and first-seal load policy. The short default-production
+follow-up proof below covers the new strict loader policy. Host tests cover all
+embedded kernel names, exact artifact key refusal, requested-artifact refusal
+without format substitution, record negatives and typed overrides.
 Static lints cover the exact eight-site shared-address fixture.
 
 ## Live mutant allocation
@@ -107,7 +109,9 @@ same 32 recorded graph scope/kernel sequences. Selection and key work happen
 before capture; timed replay only launches the captured graph. Paired processes
 hold the parent lock throughout. CPU unlocks occur in separate numeric children.
 The corrected b1 ratios are about 1.010, versus about 0.998 in the failed record.
-This isolates module-load initialization order as the changed execution path.
+This isolates eager module loading during coverage discovery as the changed
+execution path. The root attributes the earlier b1 slowdown to that fault, fixed
+by `79de5eb`; no cubin-versus-JIT attribution run is needed.
 The driver allocation/cache mechanism is not proved; retain this as an audit
 residual, not a claim that the old record passed.
 
@@ -146,6 +150,17 @@ Explicit qualification requests resolve their declared embedded artifact before
 loading; a driver refusal never changes the artifact being measured. Gates,
 bounds, samples, seeds, production coverage and production artifact pins do not
 change. The new refusal policy affects failed loads only, not any retained successful
-control or mutant. The short default-production GPU proof is required for this
-follow-up. Earlier preflight receipts prove the unchanged artifact bytes, not the
-new loader policy. They retain their original source and compiled-lock identities.
+control or mutant. The short default-production GPU proof passed for this
+follow-up on cc 12.0. Earlier preflight receipts prove the unchanged artifact
+bytes, not the new loader policy. They retain their original source and compiled-lock identities.
+
+The default build selects `sincnet.conv0.abs_pool` and `resnet.layer1.0.conv1`,
+batch 1 FP32, with their PR #36 sm75 PTX-JIT pins. No force-JIT or forced-tier
+environment was present; exactly two modules were recorded, both JIT. The proof
+ran under the shared flock, not a timing window.
+`evidence/phase2c1-production-artifacts.json` pins the actual measured 42 lock,
+source commit, two successful production selections, 433 source hashes, command
+logs and independent Mac receipt. The final owner lock does not relabel that binary.
+The host test covers all 52 current production tuples, exact cubin requests, driver
+refusal without substitution, conflicting owners and the typed Library policy.
+Both table modes and all required Mac checks pass.

@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "audited_base_commit": "8952f419928d91ecb67fadd8715b3ef19ede63fe",
-  "collection_diff_end_commit": "2cf2cf75252114aeb509022e90a9d82642ecf62d",
+  "collection_diff_end_commit": "5a308be474853bc5e38eab3810993ae1b1641d9b",
   "gate_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-  "collection_diff_sha256": "1403aa2eb0d7a9314f192d207fc3a1f06c12f7c9612737c9cbc68f2a36676c46",
+  "collection_diff_sha256": "cde95fbc6ec68696718d29a6da124386acd1f64c3acd08f2a5c0e7bb0760ff15",
   "changed_collection_injection_files": [
     "Cargo.toml",
     "scripts/cuda/qualify/artifacts.py",
@@ -20,6 +20,7 @@
     "src/inference/cuda/embedding.rs",
     "src/inference/cuda/embedding/dispatch.rs",
     "src/inference/cuda/embedding/kernels.rs",
+    "src/inference/cuda/error.rs",
     "src/inference/cuda/fbank.rs",
     "src/inference/cuda/implementation.rs",
     "src/inference/cuda/implementation/overrides.rs",
@@ -166,11 +167,15 @@
   ],
   "final_phase2c_seal": "Run all 39 standard mutants at the end of phase 2c-2; do not infer area-specific qualification from this reduced infrastructure proof",
   "collection_diff_file": "phase2c1-collection-injection.diff.gz",
-  "collection_diff_archive_sha256": "5ecf836035c437445dbbe88a29f925a32739efb8e9fe7345d706606225276106",
+  "collection_diff_archive_sha256": "731d4110c1ecf2dd5ee4a8f3e730ca532f8235c8fae1638939d33ea0e9b2623b",
   "live_results_file": "phase2c1-results.json",
-  "live_results_sha256": "78ede54b926d4dea7fb39523084e7abd7491b0079db33df82931f640d16bce5c",
+  "live_results_sha256": "003bc22124cf13490c429fd04eed693bdc594ac9cdd2072f503a1fa6b750e146",
   "collection_endpoint_amendment": {
-    "previous_commit": "cc9b225e7d66ef3bd2f486a700e478d1c66b329f",
-    "reason": "The endpoint now includes unloaded legacy fixture declarations and a direct Sinc StageTail plan-owner test; all gates, arithmetic, schedules, sample counts and seeds remain unchanged"
+    "previous_commit": "2cf2cf75252114aeb509022e90a9d82642ecf62d",
+    "reason": "The follow-up restores strict record-owned production artifact requests, typed refusal policy and single artifact owners; the GPU proof array assertion is fixed; all gates, arithmetic, schedules, sample counts and seeds remain unchanged"
+  },
+  "production_artifact_proof": {
+    "file": "phase2c1-production-artifacts.json",
+    "sha256": "7524c069aaf510ded6a331f944ed85533980d7a075f34f1245b28bd8cb6b27a8"
   }
 }
