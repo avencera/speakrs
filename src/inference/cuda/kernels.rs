@@ -253,7 +253,8 @@ pub enum KernelModule {
     FbankDft,
     /// Record-owned segmentation dense operators
     Segdense,
-    /// Record-owned wide convolution operators
+    /// Wide trunk convolutions: the stem, the 1x1 shortcuts, the strided layers from
+    /// 64 channels and the 128- and 256-channel layers
     Wideconv,
 }
 
@@ -290,7 +291,7 @@ impl KernelModule {
             Self::Sincnet => include_str!("ptx/sincnet.manifest"),
             Self::Segdense => include_str!("ptx/segdense.manifest"),
             Self::FbankDft => include_str!("ptx/fbankdft.manifest"),
-            Self::Wideconv => "",
+            Self::Wideconv => include_str!("ptx/wideconv.manifest"),
             Self::LstmProj => include_str!("ptx/lstmproj.manifest"),
         }
     }
@@ -298,7 +299,6 @@ impl KernelModule {
     /// The PTX variants embedded in this build
     pub const fn variants(self) -> AreaPtx {
         match self {
-            Self::Wideconv => AreaPtx::baseline(None),
             #[cfg(test)]
             Self::Probe => AreaPtx {
                 sm75: tier_ptx!(["cuda-sm75"], "ptx/probe.sm75", [75, 80, 86, 89, 90, 120]),
@@ -374,6 +374,20 @@ impl KernelModule {
                 ),
                 sm90: None,
                 sm120: tier_ptx!(["cuda-sm120"], "ptx/lstmproj.sm120", [120]),
+            },
+            Self::Wideconv => AreaPtx {
+                sm75: tier_ptx!(
+                    ["cuda-sm75"],
+                    "ptx/wideconv.sm75",
+                    [75, 80, 86, 89, 90, 120]
+                ),
+                sm80: tier_ptx!(
+                    ["cuda-sm80", "cuda-sm90", "cuda-sm120"],
+                    "ptx/wideconv.sm80",
+                    [80, 86, 89, 90, 120]
+                ),
+                sm90: None,
+                sm120: None,
             },
         }
     }

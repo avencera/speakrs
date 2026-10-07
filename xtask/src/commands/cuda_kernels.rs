@@ -154,6 +154,8 @@ pub const AREAS: &[Area] = &[
     // the driver-only LSTM stack; sm80 adds TF32 tensor projections, and sm120 is the
     // same source built for the newest target
     Area::new("lstmproj", &[Tier::Sm75, Tier::Sm80, Tier::Sm120]),
+    // the sm80 variant adds the tensor-core kernels; sm75 traps in those entries
+    Area::new("wideconv", &[Tier::Sm75, Tier::Sm80]),
 ];
 
 /// One PTX file: an area built for one tier

@@ -72,6 +72,7 @@ use super::candidate::{
     ConfigPin, ConvCandidate, ConvLayerSpec, ConvOxide, DenseCandidate, DenseOxide, DenseSpec,
     FbankCandidate, FbankOxide, FbankSpec, LstmCandidate, LstmOxide, LstmProjOxide, LstmSpec,
     PlanError, SegConvCandidate, SegConvOxide, SegConvSpec, SincCandidate, SincOxide, SincSpec,
+    WideconvOxide,
 };
 use super::device::DeviceAttributes;
 use super::error::GeometryError;
@@ -527,6 +528,34 @@ impl Qualified {
         self.finish(area, super::driver_only(), plan)
     }
 
+    /// Build exactly the accepted wide convolution
+    pub(crate) fn wideconv(
+        self,
+        runtime: &CudaRuntime,
+        spec: ConvLayerSpec<'_>,
+    ) -> Result<Option<WideconvOxide>, CudaError> {
+        let area = KernelModule::Wideconv;
+        let kernels = self.check(runtime, area, spec.name, spec.conv.batch, spec.conv.math)?;
+        let pin = match self.pin {
+            PlanPin::Pinned(ConfigPin::Wideconv(pin)) => Ok(pin),
+            PlanPin::Pinned(other) => return Err(self.foreign_pin(other)),
+            #[cfg(all(test, feature = "_cuda-libraries"))]
+            PlanPin::Implemented => WideconvOxide::implemented_pin(&spec),
+        };
+        let plan = pin.and_then(|pin| {
+            let plan = WideconvOxide::plan(runtime, &kernels, spec, pin)?;
+            #[cfg(all(test, feature = "_cuda-libraries"))]
+            super::test_support::configuration::record(
+                self.boundary.name(),
+                self.batch,
+                self.math,
+                ConfigPin::Wideconv(pin),
+            );
+            Ok(plan)
+        });
+        self.finish(area, super::driver_only(), plan)
+    }
+
     /// Build exactly the accepted Sinc producer
     pub(crate) fn sinc(
         self,
@@ -940,6 +969,7 @@ fn artifact_refusal(error: CudaError, library_allowed: bool) -> Result<Selected,
 fn candidate_coverage(area: KernelModule, tier: PtxTier) -> Coverage {
     match area {
         KernelModule::Resnet => ConvOxide::coverage(tier),
+        KernelModule::Wideconv => WideconvOxide::coverage(tier),
         KernelModule::Lstm => LstmOxide::coverage(tier),
         KernelModule::Sincnet => SincOxide::coverage(tier),
         KernelModule::FbankDft => FbankOxide::coverage(tier),
@@ -958,10 +988,7 @@ fn explicit_request(
 ) -> Result<Option<ModuleRequest>, CudaError> {
     explicit_route(boundary, batch, math, |area| {
         // areas without a port have no implemented tuple or artifact to resolve
-        if matches!(
-            area,
-            KernelModule::Wideconv | KernelModule::Segdense | KernelModule::LstmProj
-        ) {
+        if matches!(area, KernelModule::Segdense | KernelModule::LstmProj) {
             return Ok(None);
         }
         let request = modules.embedded_exact(area)?;

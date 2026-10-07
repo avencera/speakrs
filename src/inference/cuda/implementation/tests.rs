@@ -1465,6 +1465,10 @@ fn plan_from_pin(
             context: "segdense production proof",
             reason: "no production entry exists before the routing port".to_owned(),
         }),
+        ConfigPin::Wideconv(_) => Err(CudaError::Unsupported {
+            context: "wideconv production proof",
+            reason: "no production entry exists for the driver-only port".to_owned(),
+        }),
         ConfigPin::Conv(pin) => {
             let trunk = [FBANK_MEL_BINS, FBANK_FRAMES];
             let ([in_channels, out_channels], stride, input) = match pin.shape() {
