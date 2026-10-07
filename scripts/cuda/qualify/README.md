@@ -1188,3 +1188,8 @@ timing and paired processes must agree. Device-wide table checks compare the
 same fingerprints. `sanitizer_fingerprint` stays separate for the tool policy.
 Only exact PR #36 records use the explicit installed-file legacy receipt; its
 missing process-loaded evidence remains a historical gap.
+
+FirstUseFallback prepares separate one-element cuBLAS operands before the profile
+warm-up. The first host replay hook issues one SGEMM under the selected boundary's
+candidate scope, without rerunning the operator or stage. A locked API-call counter
+requires exactly one call in that hook. Eager execution and capture never use it.

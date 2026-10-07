@@ -269,6 +269,7 @@ struct ProjectionNodes {
 
 thread_local! {
     static STACK: RefCell<Vec<Frame>> = const { RefCell::new(Vec::new()) };
+    static CALL_COUNT: Cell<u64> = const { Cell::new(0) };
     static CALL_VIOLATIONS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static GRAPH_VIOLATIONS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static PROJECTION_NODES: RefCell<ProjectionNodes> = const { RefCell::new(ProjectionNodes { capture_id: None, nodes: BTreeSet::new() }) };
@@ -377,6 +378,24 @@ impl FirstReplay {
         let first = std::mem::replace(&mut self.0, false);
         (first && choice == "FirstUseFallback").then(fallback)
     }
+
+    /// Check the real Library API count, not just the number of host callbacks
+    pub(crate) fn before_library_call<T>(
+        &mut self,
+        choice: &str,
+        fallback: impl FnOnce() -> Result<T, CudaError>,
+    ) -> Option<Result<T, CudaError>> {
+        self.before(choice, || {
+            let before = CALL_COUNT.with(Cell::get);
+            let result = fallback()?;
+            assert_eq!(
+                CALL_COUNT.with(Cell::get) - before,
+                1,
+                "first replay must issue exactly one Library API call"
+            );
+            Ok(result)
+        })
+    }
 }
 
 /// Preserve the no-fault Library route until the locked first-replay hook runs
@@ -389,6 +408,7 @@ pub(crate) fn mutant_scope(stream: &CudaStream, layer: &str, mutant: Mutant) -> 
 
 /// Every library call made while a candidate scope is open is a violation
 fn check_call(name: &str) {
+    CALL_COUNT.with(|count| count.set(count.get() + 1));
     let candidate = STACK.with(|stack| {
         stack
             .borrow()
@@ -1393,4 +1413,35 @@ fn capture_trace_keeps_forbidden_library_call_tracking_active() {
     assert!(!CAPTURE_TRACE.with(Cell::get));
     STACK.with(|stack| *stack.borrow_mut() = saved_stack);
     CALL_VIOLATIONS.with(|calls| *calls.borrow_mut() = saved_calls);
+}
+
+#[test]
+fn first_replay_checks_exactly_one_library_api_call() {
+    let saved = CALL_COUNT.with(Cell::get);
+    let mut hook = FirstReplay::new();
+    hook.before_library_call("FirstUseFallback", || {
+        check_call("cublas.single");
+        Ok(())
+    })
+    .unwrap()
+    .unwrap();
+    assert_eq!(CALL_COUNT.with(Cell::get) - saved, 1);
+    assert!(
+        hook.before_library_call::<()>("FirstUseFallback", || panic!(
+            "second replay cannot call Library"
+        ))
+        .is_none()
+    );
+    for calls in [0, 2] {
+        let rejected = std::panic::catch_unwind(|| {
+            FirstReplay::new().before_library_call("FirstUseFallback", || {
+                for _ in 0..calls {
+                    check_call("cublas.extra");
+                }
+                Ok(())
+            })
+        });
+        assert!(rejected.is_err());
+    }
+    CALL_COUNT.with(|count| count.set(saved));
 }

@@ -209,6 +209,36 @@ fn capture(
     Ok(captured?.expect("a qualification operator enqueues at least one node"))
 }
 
+/// Prepared scratch for one real API call, independent of the normal stage enqueue
+struct FirstUseCall {
+    a: cudarc::driver::CudaSlice<f32>,
+    b: cudarc::driver::CudaSlice<f32>,
+    c: cudarc::driver::CudaSlice<f32>,
+}
+
+impl FirstUseCall {
+    fn prepare(runtime: &CudaRuntime, choice: &str) -> Result<Option<Self>, CudaError> {
+        if choice != "FirstUseFallback" {
+            return Ok(None);
+        }
+        runtime.prepare_library(crate::inference::cuda::CudaLibrary::Cublas)?;
+        Ok(Some(Self {
+            a: runtime.stream().clone_htod(&[2.0])?,
+            b: runtime.stream().clone_htod(&[3.0])?,
+            c: runtime.stream().alloc_zeros(1)?,
+        }))
+    }
+
+    fn enqueue(&mut self, runtime: &CudaRuntime) -> Result<(), CudaError> {
+        runtime.sgemm(
+            crate::inference::cuda::Sgemm::new(1, 1, 1),
+            &self.a,
+            &self.b,
+            &mut self.c,
+        )
+    }
+}
+
 /// One complete profile lifecycle without timing bursts or repeated graph replays
 fn profile_case(
     runtime: &CudaRuntime,
@@ -221,6 +251,7 @@ fn profile_case(
         let _window = window(key);
         return enqueue();
     }
+    let mut fallback = FirstUseCall::prepare(runtime, choice)?;
     for _ in 0..WARMUP {
         enqueue()?;
     }
@@ -239,11 +270,14 @@ fn profile_case(
     {
         let _marker = super::library(runtime.stream(), "driver.first_replay");
         let mut first = super::FirstReplay::new();
-        if let Some(result) = first.before(choice, || {
+        if let Some(result) = first.before_library_call(choice, || {
             // a graph has fixed nodes, so the one-shot fault belongs to this host hook
             let _window = window(&format!("{key}/first-replay"));
             let _candidate = super::candidate(runtime.stream(), layer);
-            enqueue()
+            fallback
+                .as_mut()
+                .expect("prepared first-replay fault")
+                .enqueue(runtime)
         }) {
             result?;
         }
