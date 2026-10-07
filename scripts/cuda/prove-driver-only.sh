@@ -15,8 +15,12 @@ repo=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$repo"
 evidence=${SPEAKRS_DRIVER_PROOF_OUTPUT:-$repo/_scratch/no-cudnn/driver-only/routing/loader-proof}
 mkdir -p "$evidence"
+evidence=$(mktemp -d "$evidence/run-$feature.XXXXXX")
+echo "Proof evidence: $evidence"
 # a separate target directory prevents another feature build from replacing this binary
-export CARGO_TARGET_DIR="$repo/target/driver-only-proof"
+mkdir -p "$repo/target/driver-only-proof"
+export CARGO_TARGET_DIR
+CARGO_TARGET_DIR=$(mktemp -d "$repo/target/driver-only-proof/build-$feature.XXXXXX")
 unset SPEAKRS_CUDA_PTX_TIER SPEAKRS_CUDA_FORCE_LIBRARY
 cargo build --locked -p xtask --bin xtask --no-default-features --features "$feature"
 binary="$CARGO_TARGET_DIR/debug/xtask"
