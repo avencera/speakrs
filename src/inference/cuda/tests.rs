@@ -11,11 +11,13 @@
 //! `flock /workspace/gpu-bench.lock cargo test --release --features cuda --lib
 //! segmentation_benchmark -- --ignored --nocapture`
 
+mod driver_sinc;
 mod embedding;
 mod fbank;
 mod resnet;
 mod runtime;
 mod segmentation;
+mod wideconv;
 
 use std::path::PathBuf;
 
