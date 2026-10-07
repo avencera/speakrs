@@ -204,6 +204,76 @@ class RecordsFixture(unittest.TestCase):
             "device_name": "Fixture GPU",
         }
 
+        self.entry["boundary_domain"] = [{"boundary": "lstm.stack", "batches": [1, 32]}]
+        self.entry["models"] = {"embedding": "e" * 64, "segmentation": "f" * 64}
+        self.entry["library_artifacts"] = {
+            area: {"tier": "sm75", "artifact": {"kind": "PtxJit", "sha256": "c" * 64}}
+            for area in ("fbank", "embedding", "segmentation")
+        }
+        self.entry["der"] = self.der_receipt(self.entry)
+
+    def der_receipt(self, entries):
+        if isinstance(entries, dict):
+            entries = [entries]
+        first = entries[0]
+        domain = records.der_evidence.PlanDomain.parse(first["boundary_domain"])
+        plans = []
+        for mode in sorted(
+            {row["tuple"][2] for entry in entries for row in entry["configurations"]}
+        ):
+            plan = {
+                "device_scope": first["speed_scope"],
+                "math": mode,
+                "models": first["models"],
+                "inputs": {
+                    "manifest_sha256": "5" * 64,
+                    "reference_sha256": "6" * 64,
+                    "files": 2,
+                },
+                "pipeline_config_sha256": "7" * 64,
+                "library_artifacts": first["library_artifacts"],
+                "routes": records.der_evidence.routes(entries, domain, mode),
+            }
+            identity = records.der_evidence.digest(
+                {
+                    name: plan[name]
+                    for name in (
+                        "device_scope",
+                        "math",
+                        "models",
+                        "inputs",
+                        "pipeline_config_sha256",
+                        "library_artifacts",
+                    )
+                }
+            )
+            baseline = {
+                "routes": domain.library_routes(),
+                "control_archive_sha256": "8" * 64,
+                "metrics": {
+                    "der": 1.0,
+                    "output_sha256": "9" * 64,
+                    "identity_sha256": identity,
+                },
+            }
+            candidate = {
+                "der": 1.0,
+                "output_sha256": "a" * 64,
+                "identity_sha256": identity,
+            }
+            plan.update(
+                baseline=baseline,
+                candidate=candidate,
+                verdict={
+                    "passed": True,
+                    "baseline_sha256": records.der_evidence.digest(baseline),
+                    "candidate_sha256": records.der_evidence.digest(candidate),
+                    "policy_sha256": "b" * 64,
+                },
+            )
+            plans.append(plan)
+        return self.store({"schema": 1, "plans": plans})
+
     def refresh_lock(self):
         path = self.root / records.ACCEPTANCE
         lock = self.root / "scripts/cuda/qualify/LOCK"
@@ -397,6 +467,8 @@ class Records(RecordsFixture):
                 }
             ],
         }
+        entry["boundary_domain"] = [{"boundary": boundary, "batches": [1, 32]}]
+        entry["der"] = self.der_receipt(entry)
         self.check([entry])
         records.write_summaries([entry], self.root, records=self.cache / "records")
         self.refresh_lock()
@@ -567,6 +639,7 @@ class Records(RecordsFixture):
             "record": record_hash,
             "speed_scope": {"kind": "LegacyCapability", "capability": "12.0"},
         }
+        entry["der"] = self.der_receipt(entry)
         binding = {
             "files": records.shipped_files(self.root, "lstm", legacy=True),
             "lock_digest": self.record["lock_digest"],
@@ -622,6 +695,7 @@ class Records(RecordsFixture):
             "record": record_hash,
             "speed_scope": {"kind": "LegacyCapability", "capability": "12.0"},
         }
+        entry["der"] = self.der_receipt(entry)
         binding = {
             "files": records.shipped_files(self.root, "lstm", legacy=True),
             "lock_digest": self.record["lock_digest"],
@@ -984,6 +1058,7 @@ class ProductionLoad(RecordsFixture):
                 "artifact": module["artifact"],
                 "record": self.store(raw),
             }
+            entry["der"] = self.der_receipt(entry)
             with self.subTest(tier=tier):
                 result = self.check([entry])["entries"][0]
                 self.assertEqual(result["tier"], tier)
@@ -1078,6 +1153,7 @@ class ArtifactEvidence(RecordsFixture):
             name: artifact[name] for name in ("kind", "arch", "sha256")
         }
         self.entry["record"] = self.store(self.record)
+        self.entry["der"] = self.der_receipt(self.entry)
         return artifact
 
     def test_cubin_metadata_is_pinned_and_jit_does_not_match(self):
@@ -1314,12 +1390,11 @@ class Summaries(RecordsFixture):
         changed = copy.deepcopy(entry)
         changed["coverage"]["entries"][0]["batches"] = [32]
         changed["configurations"][0]["tuple"][1] = 32
-        records.check_table([changed], self.root, self.cache / "records")
+        with self.assertRaisesRegex(records.Rejected, "differ from whole plan"):
+            records.check_table([changed], self.root, self.cache / "records")
         self.assertEqual(
-            records.derive_summaries(
-                [changed], self.root, records=self.cache / "records"
-            ),
-            summary,
+            summary["records"][pin]["accepted_tuples"],
+            [["lstm.stack", 1, "fp32"], ["lstm.stack", 32, "fp32"]],
         )
 
     def test_offline_gate_rejects_unrealizable_device_even_with_refreshed_lock(self):
@@ -1343,6 +1418,117 @@ class Summaries(RecordsFixture):
         self.prepare()
         records.check_table([self.entry], self.root, self.cache / "records")
         self.assertEqual(os.environ.get("SPEAKRS_QUALIFY_CACHE"), before)
+
+
+class WholePlanDer(RecordsFixture):
+    def receipt(self):
+        return records.load(self.entry["der"], self.root)
+
+    def test_arbitrary_nonempty_json_and_each_missing_identity_are_rejected(self):
+        with self.assertRaisesRegex(records.Rejected, "invalid evidence fields"):
+            self.check([{**self.entry, "der": self.store({"anything": "nonempty"})}])
+        raw = self.receipt()
+        for field in raw["plans"][0]:
+            bad = copy.deepcopy(raw)
+            del bad["plans"][0][field]
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(records.Rejected, "invalid plan fields"),
+            ):
+                self.check([{**self.entry, "der": self.store(bad)}])
+
+    def test_scope_math_models_input_library_and_plan_routes_are_bound(self):
+        for fault in (
+            "scope",
+            "math",
+            "models",
+            "inputs",
+            "pipeline",
+            "library",
+            "routes",
+            "baseline",
+            "verdict",
+            "nonfinite",
+        ):
+            raw = self.receipt()
+            plan = raw["plans"][0]
+            if fault == "scope":
+                plan["device_scope"]["sm_count"] = 70
+            elif fault == "math":
+                plan["math"] = "tf32"
+            elif fault == "models":
+                plan["models"]["embedding"] = "0" * 64
+            elif fault == "inputs":
+                plan["inputs"]["manifest_sha256"] = "0" * 64
+            elif fault == "pipeline":
+                plan["pipeline_config_sha256"] = "0" * 64
+            elif fault == "library":
+                plan["library_artifacts"]["fbank"]["artifact"]["sha256"] = "0" * 64
+            elif fault == "routes":
+                plan["routes"].pop()
+            elif fault == "baseline":
+                plan["baseline"]["routes"][0]["route"] = {"kind": "Candidate"}
+            elif fault == "verdict":
+                plan["candidate"]["output_sha256"] = "0" * 64
+            else:
+                plan["candidate"]["der"] = float("nan")
+            with self.subTest(fault=fault), self.assertRaises(records.Rejected):
+                self.check([{**self.entry, "der": self.store(raw)}])
+
+    def test_an_area_receipt_cannot_authorize_a_combined_plan(self):
+        original = self.receipt()
+        first = copy.deepcopy(self.entry)
+        other = copy.deepcopy(first)
+        domain = [
+            *first["boundary_domain"],
+            {"boundary": "sincnet.conv0.abs_pool", "batches": [1, 32]},
+        ]
+        first["boundary_domain"] = other["boundary_domain"] = domain
+        other.update(
+            area="sincnet",
+            configurations=[
+                {
+                    "tuple": ["sincnet.conv0.abs_pool", 1, "fp32"],
+                    "pin": {"kind": "Sinc", "selection": "ConvAbsPool"},
+                }
+            ],
+        )
+        with self.assertRaisesRegex(records.Rejected, "differ from whole plan"):
+            records.der_evidence.check(original, first["der"], [first, other])
+        pin = self.der_receipt([first, other])
+        raw = records.load(pin, self.root)
+        accepted = records.der_evidence.check(raw, pin, [first, other])
+        self.assertEqual(accepted["kind"], "WholePlan")
+        self.assertEqual(
+            sum(
+                row["route"]["kind"] == "Candidate" for row in raw["plans"][0]["routes"]
+            ),
+            2,
+        )
+        other["der"] = "0" * 64
+        with self.assertRaisesRegex(records.Rejected, "one whole execution plan"):
+            records.der_evidence.groups([first, other])
+
+    def test_locked_receipts_are_rebound_even_when_the_lock_is_refreshed(self):
+        summary = records.write_summaries(
+            [self.entry], self.root, records=self.cache / "records"
+        )
+        receipt = summary["records"][self.entry["record"]]["der_evidence"]
+        receipt["evidence"]["plans"][0]["routes"].pop()
+        (self.root / records.ACCEPTANCE).write_bytes(
+            records.canonical_summaries(summary)
+        )
+        self.refresh_lock()
+        with self.assertRaisesRegex(records.Rejected, "differ from whole plan"):
+            records.check_table([self.entry], self.root)
+
+    def test_legacy_der_mapping_cannot_authorize_a_new_record(self):
+        with self.assertRaisesRegex(
+            records.Rejected, "cannot authorize a new execution plan"
+        ):
+            records.der_evidence.check(
+                {}, records.der_evidence.LEGACY_HASH, [self.entry]
+            )
 
 
 if __name__ == "__main__":

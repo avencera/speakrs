@@ -8,6 +8,7 @@ from pathlib import Path
 
 import artifacts
 import configurations
+import der as der_evidence
 import environment
 from domains import MODEL, boundary, collection
 from assets import cache_directory
@@ -800,9 +801,6 @@ def check_table_records(
                 "table: candidate coverage differs from accepted declaration"
             )
         files, gap = check_binding(entry["record"], record, child, tier, root)
-        der = load(entry["der"], root, records=records)
-        if not der:
-            raise Rejected("table: empty DER evidence")
         evidence.append(
             {
                 "record": entry["record"],
@@ -841,6 +839,11 @@ def check_table_records(
                 "tuples": [list(row) for row in sorted(selected)],
             }
         )
+    receipts = der_evidence.receipts(
+        entries, lambda pin: load(pin, root, records=records)
+    )
+    for row in evidence:
+        row["der_evidence"] = receipts[row["der"]]
     environment.consistent(evidence)
     return {"entries": evidence}
 
@@ -852,6 +855,7 @@ SUMMARY_FIELDS = {
     "device_name",
     "record_schema",
     "der",
+    "der_evidence",
     "tier",
     "device_capability",
     "artifact",
@@ -1182,6 +1186,7 @@ def check_table(
             entry, summary.get("configurations"), triples(entry["coverage"])
         )
         evidence.append(summary)
+    der_evidence.offline(entries, summaries)
     environment.consistent(evidence)
     if (
         records is not None

@@ -771,7 +771,7 @@ python3 scripts/cuda/qualify/qualify.py --check-table --records "$SPEAKRS_QUALIF
 This reads `<cache>/records/<sha256>`, verifies exact raw file hashes and re-runs
 the locked evaluator. It re-derives the complete canonical summary; its bytes must
 match the committed summary exactly. The full mode also checks all offline drift
-rules. The DER evidence hash must resolve to a nonempty JSON object in this mode.
+rules. The DER evidence hash must resolve to a whole-plan receipt in this mode.
 No raw record or generated verdict can silently change the shipped summary.
 
 The table and its derived summary replace `QUALIFIED.json` and `qualified.py`.
@@ -779,7 +779,9 @@ There is one locked noise evaluator. It agrees with the old evaluator on all thr
 pinned records, including 20 ResNet and three LSTM noise-blocked cases. Full record
 checks validate phase completion, exact aggregate checks, and required numeric,
 secret, speed, stage and paired evidence for each declared case. Stress batches
-must pass but never grant production coverage.
+must pass but never grant model-boundary production coverage. Filterbank batches
+B1 through B32 are all production-domain batches; B33 and B64 are not filterbank
+collection cases. `domains.BatchDomain` keeps these domains separate.
 
 New records retain source-file hashes. The three older records retain a driver
 binary hash, not source hashes. Their fixed source, manifest and PTX bindings were
@@ -798,6 +800,46 @@ table and exact raw cache. This is an explicit owner action, followed by full
 comparison, drift tests and a new lock. Qualification proof uses the full record
 mode before the GPU matrix. Summary generation does not run a GPU or approve a
 new candidate. No writable acceptance manifest or second noise-rule copy remains.
+
+### Whole-plan DER receipts
+
+New integrated DER evidence uses a closed schema: `{"schema": 1, "plans": [...]}`.
+There is one plan for each selected math mode, in sorted mode order. Each plan
+binds the following fields:
+
+- `device_scope`: the exact speed-proof point or explicit legacy capability scope
+- `math`, `models`: math mode and both model content hashes from the Rust export
+- `inputs`: input-manifest and reference hashes, plus a positive input file count
+- `pipeline_config_sha256`: the complete integrated pipeline configuration hash
+- `library_artifacts`: tiers and actual-byte keys of the always-on fbank, embedding
+  and segmentation modules
+- `routes`: one route for every exported boundary and its production batches,
+  including Library routes. Candidate routes include area, tier, artifact key and
+  the exact tested `ConfigPin`
+- `baseline`: all-Library routes, frozen control archive hash and DER metrics
+- `candidate`: candidate DER metrics
+- `verdict`: the passing decision, policy hash and canonical baseline/candidate
+  hashes
+
+Both metric records include finite nonnegative DER, an output hash and an identity
+hash. The identity hash covers device, math, model, input, pipeline configuration
+and always-on artifacts. The baseline and candidate must use the same identity.
+This schema binds an existing integrated verdict; it adds no DER threshold.
+The policy hash identifies the rule used by the integrated scorer.
+
+Every entry on the same device scope must use the same integrated receipt and
+complete plan domain. A per-area receipt cannot authorize a combined execution
+plan. Raw checks validate the immutable evidence. Offline checks repeat the plan
+binding against the owner-locked receipt, including after a lock refresh.
+
+Only the exact archived PR #36 integrated hash in `der.LEGACY_HASH` can use
+`LEGACY_DER.json`. This mapping fixes the original record/configuration pins,
+model hashes, domain, always-on artifact hashes, scope and A/B verdict. Removed
+tuple permissions stay removed. The old integrated summary has no direct model
+or audio content hashes and no per-process environment query. The model hashes
+come from the archived qualification inputs; the remaining mapping is an explicit
+migration, not a new measurement. `LegacyWholePlan.evidence_gap` retains this gap.
+No other nonempty JSON object is accepted.
 
 ### Explicit legacy hardware mapping
 

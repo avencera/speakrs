@@ -65,6 +65,40 @@ pub(crate) fn planned() -> Value {
     })
 }
 
+/// The complete boundary and batch domain, exported from the typed owner
+pub(crate) fn boundary_domain() -> Value {
+    use crate::inference::cuda::implementation::BoundaryId;
+    Value::Array(
+        BoundaryId::all()
+            .map(|boundary| {
+                let batches: Vec<_> = (1..=32)
+                    .filter(|batch| boundary.batches().contains(*batch))
+                    .collect();
+                json!({"boundary":boundary.name(), "batches":batches})
+            })
+            .collect(),
+    )
+}
+
+/// The pinned model bytes of the integrated native pipeline
+pub(crate) fn model_identity() -> Value {
+    let assets: Value = serde_json::from_str(include_str!("ASSETS.json")).expect("locked assets");
+    json!({
+        "embedding": assets["files"]["/workspace/models-native/wespeaker-multimask-tail.safetensors"],
+        "segmentation": assets["files"]["/workspace/models-native/segmentation-3.0.safetensors"],
+    })
+}
+
+/// Always-on Library-owned GPU bytes used by the full integrated plan
+pub(crate) fn library_artifacts() -> Value {
+    use crate::inference::cuda::kernels::ArtifactHash;
+    json!({
+        "fbank": {"tier":"sm75", "artifact":{"kind":"PtxJit", "sha256":ArtifactHash::of(include_bytes!("../../src/inference/cuda/ptx/fbank.sm75.ptx")).to_string()}},
+        "embedding": {"tier":"sm75", "artifact":{"kind":"PtxJit", "sha256":ArtifactHash::of(include_bytes!("../../src/inference/cuda/ptx/embedding.sm75.ptx")).to_string()}},
+        "segmentation": {"tier":"sm75", "artifact":{"kind":"PtxJit", "sha256":ArtifactHash::of(include_bytes!("../../src/inference/cuda/ptx/segmentation.sm75.ptx")).to_string()}},
+    })
+}
+
 /// Test-only pin adapter for the generic fbank seam; Library has no candidate pin
 pub(super) trait FbankPinEvidence: Copy {
     /// The candidate execution identity, or no identity for the Library control

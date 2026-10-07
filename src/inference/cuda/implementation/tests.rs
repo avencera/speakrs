@@ -645,6 +645,9 @@ fn export_production_table() {
                 "record": speed.record.to_string(),
                 "accuracy_record": accuracy.to_string(),
                 "configurations": configurations,
+                "boundary_domain": super::super::test_support::configuration::boundary_domain(),
+                "models": super::super::test_support::configuration::model_identity(),
+                "library_artifacts": super::super::test_support::configuration::library_artifacts(),
                 "der": speed.integrated.to_string(),
             }));
         }

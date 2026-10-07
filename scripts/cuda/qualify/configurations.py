@@ -27,6 +27,7 @@ def pin(raw: object, area: str) -> dict:
             selection not in ("LegacyWaves", "Kernel")
             or set(value) != {"kind", "selection", field}
             or value.get("kind") != "Conv"
+            or not isinstance(value.get(field), str)
             or value.get(field) not in allowed
         ):
             raise Rejected("table: invalid convolution configuration pin")
