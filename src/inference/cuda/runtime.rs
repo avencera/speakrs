@@ -14,8 +14,6 @@ use tracing::debug;
 
 use super::device::DeviceAttributes;
 use super::error::CudaLibrary;
-#[cfg(all(test, feature = "_cuda-libraries"))]
-use super::kernels::LoadedArtifact;
 use super::kernels::{ArtifactHash, ArtifactLoadError, ModuleRequest};
 use super::{ComputeCapability, CudaError, KernelModule, LoadedKernels, PtxTier};
 #[cfg(feature = "_cuda-libraries")]
@@ -185,7 +183,7 @@ impl CudaRuntime {
     }
 
     /// The module production loads for `module` on this device, resolved before any
-    /// load; `None` when no binding covers this device within the tier limit
+    /// load; bindings take precedence over the best runnable embedded artifact
     pub(crate) fn production_module(
         &self,
         module: KernelModule,
@@ -198,28 +196,20 @@ impl CudaRuntime {
         )
     }
 
-    /// The best embedded artifact an explicit qualification asks for: the highest
-    /// embedded variant within the tier limit, as the device's exact cubin when
-    /// embedded, otherwise PTX JIT
+    /// The same area artifact for explicit and production plans, so their cache
+    /// identities cannot conflict
     #[cfg(all(test, feature = "_cuda-libraries"))]
     pub(crate) fn embedded_exact_request(
         &self,
         module: KernelModule,
     ) -> Result<ModuleRequest, CudaError> {
-        let capability = self.device.capability();
-        let variants = module.variants();
-        let (tier, ptx) = variants.resolve(module, self.ptx_tier, capability)?;
-        let embedded = variants.embedded(tier).expect("resolved embedded tier");
-        let artifact = embedded.cubin(capability).map_or(
-            LoadedArtifact::PtxJit {
-                sha256: ArtifactHash::of(ptx.as_bytes()),
-            },
-            |cubin| LoadedArtifact::Cubin {
-                arch: cubin.arch,
-                sha256: ArtifactHash::of(cubin.bytes),
-            },
-        );
-        Ok(ModuleRequest::new(module, tier, artifact))
+        self.production_module(module)?
+            .ok_or(CudaError::AreaTierNotCompiledIn {
+                area: module.name(),
+                tier: self.ptx_tier,
+                device: self.device.capability(),
+                feature: self.ptx_tier.feature(),
+            })
     }
 
     /// The area's production module, reusing only a cache entry with the same identity

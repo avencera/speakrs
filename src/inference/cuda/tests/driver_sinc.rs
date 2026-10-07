@@ -14,7 +14,8 @@ use cudarc::driver::{CudaGraph, CudaStream, sys};
 use serde_json::json;
 
 use super::super::candidate::{Phases, SincCandidate, SincInputs, SincOxide, SincPin, SincSpec};
-use super::super::dnn::{Conv2d, ConvPlanner};
+use super::super::dnn::ConvPlanner;
+use super::super::geometry::Conv2d;
 use super::super::{CudaError, CudaMath, KernelModule, SafetensorsFile};
 use super::{reference_dir, runtime};
 

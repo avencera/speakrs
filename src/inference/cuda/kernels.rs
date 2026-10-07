@@ -456,26 +456,38 @@ impl AreaPtx {
         }
     }
 
-    /// Resolve the best runnable driver-only module without loading it
+    /// The highest runnable embedded tier, without hashing its artifact
+    pub(crate) fn runnable_tier(
+        self,
+        limit: PtxTier,
+        device: ComputeCapability,
+    ) -> Option<PtxTier> {
+        [PtxTier::Sm120, PtxTier::Sm90, PtxTier::Sm80, PtxTier::Sm75]
+            .into_iter()
+            .find(|tier| {
+                *tier <= limit && tier.min_capability() <= device && self.embedded(*tier).is_some()
+            })
+    }
+
+    /// Resolve EmbeddedExact: the best runnable tier and this device's cubin or PTX
     pub(crate) fn driver_request(
         self,
         area: KernelModule,
         limit: PtxTier,
         device: ComputeCapability,
     ) -> Option<ModuleRequest> {
-        [PtxTier::Sm120, PtxTier::Sm90, PtxTier::Sm80, PtxTier::Sm75]
-            .into_iter()
-            .filter(|tier| *tier <= limit && tier.min_capability() <= device)
-            .find_map(|tier| {
-                let ptx = self.embedded(tier)?;
-                Some(ModuleRequest::new(
-                    area,
-                    tier,
-                    LoadedArtifact::PtxJit {
-                        sha256: ArtifactHash::of(ptx.text.as_bytes()),
-                    },
-                ))
-            })
+        let tier = self.runnable_tier(limit, device)?;
+        let ptx = self.embedded(tier)?;
+        let artifact = ptx.cubin(device).map_or_else(
+            || LoadedArtifact::PtxJit {
+                sha256: ArtifactHash::of(ptx.text.as_bytes()),
+            },
+            |cubin| LoadedArtifact::Cubin {
+                arch: device,
+                sha256: ArtifactHash::of(cubin.bytes),
+            },
+        );
+        Some(ModuleRequest::new(area, tier, artifact))
     }
 
     /// The highest embedded variant at or below `limit`

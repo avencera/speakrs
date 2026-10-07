@@ -101,8 +101,14 @@ fn missing_area_fails_typed_before_any_artifact_load() {
         ("linear0", 2, CudaMath::Tf32),
         ("sincnet.conv1", 3, CudaMath::Fp32),
     ] {
-        let result =
-            PlanRequest::DriverOnly.resolve(BoundaryId::named(boundary), batch, math, &mut fixture);
+        let result = select_from(
+            &[],
+            BoundaryId::named(boundary),
+            batch,
+            math,
+            &mut &mut fixture,
+            super::Selection::DriverOnly,
+        );
         assert!(
             matches!(result, Err(CudaError::MissingKernel { boundary: actual, batch: b, math: m }) if actual == boundary && b == batch && m == math)
         );
@@ -341,4 +347,96 @@ fn fbank_speed_scope_depends_on_math_and_segdense_requires_the_measured_tier() {
         panic!("driver-only uses the unmeasured sm75 implementation")
     };
     assert_eq!(token.evidence, TokenEvidence::Implemented);
+}
+
+#[test]
+fn resnet_binding_is_the_same_across_production_and_driver_routes() {
+    use crate::inference::cuda::kernels::LoadedArtifact;
+    let mut fixture = Fixture::new();
+    let boundary = BoundaryId::named("resnet.layer1.0.conv1");
+    let production = super::super::production_module(
+        KernelModule::Resnet,
+        &fixture.device,
+        fixture.limit,
+        KernelModule::Resnet.variants(),
+    )
+    .unwrap()
+    .unwrap();
+    let Selected::Oxide(token) = PlanRequest::DriverOnly
+        .resolve(boundary, 1, CudaMath::Fp32, &mut fixture)
+        .unwrap()
+    else {
+        panic!("missing ResNet driver plan")
+    };
+    assert_eq!(token.target.module, production);
+    assert!(matches!(
+        production.artifact(),
+        LoadedArtifact::PtxJit { .. }
+    ));
+    assert!(production.check_cached(token.target.module).is_ok());
+    assert_eq!(fixture.loads, [production]);
+}
+
+#[test]
+#[cfg(feature = "_cuda-libraries")]
+fn trunk_scope_matches_measured_totals_and_library_fallbacks() {
+    let mut fixture = Fixture::new();
+    for capability in [
+        ComputeCapability::new(12, 0),
+        ComputeCapability::new(8, 9),
+        ComputeCapability::new(9, 0),
+    ] {
+        fixture.device = Builder::new(capability).multiprocessors(36).build();
+        for batch in [1, 7, 32, 33] {
+            for math in [CudaMath::Fp32, CudaMath::Tf32] {
+                for boundary in [
+                    "resnet.conv1",
+                    "resnet.layer2.0.conv2",
+                    "resnet.layer3.0.conv1",
+                ] {
+                    let selected = PlanRequest::Hybrid
+                        .resolve(BoundaryId::named(boundary), batch, math, &mut fixture)
+                        .unwrap();
+                    let expected = matches!(batch, 1 | 32)
+                        && (capability == ComputeCapability::new(12, 0)
+                            || capability == ComputeCapability::new(8, 9)
+                                && (batch == 32 || math == CudaMath::Tf32));
+                    assert_eq!(
+                        matches!(selected, Selected::Oxide(_)),
+                        expected,
+                        "{capability:?} {boundary} b{batch} {math:?}"
+                    );
+                    assert!(matches!(
+                        PlanRequest::DriverOnly
+                            .resolve(BoundaryId::named(boundary), batch, math, &mut fixture)
+                            .unwrap(),
+                        Selected::Oxide(_)
+                    ));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn every_model_boundary_has_a_driver_route_for_model_batches() {
+    let mut fixture = Fixture::new();
+    for boundary in
+        BoundaryId::all().filter(|boundary| *boundary != BoundaryId::named("lstm.stack.input_proj"))
+    {
+        // the projected stack owns input projection; only the legacy stack names it separately
+        for batch in [1, 32] {
+            for math in [CudaMath::Fp32, CudaMath::Tf32] {
+                assert!(
+                    matches!(
+                        PlanRequest::DriverOnly
+                            .resolve(boundary, batch, math, &mut fixture)
+                            .unwrap(),
+                        Selected::Oxide(_)
+                    ),
+                    "{boundary:?} b{batch} {math:?}"
+                );
+            }
+        }
+    }
 }

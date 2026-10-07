@@ -49,6 +49,10 @@ pub(crate) fn pin_json(pin: ConfigPin) -> Value {
         ConfigPin::Segdense(pin) => {
             json!({"kind":"Segdense", "kernel": pin.config().kernel, "splits": pin.splits()})
         }
+        ConfigPin::Wideconv(WideconvPin::Configured(config)) => {
+            json!({"kind":"Wideconv", "selection":"Configured",
+                "config":format!("{config:?}")})
+        }
         ConfigPin::Wideconv(WideconvPin::DeviceRule) => {
             json!({"kind":"Wideconv", "selection":"DeviceRule"})
         }

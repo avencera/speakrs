@@ -177,8 +177,15 @@ impl Convs<'_> {
                 self.candidate(plan, layer, x, none, y)
             }
             _ => {
-                self.conv(layer, x, y)?;
-                self.bias(layer, y)
+                #[cfg(all(test, feature = "_cuda-libraries"))]
+                {
+                    self.conv_bias(layer, x, y)
+                }
+                #[cfg(not(all(test, feature = "_cuda-libraries")))]
+                {
+                    self.conv(layer, x, y)?;
+                    self.bias(layer, y)
+                }
             }
         }
     }

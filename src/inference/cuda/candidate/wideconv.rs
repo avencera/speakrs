@@ -14,8 +14,6 @@
 //! A100. Partitioned plans own their partial-sum planes, allocated in `plan`, so
 //! enqueueing allocates nothing and is capturable
 
-use std::cell::RefCell;
-
 use cudarc::driver::sys::CUfunction_attribute;
 use cudarc::driver::{
     CudaFunction, CudaSlice, CudaStream, CudaView, CudaViewMut, DevicePtr, LaunchConfig,
@@ -25,7 +23,7 @@ use cudarc::driver::{
 use super::{
     Batches, ConvCandidate, ConvInputs, ConvLayerSpec, Coverage, CoverageEntry, Epilogue,
     FiniteContract, GeometryError, InfinityContract, Maths, NanContract, Op, Phases, PlanError,
-    SignedZeroContract, SpecialValues,
+    Scratch, SignedZeroContract, SpecialValues,
 };
 use crate::inference::cuda::device::DeviceAttributes;
 use crate::inference::cuda::error::{check_len, element_count};
@@ -284,6 +282,8 @@ pub(crate) struct Config {
 pub(crate) enum Pin {
     /// [`Config::select`] for the plan's device and loaded tier
     DeviceRule,
+    /// Fixed configuration selected from cached attributes before loading
+    Configured(Config),
 }
 
 /// Most whole waves of Winograd CTAs before which a launch splits its last, partial wave
@@ -740,20 +740,20 @@ impl Shape {
 
 /// Validated indexing and launch geometry, before any device allocation
 #[derive(Debug)]
-struct Layout {
+pub(super) struct Layout {
     shape: Shape,
-    config: LaunchConfig,
-    input_len: usize,
-    output_len: usize,
-    workspace_len: usize,
+    pub(super) config: LaunchConfig,
+    pub(super) input_len: usize,
+    pub(super) output_len: usize,
+    pub(super) workspace_len: usize,
     /// First Winograd cell that splits; the cell count when none does
-    split_from: u32,
+    pub(super) split_from: u32,
     /// Winograd cells: 64 output channels by one row of 32 tiles, without the channel blocks
-    cells: u32,
+    pub(super) cells: u32,
 }
 
 impl Layout {
-    fn new(
+    pub(super) fn new(
         conv: Conv2d,
         partition: Partition,
         split_cells: SplitCells,
@@ -905,7 +905,7 @@ pub(crate) struct Oxide {
     fixup: CudaFunction,
     packed: CudaSlice<f32>,
     /// partition planes, `layout.workspace_len` elements used; one element when whole
-    workspace: RefCell<CudaSlice<f32>>,
+    workspace: Scratch<f32>,
     layout: Layout,
     tier: PtxTier,
 }
@@ -1053,11 +1053,7 @@ impl Oxide {
             fixup: kernels.function("spk_wideconv_wino_fixup")?,
             packed,
             // CUDA cannot allocate zero bytes
-            workspace: RefCell::new(
-                runtime
-                    .stream()
-                    .alloc_zeros::<f32>(layout.workspace_len.max(1))?,
-            ),
+            workspace: Scratch::zeros(runtime, layout.workspace_len.max(1))?,
             layout,
             tier: kernels.tier(),
         })
@@ -1452,9 +1448,23 @@ impl ConvCandidate for Oxide {
         layer: ConvLayerSpec<'_>,
         pin: Pin,
     ) -> Result<Self, PlanError> {
-        let Pin::DeviceRule = pin;
-        let device = Device::new(runtime.device(), kernels.tier());
-        let config = Config::select(device, layer.conv).map_err(refusal)?;
+        let config = match pin {
+            Pin::DeviceRule => {
+                Config::select(Device::new(runtime.device(), kernels.tier()), layer.conv)
+                    .map_err(refusal)?
+            }
+            Pin::Configured(config)
+                if model_conv(layer.name, layer.conv.batch, layer.conv.math)? == layer.conv =>
+            {
+                config
+            }
+            Pin::Configured(_) => {
+                return Err(PlanError::Geometry(GeometryError::Unimplemented {
+                    context: "wideconv fixed geometry",
+                    reason: "the model shape differs from the selected pin".into(),
+                }));
+            }
+        };
         Self::with_config(runtime, kernels, layer, config)
     }
 
@@ -1478,7 +1488,7 @@ impl ConvCandidate for Oxide {
             });
         }
 
-        let mut planes = self.workspace.borrow_mut();
+        let mut planes = self.workspace.get();
         // reborrow both so they share one lifetime
         let mut workspace = planes.slice_mut(..self.layout.workspace_len);
         let mut output = y.slice_mut(..);
@@ -1590,472 +1600,84 @@ fn linear_config(elements: u32) -> LaunchConfig {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{Algorithm, Layout, Partition, SplitCells, TensorKernel, WinogradProducts};
-    use crate::inference::cuda::geometry::Conv2d;
-    use crate::inference::cuda::{CudaError, CudaMath};
+/// Trunk totals from do-wideconv sm80 dev runs, not a whole-area universal claim
+pub(super) const TRUNK_SPEED_SUMMARY: &str = "do-wideconv sm80 trunk totals: Blackwell b1/b32 both maths >=1.34x; Ada FP32 b32 1.29x and TF32 b1/b32 >=1.39x; Ada FP32 b1 1.01x uses Library";
 
-    fn stem(batch: usize, input: [usize; 2]) -> Conv2d {
-        Conv2d {
-            batch,
-            input,
-            in_channels: 1,
-            out_channels: 32,
-            kernel: [3, 3],
-            padding: [1, 1],
-            stride: [1, 1],
-            dilation: [1, 1],
-            math: CudaMath::Fp32,
-        }
+pub(super) fn trunk_speed_scope(
+    _boundary: super::super::implementation::BoundaryId,
+    batch: usize,
+    math: CudaMath,
+    device: &DeviceAttributes,
+) -> Option<super::super::implementation::SpeedScope> {
+    let capability = device.capability();
+    let measured = matches!(batch, 1 | 32)
+        && (capability == ComputeCapability::new(12, 0)
+            || capability == ComputeCapability::new(8, 9)
+                && (math == CudaMath::Tf32 || batch == 32));
+    measured.then_some(super::super::implementation::SpeedScope::MeasuredCapability { capability })
+}
+
+impl super::DriverCandidate for Oxide {
+    const AREA: super::KernelModule = super::KernelModule::Wideconv;
+
+    fn driver_coverage(tier: PtxTier) -> Coverage {
+        <Self as ConvCandidate>::coverage(tier)
     }
 
-    #[test]
-    fn rejects_size_overflow_before_output_arithmetic() {
-        let result = Layout::new(
-            stem(1, [usize::MAX, 1]),
-            Partition::Whole,
-            SplitCells::All,
-            Algorithm::Spatial,
-        );
-        assert!(matches!(result, Err(CudaError::DimensionOverflow { .. })));
+    fn speed_scope(
+        boundary: super::super::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        device: &DeviceAttributes,
+        tier: PtxTier,
+    ) -> Option<super::super::implementation::SpeedScope> {
+        trunk_speed_scope(boundary, batch, math, device).filter(|_| tier >= PtxTier::Sm80)
     }
 
-    #[test]
-    fn rejects_grid_overflow_before_allocation() {
-        assert!(matches!(
-            Layout::new(
-                stem(65536, [1, 1]),
-                Partition::Whole,
-                SplitCells::All,
-                Algorithm::Spatial
-            ),
-            Err(CudaError::Unsupported { .. })
-        ));
-        assert!(
-            Layout::new(
-                stem(65535, [1, 1]),
-                Partition::Whole,
-                SplitCells::All,
-                Algorithm::Spatial
-            )
-            .is_ok()
-        );
+    fn speed_summary(_math: CudaMath) -> &'static str {
+        TRUNK_SPEED_SUMMARY
     }
 
-    #[test]
-    fn rejects_inputs_other_than_compiled_sizes() {
-        let conv = |in_channels, out_channels, input, kernel: usize, stride| Conv2d {
-            batch: 32,
-            input,
-            in_channels,
-            out_channels,
-            kernel: [kernel; 2],
-            padding: [kernel / 2; 2],
-            stride: [stride; 2],
-            dilation: [1, 1],
-            math: CudaMath::Tf32,
-        };
-        let cases = [
-            (
-                conv(128, 128, [20, 250], 3, 1),
-                Algorithm::TensorCore(TensorKernel::Tf32),
-            ),
-            (
-                conv(64, 128, [40, 499], 3, 2),
-                Algorithm::TensorCore(TensorKernel::Tf32),
-            ),
-            (
-                conv(128, 256, [20, 250], 3, 2),
-                Algorithm::TensorCore(TensorKernel::Tf32x3),
-            ),
-            (conv(128, 256, [20, 250], 1, 2), Algorithm::Spatial),
-            (conv(32, 64, [80, 998], 1, 2), Algorithm::Spatial),
-        ];
-        for (mut conv, algorithm) in cases {
-            assert!(Layout::new(conv, Partition::Whole, SplitCells::All, algorithm).is_ok());
-            conv.input[1] -= 2;
-            assert!(matches!(
-                Layout::new(conv, Partition::Whole, SplitCells::All, algorithm),
-                Err(CudaError::Unsupported { .. })
-            ));
-        }
+    fn driver_pin(
+        boundary: super::super::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        device: &DeviceAttributes,
+        tier: PtxTier,
+    ) -> Result<super::ConfigPin, PlanError> {
+        let conv = model_conv(boundary.name(), batch, math)?;
+        let config = Config::select(Device::new(device, tier), conv).map_err(refusal)?;
+        Ok(super::ConfigPin::Wideconv(Pin::Configured(config)))
     }
+}
 
-    #[test]
-    fn strided_tensor_launch_mirrors_device_tiles() {
-        let conv = |batch, in_channels, input, math| Conv2d {
-            batch,
-            input,
-            in_channels,
-            out_channels: 2 * in_channels,
-            kernel: [3, 3],
-            padding: [1, 1],
-            stride: [2, 2],
-            dilation: [1, 1],
-            math,
-        };
-        let (f, t) = (CudaMath::Fp32, CudaMath::Tf32);
-        let (one, slim, three, wide) = (
-            TensorKernel::Tf32,
-            TensorKernel::Tf32Slim,
-            TensorKernel::Tf32x3,
-            TensorKernel::Tf32x3Wide,
-        );
-        // 64 -> 128: three 96-column narrow tiles per output row, or two of 128; 128 ->
-        // 256: two 64-column narrow tiles per row of 125, or one of 128; 3xTF32 tiles
-        // are always 32 or 48 columns wide
-        for (conv, products, grid, shared) in [
-            (conv(1, 64, [40, 499], t), one, (1, 60, 1), 37376),
-            (conv(32, 64, [40, 499], t), one, (1, 1280, 1), 49664),
-            (conv(1, 128, [20, 250], t), one, (2, 20, 1), 25088),
-            (conv(32, 128, [20, 250], t), one, (2, 320, 1), 49664),
-            (conv(32, 64, [40, 499], f), three, (1, 5120, 1), 12800),
-            (conv(32, 128, [20, 250], f), three, (2, 1280, 1), 12800),
-            (conv(1, 128, [20, 250], t), three, (2, 40, 1), 12800),
-            (conv(32, 64, [40, 499], f), wide, (1, 3840, 1), 18944),
-            (conv(32, 128, [20, 250], f), wide, (2, 960, 1), 18944),
-            (conv(1, 64, [40, 499], t), slim, (1, 80, 1), 25088),
-            (conv(1, 128, [20, 250], t), slim, (2, 40, 1), 12800),
-        ] {
-            let layout = Layout::new(
-                conv,
-                Partition::Whole,
-                SplitCells::All,
-                Algorithm::TensorCore(products),
-            )
-            .expect("compiled strided shape");
-            assert_eq!(layout.config.grid_dim, grid);
-            assert_eq!(layout.config.shared_mem_bytes, shared);
-        }
-        // one product rounds to TF32, and three products cover only stride 2
-        let same = Conv2d {
-            stride: [1, 1],
-            out_channels: 128,
-            ..conv(32, 128, [20, 250], t)
-        };
-        for (conv, products) in [
-            (conv(32, 64, [40, 499], f), one),
-            (conv(1, 64, [40, 499], f), slim),
-            (same, three),
-            (same, slim),
-        ] {
-            assert!(matches!(
-                Layout::new(
-                    conv,
-                    Partition::Whole,
-                    SplitCells::All,
-                    Algorithm::TensorCore(products)
-                ),
-                Err(CudaError::Unsupported { .. })
-            ));
-        }
+/// Geometry compiled into the model's 22 wide convolution boundaries
+fn model_conv(name: &str, batch: usize, math: CudaMath) -> Result<Conv2d, PlanError> {
+    if !LAYERS.contains(&name) {
+        return Err(PlanError::Geometry(GeometryError::Unimplemented {
+            context: "wideconv boundary",
+            reason: name.into(),
+        }));
     }
-
-    #[test]
-    fn winograd_launch_mirrors_device_tiles() {
-        let conv = |batch, channels, input, stride| Conv2d {
-            batch,
-            input,
-            in_channels: channels,
-            out_channels: channels,
-            kernel: [3, 3],
-            padding: [1, 1],
-            stride: [stride; 2],
-            dilation: [1, 1],
-            math: CudaMath::Fp32,
-        };
-        // 64 output channels by one row of 32 tiles: 125 tile columns take 4 segments
-        // per tile row and 63 take 2; whole cells take one CTA row, split cells one per
-        // partition
-        for (batch, channels, input, partition, split_cells, grid) in [
-            (
-                32,
-                128,
-                [20, 250],
-                Partition::Whole,
-                SplitCells::All,
-                (2, 1280, 1),
-            ),
-            (
-                32,
-                256,
-                [10, 125],
-                Partition::Whole,
-                SplitCells::All,
-                (4, 320, 1),
-            ),
-            (
-                1,
-                128,
-                [20, 250],
-                Partition::Two,
-                SplitCells::All,
-                (2, 80, 1),
-            ),
-            (
-                1,
-                256,
-                [10, 125],
-                Partition::Four,
-                SplitCells::All,
-                (4, 40, 1),
-            ),
-            (
-                1,
-                128,
-                [20, 250],
-                Partition::Two,
-                SplitCells::From(34),
-                (2, 46, 1),
-            ),
-            (
-                1,
-                256,
-                [10, 125],
-                Partition::Four,
-                SplitCells::From(8),
-                (4, 16, 1),
-            ),
-        ] {
-            let layout = Layout::new(
-                conv(batch, channels, input, 1),
-                partition,
-                split_cells,
-                Algorithm::Winograd(WinogradProducts::Fp32),
-            )
-            .expect("compiled same-channel shape");
-            assert_eq!(layout.config.grid_dim, grid);
-            assert_eq!(layout.config.block_dim, (256, 1, 1));
-            assert_eq!(layout.config.shared_mem_bytes, 62_464);
-            let planes = partition.count() as usize;
-            let output = batch * channels * input[0] * input[1];
-            assert_eq!(
-                layout.workspace_len,
-                if planes == 1 { 0 } else { planes * output }
-            );
-        }
-        // the split tail cannot start past the last cell, nor split other algorithms
-        let c128 = conv(1, 128, [20, 250], 1);
-        assert!(
-            Layout::new(
-                c128,
-                Partition::Two,
-                SplitCells::From(41),
-                Algorithm::Winograd(WinogradProducts::Fp32)
-            )
-            .is_err()
-        );
-        assert!(
-            Layout::new(
-                c128,
-                Partition::Two,
-                SplitCells::From(4),
-                Algorithm::Spatial
-            )
-            .is_err()
-        );
-        for conv in [conv(32, 128, [20, 248], 1), conv(32, 128, [20, 250], 2)] {
-            assert!(matches!(
-                Layout::new(
-                    conv,
-                    Partition::Whole,
-                    SplitCells::All,
-                    Algorithm::Winograd(WinogradProducts::Fp32)
-                ),
-                Err(CudaError::Unsupported { .. })
-            ));
-        }
-    }
-
-    #[test]
-    fn selection_follows_device_attributes() {
-        use super::{Config, Device};
-        use crate::inference::cuda::{ComputeCapability, PtxTier};
-
-        let device = |major, minor, sms, tier| Device {
-            capability: ComputeCapability::new(major, minor),
-            sms,
-            tier,
-        };
-        let ada = device(8, 9, 34, PtxTier::Sm80);
-        let ada_sm75 = device(8, 9, 34, PtxTier::Sm75);
-        let blackwell = device(12, 0, 36, PtxTier::Sm80);
-        let a100 = device(8, 0, 108, PtxTier::Sm80);
-        let a100_sm75 = device(8, 0, 108, PtxTier::Sm75);
-        let same = |batch, channels, input, math| Conv2d {
-            batch,
-            input,
-            in_channels: channels,
-            out_channels: channels,
-            kernel: [3, 3],
-            padding: [1, 1],
-            stride: [1, 1],
-            dilation: [1, 1],
-            math,
-        };
-        let c128 = |batch, math| same(batch, 128, [20, 250], math);
-        let c256 = |batch, math| same(batch, 256, [10, 125], math);
-        let pick = |device, conv| Config::select(device, conv).expect("known contract");
-        let wino = |products, partition, split_cells| Config {
-            algorithm: Algorithm::Winograd(products),
-            partition,
-            split_cells,
-        };
-        let whole = |algorithm| Config {
-            algorithm,
-            partition: Partition::Whole,
-            split_cells: SplitCells::All,
-        };
-        let tensor = whole(Algorithm::TensorCore(TensorKernel::Tf32));
-        let slim = whole(Algorithm::TensorCore(TensorKernel::Tf32Slim));
-        let spatial = whole(Algorithm::Spatial);
-        let spatial_four = Config {
-            algorithm: Algorithm::Spatial,
-            partition: Partition::Four,
-            split_cells: SplitCells::All,
-        };
-        let tc3 = whole(Algorithm::TensorCore(TensorKernel::Tf32x3));
-        let tc3w = whole(Algorithm::TensorCore(TensorKernel::Tf32x3Wide));
-        let strided = |batch, in_channels, input, math| Conv2d {
-            batch,
-            input,
-            in_channels,
-            out_channels: 2 * in_channels,
-            kernel: [3, 3],
-            padding: [1, 1],
-            stride: [2, 2],
-            dilation: [1, 1],
-            math,
-        };
-        let c64s2 = |batch, math| strided(batch, 64, [40, 499], math);
-        let c128s2 = |batch, math| strided(batch, 128, [20, 250], math);
-        use Partition::{Four, Two, Whole};
-        use SplitCells::{All, From};
-        use WinogradProducts::{Fp32, Fp32Sweep2, Tf32x2, Tf32x3};
-        let (f, t) = (CudaMath::Fp32, CudaMath::Tf32);
-        // batch 1 has 80 (128 channels) or 40 (256 channels) CTAs: 34 or 36 SMs run the
-        // 128-channel layers' whole waves and split the cells of the partial wave to fill
-        // one wave, and split every cell of the 256-channel layers' one wave and a bit;
-        // 108 SMs split the tensor-core products of every cell up to one wave, and in FP32
-        // mode in at least two; batch 32 has thousands of CTAs
-        for (device, conv, expected) in [
-            (ada, c128(1, f), wino(Fp32Sweep2, Two, From(34))),
-            (ada, c256(1, f), wino(Fp32, Four, All)),
-            (ada, c128(32, f), wino(Fp32Sweep2, Whole, All)),
-            (ada, c256(32, f), wino(Fp32, Whole, All)),
-            (blackwell, c128(32, f), wino(Fp32Sweep2, Whole, All)),
-            (ada, c128(1, t), wino(Fp32, Two, From(34))),
-            (ada, c128(32, t), tensor),
-            (ada_sm75, c128(32, t), wino(Fp32, Whole, All)),
-            (blackwell, c128(1, f), wino(Fp32Sweep2, Four, From(36))),
-            (blackwell, c256(1, f), wino(Fp32, Four, All)),
-            (a100, c128(1, f), wino(Tf32x3, Two, All)),
-            (a100, c256(1, f), wino(Tf32x3, Two, All)),
-            (a100, c128(1, t), wino(Tf32x2, Whole, All)),
-            (a100, c128(32, f), wino(Tf32x3, Whole, All)),
-            (a100, c128(32, t), wino(Tf32x2, Whole, All)),
-            (a100, c256(1, t), wino(Tf32x3, Two, All)),
-            (a100, c256(32, t), tensor),
-            (a100_sm75, c128(32, f), wino(Fp32Sweep2, Whole, All)),
-            // stride 2: TF32 mode on the sm80 tier runs one TF32 product everywhere, in
-            // slim tiles where the SMs outnumber the narrow tiles; FP32 mode runs 3xTF32
-            // tiles on TF32-rich parts, except the 128 -> 256 layer below batch 8, and
-            // the spatial kernels elsewhere
-            (ada, c64s2(32, t), tensor),
-            (ada, c64s2(1, t), tensor),
-            (ada, c128s2(1, t), tensor),
-            (blackwell, c128s2(1, t), tensor),
-            (a100, c64s2(1, t), slim),
-            (a100, c128s2(1, t), slim),
-            (a100, c64s2(2, t), tensor),
-            (a100, c128s2(2, t), slim),
-            (ada, c64s2(32, f), spatial),
-            (blackwell, c128s2(32, f), spatial),
-            (a100, c64s2(32, f), tc3w),
-            (a100, c128s2(32, f), tc3w),
-            (a100, c64s2(8, f), tc3w),
-            (a100, c64s2(1, f), tc3),
-            (a100, c64s2(7, f), tc3),
-            (a100, c128s2(1, f), spatial_four),
-            (a100, c128s2(8, f), tc3w),
-            (a100, c128s2(32, t), tensor),
-            (a100_sm75, c64s2(32, f), spatial),
-        ] {
-            assert_eq!(pick(device, conv), expected, "{device:?} {conv:?}");
-        }
-        // the stem's 39 wide CTAs per item fill eight waves from batch 7 on 34 SMs and
-        // from batch 23 on 108
-        assert_eq!(pick(ada, stem(1, [80, 998])).algorithm, Algorithm::Spatial);
-        assert_eq!(pick(ada, stem(7, [80, 998])).algorithm, Algorithm::WideStem);
-        assert_eq!(
-            pick(a100, stem(22, [80, 998])).algorithm,
-            Algorithm::Spatial
-        );
-        assert_eq!(
-            pick(a100, stem(32, [80, 998])).algorithm,
-            Algorithm::WideStem
-        );
-        let wide = Layout::new(
-            stem(32, [80, 998]),
-            Partition::Whole,
-            SplitCells::All,
-            Algorithm::WideStem,
-        )
-        .expect("stem contract");
-        assert_eq!(wide.config.grid_dim, (39, 32, 1));
-        assert_eq!(wide.config.block_dim, (256, 1, 1));
-    }
-
-    /// The routing finds a kernel for every trunk convolution in exactly one area: the
-    /// PR #36 shapes or these
-    #[test]
-    fn trunk_convolutions_have_exactly_one_kernel_area() {
-        use crate::inference::cuda::candidate::{ConvCandidate, ConvOxide, WideconvOxide};
-        use crate::inference::cuda::implementation::BoundaryId;
-        use crate::inference::cuda::{KernelModule, PtxTier};
-
-        let resnet: Vec<&str> = ConvOxide::COVERAGE
-            .entries()
-            .iter()
-            .flat_map(|entry| entry.layers.iter().copied())
-            .collect();
-        let trunk: Vec<_> = BoundaryId::all()
-            .filter(|boundary| boundary.area() == KernelModule::Resnet)
-            .collect();
-        assert_eq!(trunk.len(), 36);
-        for boundary in trunk {
-            let name = boundary.name();
-            for tier in [PtxTier::Sm75, PtxTier::Sm80] {
-                for batch in [1, 7, 32, 33, 64] {
-                    for math in [CudaMath::Fp32, CudaMath::Tf32] {
-                        let wide = WideconvOxide::coverage(tier).covers(name, batch, math);
-                        assert!(
-                            wide != resnet.contains(&name),
-                            "{name} b{batch} {math:?} {tier}"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn rejects_empty_and_partitioned_stems() {
-        for conv in [stem(0, [80, 998]), stem(1, [0, 998])] {
-            assert!(matches!(
-                Layout::new(conv, Partition::Whole, SplitCells::All, Algorithm::Spatial),
-                Err(CudaError::Unsupported { .. })
-            ));
-        }
-        assert!(
-            Layout::new(
-                stem(1, [80, 998]),
-                Partition::Two,
-                SplitCells::All,
-                Algorithm::Spatial
-            )
-            .is_err()
-        );
-    }
+    let (in_channels, out_channels, input, kernel, stride) = match name {
+        "resnet.conv1" => (1, 32, [80, 998], 3, 1),
+        "resnet.layer2.0.shortcut.0" => (32, 64, [80, 998], 1, 2),
+        "resnet.layer3.0.shortcut.0" => (64, 128, [40, 499], 1, 2),
+        "resnet.layer4.0.shortcut.0" => (128, 256, [20, 250], 1, 2),
+        "resnet.layer3.0.conv1" => (64, 128, [40, 499], 3, 2),
+        "resnet.layer4.0.conv1" => (128, 256, [20, 250], 3, 2),
+        _ if name.starts_with("resnet.layer3.") => (128, 128, [20, 250], 3, 1),
+        _ => (256, 256, [10, 125], 3, 1),
+    };
+    Ok(Conv2d {
+        batch,
+        in_channels,
+        out_channels,
+        input,
+        kernel: [kernel; 2],
+        padding: [kernel / 2; 2],
+        stride: [stride; 2],
+        dilation: [1; 2],
+        math,
+    })
 }

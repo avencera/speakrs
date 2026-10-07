@@ -24,7 +24,8 @@ use super::super::candidate::{
     ConvCandidate, ConvInputs, ConvLayerSpec, ConvOxide, Epilogue, Phases, PlanError,
     WideconvConfig, WideconvDevice, WideconvOxide,
 };
-use super::super::dnn::{Conv2d, ConvPlanner, Residual};
+use super::super::dnn::ConvPlanner;
+use super::super::geometry::{Conv2d, Residual};
 use super::super::implementation::Choice;
 use super::super::{
     ComputeCapability, CudaError, CudaMath, CudaRuntime, KernelModule, ResNetEmbedding,
@@ -664,10 +665,8 @@ fn min_cosine(actual: &[f32], expected: &[f32]) -> f64 {
 /// as a CUDA graph, against the same model with every convolution on cuDNN and against
 /// the ONNX Runtime reference
 ///
-/// Model load resolves every layer through production first, so on a device whose
-/// production ResNet binding is PTX JIT (capability 12.0) the explicit exact-cubin
-/// request conflicts with the cached module; run there with
-/// `SPEAKRS_CUDA_FORCE_PTX_JIT=1`
+/// Production and explicit plans share one artifact per area, including the pinned
+/// ResNet PTX JIT binding on capability 12.0; no artifact override is needed
 #[test]
 #[ignore = "development check; run on a GPU box with the references under the GPU lock"]
 fn driver_trunk_embedding_matches_library() -> Result<(), CudaError> {

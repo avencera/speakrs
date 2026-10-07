@@ -3,7 +3,7 @@
 use super::{BoundaryId, Modules, PlanPin, Qualified, Selected, Selection, Target, TokenEvidence};
 use crate::inference::cuda::candidate::{
     ConfigPin, ConvOxide, Coverage, DriverCandidate, FbankOxide, LstmProjOxide, PlanError,
-    SegdenseArea, SincOxide,
+    SegdenseArea, SincOxide, WideconvOxide,
 };
 use crate::inference::cuda::device::DeviceAttributes;
 use crate::inference::cuda::{CudaError, CudaMath, KernelModule, PtxTier};
@@ -11,6 +11,7 @@ use crate::inference::cuda::{CudaError, CudaMath, KernelModule, PtxTier};
 /// One area's library-free candidate interface, independent of artifact loading
 pub(super) struct Area {
     area: KernelModule,
+    hybrid: HybridPolicy,
     coverage: fn(PtxTier) -> Coverage,
     scope: fn(BoundaryId, usize, CudaMath, &DeviceAttributes, PtxTier) -> Option<super::SpeedScope>,
     summary: fn(CudaMath) -> &'static str,
@@ -18,24 +19,41 @@ pub(super) struct Area {
         fn(BoundaryId, usize, CudaMath, &DeviceAttributes, PtxTier) -> Result<ConfigPin, PlanError>,
 }
 
+/// A port either owns speed selection or retains the frozen qualified table
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HybridPolicy {
+    Scoped,
+    QualifiedTable,
+}
+
 impl Area {
     /// Register a complete port; library-dependent legacy candidates do not register
     pub(super) fn candidate<C: DriverCandidate>() -> Self {
         Self {
             area: C::AREA,
+            hybrid: HybridPolicy::Scoped,
             coverage: C::driver_coverage,
             scope: C::speed_scope,
             summary: C::speed_summary,
             pin: C::driver_pin,
         }
     }
+
+    /// Register implementation coverage without replacing qualified-table speed policy
+    fn qualified<C: DriverCandidate>() -> Self {
+        Self {
+            hybrid: HybridPolicy::QualifiedTable,
+            ..Self::candidate::<C>()
+        }
+    }
 }
 
 // ports add registrations here once their complete boundary is library-free
-pub(super) fn areas() -> [Area; 5] {
+pub(super) fn areas() -> [Area; 6] {
     [
+        Area::candidate::<WideconvOxide>(),
         Area::candidate::<ConvOxide>(),
-        Area::candidate::<SincOxide>(),
+        Area::qualified::<SincOxide>(),
         Area::candidate::<SegdenseArea>(),
         Area::candidate::<FbankOxide>(),
         Area::candidate::<LstmProjOxide>(),
@@ -65,16 +83,6 @@ pub(super) fn select(
         Selection::DriverOnly,
     )
     .map(|selected| selected.expect("driver route returns a selection or an error"))
-}
-
-pub(super) fn uses_port_artifact(area: KernelModule) -> bool {
-    areas().iter().any(|candidate| {
-        candidate.area == area
-            && matches!(
-                area,
-                KernelModule::FbankDft | KernelModule::Segdense | KernelModule::LstmProj
-            )
-    })
 }
 
 pub(super) fn select_ports(
@@ -107,11 +115,16 @@ pub(super) fn select_from(
             continue;
         };
 
-        let Some(request) = area.variants().driver_request(
+        if selection == Selection::Production && candidate.hybrid == HybridPolicy::QualifiedTable {
+            continue;
+        }
+        let Some(request) = super::production_module(
             *area,
+            modules.device(),
             modules.tier_limit(),
-            modules.device().capability(),
-        ) else {
+            area.variants(),
+        )?
+        else {
             continue;
         };
         if !(candidate.coverage)(request.tier()).covers(boundary.name(), batch, math) {
@@ -174,7 +187,7 @@ pub(super) fn select_from(
                 reason: "loaded artifact differs from selected artifact".to_owned(),
             });
         }
-        return Ok(Some(Selected::Oxide(Qualified {
+        return Ok(Some(Selected::Oxide(Box::new(Qualified {
             boundary,
             batch,
             math,
@@ -188,7 +201,7 @@ pub(super) fn select_from(
                 summary: (candidate.summary)(math),
             }),
             selection,
-        })));
+        }))));
     }
     if selection == Selection::Production {
         return Ok(None);

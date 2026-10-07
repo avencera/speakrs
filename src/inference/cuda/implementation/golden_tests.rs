@@ -226,7 +226,7 @@ fn observe(
 /// The artifact a production module load requests before any driver work, if any
 fn module_request(device: Device, area: KernelModule) -> Option<(PtxTier, LoadedArtifact)> {
     let limit = PtxTier::select(device.capability, None).unwrap();
-    super::production_module(area, &device.attributes(), limit, area.variants())
+    super::qualified_module(area, &device.attributes(), limit, area.variants())
         .unwrap()
         .map(|request| (request.tier(), request.artifact()))
 }

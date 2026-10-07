@@ -38,7 +38,7 @@ impl fmt::Debug for RecordHash {
     }
 }
 
-/// The worst measured speedup on one architecture, in thousandths
+/// A conservative lower bound on measured speedup on one architecture, in thousandths
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ArchitectureSpeed {
     pub(crate) capability: ComputeCapability,

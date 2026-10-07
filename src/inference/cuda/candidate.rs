@@ -53,6 +53,50 @@ pub(super) use kernel_inventory::conv_kernel_inventory;
 
 #[cfg(test)]
 mod kernel_inventory {
+    pub(crate) const WIDECONV_KERNELS: [&str; 41] = [
+        "spk_wideconv_c128",
+        "spk_wideconv_c128s2",
+        "spk_wideconv_c256",
+        "spk_wideconv_c64s2",
+        "spk_wideconv_gemm",
+        "spk_wideconv_pack_tc",
+        "spk_wideconv_pack_tc3",
+        "spk_wideconv_pack_wbf",
+        "spk_wideconv_pack_weights",
+        "spk_wideconv_pack_winograd",
+        "spk_wideconv_pack_wtc",
+        "spk_wideconv_reduce",
+        "spk_wideconv_shortcut_c128",
+        "spk_wideconv_shortcut_c128_wide",
+        "spk_wideconv_shortcut_c32",
+        "spk_wideconv_shortcut_c64",
+        "spk_wideconv_shortcut_c64_wide",
+        "spk_wideconv_stem",
+        "spk_wideconv_stem_wide",
+        "spk_wideconv_tc3_c128s2",
+        "spk_wideconv_tc3_c128s2_wide",
+        "spk_wideconv_tc3_c64s2",
+        "spk_wideconv_tc3_c64s2_wide",
+        "spk_wideconv_tc_c128",
+        "spk_wideconv_tc_c128s2",
+        "spk_wideconv_tc_c128s2_narrow",
+        "spk_wideconv_tc_c128s2_slim",
+        "spk_wideconv_tc_c256",
+        "spk_wideconv_tc_c64s2",
+        "spk_wideconv_tc_c64s2_narrow",
+        "spk_wideconv_tc_c64s2_slim",
+        "spk_wideconv_wbf_c128",
+        "spk_wideconv_wbf_c256",
+        "spk_wideconv_wino_c128",
+        "spk_wideconv_wino_c128_sweep2",
+        "spk_wideconv_wino_c256",
+        "spk_wideconv_wino_fixup",
+        "spk_wideconv_wtc2_c128",
+        "spk_wideconv_wtc2_c256",
+        "spk_wideconv_wtc3_c128",
+        "spk_wideconv_wtc3_c256",
+    ];
+
     /// Every kernel entry a plan can launch, for the PTX inventory check
     pub(crate) const SEGDENSE_KERNELS: [&str; 32] = [
         "spk_segdense_pack",
@@ -110,7 +154,7 @@ mod kernel_inventory {
 #[cfg(test)]
 pub(super) use fbank::REQUIRED_KERNELS as FBANK_DFT_KERNELS;
 #[cfg(test)]
-pub(super) use kernel_inventory::SEGDENSE_KERNELS;
+pub(super) use kernel_inventory::{SEGDENSE_KERNELS, WIDECONV_KERNELS};
 #[cfg(test)]
 pub(super) use lstm::REQUIRED_KERNELS as LSTM_KERNELS;
 #[cfg(test)]

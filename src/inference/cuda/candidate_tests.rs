@@ -380,3 +380,6 @@ fn fixed_dense_and_temporal_ports_refuse_other_window_lengths_before_enqueue() {
         Err(PlanError::Geometry(GeometryError::Unimplemented { .. }))
     ));
 }
+
+#[path = "candidate_tests/wideconv.rs"]
+mod wideconv;

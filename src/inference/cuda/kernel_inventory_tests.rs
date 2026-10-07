@@ -40,6 +40,7 @@ fn plans() -> Vec<(KernelModule, Vec<&'static str>)> {
             candidate::FBANK_DFT_KERNELS.to_vec(),
         ),
         (KernelModule::LstmProj, candidate::LSTMPROJ_KERNELS.to_vec()),
+        (KernelModule::Wideconv, candidate::WIDECONV_KERNELS.to_vec()),
     ];
     #[cfg(feature = "_cuda-libraries")]
     let plans = {

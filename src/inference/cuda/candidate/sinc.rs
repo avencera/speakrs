@@ -16,7 +16,7 @@ use super::{
     SpecialValues,
 };
 use crate::inference::cuda::error::check_len;
-use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, LoadedKernels, PtxTier};
+use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, LoadedKernels};
 
 const SPK_SINCNET_PACK_FILTERS: &str = "spk_sincnet_pack_filters";
 const SPK_SINCNET_CONV_ABS_POOL: &str = "spk_sincnet_conv_abs_pool";
@@ -75,13 +75,6 @@ impl SincCandidate for Oxide {
     }]);
     // TF32 mode was left out for qualification, not implementation: the kernel runs
     // full-precision FP32 in both modes, and a driver-only build has no cuDNN to defer to
-    fn coverage(_tier: PtxTier) -> Coverage {
-        if crate::inference::cuda::driver_only() {
-            return IMPLEMENTED;
-        }
-
-        Self::COVERAGE
-    }
 
     // the pooling maximum is PTX `max.f32`, which returns the non-NaN operand, and it
     // starts at negative infinity over absolute values
@@ -234,8 +227,8 @@ fn to_u32(value: usize) -> Result<u32, CudaError> {
 impl super::DriverCandidate for Oxide {
     const AREA: super::KernelModule = super::KernelModule::Sincnet;
 
-    fn driver_coverage(tier: super::PtxTier) -> Coverage {
-        <Self as SincCandidate>::coverage(tier)
+    fn driver_coverage(_tier: super::PtxTier) -> Coverage {
+        IMPLEMENTED
     }
 
     fn driver_pin(

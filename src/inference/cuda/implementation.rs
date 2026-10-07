@@ -137,7 +137,7 @@ pub(crate) enum Choice {
 #[derive(Debug)]
 pub(crate) enum Selected {
     Library,
-    Oxide(Qualified),
+    Oxide(Box<Qualified>),
     #[cfg(all(test, feature = "_cuda-libraries"))]
     Mutant(super::test_support::Mutant),
 }
@@ -174,20 +174,27 @@ const _: () = evidence::validate(PRODUCTION, ALWAYS_ON, ROUTE_PRECEDENCE);
 /// Production model batch classes, excluding the harness stress classes
 pub(crate) const MODEL_BATCHES: [usize; 2] = ProductionBatches::MODEL;
 
-/// The module production loads for an area on this device, resolved before any load
+/// The single artifact every use of an area loads on this device
 ///
-/// Always-on areas request driver JIT of their embedded baseline PTX on every device.
-/// Candidate areas request exactly their binding's module, or nothing when no binding
-/// covers the device or the runtime's tier limit is below the binding's tier
+/// A qualified binding wins even in driver-only builds. Unbound candidates use the
+/// device's exact cubin, or embedded PTX when that cubin is not shipped
 pub(crate) fn production_module(
     area: KernelModule,
     device: &DeviceAttributes,
     limit: PtxTier,
     variants: AreaPtx,
 ) -> Result<Option<ModuleRequest>, CudaError> {
-    if super::driver_only() || driver::uses_port_artifact(area) {
-        return Ok(variants.driver_request(area, limit, device.capability()));
-    }
+    let qualified = qualified_module(area, device, limit, variants)?;
+    Ok(qualified.or_else(|| variants.driver_request(area, limit, device.capability())))
+}
+
+/// The frozen qualified-table artifact policy, independent of complete port fallback
+fn qualified_module(
+    area: KernelModule,
+    device: &DeviceAttributes,
+    limit: PtxTier,
+    variants: AreaPtx,
+) -> Result<Option<ModuleRequest>, CudaError> {
     if !ALWAYS_ON.contains(&area) {
         return Ok(bound_module(PRODUCTION, area, device, limit));
     }
@@ -209,22 +216,18 @@ pub(crate) fn production_module(
     )))
 }
 
-/// The production module's tier, without hashing embedded bytes
+/// Resolve the area's tier with the same precedence, without hashing its bytes
 fn production_tier(
     area: KernelModule,
     device: &DeviceAttributes,
     limit: PtxTier,
 ) -> Option<PtxTier> {
-    if super::driver_only() || driver::uses_port_artifact(area) {
-        return area
-            .variants()
-            .driver_request(area, limit, device.capability())
-            .map(ModuleRequest::tier);
-    }
     if ALWAYS_ON.contains(&area) {
         return Some(PtxTier::BASELINE);
     }
-    bound_module(PRODUCTION, area, device, limit).map(ModuleRequest::tier)
+    bound_module(PRODUCTION, area, device, limit)
+        .map(ModuleRequest::tier)
+        .or_else(|| area.variants().runnable_tier(limit, device.capability()))
 }
 
 fn bound_module(
@@ -749,9 +752,9 @@ pub(crate) fn select(
     }
     Ok(
         match production_route(PRODUCTION, ROUTE_PRECEDENCE, boundary, batch, math, device) {
-            Some(route) if route.module == loaded => {
-                Selected::Oxide(Qualified::production(boundary, batch, math, device, route))
-            }
+            Some(route) if route.module == loaded => Selected::Oxide(Box::new(
+                Qualified::production(boundary, batch, math, device, route),
+            )),
             _ => Selected::Library,
         },
     )
@@ -938,13 +941,13 @@ impl PlanRequest {
         };
         // a diagnostic override can load other bytes, which never match the binding
         Ok(if loaded == route.module {
-            Selected::Oxide(Qualified::production(
+            Selected::Oxide(Box::new(Qualified::production(
                 boundary,
                 batch,
                 math,
                 modules.device(),
                 route,
-            ))
+            )))
         } else {
             Selected::Library
         })
@@ -1027,7 +1030,7 @@ fn qualification_selection(
     let coverage = candidate_coverage(loaded.area(), loaded.tier());
     Ok(match choice {
         Choice::Oxide(selection) if coverage.covers(boundary.name(), batch, math) => {
-            Selected::Oxide(Qualified {
+            Selected::Oxide(Box::new(Qualified {
                 boundary,
                 batch,
                 math,
@@ -1038,7 +1041,7 @@ fn qualification_selection(
                 pin: PlanPin::Implemented,
                 evidence: TokenEvidence::Qualification,
                 selection,
-            })
+            }))
         }
         Choice::Mutant(mutant) => Selected::Mutant(mutant),
         Choice::StageTail | Choice::StageTailControl if math == CudaMath::Fp32 => {
