@@ -713,6 +713,9 @@ fn export_production_table() {
                     "pin": super::super::test_support::configuration::pin_json(proof.pin),
                 })).collect();
             let scope = match speed.scope {
+                SpeedScope::MeasuredCapability { capability } => {
+                    serde_json::json!({ "kind": "MeasuredCapability", "capability": format!("{}.{}", capability.major, capability.minor) })
+                }
                 SpeedScope::AllDevices(evidence) => serde_json::json!({
                     "kind": "AllDevices", "summary": evidence.summary(),
                     "architectures": evidence.measurements().iter().map(|speed| serde_json::json!({
@@ -1636,7 +1639,7 @@ fn explicit_wideconv_route_wins_only_for_its_implemented_tuple() {
 #[test]
 fn broad_winner_selects_on_an_unmeasured_gpu() {
     use super::evidence::{ArchitectureSpeed, BroadEvidence};
-    static SUMMARY: BroadEvidence = BroadEvidence::new(
+    static SUMMARY: BroadEvidence = BroadEvidence::with_minimum(
         &[
             ArchitectureSpeed {
                 capability: ComputeCapability::new(8, 0),
@@ -1648,6 +1651,7 @@ fn broad_winner_selects_on_an_unmeasured_gpu() {
             },
         ],
         "fixture: fused fbank producer avoids materialized DFT matrices on Ampere and Ada",
+        crate::inference::cuda::ComputeCapability::new(7, 5),
     );
     const SCOPE: SpeedScope = SpeedScope::AllDevices(&SUMMARY);
     static PROOFS: [TupleProof; 1] = [fixture_proof(
@@ -1726,10 +1730,12 @@ fn force_library_environment_disables_production_candidates() {
         "resnet.layer1.0.conv1",
         "lstm.stack",
         "sincnet.conv0.abs_pool",
+        "linear0",
+        "fbank.dft",
     ] {
         assert!(matches!(
             fixture
-                .resolve(PlanRequest::Production, boundary, 1, CudaMath::Fp32)
+                .resolve(PlanRequest::Hybrid, boundary, 1, CudaMath::Fp32)
                 .unwrap(),
             Selected::Library
         ));
@@ -1748,7 +1754,7 @@ fn broad_evidence_rejects_weak_or_single_architecture_claims() {
         &[
             ArchitectureSpeed {
                 capability: ADA,
-                minimum_speedup_milli: 1199,
+                minimum_speedup_milli: 1049,
             },
             ArchitectureSpeed {
                 capability: BLACKWELL,
@@ -1766,6 +1772,13 @@ fn broad_evidence_rejects_weak_or_single_architecture_claims() {
             },
         ][..],
     ] {
-        assert!(std::panic::catch_unwind(|| BroadEvidence::new(measurements, "fixture")).is_err());
+        assert!(
+            std::panic::catch_unwind(|| BroadEvidence::with_minimum(
+                measurements,
+                "fixture",
+                crate::inference::cuda::ComputeCapability::new(7, 5)
+            ))
+            .is_err()
+        );
     }
 }

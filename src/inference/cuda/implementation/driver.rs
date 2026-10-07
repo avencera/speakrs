@@ -2,7 +2,8 @@
 
 use super::{BoundaryId, Modules, PlanPin, Qualified, Selected, Selection, Target, TokenEvidence};
 use crate::inference::cuda::candidate::{
-    ConfigPin, ConvOxide, Coverage, DriverCandidate, PlanError, SincOxide,
+    ConfigPin, ConvOxide, Coverage, DriverCandidate, FbankOxide, LstmProjOxide, PlanError,
+    SegdenseArea, SincOxide,
 };
 use crate::inference::cuda::device::DeviceAttributes;
 use crate::inference::cuda::{CudaError, CudaMath, KernelModule, PtxTier};
@@ -11,7 +12,8 @@ use crate::inference::cuda::{CudaError, CudaMath, KernelModule, PtxTier};
 pub(super) struct Area {
     area: KernelModule,
     coverage: fn(PtxTier) -> Coverage,
-    broad: Option<&'static super::BroadEvidence>,
+    scope: fn(usize, CudaMath, &DeviceAttributes) -> Option<super::SpeedScope>,
+    summary: fn(CudaMath) -> &'static str,
     pin:
         fn(BoundaryId, usize, CudaMath, &DeviceAttributes, PtxTier) -> Result<ConfigPin, PlanError>,
 }
@@ -22,17 +24,21 @@ impl Area {
         Self {
             area: C::AREA,
             coverage: C::driver_coverage,
-            broad: C::broad_evidence(),
+            scope: C::speed_scope,
+            summary: C::speed_summary,
             pin: C::driver_pin,
         }
     }
 }
 
 // ports add registrations here once their complete boundary is library-free
-fn areas() -> [Area; 2] {
+pub(super) fn areas() -> [Area; 5] {
     [
         Area::candidate::<ConvOxide>(),
         Area::candidate::<SincOxide>(),
+        Area::candidate::<SegdenseArea>(),
+        Area::candidate::<FbankOxide>(),
+        Area::candidate::<LstmProjOxide>(),
     ]
 }
 
@@ -58,22 +64,28 @@ pub(super) fn select(
         &mut modules,
         Selection::DriverOnly,
     )
+    .map(|selected| selected.expect("driver route returns a selection or an error"))
 }
 
-pub(super) fn is_broad(area: KernelModule) -> bool {
-    areas()
-        .iter()
-        .any(|candidate| candidate.area == area && candidate.broad.is_some())
+pub(super) fn uses_port_artifact(area: KernelModule) -> bool {
+    areas().iter().any(|candidate| {
+        candidate.area == area
+            && matches!(
+                area,
+                KernelModule::FbankDft | KernelModule::Segdense | KernelModule::LstmProj
+            )
+    })
 }
 
-pub(super) fn select_broad(
+pub(super) fn select_ports(
     boundary: BoundaryId,
     batch: usize,
     math: CudaMath,
+    candidates: &[Area],
     modules: &mut impl Modules,
-) -> Result<Selected, CudaError> {
+) -> Result<Option<Selected>, CudaError> {
     select_from(
-        &areas(),
+        candidates,
         boundary,
         batch,
         math,
@@ -82,21 +94,19 @@ pub(super) fn select_broad(
     )
 }
 
-fn select_from(
+pub(super) fn select_from(
     areas: &[Area],
     boundary: BoundaryId,
     batch: usize,
     math: CudaMath,
     modules: &mut impl Modules,
     selection: Selection,
-) -> Result<Selected, CudaError> {
+) -> Result<Option<Selected>, CudaError> {
     for area in super::ROUTE_PRECEDENCE {
         let Some(candidate) = areas.iter().find(|candidate| candidate.area == *area) else {
             continue;
         };
-        if selection == Selection::Production && candidate.broad.is_none() {
-            continue;
-        }
+
         let Some(request) = area.variants().driver_request(
             *area,
             modules.tier_limit(),
@@ -106,6 +116,12 @@ fn select_from(
         };
         if !(candidate.coverage)(request.tier()).covers(boundary.name(), batch, math) {
             continue;
+        }
+        let scope = (candidate.scope)(batch, math, modules.device())
+            .filter(|scope| scope.contains(modules.device()) && scope.allows_tier(request.tier()));
+        if selection == Selection::Production && scope.is_none() {
+            // a complete port owns its covered tuple even when speed is unmeasured
+            return Ok(Some(Selected::Library));
         }
         let pin = (candidate.pin)(boundary, batch, math, modules.device(), request.tier());
         if selection == Selection::Production
@@ -118,7 +134,7 @@ fn select_from(
                     ))
             )
         {
-            return Ok(Selected::Library);
+            return Ok(Some(Selected::Library));
         }
         let pin = pin.map_err(|error| match error {
             PlanError::Cuda(error) => error,
@@ -148,7 +164,8 @@ fn select_from(
         let loaded = match modules.load(request) {
             Ok(loaded) => loaded,
             Err(error) => {
-                return super::artifact_refusal(error, selection == Selection::Production);
+                return super::artifact_refusal(error, selection == Selection::Production)
+                    .map(Some);
             }
         };
         if loaded != request {
@@ -157,7 +174,7 @@ fn select_from(
                 reason: "loaded artifact differs from selected artifact".to_owned(),
             });
         }
-        return Ok(Selected::Oxide(Qualified {
+        return Ok(Some(Selected::Oxide(Qualified {
             boundary,
             batch,
             math,
@@ -166,16 +183,15 @@ fn select_from(
                 device: modules.device().capability(),
             },
             pin: PlanPin::Pinned(pin),
-            evidence: candidate
-                .broad
-                .map_or(TokenEvidence::Implemented, |summary| TokenEvidence::Broad {
-                    scope: super::SpeedScope::AllDevices(summary),
-                }),
+            evidence: scope.map_or(TokenEvidence::Implemented, |scope| TokenEvidence::Port {
+                scope,
+                summary: (candidate.summary)(math),
+            }),
             selection,
-        }));
+        })));
     }
     if selection == Selection::Production {
-        return Ok(Selected::Library);
+        return Ok(None);
     }
     Err(missing(boundary, batch, math))
 }

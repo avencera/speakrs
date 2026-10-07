@@ -36,6 +36,8 @@ use tracing::debug;
 use self::dispatch::Plan;
 use self::kernels::{ChannelBias, EmbeddingKernels, PoolShape};
 use self::trunk::{ConvLayer, STEM_SLOT, Trunk};
+use super::candidate::{DenseSite, DenseSpec};
+use super::dense::DensePlan;
 use super::error::{check_len, element_count};
 use super::fbank::{FBANK_FRAMES, FBANK_MEL_BINS};
 use super::geometry::Residual;
@@ -147,27 +149,31 @@ impl ResNetEmbedding {
                     ));
                 }
             }
-            needs.push(LibraryNeed::new(
-                HEAD,
-                batch,
-                math,
-                AreaTarget::for_area(runtime, KernelModule::Embedding)?,
-                CudaLibrary::Cublas,
-            ));
+            if matches!(
+                plan_selection(
+                    runtime,
+                    HEAD,
+                    batch,
+                    math,
+                    #[cfg(all(test, feature = "_cuda-libraries"))]
+                    None
+                )?,
+                Selected::Library
+            ) {
+                needs.push(LibraryNeed::new(
+                    HEAD,
+                    batch,
+                    math,
+                    AreaTarget::for_area(runtime, KernelModule::Embedding)?,
+                    CudaLibrary::Cublas,
+                ));
+            }
         }
         if super::driver_only() {
             for need in &needs {
                 need.prepare(runtime)?;
             }
         }
-        LibraryNeed::new(
-            HEAD,
-            1,
-            math,
-            AreaTarget::for_area(runtime, KernelModule::Embedding)?,
-            CudaLibrary::Cublas,
-        )
-        .prepare(runtime)?;
         let pooled = 2 * pool_columns(&trunk);
         let head_weight = weights.upload(runtime, HEAD_WEIGHT, &[EMBEDDING_DIM, pooled])?;
         let head_bias = weights.upload(runtime, HEAD_BIAS, &[EMBEDDING_DIM])?;
@@ -222,6 +228,17 @@ impl ResNetEmbedding {
         Ok(EmbeddingBatch {
             model: Arc::clone(model),
             chunks,
+            head: DensePlan::new(
+                runtime,
+                DenseSpec::new(DenseSite::Embedding, chunks, model.math).map_err(|error| {
+                    CudaError::Unsupported {
+                        context: "embedding projection",
+                        reason: error.to_string(),
+                    }
+                })?,
+                model.head_weight.data(),
+                model.head_bias.data(),
+            )?,
             fbank: DeviceTensor::zeros(stream, &[chunks, FBANK_FRAMES, FBANK_MEL_BINS])?,
             masks: DeviceTensor::zeros(stream, &[rows, MASK_FRAMES])?,
             stem_input: stream.alloc_zeros(stem_len)?,
@@ -255,6 +272,7 @@ pub struct EmbeddingBatch {
     /// the model whose weights, kernels and precision this batch runs
     model: Arc<Model>,
     chunks: usize,
+    head: DensePlan,
     fbank: DeviceTensor,
     masks: DeviceTensor,
     stem_input: CudaSlice<f32>,
@@ -353,6 +371,7 @@ impl EmbeddingBatch {
         let EmbeddingBatch {
             model,
             chunks,
+            head,
             fbank,
             masks,
             stem_input,
@@ -493,50 +512,53 @@ impl EmbeddingBatch {
         let rows = chunks * SPEAKERS_PER_CHUNK;
         let mut embeddings = output.data_mut().as_view_mut();
 
-        let gemm = Sgemm {
-            b_transposed: true,
-            beta: 1.0,
-            math,
-            ..Sgemm::new(rows, EMBEDDING_DIM, 2 * columns)
-        };
-        #[cfg(all(test, feature = "_cuda-libraries"))]
-        super::test_support::boundaries::run(
-            qualification.get("resnet.seg_1"),
-            runtime,
-            super::test_support::candidate_seam::Operation::Dense(
-                super::candidate::DenseSpec::new(
-                    super::candidate::DenseSite::Embedding,
-                    chunks,
-                    math,
-                )
-                .map_err(|e| CudaError::Unsupported {
-                    context: "stage head spec",
-                    reason: e.to_string(),
-                })?,
-            ),
-            super::test_support::candidate_seam::Views {
-                input: pooled.as_view(),
-                weight: model.head_weight.data().as_view(),
-                bias: Some(model.head_bias.data().as_view()),
-                residual: None,
-            },
-            &mut embeddings,
-            |output| {
+        head.enqueue(runtime, &pooled.as_view(), &mut embeddings, |output| {
+            let gemm = Sgemm {
+                b_transposed: true,
+                beta: 1.0,
+                math,
+                ..Sgemm::new(rows, EMBEDDING_DIM, 2 * columns)
+            };
+            #[cfg(all(test, feature = "_cuda-libraries"))]
+            super::test_support::boundaries::run(
+                qualification.get("resnet.seg_1"),
+                runtime,
+                super::test_support::candidate_seam::Operation::Dense(
+                    super::candidate::DenseSpec::new(
+                        super::candidate::DenseSite::Embedding,
+                        chunks,
+                        math,
+                    )
+                    .map_err(|e| CudaError::Unsupported {
+                        context: "stage head spec",
+                        reason: e.to_string(),
+                    })?,
+                ),
+                super::test_support::candidate_seam::Views {
+                    input: pooled.as_view(),
+                    weight: model.head_weight.data().as_view(),
+                    bias: Some(model.head_bias.data().as_view()),
+                    residual: None,
+                },
+                output,
+                |output| {
+                    model.kernels.broadcast_rows(
+                        runtime,
+                        &model.head_bias.data().as_view(),
+                        output,
+                    )?;
+                    runtime.sgemm(gemm, &pooled, model.head_weight.data(), output)
+                },
+            )?;
+            #[cfg(not(all(test, feature = "_cuda-libraries")))]
+            {
                 model
                     .kernels
                     .broadcast_rows(runtime, &model.head_bias.data().as_view(), output)?;
-                runtime.sgemm(gemm, &pooled, model.head_weight.data(), output)
-            },
-        )?;
-        #[cfg(not(all(test, feature = "_cuda-libraries")))]
-        {
-            model.kernels.broadcast_rows(
-                runtime,
-                &model.head_bias.data().as_view(),
-                &mut embeddings,
-            )?;
-            runtime.sgemm(gemm, &pooled, model.head_weight.data(), &mut embeddings)?;
-        }
+                runtime.sgemm(gemm, &pooled, model.head_weight.data(), output)?;
+            }
+            Ok(())
+        })?;
         tap(EmbeddingTap::Output, &embeddings.as_view())?;
 
         Ok(())

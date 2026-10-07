@@ -364,17 +364,8 @@ impl<C: DenseCandidate> Executor for DenseAdapter<C> {
         views: Views<'_>,
         mut output: CudaViewMut<'_, f32>,
     ) -> Result<(), CudaError> {
-        self.0.enqueue(
-            &views.input,
-            &views.weight,
-            views
-                .bias
-                .as_ref()
-                .ok_or_else(|| error("dense bias is absent"))?,
-            &mut output,
-            &Phases::new(),
-            runtime,
-        )
+        self.0
+            .enqueue(&views.input, &mut output, &Phases::new(), runtime)
     }
 }
 impl<C: SegConvCandidate> Executor for TemporalAdapter<C> {
@@ -387,13 +378,8 @@ impl<C: SegConvCandidate> Executor for TemporalAdapter<C> {
         views: Views<'_>,
         mut output: CudaViewMut<'_, f32>,
     ) -> Result<(), CudaError> {
-        self.0.enqueue(
-            &views.input,
-            &views.weight,
-            &mut output,
-            &Phases::new(),
-            runtime,
-        )
+        self.0
+            .enqueue(&views.input, &mut output, &Phases::new(), runtime)
     }
 }
 impl<C: ConvCandidate> Executor for SpatialAdapter<C> {
@@ -450,9 +436,10 @@ where
         let Operation::Dense(spec) = operation else {
             return Err(error("not a dense operation"));
         };
-        let pin = C::implemented_pin(spec).map_err(|e| error(e.to_string()))?;
-        let plan =
-            C::plan(r.runtime, r.kernels, spec, pin.clone()).map_err(|e| error(e.to_string()))?;
+        let pin = C::implemented_pin(spec, r.kernels.tier(), r.runtime.device())
+            .map_err(|e| error(e.to_string()))?;
+        let plan = C::plan(r.runtime, r.kernels, spec, r.weight, r.bias, pin.clone())
+            .map_err(|e| error(e.to_string()))?;
         Ok((DenseAdapter(plan), pin))
     }
 }
@@ -471,9 +458,10 @@ where
         let Operation::Temporal(spec) = operation else {
             return Err(error("not a temporal operation"));
         };
-        let pin = C::implemented_pin(spec).map_err(|e| error(e.to_string()))?;
-        let plan =
-            C::plan(r.runtime, r.kernels, spec, pin.clone()).map_err(|e| error(e.to_string()))?;
+        let pin = C::implemented_pin(spec, r.kernels.tier(), r.runtime.device())
+            .map_err(|e| error(e.to_string()))?;
+        let plan = C::plan(r.runtime, r.kernels, spec, r.weight, pin.clone())
+            .map_err(|e| error(e.to_string()))?;
         Ok((TemporalAdapter(plan), pin))
     }
 }

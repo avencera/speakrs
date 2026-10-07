@@ -633,8 +633,7 @@ pub(super) fn secret(
         let audio = super::transformed_audio(&fixture, batch, &mut state);
         if test_support::phase() == Some("profile") {
             let spec = FbankSpec::new(batch, math).map_err(plan_error)?;
-            let mut candidate =
-                Operator::<Library>::new(runtime, spec, choice, [audio.clone(), audio])?;
+            let mut candidate = Operator::new(runtime, spec, choice, [audio.clone(), audio])?;
             {
                 let _window = test_support::window(&format!(
                     "lifecycle/secret/{}/{LAYER}/b{batch}/fresh",

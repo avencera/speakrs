@@ -62,14 +62,16 @@ mod production {
 
 pub(crate) use boundary::{BoundaryId, ProductionBatches};
 pub(crate) use evidence::{
-    Binding, BroadEvidence, RecordHash, SpeedEvidence, SpeedScope, SpeedStatus, TupleProof,
+    ArchitectureSpeed, Binding, BroadEvidence, RecordHash, SpeedEvidence, SpeedScope, SpeedStatus,
+    TupleProof,
 };
 
 #[cfg(all(test, feature = "_cuda-libraries"))]
 use super::candidate::{Batches, Coverage, CoverageEntry, Maths};
 use super::candidate::{
-    ConfigPin, ConvCandidate, ConvLayerSpec, ConvOxide, FbankCandidate, FbankOxide, FbankSpec,
-    LstmCandidate, LstmOxide, LstmSpec, PlanError, SincCandidate, SincOxide, SincSpec,
+    ConfigPin, ConvCandidate, ConvLayerSpec, ConvOxide, DenseCandidate, DenseOxide, DenseSpec,
+    FbankCandidate, FbankOxide, FbankSpec, LstmCandidate, LstmOxide, LstmProjOxide, LstmSpec,
+    PlanError, SegConvCandidate, SegConvOxide, SegConvSpec, SincCandidate, SincOxide, SincSpec,
 };
 use super::device::DeviceAttributes;
 use super::error::GeometryError;
@@ -159,6 +161,7 @@ const ROUTE_PRECEDENCE: &[KernelModule] = &[
     KernelModule::Wideconv,
     KernelModule::Resnet,
     KernelModule::Segdense,
+    KernelModule::LstmProj,
     KernelModule::Lstm,
     KernelModule::Sincnet,
     KernelModule::FbankDft,
@@ -181,7 +184,7 @@ pub(crate) fn production_module(
     limit: PtxTier,
     variants: AreaPtx,
 ) -> Result<Option<ModuleRequest>, CudaError> {
-    if super::driver_only() || driver::is_broad(area) {
+    if super::driver_only() || driver::uses_port_artifact(area) {
         return Ok(variants.driver_request(area, limit, device.capability()));
     }
     if !ALWAYS_ON.contains(&area) {
@@ -211,7 +214,7 @@ fn production_tier(
     device: &DeviceAttributes,
     limit: PtxTier,
 ) -> Option<PtxTier> {
-    if super::driver_only() || driver::is_broad(area) {
+    if super::driver_only() || driver::uses_port_artifact(area) {
         return area
             .variants()
             .driver_request(area, limit, device.capability())
@@ -301,7 +304,10 @@ pub(crate) enum TokenEvidence {
     /// Implemented library-free coverage, without a speed claim
     Implemented,
     /// A complete broad-winner port, carrying its structural speed evidence
-    Broad { scope: SpeedScope },
+    Port {
+        scope: SpeedScope,
+        summary: &'static str,
+    },
     /// An explicit qualification control, which grants no production evidence
     #[cfg(all(test, feature = "_cuda-libraries"))]
     Qualification,
@@ -320,6 +326,21 @@ pub(crate) struct Qualified {
 }
 
 impl Qualified {
+    /// The area that owns this selected plan
+    pub(crate) fn area(&self) -> KernelModule {
+        self.target.module.area()
+    }
+
+    fn speed_measured(&self) -> bool {
+        match self.evidence {
+            TokenEvidence::Production { speed, .. } => {
+                speed.scope.measured_on_device(self.target.device)
+            }
+            TokenEvidence::Port { scope, .. } => scope.measured_on_device(self.target.device),
+            _ => false,
+        }
+    }
+
     fn production(
         boundary: BoundaryId,
         batch: usize,
@@ -385,7 +406,7 @@ impl Qualified {
                 scope = ?speed.scope,
                 "CUDA production evidence"
             ),
-            TokenEvidence::Broad { scope } => {
+            TokenEvidence::Port { scope, .. } => {
                 if let SpeedScope::AllDevices(evidence) = scope {
                     tracing::debug!(
                         summary = evidence.summary(),
@@ -415,13 +436,7 @@ impl Qualified {
         let library_allowed = self.selection == Selection::Production && !driver_only;
         match result {
             Ok(plan) => {
-                let measured = match self.evidence {
-                    TokenEvidence::Production { speed, .. } => {
-                        speed.scope.measured_on_device(self.target.device)
-                    }
-                    TokenEvidence::Broad { scope } => scope.measured_on_device(self.target.device),
-                    _ => false,
-                };
+                let measured = self.speed_measured();
                 tracing::info!(boundary = self.boundary.name(), batch = self.batch,
                     math = ?self.math, area = area.name(), speed_measured = measured,
                     evidence = ?self.evidence, "CUDA route implementation=Oxide");
@@ -574,12 +589,82 @@ impl Qualified {
         self.finish(area, super::driver_only(), plan)
     }
 
+    /// Build the library-free projected LSTM stack
+    pub(crate) fn projected_lstm(
+        self,
+        runtime: &CudaRuntime,
+        spec: LstmSpec<'_>,
+    ) -> Result<Option<LstmProjOxide>, CudaError> {
+        let area = KernelModule::LstmProj;
+        let kernels = self.check(runtime, area, "lstm.stack", spec.batch, spec.math)?;
+        let pin = match self.pin {
+            PlanPin::Pinned(ConfigPin::Lstm(pin)) => Ok(pin),
+            PlanPin::Pinned(other) => return Err(self.foreign_pin(other)),
+            #[cfg(all(test, feature = "_cuda-libraries"))]
+            PlanPin::Implemented => {
+                LstmProjOxide::device_pin(runtime.device(), kernels.tier(), &spec)
+            }
+        };
+        let plan = pin.and_then(|pin| LstmProjOxide::plan(runtime, &kernels, spec, pin));
+        self.finish(area, super::driver_only(), plan)
+    }
+
+    /// Build a complete dense operation from its selected module and packed weights
+    pub(crate) fn dense(
+        self,
+        runtime: &CudaRuntime,
+        spec: DenseSpec,
+        weight: &cudarc::driver::CudaSlice<f32>,
+        bias: &cudarc::driver::CudaSlice<f32>,
+    ) -> Result<Option<DenseOxide>, CudaError> {
+        let area = KernelModule::Segdense;
+        let kernels = self.check(
+            runtime,
+            area,
+            spec.site().boundary().name(),
+            spec.batch(),
+            spec.math(),
+        )?;
+        let pin = match self.pin {
+            PlanPin::Pinned(ConfigPin::Segdense(pin)) => Ok(pin),
+            PlanPin::Pinned(other) => return Err(self.foreign_pin(other)),
+            #[cfg(all(test, feature = "_cuda-libraries"))]
+            PlanPin::Implemented => {
+                DenseOxide::implemented_pin(spec, kernels.tier(), runtime.device())
+            }
+        };
+        let plan = pin.and_then(|pin| DenseOxide::plan(runtime, &kernels, spec, weight, bias, pin));
+        self.finish(area, super::driver_only(), plan)
+    }
+
+    /// Build a raw temporal convolution from its selected module and packed weights
+    pub(crate) fn segconv(
+        self,
+        runtime: &CudaRuntime,
+        spec: SegConvSpec,
+        weight: &cudarc::driver::CudaSlice<f32>,
+    ) -> Result<Option<SegConvOxide>, CudaError> {
+        let area = KernelModule::Segdense;
+        let kernels = self.check(
+            runtime,
+            area,
+            spec.site().boundary().name(),
+            spec.batch(),
+            spec.math(),
+        )?;
+        let pin = match self.pin {
+            PlanPin::Pinned(ConfigPin::Segdense(pin)) => Ok(pin),
+            PlanPin::Pinned(other) => return Err(self.foreign_pin(other)),
+            #[cfg(all(test, feature = "_cuda-libraries"))]
+            PlanPin::Implemented => {
+                SegConvOxide::implemented_pin(spec, kernels.tier(), runtime.device())
+            }
+        };
+        let plan = pin.and_then(|pin| SegConvOxide::plan(runtime, &kernels, spec, weight, pin));
+        self.finish(area, super::driver_only(), plan)
+    }
+
     /// Build exactly the accepted filterbank energy producer
-    // only qualification plans it until an accepted record wires the `fbank.rs` call site
-    #[cfg_attr(
-        not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))),
-        allow(dead_code)
-    )]
     pub(crate) fn fbank(
         self,
         runtime: &CudaRuntime,
@@ -590,12 +675,12 @@ impl Qualified {
         let pin = match self.pin {
             PlanPin::Pinned(ConfigPin::Fbank(pin)) => Ok(pin),
             PlanPin::Pinned(other) => return Err(self.foreign_pin(other)),
-            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            #[cfg(all(test, feature = "_cuda-libraries"))]
             PlanPin::Implemented => FbankOxide::implemented_pin(spec),
         };
         let plan = pin.and_then(|pin| {
             let plan = FbankOxide::plan(runtime, &kernels, spec, pin)?;
-            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            #[cfg(all(test, feature = "_cuda-libraries"))]
             super::test_support::configuration::record(
                 self.boundary.name(),
                 self.batch,
@@ -689,7 +774,7 @@ pub(crate) fn plan_selection(
     math: CudaMath,
     #[cfg(all(test, feature = "_cuda-libraries"))] override_choice: Option<Choice>,
 ) -> Result<Selected, CudaError> {
-    let request = PlanRequest::Production;
+    let request = PlanRequest::Hybrid;
     #[cfg(all(test, feature = "_cuda-libraries"))]
     let request = override_choice.map_or_else(
         || match super::test_support::default_choice(Choice::Oxide(Selection::Production)) {
@@ -698,12 +783,29 @@ pub(crate) fn plan_selection(
         },
         PlanRequest::Qualification,
     );
-    request.resolve(boundary, batch, math, runtime)
+    let selected = request.resolve(boundary, batch, math, runtime)?;
+    match &selected {
+        Selected::Oxide(token) => {
+            tracing::info!(boundary = boundary.name(), batch, ?math, area = token.area().name(), speed_measured = token.speed_measured(), evidence = ?token.evidence, "CUDA route selected implementation=Oxide")
+        }
+        Selected::Library => tracing::info!(
+            boundary = boundary.name(),
+            batch,
+            ?math,
+            speed_measured = false,
+            "CUDA route selected implementation=Library"
+        ),
+        #[cfg(all(test, feature = "_cuda-libraries"))]
+        Selected::Mutant(_) => {}
+    }
+    Ok(selected)
 }
 
 /// Selection intent precedes artifact loading; only an Oxide token needs artifact identity
 #[derive(Debug, Clone, Copy)]
 enum PlanRequest {
+    Hybrid,
+    #[cfg_attr(not(all(test, feature = "_cuda-libraries")), allow(dead_code))]
     Production,
     #[cfg(test)]
     DriverOnly,
@@ -717,7 +819,18 @@ impl PlanRequest {
         boundary: BoundaryId,
         batch: usize,
         math: CudaMath,
+        modules: impl Modules,
+    ) -> Result<Selected, CudaError> {
+        self.resolve_with_candidates(boundary, batch, math, modules, &driver::areas())
+    }
+
+    fn resolve_with_candidates(
+        self,
+        boundary: BoundaryId,
+        batch: usize,
+        math: CudaMath,
         mut modules: impl Modules,
+        candidates: &[driver::Area],
     ) -> Result<Selected, CudaError> {
         if batch == 0 {
             return Err(CudaError::Unsupported {
@@ -732,13 +845,13 @@ impl PlanRequest {
         if driver {
             return driver::select(boundary, batch, math, modules);
         }
-        if modules.force_library() && matches!(self, Self::Production) {
+        if modules.force_library() && matches!(self, Self::Production | Self::Hybrid) {
             return Ok(Selected::Library);
         }
 
-        if matches!(self, Self::Production)
-            && let selected @ Selected::Oxide(_) =
-                driver::select_broad(boundary, batch, math, &mut modules)?
+        if matches!(self, Self::Hybrid)
+            && let Some(selected) =
+                driver::select_ports(boundary, batch, math, candidates, &mut modules)?
         {
             return Ok(selected);
         }
@@ -782,7 +895,7 @@ impl PlanRequest {
             Err(error) => {
                 return artifact_refusal(
                     error,
-                    matches!(self, Self::Production) && !super::driver_only(),
+                    matches!(self, Self::Production | Self::Hybrid) && !super::driver_only(),
                 );
             }
         };
@@ -839,7 +952,7 @@ fn explicit_request(
         // areas without a port have no implemented tuple or artifact to resolve
         if matches!(
             area,
-            KernelModule::Wideconv | KernelModule::Segdense | KernelModule::FbankDft
+            KernelModule::Wideconv | KernelModule::Segdense | KernelModule::LstmProj
         ) {
             return Ok(None);
         }

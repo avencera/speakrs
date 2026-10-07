@@ -15,7 +15,9 @@
 use std::sync::Arc;
 
 use cudarc::driver::sys::CUfunction_attribute;
-use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
+use cudarc::driver::{
+    CudaFunction, CudaSlice, CudaStream, CudaView, CudaViewMut, LaunchConfig, PushKernelArg,
+};
 
 use super::{
     Batches, Coverage, CoverageEntry, DenseCandidate, DenseSite, DenseSpec, FiniteContract,
@@ -64,48 +66,11 @@ const HALF_MIN_SPLITS: u32 = (5120 / HALF_STAGE).div_ceil(HALF_SLICE / HALF_STAG
 /// Dynamic shared memory of `spk_segdense_embed_b32_f16`, as `mma_half_split!`
 /// documents it: 96 row scales, the FP16 slice of 96 rows and a three-stage weight
 /// ring, which the cross-group reduction of 192 threads' 64 accumulators reuses
-const HALF_SHARED: u32 = {
+pub(super) const HALF_SHARED: u32 = {
     let ring = 96 * (HALF_SLICE / 2 + 4) + 3 * (HALF_STAGE / 2) * (128 + 8);
     let reduction = 192 * 32 * 64 / 32;
     4 * (96 + if ring > reduction { ring } else { reduction })
 };
-
-/// Every kernel entry a plan can launch, for the PTX inventory check
-#[cfg(test)]
-pub(crate) const REQUIRED_KERNELS: [&str; 32] = [
-    "spk_segdense_pack",
-    "spk_segdense_pack_conv_mma",
-    "spk_segdense_conv1_b1",
-    "spk_segdense_conv1_b32",
-    "spk_segdense_conv1_b32_tc",
-    "spk_segdense_conv1_b32_x3",
-    "spk_segdense_conv2_b1",
-    "spk_segdense_conv2_b32",
-    "spk_segdense_conv2_b32_tc",
-    "spk_segdense_conv2_b32_x3",
-    "spk_segdense_linear0_b1",
-    "spk_segdense_linear0_b1_tf32",
-    "spk_segdense_linear0_b32",
-    "spk_segdense_linear0_b32_tf32",
-    "spk_segdense_linear1_b1",
-    "spk_segdense_linear1_b1_tf32",
-    "spk_segdense_linear1_b32",
-    "spk_segdense_linear1_b32_tf32",
-    "spk_segdense_classifier_b1",
-    "spk_segdense_classifier_b32",
-    "spk_segdense_embed_b1",
-    "spk_segdense_embed_b32",
-    "spk_segdense_embed_b32_tf32",
-    "spk_segdense_embed_b32_tf32_k2",
-    "spk_segdense_embed_b32_tf32_e64",
-    "spk_segdense_embed_b32_x3",
-    "spk_segdense_embed_b32_f16",
-    "spk_segdense_reduce_embed",
-    "spk_segdense_reduce_embed_flat",
-    "spk_segdense_reduce_e18",
-    "spk_segdense_reduce_e34",
-    "spk_segdense_reduce_e36",
-];
 
 /// Finite operands give finite outputs within the FP32 range; NaN, infinity and the
 /// sign of zero are not established, since the FP16 and TF32 splits and the fused
@@ -123,12 +88,12 @@ const SPECIAL_VALUES: SpecialValues = SpecialValues {
 /// FP32 rate and on parts where the two are about equal, with 34 to more than 100
 /// SMs, so the best kernel differs by device
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Hardware {
-    capability: ComputeCapability,
+pub(super) struct Hardware {
+    pub(super) capability: ComputeCapability,
     /// Streaming multiprocessors this context may use
-    multiprocessors: u32,
+    pub(super) multiprocessors: u32,
     /// Shared memory one block may opt in to, in bytes
-    shared_optin: u32,
+    pub(super) shared_optin: u32,
 }
 
 impl Hardware {
@@ -236,7 +201,7 @@ impl Site {
 
     /// The kernel of this site for `batch`, `math`, the loaded PTX `tier` and the
     /// device, if the batch is one the kernels are compiled for
-    fn choice(
+    pub(super) fn choice(
         self,
         batch: usize,
         math: CudaMath,
@@ -369,7 +334,7 @@ pub(crate) enum Entry {
 }
 
 impl Entry {
-    const fn site(self) -> Site {
+    pub(super) const fn site(self) -> Site {
         match self {
             Self::Conv1B1 | Self::Conv1B32 | Self::Conv1B32Tc | Self::Conv1B32X3 => Site::Conv1,
             Self::Conv2B1 | Self::Conv2B32 | Self::Conv2B32Tc | Self::Conv2B32X3 => Site::Conv2,
@@ -390,7 +355,7 @@ impl Entry {
         }
     }
 
-    const fn batch(self) -> usize {
+    pub(super) const fn batch(self) -> usize {
         match self {
             Self::Conv1B1
             | Self::Conv2B1
@@ -405,7 +370,7 @@ impl Entry {
     }
 
     /// The launch shape, with `splits` reduction slices for a split-K entry
-    const fn config(self, splits: u32) -> Config {
+    pub(super) const fn config(self, splits: u32) -> Config {
         match self {
             Self::Conv1B1 => Config::conv("spk_segdense_conv1_b1", 64, 256),
             Self::Conv1B32 => Config::conv("spk_segdense_conv1_b32", 128, 128),
@@ -446,21 +411,21 @@ impl Entry {
         }
     }
 
-    const fn is_split(self) -> bool {
+    pub(super) const fn is_split(self) -> bool {
         matches!(self.config(1).kind, Kind::Split { .. })
     }
 }
 
 /// A kernel entry and, for split-K entries, its reduction slice count
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Choice {
-    entry: Entry,
+pub(super) struct Choice {
+    pub(super) entry: Entry,
     /// 1 to [`EMBED_MAX_SPLITS`] for split-K entries, 0 otherwise
-    splits: u8,
+    pub(super) splits: u8,
 }
 
 impl Choice {
-    const fn fixed(entry: Entry) -> Self {
+    pub(super) const fn fixed(entry: Entry) -> Self {
         Self { entry, splits: 0 }
     }
 
@@ -472,7 +437,7 @@ impl Choice {
         }
     }
 
-    const fn config(self) -> Config {
+    pub(super) const fn config(self) -> Config {
         self.entry.config(self.splits as u32)
     }
 }
@@ -685,7 +650,7 @@ impl SegdensePin {
     }
 
     /// Refuse a pin for another boundary or a module that lacks its kernels
-    fn check(
+    pub(super) fn check(
         self,
         site: Site,
         batch: usize,
@@ -885,8 +850,8 @@ impl Producer {
     /// Queues the producer and, for split-K, its fixed-order reduction
     fn enqueue(
         &self,
-        input: &CudaSlice<f32>,
-        output: &mut CudaSlice<f32>,
+        input: &CudaView<'_, f32>,
+        output: &mut CudaViewMut<'_, f32>,
         phases: &Phases,
         stream: &CudaStream,
     ) -> Result<(), CudaError> {
@@ -1022,7 +987,7 @@ fn pack_on_device(
 /// recomputing these rows in 3xTF32 removes the largest share of the error a fixed
 /// number of rows can. The choice depends on the weights alone, never on the inputs,
 /// so it holds for every input the model sees
-fn selected_rows(weight: &[f32], n: usize, count: usize) -> Vec<u32> {
+pub(super) fn selected_rows(weight: &[f32], n: usize, count: usize) -> Vec<u32> {
     let mut energy: Vec<(f64, u32)> = weight
         .chunks_exact(n)
         .zip(0u32..)
@@ -1046,7 +1011,7 @@ fn selected_rows(weight: &[f32], n: usize, count: usize) -> Vec<u32> {
 /// the FP16 pair `(w[col][2p] s, w[col][2p + 1] s)` with the low half first, and
 /// float `k / 2 * n + col` holds `1 / s`, where the power of two `s` puts the
 /// column's largest magnitude in `[2^14, 2^15)` ([`half_scale`])
-fn pack_half_columns(weight: &[f32], n: usize, k: usize) -> Vec<f32> {
+pub(super) fn pack_half_columns(weight: &[f32], n: usize, k: usize) -> Vec<f32> {
     let mut packed = vec![0.0; k / 2 * n + n];
     for (col, row) in weight.chunks_exact(k).take(n).enumerate() {
         let largest = row
@@ -1067,7 +1032,7 @@ fn pack_half_columns(weight: &[f32], n: usize, k: usize) -> Vec<f32> {
 /// The power of two `s` that puts `largest` in `[2^14, 2^15)`, below the FP16 maximum
 /// of 65504 even after rounding, and `1 / s`; the exponent is clamped so both are
 /// normal floats. The kernel crate's `half_scale` scales activation rows the same way
-fn half_scale(largest: f32) -> (f32, f32) {
+pub(super) fn half_scale(largest: f32) -> (f32, f32) {
     let exponent = ((largest.to_bits() >> 23) & 0xff) as i32 - 127;
     let shift = (14 - exponent).clamp(-113, 126);
     (
@@ -1078,7 +1043,7 @@ fn half_scale(largest: f32) -> (f32, f32) {
 
 /// `value` rounded to the nearest FP16, ties to even, as binary16 bits, which is what
 /// the kernels' `cvt.rn.f16x2.f32` gives
-fn f16_bits(value: f32) -> u16 {
+pub(super) fn f16_bits(value: f32) -> u16 {
     let bits = value.to_bits();
     let sign = ((bits >> 16) & 0x8000) as u16;
     let exponent = ((bits >> 23) & 0xff) as i32;
@@ -1118,15 +1083,15 @@ fn round_up(value: u32, bits: u32, kept: u32) -> bool {
 
 /// The split-K reduction kernel for a number of partial planes, and its launch
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ReductionShape {
-    kernel: &'static str,
-    splits: u32,
-    grid: u32,
-    block: u32,
+pub(super) struct ReductionShape {
+    pub(super) kernel: &'static str,
+    pub(super) splits: u32,
+    pub(super) grid: u32,
+    pub(super) block: u32,
 }
 
 #[derive(Debug)]
-struct Reduction {
+pub(super) struct Reduction {
     function: CudaFunction,
     shape: ReductionShape,
 }
@@ -1137,7 +1102,7 @@ impl Reduction {
     /// registers, so eight warps share them and meet in shared memory. The split
     /// counts `Site::config` picks on the development GPUs have fixed-count forms
     /// with no per-plane test
-    const fn shape(splits: u32) -> ReductionShape {
+    pub(super) const fn shape(splits: u32) -> ReductionShape {
         const OUTPUTS: u32 = 96 * 256;
         let fixed = match splits {
             18 => Some("spk_segdense_reduce_e18"),
@@ -1215,8 +1180,8 @@ impl DenseCandidate for DenseOxide {
 
     fn enqueue(
         &self,
-        x: &CudaSlice<f32>,
-        output: &mut CudaSlice<f32>,
+        x: &CudaView<'_, f32>,
+        output: &mut CudaViewMut<'_, f32>,
         phases: &Phases,
         runtime: &CudaRuntime,
     ) -> Result<(), CudaError> {
@@ -1263,8 +1228,8 @@ impl SegConvCandidate for SegConvOxide {
 
     fn enqueue(
         &self,
-        x: &CudaSlice<f32>,
-        output: &mut CudaSlice<f32>,
+        x: &CudaView<'_, f32>,
+        output: &mut CudaViewMut<'_, f32>,
         phases: &Phases,
         runtime: &CudaRuntime,
     ) -> Result<(), CudaError> {
@@ -1272,323 +1237,64 @@ impl SegConvCandidate for SegConvOxide {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{
-        Choice, Config, Entry, HALF_SHARED, Hardware, Kind, PlanError, Reduction, SegdensePin,
-        Site, f16_bits, half_scale, pack_half_columns, selected_rows,
-    };
-    use crate::inference::cuda::{ComputeCapability, CudaMath, PtxTier};
-
-    const fn device(major: u32, minor: u32, multiprocessors: u32, shared_kib: u32) -> Hardware {
-        Hardware {
-            capability: ComputeCapability::new(major, minor),
-            multiprocessors,
-            shared_optin: shared_kib * 1024,
-        }
+/// One registry owner for the complete segmentation and embedding dense area
+pub(crate) struct Area;
+impl super::DriverCandidate for Area {
+    const AREA: KernelModule = KernelModule::Segdense;
+    fn driver_coverage(_tier: PtxTier) -> Coverage {
+        Coverage(&[CoverageEntry {
+            layers: &[
+                "sincnet.conv1",
+                "sincnet.conv2",
+                "linear0",
+                "linear1",
+                "linear2",
+                "resnet.seg_1",
+            ],
+            batches: Batches::Only(&BATCHES),
+            maths: Maths::All,
+        }])
     }
-
-    const A100: Hardware = device(8, 0, 108, 163);
-    const H100: Hardware = device(9, 0, 132, 227);
-    const RTX_4060_TI: Hardware = device(8, 9, 34, 99);
-    const RTX_5060_TI: Hardware = device(12, 0, 36, 99);
-    const RTX_3090: Hardware = device(8, 6, 82, 99);
-    const T4: Hardware = device(7, 5, 40, 64);
-
-    const SITES: [Site; 6] = [
-        Site::Conv1,
-        Site::Conv2,
-        Site::Linear0,
-        Site::Linear1,
-        Site::Linear2,
-        Site::Embedding,
-    ];
-
-    fn kernel(
-        site: Site,
+    fn broad_evidence() -> Option<&'static crate::inference::cuda::implementation::BroadEvidence> {
+        use crate::inference::cuda::implementation::{ArchitectureSpeed, BroadEvidence};
+        const EVIDENCE: BroadEvidence = BroadEvidence::with_limits(
+            &[
+                ArchitectureSpeed {
+                    capability: ComputeCapability::new(8, 9),
+                    minimum_speedup_milli: 1060,
+                },
+                ArchitectureSpeed {
+                    capability: ComputeCapability::new(12, 0),
+                    minimum_speedup_milli: 1060,
+                },
+            ],
+            "segdense sm80: fused conv/pool producers and packed dense epilogues; do-segdense dev reports on Ada and Blackwell, every measured case >=1.06x; A100 24/24 dev",
+            ComputeCapability::new(8, 0),
+            PtxTier::Sm80,
+        );
+        Some(&EVIDENCE)
+    }
+    fn driver_pin(
+        boundary: crate::inference::cuda::implementation::BoundaryId,
         batch: usize,
         math: CudaMath,
+        device: &DeviceAttributes,
         tier: PtxTier,
-        hardware: Hardware,
-    ) -> Config {
-        config(site, batch, math, tier, hardware).expect("production batch")
-    }
-
-    fn config(
-        site: Site,
-        batch: usize,
-        math: CudaMath,
-        tier: PtxTier,
-        hardware: Hardware,
-    ) -> Option<Config> {
-        site.choice(batch, math, tier, hardware).map(Choice::config)
-    }
-
-    #[test]
-    fn every_model_batch_has_a_kernel_and_no_other_batch_does() {
-        for hardware in [A100, H100, RTX_4060_TI, RTX_5060_TI, RTX_3090, T4] {
-            for site in SITES {
-                for math in [CudaMath::Fp32, CudaMath::Tf32] {
-                    for tier in [PtxTier::Sm75, PtxTier::Sm80] {
-                        for batch in [0, 2, 7, 31, 33, 64] {
-                            assert_eq!(site.choice(batch, math, tier, hardware), None);
-                        }
-                        for batch in [1, 32] {
-                            let choice = site.choice(batch, math, tier, hardware).unwrap();
-                            assert_eq!((choice.entry.site(), choice.entry.batch()), (site, batch));
-                            assert_eq!(choice.entry.is_split(), choice.splits > 0);
-                            let config = choice.config();
-                            assert!(config.kernel.contains(&format!("_b{batch}")));
-                            assert!(config.shared <= hardware.shared_optin.max(48 * 1024));
-                        }
-                    }
-                }
+    ) -> Result<super::ConfigPin, PlanError> {
+        let site = match boundary.name() {
+            "sincnet.conv1" => Site::Conv1,
+            "sincnet.conv2" => Site::Conv2,
+            "linear0" => Site::Linear0,
+            "linear1" => Site::Linear1,
+            "linear2" => Site::Linear2,
+            "resnet.seg_1" => Site::Embedding,
+            _ => {
+                return Err(PlanError::Geometry(GeometryError::Unimplemented {
+                    context: CONTEXT,
+                    reason: format!("unknown boundary {boundary}"),
+                }));
             }
-        }
-    }
-
-    #[test]
-    fn pins_refuse_other_boundaries_and_lower_modules() {
-        let pin = SegdensePin {
-            choice: Choice::fixed(Entry::Linear0B32Select),
-            math: CudaMath::Tf32,
-            tier: PtxTier::Sm80,
         };
-        assert!(
-            pin.check(Site::Linear0, 32, CudaMath::Tf32, PtxTier::Sm80)
-                .is_ok()
-        );
-        assert!(
-            pin.check(Site::Linear0, 32, CudaMath::Tf32, PtxTier::Sm120)
-                .is_ok()
-        );
-        for (site, batch, math) in [
-            (Site::Linear1, 32, CudaMath::Tf32),
-            (Site::Linear0, 1, CudaMath::Tf32),
-            (Site::Linear0, 32, CudaMath::Fp32),
-        ] {
-            assert!(matches!(
-                pin.check(site, batch, math, PtxTier::Sm80),
-                Err(PlanError::Geometry(_))
-            ));
-        }
-        assert!(matches!(
-            pin.check(Site::Linear0, 32, CudaMath::Tf32, PtxTier::Sm75),
-            Err(PlanError::DeviceUnsupported { .. })
-        ));
-    }
-
-    #[test]
-    fn tensor_convolutions_only_on_tensor_heavy_parts() {
-        let convs = [
-            (
-                Site::Conv1,
-                "spk_segdense_conv1_b32_tc",
-                "spk_segdense_conv1_b32_x3",
-                "spk_segdense_conv1_b32",
-            ),
-            (
-                Site::Conv2,
-                "spk_segdense_conv2_b32_tc",
-                "spk_segdense_conv2_b32_x3",
-                "spk_segdense_conv2_b32",
-            ),
-        ];
-        for (site, tf32, fp32, simt) in convs {
-            for hardware in [A100, H100] {
-                let tc = kernel(site, 32, CudaMath::Tf32, PtxTier::Sm80, hardware);
-                let x3 = kernel(site, 32, CudaMath::Fp32, PtxTier::Sm80, hardware);
-                assert_eq!((tc.kernel, x3.kernel), (tf32, fp32));
-                assert!(x3.shared <= hardware.shared_optin);
-            }
-
-            for hardware in [RTX_4060_TI, RTX_5060_TI, RTX_3090] {
-                let tf32_mode = kernel(site, 32, CudaMath::Tf32, PtxTier::Sm80, hardware);
-                let fp32_mode = kernel(site, 32, CudaMath::Fp32, PtxTier::Sm80, hardware);
-                assert_eq!((tf32_mode.kernel, fp32_mode.kernel), (simt, simt));
-            }
-        }
-
-        // batch 1 keeps the SIMT convolution everywhere
-        assert_eq!(
-            kernel(Site::Conv1, 1, CudaMath::Tf32, PtxTier::Sm80, A100).kernel,
-            "spk_segdense_conv1_b1"
-        );
-    }
-
-    #[test]
-    fn sm75_tier_never_selects_tensor_kernels() {
-        for hardware in [A100, RTX_4060_TI, T4] {
-            for site in SITES {
-                for batch in [1, 32] {
-                    for math in [CudaMath::Fp32, CudaMath::Tf32] {
-                        let config = kernel(site, batch, math, PtxTier::Sm75, hardware);
-                        // the one TF32 kernel picked on every tier is plain SIMT in sm75
-                        let plain_tf32 = (site, batch, math) == (Site::Linear1, 1, CudaMath::Tf32);
-                        assert!(
-                            (plain_tf32 || !config.kernel.contains("_tf32"))
-                                && !config.kernel.ends_with("_tc")
-                                && !config.kernel.ends_with("_x3")
-                                && !config.kernel.ends_with("_f16"),
-                            "{site:?} {batch} {math:?}: {}",
-                            config.kernel
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn embedding_splits_fill_one_wave() {
-        let splits =
-            |math, hardware| match kernel(Site::Embedding, 32, math, PtxTier::Sm80, hardware) {
-                Config {
-                    kernel,
-                    kind: Kind::Split { splits, .. },
-                    ..
-                } => (kernel, splits),
-                other => panic!("not split-K: {other:?}"),
-            };
-
-        // FP16 products: two 96 x 128 tiles, one resident block per SM
-        assert_eq!(
-            splits(CudaMath::Tf32, RTX_4060_TI),
-            ("spk_segdense_embed_b32_f16", 17)
-        );
-        assert_eq!(
-            splits(CudaMath::Tf32, RTX_5060_TI),
-            ("spk_segdense_embed_b32_f16", 18)
-        );
-        // under 32 SMs a slice would exceed the FP16 kernel's shared slice, and
-        // without the shared memory opt-in it cannot run: TF32 products with two
-        // resident blocks per SM, or one on consumer Blackwell
-        let small = |hardware: Hardware| Hardware {
-            multiprocessors: 30,
-            ..hardware
-        };
-        assert_eq!(
-            splits(CudaMath::Tf32, small(RTX_4060_TI)),
-            ("spk_segdense_embed_b32_tf32", 30)
-        );
-        assert_eq!(
-            splits(CudaMath::Tf32, small(RTX_5060_TI)),
-            ("spk_segdense_embed_b32_tf32_k2", 15)
-        );
-        let no_optin = Hardware {
-            shared_optin: HALF_SHARED - 1,
-            ..RTX_4060_TI
-        };
-        assert_eq!(
-            splits(CudaMath::Tf32, no_optin),
-            ("spk_segdense_embed_b32_tf32", 34)
-        );
-        // four 96 x 64 tiles on tensor-heavy parts
-        assert_eq!(
-            splits(CudaMath::Tf32, A100),
-            ("spk_segdense_embed_b32_tf32_e64", 54)
-        );
-        // FP32: two resident SIMT blocks per SM, or 3xTF32 on tensor-heavy parts
-        assert_eq!(
-            splits(CudaMath::Fp32, RTX_4060_TI),
-            ("spk_segdense_embed_b32", 34)
-        );
-        // four 96 x 64 tiles for 3xTF32
-        assert_eq!(
-            splits(CudaMath::Fp32, A100),
-            ("spk_segdense_embed_b32_x3", 54)
-        );
-        // a one-SM partition still gets one slice, and a 132-SM part no more than
-        // the reduction adds
-        assert_eq!(splits(CudaMath::Fp32, device(8, 9, 1, 99)).1, 1);
-        assert_eq!(splits(CudaMath::Fp32, device(8, 9, 132, 99)).1, 128);
-        assert_eq!(splits(CudaMath::Tf32, device(8, 9, 132, 99)).1, 66);
-    }
-
-    #[test]
-    fn reductions_cover_every_output_once() {
-        for splits in 1..=128 {
-            let shape = Reduction::shape(splits);
-            let kernel = match splits {
-                18 | 34 | 36 => format!("spk_segdense_reduce_e{splits}"),
-                ..=40 => "spk_segdense_reduce_embed_flat".to_owned(),
-                _ => "spk_segdense_reduce_embed".to_owned(),
-            };
-            assert_eq!(shape.kernel, kernel);
-            assert_eq!(shape.splits, splits);
-            // the flat and fixed kernels have a thread per four outputs, the warp
-            // kernel a block per 128
-            let outputs = match shape.kernel {
-                "spk_segdense_reduce_embed" => shape.grid * 128,
-                _ => shape.grid * shape.block * 4,
-            };
-            assert_eq!(outputs, 96 * 256);
-        }
-    }
-
-    #[test]
-    fn selected_rows_have_the_largest_weight_energy() {
-        // rows of two columns with energies 1, 25, 0, 25 and 4
-        let weight = [1.0, 0.0, 3.0, -4.0, 0.0, 0.0, 0.0, 5.0, 2.0, 0.0];
-        assert_eq!(selected_rows(&weight, 2, 3), [1, 3, 4]);
-        // the tie between rows 1 and 3 goes to the lower index
-        assert_eq!(selected_rows(&weight, 2, 1), [1]);
-        assert_eq!(selected_rows(&weight, 2, 5), [0, 1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn f16_rounding_matches_binary16() {
-        let cases: [(f32, u16); 16] = [
-            (1.0, 0x3c00),
-            (-2.0, 0xc000),
-            (-0.0, 0x8000),
-            (65504.0, 0x7bff),
-            // the last value below the halfway point to 65536 stays finite
-            (65519.996, 0x7bff),
-            (65520.0, 0x7c00),
-            // ties go to the even significand
-            (1.0 + 2f32.powi(-11), 0x3c00),
-            (1.0 + 3.0 * 2f32.powi(-11), 0x3c02),
-            (2f32.powi(-14), 0x0400),
-            // the largest subnormal rounds up into the normal range
-            (2f32.powi(-14) * (1.0 - 2f32.powi(-11)), 0x0400),
-            (2f32.powi(-24), 0x0001),
-            (2f32.powi(-25), 0x0000),
-            (1.5 * 2f32.powi(-25), 0x0001),
-            (f32::MIN_POSITIVE / 2.0, 0x0000),
-            (f32::INFINITY, 0x7c00),
-            (f32::NAN, 0x7e00),
-        ];
-        for (value, expected) in cases {
-            assert_eq!(f16_bits(value), expected, "{value:e}");
-        }
-    }
-
-    #[test]
-    fn half_columns_scale_into_the_f16_range() {
-        // two columns of four reduction terms: magnitudes up to 3 and up to 2^-20
-        let tiny = 2f32.powi(-20);
-        let weight = [1.0, -3.0, 0.5, 2.0, tiny, -tiny / 2.0, 0.0, tiny / 4.0];
-        let packed = pack_half_columns(&weight, 2, 4);
-        assert_eq!(packed.len(), 4 / 2 * 2 + 2);
-
-        // column 0 scales by 2^13 (3 * 2^13 lies in [2^14, 2^15)), column 1 by 2^34
-        assert_eq!(packed[4..], [2f32.powi(-13), 2f32.powi(-34)]);
-        let words: Vec<u32> = packed[..4].iter().map(|word| word.to_bits()).collect();
-        let pair =
-            |low: f32, high: f32| u32::from(f16_bits(low)) | (u32::from(f16_bits(high)) << 16);
-        assert_eq!(
-            words,
-            [
-                pair(8192.0, -24576.0),
-                pair(16384.0, -8192.0),
-                pair(4096.0, 16384.0),
-                pair(0.0, 4096.0),
-            ]
-        );
-
-        // a zero column and an infinite one keep normal scales
-        assert_eq!(half_scale(0.0), (2f32.powi(126), 2f32.powi(-126)));
-        assert_eq!(half_scale(f32::INFINITY), (2f32.powi(-113), 2f32.powi(113)));
+        SegdensePin::select(site, batch, math, tier, device).map(super::ConfigPin::Segdense)
     }
 }

@@ -312,8 +312,18 @@ impl Plan {
     ) -> Result<(), CudaError> {
         let phases = Phases::new();
         match self {
-            Self::Conv(plan) => plan.enqueue(input, output, &phases, runtime),
-            Self::Dense(plan) => plan.enqueue(input, output, &phases, runtime),
+            Self::Conv(plan) => plan.enqueue(
+                &input.as_view(),
+                &mut output.as_view_mut(),
+                &phases,
+                runtime,
+            ),
+            Self::Dense(plan) => plan.enqueue(
+                &input.as_view(),
+                &mut output.as_view_mut(),
+                &phases,
+                runtime,
+            ),
         }
     }
 }

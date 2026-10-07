@@ -36,7 +36,7 @@ use super::{
     NanContract, Op, PlanError, Scratch, SideStream, SignedZeroContract, SpecialValues,
 };
 use crate::inference::cuda::{
-    ComputeCapability, CudaError, CudaMath, CudaRuntime, LoadedKernels, PtxTier,
+    ComputeCapability, CudaError, CudaMath, CudaRuntime, KernelModule, LoadedKernels, PtxTier,
 };
 
 const SPK_LSTM_CLEAR: &str = "spk_lstm_clear";
@@ -224,16 +224,16 @@ impl LstmCandidate for Oxide {
 
 /// What the projection rule reads from the device and the loaded module
 #[derive(Debug, Clone, Copy)]
-struct ProjectionTarget {
-    capability: ComputeCapability,
-    shared_optin_bytes: u32,
-    tier: PtxTier,
+pub(super) struct ProjectionTarget {
+    pub(super) capability: ComputeCapability,
+    pub(super) shared_optin_bytes: u32,
+    pub(super) tier: PtxTier,
 }
 
 /// TF32 mode uses tensor projections where the loaded tier has them, the device can
 /// host their tile, enough rows amortize it and they were accurate enough; every other
 /// case uses FP32
-fn projection_rule(
+pub(super) fn projection_rule(
     target: ProjectionTarget,
     batch: usize,
     rows: usize,
@@ -605,76 +605,42 @@ fn to_u32(context: &'static str, value: usize) -> Result<u32, CudaError> {
     u32::try_from(value).map_err(|_| CudaError::DimensionOverflow { context, value })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{
-        ComputeCapability, CudaMath, LstmProjection, ProjectionTarget, PtxTier, projection_rule,
-    };
-
-    const FRAMES: usize = 589;
-
-    fn target(major: u32, minor: u32, tier: PtxTier) -> ProjectionTarget {
-        ProjectionTarget {
-            capability: ComputeCapability::new(major, minor),
-            shared_optin_bytes: 99 << 10,
-            tier,
-        }
+impl super::DriverCandidate for Oxide {
+    const AREA: KernelModule = KernelModule::LstmProj;
+    fn driver_coverage(tier: PtxTier) -> Coverage {
+        Self::coverage(tier)
     }
-
-    fn rule(target: ProjectionTarget, batch: usize, math: CudaMath) -> LstmProjection {
-        projection_rule(target, batch, batch * FRAMES, math)
+    fn speed_scope(
+        batch: usize,
+        _math: CudaMath,
+        device: &DeviceAttributes,
+    ) -> Option<crate::inference::cuda::implementation::SpeedScope> {
+        let capability = device.capability();
+        ([1, 32].contains(&batch)
+            && [ComputeCapability::new(8, 9), ComputeCapability::new(12, 0)].contains(&capability))
+        .then_some(
+            crate::inference::cuda::implementation::SpeedScope::MeasuredCapability { capability },
+        )
     }
-
-    #[test]
-    fn fp32_mode_never_uses_tensor_projections() {
-        for tier in PtxTier::ALL {
-            let device = target(8, 0, tier);
-            assert_eq!(rule(device, 1, CudaMath::Fp32), LstmProjection::Small);
-            assert_eq!(rule(device, 3, CudaMath::Fp32), LstmProjection::Small);
-            assert_eq!(rule(device, 4, CudaMath::Fp32), LstmProjection::Large);
-            assert_eq!(rule(device, 32, CudaMath::Fp32), LstmProjection::Large);
-        }
+    fn speed_summary(_math: CudaMath) -> &'static str {
+        "do-lstm dev: library-free projection and recurrence faster on Ada 8.9 and Blackwell 12.0 at b1/b32 in both maths"
     }
-
-    #[test]
-    fn tf32_tensor_projections_need_the_sm80_tier_shared_memory_and_rows() {
-        assert_eq!(
-            rule(target(8, 0, PtxTier::Sm80), 32, CudaMath::Tf32),
-            LstmProjection::Tensor
-        );
-        assert_eq!(
-            rule(target(8, 6, PtxTier::Sm75), 32, CudaMath::Tf32),
-            LstmProjection::Large
-        );
-        assert_eq!(
-            rule(target(8, 0, PtxTier::Sm80), 1, CudaMath::Tf32),
-            LstmProjection::Small
-        );
-        let small_shared = ProjectionTarget {
-            shared_optin_bytes: 48 << 10,
-            ..target(8, 6, PtxTier::Sm80)
-        };
-        assert_eq!(
-            rule(small_shared, 32, CudaMath::Tf32),
-            LstmProjection::Large
-        );
-    }
-
-    #[test]
-    fn measured_tf32_accuracy_failures_use_fp32_projections() {
-        for tier in [PtxTier::Sm80, PtxTier::Sm120] {
-            for batch in [4, 7, 32, 33, 64] {
-                assert_eq!(
-                    rule(target(12, 0, tier), batch, CudaMath::Tf32),
-                    LstmProjection::Large,
-                    "cc 12.0 {tier} b{batch}"
-                );
-            }
-        }
-
-        let ada = target(8, 9, PtxTier::Sm80);
-        assert_eq!(rule(ada, 32, CudaMath::Tf32), LstmProjection::Large);
-        assert_eq!(rule(ada, 33, CudaMath::Tf32), LstmProjection::Tensor);
-        assert_eq!(rule(ada, 64, CudaMath::Tf32), LstmProjection::Tensor);
+    fn driver_pin(
+        _boundary: crate::inference::cuda::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        device: &DeviceAttributes,
+        tier: PtxTier,
+    ) -> Result<super::ConfigPin, PlanError> {
+        Ok(super::ConfigPin::Lstm(LstmPin::Projected(projection_rule(
+            ProjectionTarget {
+                capability: device.capability(),
+                shared_optin_bytes: device.shared_optin_bytes(),
+                tier,
+            },
+            batch,
+            batch * 589,
+            math,
+        ))))
     }
 }

@@ -339,3 +339,12 @@ fn fbank_tables_satisfy_the_staged_kernel_layout() {
     let (starts, counts) = with(79, 240, 16);
     assert!(Tables::checked(window, starts, counts, 16, mel.weights.clone()).is_ok());
 }
+
+#[path = "candidate_tests/segdense.rs"]
+pub(super) mod segdense;
+
+#[path = "candidate_tests/lstmproj.rs"]
+mod lstmproj;
+
+#[path = "candidate_tests/lstmproj_layout.rs"]
+mod lstmproj_layout;

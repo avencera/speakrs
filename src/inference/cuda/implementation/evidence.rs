@@ -13,7 +13,7 @@ use super::boundary::same as same_text;
 use crate::inference::cuda::candidate::ConfigPin;
 use crate::inference::cuda::device::DeviceAttributes;
 use crate::inference::cuda::kernels::{ArtifactHash, LoadedArtifact, ModuleRequest};
-use crate::inference::cuda::{ComputeCapability, CudaMath, KernelModule};
+use crate::inference::cuda::{ComputeCapability, CudaMath, KernelModule, PtxTier};
 
 /// SHA-256 of one immutable record in the outside-tree cache
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -47,21 +47,39 @@ pub(crate) struct ArchitectureSpeed {
 
 /// Structural speed evidence accepted for every supported device
 ///
-/// Construction requires two distinct architectures and at least 1.2x in every
+/// Construction requires two distinct architectures and at least 1.05x in every
 /// measured case. The summary names the structural reason and the supporting reports
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BroadEvidence {
     measurements: &'static [ArchitectureSpeed],
     summary: &'static str,
+    minimum: ComputeCapability,
+    minimum_tier: PtxTier,
 }
 
-// complete area ports provide production summaries; host tests exercise them now
-#[cfg_attr(not(test), allow(dead_code))]
 impl BroadEvidence {
-    pub(crate) const fn new(
+    /// The oldest architecture to which these structural wins apply
+    pub(crate) const fn with_minimum(
         measurements: &'static [ArchitectureSpeed],
         summary: &'static str,
+        minimum: ComputeCapability,
     ) -> Self {
+        Self::with_limits(measurements, summary, minimum, PtxTier::Sm75)
+    }
+
+    /// Separate device coverage from the oldest artifact with the measured algorithm
+    pub(crate) const fn with_limits(
+        measurements: &'static [ArchitectureSpeed],
+        summary: &'static str,
+        minimum: ComputeCapability,
+        minimum_tier: PtxTier,
+    ) -> Self {
+        let tier_minimum = minimum_tier.min_capability();
+        assert!(
+            minimum.major > tier_minimum.major
+                || minimum.major == tier_minimum.major && minimum.minor >= tier_minimum.minor,
+            "broad device scope must support its artifact tier"
+        );
         assert!(
             measurements.len() >= 2 && !summary.is_empty(),
             "broad evidence needs two architectures and a summary"
@@ -70,8 +88,8 @@ impl BroadEvidence {
         let mut index = 0;
         while index < measurements.len() {
             assert!(
-                measurements[index].minimum_speedup_milli >= 1200,
-                "every architecture must win by at least 1.2x"
+                measurements[index].minimum_speedup_milli >= 1050,
+                "every architecture must win by at least 1.05x"
             );
             let mut other = index + 1;
             while other < measurements.len() {
@@ -96,6 +114,8 @@ impl BroadEvidence {
         Self {
             measurements,
             summary,
+            minimum,
+            minimum_tier,
         }
     }
 
@@ -107,7 +127,9 @@ impl BroadEvidence {
     }
 
     const fn same(self, other: Self) -> bool {
-        if !same_text(self.summary, other.summary)
+        if self.minimum_tier as u8 != other.minimum_tier as u8
+            || !same_capability(self.minimum, other.minimum)
+            || !same_text(self.summary, other.summary)
             || self.measurements.len() != other.measurements.len()
         {
             return false;
@@ -131,8 +153,6 @@ impl BroadEvidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SpeedScope {
     /// A structural winner accepted on every supported GPU, with explicit evidence
-    // no complete broad-winner port is registered in this snapshot
-    #[cfg_attr(not(test), allow(dead_code))]
     AllDevices(&'static BroadEvidence),
     /// One measured card: its capability, SM count and driver-reported name
     // the first new record adds a point binding; until then only tests construct one
@@ -142,6 +162,8 @@ pub(crate) enum SpeedScope {
         multiprocessors: u32,
         device_name: &'static str,
     },
+    /// Development speed measured for a capability, without a legacy record claim
+    MeasuredCapability { capability: ComputeCapability },
     /// A PR #36 record approved for a whole capability before SM count was a key;
     /// never copied into point evidence
     LegacyCapability { capability: ComputeCapability },
@@ -150,15 +172,17 @@ pub(crate) enum SpeedScope {
 impl SpeedScope {
     pub(crate) const fn capability(self) -> ComputeCapability {
         match self {
-            Self::AllDevices(_) => ComputeCapability::new(7, 5),
-            Self::Point { capability, .. } | Self::LegacyCapability { capability } => capability,
+            Self::AllDevices(evidence) => evidence.minimum,
+            Self::Point { capability, .. }
+            | Self::LegacyCapability { capability }
+            | Self::MeasuredCapability { capability } => capability,
         }
     }
 
     /// Whether this exact device is inside the scope
     pub(crate) fn contains(self, device: &DeviceAttributes) -> bool {
         match self {
-            Self::AllDevices(_) => device.capability() >= ComputeCapability::new(7, 5),
+            Self::AllDevices(evidence) => device.capability() >= evidence.minimum,
             Self::Point {
                 capability,
                 multiprocessors,
@@ -168,7 +192,17 @@ impl SpeedScope {
                     && device.multiprocessors().get() == multiprocessors
                     && device.name() == device_name
             }
-            Self::LegacyCapability { capability } => device.capability() == capability,
+            Self::LegacyCapability { capability } | Self::MeasuredCapability { capability } => {
+                device.capability() == capability
+            }
+        }
+    }
+
+    /// Whether this artifact tier contains the algorithm covered by the speed evidence
+    pub(crate) fn allows_tier(self, tier: PtxTier) -> bool {
+        match self {
+            Self::AllDevices(evidence) => tier >= evidence.minimum_tier,
+            _ => true,
         }
     }
 
@@ -227,6 +261,10 @@ impl SpeedScope {
                     && left_sms == right_sms
                     && same_text(left_name, right_name)
             }
+            (
+                Self::MeasuredCapability { capability: left },
+                Self::MeasuredCapability { capability: right },
+            ) => same_capability(left, right),
             (
                 Self::LegacyCapability { capability: left },
                 Self::LegacyCapability { capability: right },

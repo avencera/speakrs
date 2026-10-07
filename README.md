@@ -260,6 +260,12 @@ CUDA modes use `segmentation-3.0.safetensors` and
 `wespeaker-multimask-tail.safetensors`. `RuntimeConfig` selects precision and graphs.
 `SPEAKRS_CUDA_PTX_TIER=sm75` limits the kernel tier. Hybrid selection uses measured
 speed for device-sensitive kernels and explicit all-device evidence for broad winners.
+The FP32 fbank FFT/mel producer is a broad winner on cc 8.0 and newer; segdense is a broad
+winner on cc 8.0 and newer with the sm80 tier. These fused kernels won by at least
+1.05x in every measured case on at least two architectures. Full `cuda` embeds all
+target kernels alongside cuDNN and cuBLAS. LSTM and the ResNet trunk use kernels only
+where their speed was measured faster; other devices use Library. TF32 fbank uses
+the kernel only on cc 8.9, where it was measured faster.
 `SPEAKRS_CUDA_FORCE_LIBRARY=1` makes a `cuda` build use Library at each replaceable
 boundary. The choice is logged when the model loads.
 

@@ -347,13 +347,19 @@ impl DenseCandidate for FakePort {
     fn coverage(tier: PtxTier) -> Coverage {
         FakeFactory::<2>::coverage(tier)
     }
-    fn implemented_pin(_spec: DenseSpec) -> Result<FakePin, PlanError> {
+    fn implemented_pin(
+        _spec: DenseSpec,
+        _tier: PtxTier,
+        _device: &crate::inference::cuda::device::DeviceAttributes,
+    ) -> Result<FakePin, PlanError> {
         Ok(FakePin { factor: 3 })
     }
     fn plan(
         _runtime: &CudaRuntime,
         _kernels: &LoadedKernels,
         _spec: DenseSpec,
+        _weight: &cudarc::driver::CudaSlice<f32>,
+        _bias: &cudarc::driver::CudaSlice<f32>,
         _pin: FakePin,
     ) -> Result<Self, PlanError> {
         no_gpu()
@@ -361,8 +367,6 @@ impl DenseCandidate for FakePort {
     fn enqueue(
         &self,
         _x: &CudaView<'_, f32>,
-        _weight: &CudaView<'_, f32>,
-        _bias: &CudaView<'_, f32>,
         _output: &mut CudaViewMut<'_, f32>,
         _phases: &Phases,
         _runtime: &CudaRuntime,
@@ -377,13 +381,18 @@ impl SegConvCandidate for FakePort {
     fn coverage(tier: PtxTier) -> Coverage {
         FakeFactory::<2>::coverage(tier)
     }
-    fn implemented_pin(_spec: SegConvSpec) -> Result<FakePin, PlanError> {
+    fn implemented_pin(
+        _spec: SegConvSpec,
+        _tier: PtxTier,
+        _device: &crate::inference::cuda::device::DeviceAttributes,
+    ) -> Result<FakePin, PlanError> {
         Ok(FakePin { factor: 3 })
     }
     fn plan(
         _runtime: &CudaRuntime,
         _kernels: &LoadedKernels,
         _spec: SegConvSpec,
+        _weight: &cudarc::driver::CudaSlice<f32>,
         _pin: FakePin,
     ) -> Result<Self, PlanError> {
         no_gpu()
@@ -391,7 +400,6 @@ impl SegConvCandidate for FakePort {
     fn enqueue(
         &self,
         _x: &CudaView<'_, f32>,
-        _weight: &CudaView<'_, f32>,
         _output: &mut CudaViewMut<'_, f32>,
         _phases: &Phases,
         _runtime: &CudaRuntime,

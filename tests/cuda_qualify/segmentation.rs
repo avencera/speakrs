@@ -493,7 +493,7 @@ impl SegmentationWorkspace {
             LstmStage::Library(plan) | LstmStage::Mutant { library: plan, .. } => {
                 plan.workspace_bytes()
             }
-            LstmStage::Oxide { .. } => 0,
+            LstmStage::Oxide { .. } | LstmStage::Projected { .. } => 0,
         }
     }
 }

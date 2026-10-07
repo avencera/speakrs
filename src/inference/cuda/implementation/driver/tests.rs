@@ -14,6 +14,7 @@ use crate::inference::cuda::{ComputeCapability, CudaError, CudaMath, KernelModul
 struct Fixture {
     device: DeviceAttributes,
     loads: Vec<ModuleRequest>,
+    limit: PtxTier,
 }
 
 impl Fixture {
@@ -21,9 +22,11 @@ impl Fixture {
         Self {
             device: Builder::new(ComputeCapability::new(12, 0))
                 .multiprocessors(36)
+                .shared_optin_bytes(99 << 10)
                 .name("unmeasured GPU")
                 .build(),
             loads: vec![],
+            limit: PtxTier::Sm120,
         }
     }
 }
@@ -33,7 +36,7 @@ impl Modules for &mut Fixture {
         &self.device
     }
     fn tier_limit(&self) -> PtxTier {
-        PtxTier::Sm120
+        self.limit
     }
     fn load(&mut self, request: ModuleRequest) -> Result<ModuleRequest, CudaError> {
         self.loads.push(request);
@@ -79,7 +82,7 @@ fn stub_area_routes_implemented_coverage_and_marks_speed_unmeasured() {
         super::Selection::DriverOnly,
     )
     .unwrap();
-    let Selected::Oxide(token) = selected else {
+    let Some(Selected::Oxide(token)) = selected else {
         panic!("covered tuple must use the stub")
     };
     assert!(matches!(
@@ -94,9 +97,9 @@ fn stub_area_routes_implemented_coverage_and_marks_speed_unmeasured() {
 fn missing_area_fails_typed_before_any_artifact_load() {
     let mut fixture = Fixture::new();
     for (boundary, batch, math) in [
-        ("fbank.dft", 1, CudaMath::Fp32),
-        ("lstm.stack", 32, CudaMath::Tf32),
-        ("linear0", 32, CudaMath::Fp32),
+        ("resnet.conv1", 1, CudaMath::Fp32),
+        ("linear0", 2, CudaMath::Tf32),
+        ("sincnet.conv1", 3, CudaMath::Fp32),
     ] {
         let result =
             PlanRequest::DriverOnly.resolve(BoundaryId::named(boundary), batch, math, &mut fixture);
@@ -155,8 +158,8 @@ impl DriverCandidate for BroadStub {
         Stub::driver_coverage(tier)
     }
     fn broad_evidence() -> Option<&'static crate::inference::cuda::implementation::BroadEvidence> {
-        use crate::inference::cuda::implementation::evidence::{ArchitectureSpeed, BroadEvidence};
-        static SUMMARY: BroadEvidence = BroadEvidence::new(
+        use crate::inference::cuda::implementation::{ArchitectureSpeed, BroadEvidence};
+        static SUMMARY: BroadEvidence = BroadEvidence::with_minimum(
             &[
                 ArchitectureSpeed {
                     capability: ComputeCapability::new(8, 0),
@@ -168,6 +171,7 @@ impl DriverCandidate for BroadStub {
                 },
             ],
             "fixture: fused producer removes an intermediate buffer on Ampere and Ada",
+            crate::inference::cuda::ComputeCapability::new(7, 5),
         );
         Some(&SUMMARY)
     }
@@ -194,14 +198,147 @@ fn hybrid_broad_port_uses_explicit_evidence_on_an_unmeasured_device() {
         super::Selection::Production,
     )
     .unwrap();
-    let Selected::Oxide(token) = selected else {
+    let Some(Selected::Oxide(token)) = selected else {
         panic!("broad port must run on an unmeasured GPU")
     };
-    let TokenEvidence::Broad { scope } = token.evidence else {
+    let TokenEvidence::Port { scope, .. } = token.evidence else {
         panic!("broad port must carry its evidence")
     };
     assert!(scope.contains(&fixture.device));
     assert!(!scope.measured_on_device(fixture.device.capability()));
     assert_eq!(token.selection, super::Selection::Production);
     assert_eq!(fixture.loads, [token.target.module]);
+}
+
+#[cfg(feature = "_cuda-libraries")]
+struct RefusingBroad;
+#[cfg(feature = "_cuda-libraries")]
+impl DriverCandidate for RefusingBroad {
+    const AREA: KernelModule = KernelModule::Sincnet;
+    fn driver_coverage(tier: PtxTier) -> Coverage {
+        Stub::driver_coverage(tier)
+    }
+    fn broad_evidence() -> Option<&'static crate::inference::cuda::implementation::BroadEvidence> {
+        BroadStub::broad_evidence()
+    }
+    fn driver_pin(
+        _boundary: BoundaryId,
+        _batch: usize,
+        _math: CudaMath,
+        _device: &DeviceAttributes,
+        _tier: PtxTier,
+    ) -> Result<ConfigPin, PlanError> {
+        Err(PlanError::DeviceUnsupported {
+            reason: "stub resource refusal".to_owned(),
+        })
+    }
+}
+
+#[test]
+#[cfg(feature = "_cuda-libraries")]
+fn hybrid_refusal_is_final_even_when_the_legacy_table_has_a_route() {
+    let mut fixture = Fixture::new();
+    let selected = PlanRequest::Hybrid
+        .resolve_with_candidates(
+            BoundaryId::named("sincnet.conv0.abs_pool"),
+            1,
+            CudaMath::Fp32,
+            &mut fixture,
+            &[Area::candidate::<RefusingBroad>()],
+        )
+        .unwrap();
+    assert!(matches!(selected, Selected::Library));
+    assert!(fixture.loads.is_empty());
+}
+
+#[test]
+#[cfg(feature = "_cuda-libraries")]
+fn merged_ports_obey_broad_and_device_sensitive_speed_scopes() {
+    let mut fixture = Fixture::new();
+    fixture.device = Builder::new(ComputeCapability::new(9, 0))
+        .name("unmeasured Hopper")
+        .build();
+    for boundary in ["linear0", "sincnet.conv1", "resnet.seg_1", "fbank.dft"] {
+        let selected = PlanRequest::Hybrid
+            .resolve(BoundaryId::named(boundary), 1, CudaMath::Fp32, &mut fixture)
+            .unwrap();
+        let Selected::Oxide(token) = selected else {
+            panic!("broad port must run on Hopper")
+        };
+        let TokenEvidence::Port { scope, .. } = token.evidence else {
+            panic!("missing speed policy")
+        };
+        assert!(matches!(
+            scope,
+            crate::inference::cuda::implementation::SpeedScope::AllDevices(_)
+        ));
+        assert!(!scope.measured_on_device(fixture.device.capability()));
+    }
+    let selected = PlanRequest::Hybrid
+        .resolve(
+            BoundaryId::named("lstm.stack"),
+            1,
+            CudaMath::Fp32,
+            &mut fixture,
+        )
+        .unwrap();
+    assert!(matches!(selected, Selected::Library));
+    fixture.device = Builder::new(ComputeCapability::new(7, 5)).build();
+    let selected = PlanRequest::Hybrid
+        .resolve(
+            BoundaryId::named("linear0"),
+            1,
+            CudaMath::Fp32,
+            &mut fixture,
+        )
+        .unwrap();
+    assert!(matches!(selected, Selected::Library));
+}
+
+#[test]
+#[cfg(feature = "_cuda-libraries")]
+fn fbank_speed_scope_depends_on_math_and_segdense_requires_the_measured_tier() {
+    let mut fixture = Fixture::new();
+    for capability in [
+        ComputeCapability::new(12, 0),
+        ComputeCapability::new(8, 9),
+        ComputeCapability::new(7, 5),
+    ] {
+        fixture.device = Builder::new(capability).build();
+        for math in [CudaMath::Fp32, CudaMath::Tf32] {
+            let selected = PlanRequest::Hybrid
+                .resolve(BoundaryId::named("fbank.dft"), 1, math, &mut fixture)
+                .unwrap();
+            let kernel = capability >= ComputeCapability::new(8, 0)
+                && (math == CudaMath::Fp32 || capability == ComputeCapability::new(8, 9));
+            assert_eq!(
+                matches!(selected, Selected::Oxide(_)),
+                kernel,
+                "fbank {capability:?} {math:?}"
+            );
+        }
+    }
+    fixture.device = Builder::new(ComputeCapability::new(8, 9)).build();
+    fixture.limit = PtxTier::Sm75;
+    let selected = PlanRequest::Hybrid
+        .resolve(
+            BoundaryId::named("linear0"),
+            1,
+            CudaMath::Fp32,
+            &mut fixture,
+        )
+        .unwrap();
+    assert!(matches!(selected, Selected::Library));
+    let selected = PlanRequest::DriverOnly
+        .resolve(
+            BoundaryId::named("linear0"),
+            1,
+            CudaMath::Fp32,
+            &mut fixture,
+        )
+        .unwrap();
+    let Selected::Oxide(token) = selected else {
+        panic!("driver-only uses the unmeasured sm75 implementation")
+    };
+    assert_eq!(token.evidence, TokenEvidence::Implemented);
 }

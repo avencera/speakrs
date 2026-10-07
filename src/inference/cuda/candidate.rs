@@ -43,8 +43,8 @@ use super::{CudaError, CudaMath, CudaRuntime, KernelModule, LoadedKernels, PtxTi
 mod conv;
 mod fbank;
 mod lstm;
-mod segdense;
 mod lstmproj;
+mod segdense;
 mod sinc;
 
 #[cfg(test)]
@@ -71,11 +71,11 @@ mod kernel_inventory {
     }
 }
 #[cfg(test)]
+pub(super) use candidate_tests::segdense::REQUIRED_KERNELS as SEGDENSE_KERNELS;
+#[cfg(test)]
 pub(super) use fbank::REQUIRED_KERNELS as FBANK_DFT_KERNELS;
 #[cfg(test)]
 pub(super) use lstm::REQUIRED_KERNELS as LSTM_KERNELS;
-#[cfg(test)]
-pub(super) use segdense::REQUIRED_KERNELS as SEGDENSE_KERNELS;
 #[cfg(test)]
 pub(super) use lstmproj::REQUIRED_KERNELS as LSTMPROJ_KERNELS;
 #[cfg(test)]
@@ -85,11 +85,9 @@ pub(crate) use conv::Oxide as ConvOxide;
 pub(crate) use fbank::Oxide as FbankOxide;
 pub(crate) use lstm::Oxide as LstmOxide;
 // the routing port selects these plans
-pub(crate) use segdense::SegdensePin;
-#[allow(unused_imports)]
+pub(crate) use segdense::{Area as SegdenseArea, SegdensePin};
 pub(crate) use segdense::{DenseOxide, SegConvOxide};
 // the root's routing for builds without libraries consumes this export
-#[allow(unused_imports)]
 pub(crate) use lstmproj::Oxide as LstmProjOxide;
 pub(crate) use sinc::Oxide as SincOxide;
 
@@ -168,8 +166,7 @@ impl ConfigPin {
     pub(crate) const fn is_device_rule(self) -> bool {
         matches!(
             self,
-            Self::Conv(ConvPin::LegacyWaves(_))
-                | Self::Lstm(LstmPin::LegacyCooperative | LstmPin::Projected(_))
+            Self::Conv(ConvPin::LegacyWaves(_)) | Self::Lstm(LstmPin::LegacyCooperative)
         )
     }
 }
@@ -1113,6 +1110,18 @@ pub(crate) enum DenseSite {
     Embedding,
 }
 
+impl DenseSite {
+    /// The fixed model boundary implemented by this site
+    pub(crate) fn boundary(self) -> super::implementation::BoundaryId {
+        super::implementation::BoundaryId::named(match self {
+            Self::Linear0 => "linear0",
+            Self::Linear1 => "linear1",
+            Self::Classifier => "linear2",
+            Self::Embedding => "resnet.seg_1",
+        })
+    }
+}
+
 /// The operation after dense multiplication
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DenseEpilogue {
@@ -1230,8 +1239,8 @@ pub(crate) trait DenseCandidate: Sized {
     /// Write the complete output on the runtime stream, with the planned weights
     fn enqueue(
         &self,
-        x: &CudaSlice<f32>,
-        output: &mut CudaSlice<f32>,
+        x: &CudaView<'_, f32>,
+        output: &mut CudaViewMut<'_, f32>,
         phases: &Phases,
         runtime: &CudaRuntime,
     ) -> Result<(), CudaError>;
@@ -1244,6 +1253,16 @@ pub(crate) enum SegConvSite {
     Conv1,
     /// The 60 to 60 channel convolution
     Conv2,
+}
+
+impl SegConvSite {
+    /// The fixed model boundary implemented by this site
+    pub(crate) fn boundary(self) -> super::implementation::BoundaryId {
+        super::implementation::BoundaryId::named(match self {
+            Self::Conv1 => "sincnet.conv1",
+            Self::Conv2 => "sincnet.conv2",
+        })
+    }
 }
 
 /// Validated five-tap, stride-one NCW convolution without bias
@@ -1351,8 +1370,8 @@ pub(crate) trait SegConvCandidate: Sized {
     /// the planned weights
     fn enqueue(
         &self,
-        x: &CudaSlice<f32>,
-        output: &mut CudaSlice<f32>,
+        x: &CudaView<'_, f32>,
+        output: &mut CudaViewMut<'_, f32>,
         phases: &Phases,
         runtime: &CudaRuntime,
     ) -> Result<(), CudaError>;
@@ -1391,6 +1410,20 @@ pub(crate) trait DriverCandidate {
     /// Structural speed evidence, if this complete port is accepted on all devices
     fn broad_evidence() -> Option<&'static super::implementation::BroadEvidence> {
         None
+    }
+    /// Speed policy of the complete port, separate from implemented coverage
+    fn speed_scope(
+        _batch: usize,
+        _math: CudaMath,
+        _device: &DeviceAttributes,
+    ) -> Option<super::implementation::SpeedScope> {
+        Self::broad_evidence().map(super::implementation::SpeedScope::AllDevices)
+    }
+    /// The development reports supporting this port's speed policy
+    fn speed_summary(_math: CudaMath) -> &'static str {
+        Self::broad_evidence().map_or("device-sensitive port measurements", |evidence| {
+            evidence.summary()
+        })
     }
     /// One complete pin, selected from cached device facts without GPU allocation
     fn driver_pin(

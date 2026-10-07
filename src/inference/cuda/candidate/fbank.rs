@@ -15,7 +15,9 @@ use super::{
     SpecialValues,
 };
 use crate::inference::cuda::error::check_len;
-use crate::inference::cuda::{CudaError, CudaRuntime, LoadedKernels};
+use crate::inference::cuda::{
+    CudaError, CudaMath, CudaRuntime, KernelModule, LoadedKernels, PtxTier,
+};
 
 const FBANKDFT_FFT_MEL_ACCURATE: &str = "fbankdft_fft_mel_accurate";
 
@@ -303,5 +305,67 @@ impl FbankCandidate for Oxide {
         // the waveform and energy lengths of this grid
         unsafe { launch.launch(self.launch.config()) }?;
         Ok(())
+    }
+}
+
+impl super::DriverCandidate for Oxide {
+    const AREA: KernelModule = KernelModule::FbankDft;
+    fn driver_coverage(tier: PtxTier) -> Coverage {
+        Self::coverage(tier)
+    }
+    fn broad_evidence() -> Option<&'static crate::inference::cuda::implementation::BroadEvidence> {
+        use crate::inference::cuda::implementation::{ArchitectureSpeed, BroadEvidence};
+        const EVIDENCE: BroadEvidence = BroadEvidence::with_minimum(
+            &[
+                ArchitectureSpeed {
+                    capability: crate::inference::cuda::ComputeCapability::new(12, 0),
+                    minimum_speedup_milli: 1050,
+                },
+                ArchitectureSpeed {
+                    capability: crate::inference::cuda::ComputeCapability::new(8, 9),
+                    minimum_speedup_milli: 1050,
+                },
+            ],
+            "fbank accurate FFT/mel FP32: removes dense DFT GEMM; original RTX 5060 Ti and xdev-ada accurate-producer reports, every measured case >=1.05x; p2c2-fbank Ada operator wins at all batches",
+            crate::inference::cuda::ComputeCapability::new(8, 0),
+        );
+        Some(&EVIDENCE)
+    }
+    fn speed_scope(
+        _batch: usize,
+        math: CudaMath,
+        device: &crate::inference::cuda::device::DeviceAttributes,
+    ) -> Option<crate::inference::cuda::implementation::SpeedScope> {
+        use crate::inference::cuda::implementation::SpeedScope;
+        match math {
+            CudaMath::Fp32 => Self::broad_evidence().map(SpeedScope::AllDevices),
+            CudaMath::Tf32
+                if device.capability() == crate::inference::cuda::ComputeCapability::new(8, 9) =>
+            {
+                Some(SpeedScope::MeasuredCapability {
+                    capability: device.capability(),
+                })
+            }
+            CudaMath::Tf32 => None,
+        }
+    }
+    fn speed_summary(math: CudaMath) -> &'static str {
+        match math {
+            CudaMath::Fp32 => Self::broad_evidence()
+                .expect("FP32 broad evidence")
+                .summary(),
+            CudaMath::Tf32 => {
+                "p2c2-fbank Ada TF32: 1.30-1.82x, every batch 1..32; other architectures unmeasured"
+            }
+        }
+    }
+    fn driver_pin(
+        _boundary: crate::inference::cuda::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        _device: &crate::inference::cuda::device::DeviceAttributes,
+        _tier: PtxTier,
+    ) -> Result<super::ConfigPin, PlanError> {
+        Self::implemented_pin(FbankSpec::new(batch, math)?).map(super::ConfigPin::Fbank)
     }
 }
