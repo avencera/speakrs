@@ -12,6 +12,87 @@ use serde_json::{Value, json};
 
 const LAYER: &str = "fbank.dft";
 const ELEMENTS: usize = 998 * 80;
+const WAVEFORM_SAMPLES: usize = 160_000;
+
+/// Own the Lookup fault's first waveform before any graph captures it
+struct LookupPlan<T>(T);
+
+impl<T> LookupPlan<T> {
+    fn prepare(
+        spec: FbankSpec,
+        first: &[f32],
+        upload: impl FnOnce(&[f32]) -> Result<T, CudaError>,
+    ) -> Result<Self, CudaError> {
+        let expected = spec.batch() * WAVEFORM_SAMPLES;
+        if first.len() != expected {
+            return Err(CudaError::BufferLength {
+                context: "fbank Lookup snapshot",
+                expected,
+                actual: first.len(),
+            });
+        }
+        // cuda slice Clone allocates; enqueue must only borrow this owned snapshot
+        upload(first)
+            .map(Self)
+            .map_err(|error| Self::error("snapshot clone_htod before capture", error))
+    }
+
+    fn enqueue(&self, producer: impl FnOnce(&T) -> Result<(), CudaError>) -> Result<(), CudaError> {
+        producer(&self.0).map_err(|error| Self::error("producer enqueue", error))
+    }
+
+    fn error(call: &'static str, error: CudaError) -> CudaError {
+        CudaError::Unsupported {
+            context: "fbank Lookup injection",
+            reason: format!("{call}: {error}"),
+        }
+    }
+}
+
+/// Keep capture diagnostics local to the Lookup injection, not other harness routes
+fn capture_lookup(
+    runtime: &CudaRuntime,
+    enqueue: impl FnOnce() -> Result<(), CudaError>,
+) -> Result<cudarc::driver::CudaGraph, CudaError> {
+    use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
+
+    let stream = runtime.stream();
+    stream
+        .synchronize()
+        .map_err(CudaError::from)
+        .map_err(|error| {
+            LookupPlan::<()>::error("CudaStream::synchronize before capture", error)
+        })?;
+    let context = runtime.context();
+    let tracking = context.is_event_tracking();
+    // SAFETY: all buffers use this stream and remain owned by the operator
+    unsafe { context.disable_event_tracking() };
+    let captured = stream
+        .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)
+        .map_err(CudaError::from)
+        .map_err(|error| LookupPlan::<()>::error("cuStreamBeginCapture", error))
+        .and_then(|()| {
+            let _trace = super::super::CaptureTrace::start();
+            let enqueued = enqueue();
+            // end capture even after enqueue fails, as on the ordinary harness path
+            let graph = stream
+                .end_capture(CUgraphInstantiate_flags(0))
+                .map_err(CudaError::from)
+                .map_err(|error| {
+                    LookupPlan::<()>::error(
+                        "CudaStream::end_capture (cuStreamEndCapture/cuGraphInstantiate)",
+                        error,
+                    )
+                });
+            enqueued?;
+            graph
+        });
+    if tracking {
+        // SAFETY: restore the tracking state from before capture, including on error
+        unsafe { context.enable_event_tracking() };
+    }
+    Ok(captured?.expect("Lookup enqueues the Library producer"))
+}
 
 fn plan_error(error: impl std::fmt::Display) -> CudaError {
     CudaError::Unsupported {
@@ -81,6 +162,7 @@ fn fixture(
 enum Route<C> {
     Library,
     Candidate(C),
+    Lookup(LookupPlan<CudaSlice<f32>>),
     Mutant(Mutant),
 }
 
@@ -109,6 +191,9 @@ where
         let library = Library::plan(runtime, spec, ()).map_err(plan_error)?;
         let route = match choice {
             "Library" => Route::Library,
+            "Lookup" => Route::Lookup(LookupPlan::prepare(spec, &host[0], |first| {
+                Ok(runtime.stream().clone_htod(first)?)
+            })?),
             "Oxide" => {
                 assert!(
                     C::coverage(runtime.ptx_tier()).covers(LAYER, spec.batch(), spec.math()),
@@ -179,6 +264,37 @@ where
                     runtime,
                 )?;
             }
+            Route::Lookup(lookup) => {
+                test_support::poison(runtime)
+                    .map_err(|error| LookupPlan::<()>::error("poison launch", error))?;
+                let _scope = test_support::mutant_scope(runtime.stream(), LAYER, Mutant::Lookup);
+                lookup.enqueue(|input| {
+                    self.library.enqueue(
+                        &input.as_view(),
+                        &mut self.energies.as_view_mut(),
+                        &phases,
+                        runtime,
+                    )
+                })?;
+                test_support::post(
+                    runtime,
+                    &mut self.energies,
+                    self.spec.batch(),
+                    Mutant::Lookup,
+                )
+                .map_err(|error| LookupPlan::<()>::error("post output pointer", error))?;
+                if stage {
+                    let _scope = test_support::library(runtime.stream(), "fbank.log_cmn");
+                    self.library
+                        .consume(
+                            runtime,
+                            &self.energies.as_view(),
+                            &mut self.features.as_view_mut(),
+                        )
+                        .map_err(|error| LookupPlan::<()>::error("log_cmn launch", error))?;
+                }
+                return Ok(());
+            }
             Route::Mutant(mutant) => {
                 test_support::poison(runtime)?;
                 let _scope = test_support::mutant_scope(runtime.stream(), LAYER, *mutant);
@@ -186,10 +302,7 @@ where
                     if *mutant == Mutant::Precision {
                         test_support::round_input(runtime, &self.audio[which])?;
                     }
-                    let cached = (*mutant == Mutant::Lookup)
-                        .then(|| test_support::lookup(runtime, LAYER, &self.audio[which]))
-                        .transpose()?;
-                    let input = cached.as_ref().unwrap_or(&self.audio[which]);
+                    let input = &self.audio[which];
                     let repeats = if *mutant == Mutant::Slow { 3 } else { 1 };
                     for _ in 0..repeats {
                         self.library.enqueue(
@@ -284,11 +397,19 @@ impl Run<'_> {
             }
             op.restore(self.runtime, 0)?;
             test_support::set_label(Some(self.key(layer, 0)));
-            let first = capture(self.runtime, || op.run(self.runtime, 0, stage));
+            let first = if self.choice == "Lookup" {
+                capture_lookup(self.runtime, || op.run(self.runtime, 0, stage))
+            } else {
+                capture(self.runtime, || op.run(self.runtime, 0, stage))
+            };
             test_support::set_label(None);
             let graphs = [
                 first?,
-                capture(self.runtime, || op.run(self.runtime, 1, stage))?,
+                if self.choice == "Lookup" {
+                    capture_lookup(self.runtime, || op.run(self.runtime, 1, stage))?
+                } else {
+                    capture(self.runtime, || op.run(self.runtime, 1, stage))?
+                },
             ];
             if self.phase == "timing" {
                 let cell = RefCell::new(&mut op);
@@ -498,6 +619,82 @@ pub(super) fn secret(
         rows.push(row);
     }
     Ok(())
+}
+
+#[test]
+fn lookup_plans_every_batch_before_capture_and_reuses_the_first_input() {
+    use std::cell::Cell;
+
+    use crate::inference::cuda::implementation::BoundaryId;
+
+    // this is the same prepare/enqueue seam that the CUDA capture closure calls
+    // host callbacks check ownership and borrowing without loading a CUDA driver
+    for math in [CudaMath::Fp32, CudaMath::Tf32] {
+        let batches = BoundaryId::named(LAYER).batches();
+        for batch in (0..=64).filter(|batch| batches.contains(*batch)) {
+            let spec = FbankSpec::new(batch, math).expect("declared batch");
+            let mut first = vec![batch as f32; batch * WAVEFORM_SAMPLES];
+            first[0] = -0.125;
+            let uploads = Cell::new(0);
+            let plan = LookupPlan::prepare(spec, &first, |waveform| {
+                uploads.set(uploads.get() + 1);
+                Ok(waveform.to_vec())
+            })
+            .expect("Lookup plan");
+            let pointer = plan.0.as_ptr();
+            first.fill(0.75);
+            let captures = Cell::new(0);
+            let mut replay = Vec::new();
+            for _input in 0..2 {
+                for _stage in [false, true] {
+                    plan.enqueue(|snapshot| {
+                        captures.set(captures.get() + 1);
+                        assert_eq!(snapshot.as_ptr(), pointer);
+                        replay = snapshot.clone();
+                        Ok(())
+                    })
+                    .expect("capture enqueue borrows prepared storage");
+                    assert_eq!(replay.len(), batch * WAVEFORM_SAMPLES);
+                    assert_eq!(replay[0], -0.125);
+                    assert!(replay[1..].iter().all(|value| *value == batch as f32));
+                    assert_ne!(replay, first, "switched input must not refresh Lookup");
+                    assert_eq!(
+                        uploads.get(),
+                        1,
+                        "capture must not prepare another snapshot"
+                    );
+                }
+            }
+            assert_eq!(captures.get(), 4);
+        }
+    }
+}
+
+#[test]
+fn lookup_rejects_wrong_lengths_before_upload_and_reports_call_sites() {
+    let spec = FbankSpec::new(1, CudaMath::Fp32).expect("batch");
+    let result = LookupPlan::prepare(spec, &[0.0], |_| -> Result<(), CudaError> {
+        panic!("invalid waveform must not be uploaded")
+    });
+    assert!(matches!(
+        result,
+        Err(CudaError::BufferLength {
+            context: "fbank Lookup snapshot",
+            expected: WAVEFORM_SAMPLES,
+            actual: 1,
+        })
+    ));
+    let error = LookupPlan(()).enqueue(|_| {
+        Err(CudaError::BufferLength {
+            context: "injected producer error",
+            expected: 2,
+            actual: 1,
+        })
+    });
+    let message = error.expect_err("producer failure is retained").to_string();
+    assert!(message.contains("fbank Lookup injection"));
+    assert!(message.contains("producer enqueue"));
+    assert!(message.contains("injected producer error"));
 }
 
 #[test]
