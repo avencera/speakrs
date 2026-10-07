@@ -146,6 +146,12 @@ class RecordsFixture(unittest.TestCase):
             },
         }
         self.entry["candidate_coverage"] = copy.deepcopy(self.entry["coverage"])
+        self.entry["speed_scope"] = {
+            "kind": "Point",
+            "capability": "12.0",
+            "sm_count": 36,
+            "device_name": "Fixture GPU",
+        }
 
     def refresh_lock(self):
         path = self.root / records.ACCEPTANCE
@@ -326,7 +332,11 @@ class Records(RecordsFixture):
         child["reason"] = "all required checks passed"
         raw = complete_fixture({**self.record, "schema": 3, "tiers": {"sm75": child}})
         record_hash = self.store(raw)
-        entry = {**self.entry, "record": record_hash}
+        entry = {
+            **self.entry,
+            "record": record_hash,
+            "speed_scope": {"kind": "LegacyCapability", "capability": "12.0"},
+        }
         binding = {
             "files": records.shipped_files(self.root, "lstm", legacy=True),
             "lock_digest": self.record["lock_digest"],
@@ -348,6 +358,21 @@ class Records(RecordsFixture):
             ):
                 self.check([entry])
 
+    def test_speed_scope_must_match_record_evidence(self):
+        self.check([self.entry])
+        point = self.entry["speed_scope"]
+        for scope in (
+            None,
+            {"kind": "LegacyCapability", "capability": "12.0"},
+            {**point, "sm_count": 70},
+            {**point, "device_name": "Other GPU"},
+        ):
+            with (
+                self.subTest(scope=scope),
+                self.assertRaisesRegex(records.Rejected, "speed scope"),
+            ):
+                self.check([{**self.entry, "speed_scope": scope}])
+
     def test_legacy_sources_and_coverage_remain_strict(self):
         child = copy.deepcopy(self.child)
         child.pop("code_sha256")
@@ -358,7 +383,11 @@ class Records(RecordsFixture):
         record_hash = self.store(
             complete_fixture({**self.record, "schema": 3, "tiers": {"sm75": child}})
         )
-        entry = {**self.entry, "record": record_hash}
+        entry = {
+            **self.entry,
+            "record": record_hash,
+            "speed_scope": {"kind": "LegacyCapability", "capability": "12.0"},
+        }
         binding = {
             "files": records.shipped_files(self.root, "lstm", legacy=True),
             "lock_digest": self.record["lock_digest"],
@@ -650,6 +679,44 @@ class Records(RecordsFixture):
             qualify.capture_multisets(Path("trace"), [process], "nonce", required=1)
 
 
+class LegacyAmendments(unittest.TestCase):
+    def test_later_pins_amend_earlier_ones_and_all_are_reported(self):
+        path = "src/inference/cuda/candidate.rs"
+        first = {
+            "path": path,
+            "acceptance_sha256": "a" * 64,
+            "infrastructure_sha256": "b" * 64,
+            "reason": "first",
+        }
+        second = {
+            **first,
+            "acceptance_sha256": "b" * 64,
+            "infrastructure_sha256": "c" * 64,
+        }
+        unrelated = {
+            **first,
+            "acceptance_sha256": "d" * 64,
+            "infrastructure_sha256": "e" * 64,
+        }
+        binding = {"files": {"host_sources": {path: "a" * 64}}}
+        with patch.object(
+            records, "INFRASTRUCTURE_AMENDMENTS", [first, second, unrelated]
+        ):
+            self.assertEqual(
+                records.amended_legacy_files(binding),
+                {"host_sources": {path: "c" * 64}},
+            )
+            self.assertEqual(records.legacy_amendments(binding), [first, second])
+        # the archived binding keeps its acceptance hash
+        self.assertEqual(binding["files"]["host_sources"][path], "a" * 64)
+        # a pin listed before the one it amends never applies
+        with patch.object(records, "INFRASTRUCTURE_AMENDMENTS", [second, first]):
+            self.assertEqual(
+                records.amended_legacy_files(binding),
+                {"host_sources": {path: "b" * 64}},
+            )
+
+
 class ProductionLoad(RecordsFixture):
     def variant(self, tier):
         path = self.root / f"src/inference/cuda/ptx/lstm.{tier}.ptx"
@@ -692,6 +759,19 @@ class ProductionLoad(RecordsFixture):
         self.variant("sm90")
         with self.assertRaisesRegex(records.Rejected, "cannot realize"):
             records.production_load("lstm", "sm90", "8.0", self.root)
+
+    def test_binding_tier_stays_loadable_beside_a_higher_variant(self):
+        # the only build that embeds sm75 also embeds sm80, which the old
+        # highest-variant loader would have chosen instead
+        (self.root / "src/inference/cuda/kernels.rs").write_text("")
+        self.write_embed("sm75", ["cuda-sm120"])
+        (self.root / "src/inference/cuda/ptx/lstm.sm80.ptx").write_text("fixture sm80")
+        self.write_embed("sm80", ["cuda-sm120"])
+        records.production_load("lstm", "sm75", "12.0", self.root)
+        records.production_load("lstm", "sm80", "12.0", self.root)
+        # no build the device supports embeds the tier
+        with self.assertRaisesRegex(records.Rejected, "cannot realize"):
+            records.production_load("lstm", "sm80", "8.9", self.root)
 
     def test_malformed_device_and_unavailable_tiers_fail_closed(self):
         for capability in ("8", "8.0.0", "8.10", "-8.0", "NaN", "7.0"):

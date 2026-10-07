@@ -140,29 +140,54 @@ INFRASTRUCTURE_AMENDMENTS = [
         "infrastructure_sha256": "09a4a44ef930dee6fee351fe35fe6451cc316bf08da0bdf843bbb9f785531496",
         "reason": "Exact-architecture cubin build pins extend the PTX manifest; PTX bytes are unchanged",
     },
+    {
+        "path": "src/inference/cuda/candidate.rs",
+        "acceptance_sha256": "f3eebb5a137ae963d0d8258b13f99d4aa01786467eb9e4b73af6a3e5e11a5343",
+        "infrastructure_sha256": "abb8ecaef15c5771a4c058203e48d47b80845b55f6bd17672f348faf4e59e110",
+        "reason": "Typed selection domain: config pins, special-value contracts and typed plan refusals; no algorithm changes",
+    },
+    {
+        "path": "src/inference/cuda/candidate/conv.rs",
+        "acceptance_sha256": "0e9bc602a618dd1202df9e7cfc566461f6537c474bb2759e099c0c46165e8506",
+        "infrastructure_sha256": "fec622a1dcfa08cec6a313975a288eef70fc1c5d1e13e4736815dff8eca2253b",
+        "reason": "Typed selection domain: plans build from the legacy wave-rule pin with the same tiling choice; no algorithm changes",
+    },
+    {
+        "path": "src/inference/cuda/candidate/lstm.rs",
+        "acceptance_sha256": "cb62ccec56e3549db8b25ecd5c33c8a63adfbfefe5153329fc69d401f1c6b731",
+        "infrastructure_sha256": "8a52b696bc9a46059509cdeddd669e92921f3d960df2098860bd85ba0810d6f2",
+        "reason": "Typed selection domain: plans build from the legacy cooperative pin; no algorithm changes",
+    },
+    {
+        "path": "src/inference/cuda/candidate/sinc.rs",
+        "acceptance_sha256": "96dac61ad53f015646b391a18febe024e5d2706c25075a9767caa8b5cd976d7e",
+        "infrastructure_sha256": "bea5240a8503e375116533eac1237659182c109e78c34baf5e1c6be7b1652aa6",
+        "reason": "Typed selection domain: plans build from the fixed producer pin; no algorithm changes",
+    },
 ]
 
 
-def amended_legacy_files(binding: dict) -> dict:
-    """Preserve original acceptance hashes and apply only explicit infrastructure pins"""
+def apply_amendments(binding: dict) -> tuple[dict, list[dict]]:
+    """Apply explicit infrastructure pins in order, so a later pin may amend an earlier one"""
     result = {group: dict(hashes) for group, hashes in binding["files"].items()}
+    applied = []
     for amendment in INFRASTRUCTURE_AMENDMENTS:
         for hashes in result.values():
             if hashes.get(amendment["path"]) == amendment["acceptance_sha256"]:
                 hashes[amendment["path"]] = amendment["infrastructure_sha256"]
-    return result
+                if amendment not in applied:
+                    applied.append(amendment)
+    return result, applied
+
+
+def amended_legacy_files(binding: dict) -> dict:
+    """Preserve original acceptance hashes and apply only explicit infrastructure pins"""
+    return apply_amendments(binding)[0]
 
 
 def legacy_amendments(binding: dict) -> list[dict]:
     """Expose every applied old/new pin without changing archived record provenance"""
-    return [
-        amendment
-        for amendment in INFRASTRUCTURE_AMENDMENTS
-        if any(
-            hashes.get(amendment["path"]) == amendment["acceptance_sha256"]
-            for hashes in binding["files"].values()
-        )
-    ]
+    return apply_amendments(binding)[1]
 
 
 def digest(value: str) -> str:
@@ -608,6 +633,25 @@ def check_binding(
     return current, gap
 
 
+def speed_scope(entry: dict, *, legacy: bool, capability: str, device: dict) -> None:
+    """Bind the exported speed scope to the record's own device evidence.
+
+    Legacy approval stays capability-wide; modern evidence covers only the measured
+    card. Neither can be relabelled as the other.
+    """
+    if legacy:
+        expected = {"kind": "LegacyCapability", "capability": capability}
+    else:
+        expected = {
+            "kind": "Point",
+            "capability": capability,
+            "sm_count": device.get("sm_count"),
+            "device_name": device.get("name"),
+        }
+    if entry.get("speed_scope") != expected:
+        raise Rejected("table: speed scope differs from record device evidence")
+
+
 def unique_artifact_owners(entries: list[dict]) -> None:
     """One production owner binds each area, tier and exact device to one artifact"""
     owners = set()
@@ -705,6 +749,7 @@ def check_table_records(
             != loaded_key
         ):
             raise Rejected("table: selected artifact differs from qualified load")
+        speed_scope(entry, legacy=legacy, capability=capability, device=recorded_device)
         selected = triples(entry["coverage"])
         accepted = evaluation["accepted_tuples"]
         outside = selected - {tuple(row) for row in accepted}
@@ -1029,6 +1074,12 @@ def check_table(
             != loaded_key
         ):
             raise Rejected("table: selected artifact differs from qualified load")
+        speed_scope(
+            entry,
+            legacy=summary["legacy"],
+            capability=capability,
+            device=summary["device"],
+        )
         exported = entry.get("candidate_coverage")
         if not isinstance(exported, dict):
             raise Rejected("table: missing Rust candidate coverage export")

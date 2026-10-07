@@ -65,9 +65,9 @@ available. Tier-only features are not qualification builds. `SPEAKRS_CUDA_PTX_TI
 sets the tier limit for one run: `sm75`, `sm80`, `sm90` or `sm120`. Direct Python
 invocation also accepts `--tier`. The device must support that tier. The candidate's
 own loaded area must use the requested tier; a lower-tier candidate rejects the
-run. Library-owned and glue areas use the production loader: the highest embedded
-variant at or below both the limit and device capability. A lower tier in those
-areas is valid and remains recorded. A Library control has no candidate area. Fixed
+run. Library-owned and glue areas use the production loader, which requests the
+module the production policy names: always-on areas load their embedded baseline
+PTX through driver JIT. A lower tier in those areas is valid and remains recorded. A Library control has no candidate area. Fixed
 `qualify` and `controls` test instrumentation has its own sm75 PTX and is identified
 separately. A tier label alone is not proof of matching loaded PTX.
 
@@ -217,11 +217,15 @@ const COVERAGE: Coverage = Coverage(&[
 ]);
 ```
 
-Dispatch runs the candidate for exactly the union's triples and the Library path for
-every other one. Production selection uses the locked `implementation::PRODUCTION`
-table. The table selects the accepted ResNet, LSTM, and SincNet coverage for
-exactly their declared triples. Every other triple runs the Library path. The
-production-table test pins those triples independently of the declarations.
+This is implemented coverage only. Production selection uses the locked
+`implementation::PRODUCTION` bindings, one file per area under
+`implementation/production/`. A binding names one module request (area, tier,
+artifact) for one device scope and carries tuple proofs. Each proof names a typed
+`BoundaryId`, batch, math, complete `ConfigPin` and accuracy record, and a separate
+speed status. Only a proof whose speed was measured for the device selects the
+candidate; an unmeasured proof selects Library. Every other triple runs the Library
+path. The golden selection test pins the 52 PR #36 tuples independently of the
+declarations, on cc 12.0 at 36 and 70 SMs, cc 8.9, cc 8.0 and cc 7.5.
 Qualification starts all other boundaries on the Library path, so production
 defaults cannot change a Library control or another candidate's input.
 Layers must be boundary names of the target (`resnet.layer1.0.conv1` ...
@@ -497,10 +501,12 @@ register taint does not cross function boundaries. Dollar-prefixed registers,
 wide arithmetic, vector load elements and narrowing below 32 bits are checked.
 Unknown result widths cannot suppress a tainted narrowing sink.
 
-The loader first selects the PTX tier for each area. The production table then
-owns the artifact request for that area, tier and exact device capability. A
-`PtxJit` pin loads the pinned embedded PTX; a `Cubin { arch, sha256 }` pin loads
-only that exact architecture and hash. A missing or driver-rejected requested
+A production binding resolves a complete module request before any load: the
+area, the tier whose bytes are loaded and the exact artifact. Adding another
+embedded tier never moves a binding. A forced tier limit below the binding's tier
+leaves its tuples on Library. A `PtxJit` pin loads the pinned embedded PTX of the
+binding's tier; a `Cubin { arch, sha256 }` pin loads only that exact architecture
+and hash. A missing or driver-rejected requested
 artifact is a typed refusal, not a request to try the other format. Production
 uses the existing Library fallback where allowed; driver-only mode returns the
 typed refusal. Uncovered production tuples load no candidate module.
@@ -521,10 +527,16 @@ still form the selection key, so this override cannot authorize a cubin pin.
 The legacy StageTail fixture retains its explicit JIT policy. Current PR #36
 production pins request JIT without any environment override, including cc 12.0.
 
-One table owner binds each area, tier and exact capability to one artifact.
-A compile-time assertion and both `--check-table` modes reject duplicate owners;
-coverage for one owner must be combined in that entry. Cached modules cannot be
-replaced by a request for a different artifact.
+The runtime caches one module per area, so a compile-time validator rejects two
+different module requests for one area on overlapping device scopes. One binding
+may carry proofs from several records, but each tuple has one proof per device.
+Both `--check-table` modes still reject a second exported owner for one area, tier
+and capability. Cached modules cannot be replaced by a request for a different
+module. Speed evidence has a typed scope: a point (capability, SM count and device
+name) for new records, or capability-wide for the three PR #36 records only. The
+validator rejects a device-dependent selection rule pinned on point evidence, and
+both table modes reject an exported scope that differs from the record's own
+device evidence, so legacy approval is never relabelled as point evidence.
 The selection key includes the tier, exact device capability and loaded artifact.
 A cubin-qualified table entry cannot match JIT, another cubin architecture, or
 other bytes. A mismatch uses Library where allowed, or the typed driver-only
@@ -533,7 +545,8 @@ They do not authorize the new cubins.
 
 Selection intent and coverage come before artifact loading. Library controls,
 Library-backed faults, and uncovered tuples do not load a candidate module for
-selection or diagnostics. Library diagnostics use only the embedded tier and
+selection or diagnostics. Library diagnostics use only the production module's
+tier, or the baseline tier when the area loads no module on the device, and the
 device context. A covered Oxide request loads its artifact before it can receive
 a qualification token. The exact candidate-area loading check remains required.
 
@@ -740,10 +753,10 @@ no raw records. Each entry must be a subset of its summarized accepted tuples,
 with matching tier, device capability, area and DER hash. Current area source,
 manifest, PTX and full tested coverage hashes must equal the summary. Missing
 summaries, extra production tuples, changed files or declarations fail closed.
-The pinned tier must also be one that production can load on that device. For
-some tier feature supported by the device, it must be the highest variant the
-area ships at or below that feature. This permits a minimal tier build even when
-an all-tier build selects a higher variant. A forced qualification tier that no
+The pinned tier must also be one that production can load on that device: some
+tier feature supported by the device must embed that tier at or below its own
+limit. A binding names its tier, so a higher embedded variant does not displace
+it. A forced qualification tier that no
 production build can select on the pinned device cannot authorize an entry.
 The summary contains the original record hash, harness lock digest, accepted tuples
 and complete noise-rule inputs, threshold and result. CI runs this offline mode
@@ -773,9 +786,11 @@ binary hash, not source hashes. Their fixed source, manifest and PTX bindings we
 copied from PR #36's acceptance manifest into the explicit locked legacy mapping.
 Both the original shared candidate-interface hash and its amended hash are reported.
 The original amendment covers `PlanError`, per-tier coverage and production/stress
-batches. Separate fixed old/new pins cover host kernel enumeration and cubin
-manifest metadata. Each pin states the reason. Neither amendment changes candidate
-arithmetic or claims new GPU evidence. It is not GPU evidence for a changed operator. Added,
+batches. Separate fixed old/new pins cover host kernel enumeration, cubin manifest
+metadata and the typed selection domain (config pins, special-value contracts and
+typed plan refusals). Amendments apply in order, so a later pin may amend an earlier
+one, and every applied pin is reported. Each pin states the reason. No amendment
+changes candidate arithmetic or claims new GPU evidence. It is not GPU evidence for a changed operator. Added,
 removed or changed bound files reject. The summary retains this source evidence gap.
 
 Owners generate summaries with `records.write_summaries` from the evaluated Rust

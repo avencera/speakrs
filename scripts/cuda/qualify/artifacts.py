@@ -148,7 +148,12 @@ EMBED = re.compile(
 
 
 def production_load(area: str, tier: str, device_capability: str, root: Path) -> None:
-    """Follow the checked AreaPtx feature masks, never directory-name availability"""
+    """Follow the checked AreaPtx feature masks, never directory-name availability.
+
+    A production binding names its tier and loads exactly that variant, so some GPU
+    feature build the device supports must embed the tier within its own limit. A
+    higher embedded variant does not displace the binding's tier.
+    """
     device_cc = capability(device_capability)
     path = root / "src/inference/cuda/kernels.rs"
     file_hash(path)
@@ -178,12 +183,7 @@ def production_load(area: str, tier: str, device_capability: str, root: Path) ->
     for build, minimum in TIERS.items():
         if minimum > device_cc:
             continue
-        selectable = [
-            variant
-            for variant, features in variants.items()
-            if "cuda-" + build in features and TIERS[variant] <= minimum
-        ]
-        if selectable and max(selectable, key=TIERS.__getitem__) == tier:
+        if "cuda-" + build in variants[tier] and TIERS[tier] <= minimum:
             return
     raise Rejected(
         "table: production load cannot realize the pinned tier on the device"

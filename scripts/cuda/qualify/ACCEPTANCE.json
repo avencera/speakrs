@@ -29,8 +29,8 @@
       "device_name": "NVIDIA GeForce RTX 5070 Ti",
       "files": {
         "host_sources": {
-          "src/inference/cuda/candidate.rs": "f3eebb5a137ae963d0d8258b13f99d4aa01786467eb9e4b73af6a3e5e11a5343",
-          "src/inference/cuda/candidate/lstm.rs": "cb62ccec56e3549db8b25ecd5c33c8a63adfbfefe5153329fc69d401f1c6b731",
+          "src/inference/cuda/candidate.rs": "abb8ecaef15c5771a4c058203e48d47b80845b55f6bd17672f348faf4e59e110",
+          "src/inference/cuda/candidate/lstm.rs": "8a52b696bc9a46059509cdeddd669e92921f3d960df2098860bd85ba0810d6f2",
           "src/inference/cuda/candidate/lstm/layout.rs": "478adba61b4c5f2b21d22147b7f0e73768164831559f711a4d8653f04de77e8c"
         },
         "kernel_sources": {
@@ -61,6 +61,18 @@
           "infrastructure_sha256": "09e6f3772953d81c57284baf88db917aea0a637e720b9a965e078ed0d634c3a4",
           "path": "src/inference/cuda/ptx/lstm.manifest",
           "reason": "Exact-architecture cubin build pins extend the PTX manifest; PTX bytes are unchanged"
+        },
+        {
+          "acceptance_sha256": "f3eebb5a137ae963d0d8258b13f99d4aa01786467eb9e4b73af6a3e5e11a5343",
+          "infrastructure_sha256": "abb8ecaef15c5771a4c058203e48d47b80845b55f6bd17672f348faf4e59e110",
+          "path": "src/inference/cuda/candidate.rs",
+          "reason": "Typed selection domain: config pins, special-value contracts and typed plan refusals; no algorithm changes"
+        },
+        {
+          "acceptance_sha256": "cb62ccec56e3549db8b25ecd5c33c8a63adfbfefe5153329fc69d401f1c6b731",
+          "infrastructure_sha256": "8a52b696bc9a46059509cdeddd669e92921f3d960df2098860bd85ba0810d6f2",
+          "path": "src/inference/cuda/candidate/lstm.rs",
+          "reason": "Typed selection domain: plans build from the legacy cooperative pin; no algorithm changes"
         }
       ],
       "legacy": true,
@@ -429,8 +441,8 @@
       "device_name": "NVIDIA GeForce RTX 5070 Ti",
       "files": {
         "host_sources": {
-          "src/inference/cuda/candidate.rs": "f3eebb5a137ae963d0d8258b13f99d4aa01786467eb9e4b73af6a3e5e11a5343",
-          "src/inference/cuda/candidate/conv.rs": "0e9bc602a618dd1202df9e7cfc566461f6537c474bb2759e099c0c46165e8506"
+          "src/inference/cuda/candidate.rs": "abb8ecaef15c5771a4c058203e48d47b80845b55f6bd17672f348faf4e59e110",
+          "src/inference/cuda/candidate/conv.rs": "fec622a1dcfa08cec6a313975a288eef70fc1c5d1e13e4736815dff8eca2253b"
         },
         "kernel_sources": {
           "crates/speakrs-cuda-kernels/src/resnet.rs": "9f2b5fd4c5c88236aad9829c8ef48c1c7b1b55169a8d82228edbd622c8184122"
@@ -460,6 +472,18 @@
           "infrastructure_sha256": "734d43a71f6958fce6cdac766723e4ffba6b32c584e2ebf5accfbdfafd019031",
           "path": "src/inference/cuda/ptx/resnet.manifest",
           "reason": "Exact-architecture cubin build pins extend the PTX manifest; PTX bytes are unchanged"
+        },
+        {
+          "acceptance_sha256": "f3eebb5a137ae963d0d8258b13f99d4aa01786467eb9e4b73af6a3e5e11a5343",
+          "infrastructure_sha256": "abb8ecaef15c5771a4c058203e48d47b80845b55f6bd17672f348faf4e59e110",
+          "path": "src/inference/cuda/candidate.rs",
+          "reason": "Typed selection domain: config pins, special-value contracts and typed plan refusals; no algorithm changes"
+        },
+        {
+          "acceptance_sha256": "0e9bc602a618dd1202df9e7cfc566461f6537c474bb2759e099c0c46165e8506",
+          "infrastructure_sha256": "fec622a1dcfa08cec6a313975a288eef70fc1c5d1e13e4736815dff8eca2253b",
+          "path": "src/inference/cuda/candidate/conv.rs",
+          "reason": "Typed selection domain: plans build from the legacy wave-rule pin with the same tiling choice; no algorithm changes"
         }
       ],
       "legacy": true,
@@ -1185,8 +1209,8 @@
       "device_name": "NVIDIA GeForce RTX 5070 Ti",
       "files": {
         "host_sources": {
-          "src/inference/cuda/candidate.rs": "f3eebb5a137ae963d0d8258b13f99d4aa01786467eb9e4b73af6a3e5e11a5343",
-          "src/inference/cuda/candidate/sinc.rs": "96dac61ad53f015646b391a18febe024e5d2706c25075a9767caa8b5cd976d7e"
+          "src/inference/cuda/candidate.rs": "abb8ecaef15c5771a4c058203e48d47b80845b55f6bd17672f348faf4e59e110",
+          "src/inference/cuda/candidate/sinc.rs": "bea5240a8503e375116533eac1237659182c109e78c34baf5e1c6be7b1652aa6"
         },
         "kernel_sources": {
           "crates/speakrs-cuda-kernels/src/sincnet.rs": "600f1c3688e073e13b65a36b0fbe4917dde498218efba8c61fca912e6f9d6920"
@@ -1216,6 +1240,18 @@
           "infrastructure_sha256": "09a4a44ef930dee6fee351fe35fe6451cc316bf08da0bdf843bbb9f785531496",
           "path": "src/inference/cuda/ptx/sincnet.manifest",
           "reason": "Exact-architecture cubin build pins extend the PTX manifest; PTX bytes are unchanged"
+        },
+        {
+          "acceptance_sha256": "f3eebb5a137ae963d0d8258b13f99d4aa01786467eb9e4b73af6a3e5e11a5343",
+          "infrastructure_sha256": "abb8ecaef15c5771a4c058203e48d47b80845b55f6bd17672f348faf4e59e110",
+          "path": "src/inference/cuda/candidate.rs",
+          "reason": "Typed selection domain: config pins, special-value contracts and typed plan refusals; no algorithm changes"
+        },
+        {
+          "acceptance_sha256": "96dac61ad53f015646b391a18febe024e5d2706c25075a9767caa8b5cd976d7e",
+          "infrastructure_sha256": "bea5240a8503e375116533eac1237659182c109e78c34baf5e1c6be7b1652aa6",
+          "path": "src/inference/cuda/candidate/sinc.rs",
+          "reason": "Typed selection domain: plans build from the fixed producer pin; no algorithm changes"
         }
       ],
       "legacy": true,
