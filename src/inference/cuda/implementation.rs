@@ -325,6 +325,11 @@ impl Qualified {
         }
     }
 
+    /// The module already selected and loaded before this plan is constructed
+    fn plan_module(&self) -> ModuleRequest {
+        self.target.module
+    }
+
     fn check(
         &self,
         runtime: &CudaRuntime,
@@ -332,7 +337,7 @@ impl Qualified {
         boundary: &str,
         batch: usize,
         math: CudaMath,
-    ) -> Result<(), CudaError> {
+    ) -> Result<super::LoadedKernels, CudaError> {
         let mismatch = || CudaError::Unsupported {
             context: "qualified plan",
             reason: "qualification token does not match the requested plan".to_owned(),
@@ -346,7 +351,8 @@ impl Qualified {
             return Err(mismatch());
         }
         // the cached module must be exactly the token's; a conflicting cache is an error
-        if runtime.load_module(self.target.module)?.request() != self.target.module {
+        let loaded = runtime.load_module(self.plan_module())?;
+        if loaded.request() != self.plan_module() {
             return Err(mismatch());
         }
         match self.evidence {
@@ -363,7 +369,7 @@ impl Qualified {
             #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
             TokenEvidence::Qualification => {}
         }
-        Ok(())
+        Ok(loaded)
     }
 
     /// Resolve a refusal without constructing a dormant Library plan
@@ -444,7 +450,7 @@ impl Qualified {
         spec: ConvLayerSpec<'_>,
     ) -> Result<Option<ConvOxide>, CudaError> {
         let area = KernelModule::Resnet;
-        self.check(runtime, area, spec.name, spec.conv.batch, spec.conv.math)?;
+        let kernels = self.check(runtime, area, spec.name, spec.conv.batch, spec.conv.math)?;
         let pin = match self.pin {
             PlanPin::Pinned(ConfigPin::Conv(pin)) => Ok(pin),
             PlanPin::Pinned(other) => return Err(self.foreign_pin(other)),
@@ -452,7 +458,7 @@ impl Qualified {
             PlanPin::Implemented => ConvOxide::implemented_pin(&spec),
         };
         let plan = pin.and_then(|pin| {
-            let plan = ConvOxide::plan(runtime, spec, pin)?;
+            let plan = ConvOxide::plan(runtime, &kernels, spec, pin)?;
             #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
             super::test_support::configuration::record(
                 self.boundary.name(),
@@ -472,7 +478,7 @@ impl Qualified {
         spec: SincSpec<'_>,
     ) -> Result<Option<SincOxide>, CudaError> {
         let area = KernelModule::Sincnet;
-        self.check(
+        let kernels = self.check(
             runtime,
             area,
             "sincnet.conv0.abs_pool",
@@ -486,7 +492,7 @@ impl Qualified {
             PlanPin::Implemented => SincOxide::implemented_pin(&spec),
         };
         let plan = pin.and_then(|pin| {
-            let plan = SincOxide::plan(runtime, spec, pin)?;
+            let plan = SincOxide::plan(runtime, &kernels, spec, pin)?;
             #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
             super::test_support::configuration::record(
                 self.boundary.name(),
@@ -506,7 +512,7 @@ impl Qualified {
         spec: LstmSpec<'_>,
     ) -> Result<Option<LstmOxide>, CudaError> {
         let area = KernelModule::Lstm;
-        self.check(runtime, area, "lstm.stack", spec.batch, spec.math)?;
+        let kernels = self.check(runtime, area, "lstm.stack", spec.batch, spec.math)?;
         let pin = match self.pin {
             PlanPin::Pinned(ConfigPin::Lstm(pin)) => Ok(pin),
             PlanPin::Pinned(other) => return Err(self.foreign_pin(other)),
@@ -514,7 +520,7 @@ impl Qualified {
             PlanPin::Implemented => LstmOxide::implemented_pin(&spec),
         };
         let plan = pin.and_then(|pin| {
-            let plan = LstmOxide::plan(runtime, spec, pin)?;
+            let plan = LstmOxide::plan(runtime, &kernels, spec, pin)?;
             #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
             super::test_support::configuration::record(
                 self.boundary.name(),

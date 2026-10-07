@@ -61,6 +61,7 @@ struct Fixture {
     limit: PtxTier,
     loader: Loader,
     loads: Vec<ModuleRequest>,
+    explicit_artifact: Option<LoadedArtifact>,
 }
 
 impl Fixture {
@@ -70,6 +71,7 @@ impl Fixture {
             limit: PtxTier::Sm120,
             loader: Loader::Exact,
             loads: Vec::new(),
+            explicit_artifact: None,
         }
     }
 
@@ -116,7 +118,10 @@ impl Modules for &mut Fixture {
     }
 
     fn embedded_exact(&self, area: KernelModule) -> Result<ModuleRequest, CudaError> {
-        Ok(legacy_module(area))
+        let request = legacy_module(area);
+        Ok(self.explicit_artifact.map_or(request, |artifact| {
+            ModuleRequest::new(area, request.tier(), artifact)
+        }))
     }
 }
 
@@ -298,6 +303,45 @@ fn production_token_requires_the_bound_module_identity() {
         ),
         Err(CudaError::ArtifactUnavailable { .. })
     ));
+}
+
+#[test]
+fn explicit_plan_keeps_the_loaded_module_instead_of_resolving_production_again() {
+    for capability in [ADA, BLACKWELL] {
+        let mut fixture = Fixture::new(capability);
+        if capability == BLACKWELL {
+            fixture.explicit_artifact = Some(LoadedArtifact::Cubin {
+                arch: capability,
+                sha256: ArtifactHash::of(b"explicit exact-architecture cubin"),
+            });
+        }
+        let token = token(
+            fixture
+                .resolve(
+                    PlanRequest::Qualification(Choice::Oxide(Selection::Explicit)),
+                    "lstm.stack",
+                    1,
+                    CudaMath::Fp32,
+                )
+                .unwrap(),
+        );
+        let request = token.plan_module();
+        let loaded_for_plan = (&mut fixture).load(request).unwrap();
+        assert_eq!(loaded_for_plan, request);
+        assert_eq!(fixture.loads.last(), Some(&request));
+        let production = super::production_module(
+            KernelModule::Lstm,
+            &fixture.device,
+            fixture.limit,
+            KernelModule::Lstm.variants(),
+        )
+        .unwrap();
+        if capability == ADA {
+            assert!(production.is_none());
+        } else {
+            assert_ne!(production, Some(request));
+        }
+    }
 }
 
 #[test]

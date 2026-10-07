@@ -24,8 +24,10 @@ fn explicit_plan(
         spec.conv.batch,
         spec.conv.math,
     );
+    let kernels =
+        runtime.load_module(runtime.embedded_exact_request(super::super::KernelModule::Resnet)?)?;
     ConvOxide::implemented_pin(&spec)
-        .and_then(|pin| ConvOxide::plan(runtime, spec, pin))
+        .and_then(|pin| ConvOxide::plan(runtime, &kernels, spec, pin))
         .map_err(|error| match error {
             PlanError::Cuda(error) => error,
             PlanError::DeviceUnsupported { reason } => CudaError::CandidateDeviceUnsupported {

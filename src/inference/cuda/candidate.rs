@@ -18,7 +18,8 @@
 //! A plan is built from a [`ConfigPin`] that names its complete execution choice.
 //! Production passes the pin its accepted record names; qualification passes the
 //! candidate's own implemented pin. Each trait also states its [`SpecialValues`]
-//! contract
+//! contract. The locked owner passes the exact loaded module from the selection
+//! token; a plan never resolves production module policy again
 //!
 //! Candidate code lives in `candidate/` and its kernels in the `resnet`, `lstm` and
 //! `sincnet` PTX areas. The harness scans those files before it builds anything; see
@@ -35,7 +36,7 @@ use cudarc::driver::{
 
 use super::dnn::Conv2d;
 pub(crate) use super::error::{GeometryError, WeightFault};
-use super::{CudaError, CudaMath, CudaRuntime, KernelModule, PtxTier, Sgemm};
+use super::{CudaError, CudaMath, CudaRuntime, KernelModule, LoadedKernels, PtxTier, Sgemm};
 
 mod conv;
 mod lstm;
@@ -490,6 +491,7 @@ pub(crate) trait ConvCandidate: Sized {
     /// untimed
     fn plan(
         runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
         layer: ConvLayerSpec<'_>,
         pin: ConvPin,
     ) -> Result<Self, PlanError>;
@@ -561,7 +563,12 @@ pub(crate) trait SincCandidate: Sized {
     fn implemented_pin(spec: &SincSpec<'_>) -> Result<SincPin, PlanError>;
 
     /// Prepares one batch size from `pin`; runs once per batch class, untimed
-    fn plan(runtime: &CudaRuntime, spec: SincSpec<'_>, pin: SincPin) -> Result<Self, PlanError>;
+    fn plan(
+        runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
+        spec: SincSpec<'_>,
+        pin: SincPin,
+    ) -> Result<Self, PlanError>;
 
     /// Enqueues the producer on `stream`, writing every element of `output`
     fn enqueue(
@@ -617,7 +624,12 @@ pub(crate) trait LstmCandidate: Sized {
     fn implemented_pin(spec: &LstmSpec<'_>) -> Result<LstmPin, PlanError>;
 
     /// Prepares one batch size from `pin`; runs once per batch class, untimed
-    fn plan(runtime: &CudaRuntime, spec: LstmSpec<'_>, pin: LstmPin) -> Result<Self, PlanError>;
+    fn plan(
+        runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
+        spec: LstmSpec<'_>,
+        pin: LstmPin,
+    ) -> Result<Self, PlanError>;
 
     /// Enqueues the stack on `stream`, every input projection inside
     /// [`LstmPhases::input_proj`] and every recurrence inside [`LstmPhases::recurrence`]
@@ -940,9 +952,9 @@ impl<'a> Projection<'a> {
 mod tests {
     use super::{
         Batches, Coverage, CoverageEntry, CudaError, CudaMath, CudaRuntime, CudaStream,
-        CudaViewMut, FiniteContract, InfinityContract, Maths, NanContract, Phases, PlanError,
-        PtxTier, SignedZeroContract, SincCandidate, SincInputs, SincOutput, SincPin, SincSpec,
-        SpecialValues,
+        CudaViewMut, FiniteContract, InfinityContract, LoadedKernels, Maths, NanContract, Phases,
+        PlanError, PtxTier, SignedZeroContract, SincCandidate, SincInputs, SincOutput, SincPin,
+        SincSpec, SpecialValues,
     };
 
     struct TierFixture;
@@ -979,6 +991,7 @@ mod tests {
 
         fn plan(
             _runtime: &CudaRuntime,
+            _kernels: &LoadedKernels,
             _spec: SincSpec<'_>,
             _pin: SincPin,
         ) -> Result<Self, PlanError> {

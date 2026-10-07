@@ -24,7 +24,7 @@ use super::{
     PlanError, SignedZeroContract, SpecialValues,
 };
 use crate::inference::cuda::dnn::Conv2d;
-use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, KernelModule};
+use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, LoadedKernels};
 
 const SPK_RESNET_PACK_WEIGHTS: &str = "spk_resnet_pack_weights";
 
@@ -230,6 +230,7 @@ impl ConvCandidate for Oxide {
 
     fn plan(
         runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
         layer: ConvLayerSpec<'_>,
         pin: ConvPin,
     ) -> Result<Self, PlanError> {
@@ -266,7 +267,6 @@ impl ConvCandidate for Oxide {
         };
         let weight_len = conv.out_channels * conv.in_channels * 9;
         check_len("fused conv3x3 weights", weight_len, layer.weight.len())?;
-        let kernels = runtime.load_kernels(KernelModule::Resnet)?;
         let pack = kernels.function(SPK_RESNET_PACK_WEIGHTS)?;
         let mut packed = runtime.stream().alloc_zeros::<f32>(weight_len)?;
         pack_weights(

@@ -179,6 +179,30 @@ INFRASTRUCTURE_AMENDMENTS = [
         "infrastructure_sha256": "00206550965eee79ec7a5669d1f36b512056a8f9c5e0ddb17f1d7ab8cb61e39c",
         "reason": "Filterbank producer interface and compiled host candidate tests; existing candidate algorithms are unchanged",
     },
+    {
+        "path": "src/inference/cuda/candidate.rs",
+        "acceptance_sha256": "00206550965eee79ec7a5669d1f36b512056a8f9c5e0ddb17f1d7ab8cb61e39c",
+        "infrastructure_sha256": "70d700da18ac3794dbf78f81b51f053efc0c006cf91b8e651094896a20aa91ba",
+        "reason": "Plans receive the exact loaded module from the selection token instead of resolving production policy again; arithmetic and launch geometry are unchanged",
+    },
+    {
+        "path": "src/inference/cuda/candidate/conv.rs",
+        "acceptance_sha256": "fec622a1dcfa08cec6a313975a288eef70fc1c5d1e13e4736815dff8eca2253b",
+        "infrastructure_sha256": "1e73f6e20d2bde5da32044de64f4a6f51b628494800b2e38e79e1acbfaf2e2d4",
+        "reason": "Plans receive the exact loaded module from the selection token instead of resolving production policy again; arithmetic and launch geometry are unchanged",
+    },
+    {
+        "path": "src/inference/cuda/candidate/lstm.rs",
+        "acceptance_sha256": "8a52b696bc9a46059509cdeddd669e92921f3d960df2098860bd85ba0810d6f2",
+        "infrastructure_sha256": "21207a90cac5ed8ab5be95efaeeaf71a35505f569694faa651723731d07269d0",
+        "reason": "Plans receive the exact loaded module from the selection token instead of resolving production policy again; arithmetic and launch geometry are unchanged",
+    },
+    {
+        "path": "src/inference/cuda/candidate/sinc.rs",
+        "acceptance_sha256": "bea5240a8503e375116533eac1237659182c109e78c34baf5e1c6be7b1652aa6",
+        "infrastructure_sha256": "160e505171af5b61246c3408def5a8309a0f6f52a3a47c63995a7248c79796d7",
+        "reason": "Plans receive the exact loaded module from the selection token instead of resolving production policy again; arithmetic and launch geometry are unchanged",
+    },
 ]
 
 

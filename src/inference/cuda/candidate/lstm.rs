@@ -28,7 +28,7 @@ use super::{
     LstmPhases, LstmPin, LstmSpec, Maths, NanContract, Op, PlanError, ProjectionGemm, Scratch,
     SideStream, SignedZeroContract, SpecialValues,
 };
-use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, KernelModule};
+use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, LoadedKernels};
 
 const SPK_LSTM_CLEAR: &str = "spk_lstm_clear";
 
@@ -98,9 +98,13 @@ impl LstmCandidate for Oxide {
         Ok(LstmPin::LegacyCooperative)
     }
 
-    fn plan(runtime: &CudaRuntime, spec: LstmSpec<'_>, pin: LstmPin) -> Result<Self, PlanError> {
+    fn plan(
+        runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
+        spec: LstmSpec<'_>,
+        pin: LstmPin,
+    ) -> Result<Self, PlanError> {
         let LstmPin::LegacyCooperative = pin;
-        let kernels = runtime.load_kernels(KernelModule::Lstm)?;
         let recurrence = kernels.function(KERNEL)?;
         let clear = kernels.function(SPK_LSTM_CLEAR)?;
         let capacity = runtime.cooperative_capacity(&recurrence, THREADS, 0)?;

@@ -16,7 +16,7 @@ use super::{
     SpecialValues,
 };
 use crate::inference::cuda::error::check_len;
-use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, KernelModule};
+use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, LoadedKernels};
 
 const SPK_SINCNET_PACK_FILTERS: &str = "spk_sincnet_pack_filters";
 const SPK_SINCNET_CONV_ABS_POOL: &str = "spk_sincnet_conv_abs_pool";
@@ -80,7 +80,12 @@ impl SincCandidate for Oxide {
         Ok(SincPin::ConvAbsPool)
     }
 
-    fn plan(runtime: &CudaRuntime, spec: SincSpec<'_>, pin: SincPin) -> Result<Self, PlanError> {
+    fn plan(
+        runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
+        spec: SincSpec<'_>,
+        pin: SincPin,
+    ) -> Result<Self, PlanError> {
         let SincPin::ConvAbsPool = pin;
         check_len(CONTEXT, CHANNELS * TAPS, spec.filters.len())?;
         // every valid pooled output reads only samples of its own row when the pooled
@@ -93,7 +98,6 @@ impl SincCandidate for Oxide {
 
         // packing once per plan measured slightly faster than packing on every call;
         // every plan packs the filters it is given
-        let kernels = runtime.load_kernels(KernelModule::Sincnet)?;
         let mut packed = runtime.stream().alloc_zeros(CHANNELS * TAPS)?;
         pack(
             runtime.stream(),
