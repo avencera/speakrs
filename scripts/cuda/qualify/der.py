@@ -172,6 +172,35 @@ def execution_identity(
     return digest(value)
 
 
+def live_inventory(raw: object) -> dict:
+    """Require an available locked-owner inventory before modern DER acceptance"""
+    candidate: dict = dict(raw) if isinstance(raw, dict) else {}
+    if candidate.get("kind") == "Missing":
+        value = fields(raw, {"kind", "sources"}, "missing source inventory")
+        if not isinstance(value["sources"], list) or not value["sources"]:
+            raise Rejected("DER: invalid missing source inventory")
+        raise Rejected(f"DER: missing live locked sources: {value['sources']}")
+    value = fields(
+        raw,
+        {"kind", "inputs", "pipeline_config_sha256", "control_archive_sha256"},
+        "live locked source inventory",
+    )
+    if value["kind"] != "Locked":
+        raise Rejected("DER: invalid live locked source inventory kind")
+    inputs = fields(
+        value["inputs"],
+        {"manifest_sha256", "reference_sha256", "files"},
+        "live input inventory",
+    )
+    for name in ("manifest_sha256", "reference_sha256"):
+        artifacts.sha256(inputs[name])
+    if type(inputs["files"]) is not int or inputs["files"] <= 0:
+        raise Rejected("DER: invalid live input file count")
+    artifacts.sha256(value["pipeline_config_sha256"])
+    artifacts.sha256(value["control_archive_sha256"])
+    return value
+
+
 def validate_plan(raw: object, entries: list[dict], mode: str) -> dict:
     """Bind model, input, configuration, baseline and verdict to one complete plan"""
     value = fields(
@@ -191,6 +220,7 @@ def validate_plan(raw: object, entries: list[dict], mode: str) -> dict:
         "plan",
     )
     first = entries[0]
+    inventory = live_inventory(first.get("der_inventory"))
     domain = PlanDomain.parse(first.get("boundary_domain"))
     if scope(value["device_scope"]) != first["speed_scope"] or value["math"] != mode:
         raise Rejected("DER: device scope or math differs from execution plan")
@@ -206,6 +236,10 @@ def validate_plan(raw: object, entries: list[dict], mode: str) -> dict:
     if type(inputs["files"]) is not int or inputs["files"] <= 0:
         raise Rejected("DER: invalid input file count")
     artifacts.sha256(value["pipeline_config_sha256"])
+    if inputs != inventory["inputs"]:
+        raise Rejected("DER: input hashes or count differ from live locked inventory")
+    if value["pipeline_config_sha256"] != inventory["pipeline_config_sha256"]:
+        raise Rejected("DER: pipeline hash differs from live locked inventory")
     library = fields(
         value["library_artifacts"],
         {"fbank", "embedding", "segmentation"},
@@ -244,6 +278,8 @@ def validate_plan(raw: object, entries: list[dict], mode: str) -> dict:
     if baseline["routes"] != domain.library_routes():
         raise Rejected("DER: baseline is not the full Library execution plan")
     artifacts.sha256(baseline["control_archive_sha256"])
+    if baseline["control_archive_sha256"] != inventory["control_archive_sha256"]:
+        raise Rejected("DER: control archive hash differs from live locked inventory")
     base_metrics = metric(baseline["metrics"], "baseline metrics")
     candidate = metric(value["candidate"], "candidate metrics")
     if (
@@ -353,6 +389,7 @@ def groups(entries: list[dict]) -> list[list[dict]]:
             or entry.get("boundary_domain") != first.get("boundary_domain")
             or entry.get("models") != first.get("models")
             or entry.get("library_artifacts") != first.get("library_artifacts")
+            or entry.get("der_inventory") != first.get("der_inventory")
             for entry in group
         ):
             raise Rejected("DER: device entries do not share one whole execution plan")

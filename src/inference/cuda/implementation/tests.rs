@@ -691,6 +691,7 @@ fn export_production_table() {
                 "configurations": configurations,
                 "boundary_domain": super::super::test_support::configuration::boundary_domain(),
                 "models": super::super::test_support::configuration::model_identity(),
+                "der_inventory": super::super::test_support::configuration::der_inventory(),
                 "library_artifacts": super::super::test_support::configuration::library_artifacts(),
                 "der": speed.integrated.to_string(),
             }));

@@ -223,6 +223,16 @@ class RecordsFixture(unittest.TestCase):
             area: {"tier": "sm75", "artifact": {"kind": "PtxJit", "sha256": "c" * 64}}
             for area in ("fbank", "embedding", "segmentation")
         }
+        self.entry["der_inventory"] = {
+            "kind": "Locked",
+            "inputs": {
+                "manifest_sha256": "5" * 64,
+                "reference_sha256": "6" * 64,
+                "files": 2,
+            },
+            "pipeline_config_sha256": "7" * 64,
+            "control_archive_sha256": "8" * 64,
+        }
         self.entry["der"] = self.der_receipt(self.entry)
 
     def der_receipt(self, entries):
@@ -1525,6 +1535,72 @@ class WholePlanDer(RecordsFixture):
                 plan["candidate"]["der"] = float("nan")
             with self.subTest(fault=fault), self.assertRaises(records.Rejected):
                 self.check([{**self.entry, "der": self.store(raw)}])
+
+    def test_forged_input_pins_fail_even_with_recomputed_receipt_identities(self):
+        for field in (
+            "manifest_sha256",
+            "reference_sha256",
+            "pipeline_config_sha256",
+            "control_archive_sha256",
+        ):
+            raw = self.receipt()
+            for plan in raw["plans"]:
+                if field in ("manifest_sha256", "reference_sha256"):
+                    plan["inputs"][field] = "0" * 64
+                elif field == "pipeline_config_sha256":
+                    plan[field] = "0" * 64
+                else:
+                    plan["baseline"][field] = "0" * 64
+                identity = records.der_evidence.digest(
+                    {
+                        name: plan[name]
+                        for name in (
+                            "device_scope",
+                            "math",
+                            "models",
+                            "inputs",
+                            "pipeline_config_sha256",
+                            "library_artifacts",
+                        )
+                    }
+                )
+                baseline = plan["baseline"]
+                baseline["metrics"]["identity_sha256"] = identity
+                baseline["metrics"]["execution_sha256"] = (
+                    records.der_evidence.execution_identity(
+                        identity, baseline["routes"], baseline["control_archive_sha256"]
+                    )
+                )
+                plan["candidate"]["identity_sha256"] = identity
+                plan["candidate"]["execution_sha256"] = (
+                    records.der_evidence.execution_identity(identity, plan["routes"])
+                )
+                plan["verdict"]["baseline_sha256"] = records.der_evidence.digest(
+                    baseline
+                )
+                plan["verdict"]["candidate_sha256"] = records.der_evidence.digest(
+                    plan["candidate"]
+                )
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(records.Rejected, "live locked inventory"),
+            ):
+                self.check([{**self.entry, "der": self.store(raw)}])
+
+    def test_missing_live_der_source_cannot_accept_a_modern_receipt(self):
+        for inventory in (
+            None,
+            {
+                "kind": "Missing",
+                "sources": ["DER audio content manifest with file count"],
+            },
+        ):
+            entry = {**self.entry, "der_inventory": inventory}
+            with (
+                self.subTest(inventory=inventory),
+                self.assertRaisesRegex(records.Rejected, "live locked"),
+            ):
+                self.check([entry])
 
     def test_route_change_cannot_reuse_scorer_metrics_or_verdict_in_either_mode(self):
         child = copy.deepcopy(self.child)

@@ -89,6 +89,26 @@ pub(crate) fn model_identity() -> Value {
     })
 }
 
+/// A DER source inventory must come from locked live sources, not receipt claims
+enum DerInventory {
+    Missing { sources: [&'static str; 4] },
+}
+
+/// Export absent sources explicitly; qualification assets are not integrated DER inputs
+pub(crate) fn der_inventory() -> Value {
+    let inventory = DerInventory::Missing {
+        sources: [
+            "DER audio content manifest with file count",
+            "DER reference annotation content inventory",
+            "DER serialized pipeline configuration",
+            "DER Library baseline control archive",
+        ],
+    };
+    match inventory {
+        DerInventory::Missing { sources } => json!({"kind": "Missing", "sources": sources}),
+    }
+}
+
 /// Always-on Library-owned GPU bytes used by the full integrated plan
 pub(crate) fn library_artifacts() -> Value {
     use crate::inference::cuda::kernels::ArtifactHash;
