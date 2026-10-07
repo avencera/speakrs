@@ -1,19 +1,19 @@
 //! Reject generic shared addresses narrowed without conversion to shared space
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use color_eyre::eyre::{Result, bail};
 
 /// Follow generic shared-address values within each PTX function
 ///
 /// PTX register reuse and branches require a conservative fixed point: an address
-/// that reaches a narrowing conversion on any path is unsafe. Never carry taint
+/// that reaches a narrowing conversion on any path is unsafe; never carry taint
 /// between functions, whose register names are independent
 pub(super) fn check_shared_truncation(ptx: &str) -> Result<()> {
     let sites = shared_truncations(ptx);
     if !sites.is_empty() {
         bail!(
-            "generic shared address reaches cvt.u32.u64; use cvta.to.shared before narrowing:\n    {}",
+            "generic shared address reaches a 32-bit truncation; use cvta.to.shared before narrowing:\n    {}",
             sites.join("\n    ")
         );
     }
@@ -72,49 +72,43 @@ fn shared_truncations(ptx: &str) -> Vec<String> {
         }) else {
             continue;
         };
-        let instructions: Vec<Vec<_>> = tail[..body_end]
+        let instructions: Vec<_> = tail[..body_end]
             .split(';')
-            .map(|statement| {
-                statement
-                    .split(|c: char| c.is_whitespace() || ",{}:".contains(c))
-                    .filter(|word| !word.is_empty())
-                    .collect()
-            })
+            .filter_map(Instruction::parse)
             .collect();
+        // register reuse must not hide an earlier wide definition
+        let mut widths = BTreeMap::new();
+        for instruction in &instructions {
+            if !instruction.has_destination() {
+                continue;
+            }
+            for register in instruction.destinations() {
+                let width = instruction.destination_width();
+                widths
+                    .entry(register)
+                    .and_modify(|previous: &mut Option<usize>| {
+                        *previous = (*previous).max(width);
+                    })
+                    .or_insert(width);
+            }
+        }
         let mut tainted = BTreeSet::new();
-        for words in &instructions {
-            if let Some(op) = words.iter().position(|word| *word == "cvta.shared.u64")
-                && let Some(destination) = words.get(op + 1)
-            {
-                tainted.insert(*destination);
+        for instruction in &instructions {
+            if instruction.generic_shared() {
+                tainted.extend(instruction.destinations());
             }
         }
 
         loop {
             let mut changed = false;
-            for words in &instructions {
-                let Some(op) = words.iter().position(|word| {
-                    matches!(
-                        *word,
-                        "add.u64"
-                            | "add.s64"
-                            | "sub.u64"
-                            | "sub.s64"
-                            | "mov.u64"
-                            | "mov.s64"
-                            | "mov.b64"
-                    )
-                }) else {
+            for instruction in &instructions {
+                if instruction.sanitizes() || !instruction.has_destination() {
                     continue;
-                };
-                let Some(destination) = words.get(op + 1) else {
-                    continue;
-                };
-                if words[op + 2..]
-                    .iter()
-                    .any(|source| tainted.contains(source))
-                {
-                    changed |= tainted.insert(*destination);
+                }
+                if instruction.sources().any(|source| tainted.contains(source)) {
+                    for destination in instruction.destinations() {
+                        changed |= tainted.insert(destination);
+                    }
                 }
             }
             if !changed {
@@ -122,17 +116,145 @@ fn shared_truncations(ptx: &str) -> Vec<String> {
             }
         }
 
-        for words in &instructions {
-            if let Some(op) = words.iter().position(|word| *word == "cvt.u32.u64")
-                && let Some(source) = words.get(op + 2).filter(|source| tainted.contains(*source))
-            {
-                sites.push(format!("{name}: {source}"));
+        for instruction in &instructions {
+            if instruction.generic_shared() && instruction.opcode.ends_with(".u32") {
+                sites.extend(
+                    instruction
+                        .destinations()
+                        .map(|register| format!("{name}: {register}")),
+                );
+                continue;
+            }
+            if instruction.truncates() {
+                sites.extend(
+                    instruction
+                        .sources()
+                        .filter(|source| {
+                            tainted.contains(source)
+                                && widths
+                                    .get(source)
+                                    .copied()
+                                    .flatten()
+                                    .is_none_or(|width| width > 32)
+                        })
+                        .map(|source| format!("{name}: {source}")),
+                );
             }
         }
         rest = &tail[body_end + 1..];
     }
 
     sites
+}
+
+struct Instruction<'a> {
+    opcode: &'a str,
+    operands: Vec<Vec<&'a str>>,
+}
+
+impl<'a> Instruction<'a> {
+    fn parse(statement: &'a str) -> Option<Self> {
+        let statement = statement.trim();
+        // declarations and block labels can precede the instruction in a statement
+        let opcode = statement
+            .split(|c: char| c.is_whitespace() || "{}:".contains(c))
+            .find(|word| {
+                !word.starts_with('.')
+                    && (word.contains('.') || *word == "call")
+                    && !word.starts_with('@')
+            })?;
+        let (_, operands) = statement.split_once(opcode)?;
+        let is_call = opcode.split('.').next() == Some("call");
+        let has_returns = !is_call || operands.trim_start().starts_with('(');
+        let mut depth = 0;
+        let mut operands: Vec<Vec<_>> = operands
+            .split(|c| {
+                if matches!(c, '{' | '(') {
+                    depth += 1;
+                }
+                if matches!(c, '}' | ')') {
+                    depth -= 1;
+                }
+                c == ',' && depth == 0
+            })
+            .map(|operand| {
+                operand
+                    .split(|c: char| c.is_whitespace() || "{}(),[]|+-".contains(c))
+                    .filter(|word| {
+                        word.starts_with('%')
+                            || word.starts_with('_')
+                            || word.starts_with(|c: char| c.is_ascii_alphabetic())
+                    })
+                    .collect()
+            })
+            .collect();
+        // a call without return operands must not treat its callee as a destination
+        if !has_returns {
+            operands.insert(0, Vec::new());
+        }
+        Some(Self { opcode, operands })
+    }
+
+    fn generic_shared(&self) -> bool {
+        self.opcode.starts_with("cvta.shared.")
+    }
+
+    fn sanitizes(&self) -> bool {
+        self.opcode.starts_with("cvta.to.shared.")
+    }
+
+    fn has_destination(&self) -> bool {
+        // memory writes and control flow have no register result
+        !matches!(
+            self.opcode.split('.').next(),
+            Some("st" | "red" | "bra" | "brx" | "ret" | "exit")
+        )
+    }
+
+    fn destinations(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.operands.first().into_iter().flatten().copied()
+    }
+
+    fn sources(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.operands.iter().skip(1).flatten().copied()
+    }
+
+    fn destination_width(&self) -> Option<usize> {
+        let width = self.opcode.split('.').find_map(|part| {
+            let (kind, digits) = part.split_at_checked(1)?;
+            matches!(kind, "u" | "s" | "b" | "f")
+                .then(|| digits.parse::<usize>().ok())
+                .flatten()
+        })?;
+        Some(
+            width
+                / self
+                    .operands
+                    .first()
+                    .map_or(1, |registers| registers.len().max(1)),
+        )
+    }
+
+    fn truncates(&self) -> bool {
+        if self.sanitizes() {
+            return false;
+        }
+        let mut parts = self.opcode.split('.');
+        if !matches!(parts.next(), Some("cvt" | "mov")) {
+            return false;
+        }
+        let destination_type = parts.find(|part| {
+            matches!(
+                *part,
+                "u32" | "s32" | "b32" | "f32" | "u64" | "s64" | "b64" | "f64"
+            )
+        });
+        matches!(destination_type, Some("u32" | "s32" | "b32" | "f32"))
+            || self
+                .operands
+                .first()
+                .is_some_and(|registers| registers.len() > 1)
+    }
 }
 
 fn without_comments(ptx: &str) -> String {
@@ -177,12 +299,42 @@ mod tests {
     fn pre_fix_lstm_has_all_eight_truncations() {
         let fixture = include_str!("../../../tests/fixtures/ptx/shared-truncation-lstm.ptx");
         let sites = shared_truncations(fixture);
-        assert_eq!(sites.len(), 8, "{sites:?}");
-        assert!(
-            sites
-                .iter()
-                .all(|site| site.starts_with("spk_lstm_projection_tf32:"))
+        assert_eq!(
+            sites,
+            [
+                "%rd69", "%rd79", "%rd94", "%rd104", "%rd115", "%rd126", "%rd143", "%rd145"
+            ]
+            .map(|register| format!("spk_lstm_projection_tf32: {register}"))
         );
+        assert!(check_shared_truncation(fixture).is_err());
+    }
+
+    #[test]
+    fn all_shared_propagation_and_truncation_paths_are_checked() {
+        let fixture = include_str!("../../../tests/fixtures/ptx/shared-truncation-paths.ptx");
+        let mut expected: Vec<_> = (0..8).map(|index| format!("path{index}: %out")).collect();
+        expected.extend(
+            [
+                "shared32: %base",
+                "signed: %base",
+                "bits: %base",
+                "move32: %base",
+                "vector: %base",
+                "vector: %wide",
+                "backwards: %copy",
+                "shared32_widened: %base",
+                "shared32_widened: %wide",
+                "named: %copy",
+                "signed_mad: %out",
+                "signed_mul: %out",
+                "rzi: %base",
+                "call_return: %out",
+                "call_returns: %first",
+                "call_returns: %second",
+            ]
+            .map(str::to_owned),
+        );
+        assert_eq!(shared_truncations(fixture), expected);
         assert!(check_shared_truncation(fixture).is_err());
     }
 

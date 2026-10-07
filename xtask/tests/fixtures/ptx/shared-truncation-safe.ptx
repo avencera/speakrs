@@ -22,3 +22,21 @@
     cvt.u32.u64 %r1, %rd2;
     ret;
 }
+
+.visible .entry converted_variants()
+{
+    cvta.shared.u64 %base, smem;
+    cvta.to.shared.u64 %safe, %base;
+    cvt.rn.u32.s64 %a, %safe;
+    mov.b64 {%lo, %hi}, %safe;
+    cvta.to.shared.u32 %direct, %base;
+    mov.b32 %copy, %direct;
+}
+
+.visible .entry calls_without_returns()
+{
+    cvta.shared.u64 %base, smem;
+    call external, (%base);
+    call (%out), external, (1);
+    cvt.u32.u64 %narrow, %out;
+}
