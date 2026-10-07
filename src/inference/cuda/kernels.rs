@@ -279,15 +279,13 @@ impl KernelModule {
             Self::Resnet => include_str!("ptx/resnet.manifest"),
             Self::Lstm => include_str!("ptx/lstm.manifest"),
             Self::Sincnet => include_str!("ptx/sincnet.manifest"),
-            // no candidate artifact exists until the separate kernel port
-            Self::FbankDft => "",
+            Self::FbankDft => include_str!("ptx/fbankdft.manifest"),
         }
     }
 
     /// The PTX variants embedded in this build
     pub const fn variants(self) -> AreaPtx {
         match self {
-            Self::FbankDft => AreaPtx::baseline(None),
             #[cfg(test)]
             Self::Probe => AreaPtx {
                 sm75: tier_ptx!(["cuda-sm75"], "ptx/probe.sm75", [75, 80, 86, 89, 90, 120]),
@@ -327,6 +325,11 @@ impl KernelModule {
             Self::Sincnet => AreaPtx::baseline(tier_ptx!(
                 ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120"],
                 "ptx/sincnet.sm75",
+                [75, 80, 86, 89, 90, 120]
+            )),
+            Self::FbankDft => AreaPtx::baseline(tier_ptx!(
+                ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120"],
+                "ptx/fbankdft.sm75",
                 [75, 80, 86, 89, 90, 120]
             )),
         }
@@ -509,6 +512,7 @@ mod tests {
             KernelModule::Resnet,
             KernelModule::Lstm,
             KernelModule::Sincnet,
+            KernelModule::FbankDft,
         ] {
             for (tier, ptx) in area.variants().iter() {
                 if tier.min_capability() > device {
@@ -572,8 +576,11 @@ mod tests {
                     area.name()
                 );
             }
-            let loaded = runtime.load_kernels(area)?;
-            assert_eq!(loaded.artifact(), runtime.load_kernels(area)?.artifact());
+            // a record-owned area without a binding on this device has no production load
+            if runtime.production_module(area)?.is_some() {
+                let loaded = runtime.load_kernels(area)?;
+                assert_eq!(loaded.artifact(), runtime.load_kernels(area)?.artifact());
+            }
         }
         runtime.synchronize()
     }

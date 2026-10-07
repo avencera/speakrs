@@ -34,6 +34,10 @@ fn plans() -> Vec<(KernelModule, Vec<&'static str>)> {
         (KernelModule::Resnet, candidate::conv_kernel_inventory()),
         (KernelModule::Lstm, candidate::LSTM_KERNELS.to_vec()),
         (KernelModule::Sincnet, candidate::SINC_KERNELS.to_vec()),
+        (
+            KernelModule::FbankDft,
+            candidate::FBANK_DFT_KERNELS.to_vec(),
+        ),
     ];
     #[cfg(all(feature = "cuda", not(feature = "cuda-driver-only")))]
     let plans = {
