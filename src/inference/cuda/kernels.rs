@@ -285,15 +285,16 @@ impl KernelModule {
             Self::Resnet => include_str!("ptx/resnet.manifest"),
             Self::Lstm => include_str!("ptx/lstm.manifest"),
             Self::Sincnet => include_str!("ptx/sincnet.manifest"),
+            Self::Segdense => include_str!("ptx/segdense.manifest"),
             // no candidate artifact exists until the separate kernel port
-            Self::FbankDft | Self::Segdense | Self::Wideconv => "",
+            Self::FbankDft | Self::Wideconv => "",
         }
     }
 
     /// The PTX variants embedded in this build
     pub const fn variants(self) -> AreaPtx {
         match self {
-            Self::FbankDft | Self::Segdense | Self::Wideconv => AreaPtx::baseline(None),
+            Self::FbankDft | Self::Wideconv => AreaPtx::baseline(None),
             #[cfg(test)]
             Self::Probe => AreaPtx {
                 sm75: tier_ptx!(["cuda-sm75"], "ptx/probe.sm75", [75, 80, 86, 89, 90, 120]),
@@ -335,6 +336,22 @@ impl KernelModule {
                 "ptx/sincnet.sm75",
                 [75, 80, 86, 89, 90, 120]
             )),
+            // the sm80 tier adds tensor-core kernels; on cc 8.0 and newer it replaces
+            // the sm75 variant, whose tensor-core entries are trapping stubs
+            Self::Segdense => AreaPtx {
+                sm75: tier_ptx!(
+                    ["cuda-sm75"],
+                    "ptx/segdense.sm75",
+                    [75, 80, 86, 89, 90, 120]
+                ),
+                sm80: tier_ptx!(
+                    ["cuda-sm80", "cuda-sm90", "cuda-sm120"],
+                    "ptx/segdense.sm80",
+                    [80, 86, 89, 90, 120]
+                ),
+                sm90: None,
+                sm120: None,
+            },
         }
     }
 }
@@ -515,6 +532,7 @@ mod tests {
             KernelModule::Resnet,
             KernelModule::Lstm,
             KernelModule::Sincnet,
+            KernelModule::Segdense,
         ] {
             for (tier, ptx) in area.variants().iter() {
                 if tier.min_capability() > device {
