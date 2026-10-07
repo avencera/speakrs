@@ -19,7 +19,7 @@ fn library_and_mutant_requests_do_not_load_candidate_artifacts() {
     ] {
         for choice in [Choice::Library, Choice::Mutant(Mutant::Precision)] {
             let selected = PlanRequest::Qualification(choice)
-                .resolve(area, boundary, 1, CudaMath::Fp32, location, || {
+                .resolve(area, boundary, 1, CudaMath::Fp32, location, |_| {
                     panic!("Library-backed request must not load a candidate module")
                 })
                 .unwrap();
@@ -31,14 +31,14 @@ fn library_and_mutant_requests_do_not_load_candidate_artifacts() {
         }
         assert!(
             PlanRequest::Qualification(Choice::Library)
-                .resolve(area, "", 1, CudaMath::Fp32, location, || panic!(
+                .resolve(area, "", 1, CudaMath::Fp32, location, |_| panic!(
                     "invalid tuple"
                 ))
                 .is_err()
         );
         assert!(
             PlanRequest::Qualification(Choice::Library)
-                .resolve(area, boundary, 0, CudaMath::Fp32, location, || panic!(
+                .resolve(area, boundary, 0, CudaMath::Fp32, location, |_| panic!(
                     "invalid tuple"
                 ))
                 .is_err()
@@ -66,7 +66,7 @@ fn uncovered_candidate_requests_do_not_load_artifacts() {
                     1,
                     CudaMath::Tf32,
                     location,
-                    || panic!("uncovered request must not load an artifact")
+                    |_| panic!("uncovered request must not load an artifact")
                 )
                 .unwrap(),
             Selected::Library
@@ -85,7 +85,7 @@ fn uncovered_candidate_requests_do_not_load_artifacts() {
                     batch,
                     math,
                     AreaTarget { device, ..location },
-                    || panic!("uncovered production tuple must not load an artifact")
+                    |_| panic!("uncovered production tuple must not load an artifact")
                 )
                 .unwrap(),
             Selected::Library
@@ -120,7 +120,8 @@ fn sinc_stage_tail_owner_resolves_coverage_before_loading() {
                     batch,
                     math,
                     AreaTarget { tier, device },
-                    || {
+                    |request| {
+                        assert_eq!(request, super::ArtifactRequest::Pinned(target.artifact));
                         loads += 1;
                         Ok(target)
                     },
@@ -167,7 +168,11 @@ fn covered_selection_loads_and_matches_the_actual_artifact() {
                 1,
                 CudaMath::Fp32,
                 location,
-                || {
+                |request| {
+                    assert_eq!(
+                        request,
+                        super::ArtifactRequest::Pinned(legacy_artifact("lstm"))
+                    );
                     loads += 1;
                     Ok(Target {
                         tier: location.tier,
@@ -212,7 +217,8 @@ fn explicit_candidate_keeps_its_loaded_identity_and_library_errors_need_no_artif
             1,
             CudaMath::Fp32,
             location,
-            || {
+            |request| {
+                assert_eq!(request, super::ArtifactRequest::EmbeddedExact);
                 loads += 1;
                 Ok(Target {
                     tier: location.tier,
@@ -694,4 +700,253 @@ fn cubin_qualification_never_matches_jit_or_another_binary() {
         assert!(entry.matches_target(target));
         assert!(!entry.matches_target(Target { artifact, ..target }));
     }
+}
+
+#[test]
+fn every_production_tuple_requests_its_qualified_ptx_jit() {
+    use super::{AreaTarget, ArtifactRequest, PlanRequest};
+    let device = ComputeCapability::new(12, 0);
+    let mut selected_count = 0;
+    for entry in PRODUCTION {
+        let location = AreaTarget {
+            tier: entry.tier,
+            device,
+        };
+        assert_eq!(
+            super::production_artifact(entry.area, location),
+            Some(entry.artifact)
+        );
+        assert!(matches!(entry.artifact, LoadedArtifact::PtxJit { .. }));
+        assert_eq!(entry.artifact, legacy_artifact(entry.area.name()));
+        for layer in entry
+            .coverage
+            .entries()
+            .iter()
+            .flat_map(|row| row.layers.iter().copied())
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            for batch in super::MODEL_BATCHES {
+                for math in [CudaMath::Fp32, CudaMath::Tf32] {
+                    if !entry.coverage.covers(layer, batch, math) {
+                        continue;
+                    }
+                    let mut loads = 0;
+                    let selected = PlanRequest::Production
+                        .resolve(entry.area, layer, batch, math, location, |request| {
+                            assert_eq!(request, ArtifactRequest::Pinned(entry.artifact));
+                            loads += 1;
+                            Ok(Target {
+                                tier: location.tier,
+                                device,
+                                artifact: entry.artifact,
+                            })
+                        })
+                        .unwrap();
+                    let Selected::Oxide(token) = selected else {
+                        panic!("qualified production tuple fell back: {layer} b{batch} {math:?}")
+                    };
+                    assert_eq!(token.target.artifact, entry.artifact);
+                    assert_eq!(token.record, entry.record);
+                    assert_eq!(loads, 1);
+                    selected_count += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(selected_count, 52);
+}
+
+#[test]
+fn hypothetical_cubin_owner_requests_only_its_pinned_binary() {
+    use super::{AreaTarget, Production};
+    use crate::inference::cuda::kernels::{EmbeddedCubin, load_artifact};
+    let device = ComputeCapability::new(12, 0);
+    let embedded = EmbeddedCubin {
+        arch: device,
+        bytes: b"qualified cubin",
+    };
+    let artifact = LoadedArtifact::Cubin {
+        arch: device,
+        sha256: ArtifactHash::of(embedded.bytes),
+    };
+    let entries = [Production {
+        artifact,
+        ..Production {
+            area: KernelModule::Sincnet,
+            coverage: PRODUCTION[2].coverage,
+            tier: PtxTier::Sm75,
+            devices: super::DEVICES,
+            artifact,
+            record: "qualified-cubin",
+            der: "qualified-der",
+        }
+    }];
+    super::validate_production_owners(&entries);
+    let owner = super::production_owner(
+        &entries,
+        KernelModule::Sincnet,
+        AreaTarget {
+            tier: PtxTier::Sm75,
+            device,
+        },
+    )
+    .unwrap();
+    let (loaded, actual) = load_artifact(
+        owner.artifact,
+        Some(embedded),
+        ArtifactHash::of(b"source ptx"),
+        |bytes| Ok::<_, ()>(bytes.to_vec()),
+        || panic!("cubin record cannot request PTX"),
+    )
+    .unwrap();
+    assert_eq!(loaded, embedded.bytes);
+    assert_eq!(actual, artifact);
+}
+
+#[test]
+fn conflicting_production_owners_are_rejected() {
+    let duplicate = [
+        super::Production {
+            artifact: LoadedArtifact::Cubin {
+                arch: ComputeCapability::new(12, 0),
+                sha256: ArtifactHash::of(b"cubin"),
+            },
+            ..super::Production {
+                area: PRODUCTION[0].area,
+                coverage: PRODUCTION[0].coverage,
+                tier: PRODUCTION[0].tier,
+                devices: PRODUCTION[0].devices,
+                artifact: PRODUCTION[0].artifact,
+                record: PRODUCTION[0].record,
+                der: PRODUCTION[0].der,
+            }
+        },
+        super::Production {
+            area: PRODUCTION[0].area,
+            coverage: PRODUCTION[0].coverage,
+            tier: PRODUCTION[0].tier,
+            devices: PRODUCTION[0].devices,
+            artifact: PRODUCTION[0].artifact,
+            record: PRODUCTION[0].record,
+            der: PRODUCTION[0].der,
+        },
+    ];
+    assert!(std::panic::catch_unwind(|| super::validate_production_owners(&duplicate)).is_err());
+}
+
+#[test]
+fn requested_artifact_rejection_uses_typed_policy_without_swapping() {
+    use super::{AreaTarget, PlanRequest};
+    use crate::inference::cuda::{
+        CudaError,
+        kernels::{ArtifactLoadError, EmbeddedCubin, load_artifact},
+    };
+    use cudarc::driver::{DriverError, sys::CUresult};
+    let artifact = legacy_artifact("sincnet");
+    let make_error = || CudaError::ArtifactLoad {
+        module: "sincnet",
+        artifact,
+        source: DriverError(CUresult::CUDA_ERROR_INVALID_IMAGE),
+    };
+    let mut loads = 0;
+    let selected = PlanRequest::Production
+        .resolve(
+            KernelModule::Sincnet,
+            "sincnet.conv0.abs_pool",
+            1,
+            CudaMath::Fp32,
+            AreaTarget {
+                tier: PtxTier::Sm75,
+                device: ComputeCapability::new(12, 0),
+            },
+            |request| {
+                assert_eq!(request, super::ArtifactRequest::Pinned(artifact));
+                loads += 1;
+                let cubin = EmbeddedCubin {
+                    arch: ComputeCapability::new(12, 0),
+                    bytes: b"must not load",
+                };
+                let LoadedArtifact::PtxJit { sha256 } = artifact else {
+                    unreachable!()
+                };
+                let error = load_artifact::<(), _>(
+                    artifact,
+                    Some(cubin),
+                    sha256,
+                    |_| panic!("no cubin substitution"),
+                    || Err(make_error()),
+                )
+                .unwrap_err();
+                let ArtifactLoadError::Driver(error) = error else {
+                    panic!("must preserve driver rejection")
+                };
+                Err(error)
+            },
+        )
+        .unwrap();
+    assert!(matches!(selected, Selected::Library));
+    assert_eq!(loads, 1);
+    assert!(
+        matches!(super::artifact_refusal(make_error(), false), Err(CudaError::ArtifactLoad { artifact: actual, .. }) if actual == artifact)
+    );
+}
+
+#[test]
+#[ignore = "short GPU proof; run under the shared GPU flock without diagnostic overrides"]
+fn default_production_loads_record_pinned_jit() -> Result<(), crate::inference::cuda::CudaError> {
+    use crate::inference::cuda::CudaRuntime;
+    use std::fs::{OpenOptions, TryLockError};
+    for name in [
+        crate::inference::cuda::kernels::FORCE_PTX_JIT_ENV,
+        crate::inference::cuda::tier::PTX_TIER_ENV,
+        "SPEAKRS_QUALIFY_PHASE",
+    ] {
+        assert!(
+            std::env::var_os(name).is_none(),
+            "default production proof forbids {name}"
+        );
+    }
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/workspace/gpu-bench.lock")
+        .expect("shared GPU lock exists");
+    assert!(matches!(lock.try_lock(), Err(TryLockError::WouldBlock)));
+    let runtime = CudaRuntime::new(0)?;
+    assert_eq!(runtime.compute_capability(), ComputeCapability::new(12, 0));
+    for (area, boundary) in [
+        (KernelModule::Sincnet, "sincnet.conv0.abs_pool"),
+        (KernelModule::Resnet, "resnet.layer1.0.conv1"),
+    ] {
+        let selected = super::plan_selection(&runtime, area, boundary, 1, CudaMath::Fp32, None)?;
+        let Selected::Oxide(token) = selected else {
+            panic!("default production must select the qualified candidate")
+        };
+        let expected = legacy_artifact(area.name());
+        assert_eq!(token.target.artifact, expected);
+        let loaded = runtime.load_kernels(area)?;
+        assert_eq!(loaded.artifact(), expected);
+        let (_, ptx) = runtime.area_ptx(area)?;
+        for line in ptx
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(".visible .entry "))
+        {
+            loaded.function(line.split(['(', ' ', '\t']).next().unwrap())?;
+        }
+        println!(
+            "production_artifact_proof {}",
+            serde_json::json!({ "area": area.name(), "boundary": boundary, "batch": 1, "math": "fp32", "candidate": true, "tier": token.target.tier.to_string(), "device": token.target.device.to_string(), "artifact": crate::inference::cuda::test_support::artifact_json(loaded.artifact()), "embedded_ptx_sha256": loaded.ptx_sha256().to_string(), "record": token.record, "name": runtime.context().name()?, "sm_count": runtime.multiprocessor_count()?, "l2_bytes": runtime.l2_cache_size()? })
+        );
+    }
+    let modules = crate::inference::cuda::test_support::loaded_modules();
+    let modules = modules["modules"]
+        .as_array()
+        .expect("recorded module array");
+    assert_eq!(modules.len(), 2);
+    assert!(
+        modules
+            .iter()
+            .all(|module| module["artifact"]["kind"] == "PtxJit")
+    );
+    runtime.synchronize()
 }

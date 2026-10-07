@@ -600,6 +600,20 @@ def check_binding(
     return current, gap
 
 
+def unique_artifact_owners(entries: list[dict]) -> None:
+    """One production owner binds each area, tier and exact device to one artifact"""
+    owners = set()
+    for entry in entries:
+        for device in entry["devices"]:
+            area = entry.get("area")
+            if area not in ("resnet", "lstm", "sincnet"):
+                raise Rejected("table: missing production artifact area")
+            owner = (area, entry["tier"], device)
+            if owner in owners:
+                raise Rejected("table: duplicate production artifact owner")
+            owners.add(owner)
+
+
 def check_table_records(
     entries: list[dict], root: Path = ROOT, *, records: Path | None = None
 ) -> dict:
@@ -610,6 +624,7 @@ def check_table_records(
     """
     if not entries:
         raise Rejected("table: no production entries")
+    unique_artifact_owners(entries)
     evidence = []
     for entry in entries:
         record = load(entry["record"], root, records=records)
@@ -862,6 +877,7 @@ def check_table(
     """Check locked acceptance summaries offline or against explicit raw records"""
     if not entries:
         raise Rejected("table: no production entries")
+    unique_artifact_owners(entries)
     committed, raw = acceptance_summary(root)
     summaries = committed["records"]
     pins = {digest(entry["record"]) for entry in entries}

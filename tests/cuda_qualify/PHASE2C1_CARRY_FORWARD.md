@@ -28,7 +28,7 @@ LSTM and ResNet on cc 12.0; SincNet on cc 8.9. Their raw hashes are pinned in th
 JSON plan. They prove device/artifact evidence and unlocked f64/draw sections on
 both devices. The actual cc 12.0 and cc 8.9 cubin/JIT all-entry proofs cover the
 unchanged loader bytes. Host tests cover all embedded kernel names, exact artifact
-key refusal, failed-cubin JIT fallback, record negatives and typed overrides.
+key refusal, requested-artifact refusal without format substitution, record negatives and typed overrides.
 Static lints cover the exact eight-site shared-address fixture.
 
 ## Live mutant allocation
@@ -127,8 +127,25 @@ archive/device identity. The later 03 source archive is used for the corrected
 matched pair; no projection baseline is relabelled or assumed for that archive.
 Any later control that needs a different baseline identity must collect it.
 
-The exact cubin/JIT entry proofs keep their old f84 lock. PTX, cubin, manifest,
-runtime-loader and `load_artifact` source bytes have no changes since those
-proofs. The later changes concern unloaded intent and fixture declarations.
+The exact cubin/JIT entry proofs keep their old f84 lock. At the first seal,
+PTX, cubin, manifest, runtime-loader and `load_artifact` source bytes had no changes
+since those proofs. Those later changes concerned unloaded intent and fixture
+declarations. The production artifact ownership follow-up below changes the loader
+policy, not the PTX, cubin or manifest bytes.
 Host tests cover their key checks; there is no new binary-load acceptance claim.
 Run the full 39 standard mutants at the final phase 2c seal after phase 2c-2.
+
+
+## Production artifact ownership follow-up
+
+The first seal used cubin-first loading even for legacy JIT-qualified production
+entries. This changed production selection to Library fallback on cc 12.0 and
+was a regression. The follow-up makes the production record own the artifact
+request before loading. Legacy pins again select JIT without a diagnostic override.
+Explicit qualification requests resolve their declared embedded artifact before
+loading; a driver refusal never changes the artifact being measured. Gates,
+bounds, samples, seeds, production coverage and production artifact pins do not
+change. The new refusal policy affects failed loads only, not any retained successful
+control or mutant. The short default-production GPU proof is required for this
+follow-up. Earlier preflight receipts prove the unchanged artifact bytes, not the
+new loader policy. They retain their original source and compiled-lock identities.

@@ -13,7 +13,7 @@ use cudarc::nvrtc::Ptx;
 use tracing::debug;
 
 use super::error::CudaLibrary;
-use super::kernels::ArtifactHash;
+use super::kernels::{ArtifactHash, ArtifactLoadError, ArtifactRequest, LoadedArtifact};
 use super::{ComputeCapability, CudaError, KernelModule, LoadedKernels, PtxTier};
 #[cfg(feature = "cuda")]
 use super::{CudaMath, libraries::Libraries};
@@ -107,6 +107,13 @@ impl CudaRuntime {
                 KernelModule::Lstm,
                 KernelModule::Sincnet,
             ] {
+                let location = super::implementation::AreaTarget::for_area(&runtime, area)?;
+                if super::implementation::production_artifact(area, location).is_none() {
+                    return Err(CudaError::TierNotQualified {
+                        tier: location.tier,
+                        device: capability,
+                    });
+                }
                 let target = super::implementation::Target::for_area(&runtime, area)?;
                 if !super::implementation::tier_qualified(area, target) {
                     return Err(CudaError::TierNotQualified {
@@ -192,42 +199,88 @@ impl CudaRuntime {
             .resolve(module, self.ptx_tier, self.capability)
     }
 
-    /// Load an area's highest embedded tier, preferring only an exact-capability cubin
+    /// Load the record-pinned artifact, or the exact embedded artifact for a direct request
     ///
-    /// Missing or driver-rejected cubins fall back to PTX JIT. The cached result is
-    /// also the selection key, so planning cannot qualify one artifact and execute
-    /// another. Library policy does not change the module-loading fallback
+    /// Plan selection skips uncovered areas before this call. A cached module retains
+    /// its actual identity; requests for different bytes fail rather than replace it
     pub fn load_kernels(&self, module: KernelModule) -> Result<LoadedKernels, CudaError> {
-        let mut modules = self
+        if let Some(loaded) = self
             .modules
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(loaded) = modules.get(&module) {
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&module)
+        {
             return Ok(loaded.clone());
         }
+        let location = super::implementation::AreaTarget::for_area(self, module)?;
+        let request = super::implementation::production_artifact(module, location)
+            .map_or(ArtifactRequest::EmbeddedExact, ArtifactRequest::Pinned);
+        self.load_requested_kernels(module, request)
+    }
+
+    /// Resolve a declaration to actual embedded bytes before a strict driver load
+    pub(crate) fn load_requested_kernels(
+        &self,
+        module: KernelModule,
+        request: ArtifactRequest,
+    ) -> Result<LoadedKernels, CudaError> {
         let (tier, ptx) = self.area_ptx(module)?;
         let embedded = module
             .variants()
             .embedded(tier)
             .expect("resolved embedded tier");
         let ptx_sha256 = ArtifactHash::of(ptx.as_bytes());
+        let cubin = embedded.cubin(self.capability);
         let force_jit =
             std::env::var_os(super::kernels::FORCE_PTX_JIT_ENV).is_some_and(|value| value == "1");
-        let cubin = (!force_jit)
-            .then(|| embedded.cubin(self.capability))
-            .flatten();
+        let requested = if force_jit {
+            LoadedArtifact::PtxJit { sha256: ptx_sha256 }
+        } else {
+            match request {
+                ArtifactRequest::Pinned(artifact) => artifact,
+                ArtifactRequest::EmbeddedExact => {
+                    cubin.map_or(LoadedArtifact::PtxJit { sha256: ptx_sha256 }, |cubin| {
+                        LoadedArtifact::Cubin {
+                            arch: cubin.arch,
+                            sha256: ArtifactHash::of(cubin.bytes),
+                        }
+                    })
+                }
+            }
+        };
+        let mut modules = self
+            .modules
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(loaded) = modules.get(&module) {
+            return if loaded.artifact() == requested {
+                Ok(loaded.clone())
+            } else {
+                Err(CudaError::ArtifactUnavailable {
+                    module: module.name(),
+                    artifact: requested,
+                })
+            };
+        }
         let (inner, artifact) = super::kernels::load_artifact(
+            requested,
             cubin,
             ptx_sha256,
             |bytes| self.context.load_module(Ptx::from_binary(bytes.to_vec())),
             || self.context.load_module(Ptx::from_src(ptx)),
         )
-        .map_err(|source| CudaError::ModuleLoad {
-            module: module.name(),
-            source,
+        .map_err(|error| match error {
+            ArtifactLoadError::Unavailable => CudaError::ArtifactUnavailable {
+                module: module.name(),
+                artifact: requested,
+            },
+            ArtifactLoadError::Driver(source) => CudaError::ArtifactLoad {
+                module: module.name(),
+                artifact: requested,
+                source,
+            },
         })?;
         debug!(area = module.name(), %tier, capability = %self.capability, ?artifact, "Loaded CUDA artifact");
-
         let loaded = LoadedKernels::new(module, tier, inner, artifact, ptx_sha256);
         debug!(embedded_ptx_sha256 = %loaded.ptx_sha256(), "CUDA embedded PTX identity");
         #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]

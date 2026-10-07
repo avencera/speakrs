@@ -4,7 +4,7 @@
 #[allow(dead_code)]
 pub(crate) mod overrides;
 
-use super::kernels::{ArtifactHash, LoadedArtifact};
+use super::kernels::{ArtifactHash, ArtifactRequest, LoadedArtifact};
 
 use super::candidate::{
     Batches, ConvCandidate, ConvLayerSpec, ConvOxide, Coverage, CoverageEntry, LstmCandidate,
@@ -215,6 +215,58 @@ const PRODUCTION: &[Production] = &[
         der: INTEGRATED_DER,
     },
 ];
+
+// one owner per area/tier/device prevents conflicting artifact requests at compile time
+const _: () = validate_production_owners(PRODUCTION);
+
+const fn validate_production_owners(entries: &[Production]) {
+    let mut i = 0;
+    while i < entries.len() {
+        let mut j = i + 1;
+        while j < entries.len() {
+            if entries[i].area as u8 == entries[j].area as u8
+                && entries[i].tier as u8 == entries[j].tier as u8
+            {
+                let mut a = 0;
+                while a < entries[i].devices.len() {
+                    let mut b = 0;
+                    while b < entries[j].devices.len() {
+                        let left = entries[i].devices[a];
+                        let right = entries[j].devices[b];
+                        assert!(
+                            left.major != right.major || left.minor != right.minor,
+                            "production area/tier/device must have one artifact owner"
+                        );
+                        b += 1;
+                    }
+                    a += 1;
+                }
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+}
+
+/// The record owns the artifact request before any module is loaded
+pub(crate) fn production_artifact(
+    area: KernelModule,
+    location: AreaTarget,
+) -> Option<LoadedArtifact> {
+    production_owner(PRODUCTION, area, location).map(|entry| entry.artifact)
+}
+
+fn production_owner(
+    entries: &[Production],
+    area: KernelModule,
+    location: AreaTarget,
+) -> Option<&Production> {
+    entries.iter().find(|entry| {
+        entry.area == area
+            && entry.tier == location.tier
+            && entry.devices.contains(&location.device)
+    })
+}
 
 /// A boundary accepted by a pinned record, or an explicit qualification control
 #[derive(Debug)]
@@ -437,7 +489,14 @@ pub(crate) fn plan_selection(
         batch,
         math,
         AreaTarget::for_area(runtime, area)?,
-        || Target::for_area(runtime, area),
+        |request| {
+            let loaded = runtime.load_requested_kernels(area, request)?;
+            Ok(Target {
+                tier: loaded.tier(),
+                device: runtime.compute_capability(),
+                artifact: loaded.artifact(),
+            })
+        },
     )
 }
 
@@ -457,7 +516,7 @@ impl PlanRequest {
         batch: usize,
         math: CudaMath,
         location: AreaTarget,
-        load: impl FnOnce() -> Result<Target, CudaError>,
+        load: impl FnOnce(ArtifactRequest) -> Result<Target, CudaError>,
     ) -> Result<Selected, CudaError> {
         if boundary.is_empty() || batch == 0 {
             return Err(CudaError::Unsupported {
@@ -478,28 +537,53 @@ impl PlanRequest {
                     if !candidate_coverage(area, location.tier).covers(boundary, batch, math) {
                         return Ok(Selected::Library);
                     }
-                    return qualification_selection(choice, area, boundary, batch, math, load()?);
+                    return qualification_selection(
+                        choice,
+                        area,
+                        boundary,
+                        batch,
+                        math,
+                        load(ArtifactRequest::EmbeddedExact)?,
+                    );
                 }
                 _ => {}
             }
         }
 
         // uncovered production tuples cannot need a loaded artifact, even for diagnostics
-        let covered = PRODUCTION.iter().any(|entry| {
-            entry.area == area
-                && entry.tier == location.tier
-                && entry.devices.contains(&location.device)
-                && MODEL_BATCHES.contains(&batch)
-                && entry.coverage.covers(boundary, batch, math)
-        });
-        if !covered {
+        let Some(entry) = production_owner(PRODUCTION, area, location).filter(|entry| {
+            MODEL_BATCHES.contains(&batch) && entry.coverage.covers(boundary, batch, math)
+        }) else {
             return Ok(Selected::Library);
-        }
-        select(boundary, batch, math, load()?).map_err(|error| CudaError::Unsupported {
+        };
+        let target = match load(ArtifactRequest::Pinned(entry.artifact)) {
+            Ok(target) => target,
+            Err(error) => {
+                return artifact_refusal(
+                    error,
+                    matches!(self, Self::Production) && !super::driver_only(),
+                );
+            }
+        };
+        select(boundary, batch, math, target).map_err(|error| CudaError::Unsupported {
             context: "CUDA selection",
             reason: error.to_string(),
         })
     }
+}
+
+/// Only production may use the established Library policy after an artifact refusal
+fn artifact_refusal(error: CudaError, library_allowed: bool) -> Result<Selected, CudaError> {
+    if library_allowed
+        && matches!(
+            error,
+            CudaError::ArtifactLoad { .. } | CudaError::ArtifactUnavailable { .. }
+        )
+    {
+        tracing::warn!(%error, "CUDA qualified artifact unavailable; using Library");
+        return Ok(Selected::Library);
+    }
+    Err(error)
 }
 
 #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]

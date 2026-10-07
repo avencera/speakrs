@@ -489,14 +489,27 @@ against every PTX tier that it can use. The PTX lint rejects generic shared
 addresses from `cvta.shared.u64` that reach `cvt.u32.u64`, including through
 64-bit add, subtract and move instructions.
 
-The loader first selects the PTX tier for each area. It tries only the cubin for
-the device's exact compute capability. A missing cubin or a driver load failure
-uses PTX JIT instead. It never loads a cubin for another capability. The typed
-loaded artifact is `Cubin { arch, sha256 }` or `PtxJit { sha256 }`.
-`SPEAKRS_CUDA_FORCE_PTX_JIT=1` selects JIT for a diagnostic process. The harness
-sets this only for the explicit legacy StageTail fixture. Other proof runs prefer
-exact cubins. Records state the policy and the artifact that the driver accepted.
+The loader first selects the PTX tier for each area. The production table then
+owns the artifact request for that area, tier and exact device capability. A
+`PtxJit` pin loads the pinned embedded PTX; a `Cubin { arch, sha256 }` pin loads
+only that exact architecture and hash. A missing or driver-rejected requested
+artifact is a typed refusal, not a request to try the other format. Production
+uses the existing Library fallback where allowed; driver-only mode returns the
+typed refusal. Uncovered production tuples load no candidate module.
 
+An explicit qualification triple requests the exact embedded artifact it declares
+before loading: the device's exact cubin when embedded, otherwise PTX JIT. A
+rejected cubin does not silently become a JIT measurement. The typed successful
+artifact is `Cubin { arch, sha256 }` or `PtxJit { sha256 }`.
+`SPEAKRS_CUDA_FORCE_PTX_JIT=1` is a diagnostic override only. Actual loaded bytes
+still form the selection key, so this override cannot authorize a cubin pin.
+The legacy StageTail fixture retains its explicit JIT policy. Current PR #36
+production pins request JIT without any environment override, including cc 12.0.
+
+One table owner binds each area, tier and exact capability to one artifact.
+A compile-time assertion and both `--check-table` modes reject duplicate owners;
+coverage for one owner must be combined in that entry. Cached modules cannot be
+replaced by a request for a different artifact.
 The selection key includes the tier, exact device capability and loaded artifact.
 A cubin-qualified table entry cannot match JIT, another cubin architecture, or
 other bytes. A mismatch uses Library where allowed, or the typed driver-only

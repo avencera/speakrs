@@ -114,25 +114,45 @@ impl EmbeddedPtx {
     }
 }
 
-/// Load one exact candidate binary, then PTX if the driver refuses it
+/// An artifact request resolved before the driver sees any bytes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArtifactRequest {
+    /// The exact artifact pinned by a qualification record
+    Pinned(LoadedArtifact),
+    /// An explicit qualification of the best embedded artifact for this device
+    EmbeddedExact,
+}
+
+/// Failure to load the requested artifact, without substituting another artifact
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ArtifactLoadError<E> {
+    Unavailable,
+    Driver(E),
+}
+
+/// Load exactly the requested bytes; driver rejection never tries the other format
 pub(super) fn load_artifact<T, E>(
+    requested: LoadedArtifact,
     cubin: Option<EmbeddedCubin>,
     ptx_sha256: ArtifactHash,
     load_cubin: impl FnOnce(&[u8]) -> Result<T, E>,
     load_ptx: impl FnOnce() -> Result<T, E>,
-) -> Result<(T, LoadedArtifact), E> {
-    if let Some(cubin) = cubin
-        && let Ok(loaded) = load_cubin(cubin.bytes)
-    {
-        return Ok((
-            loaded,
-            LoadedArtifact::Cubin {
-                arch: cubin.arch,
-                sha256: ArtifactHash::of(cubin.bytes),
-            },
-        ));
-    }
-    load_ptx().map(|loaded| (loaded, LoadedArtifact::PtxJit { sha256: ptx_sha256 }))
+) -> Result<(T, LoadedArtifact), ArtifactLoadError<E>> {
+    let loaded = match requested {
+        LoadedArtifact::PtxJit { sha256 } if sha256 == ptx_sha256 => load_ptx(),
+        LoadedArtifact::Cubin { arch, sha256 } => {
+            let Some(cubin) =
+                cubin.filter(|cubin| cubin.arch == arch && ArtifactHash::of(cubin.bytes) == sha256)
+            else {
+                return Err(ArtifactLoadError::Unavailable);
+            };
+            load_cubin(cubin.bytes)
+        }
+        _ => return Err(ArtifactLoadError::Unavailable),
+    };
+    loaded
+        .map(|loaded| (loaded, requested))
+        .map_err(ArtifactLoadError::Driver)
 }
 
 /// A cuda-oxide kernel area, embedded as committed PTX
@@ -413,7 +433,12 @@ mod tests {
                 };
                 let ptx_hash = ArtifactHash::of(ptx.as_bytes());
                 let (module, artifact) = load_artifact(
-                    (!force_jit).then_some(cubin),
+                    if force_jit {
+                        LoadedArtifact::PtxJit { sha256: ptx_hash }
+                    } else {
+                        cubin_key
+                    },
+                    Some(cubin),
                     ptx_hash,
                     |bytes| {
                         runtime
@@ -421,7 +446,14 @@ mod tests {
                             .load_module(Ptx::from_binary(bytes.to_vec()))
                     },
                     || runtime.context().load_module(Ptx::from_src(ptx)),
-                )?;
+                )
+                .map_err(|error| match error {
+                    super::ArtifactLoadError::Driver(source) => CudaError::Driver(source),
+                    super::ArtifactLoadError::Unavailable => CudaError::ArtifactUnavailable {
+                        module: area.name(),
+                        artifact: cubin_key,
+                    },
+                })?;
                 if force_jit {
                     assert_eq!(artifact, LoadedArtifact::PtxJit { sha256: ptx_hash });
                     assert_ne!(artifact, cubin_key);
@@ -452,66 +484,83 @@ mod tests {
     }
 
     #[test]
-    fn binary_loading_uses_only_the_exact_architecture_and_keeps_jit_identity() {
-        use super::{ArtifactHash, EmbeddedCubin, EmbeddedPtx, LoadedArtifact, load_artifact};
-        let cubins = [
-            EmbeddedCubin {
-                arch: ComputeCapability::new(8, 9),
-                bytes: b"cubin89",
-            },
-            EmbeddedCubin {
-                arch: ComputeCapability::new(12, 0),
-                bytes: b"cubin120",
-            },
-        ];
-        let ptx = EmbeddedPtx {
-            text: "ptx",
-            cubins: &[],
+    fn pinned_loading_never_substitutes_artifacts() {
+        use super::{
+            ArtifactHash, ArtifactLoadError, EmbeddedCubin, LoadedArtifact, load_artifact,
         };
-        let hash = ArtifactHash::of(ptx.text.as_bytes());
+        let hash = ArtifactHash::of(b"ptx");
+        let jit = LoadedArtifact::PtxJit { sha256: hash };
         for device in [ComputeCapability::new(8, 9), ComputeCapability::new(12, 0)] {
-            let cubin = cubins
-                .iter()
-                .copied()
-                .find(|cubin| cubin.arch == device)
-                .unwrap();
-            let (loaded, artifact) = load_artifact(
+            let cubin = EmbeddedCubin {
+                arch: device,
+                bytes: b"cubin",
+            };
+            let binary = LoadedArtifact::Cubin {
+                arch: device,
+                sha256: ArtifactHash::of(cubin.bytes),
+            };
+            let result = load_artifact(
+                binary,
                 Some(cubin),
                 hash,
-                |bytes| Ok::<_, ()>(bytes.to_vec()),
-                || panic!("accepted cubin must not JIT"),
+                |bytes| Ok::<_, &str>(bytes.to_vec()),
+                || panic!("cubin request cannot JIT"),
             )
             .unwrap();
-            assert_eq!(loaded, cubin.bytes);
+            assert_eq!(result, (cubin.bytes.to_vec(), binary));
             assert_eq!(
-                artifact,
-                LoadedArtifact::Cubin {
-                    arch: device,
-                    sha256: ArtifactHash::of(cubin.bytes)
-                }
+                load_artifact::<(), _>(
+                    binary,
+                    Some(cubin),
+                    hash,
+                    |_| Err("driver refusal"),
+                    || panic!("refused cubin must not JIT")
+                ),
+                Err(ArtifactLoadError::Driver("driver refusal"))
             );
-            let (loaded, artifact) = load_artifact(
-                Some(cubin),
-                hash,
-                |_| Err("driver refusal"),
-                || Ok::<_, &str>("jit"),
-            )
-            .unwrap();
-            assert_eq!(loaded, "jit");
-            assert_eq!(artifact, LoadedArtifact::PtxJit { sha256: hash });
+            assert_eq!(
+                load_artifact::<(), &str>(
+                    binary,
+                    None,
+                    hash,
+                    |_| panic!("missing cubin"),
+                    || panic!("missing cubin must not JIT")
+                ),
+                Err(ArtifactLoadError::Unavailable)
+            );
+            assert_eq!(
+                load_artifact(
+                    jit,
+                    Some(cubin),
+                    hash,
+                    |_| panic!("PTX request cannot load cubin"),
+                    || Ok::<_, &str>("jit")
+                ),
+                Ok(("jit", jit))
+            );
+            assert_eq!(
+                load_artifact::<(), _>(
+                    jit,
+                    Some(cubin),
+                    hash,
+                    |_| panic!("refused PTX cannot load cubin"),
+                    || Err("PTX rejected")
+                ),
+                Err(ArtifactLoadError::Driver("PTX rejected"))
+            );
         }
-        let (loaded, artifact) = load_artifact(
-            None,
-            hash,
-            |_| panic!("no binary candidate"),
-            || Ok::<_, ()>("jit"),
-        )
-        .unwrap();
-        assert_eq!(loaded, "jit");
-        assert_eq!(artifact, LoadedArtifact::PtxJit { sha256: hash });
+        let wrong = LoadedArtifact::PtxJit {
+            sha256: ArtifactHash::of(b"stale ptx"),
+        };
         assert_eq!(
-            load_artifact::<(), _>(None, hash, |_| unreachable!(), || Err("PTX rejected")),
-            Err("PTX rejected")
+            load_artifact::<(), &str>(
+                wrong,
+                None,
+                hash,
+                |_| panic!("wrong hash"),
+                || panic!("wrong hash")
+            ),
+            Err(ArtifactLoadError::Unavailable)
         );
     }
 

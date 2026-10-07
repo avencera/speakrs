@@ -133,6 +133,7 @@ class RecordsFixture(unittest.TestCase):
         }
         complete_fixture(self.record)
         self.entry: dict = {
+            "area": "lstm",
             "tier": "sm75",
             "artifact": copy.deepcopy(module["artifact"]),
             "devices": ["12.0"],
@@ -171,6 +172,18 @@ class RecordsFixture(unittest.TestCase):
 
 
 class Records(RecordsFixture):
+    def test_conflicting_artifacts_have_no_second_production_owner(self):
+        conflicting = copy.deepcopy(self.entry)
+        conflicting["artifact"] = {"kind": "Cubin", "arch": "12.0", "sha256": "b" * 64}
+        with self.assertRaisesRegex(
+            records.Rejected, "duplicate production artifact owner"
+        ):
+            self.check([self.entry, conflicting])
+        with self.assertRaisesRegex(
+            records.Rejected, "duplicate production artifact owner"
+        ):
+            records.check_table([self.entry, conflicting], self.root)
+
     def test_positive_and_four_required_negative_cases(self):
         self.assertFalse(self.check([self.entry])["entries"][0]["legacy"])
         for field, value, reason in [
