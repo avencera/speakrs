@@ -794,7 +794,9 @@ fn allowed(name: &str) -> bool {
 }
 
 /// The candidate PTX areas; their entries never run on a Library path
-pub(crate) const CANDIDATE_AREAS: [&str; 4] = ["resnet", "lstm", "sincnet", "fbankdft"];
+pub(crate) const CANDIDATE_AREAS: [&str; 6] = [
+    "resnet", "lstm", "sincnet", "fbankdft", "segdense", "wideconv",
+];
 
 fn candidate_area_entry(name: &str) -> bool {
     let loaded = modules().lock().unwrap_or_else(PoisonError::into_inner);
@@ -1364,3 +1366,9 @@ fn capture_trace_keeps_forbidden_library_call_tracking_active() {
     STACK.with(|stack| *stack.borrow_mut() = saved_stack);
     CALL_VIOLATIONS.with(|calls| *calls.borrow_mut() = saved_calls);
 }
+
+#[path = "../../../tests/cuda_qualify/boundaries.rs"]
+pub(crate) mod boundaries;
+
+#[path = "../../../tests/cuda_qualify/candidate_seam.rs"]
+pub(crate) mod candidate_seam;

@@ -92,6 +92,8 @@ pub use test_support::SegmentationTensor;
 #[derive(Debug)]
 pub struct SegmentationWorkspace {
     shape: SegmentationShape,
+    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    qualification: std::collections::BTreeMap<&'static str, super::test_support::boundaries::Owner>,
     sinc: SincPlan,
     conv1: ConvStage,
     conv2: ConvStage,
@@ -496,6 +498,8 @@ impl Network {
         let conv_workspace = stream.alloc_zeros(workspace_bytes.max(1))?;
         let lstm = self.plan_lstm(runtime, shape, lstm_selected)?;
         Ok(SegmentationWorkspace {
+            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            qualification: std::collections::BTreeMap::new(),
             shape,
             sinc,
             conv1,
@@ -542,6 +546,8 @@ impl Network {
             conv_workspace,
             lstm,
             tensors: t,
+            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            qualification,
             ..
         } = workspace;
         let mut conv_workspace = conv_workspace.as_view_mut();
@@ -589,6 +595,38 @@ impl Network {
 
         // the convolution bias is added inside the pooling kernel
         let [weight, bias] = &self.convs[0];
+        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        super::test_support::boundaries::run_slices(
+            qualification.get("sincnet.conv1"),
+            runtime,
+            super::test_support::candidate_seam::Operation::Temporal(
+                super::candidate::SegConvSpec::new(
+                    super::candidate::SegConvSite::Conv1,
+                    batch,
+                    self.options.math,
+                )
+                .map_err(|e| CudaError::Unsupported {
+                    context: "stage temporal spec",
+                    reason: e.to_string(),
+                })?,
+            ),
+            super::test_support::candidate_seam::Slices {
+                input: t.stage0.data(),
+                weight,
+                bias: None,
+                residual: None,
+            },
+            t.conv1.data_mut(),
+            |output| {
+                conv1.forward(
+                    &mut conv_workspace,
+                    &t.stage0.data().as_view(),
+                    &weight.as_view(),
+                    &mut output.as_view_mut(),
+                )
+            },
+        )?;
+        #[cfg(not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))))]
         conv1.forward(
             &mut conv_workspace,
             &t.stage0.data().as_view(),
@@ -608,6 +646,38 @@ impl Network {
         )?;
 
         let [weight, bias] = &self.convs[1];
+        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        super::test_support::boundaries::run_slices(
+            qualification.get("sincnet.conv2"),
+            runtime,
+            super::test_support::candidate_seam::Operation::Temporal(
+                super::candidate::SegConvSpec::new(
+                    super::candidate::SegConvSite::Conv2,
+                    batch,
+                    self.options.math,
+                )
+                .map_err(|e| CudaError::Unsupported {
+                    context: "stage temporal spec",
+                    reason: e.to_string(),
+                })?,
+            ),
+            super::test_support::candidate_seam::Slices {
+                input: t.stage1.data(),
+                weight,
+                bias: None,
+                residual: None,
+            },
+            t.conv2.data_mut(),
+            |output| {
+                conv2.forward(
+                    &mut conv_workspace,
+                    &t.stage1.data().as_view(),
+                    &weight.as_view(),
+                    &mut output.as_view_mut(),
+                )
+            },
+        )?;
+        #[cfg(not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))))]
         conv2.forward(
             &mut conv_workspace,
             &t.stage1.data().as_view(),
@@ -638,16 +708,71 @@ impl Network {
             ..Sgemm::new(rows, LINEAR[index][1], LINEAR[index][0])
         };
         let [weight, bias] = &self.linear[0];
-        runtime.sgemm(gemm(0), t.lstm_output.data(), weight, t.linear0.data_mut())?;
-        k.bias_leaky(runtime, bias, LEAKY_SLOPE, t.linear0.data_mut())?;
+        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        harness::dense(
+            qualification.get("linear0"),
+            runtime,
+            gemm(0),
+            super::candidate::DenseSite::Linear0,
+            super::test_support::candidate_seam::Slices {
+                input: t.lstm_output.data(),
+                weight,
+                bias: Some(bias),
+                residual: None,
+            },
+            t.linear0.data_mut(),
+            |output| k.bias_leaky(runtime, bias, LEAKY_SLOPE, output),
+        )?;
+        #[cfg(not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))))]
+        {
+            runtime.sgemm(gemm(0), t.lstm_output.data(), weight, t.linear0.data_mut())?;
+            k.bias_leaky(runtime, bias, LEAKY_SLOPE, t.linear0.data_mut())?;
+        };
 
         let [weight, bias] = &self.linear[1];
-        runtime.sgemm(gemm(1), t.linear0.data(), weight, t.linear1.data_mut())?;
-        k.bias_leaky(runtime, bias, LEAKY_SLOPE, t.linear1.data_mut())?;
+        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        harness::dense(
+            qualification.get("linear1"),
+            runtime,
+            gemm(1),
+            super::candidate::DenseSite::Linear1,
+            super::test_support::candidate_seam::Slices {
+                input: t.linear0.data(),
+                weight,
+                bias: Some(bias),
+                residual: None,
+            },
+            t.linear1.data_mut(),
+            |output| k.bias_leaky(runtime, bias, LEAKY_SLOPE, output),
+        )?;
+        #[cfg(not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))))]
+        {
+            runtime.sgemm(gemm(1), t.linear0.data(), weight, t.linear1.data_mut())?;
+            k.bias_leaky(runtime, bias, LEAKY_SLOPE, t.linear1.data_mut())?;
+        };
 
         let [weight, bias] = &self.linear[2];
-        runtime.sgemm(gemm(2), t.linear1.data(), weight, t.output.data_mut())?;
-        k.bias_log_softmax(runtime, bias, t.output.data_mut())
+        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        harness::dense(
+            qualification.get("linear2"),
+            runtime,
+            gemm(2),
+            super::candidate::DenseSite::Classifier,
+            super::test_support::candidate_seam::Slices {
+                input: t.linear1.data(),
+                weight,
+                bias: Some(bias),
+                residual: None,
+            },
+            t.output.data_mut(),
+            |output| k.bias_log_softmax(runtime, bias, output),
+        )?;
+        #[cfg(not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))))]
+        {
+            runtime.sgemm(gemm(2), t.linear1.data(), weight, t.output.data_mut())?;
+            k.bias_log_softmax(runtime, bias, t.output.data_mut())?;
+        }
+        Ok(())
     }
 }
 
@@ -683,3 +808,7 @@ fn pooled_tensor(
     let dims = [shape.batch, SINC_CHANNELS, shape.pool0];
     Ok(Some(DeviceTensor::zeros(runtime.stream(), &dims)?))
 }
+
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[path = "../../../tests/cuda_qualify/segdense_library.rs"]
+pub(crate) mod harness;

@@ -1529,3 +1529,42 @@ fn fixed_producer_specs_preserve_shapes_and_reject_overflow() {
         }
     }
 }
+
+#[test]
+fn explicit_wideconv_route_wins_only_for_its_implemented_tuple() {
+    use crate::inference::cuda::candidate::{Batches, Coverage, CoverageEntry, Maths};
+    const ENTRY: CoverageEntry = CoverageEntry {
+        layers: &["resnet.layer2.1.conv1"],
+        batches: Batches::Only(&[32]),
+        maths: Maths::All,
+    };
+    const COVERAGE: Coverage = Coverage(&[ENTRY]);
+    let boundary = BoundaryId::named("resnet.layer2.1.conv1");
+    let request = |area| {
+        ModuleRequest::new(
+            area,
+            PtxTier::Sm75,
+            legacy_module(KernelModule::Resnet).artifact(),
+        )
+    };
+    let route = |wide: Coverage| {
+        super::explicit_route(boundary, 32, CudaMath::Fp32, |area| {
+            Ok(match area {
+                KernelModule::Wideconv => Some((request(area), wide)),
+                KernelModule::Resnet => Some((request(area), COVERAGE)),
+                _ => None,
+            })
+        })
+        .unwrap()
+        .unwrap()
+        .area()
+    };
+    const OTHER_BATCH: Coverage = Coverage(&[CoverageEntry {
+        layers: &["resnet.layer2.1.conv1"],
+        batches: Batches::Only(&[1]),
+        maths: Maths::All,
+    }]);
+    assert_eq!(route(COVERAGE), KernelModule::Wideconv);
+    assert_eq!(route(OTHER_BATCH), KernelModule::Resnet);
+    assert_eq!(route(Coverage::NONE), KernelModule::Resnet);
+}

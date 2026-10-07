@@ -71,6 +71,47 @@ impl Convs<'_> {
         residual: Residual<'_, '_>,
         y: &mut CudaViewMut<'_, f32>,
     ) -> Result<(), CudaError> {
+        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        if let Some(owner) = self
+            .qualification
+            .and_then(|owners| owners.get(layer.name()))
+        {
+            let add = match &residual {
+                Residual::Add(value) => Some(value.slice(..)),
+                Residual::None { .. } => None,
+            };
+            let operation = super::super::test_support::candidate_seam::Operation::Spatial {
+                boundary: layer.boundary(),
+                conv: layer.conv(self.chunks, self.math),
+                epilogue: layer.epilogue(add.is_some()),
+            };
+            return owner.run(
+                self.runtime,
+                operation,
+                super::super::test_support::candidate_seam::Views {
+                    input: x.slice(..),
+                    weight: layer.weight().data().as_view(),
+                    bias: Some(layer.bias().data().as_view()),
+                    residual: add,
+                },
+                y,
+                |y| {
+                    let library = self.plan(layer)?.library()?;
+                    let residual = match &residual {
+                        Residual::Add(value) => Residual::Add(value),
+                        Residual::None { scratch } => Residual::None { scratch },
+                    };
+                    library.forward_bias_relu(
+                        &mut self.workspace.as_view_mut(),
+                        x,
+                        &layer.weight().data().as_view(),
+                        &layer.bias().data().as_view(),
+                        residual,
+                        y,
+                    )
+                },
+            );
+        }
         match self.plan(layer)? {
             #[cfg(feature = "cuda")]
             Plan::Library(plan) => {

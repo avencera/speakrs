@@ -301,6 +301,8 @@ impl<'a> Operator<'a> {
             plans: &self.plans,
             workspace: &mut self.workspace,
             chunks: self.batch,
+            qualification: None,
+            math: self.model.0.math,
         };
         let set = &self.inputs[which];
         let r = set.residual.as_view();
@@ -414,5 +416,89 @@ impl EmbeddingBatch {
             + self.pooled.len()
             + self.output.len();
         floats * size_of::<f32>()
+    }
+}
+
+/// Prepared functions for the unchanged Library head bias operation
+pub(crate) struct HeadBias(super::kernels::EmbeddingKernels);
+
+impl HeadBias {
+    /// Load Library functions before any enqueue or capture
+    pub(crate) fn new(runtime: &CudaRuntime) -> Result<Self, CudaError> {
+        Ok(Self(super::kernels::EmbeddingKernels::load(runtime)?))
+    }
+    /// Seed output rows without resolving or loading a module
+    pub(crate) fn run(
+        &self,
+        runtime: &CudaRuntime,
+        bias: &CudaSlice<f32>,
+        output: &mut CudaSlice<f32>,
+    ) -> Result<(), CudaError> {
+        self.0
+            .broadcast_rows(runtime, &bias.as_view(), &mut output.as_view_mut())
+    }
+}
+
+/// Install one prepared route using the actual embedding operation weights
+impl EmbeddingBatch {
+    pub(crate) fn install_boundary(
+        &mut self,
+        runtime: &CudaRuntime,
+        operation: test_support::candidate_seam::Operation,
+        choice: &str,
+        fixture: Vec<f32>,
+    ) -> Result<(), CudaError> {
+        use crate::inference::cuda::candidate::{DenseSite, DenseSpec};
+        use test_support::candidate_seam::Operation;
+        assert!(self.graph.is_none(), "install boundary before capture");
+        let invalid = || CudaError::Unsupported {
+            context: "embedding boundary installation",
+            reason: "operation does not match this model workspace".to_owned(),
+        };
+        if operation.tuple() != (self.chunks, self.model.math) {
+            return Err(invalid());
+        }
+        let (weight, bias) = match operation {
+            Operation::Dense(spec) if spec.site() == DenseSite::Embedding => {
+                if operation
+                    != Operation::Dense(
+                        DenseSpec::new(DenseSite::Embedding, self.chunks, self.model.math)
+                            .map_err(|_| invalid())?,
+                    )
+                {
+                    return Err(invalid());
+                }
+                (self.model.head_weight.data(), self.model.head_bias.data())
+            }
+            Operation::Spatial { boundary, .. } => {
+                let (layer, residual) = self
+                    .model
+                    .trunk
+                    .layers()
+                    .find(|(layer, _)| layer.boundary() == boundary)
+                    .ok_or_else(invalid)?;
+                let actual = Operation::Spatial {
+                    boundary,
+                    conv: layer.conv(self.chunks, self.model.math),
+                    epilogue: layer.epilogue(residual),
+                };
+                if operation != actual {
+                    return Err(invalid());
+                }
+                (layer.weight().data(), layer.bias().data())
+            }
+            _ => return Err(invalid()),
+        };
+        let owner = test_support::boundaries::Owner::prepare(
+            runtime,
+            operation,
+            choice,
+            weight,
+            bias,
+            || Ok(fixture),
+        )?;
+        self.qualification
+            .insert(operation.boundary().name(), owner);
+        Ok(())
     }
 }

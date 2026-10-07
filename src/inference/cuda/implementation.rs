@@ -737,17 +737,32 @@ fn explicit_request(
     batch: usize,
     math: CudaMath,
 ) -> Result<Option<ModuleRequest>, CudaError> {
-    for area in ROUTE_PRECEDENCE {
-        // record-owned areas without a port have no artifact to resolve
+    explicit_route(boundary, batch, math, |area| {
+        // areas without a port have no implemented tuple or artifact to resolve
         if matches!(
             area,
             KernelModule::Wideconv | KernelModule::Segdense | KernelModule::FbankDft
         ) {
-            continue;
+            return Ok(None);
         }
+        let request = modules.embedded_exact(area)?;
+        Ok(Some((request, candidate_coverage(area, request.tier()))))
+    })
+}
 
-        let request = modules.embedded_exact(*area)?;
-        if candidate_coverage(*area, request.tier()).covers(boundary.name(), batch, math) {
+/// Resolve explicit routes from implemented coverage before loading an artifact
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+fn explicit_route(
+    boundary: BoundaryId,
+    batch: usize,
+    math: CudaMath,
+    mut implemented: impl FnMut(KernelModule) -> Result<Option<(ModuleRequest, Coverage)>, CudaError>,
+) -> Result<Option<ModuleRequest>, CudaError> {
+    for area in ROUTE_PRECEDENCE {
+        let Some((request, coverage)) = implemented(*area)? else {
+            continue;
+        };
+        if coverage.covers(boundary.name(), batch, math) {
             return Ok(Some(request));
         }
     }

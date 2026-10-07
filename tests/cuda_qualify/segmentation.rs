@@ -549,3 +549,56 @@ impl CudaSegmentation {
     /// Samples in the 10 s, 16 kHz window speakrs segments
     pub const WINDOW_SAMPLES: usize = WINDOW_SAMPLES;
 }
+
+/// Install one prepared route using the actual segmentation operation weights
+impl CudaSegmentation {
+    pub(crate) fn install_boundary(
+        &mut self,
+        runtime: &CudaRuntime,
+        batch: usize,
+        operation: test_support::candidate_seam::Operation,
+        choice: &str,
+        fixture: Vec<f32>,
+    ) -> Result<(), CudaError> {
+        use crate::inference::cuda::candidate::{DenseSite, SegConvSite};
+        use test_support::candidate_seam::Operation;
+        let invalid = || CudaError::Unsupported {
+            context: "segmentation boundary installation",
+            reason: "operation does not match this model workspace".to_owned(),
+        };
+        if operation.tuple() != (batch, self.network.options.math) {
+            return Err(invalid());
+        }
+        let [weight, bias] = match operation {
+            Operation::Dense(spec) => {
+                &self.network.linear[match spec.site() {
+                    DenseSite::Linear0 => 0,
+                    DenseSite::Linear1 => 1,
+                    DenseSite::Classifier => 2,
+                    DenseSite::Embedding => return Err(invalid()),
+                }]
+            }
+            Operation::Temporal(spec) => {
+                &self.network.convs[match spec.site() {
+                    SegConvSite::Conv1 => 0,
+                    SegConvSite::Conv2 => 1,
+                }]
+            }
+            Operation::Spatial { .. } => return Err(invalid()),
+        };
+        let owner = test_support::boundaries::Owner::prepare(
+            runtime,
+            operation,
+            choice,
+            weight,
+            bias,
+            || Ok(fixture),
+        )?;
+        let workspace = self.workspace(runtime, batch, WINDOW_SAMPLES)?;
+        assert!(workspace.graph.is_none(), "install boundary before capture");
+        workspace
+            .qualification
+            .insert(operation.boundary().name(), owner);
+        Ok(())
+    }
+}

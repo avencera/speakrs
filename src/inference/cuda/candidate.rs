@@ -1153,15 +1153,20 @@ pub(crate) trait DenseCandidate: Sized {
     }
     /// Configuration used by qualification
     fn implemented_pin(spec: DenseSpec) -> Result<Self::Pin, PlanError>;
-    /// Build a plan outside measured intervals
-    fn plan(runtime: &CudaRuntime, spec: DenseSpec, pin: Self::Pin) -> Result<Self, PlanError>;
+    /// Build outside measured intervals from the owner-supplied loaded module
+    fn plan(
+        runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
+        spec: DenseSpec,
+        pin: Self::Pin,
+    ) -> Result<Self, PlanError>;
     /// Write the complete output on the runtime stream
     fn enqueue(
         &self,
-        x: &CudaSlice<f32>,
-        weight: &CudaSlice<f32>,
-        bias: &CudaSlice<f32>,
-        output: &mut CudaSlice<f32>,
+        x: &CudaView<'_, f32>,
+        weight: &CudaView<'_, f32>,
+        bias: &CudaView<'_, f32>,
+        output: &mut CudaViewMut<'_, f32>,
         phases: &Phases,
         runtime: &CudaRuntime,
     ) -> Result<(), CudaError>;
@@ -1264,14 +1269,19 @@ pub(crate) trait SegConvCandidate: Sized {
     }
     /// Configuration used by qualification
     fn implemented_pin(spec: SegConvSpec) -> Result<Self::Pin, PlanError>;
-    /// Build a plan outside measured intervals
-    fn plan(runtime: &CudaRuntime, spec: SegConvSpec, pin: Self::Pin) -> Result<Self, PlanError>;
+    /// Build outside measured intervals from the owner-supplied loaded module
+    fn plan(
+        runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
+        spec: SegConvSpec,
+        pin: Self::Pin,
+    ) -> Result<Self, PlanError>;
     /// Write every raw NCW output value, without bias, on the runtime stream
     fn enqueue(
         &self,
-        x: &CudaSlice<f32>,
-        weight: &CudaSlice<f32>,
-        output: &mut CudaSlice<f32>,
+        x: &CudaView<'_, f32>,
+        weight: &CudaView<'_, f32>,
+        output: &mut CudaViewMut<'_, f32>,
         phases: &Phases,
         runtime: &CudaRuntime,
     ) -> Result<(), CudaError>;

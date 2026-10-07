@@ -236,6 +236,8 @@ impl ResNetEmbedding {
             output: DeviceTensor::zeros(stream, &[rows, EMBEDDING_DIM])?,
             plans,
             workspace: stream.alloc_zeros(workspace_bytes.max(1))?,
+            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            qualification: std::collections::BTreeMap::new(),
             graph: None,
         })
     }
@@ -267,6 +269,8 @@ pub struct EmbeddingBatch {
     plans: Vec<(String, Plan)>,
     /// cuDNN workspace shared by every plan, sized for the largest
     workspace: CudaSlice<u8>,
+    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    qualification: std::collections::BTreeMap<&'static str, super::test_support::boundaries::Owner>,
     graph: Option<ForwardGraph>,
 }
 
@@ -359,6 +363,8 @@ impl EmbeddingBatch {
             output,
             plans,
             workspace,
+            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            qualification,
             ..
         } = self;
         let model = &**model;
@@ -373,6 +379,10 @@ impl EmbeddingBatch {
             #[cfg(feature = "cuda")]
             workspace,
             chunks,
+            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            qualification: Some(qualification),
+            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            math: model.math,
         };
 
         let mut stem_input = stem_input.as_view_mut();
@@ -436,8 +446,13 @@ impl EmbeddingBatch {
             let mut shortcut_out = shortcut.slice_mut(..output_len.min(shortcut.len()));
             let residual = match &block.shortcut {
                 Some(layer) => {
-                    convs.conv(layer, &input, &mut shortcut_out)?;
-                    convs.bias(layer, &mut shortcut_out)?;
+                    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+                    convs.conv_bias(layer, &input, &mut shortcut_out)?;
+                    #[cfg(not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))))]
+                    {
+                        convs.conv(layer, &input, &mut shortcut_out)?;
+                        convs.bias(layer, &mut shortcut_out)?;
+                    }
                     tap(
                         EmbeddingTap::Shortcut { block: index },
                         &shortcut_out.as_view(),
@@ -477,18 +492,51 @@ impl EmbeddingBatch {
 
         let rows = chunks * SPEAKERS_PER_CHUNK;
         let mut embeddings = output.data_mut().as_view_mut();
-        model.kernels.broadcast_rows(
-            runtime,
-            &model.head_bias.data().as_view(),
-            &mut embeddings,
-        )?;
+
         let gemm = Sgemm {
             b_transposed: true,
             beta: 1.0,
             math,
             ..Sgemm::new(rows, EMBEDDING_DIM, 2 * columns)
         };
-        runtime.sgemm(gemm, &pooled, model.head_weight.data(), &mut embeddings)?;
+        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        super::test_support::boundaries::run(
+            qualification.get("resnet.seg_1"),
+            runtime,
+            super::test_support::candidate_seam::Operation::Dense(
+                super::candidate::DenseSpec::new(
+                    super::candidate::DenseSite::Embedding,
+                    chunks,
+                    math,
+                )
+                .map_err(|e| CudaError::Unsupported {
+                    context: "stage head spec",
+                    reason: e.to_string(),
+                })?,
+            ),
+            super::test_support::candidate_seam::Views {
+                input: pooled.as_view(),
+                weight: model.head_weight.data().as_view(),
+                bias: Some(model.head_bias.data().as_view()),
+                residual: None,
+            },
+            &mut embeddings,
+            |output| {
+                model
+                    .kernels
+                    .broadcast_rows(runtime, &model.head_bias.data().as_view(), output)?;
+                runtime.sgemm(gemm, &pooled, model.head_weight.data(), output)
+            },
+        )?;
+        #[cfg(not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))))]
+        {
+            model.kernels.broadcast_rows(
+                runtime,
+                &model.head_bias.data().as_view(),
+                &mut embeddings,
+            )?;
+            runtime.sgemm(gemm, &pooled, model.head_weight.data(), &mut embeddings)?;
+        }
         tap(EmbeddingTap::Output, &embeddings.as_view())?;
 
         Ok(())
@@ -512,6 +560,12 @@ impl EmbeddingBatch {
 
 /// Convolution plus epilogue launches for one forward pass
 struct Convs<'a> {
+    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    qualification: Option<
+        &'a std::collections::BTreeMap<&'static str, super::test_support::boundaries::Owner>,
+    >,
+    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    math: CudaMath,
     runtime: &'a CudaRuntime,
     kernels: &'a EmbeddingKernels,
     plans: &'a [(String, Plan)],
@@ -534,6 +588,57 @@ impl<'a> Convs<'a> {
     }
 
     /// `y = conv(x, layer.weight)`
+    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    fn conv_bias(
+        &mut self,
+        layer: &ConvLayer,
+        x: &CudaView<'_, f32>,
+        y: &mut CudaViewMut<'_, f32>,
+    ) -> Result<(), CudaError> {
+        if let Some(owner) = self
+            .qualification
+            .and_then(|owners| owners.get(layer.name()))
+        {
+            let operation = super::test_support::candidate_seam::Operation::Spatial {
+                boundary: layer.boundary(),
+                conv: layer.conv(self.chunks, self.math),
+                epilogue: super::candidate::Epilogue::Bias,
+            };
+            return owner.run(
+                self.runtime,
+                operation,
+                super::test_support::candidate_seam::Views {
+                    input: x.slice(..),
+                    weight: layer.weight().data().as_view(),
+                    bias: Some(layer.bias().data().as_view()),
+                    residual: None,
+                },
+                y,
+                |y| {
+                    let plan = self.plan(layer)?.library()?;
+                    plan.forward(
+                        &mut self.workspace.as_view_mut(),
+                        x,
+                        &layer.weight().data().as_view(),
+                        y,
+                    )?;
+                    let [h, w] = layer.output();
+                    self.kernels.bias(
+                        self.runtime,
+                        &layer.bias().data().as_view(),
+                        ChannelBias {
+                            channels: layer.out_channels(),
+                            plane: h * w,
+                        },
+                        y,
+                    )
+                },
+            );
+        }
+        self.conv(layer, x, y)?;
+        self.bias(layer, y)
+    }
+
     fn conv(
         &mut self,
         layer: &ConvLayer,
@@ -599,3 +704,7 @@ fn pool_columns(trunk: &Trunk) -> usize {
 #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
 #[path = "../../../tests/cuda_qualify/embedding.rs"]
 pub(crate) mod test_support;
+
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[path = "../../../tests/cuda_qualify/wideconv_library.rs"]
+pub(crate) mod wideconv_library;
