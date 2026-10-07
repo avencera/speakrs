@@ -21,7 +21,7 @@ echo "Proof evidence: $evidence"
 mkdir -p "$repo/target/driver-only-proof"
 export CARGO_TARGET_DIR
 CARGO_TARGET_DIR=$(mktemp -d "$repo/target/driver-only-proof/build-$feature.XXXXXX")
-unset SPEAKRS_CUDA_PTX_TIER SPEAKRS_CUDA_FORCE_LIBRARY
+unset SPEAKRS_CUDA_PTX_TIER SPEAKRS_CUDA_FORCE_LIBRARY SPEAKRS_CUDA_FORCE_PTX_JIT
 cargo build --locked -p xtask --bin xtask --no-default-features --features "$feature"
 binary="$CARGO_TARGET_DIR/debug/xtask"
 ldd "$binary" | tee "$evidence/ldd.txt"
