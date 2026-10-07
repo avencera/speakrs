@@ -788,15 +788,15 @@
       },
       "files": {
         "host_sources": {
-          "src/inference/cuda/candidate.rs": "562cb6fef345fc9dd4d8ab8e127bfafd8c15e63cf2518d4d5404ca52800240e9",
-          "src/inference/cuda/candidate/lstm.rs": "21207a90cac5ed8ab5be95efaeeaf71a35505f569694faa651723731d07269d0",
-          "src/inference/cuda/candidate/lstm/layout.rs": "478adba61b4c5f2b21d22147b7f0e73768164831559f711a4d8653f04de77e8c"
+          "src/inference/cuda/candidate.rs": "dc5bb4e7c067331c84c341e542cfe6e9bd5a7159620a2d6aaa9a17e2a8164b8e",
+          "src/inference/cuda/candidate/lstm.rs": "e1f97ad209e7851f31d7bdd90a962e981ebb04ef2f88bb308ff650f59c091eca",
+          "src/inference/cuda/candidate/lstm/layout.rs": "f388f2e785be827cb231c53b215e9e8f04681a19c0a028eb140fbae8638b6730"
         },
         "kernel_sources": {
           "crates/speakrs-cuda-kernels/src/lstm.rs": "f37dc36973e1a751926bd36c110d2ac4849a3b94b43950ace81a19b6d7b0724b"
         },
         "manifests": {
-          "src/inference/cuda/ptx/lstm.manifest": "5489bc29ed44b76e550819cd7b595ae48b7e53089227fc4c7dae6324a76e3ed9"
+          "src/inference/cuda/ptx/lstm.manifest": "06e24d503fe47d20b939be0a2c18c16812ea63725726283e7a53cfd494bdb087"
         },
         "ptx": {
           "src/inference/cuda/ptx/lstm.sm75.ptx": "72945743a3c1b915c05d8ea21b438dfd860fa9487401c447fb24fd48802916fa"
@@ -862,6 +862,30 @@
           "infrastructure_sha256": "5489bc29ed44b76e550819cd7b595ae48b7e53089227fc4c7dae6324a76e3ed9",
           "path": "src/inference/cuda/ptx/lstm.manifest",
           "reason": "The kernel crate gains the fbankdft feature and module, so the shared-source hash in every manifest changes; PTX and cubin bytes are unchanged"
+        },
+        {
+          "acceptance_sha256": "562cb6fef345fc9dd4d8ab8e127bfafd8c15e63cf2518d4d5404ca52800240e9",
+          "infrastructure_sha256": "dc5bb4e7c067331c84c341e542cfe6e9bd5a7159620a2d6aaa9a17e2a8164b8e",
+          "path": "src/inference/cuda/candidate.rs",
+          "reason": "Additive CUDA gates, library-free port registration and merged-area manifest sources; legacy arithmetic, launch choices, PTX and cubin bytes are unchanged; this is not a new GPU qualification"
+        },
+        {
+          "acceptance_sha256": "21207a90cac5ed8ab5be95efaeeaf71a35505f569694faa651723731d07269d0",
+          "infrastructure_sha256": "e1f97ad209e7851f31d7bdd90a962e981ebb04ef2f88bb308ff650f59c091eca",
+          "path": "src/inference/cuda/candidate/lstm.rs",
+          "reason": "Additive CUDA gates, library-free port registration and merged-area manifest sources; legacy arithmetic, launch choices, PTX and cubin bytes are unchanged; this is not a new GPU qualification"
+        },
+        {
+          "acceptance_sha256": "478adba61b4c5f2b21d22147b7f0e73768164831559f711a4d8653f04de77e8c",
+          "infrastructure_sha256": "f388f2e785be827cb231c53b215e9e8f04681a19c0a028eb140fbae8638b6730",
+          "path": "src/inference/cuda/candidate/lstm/layout.rs",
+          "reason": "Additive CUDA gates, library-free port registration and merged-area manifest sources; legacy arithmetic, launch choices, PTX and cubin bytes are unchanged; this is not a new GPU qualification"
+        },
+        {
+          "acceptance_sha256": "5489bc29ed44b76e550819cd7b595ae48b7e53089227fc4c7dae6324a76e3ed9",
+          "infrastructure_sha256": "06e24d503fe47d20b939be0a2c18c16812ea63725726283e7a53cfd494bdb087",
+          "path": "src/inference/cuda/ptx/lstm.manifest",
+          "reason": "Additive CUDA gates, library-free port registration and merged-area manifest sources; legacy arithmetic, launch choices, PTX and cubin bytes are unchanged; this is not a new GPU qualification"
         }
       ],
       "legacy": true,
@@ -2555,14 +2579,14 @@
       },
       "files": {
         "host_sources": {
-          "src/inference/cuda/candidate.rs": "562cb6fef345fc9dd4d8ab8e127bfafd8c15e63cf2518d4d5404ca52800240e9",
-          "src/inference/cuda/candidate/conv.rs": "1e73f6e20d2bde5da32044de64f4a6f51b628494800b2e38e79e1acbfaf2e2d4"
+          "src/inference/cuda/candidate.rs": "dc5bb4e7c067331c84c341e542cfe6e9bd5a7159620a2d6aaa9a17e2a8164b8e",
+          "src/inference/cuda/candidate/conv.rs": "1d918bed2753f4f97c788a27caba82f7358c01fefb91114d25dc68abd8b9f771"
         },
         "kernel_sources": {
           "crates/speakrs-cuda-kernels/src/resnet.rs": "9f2b5fd4c5c88236aad9829c8ef48c1c7b1b55169a8d82228edbd622c8184122"
         },
         "manifests": {
-          "src/inference/cuda/ptx/resnet.manifest": "f2b07eb41228407db0f03c3aab1d49dcf34508465d7c4e3c232f4fc160133d17"
+          "src/inference/cuda/ptx/resnet.manifest": "c3736bd5a1fcc2c9f5b6ce236e6e7beef7d781b70435892fca1bf89fae62bf77"
         },
         "ptx": {
           "src/inference/cuda/ptx/resnet.sm75.ptx": "dd6449c0129f9a03bf691c0338611b50b651ab714d5803caedea87de3c72b6b7"
@@ -2628,6 +2652,24 @@
           "infrastructure_sha256": "f2b07eb41228407db0f03c3aab1d49dcf34508465d7c4e3c232f4fc160133d17",
           "path": "src/inference/cuda/ptx/resnet.manifest",
           "reason": "The kernel crate gains the fbankdft feature and module, so the shared-source hash in every manifest changes; PTX and cubin bytes are unchanged"
+        },
+        {
+          "acceptance_sha256": "562cb6fef345fc9dd4d8ab8e127bfafd8c15e63cf2518d4d5404ca52800240e9",
+          "infrastructure_sha256": "dc5bb4e7c067331c84c341e542cfe6e9bd5a7159620a2d6aaa9a17e2a8164b8e",
+          "path": "src/inference/cuda/candidate.rs",
+          "reason": "Additive CUDA gates, library-free port registration and merged-area manifest sources; legacy arithmetic, launch choices, PTX and cubin bytes are unchanged; this is not a new GPU qualification"
+        },
+        {
+          "acceptance_sha256": "1e73f6e20d2bde5da32044de64f4a6f51b628494800b2e38e79e1acbfaf2e2d4",
+          "infrastructure_sha256": "1d918bed2753f4f97c788a27caba82f7358c01fefb91114d25dc68abd8b9f771",
+          "path": "src/inference/cuda/candidate/conv.rs",
+          "reason": "Additive CUDA gates, library-free port registration and merged-area manifest sources; legacy arithmetic, launch choices, PTX and cubin bytes are unchanged; this is not a new GPU qualification"
+        },
+        {
+          "acceptance_sha256": "f2b07eb41228407db0f03c3aab1d49dcf34508465d7c4e3c232f4fc160133d17",
+          "infrastructure_sha256": "c3736bd5a1fcc2c9f5b6ce236e6e7beef7d781b70435892fca1bf89fae62bf77",
+          "path": "src/inference/cuda/ptx/resnet.manifest",
+          "reason": "Additive CUDA gates, library-free port registration and merged-area manifest sources; legacy arithmetic, launch choices, PTX and cubin bytes are unchanged; this is not a new GPU qualification"
         }
       ],
       "legacy": true,
@@ -4112,14 +4154,14 @@
       },
       "files": {
         "host_sources": {
-          "src/inference/cuda/candidate.rs": "562cb6fef345fc9dd4d8ab8e127bfafd8c15e63cf2518d4d5404ca52800240e9",
-          "src/inference/cuda/candidate/sinc.rs": "160e505171af5b61246c3408def5a8309a0f6f52a3a47c63995a7248c79796d7"
+          "src/inference/cuda/candidate.rs": "dc5bb4e7c067331c84c341e542cfe6e9bd5a7159620a2d6aaa9a17e2a8164b8e",
+          "src/inference/cuda/candidate/sinc.rs": "f76502b93b9db1dea78aed49e11e0fe89b603321965c4b5244496f191e3dae75"
         },
         "kernel_sources": {
           "crates/speakrs-cuda-kernels/src/sincnet.rs": "600f1c3688e073e13b65a36b0fbe4917dde498218efba8c61fca912e6f9d6920"
         },
         "manifests": {
-          "src/inference/cuda/ptx/sincnet.manifest": "3a2e93ae73467a74e9a827cee7ea09741f812d4898308fe72ed85f801b9440ea"
+          "src/inference/cuda/ptx/sincnet.manifest": "e7a613d5feba9b7fb87b63bd70a29cfc63cafe458551e2ce66cccde89406e096"
         },
         "ptx": {
           "src/inference/cuda/ptx/sincnet.sm75.ptx": "967bc6893f80da84d8d4d288f2cf1ca3336ca09c4386495cab722beb0ac87247"
@@ -4185,6 +4227,24 @@
           "infrastructure_sha256": "3a2e93ae73467a74e9a827cee7ea09741f812d4898308fe72ed85f801b9440ea",
           "path": "src/inference/cuda/ptx/sincnet.manifest",
           "reason": "The kernel crate gains the fbankdft feature and module, so the shared-source hash in every manifest changes; PTX and cubin bytes are unchanged"
+        },
+        {
+          "acceptance_sha256": "562cb6fef345fc9dd4d8ab8e127bfafd8c15e63cf2518d4d5404ca52800240e9",
+          "infrastructure_sha256": "dc5bb4e7c067331c84c341e542cfe6e9bd5a7159620a2d6aaa9a17e2a8164b8e",
+          "path": "src/inference/cuda/candidate.rs",
+          "reason": "Additive CUDA gates, library-free port registration and merged-area manifest sources; legacy arithmetic, launch choices, PTX and cubin bytes are unchanged; this is not a new GPU qualification"
+        },
+        {
+          "acceptance_sha256": "160e505171af5b61246c3408def5a8309a0f6f52a3a47c63995a7248c79796d7",
+          "infrastructure_sha256": "f76502b93b9db1dea78aed49e11e0fe89b603321965c4b5244496f191e3dae75",
+          "path": "src/inference/cuda/candidate/sinc.rs",
+          "reason": "Additive CUDA gates, library-free port registration and merged-area manifest sources; legacy arithmetic, launch choices, PTX and cubin bytes are unchanged; this is not a new GPU qualification"
+        },
+        {
+          "acceptance_sha256": "3a2e93ae73467a74e9a827cee7ea09741f812d4898308fe72ed85f801b9440ea",
+          "infrastructure_sha256": "e7a613d5feba9b7fb87b63bd70a29cfc63cafe458551e2ce66cccde89406e096",
+          "path": "src/inference/cuda/ptx/sincnet.manifest",
+          "reason": "Additive CUDA gates, library-free port registration and merged-area manifest sources; legacy arithmetic, launch choices, PTX and cubin bytes are unchanged; this is not a new GPU qualification"
         }
       ],
       "legacy": true,

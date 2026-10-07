@@ -1240,6 +1240,19 @@ class ArtifactEvidence(RecordsFixture):
             with self.subTest(field=field), self.assertRaises(records.Rejected):
                 self.check([{**self.entry, "record": self.store(raw)}])
 
+    def test_manifest_identity_does_not_include_a_longer_area_name(self):
+        ptx = self.root / "src/inference/cuda/ptx"
+        (ptx / "lstmproj.manifest").write_text("a separate area")
+        (ptx / "lstm.extra.manifest").write_text("owned extra manifest")
+        files = records.shipped_files(self.root, "lstm")
+        self.assertEqual(
+            set(files["manifests"]),
+            {
+                "src/inference/cuda/ptx/lstm.manifest",
+                "src/inference/cuda/ptx/lstm.extra.manifest",
+            },
+        )
+
     def test_jit_record_binds_every_candidate_cubin_and_manifest(self):
         self.check([self.entry])
         for name in (
