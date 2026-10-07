@@ -822,8 +822,11 @@ binds the following fields:
   hashes
 
 Both metric records include finite nonnegative DER, an output hash and an identity
-hash. The identity hash covers device, math, model, input, pipeline configuration
-and always-on artifacts. The baseline and candidate must use the same identity.
+hash and an execution hash. The identity hash covers device, math, model, input, pipeline configuration
+and always-on artifacts. The baseline and candidate must use the same snapshot identity. Each scorer
+metric also binds its own complete route list through `execution_sha256`. The
+baseline execution hash includes its frozen control archive. The verdict binds
+these metric objects, so it cannot be reused after a route, pin or artifact change.
 This schema binds an existing integrated verdict; it adds no DER threshold.
 The policy hash identifies the rule used by the integrated scorer.
 

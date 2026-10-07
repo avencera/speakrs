@@ -25,6 +25,9 @@ def complete_fixture(raw):
             child["numeric"]["candidate"] = [
                 {
                     "device": copy.deepcopy(child["device"]),
+                    "loaded_libraries": copy.deepcopy(
+                        child["numeric"]["library"][0]["loaded_libraries"]
+                    ),
                     "mode": mode,
                     "configurations": [
                         {
@@ -140,10 +143,20 @@ class RecordsFixture(unittest.TestCase):
             "/lib/libcublas.so.12": "3" * 64,
         }
         self.child["numeric"] = {
-            "library": [{"device": copy.deepcopy(self.child["device"])}],
+            "library": [
+                {
+                    "device": copy.deepcopy(self.child["device"]),
+                    "loaded_libraries": copy.deepcopy(
+                        self.child["sanitizer_fingerprint"]
+                    ),
+                }
+            ],
             "candidate": [
                 {
                     "device": copy.deepcopy(self.child["device"]),
+                    "loaded_libraries": copy.deepcopy(
+                        self.child["sanitizer_fingerprint"]
+                    ),
                     "mode": "fp32",
                     "configurations": [
                         {
@@ -256,7 +269,15 @@ class RecordsFixture(unittest.TestCase):
                     "identity_sha256": identity,
                 },
             }
+            baseline["metrics"]["execution_sha256"] = (
+                records.der_evidence.execution_identity(
+                    identity, baseline["routes"], baseline["control_archive_sha256"]
+                )
+            )
             candidate = {
+                "execution_sha256": records.der_evidence.execution_identity(
+                    identity, plan["routes"]
+                ),
                 "der": 1.0,
                 "output_sha256": "a" * 64,
                 "identity_sha256": identity,
@@ -1474,6 +1495,50 @@ class WholePlanDer(RecordsFixture):
                 plan["candidate"]["der"] = float("nan")
             with self.subTest(fault=fault), self.assertRaises(records.Rejected):
                 self.check([{**self.entry, "der": self.store(raw)}])
+
+    def test_route_change_cannot_reuse_scorer_metrics_or_verdict_in_either_mode(self):
+        child = copy.deepcopy(self.child)
+        both = [["lstm.stack", batch, "fp32"] for batch in (1, 32)]
+        child["coverage_declared"]["triples"] = both
+        child["accepted_tuples"] = both
+        raw_record = complete_fixture({**self.record, "tiers": {"sm75": child}})
+        original = copy.deepcopy(self.entry)
+        original["record"] = self.store(raw_record)
+        original["candidate_coverage"]["entries"][0]["batches"] = [1, 32]
+        summary = records.write_summaries(
+            [original], self.root, records=self.cache / "records"
+        )
+        raw_der = records.load(original["der"], self.root)
+        old = copy.deepcopy(raw_der["plans"][0])
+        changed = copy.deepcopy(original)
+        changed["coverage"]["entries"][0]["batches"] = [32]
+        changed["configurations"][0]["tuple"][1] = 32
+        domain = records.der_evidence.PlanDomain.parse(changed["boundary_domain"])
+        raw_der["plans"][0]["routes"] = records.der_evidence.routes(
+            [changed], domain, "fp32"
+        )
+        changed["der"] = self.store(raw_der)
+        for field in ("baseline", "candidate", "verdict"):
+            self.assertEqual(old[field], raw_der["plans"][0][field])
+        with self.assertRaisesRegex(records.Rejected, "scorer evidence"):
+            self.check([changed])
+        locked = summary["records"][original["record"]]
+        locked["der"] = changed["der"]
+        locked["der_evidence"] = {
+            "kind": "WholePlan",
+            "source_sha256": changed["der"],
+            "evidence": raw_der,
+        }
+        (self.root / records.ACCEPTANCE).write_bytes(
+            records.canonical_summaries(summary)
+        )
+        self.refresh_lock()
+        for directory in (None, self.cache / "records"):
+            with (
+                self.subTest(raw=directory is not None),
+                self.assertRaisesRegex(records.Rejected, "scorer evidence"),
+            ):
+                records.check_table([changed], self.root, directory)
 
     def test_an_area_receipt_cannot_authorize_a_combined_plan(self):
         original = self.receipt()

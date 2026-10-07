@@ -147,7 +147,9 @@ def routes(entries: list[dict], domain: PlanDomain, mode: str) -> list[dict]:
 
 def metric(raw: object, context: str) -> dict:
     """Retain scorer outputs and their exact external evidence identity"""
-    value = fields(raw, {"der", "output_sha256", "identity_sha256"}, context)
+    value = fields(
+        raw, {"der", "output_sha256", "identity_sha256", "execution_sha256"}, context
+    )
     if (
         type(value["der"]) not in (int, float)
         or not math.isfinite(value["der"])
@@ -156,7 +158,18 @@ def metric(raw: object, context: str) -> dict:
         raise Rejected(f"DER: invalid {context} score")
     artifacts.sha256(value["output_sha256"])
     artifacts.sha256(value["identity_sha256"])
+    artifacts.sha256(value["execution_sha256"])
     return value
+
+
+def execution_identity(
+    snapshot: str, selected: list[dict], control: str | None = None
+) -> str:
+    """Bind scorer metrics to routes, including the baseline's frozen control"""
+    value: dict = {"snapshot_sha256": snapshot, "routes": selected}
+    if control is not None:
+        value["control_archive_sha256"] = control
+    return digest(value)
 
 
 def validate_plan(raw: object, entries: list[dict], mode: str) -> dict:
@@ -238,6 +251,12 @@ def validate_plan(raw: object, entries: list[dict], mode: str) -> dict:
         or candidate["identity_sha256"] != identity
     ):
         raise Rejected("DER: baseline and candidate do not share the plan snapshot")
+    if base_metrics["execution_sha256"] != execution_identity(
+        identity, baseline["routes"], baseline["control_archive_sha256"]
+    ) or candidate["execution_sha256"] != execution_identity(identity, expected):
+        raise Rejected(
+            "DER: scorer evidence does not bind the selected execution routes"
+        )
     verdict = fields(
         value["verdict"],
         {"passed", "baseline_sha256", "candidate_sha256", "policy_sha256"},
