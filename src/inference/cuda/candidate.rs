@@ -374,21 +374,27 @@ pub(crate) enum ConvKernel {
     C32Stride2,
     /// `spk_resnet_conv3x3_c32s2_small`: 128 threads, 2 rows by 64 columns
     C32Stride2Small,
+    /// `spk_resnet_tc_c32`: TF32 tensor cores, 128 threads, 4 rows by 112 columns;
+    /// sm80 tier and TF32 mode only
+    C32Tensor,
+    /// `spk_resnet_tc_c64`: TF32 tensor cores, 128 threads, 4 rows by 56 columns;
+    /// sm80 tier and TF32 mode only
+    C64Tensor,
 }
 
 impl ConvKernel {
     /// The shape this entry computes
     pub(crate) const fn shape(self) -> ConvShape {
         match self {
-            Self::C32 => ConvShape::C32,
-            Self::C64 | Self::C64Small => ConvShape::C64,
+            Self::C32 | Self::C32Tensor => ConvShape::C32,
+            Self::C64 | Self::C64Small | Self::C64Tensor => ConvShape::C64,
             Self::C32Stride2 | Self::C32Stride2Small => ConvShape::C32Stride2,
         }
     }
 }
 
-/// The execution choice of a ResNet convolution: weights packed once per plan as
-/// `[cin][ky][kx][cout]`, NCHW activations, FP32 FMA in both math modes
+/// The execution choice of a ResNet convolution: weights packed once per plan, NCHW
+/// activations, FP32 FMA in both math modes except on the TF32 tensor-core entries
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConvPin {
     /// Exactly this entry and tile

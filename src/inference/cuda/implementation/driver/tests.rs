@@ -440,3 +440,86 @@ fn every_model_boundary_has_a_driver_route_for_model_batches() {
         }
     }
 }
+
+#[test]
+fn tensor_core_trunk_kernels_are_selected_only_for_tf32_on_capability_8_0() {
+    use crate::inference::cuda::candidate::{ConvKernel, ConvOxide, ConvPin};
+    let a100 = Builder::new(ComputeCapability::new(8, 0))
+        .multiprocessors(108)
+        .build();
+    let pin = |name, batch, math, device: &_, tier| {
+        ConvOxide::driver_pin(BoundaryId::named(name), batch, math, device, tier).unwrap()
+    };
+    let kernel = |kernel| ConfigPin::Conv(ConvPin::Kernel(kernel));
+    for batch in [1, 32] {
+        assert_eq!(
+            pin(
+                "resnet.layer1.0.conv1",
+                batch,
+                CudaMath::Tf32,
+                &a100,
+                PtxTier::Sm80
+            ),
+            kernel(ConvKernel::C32Tensor)
+        );
+        assert_eq!(
+            pin(
+                "resnet.layer2.3.conv2",
+                batch,
+                CudaMath::Tf32,
+                &a100,
+                PtxTier::Sm80
+            ),
+            kernel(ConvKernel::C64Tensor)
+        );
+    }
+    // the strided layer, FP32 mode and the sm75 tier keep the FP32 kernels
+    assert_eq!(
+        pin(
+            "resnet.layer2.0.conv1",
+            32,
+            CudaMath::Tf32,
+            &a100,
+            PtxTier::Sm80
+        ),
+        kernel(ConvKernel::C32Stride2)
+    );
+    assert_eq!(
+        pin(
+            "resnet.layer1.0.conv1",
+            32,
+            CudaMath::Fp32,
+            &a100,
+            PtxTier::Sm80
+        ),
+        kernel(ConvKernel::C32)
+    );
+    assert_eq!(
+        pin(
+            "resnet.layer2.1.conv1",
+            32,
+            CudaMath::Tf32,
+            &a100,
+            PtxTier::Sm75
+        ),
+        kernel(ConvKernel::C64)
+    );
+    // other sm80-tier parts keep their current selection
+    for (major, minor, sms) in [(8, 6, 84), (8, 9, 34), (9, 0, 132), (12, 0, 36)] {
+        let device = Builder::new(ComputeCapability::new(major, minor))
+            .multiprocessors(sms)
+            .build();
+        for name in ["resnet.layer1.0.conv1", "resnet.layer2.1.conv1"] {
+            let selected = pin(name, 32, CudaMath::Tf32, &device, PtxTier::Sm80);
+            assert!(
+                !matches!(
+                    selected,
+                    ConfigPin::Conv(ConvPin::Kernel(
+                        ConvKernel::C32Tensor | ConvKernel::C64Tensor
+                    ))
+                ),
+                "{major}.{minor} {name}: {selected:?}"
+            );
+        }
+    }
+}

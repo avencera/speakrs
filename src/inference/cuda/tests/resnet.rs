@@ -2,7 +2,7 @@
 //! random tensors, so it runs on any GPU without the reference files
 
 use super::super::candidate::{
-    ConvCandidate, ConvInputs, ConvLayerSpec, ConvOxide, Phases, PlanError,
+    ConvCandidate, ConvInputs, ConvKernel, ConvLayerSpec, ConvOxide, ConvPin, Phases, PlanError,
 };
 use super::super::dnn::ConvPlanner;
 use super::super::geometry::{Conv2d, Residual};
@@ -207,6 +207,57 @@ fn resnet_candidate_matches_cudnn_on_partial_tiles() -> Result<(), CudaError> {
                     candidate_error.0 <= library_error.0 && candidate_error.1 <= library_error.1,
                     "{name} b{batch} residual={add} TF32: candidate max-abs/L2 {candidate_error:?} exceeds Library {library_error:?} against FP32 truth"
                 );
+
+                let Some(kernel) = tensor_kernel(&runtime, cin, stride)? else {
+                    continue;
+                };
+                let kernels = runtime.load_module(
+                    runtime.embedded_exact_request(super::super::KernelModule::Resnet)?,
+                )?;
+                let tensor = ConvOxide::plan(
+                    &runtime,
+                    &kernels,
+                    ConvLayerSpec {
+                        name,
+                        conv: Conv2d { math, ..fp32 },
+                        epilogue: if add {
+                            super::super::candidate::Epilogue::BiasReluResidual
+                        } else {
+                            super::super::candidate::Epilogue::BiasRelu
+                        },
+                        weight: &weight,
+                        bias: &bias,
+                    },
+                    ConvPin::Kernel(kernel),
+                )
+                .map_err(|error| CudaError::Unsupported {
+                    context: "tensor-core conv3x3 plan",
+                    reason: error.to_string(),
+                })?;
+                let mut actual = stream.alloc_zeros::<f32>(output_len)?;
+                tensor.enqueue(
+                    ConvInputs {
+                        x: &x_device.as_view(),
+                        residual: add.then_some(&z),
+                        weight: &weight.as_view(),
+                        bias: &bias.as_view(),
+                    },
+                    &mut actual.as_view_mut(),
+                    &Phases::new(),
+                    stream,
+                )?;
+                let tensor_error = truth_error(&stream.clone_dtoh(&actual)?, &expected);
+                eprintln!(
+                    "RESNET_TC {name} b{batch} residual={add} {kernel:?}: max-abs/L2 {tensor_error:?}, Library TF32 {library_error:?}"
+                );
+                // one TF32 product per term, as cuDNN's TF32 path: gross mismatches only,
+                // since cuDNN may run an FP32 algorithm for a TF32 request
+                let floor = 2f64.powi(-10);
+                assert!(
+                    tensor_error.0 <= 10.0 * library_error.0 + floor * f64::from(scale)
+                        && tensor_error.1 <= 10.0 * library_error.1 + floor,
+                    "{name} b{batch} residual={add} {kernel:?}: max-abs/L2 {tensor_error:?} grossly exceeds Library TF32 {library_error:?}"
+                );
             }
         }
 
@@ -242,6 +293,26 @@ fn resnet_candidate_matches_cudnn_on_partial_tiles() -> Result<(), CudaError> {
     }
 
     Ok(())
+}
+
+/// The TF32 tensor-core entry of a stride-1 case where the loaded resnet module is the
+/// sm80 tier or newer
+fn tensor_kernel(
+    runtime: &super::super::CudaRuntime,
+    channels: usize,
+    stride: usize,
+) -> Result<Option<ConvKernel>, CudaError> {
+    let tier = runtime
+        .load_kernels(super::super::KernelModule::Resnet)?
+        .tier();
+    if stride != 1 || tier < super::super::PtxTier::Sm80 {
+        return Ok(None);
+    }
+    Ok(Some(if channels == 32 {
+        ConvKernel::C32Tensor
+    } else {
+        ConvKernel::C64Tensor
+    }))
 }
 
 /// Max-abs and relative L2 errors have no tolerance floor; exact zero stays exact
