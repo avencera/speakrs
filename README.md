@@ -289,3 +289,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, model downloads, fixture
 - [pyannote-audio](https://github.com/pyannote/pyannote-audio) - Python reference implementation
 - [pyannote community-1](https://huggingface.co/pyannote/speaker-diarization-community-1) - VBx + PLDA pipeline
 - [SpeakerKit](https://github.com/argmaxinc/WhisperKit) - Swift reference (same VBx architecture)
+
+On a Linux GPU host, run `scripts/cuda/prove-driver-only.sh MODELS_DIR SHORT_WAV
+cuda-rtx50` to check the binary links and library opens during model load and a
+short diarization. Exit 0 means the full run passed. Exit 3 means a kernel is
+missing, with no cuDNN or cuBLAS link or open.
