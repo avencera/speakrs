@@ -464,6 +464,24 @@ def expected_ids(target: str, phase: str, mode: str) -> set[str]:
     return base
 
 
+def draw_length(case: str, layer: str) -> int:
+    """Bind draw lengths to the locked model geometry, not a reported CPU section."""
+    match = re.fullmatch(
+        r"tf32/(first|last|short|mixed)/b(1|7|32|33|64)/stage(/switched)?", case
+    )
+    if match is None:
+        raise Rejected("GPU lock: invalid TF32 draw case")
+    batch = int(match[2])
+    if layer == "lstm.stack":
+        return batch * FRAMES * 256
+    if layer == "sincnet.conv0.abs_pool":
+        return batch * 80 * ((160_000 - 251) // 10 + 1)
+    conv = re.fullmatch(r"resnet.layer([12])\.([0-6])\.conv([12])", layer)
+    if conv is None or int(conv[2]) >= (3 if conv[1] == "1" else 4):
+        raise Rejected("GPU lock: invalid TF32 draw layer")
+    return batch * (32 * 80 * 998 if conv[1] == "1" else 64 * 40 * 499)
+
+
 def validate_gpu_ownership(process: dict, phase: str) -> None:
     """Require completed evidence from the selected GPU lock owner."""
     evidence = process.get("gpu_lock")
@@ -487,7 +505,7 @@ def validate_gpu_ownership(process: dict, phase: str) -> None:
         fields = (
             {"work", "locked", "case"}
             if section["work"] == "f64"
-            else {"work", "locked"}
+            else {"work", "locked", "case", "layer", "seed", "length"}
         )
         if set(section) != fields or (
             section["work"] == "f64"
@@ -507,13 +525,33 @@ def validate_gpu_ownership(process: dict, phase: str) -> None:
             emitted
         ) <= set(prepared):
             raise Rejected("GPU lock: missing unlocked f64 truth work")
-        band_count = sum(
-            8
-            for row in rows
-            if row.get("id", "").endswith("/band") and row.get("layers")
-        )
-        if sum(section["work"] == "tf32_draws" for section in sections) < band_count:
-            raise Rejected("GPU lock: missing unlocked TF32 draw work")
+        expected = Counter()
+        for row in rows:
+            if not row.get("id", "").endswith("/band") or not row.get("layers"):
+                continue
+            if row.get("seeds") != [11, 23, 37, 41, 53, 67, 79, 97]:
+                raise Rejected("GPU lock: invalid TF32 draw seeds")
+            case = row["id"].removesuffix("/band")
+            for layer in row["layers"]:
+                length = draw_length(case, layer)
+                for seed in row["seeds"]:
+                    expected[(case, layer, seed, length)] += 1
+        actual = Counter()
+        for section in sections:
+            if section["work"] != "tf32_draws":
+                continue
+            if (
+                not isinstance(section["case"], str)
+                or not isinstance(section["layer"], str)
+                or type(section["seed"]) is not int
+                or type(section["length"]) is not int
+            ):
+                raise Rejected("GPU lock: invalid TF32 draw binding")
+            actual[
+                (section["case"], section["layer"], section["seed"], section["length"])
+            ] += 1
+        if actual != expected:
+            raise Rejected("GPU lock: missing or mismatched unlocked TF32 draw work")
 
 
 def driver(

@@ -496,7 +496,11 @@ class Processes(unittest.TestCase):
         process = {
             "rows": [
                 {"id": "secret", "secret": True},
-                {"id": "tf32/stage/band", "layers": ["lstm.stack"]},
+                {
+                    "id": "tf32/first/b1/stage/band",
+                    "layers": ["lstm.stack"],
+                    "seeds": [11, 23, 37, 41, 53, 67, 79, 97],
+                },
             ],
             "gpu_lock": {
                 "path": qualify.GPU_LOCK,
@@ -507,13 +511,51 @@ class Processes(unittest.TestCase):
         }
         with self.assertRaisesRegex(qualify.Rejected, "f64 truth"):
             qualify.validate_gpu_ownership(process, "numeric")
-        sections = [{"work": "f64", "locked": False, "case": "secret"}]
+        sections: list[dict] = [{"work": "f64", "locked": False, "case": "secret"}]
         process["gpu_lock"].update(cpu_sections=sections, gpu_sections=2)
         with self.assertRaisesRegex(qualify.Rejected, "TF32 draw"):
             qualify.validate_gpu_ownership(process, "numeric")
-        sections.extend({"work": "tf32_draws", "locked": False} for _ in range(8))
+        sections.extend(
+            {
+                "work": "tf32_draws",
+                "locked": False,
+                "case": "tf32/first/b1/stage",
+                "layer": "lstm.stack",
+                "seed": seed,
+                "length": 589 * 256,
+            }
+            for seed in [11, 23, 37, 41, 53, 67, 79, 97]
+        )
         process["gpu_lock"]["gpu_sections"] = 10
         qualify.validate_gpu_ownership(process, "numeric")
+        for field, value in (
+            ("case", "tf32/last/b1/stage"),
+            ("seed", 23),
+            ("length", 1),
+            ("layer", "sincnet.conv0.abs_pool"),
+        ):
+            original = sections[1][field]
+            sections[1][field] = value
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(qualify.Rejected, "TF32 draw"),
+            ):
+                qualify.validate_gpu_ownership(process, "numeric")
+            sections[1][field] = original
+        sections.append(sections[1].copy())
+        process["gpu_lock"]["gpu_sections"] += 1
+        with self.assertRaisesRegex(qualify.Rejected, "TF32 draw"):
+            qualify.validate_gpu_ownership(process, "numeric")
+        self.assertEqual(
+            qualify.draw_length(
+                "tf32/mixed/b32/stage/switched", "resnet.layer2.0.conv1"
+            ),
+            32 * 64 * 40 * 499,
+        )
+        self.assertEqual(
+            qualify.draw_length("tf32/first/b1/stage", "sincnet.conv0.abs_pool"),
+            80 * 15975,
+        )
 
     def test_driver_uses_child_lock_only_for_numeric(self):
         mode = "fp32"

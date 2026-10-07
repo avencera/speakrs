@@ -521,7 +521,7 @@ impl Run<'_> {
             let mut band = Vec::new();
             let mut truth_draws = Vec::new();
             for seed in BAND_SEEDS {
-                set_band(Some((seed, layers.clone())));
+                set_band(Some((key.clone(), seed, layers.clone())));
                 upload(&mut buffers, which)?;
                 buffers.forward_with_taps(runtime, &mut |_, _| Ok(()))?;
                 let output = buffers.download_output(runtime)?;
@@ -815,7 +815,7 @@ impl Run<'_> {
             let mut band = Vec::new();
             let mut truth_draws = Vec::new();
             for seed in BAND_SEEDS {
-                set_band(Some((seed, layers.clone())));
+                set_band(Some((key.clone(), seed, layers.clone())));
                 model
                     .workspace(runtime, batch, WINDOW)?
                     .upload_input(runtime, input)?;

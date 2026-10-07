@@ -30,18 +30,42 @@ impl TruthCase {
     }
 }
 
+/// One host draw preparation, bound to the replay that consumes it
+pub(crate) struct DrawCase {
+    case: String,
+    layer: String,
+    seed: u32,
+    length: usize,
+}
+
+impl DrawCase {
+    /// Bind the unmodified band seed and output length before deriving draws
+    pub(crate) fn new(case: &str, layer: &str, seed: u32, length: usize) -> Self {
+        assert!(
+            !case.is_empty() && !layer.is_empty() && length > 0,
+            "valid draw case"
+        );
+        Self {
+            case: case.to_owned(),
+            layer: layer.to_owned(),
+            seed,
+            length,
+        }
+    }
+}
+
 /// CPU work that must not hold the shared GPU lock
 #[derive(Clone, Copy)]
 pub(crate) enum CpuWork<'a> {
     F64(&'a TruthCase),
-    Tf32Draws,
+    Tf32Draws(&'a DrawCase),
 }
 
 impl CpuWork<'_> {
     fn name(self) -> &'static str {
         match self {
             Self::F64(_) => "f64",
-            Self::Tf32Draws => "tf32_draws",
+            Self::Tf32Draws(_) => "tf32_draws",
         }
     }
 }
@@ -182,8 +206,14 @@ fn unlocked<T>(work: CpuWork<'_>, compute: impl FnOnce() -> T) -> T {
         let mut state = cell.borrow_mut();
         let state = state.as_mut().expect("live GPU lock owner");
         let mut evidence = json!({"work": work.name(), "locked": false});
-        if let CpuWork::F64(case) = work {
-            evidence["case"] = json!(case.id());
+        match work {
+            CpuWork::F64(case) => evidence["case"] = json!(case.id()),
+            CpuWork::Tf32Draws(draw) => {
+                evidence["case"] = json!(draw.case);
+                evidence["layer"] = json!(draw.layer);
+                evidence["seed"] = json!(draw.seed);
+                evidence["length"] = json!(draw.length);
+            }
         }
         state.cpu_sections.push(evidence);
         state.gpu_sections += 1;
@@ -193,7 +223,7 @@ fn unlocked<T>(work: CpuWork<'_>, compute: impl FnOnce() -> T) -> T {
 
 #[cfg(test)]
 mod tests {
-    use super::{CpuWork, GpuLock, TruthCase, open, unlocked};
+    use super::{CpuWork, DrawCase, GpuLock, TruthCase, open, unlocked};
     use crate::inference::cuda::CudaMath;
     use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -218,8 +248,18 @@ mod tests {
         assert!(competing.try_lock().is_err());
         assert_eq!(owner.evidence()["cpu_sections"][0]["locked"], false);
         assert_eq!(owner.evidence()["cpu_sections"][0]["case"], case.id());
+        let draw = DrawCase::new("tf32/first/b1/stage", "lstm.stack", 11, 589 * 256);
+        let value = unlocked(CpuWork::Tf32Draws(&draw), || 91);
+        assert_eq!(value, 91);
+        assert_eq!(
+            owner.evidence()["cpu_sections"][1],
+            serde_json::json!({
+                "work": "tf32_draws", "locked": false, "case": "tf32/first/b1/stage",
+                "layer": "lstm.stack", "seed": 11, "length": 589 * 256,
+            })
+        );
         let panic = catch_unwind(AssertUnwindSafe(|| {
-            unlocked(CpuWork::Tf32Draws, || panic!("CPU failure"));
+            unlocked(CpuWork::Tf32Draws(&draw), || panic!("CPU failure"));
         }));
         assert!(panic.is_err());
         assert!(competing.try_lock().is_err());

@@ -879,11 +879,11 @@ pub(crate) fn poison(runtime: &CudaRuntime) -> Result<(), CudaError> {
 }
 
 thread_local! {
-    static BAND: RefCell<Option<(u32, Vec<String>)>> = const { RefCell::new(None) };
+    static BAND: RefCell<Option<(String, u32, Vec<String>)>> = const { RefCell::new(None) };
 }
 
 /// Turns the TF32 stage noise band on with a seed and the declared layers, or off
-pub(crate) fn set_band(band: Option<(u32, Vec<String>)>) {
+pub(crate) fn set_band(band: Option<(String, u32, Vec<String>)>) {
     BAND.with(|cell| *cell.borrow_mut() = band);
 }
 
@@ -894,22 +894,26 @@ pub(crate) fn perturb<Y: DevicePtrMut<f32>>(
     layer: &str,
     output: &mut Y,
 ) -> Result<(), CudaError> {
-    let seed = BAND.with(|cell| {
+    let draw = BAND.with(|cell| {
         let band = cell.borrow();
-        let (seed, layers) = band.as_ref()?;
+        let (case, seed, layers) = band.as_ref()?;
         layers.iter().any(|name| name == layer).then(|| {
             // FNV-1a of the layer name keeps each layer's pattern independent
-            layer.bytes().fold(*seed ^ 0x811c_9dc5, |hash, byte| {
+            let derived_seed = layer.bytes().fold(*seed ^ 0x811c_9dc5, |hash, byte| {
                 (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
-            })
+            });
+            (
+                qualify::lock::DrawCase::new(case, layer, *seed, output.len()),
+                derived_seed,
+            )
         })
     });
-    let Some(seed) = seed else {
+    let Some((draw, seed)) = draw else {
         return Ok(());
     };
 
     let count = output.len();
-    let draws = qualify::lock::cpu(runtime, qualify::lock::CpuWork::Tf32Draws, || {
+    let draws = qualify::lock::cpu(runtime, qualify::lock::CpuWork::Tf32Draws(&draw), || {
         band_draws(seed, count)
     })?;
     let draws = runtime.stream().clone_htod(&draws)?;
