@@ -190,6 +190,7 @@ fn capture(
         .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)
         .map_err(CudaError::from)
         .and_then(|()| {
+            let _trace = super::CaptureTrace::start();
             let enqueued = enqueue();
             let graph = stream.end_capture(CUgraphInstantiate_flags(0));
             enqueued?;
@@ -200,6 +201,50 @@ fn capture(
         unsafe { context.enable_event_tracking() };
     }
     Ok(captured?.expect("a qualification operator enqueues at least one node"))
+}
+
+/// One complete profile lifecycle without timing bursts or repeated graph replays
+fn profile_case(
+    runtime: &CudaRuntime,
+    key: &str,
+    choice: &str,
+    layer: &str,
+    mut enqueue: impl FnMut() -> Result<(), CudaError>,
+) -> Result<(), CudaError> {
+    if std::env::var("SPEAKRS_QUALIFY_SHORT_TRACE").is_ok_and(|mode| mode == "0") {
+        let _window = window(key);
+        return enqueue();
+    }
+    for _ in 0..WARMUP {
+        enqueue()?;
+    }
+    {
+        let _window = window(key);
+        enqueue()?;
+    }
+    runtime.synchronize()?;
+    set_label(Some(key.to_owned()));
+    let graph = {
+        let _marker = super::library(runtime.stream(), "driver.capture");
+        capture(runtime, &mut enqueue)
+    };
+    set_label(None);
+    let graph = graph?;
+    {
+        let _marker = super::library(runtime.stream(), "driver.first_replay");
+        let mut first = super::FirstReplay::new();
+        if let Some(result) = first.before(choice, || {
+            // a graph has fixed nodes, so the one-shot fault belongs to this host hook
+            let _window = window(&format!("{key}/first-replay"));
+            let _candidate = super::candidate(runtime.stream(), layer);
+            enqueue()
+        }) {
+            result?;
+        }
+        graph.launch()?;
+    }
+    runtime.synchronize()?;
+    Ok(())
 }
 
 /// Timed bursts of launches, with per-launch milliseconds
@@ -458,10 +503,9 @@ impl Run<'_> {
             for which in 0..2 {
                 upload(&mut buffers, which)?;
                 let key = self.key("stage", which);
-                {
-                    let _window = window(&key);
-                    buffers.forward(runtime)?;
-                }
+                profile_case(runtime, &key, self.choice, "resnet.layer1.0.conv1", || {
+                    buffers.forward(runtime)
+                })?;
                 buffers.download_output(runtime)?;
             }
             return Ok(());
@@ -611,10 +655,9 @@ impl Run<'_> {
             "profile" => {
                 for which in 0..2 {
                     op.restore(runtime, which)?;
-                    {
-                        let _window = window(&self.key(name, which));
-                        op.run(runtime, which)?;
-                    }
+                    profile_case(runtime, &self.key(name, which), self.choice, name, || {
+                        op.run(runtime, which)
+                    })?;
                     op.output(runtime)?;
                 }
             }
@@ -731,10 +774,18 @@ impl Run<'_> {
                 model
                     .workspace(runtime, batch, WINDOW)?
                     .upload_input(runtime, input)?;
-                {
-                    let _window = window(&self.key("stage", which));
-                    model.forward_eager(runtime, batch, WINDOW)?;
-                }
+                let layer = if self.target == "lstm" {
+                    "lstm.stack"
+                } else {
+                    "sincnet.conv0.abs_pool"
+                };
+                profile_case(
+                    runtime,
+                    &self.key("stage", which),
+                    self.choice,
+                    layer,
+                    || model.forward_eager(runtime, batch, WINDOW),
+                )?;
                 download(&model)?;
             }
             return Ok(());

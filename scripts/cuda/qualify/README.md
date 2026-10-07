@@ -1041,4 +1041,36 @@ producer and consumer with no extra device copy.
 | StageTail and StageTailControl | Not applicable yet | Require an accepted production plan; no such fbank plan exists |
 | WrongLayout | Not applicable | No padded segment or padded writer exists at this boundary |
 
-`FirstUseFallback` and the short trace are added in the next shared harness change.
+`FirstUseFallback` also applies. A locked one-shot host hook makes a real Library
+call inside a candidate scope immediately before the first profiled graph replay.
+Neither eager execution nor graph capture invokes that hook. Further invocations
+of the same hook do not repeat the call.
+
+### Short profile lifecycle
+
+The nsys process includes plan construction, five warm-up invocations, one eager
+window, capture, and one graph replay per input set and boundary or stage. Timing
+bursts stay in the separate timing process. Captured nodes do not represent eager
+launches: capture mutes only their nested NVTX launch/phase ranges. The CUDA trace
+and a `driver.capture` range remain. Graph-node evidence and forbidden Library-call
+tracking remain active. Replay has its own `driver.first_replay` range outside the
+eager window. Thus the eager launch multiset remains exactly one invocation.
+
+If a process registers side streams, the harness retains an additional original
+eager-only trace for stream attribution and eager/capture multiset comparison.
+Graph replay correlations cannot reconstruct each captured node's owning scope.
+`short_profile` keeps the lifecycle trace and `profile_retained_checks` records the
+reason. This does not change the stream check or accept unowned work.
+
+| Existing profile check | Retained coverage |
+| --- | --- |
+| `profile` | Every old eager operator and stage window, both input sets, all cases and modes; plans remain in the full trace |
+| `profile`: stream rules | Same correlated eager launches; original eager-only trace is retained for registered side streams |
+| `profile:captured_library_calls` | All previous numeric/timing/paired captures plus the new profile captures and first-replay hook |
+| `profile:graph_nodes` | Same node restrictions and eager set/multiset comparisons; profile captures add both input sets |
+| `profile:sequential_capture` | Original separate seven-case trace and same multiset check |
+| `determinism:fixed_reduction_order` | All custom entries launched by the same cases; each eager invocation remains, so no atomic entry loses coverage |
+| `ptx:loaded_bytes/stable` | Same complete loaded-module inventory across phases, including the profile process |
+
+No gate, threshold, sample count, seed or noise rule changes. GPU acceptance of
+this trace requires the pilot; host compilation alone is not that evidence.

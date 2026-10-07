@@ -57,8 +57,11 @@ impl Network {
                 let mutant = *mutant;
                 super::super::test_support::poison(runtime)?;
                 {
-                    let _scope =
-                        super::super::test_support::candidate(runtime.stream(), SINC_LAYER);
+                    let _scope = super::super::test_support::mutant_scope(
+                        runtime.stream(),
+                        SINC_LAYER,
+                        mutant,
+                    );
                     if !mutant.skips() {
                         super::test_support::mutant_sinc(
                             self, runtime, shape, library, workspace, io.input, io.raw, mutant,
@@ -256,8 +259,11 @@ impl Network {
                 let mutant = *mutant;
                 super::super::test_support::poison(runtime)?;
                 {
-                    let _scope =
-                        super::super::test_support::candidate(runtime.stream(), LSTM_LAYER);
+                    let _scope = super::super::test_support::mutant_scope(
+                        runtime.stream(),
+                        LSTM_LAYER,
+                        mutant,
+                    );
                     if !mutant.skips() {
                         super::test_support::mutant_lstm(
                             self, runtime, library, input, output, mutant,

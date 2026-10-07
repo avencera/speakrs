@@ -135,6 +135,7 @@ MUTANT_GATES = {
     "Precision": Gate("layer", "layer parity"),
     "Shape": Gate("layer", "layer parity", "non_b32"),
     "Fallback": Gate("profile", "forbidden library kernels"),
+    "FirstUseFallback": Gate("profile", "forbidden library kernels"),
     "Tail": Gate("layer", "layer parity", "partial"),
     "Atomic": Gate(
         "determinism:fixed_reduction_order",
@@ -164,6 +165,7 @@ MUTANT_PHASES = {
     "Shape": ("numeric",),
     "Tail": ("numeric",),
     "Fallback": ("numeric", "profile"),
+    "FirstUseFallback": ("numeric", "profile"),
     "Atomic": ("numeric", "profile"),
     "Unscoped": ("numeric", "profile"),
     "Unlisted": ("numeric", "profile"),
@@ -1646,8 +1648,9 @@ def profile(
     *,
     test: str = PROFILE_TEST,
     label: str = "profile",
+    eager_only: bool = False,
 ) -> Path:
-    """Run the eager nsys trace with the locked NVTX shim and export it."""
+    """Trace plan, warm-up, eager, capture and one replay with the locked shim."""
     shim = directory / "nvtx.so"
     if command(
         [
@@ -1672,6 +1675,7 @@ def profile(
         SPEAKRS_QUALIFY_NVTX=str(shim),
         SPEAKRS_QUALIFY_IMPL=implementation,
         SPEAKRS_QUALIFY_PHASE="profile",
+        SPEAKRS_QUALIFY_SHORT_TRACE="0" if eager_only else "1",
         SPEAKRS_QUALIFY_OUTPUT=str(directory / f"{label}-driver.json"),
     )
     if gpu_command(
@@ -1722,6 +1726,28 @@ def profile(
             else None,
         )
     result[label] = {"path": str(exported), "sha256": sha(exported)}
+    if test == PROFILE_TEST and not eager_only and process.get("side_streams"):
+        # replay correlations cannot recover per-node side-stream ownership
+        # retain the original eager trace for the unchanged attribution check
+        result["short_profile"] = result[label]
+        retained = profile(
+            result,
+            binary,
+            env,
+            directory,
+            steps,
+            implementation,
+            target,
+            test=test,
+            label=f"{label}-eager",
+            eager_only=True,
+        )
+        result[label] = {"path": str(retained), "sha256": sha(retained)}
+        result["profile_retained_checks"] = [
+            "profile: stream attribution",
+            "profile:graph_nodes: eager launch multisets",
+        ]
+        return retained
     return exported
 
 
@@ -2102,8 +2128,6 @@ def collect_tier(
             )
         }
 
-    check(result, "profile:captured_library_calls", captured_calls)
-    graphs = graph_kernels(candidate_processes)
     if "profile" not in phases:
         check(result, "profile:graph_nodes", graph_nodes)
 
@@ -2146,6 +2170,7 @@ def collect_tier(
                 check(result, "profile", lambda: trace(False))
 
         def graph_matches_profile():
+            graphs = graph_kernels(candidate_processes)
             evidence = graph_nodes()
             eager = window_kernels(exported, nonce)
             differences = {
@@ -2164,6 +2189,8 @@ def collect_tier(
             return {**evidence, "compared_cases": len(graphs), "multisets": multisets}
 
         check(result, "profile:graph_nodes", graph_matches_profile)
+
+    check(result, "profile:captured_library_calls", captured_calls)
 
     if "profile" in phases and implementation == "Oxide":
         regression = profile(

@@ -117,8 +117,11 @@ impl Convs<'_> {
                 let mutant = *mutant;
                 super::super::test_support::poison(self.runtime)?;
                 {
-                    let _scope =
-                        super::super::test_support::candidate(self.runtime.stream(), layer.name());
+                    let _scope = super::super::test_support::mutant_scope(
+                        self.runtime.stream(),
+                        layer.name(),
+                        mutant,
+                    );
                     if !mutant.skips() {
                         super::test_support::mutant_conv(self, layer, x, residual, y, mutant)?;
                     }

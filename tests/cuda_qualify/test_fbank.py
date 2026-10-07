@@ -60,5 +60,74 @@ class FbankDomain(unittest.TestCase):
         )
 
 
+class ShortTrace(unittest.TestCase):
+    def test_retains_eager_trace_only_when_side_streams_need_it(self):
+        import json
+        import tempfile
+        from unittest.mock import patch
+
+        for streams in ([], [7]):
+            with tempfile.TemporaryDirectory() as directory:
+                modes = []
+
+                def command(argv, env, log, steps):
+                    if argv[:2] == ["nsys", "export"]:
+                        Path(argv[argv.index("-o") + 1]).write_bytes(b"trace")
+                    return 0
+
+                def gpu(argv, env, log, steps):
+                    modes.append(env["SPEAKRS_QUALIFY_SHORT_TRACE"])
+                    Path(env["SPEAKRS_QUALIFY_OUTPUT"]).write_text(
+                        json.dumps({"side_streams": streams})
+                    )
+                    return 0
+
+                result = {}
+                with (
+                    patch.object(qualify, "command", side_effect=command),
+                    patch.object(qualify, "gpu_command", side_effect=gpu),
+                    patch.object(qualify, "validate_target"),
+                ):
+                    path = qualify.profile(
+                        result,
+                        Path("driver"),
+                        {
+                            "SPEAKRS_CUDA_PTX_TIER": "sm75",
+                            "SPEAKRS_QUALIFY_TARGET": "sincnet",
+                        },
+                        Path(directory),
+                        [],
+                        "Library",
+                        "sincnet",
+                    )
+                self.assertEqual(modes, ["1", "0"] if streams else ["1"])
+                self.assertEqual(
+                    path.name, "profile-eager.sqlite" if streams else "profile.sqlite"
+                )
+                self.assertEqual("short_profile" in result, bool(streams))
+
+    def test_first_use_fault_requires_the_existing_profile_reason(self):
+        gate = qualify.MUTANT_GATES["FirstUseFallback"]
+        self.assertTrue(
+            gate.matches(
+                {
+                    "check": "sm75/profile",
+                    "reason": "profile: forbidden library kernels in a candidate scope",
+                }
+            )
+        )
+        self.assertFalse(
+            gate.matches(
+                {
+                    "check": "sm75/profile:graph_nodes",
+                    "reason": "forbidden library kernels",
+                }
+            )
+        )
+        self.assertEqual(
+            qualify.MUTANT_PHASES["FirstUseFallback"], ("numeric", "profile")
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

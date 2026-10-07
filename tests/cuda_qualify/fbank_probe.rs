@@ -172,7 +172,7 @@ impl<C: FbankCandidate> Operator<C> {
             }
             Route::Mutant(mutant) => {
                 test_support::poison(runtime)?;
-                let _scope = test_support::candidate(runtime.stream(), LAYER);
+                let _scope = test_support::mutant_scope(runtime.stream(), LAYER, *mutant);
                 if !mutant.skips() {
                     if *mutant == Mutant::Precision {
                         test_support::round_input(runtime, &self.audio[which])?;
@@ -262,8 +262,13 @@ impl Run<'_> {
             if self.phase == "profile" {
                 for which in 0..2 {
                     op.restore(self.runtime, which)?;
-                    let _window = test_support::window(&self.key(layer, which));
-                    op.run(self.runtime, which, stage)?;
+                    super::profile_case(
+                        self.runtime,
+                        &self.key(layer, which),
+                        self.choice,
+                        LAYER,
+                        || op.run(self.runtime, which, stage),
+                    )?;
                     op.output(self.runtime, stage)?;
                 }
                 continue;
@@ -298,7 +303,15 @@ impl Run<'_> {
                 continue;
             }
             if self.phase == "sanitize" {
-                graphs[0].launch()?;
+                for (which, graph) in graphs.iter().enumerate() {
+                    op.restore(self.runtime, which)?;
+                    graph.launch()?;
+                }
+                self.runtime.synchronize()?;
+                rows.push(
+                    json!({"id":self.key(LAYER, 0),"sanitized":true,"declared":op.declared()}),
+                );
+                println!("sanitized {}", self.key(LAYER, 0));
                 continue;
             }
             for which in 0..2 {

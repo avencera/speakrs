@@ -5,7 +5,7 @@
 //! nonce that the locked driver passes in `SPEAKRS_QUALIFY_NONCE`, which candidate code
 //! cannot read, so a range a candidate pushes itself never counts
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::ffi::{CStr, CString, c_char};
 use std::marker::PhantomData;
@@ -64,6 +64,8 @@ pub(crate) enum Mutant {
     StageAccuracy,
     Shape,
     Fallback,
+    /// A real Library call on the first profiled replay, never during capture
+    FirstUseFallback,
     Tail,
     Atomic,
     Slow,
@@ -88,6 +90,7 @@ impl Mutant {
             "Precision" => Some(Self::Precision),
             "Shape" => Some(Self::Shape),
             "Fallback" => Some(Self::Fallback),
+            "FirstUseFallback" => Some(Self::FirstUseFallback),
             "Tail" => Some(Self::Tail),
             "Atomic" => Some(Self::Atomic),
             "Slow" => Some(Self::Slow),
@@ -268,6 +271,7 @@ thread_local! {
     static PROJECTION_NODES: RefCell<ProjectionNodes> = const { RefCell::new(ProjectionNodes { capture_id: None, nodes: BTreeSet::new() }) };
     static GRAPH_EVIDENCE: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
     static LABEL: RefCell<Option<String>> = const { RefCell::new(None) };
+    static CAPTURE_TRACE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Labels the graph captures that follow with the driver's case id, so each case's
@@ -279,6 +283,7 @@ pub(crate) fn set_label(label: Option<String>) {
 /// One open harness scope; closes its NVTX range and checks captured nodes on drop
 pub(crate) struct Scope {
     active: bool,
+    nvtx: bool,
     _thread: PhantomData<Rc<()>>,
 }
 
@@ -286,6 +291,7 @@ fn open(kind: Kind, name: &str, stream: Option<&CudaStream>) -> Scope {
     let Some(harness) = harness() else {
         return Scope {
             active: false,
+            nvtx: false,
             _thread: PhantomData,
         };
     };
@@ -302,7 +308,10 @@ fn open(kind: Kind, name: &str, stream: Option<&CudaStream>) -> Scope {
             capture,
         })
     });
-    if let Some(nvtx) = &harness.nvtx {
+    let trace = !CAPTURE_TRACE.with(Cell::get);
+    if let Some(nvtx) = &harness.nvtx
+        && trace
+    {
         let text = CString::new(format!("qualify.{}.{}.{name}", harness.nonce, kind.label()))
             .expect("scope names have no nul bytes");
         // SAFETY: NVTX copies the terminated message during the call
@@ -311,6 +320,7 @@ fn open(kind: Kind, name: &str, stream: Option<&CudaStream>) -> Scope {
 
     Scope {
         active: true,
+        nvtx: trace && harness.nvtx.is_some(),
         _thread: PhantomData,
     }
 }
@@ -321,7 +331,9 @@ impl Drop for Scope {
             return;
         }
 
-        if let Some(nvtx) = harness().and_then(|harness| harness.nvtx.as_ref()) {
+        if self.nvtx
+            && let Some(nvtx) = harness().and_then(|harness| harness.nvtx.as_ref())
+        {
             // SAFETY: this guard closes exactly one range on the thread that opened it
             unsafe { (nvtx.pop)() };
         }
@@ -330,6 +342,46 @@ impl Drop for Scope {
             close_capture(frame);
         }
     }
+}
+
+/// Mark capture without presenting recorded nodes as correlated eager launches
+pub(crate) struct CaptureTrace(PhantomData<Rc<()>>);
+
+impl CaptureTrace {
+    pub(crate) fn start() -> Self {
+        CAPTURE_TRACE.with(|state| assert!(!state.replace(true), "non-nested trace capture"));
+        Self(PhantomData)
+    }
+}
+
+impl Drop for CaptureTrace {
+    fn drop(&mut self) {
+        CAPTURE_TRACE.with(|state| assert!(state.replace(false), "live trace capture"));
+    }
+}
+
+/// One graph's host replay hook, separate from its immutable captured nodes
+pub(crate) struct FirstReplay(bool);
+
+impl FirstReplay {
+    /// Start before this graph's first launch
+    pub(crate) fn new() -> Self {
+        Self(true)
+    }
+
+    /// Execute the planted fallback once; eager execution and capture never call this
+    pub(crate) fn before<T>(&mut self, choice: &str, fallback: impl FnOnce() -> T) -> Option<T> {
+        let first = std::mem::replace(&mut self.0, false);
+        (first && choice == "FirstUseFallback").then(fallback)
+    }
+}
+
+/// Preserve the no-fault Library route until the locked first-replay hook runs
+pub(crate) fn mutant_scope(stream: &CudaStream, layer: &str, mutant: Mutant) -> Scope {
+    if mutant == Mutant::FirstUseFallback {
+        return library(stream, layer);
+    }
+    candidate(stream, layer)
 }
 
 /// Every library call made while a candidate scope is open is a violation
@@ -1291,4 +1343,51 @@ mod timing_tests {
         drop(outer);
         assert_module_load_allowed();
     }
+}
+
+#[test]
+fn first_replay_hook_runs_the_library_fallback_only_once() {
+    let mut replay = FirstReplay::new();
+    let mut calls = 0;
+    for _ in 0..3 {
+        replay.before("FirstUseFallback", || {
+            calls += 1;
+        });
+    }
+    assert_eq!(calls, 1);
+    let mut control = FirstReplay::new();
+    assert!(
+        control
+            .before("Library", || panic!("no Library-control fault"))
+            .is_none()
+    );
+    assert!(
+        control
+            .before("FirstUseFallback", || panic!("not a first replay"))
+            .is_none()
+    );
+}
+
+#[test]
+fn capture_trace_keeps_forbidden_library_call_tracking_active() {
+    let saved_stack = STACK.with(|stack| stack.take());
+    let saved_calls = CALL_VIOLATIONS.with(|calls| calls.take());
+    {
+        let _trace = CaptureTrace::start();
+        STACK.with(|stack| {
+            stack.borrow_mut().push(Frame {
+                kind: Kind::Candidate,
+                name: "fbank.dft".to_owned(),
+                capture: None,
+            })
+        });
+        check_call("cublasSgemm");
+    }
+    assert_eq!(
+        library_call_violations(),
+        ["cublasSgemm inside candidate fbank.dft"]
+    );
+    assert!(!CAPTURE_TRACE.with(Cell::get));
+    STACK.with(|stack| *stack.borrow_mut() = saved_stack);
+    CALL_VIOLATIONS.with(|calls| *calls.borrow_mut() = saved_calls);
 }
