@@ -105,6 +105,9 @@ impl Tier {
 pub struct Area {
     name: &'static str,
     tiers: &'static [Tier],
+    /// A production binding pins the baseline's exact bytes, so every target embeds it
+    /// and higher tiers may export entries the baseline lacks instead of stubs
+    pinned_baseline: bool,
 }
 
 impl Area {
@@ -123,7 +126,19 @@ impl Area {
             index += 1;
         }
 
-        Self { name, tiers }
+        Self {
+            name,
+            tiers,
+            pinned_baseline: false,
+        }
+    }
+
+    /// As [`Area::new`], for an area whose baseline a production binding pins
+    const fn pinned_baseline(name: &'static str, tiers: &'static [Tier]) -> Self {
+        Self {
+            pinned_baseline: true,
+            ..Self::new(name, tiers)
+        }
     }
 
     fn variants(self) -> impl Iterator<Item = Variant> {
@@ -146,7 +161,9 @@ pub const AREAS: &[Area] = &[
     Area::new("segmentation", &[Tier::Sm75]),
     // candidate areas: kernels that may replace a library call, qualified by
     // `cargo xtask cuda-qualify` and kept apart from the Library-owned areas above
-    Area::new("resnet", &[Tier::Sm75]),
+    // the capability 12.0 binding pins the sm75 bytes; sm80 adds the TF32 tensor-core
+    // entries that only the A100 selection plans
+    Area::pinned_baseline("resnet", &[Tier::Sm75, Tier::Sm80]),
     Area::new("lstm", &[Tier::Sm75]),
     Area::new("sincnet", &[Tier::Sm75]),
     Area::new("segdense", &[Tier::Sm75, Tier::Sm80]),
@@ -321,7 +338,7 @@ fn build_area(crate_dir: &Path, ptx_dir: &Path, area: Area) -> Result<()> {
         .iter()
         .map(|(variant, ptx, _)| (*variant, ptx.as_str()))
         .collect();
-    check_entry_points(&modules)?;
+    check_entry_points(area, &modules)?;
 
     remove_undeclared_variants(ptx_dir, area)?;
     let mut manifest = Manifest::default();
@@ -699,7 +716,7 @@ fn check_area_ptx(crate_dir: &Path, ptx_dir: &Path, area: Area, manifest: &Manif
         .iter()
         .map(|(variant, ptx)| (*variant, ptx.as_str()))
         .collect();
-    check_entry_points(&modules)
+    check_entry_points(area, &modules)
 }
 
 fn tier_names(tiers: &[Tier]) -> String {
@@ -764,8 +781,9 @@ fn host_embed_source_problems(source: &str) -> Vec<String> {
                 let features = [Tier::Sm75, Tier::Sm80, Tier::Sm90, Tier::Sm120]
                     .into_iter()
                     .filter(|tier| {
-                        area.tiers.iter().rev().find(|shipped| **shipped <= *tier)
-                            == Some(&variant.tier)
+                        (area.pinned_baseline && variant.tier == Tier::BASELINE)
+                            || area.tiers.iter().rev().find(|shipped| **shipped <= *tier)
+                                == Some(&variant.tier)
                     })
                     .map(Tier::host_feature)
                     .collect();
@@ -1020,7 +1038,7 @@ fn parse_params(list: &str) -> Vec<String> {
 
 /// The host picks one variant per area at run time and looks kernels up by name, so
 /// every variant must export the baseline's kernels with the same parameters
-fn check_entry_points(modules: &[(Variant, &str)]) -> Result<()> {
+fn check_entry_points(area: Area, modules: &[(Variant, &str)]) -> Result<()> {
     let Some(((baseline, baseline_ptx), higher)) = modules.split_first() else {
         return Ok(());
     };
@@ -1036,6 +1054,7 @@ fn check_entry_points(modules: &[(Variant, &str)]) -> Result<()> {
             &expected,
             &variant.file_name(),
             &actual,
+            area.pinned_baseline,
         ));
     }
 
@@ -1054,6 +1073,7 @@ fn entry_point_differences(
     expected: &EntryPoints,
     actual_file: &str,
     actual: &EntryPoints,
+    may_add: bool,
 ) -> Vec<String> {
     let mut problems = Vec::new();
     for (name, params) in expected {
@@ -1069,7 +1089,10 @@ fn entry_point_differences(
         }
     }
 
-    for name in actual.keys().filter(|name| !expected.contains_key(*name)) {
+    // a pinned baseline cannot gain trapping stubs, so the host plans the added entries
+    // only for the tiers that export them
+    let added = actual.keys().filter(|name| !expected.contains_key(*name));
+    for name in added.filter(|_| !may_add) {
         problems.push(format!(
             "{actual_file} adds `{name}`, absent from {expected_file}"
         ));
@@ -1311,9 +1334,9 @@ impl ManifestVariant {
 #[cfg(test)]
 mod tests {
     use super::{
-        AREAS, Manifest, ManifestCubin, ManifestVariant, PTXAS_FLAGS, PTXAS_VERSION, Tier, Variant,
-        area_of, belongs_to, check_area_cubins, check_entry_points, check_ptx_header, entry_points,
-        host_embed_source_problems, sha256_hex, unexpected_ptx_files,
+        AREAS, Area, Manifest, ManifestCubin, ManifestVariant, PTXAS_FLAGS, PTXAS_VERSION, Tier,
+        Variant, area_of, belongs_to, check_area_cubins, check_entry_points, check_ptx_header,
+        entry_points, host_embed_source_problems, sha256_hex, unexpected_ptx_files,
     };
 
     const PROBE_PTX: &str = "//\n// Generated by LLVM\n//\n.version 6.3\n.target sm_75\n.address_size 64\n\n\t// .globl\tprobe_scale_add // .entry fake(\n.visible .entry probe_scale_add(\n\t.param .f32 probe_scale_add_param_0,\n\t.param .u64 .ptr .align 4 probe_scale_add_param_1,\n\t.param .u64 probe_scale_add_param_2\n)\n{\n\tret;\n}\n";
@@ -1368,25 +1391,64 @@ mod tests {
     fn entry_points_must_match_across_variants() {
         let same = PROBE_PTX.replace("sm_75", "sm_80");
         assert!(
-            check_entry_points(&[(probe(Tier::Sm75), PROBE_PTX), (probe(Tier::Sm80), &same)])
-                .is_ok()
+            check_entry_points(
+                AREAS[0],
+                &[(probe(Tier::Sm75), PROBE_PTX), (probe(Tier::Sm80), &same)]
+            )
+            .is_ok()
         );
 
         let renamed = same.replace("probe_scale_add", "probe_scale_add_v2");
         assert!(
-            check_entry_points(&[
-                (probe(Tier::Sm75), PROBE_PTX),
-                (probe(Tier::Sm80), &renamed)
-            ])
+            check_entry_points(
+                AREAS[0],
+                &[
+                    (probe(Tier::Sm75), PROBE_PTX),
+                    (probe(Tier::Sm80), &renamed)
+                ]
+            )
             .is_err()
         );
 
         let retyped = same.replace(".param .f32", ".param .f64");
         assert!(
-            check_entry_points(&[
-                (probe(Tier::Sm75), PROBE_PTX),
-                (probe(Tier::Sm80), &retyped)
-            ])
+            check_entry_points(
+                AREAS[0],
+                &[
+                    (probe(Tier::Sm75), PROBE_PTX),
+                    (probe(Tier::Sm80), &retyped)
+                ]
+            )
+            .is_err()
+        );
+
+        // a pinned baseline lets a higher tier add entries, never rename or retype them
+        let pinned = Area::pinned_baseline("probe", &[Tier::Sm75, Tier::Sm80]);
+        let entry = same[same.find(".visible .entry").expect("entry")..]
+            .replace("probe_scale_add", "probe_scale_add_tc");
+        let added = format!("{same}\n{entry}");
+        assert!(
+            check_entry_points(
+                pinned,
+                &[(probe(Tier::Sm75), PROBE_PTX), (probe(Tier::Sm80), &added)]
+            )
+            .is_ok()
+        );
+        assert!(
+            check_entry_points(
+                AREAS[0],
+                &[(probe(Tier::Sm75), PROBE_PTX), (probe(Tier::Sm80), &added)]
+            )
+            .is_err()
+        );
+        assert!(
+            check_entry_points(
+                pinned,
+                &[
+                    (probe(Tier::Sm75), PROBE_PTX),
+                    (probe(Tier::Sm80), &renamed)
+                ]
+            )
             .is_err()
         );
     }
@@ -1399,13 +1461,14 @@ mod tests {
                 let mask = [Tier::Sm75, Tier::Sm80, Tier::Sm90, Tier::Sm120]
                     .into_iter()
                     .filter(|tier| {
-                        variant
-                            .area
-                            .tiers
-                            .iter()
-                            .rev()
-                            .find(|shipped| **shipped <= *tier)
-                            == Some(&variant.tier)
+                        (variant.area.pinned_baseline && variant.tier == Tier::BASELINE)
+                            || variant
+                                .area
+                                .tiers
+                                .iter()
+                                .rev()
+                                .find(|shipped| **shipped <= *tier)
+                                == Some(&variant.tier)
                     })
                     .map(|tier| format!("{:?}", tier.host_feature()))
                     .collect::<Vec<_>>()

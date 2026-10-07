@@ -44,6 +44,11 @@
 use cuda_device::shared::cvta_generic_to_shared_u32;
 use cuda_device::{DisjointSlice, SharedArray, kernel, launch_bounds, ptx_asm, thread};
 
+// only the sm80 variant exports the TF32 tensor-core entries, so the sm75 PTX that the
+// capability 12.0 production binding pins keeps its exact bytes
+#[cfg(feature = "tier-sm80")]
+pub mod tensor;
+
 /// Output columns per block
 pub const CONV_TILE_COLS: u32 = 64;
 
