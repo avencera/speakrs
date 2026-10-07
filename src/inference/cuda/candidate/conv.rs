@@ -24,7 +24,7 @@ use super::{
     PlanError, SignedZeroContract, SpecialValues,
 };
 use crate::inference::cuda::dnn::Conv2d;
-use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, LoadedKernels};
+use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, LoadedKernels, PtxTier};
 
 const SPK_RESNET_PACK_WEIGHTS: &str = "spk_resnet_pack_weights";
 
@@ -52,6 +52,20 @@ const C64: [&str; 7] = [
     "resnet.layer2.3.conv1",
     "resnet.layer2.3.conv2",
 ];
+
+/// Every layer, batch and mode the three fused shapes implement
+const IMPLEMENTED: Coverage = Coverage(&[
+    CoverageEntry {
+        layers: &C32_AND_STRIDED,
+        batches: Batches::All,
+        maths: Maths::All,
+    },
+    CoverageEntry {
+        layers: &C64,
+        batches: Batches::All,
+        maths: Maths::All,
+    },
+]);
 
 /// Output columns per block; must equal `CONV_TILE_COLS` in the kernel crate
 const TILE_COLS: usize = 64;
@@ -210,6 +224,16 @@ impl ConvCandidate for Oxide {
             maths: Maths::Only(&[CudaMath::Fp32]),
         },
     ]);
+
+    // the C64 exclusions above are speed, not implementation: a driver-only build has
+    // no cuDNN to defer to, so there every kernel covers every batch and mode
+    fn coverage(_tier: PtxTier) -> Coverage {
+        if crate::inference::cuda::driver_only() {
+            return IMPLEMENTED;
+        }
+
+        Self::COVERAGE
+    }
 
     // the ReLU is `if value < 0.0 { 0.0 } else { value }` after FP32 FMA sums, so NaN
     // and negative zero pass through it

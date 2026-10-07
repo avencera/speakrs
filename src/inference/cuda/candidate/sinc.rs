@@ -16,7 +16,7 @@ use super::{
     SpecialValues,
 };
 use crate::inference::cuda::error::check_len;
-use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, LoadedKernels};
+use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, LoadedKernels, PtxTier};
 
 const SPK_SINCNET_PACK_FILTERS: &str = "spk_sincnet_pack_filters";
 const SPK_SINCNET_CONV_ABS_POOL: &str = "spk_sincnet_conv_abs_pool";
@@ -44,6 +44,13 @@ const TILE: usize = 256;
 /// Threads of one block; `THREADS` in the kernel crate
 const THREADS: u32 = 256;
 
+/// Every batch in both modes
+const IMPLEMENTED: Coverage = Coverage(&[CoverageEntry {
+    layers: &[LAYER],
+    batches: Batches::All,
+    maths: Maths::All,
+}]);
+
 /// Threads of one filter-packing block
 const PACK_THREADS: u32 = 256;
 
@@ -66,6 +73,16 @@ impl SincCandidate for Oxide {
         batches: Batches::All,
         maths: Maths::Only(&[CudaMath::Fp32]),
     }]);
+    // TF32 mode was left out for qualification, not implementation: the kernel runs
+    // full-precision FP32 in both modes, and a driver-only build has no cuDNN to defer to
+    fn coverage(_tier: PtxTier) -> Coverage {
+        if crate::inference::cuda::driver_only() {
+            return IMPLEMENTED;
+        }
+
+        Self::COVERAGE
+    }
+
     // the pooling maximum is PTX `max.f32`, which returns the non-NaN operand, and it
     // starts at negative infinity over absolute values
     const SPECIAL_VALUES: SpecialValues = SpecialValues {
