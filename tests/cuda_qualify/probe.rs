@@ -12,7 +12,8 @@ use super::{
     set_band, set_label, window,
 };
 use crate::inference::cuda::candidate::{
-    Batches, ConvCandidate, ConvOxide, Coverage, CoverageEntry, Maths, Projection,
+    Batches, ConvCandidate, ConvOxide, Coverage, CoverageEntry, FbankCandidate, FbankOxide, Maths,
+    Projection,
 };
 use crate::inference::cuda::embedding::test_support::{HostInputs, Operator};
 use crate::inference::cuda::weights::uniform;
@@ -412,7 +413,7 @@ fn declared_coverage(
         return json!({"entries": [{"layers": "all", "batches": "all", "maths": "all"}]});
     }
     if target == "fbankdft" {
-        return coverage_json(Coverage::NONE);
+        return coverage_json(FbankOxide::coverage(tier));
     }
     if target == "resnet" {
         return coverage_json(ConvOxide::coverage(tier));
@@ -1482,11 +1483,12 @@ fn prepare_process_modules(
     choice_name: &str,
     cases: &[(CudaMath, &str, usize)],
 ) -> Result<(), CudaError> {
-    if target == "fbankdft" {
-        runtime.load_kernels(KernelModule::Fbank)?;
-        return Ok(());
-    }
     let area = match target {
+        "fbankdft" => {
+            // the Library producer and the shared log/CMN consumer run the always-on area
+            runtime.load_kernels(KernelModule::Fbank)?;
+            KernelModule::FbankDft
+        }
         "resnet" => {
             runtime.load_kernels(KernelModule::Embedding)?;
             KernelModule::Resnet
@@ -1502,7 +1504,9 @@ fn prepare_process_modules(
         _ => unreachable!("fixed qualification target"),
     };
     let mut boundaries = Vec::new();
-    if target == "resnet" {
+    if target == "fbankdft" {
+        boundaries.push("fbank.dft".to_owned());
+    } else if target == "resnet" {
         for (stage, blocks) in [(1, 3), (2, 4)] {
             for block in 0..blocks {
                 for conv in [1, 2] {
@@ -1524,7 +1528,13 @@ fn prepare_process_modules(
         for boundary in &boundaries {
             let boundary = crate::inference::cuda::implementation::BoundaryId::parse(boundary)
                 .expect("fixed qualification boundary");
-            assert_eq!(boundary.area(), area);
+            // fbank.dft diagnostics name its Library-owned always-on area
+            let owner = if target == "fbankdft" {
+                KernelModule::Fbank
+            } else {
+                area
+            };
+            assert_eq!(boundary.area(), owner);
             crate::inference::cuda::implementation::plan_selection(
                 runtime,
                 boundary,

@@ -99,24 +99,6 @@ pub(crate) fn library_artifacts() -> Value {
     })
 }
 
-/// Test-only pin adapter for the generic fbank seam; Library has no candidate pin
-pub(super) trait FbankPinEvidence: Copy {
-    /// The candidate execution identity, or no identity for the Library control
-    fn configuration(self) -> Option<ConfigPin>;
-}
-
-impl FbankPinEvidence for () {
-    fn configuration(self) -> Option<ConfigPin> {
-        None
-    }
-}
-
-impl FbankPinEvidence for FbankPin {
-    fn configuration(self) -> Option<ConfigPin> {
-        Some(ConfigPin::Fbank(self))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{pin_json, planned, record};

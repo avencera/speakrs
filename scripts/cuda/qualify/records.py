@@ -43,7 +43,7 @@ AREA_HOST = {
     "resnet": "conv",
     "lstm": "lstm",
     "sincnet": "sinc",
-    "fbankdft": "fbankdft",
+    "fbankdft": "fbank",
 }
 # acceptance-time hashes migrated from QUALIFIED.json; this is not a writable manifest
 LEGACY_BINDINGS: dict[str, dict] = {

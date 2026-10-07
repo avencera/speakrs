@@ -1,7 +1,7 @@
 """Static scan of candidate code and of the build inputs, before anything is built.
 
 Candidate host code lives in src/inference/cuda/candidate/ and candidate kernels in
-the resnet, lstm and sincnet areas of the kernel crate. Locked dispatch calls the
+the resnet, lstm, sincnet and fbankdft areas of the kernel crate. Locked dispatch calls the
 candidate, so candidate code must not observe or steer the measurement: no
 environment, files, network, processes, threads, clocks or capture state; no state
 that outlives a call; no harness, NVTX or library calls; no foreign code. Comments

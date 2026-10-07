@@ -54,16 +54,18 @@ pub struct FbankConstants {
 }
 
 /// The mel filters as one contiguous run of non-zero weights per filter
+///
+/// The Library's sparse mel kernel and the record-owned DFT producer read the same runs
 #[derive(Debug, Clone)]
-pub(super) struct MelTable {
+pub(in crate::inference::cuda) struct MelTable {
     /// First DFT bin of each filter
-    pub(super) first: Vec<u32>,
+    pub(in crate::inference::cuda) first: Vec<u32>,
     /// Number of DFT bins each filter covers
-    pub(super) count: Vec<u32>,
+    pub(in crate::inference::cuda) count: Vec<u32>,
     /// Row stride of [`Self::weights`], the widest filter
-    pub(super) width: usize,
+    pub(in crate::inference::cuda) width: usize,
     /// `[FBANK_MEL_BINS, width]` weights, zero past each filter's count
-    pub(super) weights: Vec<f32>,
+    pub(in crate::inference::cuda) weights: Vec<f32>,
 }
 
 impl FbankConstants {
@@ -96,7 +98,8 @@ impl FbankConstants {
         &self.mel
     }
 
-    pub(super) fn mel_table(&self) -> &MelTable {
+    /// Contiguous filter runs
+    pub(in crate::inference::cuda) fn mel_table(&self) -> &MelTable {
         &self.mel_table
     }
 }

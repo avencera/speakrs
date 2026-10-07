@@ -3,8 +3,9 @@
 use std::cell::RefCell;
 
 use super::{BAND_SEEDS, Run, bursts, capture, metrics, paired, record, sha, timing_row};
-use crate::inference::cuda::candidate::{FbankCandidate, FbankSpec, Phases};
+use crate::inference::cuda::candidate::{FbankCandidate, FbankOxide, FbankSpec, Phases};
 use crate::inference::cuda::fbank::test_support::Library;
+use crate::inference::cuda::implementation::{BoundaryId, Selected, plan_selection};
 use crate::inference::cuda::test_support::{self, Mutant};
 use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, SafetensorsFile};
 use cudarc::driver::CudaSlice;
@@ -182,17 +183,17 @@ fn fixture(
         .collect())
 }
 
-enum Route<C> {
+enum Route {
     Library,
-    Candidate(C),
+    Candidate(FbankOxide),
     Lookup(LookupPlan<CudaSlice<f32>>),
     Mutant(Mutant),
 }
 
 /// The replacement producer owns its plan; the locked consumer is identical on both routes
-struct Operator<C> {
+struct Operator {
     library: Library,
-    route: Route<C>,
+    route: Route,
     spec: FbankSpec,
     audio: [CudaSlice<f32>; 2],
     host: [Vec<f32>; 2],
@@ -200,10 +201,7 @@ struct Operator<C> {
     features: CudaSlice<f32>,
 }
 
-impl<C: FbankCandidate> Operator<C>
-where
-    C::Pin: test_support::configuration::FbankPinEvidence,
-{
+impl Operator {
     fn new(
         runtime: &CudaRuntime,
         spec: FbankSpec,
@@ -211,7 +209,7 @@ where
         host: [Vec<f32>; 2],
     ) -> Result<Self, CudaError> {
         let _plan = test_support::plan(LAYER);
-        let library = Library::plan(runtime, spec, ()).map_err(plan_error)?;
+        let library = Library::new(runtime, spec)?;
         let route = match choice {
             "Library" => Route::Library,
             "Lookup" => {
@@ -250,15 +248,20 @@ where
                 Route::Lookup(lookup)
             }
             "Oxide" => {
-                assert!(
-                    C::coverage(runtime.ptx_tier()).covers(LAYER, spec.batch(), spec.math()),
-                    "fbank candidate must declare this plan"
-                );
-                let pin = C::implemented_pin(spec).map_err(plan_error)?;
-                let candidate = C::plan(runtime, spec, pin).map_err(plan_error)?;
-                let identity = test_support::configuration::FbankPinEvidence::configuration(pin)
-                    .expect("a candidate plan has a complete configuration pin");
-                test_support::configuration::record(LAYER, spec.batch(), spec.math(), identity);
+                // the locked owner selects and loads the module, then plans the pin
+                let selected = plan_selection(
+                    runtime,
+                    BoundaryId::named(LAYER),
+                    spec.batch(),
+                    spec.math(),
+                    Some(test_support::choice("Oxide")),
+                )?;
+                let Selected::Oxide(token) = selected else {
+                    panic!("fbank candidate must declare this plan");
+                };
+                let candidate = token
+                    .fbank(runtime, spec)?
+                    .expect("qualification refusals are typed errors, never Library");
                 Route::Candidate(candidate)
             }
             name => Route::Mutant(Mutant::parse(name).expect("applicable fbank mutant")),
@@ -410,13 +413,13 @@ impl Run<'_> {
             "switched fbank inputs must differ"
         );
         let spec = FbankSpec::new(self.batch, self.math).map_err(plan_error)?;
-        let mut op = Operator::<Library>::new(self.runtime, spec, self.choice, audio.clone())?;
+        let mut op = Operator::new(self.runtime, spec, self.choice, audio.clone())?;
         if self.phase == "paired" {
             return self.paired_fbank(rows, &mut op, spec, audio);
         }
         let truth = if self.phase == "numeric" && self.math == CudaMath::Tf32 {
             let spec = FbankSpec::new(self.batch, CudaMath::Fp32).map_err(plan_error)?;
-            let mut control = Operator::<Library>::new(self.runtime, spec, "Library", audio)?;
+            let mut control = Operator::new(self.runtime, spec, "Library", audio)?;
             let mut values = Vec::new();
             for which in 0..2 {
                 control.run(self.runtime, which, true)?;
@@ -559,11 +562,11 @@ impl Run<'_> {
     fn paired_fbank(
         &self,
         rows: &mut Vec<Value>,
-        candidate: &mut Operator<Library>,
+        candidate: &mut Operator,
         spec: FbankSpec,
         audio: [Vec<f32>; 2],
     ) -> Result<(), CudaError> {
-        let mut library = Operator::<Library>::new(self.runtime, spec, "Library", audio)?;
+        let mut library = Operator::new(self.runtime, spec, "Library", audio)?;
         let mut stages = Vec::new();
         let mut operators = Vec::new();
         for op in [&mut library, &mut *candidate] {
@@ -641,22 +644,19 @@ pub(super) fn secret(
             super::reference::fbank(&audio, constants.mel(), indices)
         })?;
         let spec = FbankSpec::new(batch, math).map_err(plan_error)?;
-        let mut library =
-            Operator::<Library>::new(runtime, spec, "Library", [audio.clone(), audio.clone()])?;
+        let mut library = Operator::new(runtime, spec, "Library", [audio.clone(), audio.clone()])?;
         library.run(runtime, 0, false)?;
         let library = library.output(runtime, false)?;
         let nudged = super::nudge(&audio, &mut state);
         let fp32 = FbankSpec::new(batch, CudaMath::Fp32).map_err(plan_error)?;
-        let mut control =
-            Operator::<Library>::new(runtime, fp32, "Library", [nudged.clone(), nudged])?;
+        let mut control = Operator::new(runtime, fp32, "Library", [nudged.clone(), nudged])?;
         control.run(runtime, 0, false)?;
         let expected = super::SecretReference {
             truth,
             library,
             nudged: control.output(runtime, false)?,
         };
-        let mut candidate =
-            Operator::<Library>::new(runtime, spec, choice, [audio.clone(), audio])?;
+        let mut candidate = Operator::new(runtime, spec, choice, [audio.clone(), audio])?;
         candidate.run(runtime, 0, false)?;
         let eager = candidate.output(runtime, false)?;
         candidate.restore(runtime, 0)?;

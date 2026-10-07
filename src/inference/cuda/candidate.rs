@@ -4,8 +4,8 @@
 //! A candidate registers a plan type, never a closure. Locked dispatch code
 //! (`embedding/dispatch.rs` and `segmentation/dispatch.rs`) creates the plan when a
 //! batch class is set up, outside every timed and traced interval, and then calls
-//! [`ConvCandidate::enqueue`], [`SincCandidate::enqueue`] or
-//! [`LstmCandidate::enqueue`] inside a scope it owns. The candidate only enqueues
+//! [`ConvCandidate::enqueue`], [`SincCandidate::enqueue`], [`LstmCandidate::enqueue`]
+//! or [`FbankCandidate::enqueue`] inside a scope it owns. The candidate only enqueues
 //! device work on the stream it is given and on registered [`SideStream`]s, and opens
 //! sub-scopes only through the locked [`Phases`] and [`LstmPhases`] handles
 //!
@@ -21,8 +21,8 @@
 //! contract. The locked owner passes the exact loaded module from the selection
 //! token; a plan never resolves production module policy again
 //!
-//! Candidate code lives in `candidate/` and its kernels in the `resnet`, `lstm` and
-//! `sincnet` PTX areas. The harness scans those files before it builds anything; see
+//! Candidate code lives in `candidate/` and its kernels in the `resnet`, `lstm`,
+//! `sincnet` and `fbankdft` PTX areas. The harness scans those files before it builds anything; see
 //! `scripts/cuda/qualify/README.md` for what the scan refuses. This file and the
 //! dispatch files are locked. Production runs a candidate only where the locked
 //! `implementation::PRODUCTION` table selects it, which the root sets at integration
@@ -39,6 +39,7 @@ pub(crate) use super::error::{GeometryError, WeightFault};
 use super::{CudaError, CudaMath, CudaRuntime, KernelModule, LoadedKernels, PtxTier, Sgemm};
 
 mod conv;
+mod fbank;
 mod lstm;
 mod sinc;
 
@@ -66,11 +67,14 @@ mod kernel_inventory {
     }
 }
 #[cfg(test)]
+pub(super) use fbank::REQUIRED_KERNELS as FBANK_DFT_KERNELS;
+#[cfg(test)]
 pub(super) use lstm::REQUIRED_KERNELS as LSTM_KERNELS;
 #[cfg(test)]
 pub(super) use sinc::REQUIRED_KERNELS as SINC_KERNELS;
 
 pub(crate) use conv::Oxide as ConvOxide;
+pub(crate) use fbank::Oxide as FbankOxide;
 pub(crate) use lstm::Oxide as LstmOxide;
 pub(crate) use sinc::Oxide as SincOxide;
 
@@ -153,9 +157,16 @@ impl ConfigPin {
 /// A complete filterbank producer configuration
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FbankPin {
-    /// Compensated FP32 FFT and mel projection, eight frames per 256-thread block
+    /// `fbankdft_fft_mel_accurate`: one 256-thread block per eight frames of a row,
+    /// grid `(ceil(998 / 8), batch)`, a packed 512-point real FFT in two-term FP32
+    /// expansions with host-f64 twiddles rounded once, and the mel filters as runs of
+    /// 16 staged bins; FP32 arithmetic in both math modes
     FftMelAccurate,
 }
+
+/// The fixed filterbank geometry and host tables a producer shares with the Library
+/// path, so a candidate cannot drift from the window and mel filters it replaces
+pub(crate) use super::fbank::{FBANK_FRAMES, FBANK_MEL_BINS, FBANK_WINDOW_SAMPLES, FbankConstants};
 
 /// The supported filterbank batches, independent of model and stress batch sets
 pub(crate) const FBANK_BATCHES: [usize; 32] = [
@@ -214,8 +225,14 @@ pub(crate) trait FbankCandidate: Sized {
     }
     /// The complete configuration used by qualification
     fn implemented_pin(spec: FbankSpec) -> Result<Self::Pin, PlanError>;
-    /// Build one validated batch plan outside measured intervals
-    fn plan(runtime: &CudaRuntime, spec: FbankSpec, pin: Self::Pin) -> Result<Self, PlanError>;
+    /// Build one validated batch plan from `pin` outside measured intervals, with the
+    /// module the selection token already loaded
+    fn plan(
+        runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
+        spec: FbankSpec,
+        pin: Self::Pin,
+    ) -> Result<Self, PlanError>;
     /// Write all energies before the shared log/CMN consumer
     fn enqueue(
         &self,
