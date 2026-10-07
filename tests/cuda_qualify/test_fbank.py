@@ -8,6 +8,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts/cuda/qualify"))
 qualify = importlib.import_module("qualify")
+records = importlib.import_module("records")
+verdict = importlib.import_module("verdict")
 
 
 class FbankDomain(unittest.TestCase):
@@ -31,6 +33,65 @@ class FbankDomain(unittest.TestCase):
                     "fbankdft",
                 )
         self.assertEqual(qualify.sanitizer_batches(coverage), list(range(1, 33)))
+
+    def test_record_domain_keeps_inner_batches_and_rejects_stress_claims(self):
+        entries = [{"layers": ["fbank.dft"], "batches": "all", "maths": "all"}]
+        expected = {
+            ("fbank.dft", batch, mode)
+            for batch in range(1, 33)
+            for mode in ("fp32", "tf32")
+        }
+        self.assertEqual(records.triples({"entries": entries}), expected)
+        self.assertEqual(records.tested_declaration({"entries": entries}), expected)
+        self.assertEqual(
+            records.summary_tuples([list(row) for row in sorted(expected)]), expected
+        )
+        for layer, batch in (("fbank.dft", 33), ("lstm.stack", 2), ("lstm.stack", 7)):
+            with self.assertRaises(records.Rejected):
+                records.triples(
+                    {
+                        "entries": [
+                            {"layers": [layer], "batches": [batch], "maths": ["fp32"]}
+                        ]
+                    }
+                )
+        child: dict = {
+            "target": "fbankdft",
+            "implementation": "Oxide",
+            "status": "passed",
+            "coverage_declared": {"triples": [list(row) for row in sorted(expected)]},
+            "coverage": {
+                "tier": "sm75",
+                "math": ["fp32", "tf32"],
+                "cases": [list(case) for case in qualify.target_cases("fbankdft")],
+            },
+            "phases_run": records.CURRENT_PHASES,
+        }
+        raw: dict = {
+            "schema": 5,
+            "target": "fbankdft",
+            "implementation": "Oxide",
+            "status": "passed",
+            "tiers": {"sm75": child},
+        }
+        names, timing = records.tuple_requirements(raw, child)
+        self.assertIn("speed:fp32/mixed/b2/fbank.dft", names)
+        self.assertIn("tf32/mixed/b31/stage", timing)
+        names |= records.required_checks("fbankdft")
+        child["checks"] = [{"check": name, "passed": True} for name in sorted(names)]
+        child["timing"] = [{"id": name} for name in sorted(timing)]
+        raw["checks"] = [
+            {"check": "sm75/" + name, "passed": True} for name in sorted(names)
+        ]
+        child["accepted_tuples"] = [list(row) for row in sorted(expected)]
+        records.complete_collection(raw)
+        self.assertEqual(
+            verdict.evaluate_record(raw, "sm75")["accepted_tuples"],
+            child["accepted_tuples"],
+        )
+        child["coverage"]["cases"] = [list(case) for case in records.TEST_CASES]
+        with self.assertRaisesRegex(records.Rejected, "incomplete tier collection"):
+            records.complete_collection(raw)
 
     def test_case_evidence_uses_the_producer_and_consumer_boundaries(self):
         numeric = qualify.expected_ids("fbankdft", "numeric", "fp32")

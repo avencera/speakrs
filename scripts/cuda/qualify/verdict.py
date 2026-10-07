@@ -4,6 +4,7 @@ import math
 from collections.abc import Sequence
 
 from gates import Rejected, finite, spread_bound
+from domains import boundary as batch_domain
 
 
 NOISE_REASON = "speed: blocked: Library process spread "
@@ -141,7 +142,9 @@ def evaluate_record(record: dict, tier: str) -> dict:
     declared = child.get("coverage_declared", {}).get(
         "triples", child.get("accepted_tuples", [])
     )
-    accepted = {tuple(row) for row in declared if row[1] in (1, 32)}
+    accepted = {
+        tuple(row) for row in declared if row[1] in batch_domain(row[0]).production
+    }
     excluded = set()
     if decision["hard_failures"]:
         excluded = accepted.copy()
@@ -162,7 +165,10 @@ def evaluate_record(record: dict, tier: str) -> dict:
                 triple
                 for triple in accepted
                 if triple[2] == mode
-                and (batch not in (1, 32) or triple[1] == batch)
+                and (
+                    batch not in batch_domain(triple[0]).production
+                    or triple[1] == batch
+                )
                 and (boundary == "stage" or triple[0] == boundary)
             }
     accepted -= excluded

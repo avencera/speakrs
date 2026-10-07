@@ -63,6 +63,7 @@ from lock import ROOT, LockError, inventory, verify
 from assets import resolve
 from records import check_table, shipped_files
 from verdict import evaluate_checks, noise_timing
+from domains import MODEL, collection
 from parse_trace import AllowList, attribute, window_kernels
 from ptx import shared_initialization
 from scan import cargo_home, scan
@@ -72,18 +73,9 @@ WORKSPACE = Path("/workspace")
 BOX = ROOT.parent
 GPU_LOCK = "/workspace/gpu-bench.lock"
 PROFILE_TEST = "inference::cuda::test_support::qualify::qualification_driver"
-CASES = (
-    ("first", 1),
-    ("last", 1),
-    ("short", 1),
-    ("mixed", 7),
-    ("mixed", 32),
-    ("mixed", 33),
-    ("mixed", 64),
-    ("short", 7),
-)
+CASES = MODEL.cases
 MODES = ("fp32", "tf32")
-BATCHES = (1, 7, 32, 33, 64)
+BATCHES = MODEL.tested
 FRAMES = 589
 PROJECTION_COLUMNS = (128, 256, 384, 512)
 # the candidate PTX area of each target
@@ -200,20 +192,12 @@ def layers(target: str) -> tuple[str, ...]:
 
 def target_batches(target: str) -> tuple[int, ...]:
     """Use the batch domain owned by the selected boundary."""
-    return tuple(range(1, 33)) if target == "fbankdft" else BATCHES
+    return collection(target).tested
 
 
 def target_cases(target: str) -> tuple[tuple[str, int], ...]:
     """Retain the existing cases and select only valid filterbank batch plans."""
-    if target == "fbankdft":
-        return (
-            ("first", 1),
-            ("last", 1),
-            ("short", 1),
-            *[("mixed", batch) for batch in range(2, 33)],
-            ("short", 7),
-        )
-    return CASES
+    return collection(target).cases
 
 
 def case_ids(target: str = "resnet") -> list[str]:
@@ -2360,7 +2344,7 @@ def collect_tier(
         [
             list(t)
             for t in sorted(coverage.triples)
-            if t[1] in (target_batches(target) if target == "fbankdft" else (1, 32))
+            if t[1] in collection(target).production
         ]
         if result["status"] == "passed" and implementation == "Oxide"
         else []

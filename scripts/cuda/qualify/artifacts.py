@@ -101,6 +101,7 @@ def module(raw: dict, root: Path, *, device_capability: str | None = None) -> di
             "resnet",
             "lstm",
             "sincnet",
+            "fbankdft",
         )
         or tier not in TIERS
     ):
@@ -193,7 +194,7 @@ def production_load(area: str, tier: str, device_capability: str, root: Path) ->
 def shipped_key(area: str, tier: str, capability: str, raw: object, root: Path) -> dict:
     """Check shipped cubin bytes; module and record bindings separately verify JIT PTX."""
     pinned = key(raw, device_capability=capability)
-    if area not in ("resnet", "lstm", "sincnet") or tier not in TIERS:
+    if area not in ("resnet", "lstm", "sincnet", "fbankdft") or tier not in TIERS:
         raise Rejected("artifact: invalid production area or tier")
     suffix = (
         "ptx"

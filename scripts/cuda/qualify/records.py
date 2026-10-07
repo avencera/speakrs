@@ -9,6 +9,7 @@ from pathlib import Path
 import artifacts
 import configurations
 import environment
+from domains import MODEL, boundary, collection
 from assets import cache_directory
 from gates import Rejected
 from lock import ROOT
@@ -242,15 +243,19 @@ def triples(raw: dict) -> set[tuple[str, int, str]]:
     """Expand an evaluated model entry without consulting candidate coverage."""
     found = set()
     for entry in raw["entries"]:
-        batches = [1, 32] if entry["batches"] == "all" else entry["batches"]
         modes = ["fp32", "tf32"] if entry["maths"] == "all" else entry["maths"]
         for layer in entry["layers"]:
+            batches = (
+                boundary(layer).production
+                if entry["batches"] == "all"
+                else entry["batches"]
+            )
             for batch in batches:
                 for mode in modes:
                     if (
                         not isinstance(layer, str)
                         or type(batch) is not int
-                        or batch not in (1, 32)
+                        or batch not in boundary(layer).production
                         or mode not in ("fp32", "tf32")
                     ):
                         raise Rejected(
@@ -262,7 +267,7 @@ def triples(raw: dict) -> set[tuple[str, int, str]]:
     return found
 
 
-TEST_BATCHES = (1, 7, 32, 33, 64)
+TEST_BATCHES = MODEL.tested
 LEGACY_PHASES = ["numeric", "timing", "profile", "sanitize"]
 CURRENT_PHASES = ["numeric", "timing", "paired", "profile", "sanitize"]
 
@@ -288,16 +293,7 @@ def required_checks(target: str) -> set[str]:
     return names
 
 
-TEST_CASES = (
-    ("first", 1),
-    ("last", 1),
-    ("short", 1),
-    ("mixed", 7),
-    ("mixed", 32),
-    ("mixed", 33),
-    ("mixed", 64),
-    ("short", 7),
-)
+TEST_CASES = MODEL.cases
 
 
 def tuple_requirements(record: dict, child: dict) -> tuple[set[str], set[str]]:
@@ -310,7 +306,7 @@ def tuple_requirements(record: dict, child: dict) -> tuple[set[str], set[str]]:
     for layer, batch, mode in triples:
         names.add(f"layer:{mode}/{layer}")
         names.add(f"secret:{mode}/secret/b{batch}/{layer}")
-        for case, sample in TEST_CASES:
+        for case, sample in collection(record["target"]).cases:
             if sample != batch:
                 continue
             key = f"{mode}/{case}/b{batch}/{layer}"
@@ -319,7 +315,7 @@ def tuple_requirements(record: dict, child: dict) -> tuple[set[str], set[str]]:
             )
             timing.add(key)
     tf32 = False
-    for case, batch in TEST_CASES:
+    for case, batch in collection(record["target"]).cases:
         for mode in ("fp32", "tf32"):
             if not any(sample == batch and math == mode for _, sample, math in triples):
                 continue
@@ -404,7 +400,8 @@ def complete_collection(record: dict) -> None:
             child.get("phases_run") != phases
             or not isinstance(coverage, dict)
             or coverage.get("tier") != tier
-            or coverage.get("cases") != [list(case) for case in TEST_CASES]
+            or coverage.get("cases")
+            != [list(case) for case in collection(record["target"]).cases]
             or coverage.get("math") != ["fp32", "tf32"]
         ):
             raise Rejected(f"table: incomplete tier collection: {tier}")
@@ -485,12 +482,15 @@ def tested_declaration(raw: dict) -> set[tuple[str, int, str]]:
     else:
         rows = []
         for entry in raw["entries"]:
-            batches = TEST_BATCHES if entry["batches"] == "all" else entry["batches"]
             modes = ["fp32", "tf32"] if entry["maths"] == "all" else entry["maths"]
             rows.extend(
                 (layer, batch, mode)
                 for layer in entry["layers"]
-                for batch in batches
+                for batch in (
+                    boundary(layer).tested
+                    if entry["batches"] == "all"
+                    else entry["batches"]
+                )
                 for mode in modes
             )
     found = set()
@@ -503,7 +503,7 @@ def tested_declaration(raw: dict) -> set[tuple[str, int, str]]:
             or row[2] not in ("fp32", "tf32")
         ):
             raise Rejected("table: invalid candidate declaration")
-        if row[1] in TEST_BATCHES:
+        if row[1] in boundary(row[0]).tested:
             found.add(tuple(row))
     if not found:
         raise Rejected("table: empty candidate declaration")
@@ -956,7 +956,7 @@ def summary_tuples(value: object) -> set[tuple[str, int, str]]:
             or not isinstance(row[0], str)
             or not row[0]
             or type(row[1]) is not int
-            or row[1] not in (1, 32)
+            or row[1] not in boundary(row[0]).production
             or row[2] not in ("fp32", "tf32")
         ):
             raise Rejected("table: invalid accepted summary tuple")

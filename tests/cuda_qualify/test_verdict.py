@@ -70,6 +70,20 @@ class Verdict(unittest.TestCase):
         self.assertEqual(result["accepted_tuples"], [["lstm.stack", 32, "fp32"]])
         self.assertEqual(result["excluded_tuples"], [["lstm.stack", 1, "fp32"]])
 
+    def test_fbank_inner_batch_noise_excludes_only_that_production_tuple(self):
+        timing = self.timing(1.059)
+        timing["id"] = "fp32/mixed/b2/fbank.dft"
+        raw = self.record(timing)
+        raw["tiers"]["sm75"]["coverage_declared"]["triples"] = [
+            ["fbank.dft", batch, "fp32"] for batch in (1, 2, 31, 32)
+        ]
+        result = verdict.evaluate_record(raw, "sm75")
+        self.assertEqual(result["excluded_tuples"], [["fbank.dft", 2, "fp32"]])
+        self.assertEqual(
+            result["accepted_tuples"],
+            [["fbank.dft", batch, "fp32"] for batch in (1, 31, 32)],
+        )
+
     def test_hard_failure_plus_noise_can_never_accept(self):
         hard = {
             "check": "layer:fp32/lstm.stack",
