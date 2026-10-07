@@ -9,7 +9,9 @@
 //! `1,7,32,33`), `TRUNK_MATHS`, `TRUNK_LAYERS`, `TRUNK_TIMING=1` for graph-timed
 //! library and kernel medians at batches 1 and 32, and `TRUNK_DEVICE=a100` to plan the
 //! wideconv layers with the A100 selection on any sm80-capable GPU, `TRUNK_RESNET=legacy`
-//! or `tensor` to force the ResNet FP32 or TF32 tensor-core kernels. `TRUNK_WEIGHTS`
+//! or `tensor` to force the ResNet FP32 or TF32 tensor-core kernels.
+//! `TRUNK_RESNET=sm80` uses the sm80 tier in both modes, with tensor kernels only
+//! in TF32 mode, for a direct comparison with the legacy artifact. `TRUNK_WEIGHTS`
 //! names the model weights when they are not beside the references
 
 use std::collections::BTreeMap;
@@ -383,7 +385,10 @@ impl Candidate {
             };
             return Ok(Self::Wide(plan));
         }
-        let kernels = if std::env::var("TRUNK_RESNET").as_deref() == Ok("tensor") {
+        let kernels = if matches!(
+            std::env::var("TRUNK_RESNET").as_deref(),
+            Ok("tensor" | "sm80")
+        ) {
             // the capability 12.0 binding pins resnet sm75, so tensor timing loads the
             // newest runnable tier directly
             let area = KernelModule::Resnet;
@@ -418,11 +423,13 @@ impl Candidate {
         let conv = spec.conv;
         match std::env::var("TRUNK_RESNET").ok().as_deref() {
             Some("legacy") => ConvOxide::implemented_pin(spec),
-            Some("tensor") => Ok(ConvPin::Kernel(match (conv.in_channels, conv.stride) {
-                (32, [1, 1]) => ConvKernel::C32Tensor,
-                (64, _) => ConvKernel::C64Tensor,
-                _ => ConvKernel::C32Stride2Tensor,
-            })),
+            Some("tensor") | Some("sm80") if conv.math == CudaMath::Tf32 => {
+                Ok(ConvPin::Kernel(match (conv.in_channels, conv.stride) {
+                    (32, [1, 1]) => ConvKernel::C32Tensor,
+                    (64, _) => ConvKernel::C64Tensor,
+                    _ => ConvKernel::C32Stride2Tensor,
+                }))
+            }
             _ => {
                 let boundary = super::super::implementation::BoundaryId::named(spec.name);
                 match ConvOxide::driver_pin(

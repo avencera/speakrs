@@ -1,4 +1,4 @@
-//! Golden production selection, frozen from the PR #36 table at 0cf5403
+//! Golden legacy selection after replacing the ResNet artifact binding
 //!
 //! The expectations are literal and independent of the production table. Only
 //! `observe` and `module_request` adapt the selection API under test
@@ -45,11 +45,9 @@ const DEVICES: [Device; 5] = [
     },
 ];
 
-const RESNET_RECORD: &str = "8f8fa3e3c158771e354aad83f4e42fca6fac998aa192b39a966067a4b0035758";
 const LSTM_RECORD: &str = "3badc1aec939b0e8f7312786d695bec6445de1dacb1f85e44124bf3ac20356f8";
 const SINC_RECORD: &str = "a4d1a2692b78a814cd2da16f084801c3641bfd11c6d095d610f3a8182ad6f675";
 const INTEGRATED_DER: &str = "8066268031afba058d93e305206d5b8225e40c6ab2ebb1052874d607e055646f";
-const RESNET_PTX: &str = "dd6449c0129f9a03bf691c0338611b50b651ab714d5803caedea87de3c72b6b7";
 const LSTM_PTX: &str = "72945743a3c1b915c05d8ea21b438dfd860fa9487401c447fb24fd48802916fa";
 const SINC_PTX: &str = "967bc6893f80da84d8d4d288f2cf1ca3336ca09c4386495cab722beb0ac87247";
 
@@ -107,37 +105,13 @@ fn legacy(record: &'static str, ptx: &str) -> Outcome {
     }
 }
 
-/// The 52 PR #36 tuples, written out without consulting any coverage declaration
+/// The four remaining PR #36 tuples, written out without consulting any coverage declaration
 fn expected(device: Device, boundary: &str, batch: usize, math: CudaMath) -> Outcome {
-    const C32: [&str; 6] = [
-        "resnet.layer1.0.conv1",
-        "resnet.layer1.0.conv2",
-        "resnet.layer1.1.conv1",
-        "resnet.layer1.1.conv2",
-        "resnet.layer1.2.conv1",
-        "resnet.layer1.2.conv2",
-    ];
-    const C64: [&str; 7] = [
-        "resnet.layer2.0.conv2",
-        "resnet.layer2.1.conv1",
-        "resnet.layer2.1.conv2",
-        "resnet.layer2.2.conv1",
-        "resnet.layer2.2.conv2",
-        "resnet.layer2.3.conv1",
-        "resnet.layer2.3.conv2",
-    ];
     if device.capability != ComputeCapability::new(12, 0) || ![1, 32].contains(&batch) {
         return Outcome::Library;
     }
     let fp32 = math == CudaMath::Fp32;
     let selected = match boundary {
-        layer if C32.contains(&layer) => Some(legacy(RESNET_RECORD, RESNET_PTX)),
-        "resnet.layer2.0.conv1" => {
-            (batch == 32 || !fp32).then(|| legacy(RESNET_RECORD, RESNET_PTX))
-        }
-        layer if C64.contains(&layer) => {
-            (batch == 32 || fp32).then(|| legacy(RESNET_RECORD, RESNET_PTX))
-        }
         "lstm.stack" => fp32.then(|| legacy(LSTM_RECORD, LSTM_PTX)),
         "sincnet.conv0.abs_pool" => fp32.then(|| legacy(SINC_RECORD, SINC_PTX)),
         _ => None,
@@ -238,7 +212,7 @@ enum Loader {
 }
 
 #[test]
-fn golden_production_selection_is_unchanged() {
+fn golden_legacy_selection_is_unchanged() {
     let mut selected = Vec::new();
     for device in DEVICES {
         for boundary in model_boundaries() {
@@ -270,15 +244,15 @@ fn golden_production_selection_is_unchanged() {
             }
         }
     }
-    // the same 52 tuples on both cc 12.0 cards, none elsewhere
-    assert_eq!(selected.len(), 2 * 52);
+    // the same four legacy tuples on both cc 12.0 cards, none elsewhere
+    assert_eq!(selected.len(), 2 * 4);
     for sms in [36, 70] {
-        assert_eq!(selected.iter().filter(|row| row.0 == sms).count(), 52);
+        assert_eq!(selected.iter().filter(|row| row.0 == sms).count(), 4);
     }
 }
 
 #[test]
-fn golden_module_requests_are_unchanged() {
+fn golden_legacy_module_requests_are_unchanged() {
     for device in DEVICES {
         for area in [
             KernelModule::Fbank,
@@ -304,7 +278,6 @@ fn golden_module_requests_are_unchanged() {
             );
         }
         for (area, ptx) in [
-            (KernelModule::Resnet, RESNET_PTX),
             (KernelModule::Lstm, LSTM_PTX),
             (KernelModule::Sincnet, SINC_PTX),
         ] {

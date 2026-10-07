@@ -20,7 +20,6 @@ from verdict import NOISE_REASON, evaluate_record, noise_timing
 # sources: qualification/k1/REPORT-K1-requalify.md, k2/REPORT-final-lock.md,
 # and k3/REPORT-K3-requalify.md in the archived native-CUDA records
 LEGACY = {
-    "8f8fa3e3c158771e354aad83f4e42fca6fac998aa192b39a966067a4b0035758": "resnet",
     "3badc1aec939b0e8f7312786d695bec6445de1dacb1f85e44124bf3ac20356f8": "lstm",
     "a4d1a2692b78a814cd2da16f084801c3641bfd11c6d095d610f3a8182ad6f675": "sincnet",
 }
@@ -65,24 +64,6 @@ LEGACY_BINDINGS: dict[str, dict] = {
             },
         },
         "lock_digest": "4bb7818f209cad9a3d841e3a71e0d9abee46f419479aeb9bf07ceaec277dfdf9",
-    },
-    "8f8fa3e3c158771e354aad83f4e42fca6fac998aa192b39a966067a4b0035758": {
-        "files": {
-            "host_sources": {
-                "src/inference/cuda/candidate.rs": "7ebccfee61ad72ad617addc5d7d32a78dc4895afbc4582383bdb2b1cc07fd2ee",
-                "src/inference/cuda/candidate/conv.rs": "b4755e8bdf919edd39d2da5e632da7af5a52fd48f3852bd17968cc29be6310a8",
-            },
-            "kernel_sources": {
-                "crates/speakrs-cuda-kernels/src/resnet.rs": "9f2b5fd4c5c88236aad9829c8ef48c1c7b1b55169a8d82228edbd622c8184122"
-            },
-            "manifests": {
-                "src/inference/cuda/ptx/resnet.manifest": "0d9a2c625742b38f5bdb1fccb4a5465b45efb9c83830b1d1e5b51077ae574d1e"
-            },
-            "ptx": {
-                "src/inference/cuda/ptx/resnet.sm75.ptx": "dd6449c0129f9a03bf691c0338611b50b651ab714d5803caedea87de3c72b6b7"
-            },
-        },
-        "lock_digest": "368389d213c1c9c3ae32b0c9375d558efbd1d88f71eec063e67b8f14163bcb70",
     },
     "a4d1a2692b78a814cd2da16f084801c3641bfd11c6d095d610f3a8182ad6f675": {
         "files": {
@@ -334,6 +315,12 @@ INFRASTRUCTURE_AMENDMENTS = [
         "acceptance_sha256": "e7a613d5feba9b7fb87b63bd70a29cfc63cafe458551e2ce66cccde89406e096",
         "infrastructure_sha256": "51bf6e0c93d29e60754cc96a2b4b851fd89fd187a78202c16b8123d1c65dd9e5",
         "reason": "Additive CUDA gates, library-free port registration and merged-area manifest sources; legacy arithmetic, launch choices, PTX and cubin bytes are unchanged; this is not a new GPU qualification",
+    },
+    {
+        "path": "src/inference/cuda/candidate.rs",
+        "acceptance_sha256": "4b76625235a10fa4ebea8b7e1868ac081e707ff1628ddf44b675d80e62e7fa3c",
+        "infrastructure_sha256": "c69c6c5db370201741f6d381b0c9a798edeeb2a5b4e9a2a57fdde408da5bf3d9",
+        "reason": "Add ResNet tensor and Winograd configuration variants; retained LSTM and SincNet algorithms, launches and artifact bytes are unchanged; this is not a new qualification",
     },
 ]
 

@@ -5,7 +5,6 @@ from gates import Rejected
 
 # exact PR #36 records, not a mapping inferred from today's production table
 LEGACY_AREAS = {
-    "8f8fa3e3c158771e354aad83f4e42fca6fac998aa192b39a966067a4b0035758": "resnet",
     "3badc1aec939b0e8f7312786d695bec6445de1dacb1f85e44124bf3ac20356f8": "lstm",
     "a4d1a2692b78a814cd2da16f084801c3641bfd11c6d095d610f3a8182ad6f675": "sincnet",
 }
@@ -78,28 +77,7 @@ def legacy(record: str) -> list[dict]:
     """Map only the archived PR #36 tuples to their accepted selection rules"""
     area = LEGACY_AREAS.get(record)
     result = {}
-    if area == "resnet":
-        # this includes the original b1 stride-2 tuple, whose speed was later removed
-        for stage, count in ((1, 3), (2, 4)):
-            for block in range(count):
-                for conv in (1, 2):
-                    boundary = f"resnet.layer{stage}.{block}.conv{conv}"
-                    shape = (
-                        "C32"
-                        if stage == 1
-                        else "C32Stride2"
-                        if block == 0 and conv == 1
-                        else "C64"
-                    )
-                    modes = ("fp32", "tf32") if shape != "C64" else ("fp32",)
-                    for batch in (1, 32):
-                        for mode in ("fp32", "tf32") if batch == 32 else modes:
-                            result[(boundary, batch, mode)] = {
-                                "kind": "Conv",
-                                "selection": "LegacyWaves",
-                                "shape": shape,
-                            }
-    elif area in ("lstm", "sincnet"):
+    if area in ("lstm", "sincnet"):
         boundary = "lstm.stack" if area == "lstm" else "sincnet.conv0.abs_pool"
         identity = (
             {"kind": "Lstm", "selection": "LegacyCooperative"}

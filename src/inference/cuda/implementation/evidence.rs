@@ -155,8 +155,6 @@ pub(crate) enum SpeedScope {
     /// A structural winner accepted on every supported GPU, with explicit evidence
     AllDevices(&'static BroadEvidence),
     /// One measured card: its capability, SM count and driver-reported name
-    // the first new record adds a point binding; until then only tests construct one
-    #[cfg_attr(not(all(test, feature = "_cuda-libraries")), allow(dead_code))]
     Point {
         capability: ComputeCapability,
         multiprocessors: u32,
@@ -310,6 +308,119 @@ impl TupleProof {
     }
 }
 
+/// An artifact binding for a measured port, without a qualification-record claim
+///
+/// Speed selection remains in the port's boundary, batch and math scope. This binding
+/// fixes the one artifact shared by every plan of the area on the measured device
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ModuleBinding {
+    scope: SpeedScope,
+    module: ModuleRequest,
+}
+
+impl ModuleBinding {
+    /// Pin an artifact separately from accuracy-qualified tuple proofs
+    pub(crate) const fn new(scope: SpeedScope, module: ModuleRequest) -> Self {
+        Self { scope, module }
+    }
+
+    /// The bound request only when the device, area and compiled tier match
+    pub(crate) fn request(
+        self,
+        area: KernelModule,
+        device: &DeviceAttributes,
+        limit: PtxTier,
+    ) -> Option<ModuleRequest> {
+        (self.module.area() == area && self.scope.contains(device) && self.module.tier() <= limit)
+            .then_some(self.module)
+    }
+}
+
+/// Validate artifact-only bindings against each other and the qualified bindings
+pub(crate) const fn validate_modules(
+    modules: &[ModuleBinding],
+    qualified: &[Binding],
+    always_on: &[KernelModule],
+    precedence: &[KernelModule],
+) {
+    let mut index = 0;
+    while index < modules.len() {
+        let left = modules[index];
+        validate_module(left.scope, left.module, always_on, precedence);
+        let mut other = index + 1;
+        while other < modules.len() {
+            let right = modules[other];
+            validate_module_pair(left.scope, left.module, right.scope, right.module);
+            other += 1;
+        }
+
+        let mut other = 0;
+        while other < qualified.len() {
+            let right = qualified[other];
+            validate_module_pair(left.scope, left.module, right.scope, right.module);
+            other += 1;
+        }
+
+        index += 1;
+    }
+}
+
+const fn validate_module_pair(
+    left_scope: SpeedScope,
+    left: ModuleRequest,
+    right_scope: SpeedScope,
+    right: ModuleRequest,
+) {
+    assert!(
+        left.area() as u8 != right.area() as u8
+            || !left_scope.overlaps(right_scope)
+            || same_module(left, right),
+        "conflicting module bindings for one area and device"
+    );
+}
+
+const fn validate_module(
+    scope: SpeedScope,
+    module: ModuleRequest,
+    always_on: &[KernelModule],
+    precedence: &[KernelModule],
+) {
+    let area = module.area() as u8;
+    assert!(
+        !contains_area(always_on, area),
+        "always-on areas cannot have record bindings"
+    );
+    assert!(
+        contains_area(precedence, area),
+        "every bound area needs a route precedence"
+    );
+    let capability = scope.capability();
+    let minimum = module.tier().min_capability();
+    assert!(
+        capability.major > minimum.major
+            || capability.major == minimum.major && capability.minor >= minimum.minor,
+        "a binding's device cannot run its tier"
+    );
+    if let LoadedArtifact::Cubin { arch, .. } = module.artifact() {
+        assert!(
+            !matches!(scope, SpeedScope::AllDevices(_)),
+            "all-device bindings require portable PTX, not a device cubin"
+        );
+        assert!(
+            same_capability(arch, capability),
+            "a cubin binding must target its exact device"
+        );
+    }
+    if let SpeedScope::Point {
+        multiprocessors,
+        device_name,
+        ..
+    } = scope
+    {
+        assert!(multiprocessors > 0 && !device_name.is_empty());
+    }
+}
+
 /// One module binding: the request an area loads on one device scope, with every
 /// tuple proof that uses it
 ///
@@ -378,41 +489,8 @@ const fn validate_binding(
     always_on: &[KernelModule],
     precedence: &[KernelModule],
 ) {
+    validate_module(binding.scope, binding.module, always_on, precedence);
     let area = binding.area() as u8;
-    assert!(
-        !contains_area(always_on, area),
-        "always-on areas cannot have record bindings"
-    );
-    assert!(
-        contains_area(precedence, area),
-        "every bound area needs a route precedence"
-    );
-    let module = binding.module;
-    let capability = binding.scope.capability();
-    let minimum = module.tier().min_capability();
-    assert!(
-        capability.major > minimum.major
-            || capability.major == minimum.major && capability.minor >= minimum.minor,
-        "a binding's device cannot run its tier"
-    );
-    if let LoadedArtifact::Cubin { arch, .. } = module.artifact() {
-        assert!(
-            !matches!(binding.scope, SpeedScope::AllDevices(_)),
-            "all-device bindings require portable PTX, not a device cubin"
-        );
-        assert!(
-            same_capability(arch, capability),
-            "a cubin binding must target its exact device"
-        );
-    }
-    if let SpeedScope::Point {
-        multiprocessors,
-        device_name,
-        ..
-    } = binding.scope
-    {
-        assert!(multiprocessors > 0 && !device_name.is_empty());
-    }
     assert!(!binding.proofs.is_empty(), "a binding needs a tuple proof");
 
     let mut index = 0;

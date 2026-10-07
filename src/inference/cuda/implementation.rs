@@ -25,7 +25,6 @@ mod production {
     use crate::inference::cuda::{ComputeCapability, CudaMath};
 
     pub(super) const FP32: CudaMath = CudaMath::Fp32;
-    pub(super) const TF32: CudaMath = CudaMath::Tf32;
 
     /// SHA256 of int-k/ab-summary.json for the integrated configuration
     pub(super) const INTEGRATED_DER: RecordHash =
@@ -62,8 +61,8 @@ mod production {
 
 pub(crate) use boundary::{BoundaryId, ProductionBatches};
 pub(crate) use evidence::{
-    ArchitectureSpeed, Binding, BroadEvidence, RecordHash, SpeedEvidence, SpeedScope, SpeedStatus,
-    TupleProof,
+    ArchitectureSpeed, Binding, BroadEvidence, ModuleBinding, RecordHash, SpeedEvidence,
+    SpeedScope, SpeedStatus, TupleProof,
 };
 
 #[cfg(all(test, feature = "_cuda-libraries"))]
@@ -143,11 +142,10 @@ pub(crate) enum Selected {
 }
 
 /// Every accepted production binding
-const PRODUCTION: &[Binding] = &[
-    production::resnet::BINDING,
-    production::lstm::BINDING,
-    production::sincnet::BINDING,
-];
+const PRODUCTION: &[Binding] = &[production::lstm::BINDING, production::sincnet::BINDING];
+
+/// Measured complete ports fix artifacts without fabricating qualification records
+const MEASURED_MODULES: &[ModuleBinding] = &[production::resnet::BINDING];
 
 // always-on areas retain the artifact policy used before cubins were shipped
 const ALWAYS_ON: &[KernelModule] = &[
@@ -169,7 +167,10 @@ const ROUTE_PRECEDENCE: &[KernelModule] = &[
 ];
 
 // one module per area and overlapping device scope, complete pins and scoped evidence
-const _: () = evidence::validate(PRODUCTION, ALWAYS_ON, ROUTE_PRECEDENCE);
+const _: () = {
+    evidence::validate(PRODUCTION, ALWAYS_ON, ROUTE_PRECEDENCE);
+    evidence::validate_modules(MEASURED_MODULES, PRODUCTION, ALWAYS_ON, ROUTE_PRECEDENCE);
+};
 
 /// Production model batch classes, excluding the harness stress classes
 pub(crate) const MODEL_BATCHES: [usize; 2] = ProductionBatches::MODEL;
@@ -188,7 +189,7 @@ pub(crate) fn production_module(
     Ok(qualified.or_else(|| variants.driver_request(area, limit, device.capability())))
 }
 
-/// The frozen qualified-table artifact policy, independent of complete port fallback
+/// Bound artifacts and the always-on baseline, independent of complete port fallback
 fn qualified_module(
     area: KernelModule,
     device: &DeviceAttributes,
@@ -196,7 +197,7 @@ fn qualified_module(
     variants: AreaPtx,
 ) -> Result<Option<ModuleRequest>, CudaError> {
     if !ALWAYS_ON.contains(&area) {
-        return Ok(bound_module(PRODUCTION, area, device, limit));
+        return Ok(bound_production_module(area, device, limit));
     }
     let tier = PtxTier::BASELINE;
     let ptx = variants
@@ -225,9 +226,21 @@ fn production_tier(
     if ALWAYS_ON.contains(&area) {
         return Some(PtxTier::BASELINE);
     }
-    bound_module(PRODUCTION, area, device, limit)
+    bound_production_module(area, device, limit)
         .map(ModuleRequest::tier)
         .or_else(|| area.variants().runnable_tier(limit, device.capability()))
+}
+
+fn bound_production_module(
+    area: KernelModule,
+    device: &DeviceAttributes,
+    limit: PtxTier,
+) -> Option<ModuleRequest> {
+    bound_module(PRODUCTION, area, device, limit).or_else(|| {
+        MEASURED_MODULES
+            .iter()
+            .find_map(|binding| binding.request(area, device, limit))
+    })
 }
 
 fn bound_module(

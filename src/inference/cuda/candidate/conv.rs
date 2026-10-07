@@ -30,6 +30,7 @@ use super::{
     PlanError, SignedZeroContract, SpecialValues,
 };
 use crate::inference::cuda::geometry::Conv2d;
+use crate::inference::cuda::implementation::SpeedScope;
 use crate::inference::cuda::{
     ComputeCapability, CudaError, CudaMath, CudaRuntime, LoadedKernels, PtxTier,
 };
@@ -233,6 +234,13 @@ pub(crate) struct Oxide {
 }
 
 impl Oxide {
+    /// The measured card class for the sm80 ResNet artifact and speed selection
+    pub(crate) const RTX50_SCOPE: SpeedScope = SpeedScope::Point {
+        capability: ComputeCapability::new(12, 0),
+        multiprocessors: 36,
+        device_name: "NVIDIA GeForce RTX 5060 Ti",
+    };
+
     fn input_len(&self) -> usize {
         self.batch * self.in_channels * self.input[0] * self.input[1]
     }
@@ -529,13 +537,22 @@ impl super::DriverCandidate for Oxide {
         batch: usize,
         math: CudaMath,
         device: &super::super::device::DeviceAttributes,
-        _tier: super::PtxTier,
+        tier: super::PtxTier,
     ) -> Option<super::super::implementation::SpeedScope> {
+        if device.capability() == ComputeCapability::new(12, 0) {
+            let scope = Self::RTX50_SCOPE;
+            return (matches!(batch, 1 | 32) && tier >= PtxTier::Sm80 && scope.contains(device))
+                .then_some(scope);
+        }
+
         super::wideconv::trunk_speed_scope(boundary, batch, math, device)
     }
 
     fn speed_summary(_math: CudaMath) -> &'static str {
-        super::wideconv::TRUNK_SPEED_SUMMARY
+        concat!(
+            "RTX 4060 Ti: TF32 b1/b32 trunk >=1.39x; FP32 b32 1.29x; ",
+            "RTX 5060 Ti (12.0, 36 SMs), sm80: TF32 b1/b32 trunk >=1.61x; FP32 >=1.34x; 144/144 accuracy checks"
+        )
     }
 
     fn driver_pin(
@@ -590,9 +607,8 @@ impl super::DriverCandidate for Oxide {
 /// FP32 kernels and cuDNN over the 14 early layers at b1 and b32
 ///
 /// The A100 (8.0) runs TF32 at eight times its FP32 rate. An RTX 4060 Ti (8.9) measured
-/// 2.18x and 1.90x of cuDNN against 1.76x and 1.47x for the FP32 kernels. Capability
-/// 12.0 measured faster too, but its PR #36 binding pins the sm75 bytes, which lack
-/// these entries
+/// 2.18x and 1.90x of cuDNN against 1.76x and 1.47x for the FP32 kernels. The
+/// measured 36-SM RTX 5060 Ti uses the same entries through its point binding
 const TENSOR_TRUNK: [ComputeCapability; 2] =
     [ComputeCapability::new(8, 0), ComputeCapability::new(8, 9)];
 
@@ -607,7 +623,7 @@ fn tensor_kernel(
 ) -> Option<ConvKernel> {
     if math != CudaMath::Tf32
         || tier < PtxTier::Sm80
-        || !TENSOR_TRUNK.contains(&device.capability())
+        || !(TENSOR_TRUNK.contains(&device.capability()) || Oxide::RTX50_SCOPE.contains(device))
     {
         return None;
     }

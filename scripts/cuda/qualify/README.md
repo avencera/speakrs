@@ -224,8 +224,10 @@ artifact) for one device scope and carries tuple proofs. Each proof names a type
 `BoundaryId`, batch, math, complete `ConfigPin` and accuracy record, and a separate
 speed status. Only a proof whose speed was measured for the device selects the
 candidate; an unmeasured proof selects Library. Every other triple runs the Library
-path. The golden selection test pins the 52 PR #36 tuples independently of the
-declarations, on cc 12.0 at 36 and 70 SMs, cc 8.9, cc 8.0 and cc 7.5.
+path. The golden legacy selection test pins the four remaining PR #36 tuples
+independently of the declarations. The ResNet PR #36 binding was replaced by a
+measured sm80 artifact binding for the 36-SM RTX 5060 Ti. Complete-port speed scopes
+and pins govern that route; it does not create a qualification-record claim.
 Qualification starts all other boundaries on the Library path, so production
 defaults cannot change a Library control or another candidate's input.
 Layers must be boundary names of the target (`resnet.layer1.0.conv1` ...
@@ -535,8 +537,8 @@ may carry proofs from several records, but each tuple has one proof per device.
 Both `--check-table` modes still reject a second exported owner for one area, tier
 and capability. Cached modules cannot be replaced by a request for a different
 module. Speed evidence has a typed scope: a point (capability, SM count and device
-name) for new records, or capability-wide for the three PR #36 records only. The
-validator rejects a device-dependent selection rule pinned on point evidence, and
+name) for new records, or capability-wide for the two retained PR #36 records only.
+The validator rejects a device-dependent selection rule pinned on point evidence, and
 both table modes reject an exported scope that differs from the record's own
 device evidence, so legacy approval is never relabelled as point evidence.
 The selection key includes the tier, exact device capability and loaded artifact.
@@ -848,21 +850,24 @@ No other nonempty JSON object is accepted.
 
 ### Explicit legacy hardware mapping
 
-Only these three PR #36 records use the legacy hardware mapping in `records.LEGACY`:
+Only these two PR #36 records use the legacy hardware mapping in `records.LEGACY`:
 
 | Area | Record SHA-256 | Hardware source report |
 | --- | --- | --- |
-| ResNet (K1) | `8f8fa3e3c158771e354aad83f4e42fca6fac998aa192b39a966067a4b0035758` | `qualification/k1/REPORT-K1-requalify.md` |
 | LSTM (K2) | `3badc1aec939b0e8f7312786d695bec6445de1dacb1f85e44124bf3ac20356f8` | `qualification/k2/REPORT-final-lock.md` |
 | SincNet (K3) | `a4d1a2692b78a814cd2da16f084801c3641bfd11c6d095d610f3a8182ad6f675` | `qualification/k3/REPORT-K3-requalify.md` |
+
+The archived ResNet K1 record is
+`8f8fa3e3c158771e354aad83f4e42fca6fac998aa192b39a966067a4b0035758`, from
+`qualification/k1/REPORT-K1-requalify.md`. It no longer grants a production binding.
 
 The reports are in the `speakrs-native-cuda-records-2026-10-04` research archive.
 They state sm75 PTX on an RTX 5070 Ti, capability 12.0. This is not Turing hardware
 qualification. The mapping supplies only the missing tier/device identity and names
 older binary-only code provenance explicitly. The derived summary also records the
 legacy device name from those reports. It does not bypass a blocked status.
-K1 and K2 keep their raw blocked outcomes; the same general noise evaluator used for
-new operator timing must accept their recorded speedups. The PR #36 noise decision
+K2 keeps its raw blocked outcome; the same general noise evaluator used for new
+operator timing must accept its recorded speedups. The PR #36 noise decision
 is documented in `decision-log.tsv`, at 1:54:43 PM CDT on October 3, 2026, and the K1
 and K2 decisions at 4:47:33 AM and 5:08:33 AM CDT on October 4, 2026.
 
@@ -1210,7 +1215,7 @@ match the record's device and versions, including the frozen Library controls.
 The locked-summary mode checks the derived receipt; raw-record mode derives it
 again from the immutable record.
 
-The three exact PR #36 record hashes use an explicit legacy receipt. Those records
+The two retained PR #36 record hashes use an explicit legacy receipt. Those records
 have installed Library file hashes but no per-process version query. Their receipt
 retains those file hashes and this evidence gap. It does not invent version fields
 or extend the mapping to other records.
@@ -1230,12 +1235,9 @@ overlapping scopes with different tiers or artifacts are rejected.
 
 New numeric processes record the complete configuration pin supplied by locked
 code to each successful plan. Both table modes require each selected tuple to
-match its record's pin. The three exact PR #36 hashes use a separate fixed mapping:
-ResNet `LegacyWaves(shape)`, LSTM `LegacyCooperative`, and Sinc `ConvAbsPool`.
-That mapping is not read from the live production table. A fixed ResNet entry is
-not the legacy wave rule, even when it uses the same PTX artifact. The legacy map
-retains the original stride-2 B1 FP32 tuple, but does not restore its removed speed
-permission.
+match its record's pin. The two retained PR #36 hashes use a separate fixed mapping:
+LSTM `LegacyCooperative` and Sinc `ConvAbsPool`. That mapping is not read from the
+live production table.
 
 ### Loaded comparison Library bytes
 
