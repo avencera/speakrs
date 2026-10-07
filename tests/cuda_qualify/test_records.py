@@ -62,6 +62,7 @@ class RecordsFixture(unittest.TestCase):
             "crates/speakrs-cuda-kernels/src/lstm.rs",
             "src/inference/cuda/ptx/lstm.manifest",
             "src/inference/cuda/ptx/lstm.sm75.ptx",
+            "src/inference/cuda/ptx/lstm.sm75.sm_120.cubin",
         ):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -146,6 +147,22 @@ class RecordsFixture(unittest.TestCase):
             },
         }
         self.entry["candidate_coverage"] = copy.deepcopy(self.entry["coverage"])
+
+    def refresh_lock(self):
+        path = self.root / records.ACCEPTANCE
+        lock = self.root / "scripts/cuda/qualify/LOCK"
+        lock.write_text(
+            json.dumps(
+                {
+                    "schema": 1,
+                    "files": {
+                        records.ACCEPTANCE: hashlib.sha256(
+                            path.read_bytes()
+                        ).hexdigest()
+                    },
+                }
+            )
+        )
 
     def write_embed(self, tier, features):
         path = self.root / "src/inference/cuda/kernels.rs"
@@ -312,7 +329,7 @@ class Records(RecordsFixture):
         record_hash = self.store(raw)
         entry = {**self.entry, "record": record_hash}
         binding = {
-            "files": copy.deepcopy(self.files),
+            "files": records.shipped_files(self.root, "lstm", legacy=True),
             "lock_digest": self.record["lock_digest"],
         }
         with (
@@ -344,14 +361,14 @@ class Records(RecordsFixture):
         )
         entry = {**self.entry, "record": record_hash}
         binding = {
-            "files": copy.deepcopy(self.files),
+            "files": records.shipped_files(self.root, "lstm", legacy=True),
             "lock_digest": self.record["lock_digest"],
         }
         with (
             patch.dict(records.LEGACY, {record_hash: "lstm"}),
             patch.dict(records.LEGACY_BINDINGS, {record_hash: binding}),
         ):
-            for hashes in self.files.values():
+            for hashes in binding["files"].values():
                 for name in hashes:
                     path = self.root / name
                     original = path.read_bytes()
@@ -739,6 +756,9 @@ class ArtifactEvidence(RecordsFixture):
         self.child["code_sha256"]["src/inference/cuda/ptx/lstm.manifest"] = (
             records.file_digest(manifest)
         )
+        self.child["code_sha256"][path.relative_to(self.root).as_posix()] = (
+            records.file_digest(path)
+        )
         module["artifact"] = artifact
         self.entry["artifact"] = {
             name: artifact[name] for name in ("kind", "arch", "sha256")
@@ -768,6 +788,44 @@ class ArtifactEvidence(RecordsFixture):
             raw["tiers"]["sm75"]["loaded_ptx"]["modules"][0]["artifact"][field] = bad
             with self.subTest(field=field), self.assertRaises(records.Rejected):
                 self.check([{**self.entry, "record": self.store(raw)}])
+
+    def test_jit_record_binds_every_candidate_cubin_and_manifest(self):
+        self.check([self.entry])
+        for name in (
+            "src/inference/cuda/ptx/lstm.sm75.sm_120.cubin",
+            "src/inference/cuda/ptx/lstm.manifest",
+        ):
+            path = self.root / name
+            original = path.read_bytes()
+            path.write_bytes(original + b" drift")
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(records.Rejected, "qualification file differs"),
+            ):
+                self.check([self.entry])
+            path.write_bytes(original)
+        raw = copy.deepcopy(self.record)
+        del raw["tiers"]["sm75"]["code_sha256"][
+            "src/inference/cuda/ptx/lstm.sm75.sm_120.cubin"
+        ]
+        with self.assertRaisesRegex(
+            records.Rejected, "missing source or manifest hashes"
+        ):
+            self.check([{**self.entry, "record": self.store(raw)}])
+
+    def test_cubin_table_pin_is_checked_against_shipped_bytes(self):
+        artifact = self.cubin()
+        entries = [
+            {**self.entry, "artifact": {**self.entry["artifact"], "sha256": "b" * 64}}
+        ]
+        with self.assertRaisesRegex(records.Rejected, "production pin differs"):
+            self.check(entries)
+        self.check([self.entry])
+        records.write_summaries([self.entry], self.root, records=self.cache / "records")
+        self.refresh_lock()
+        with self.assertRaisesRegex(records.Rejected, "production pin differs"):
+            records.check_table(entries, self.root)
+        self.assertEqual(artifact["sha256"], self.entry["artifact"]["sha256"])
 
     def test_stale_embedded_ptx_and_missing_identity_cannot_accept(self):
         for value in (None, "b" * 64):
@@ -818,22 +876,6 @@ class Summaries(RecordsFixture):
         )
         self.refresh_lock()
         return result
-
-    def refresh_lock(self):
-        path = self.root / records.ACCEPTANCE
-        lock = self.root / "scripts/cuda/qualify/LOCK"
-        lock.write_text(
-            json.dumps(
-                {
-                    "schema": 1,
-                    "files": {
-                        records.ACCEPTANCE: hashlib.sha256(
-                            path.read_bytes()
-                        ).hexdigest()
-                    },
-                }
-            )
-        )
 
     def test_offline_does_not_read_raw_cache_and_full_verification_matches(self):
         self.prepare()

@@ -188,3 +188,19 @@ def production_load(area: str, tier: str, device_capability: str, root: Path) ->
     raise Rejected(
         "table: production load cannot realize the pinned tier on the device"
     )
+
+
+def shipped_key(area: str, tier: str, capability: str, raw: object, root: Path) -> dict:
+    """A production key must name the exact shipped bytes, even before record adoption."""
+    pinned = key(raw, device_capability=capability)
+    if area not in ("resnet", "lstm", "sincnet") or tier not in TIERS:
+        raise Rejected("artifact: invalid production area or tier")
+    suffix = (
+        "ptx"
+        if pinned["kind"] == "PtxJit"
+        else f"sm_{capability.replace('.', '')}.cubin"
+    )
+    path = root / "src/inference/cuda/ptx" / f"{area}.{tier}.{suffix}"
+    if pinned["kind"] == "Cubin" and file_hash(path) != pinned["sha256"]:
+        raise Rejected("artifact: production pin differs from shipped file")
+    return pinned

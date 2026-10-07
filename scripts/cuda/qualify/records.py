@@ -489,8 +489,10 @@ def production_load(area: str, tier: str, capability: str, root: Path = ROOT) ->
     artifacts.production_load(area, tier, capability, root)
 
 
-def shipped_files(root: Path, area: str) -> dict[str, dict[str, str]]:
-    """Collect the complete area source, PTX, and build-manifest path sets."""
+def shipped_files(
+    root: Path, area: str, *, legacy: bool = False
+) -> dict[str, dict[str, str]]:
+    """Collect candidate identity; legacy records predate shipped cubins."""
     host = AREA_HOST.get(area)
     if host is None:
         raise Rejected(f"table: unknown candidate area: {area}")
@@ -510,6 +512,8 @@ def shipped_files(root: Path, area: str) -> dict[str, dict[str, str]]:
             *sorted((kernels / area).rglob("*.rs")),
         ],
     }
+    if not legacy:
+        groups["cubins"] = sorted(ptx.glob(f"{area}.*.cubin"))
     if not groups["ptx"] or ptx / f"{area}.manifest" not in groups["manifests"]:
         raise Rejected(f"table: missing candidate PTX or manifest: {area}")
     return {
@@ -523,7 +527,8 @@ def check_binding(
 ) -> tuple[dict, str | None]:
     """Bind accepted evidence to all shipped files without trusting live baselines."""
     area = record["target"]
-    current = shipped_files(root, area)
+    legacy = record_hash in LEGACY
+    current = shipped_files(root, area, legacy=legacy)
     modules = [
         module
         for module in child.get("loaded_ptx", {}).get("modules", [])
@@ -569,7 +574,7 @@ def check_binding(
         ):
             raise Rejected("table: conflicting recorded PTX bindings")
         expected["ptx"].update(loaded)
-        for group in ("host_sources", "kernel_sources", "manifests"):
+        for group in ("host_sources", "kernel_sources", "manifests", "cubins"):
             # recorded additions and removals must remain visible, including nested modules
             names = set(current[group])
             if group == "host_sources":
@@ -583,6 +588,7 @@ def check_binding(
                 for name in code
                 if name.startswith(prefix)
                 and (group != "manifests" or name.endswith(".manifest"))
+                and (group != "cubins" or name.endswith(".cubin"))
             )
             if any(name not in code for name in names):
                 raise Rejected(f"table: missing source or manifest hashes: {group}")
@@ -689,6 +695,9 @@ def check_table_records(
             loaded_key = artifacts.module(loaded[0], root, device_capability=capability)
             recorded_artifact = loaded[0]["artifact"]
             recorded_device = device
+        artifacts.shipped_key(
+            entry["area"], tier, capability, entry.get("artifact"), root
+        )
         if (
             artifacts.key(entry.get("artifact"), device_capability=capability)
             != loaded_key
@@ -956,6 +965,7 @@ def check_table(
             "manifests",
             "host_sources",
             "kernel_sources",
+            *([] if summary["legacy"] else ["cubins"]),
         }:
             raise Rejected("table: missing summary file bindings")
         for hashes in bound.values():
@@ -970,7 +980,7 @@ def check_table(
                     raise Rejected("table: invalid summary file path")
                 digest(value)
         production_load(area, tier, capability, root)
-        current = shipped_files(root, area)
+        current = shipped_files(root, area, legacy=summary["legacy"])
         if bound != current:
             raise Rejected("table: qualification files differ from acceptance summary")
         artifact = summary.get("artifact")
@@ -1009,6 +1019,9 @@ def check_table(
                 root,
                 device_capability=capability,
             )
+        artifacts.shipped_key(
+            entry["area"], tier, capability, entry.get("artifact"), root
+        )
         if (
             artifacts.key(entry.get("artifact"), device_capability=capability)
             != loaded_key

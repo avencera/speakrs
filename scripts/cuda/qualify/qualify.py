@@ -60,7 +60,7 @@ from gates import (
 import artifacts
 from lock import ROOT, LockError, inventory, verify
 from assets import resolve
-from records import check_table
+from records import check_table, shipped_files
 from verdict import evaluate_checks, noise_timing
 from parse_trace import AllowList, attribute, window_kernels
 from ptx import shared_initialization
@@ -1808,6 +1808,10 @@ def collect_tier(
             if path.is_file() and path.suffix in (".rs", ".ptx", ".manifest")
         }
     )
+    # candidate artifacts sit outside the harness lock and must be pinned in full,
+    # including unselected tiers and architectures, not just the loaded module
+    for hashes in shipped_files(ROOT, AREAS[target]).values():
+        result["code_sha256"].update(hashes)
     result["verified_inputs"] = verify_inputs(target)
     steps = result["commands"]
     binary = build(env, directory, steps)
