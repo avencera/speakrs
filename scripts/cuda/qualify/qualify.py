@@ -130,6 +130,9 @@ MUTANT_GATES = {
     "Shape": Gate("layer", "layer parity", "non_b32"),
     "Fallback": Gate("profile", "forbidden library kernels"),
     "FirstUseFallback": Gate("profile", "forbidden library kernels"),
+    "FirstUseFallbackEager": Gate("profile", "forbidden library kernels"),
+    "FirstUseFallbackCaptured": Gate("profile", "forbidden library kernels"),
+    "FirstUseFallbackReplay": Gate("profile", "forbidden library kernels"),
     "Tail": Gate("layer", "layer parity", "partial"),
     "Atomic": Gate(
         "determinism:fixed_reduction_order",
@@ -160,6 +163,9 @@ MUTANT_PHASES = {
     "Tail": ("numeric",),
     "Fallback": ("numeric", "profile"),
     "FirstUseFallback": ("numeric", "profile"),
+    "FirstUseFallbackEager": ("numeric", "profile"),
+    "FirstUseFallbackCaptured": ("numeric", "profile"),
+    "FirstUseFallbackReplay": ("numeric", "profile"),
     "Atomic": ("numeric", "profile"),
     "Unscoped": ("numeric", "profile"),
     "Unlisted": ("numeric", "profile"),
@@ -1753,10 +1759,18 @@ def profile(
             else None,
         )
     result[label] = {"path": str(exported), "sha256": sha(exported)}
+    result.setdefault("profile_traces", []).append(
+        {
+            "label": label,
+            **result[label],
+            "eager_only": eager_only,
+            "receipt": None,
+        }
+    )
     if test == PROFILE_TEST and not eager_only and process.get("side_streams"):
         # replay correlations cannot recover per-node side-stream ownership
         # retain the original eager trace for the unchanged attribution check
-        result["short_profile"] = result[label]
+        result["profile_traces"][-1]["retained_for_eager"] = True
         retained = profile(
             result,
             binary,
@@ -1778,7 +1792,101 @@ def profile(
     return exported
 
 
-CANDIDATE_AREAS = frozenset({"resnet", "lstm", "sincnet", "fbankdft"})
+def fresh_profile_windows(
+    target: str, coverage: Coverage, library_control: bool
+) -> frozenset[str]:
+    """Require fresh launches for the same typed boundary, batch and math domain."""
+    selected = (
+        Coverage.product(layers(target), target_batches(target), MODES)
+        if library_control
+        else coverage
+    )
+    return frozenset(
+        f"lifecycle/secret/{mode}/{layer}/b{batch}/fresh"
+        for layer, batch, mode in selected.triples
+    )
+
+
+def check_profile_traces(
+    result: dict,
+    required: tuple[str, ...],
+    nonce: str,
+    allow: AllowList,
+    declared: frozenset[str],
+    library_control: bool,
+    *,
+    fresh_windows: frozenset[str] = frozenset(),
+) -> dict:
+    """Read each produced trace and bind an explicit check receipt to its bytes."""
+    traces = result.get("profile_traces", [])
+    if not traces:
+        raise Rejected("profile: no produced trace inventory")
+    failures = []
+    for item in traces:
+        if item.get("receipt") is not None:
+            continue
+        path = Path(item["path"])
+        try:
+            if sha(path) != item["sha256"]:
+                raise Rejected("profile: produced trace bytes changed")
+            evidence = attribute(
+                path, required, nonce, allow, declared, library_control
+            )
+            missing_fresh = sorted(
+                name
+                for name in fresh_windows
+                if not evidence["window_kernel_events"].get(name)
+            )
+            if missing_fresh:
+                raise Rejected(
+                    f"profile: missing fresh-input kernel coverage: {missing_fresh[:8]}"
+                )
+            item["receipt"] = {
+                "passed": True,
+                "sha256": item["sha256"],
+                "evidence": evidence,
+            }
+        except (Rejected, OSError) as error:
+            item["receipt"] = {
+                "passed": False,
+                "sha256": item["sha256"],
+                "reason": str(error),
+            }
+        if item.get("retained_for_eager"):
+            # the alias is published only after this lifecycle file has been read
+            result["short_profile"] = item
+        if not item["receipt"]["passed"]:
+            failures.append(f"{item['label']}: {item['receipt']['reason']}")
+    if failures:
+        raise Rejected("profile: " + "; ".join(failures))
+    return profile_trace_receipts(result)
+
+
+def profile_trace_receipts(result: dict) -> dict:
+    """Reject unread traces and receipts that do not match the produced inventory."""
+    traces = result.get("profile_traces", [])
+    if not traces:
+        raise Rejected("profile: no produced trace inventory")
+    if len({item["path"] for item in traces}) != len(traces):
+        raise Rejected("profile: duplicate produced trace path")
+    for item in traces:
+        try:
+            current = sha(Path(item["path"]))
+        except OSError as error:
+            raise Rejected(
+                f"profile: checked trace file is missing: {item['label']}"
+            ) from error
+        if current != item["sha256"]:
+            raise Rejected(f"profile: checked trace bytes changed: {item['label']}")
+        receipt = item.get("receipt")
+        if not isinstance(receipt, dict) or receipt.get("sha256") != item["sha256"]:
+            raise Rejected(f"profile: produced trace was not checked: {item['label']}")
+        if receipt.get("passed") is not True:
+            raise Rejected(f"profile: {item['label']}: {receipt.get('reason')}")
+    return {"checked_traces": [item["label"] for item in traces]}
+
+
+CANDIDATE_AREAS = frozenset(AREAS.values())
 
 
 def stable_modules(
@@ -2159,8 +2267,9 @@ def collect_tier(
         exported = profile(
             result, binary, env, directory, steps, implementation, target
         )
-        candidate_processes.append(
-            json.loads((directory / "profile-driver.json").read_text())
+        candidate_processes.extend(
+            json.loads((directory / f"{item['label']}-driver.json").read_text())
+            for item in result["profile_traces"]
         )
         if allow is not None:
             check(
@@ -2171,13 +2280,16 @@ def collect_tier(
             declared = frozenset(layer for layer in coverage.layers)
 
             def trace(library_control: bool) -> dict:
-                return attribute(
-                    exported,
+                return check_profile_traces(
+                    result,
                     layers(target),
                     nonce,
                     allow,
                     declared,
                     library_control,
+                    fresh_windows=fresh_profile_windows(
+                        target, coverage, library_control
+                    ),
                 )
 
             if implementation == "Library":
@@ -2192,6 +2304,23 @@ def collect_tier(
                 )
             else:
                 check(result, "profile", lambda: trace(False))
+
+        else:
+            check(
+                result,
+                "profile",
+                lambda: check_profile_traces(
+                    result,
+                    layers(target),
+                    nonce,
+                    AllowList(frozenset(), frozenset()),
+                    frozenset(coverage.layers),
+                    implementation == "Library",
+                    fresh_windows=fresh_profile_windows(
+                        target, coverage, implementation == "Library"
+                    ),
+                ),
+            )
 
         def graph_matches_profile():
             graphs = graph_kernels(candidate_processes)
@@ -2233,11 +2362,26 @@ def collect_tier(
         )
         check(
             result,
+            "profile",
+            lambda: check_profile_traces(
+                result,
+                ("resnet.layer1.0.conv1",),
+                nonce,
+                allow if allow is not None else AllowList(frozenset(), frozenset()),
+                frozenset({"resnet.layer1.0.conv1"}),
+                False,
+            ),
+        )
+        check(
+            result,
             "profile:sequential_capture",
             lambda: capture_multisets(
                 regression, [regression_process], nonce, required=7
             ),
         )
+
+    if "profile" in phases:
+        check(result, "profile:trace_receipts", lambda: profile_trace_receipts(result))
 
     check(
         result,

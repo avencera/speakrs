@@ -17,7 +17,7 @@ from lock import LockError, inventory
 
 CANDIDATE_HOST = "src/inference/cuda/candidate"
 KERNEL_CRATE = "crates/speakrs-cuda-kernels/src"
-CANDIDATE_AREAS = ("resnet", "lstm", "sincnet", "fbankdft")
+CANDIDATE_AREAS = ("resnet", "lstm", "sincnet", "fbankdft", "segdense", "wideconv")
 # a static item declaration, not the `'static` lifetime
 STATIC_ITEM = r"(?<!')\bstatic\s+(?:mut\s+)?[A-Za-z_][A-Za-z0-9_]*\s*:"
 
@@ -26,6 +26,10 @@ FORBIDDEN_STD = ("env", "fs", "net", "process", "thread", "os", "io", "time")
 STD_ROOTS = ("std", "core", "alloc")
 # each rule is a pattern and the reason it is refused
 HOST_RULES: tuple[tuple[str, str], ...] = (
+    (
+        r"\b(?:load_kernels|load_artifact|load_ptx|load_cubin|load_library|load_function|load_module|cuModuleLoad[A-Za-z_]*|cuLibraryLoad[A-Za-z_]*)\b",
+        "candidate plans must use preloaded LoadedKernels",
+    ),
     (r"\boption_env\s*!", "environment read"),
     (r"\benv\s*!\s*\(\s*\"(?!CARGO_)", "env! outside compile-time Cargo constants"),
     (

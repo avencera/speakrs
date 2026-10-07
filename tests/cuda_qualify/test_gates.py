@@ -469,6 +469,40 @@ class Scan(unittest.TestCase):
         self.assertEqual(result["findings"], [])
         self.assertIn("src/inference/cuda/candidate/lstm.rs", result["host_files"])
 
+    def test_candidate_plans_cannot_reload_modules(self):
+        relative = "src/inference/cuda/candidate/fixture.rs"
+        good = "fn plan(runtime: &CudaRuntime, kernels: &LoadedKernels) { kernels.function(ENTRY)?; }"
+        self.assertEqual(
+            scan.scan_text(relative, good, scan.HOST_RULES, resolve_calls=True), []
+        )
+        for load in (
+            "runtime.load_kernels(KernelModule::Lstm)",
+            "runtime.load_module(request)",
+            "load_artifact(request, bytes, loader)",
+            "let loader = runtime.load_kernels; loader(KernelModule::Lstm)",
+            "use driver::load_ptx as restore; restore(bytes)",
+            "cuModuleLoadData(&mut module, bytes)",
+        ):
+            code = good.replace("kernels.function(ENTRY)?", load)
+            with self.subTest(load=load):
+                findings = scan.scan_text(
+                    relative, code, scan.HOST_RULES, resolve_calls=True
+                )
+                self.assertTrue(
+                    any(
+                        "preloaded LoadedKernels" in finding.reason
+                        for finding in findings
+                    )
+                )
+        for name in ("conv", "lstm", "sinc"):
+            path = f"src/inference/cuda/candidate/{name}.rs"
+            self.assertEqual(
+                scan.scan_text(
+                    path, (ROOT / path).read_text(), scan.HOST_RULES, resolve_calls=True
+                ),
+                [],
+            )
+
     def test_each_rule_refuses_its_construct(self):
         refused = {
             'let p = std::env::var("X");': "environment",
@@ -690,7 +724,6 @@ class Trace(unittest.TestCase):
             (125, 140, "call", "cudnn.conv"),
         ]
         launches = [
-            (5, "setup_kernel_outside_windows", 9, "kernel", None),
             (25, "resnet_conv", 7, "kernel", None),
             (55, "embedding_bias", 7, "kernel", None),
             (130, "sm80_xmma_fprop_cudnn", 7, "kernel", None),
@@ -709,6 +742,12 @@ class Trace(unittest.TestCase):
             path = Path(directory) / "trace.sqlite"
             self.build(path, launches, ranges)
             return self.attribute(path)
+
+    def receipt(self, result: dict, index: int) -> dict:
+        value = result["profile_traces"][index]["receipt"]
+        if not isinstance(value, dict):
+            self.fail("each produced trace must have a check receipt")
+        return value
 
     def test_good_candidate_trace_passes(self):
         result = self.run_case(lambda launches, ranges: None)
@@ -790,6 +829,260 @@ class Trace(unittest.TestCase):
 
         with self.assertRaisesRegex(trace.Rejected, "graph node"):
             self.run_case(change)
+
+    def test_every_first_use_api_position_has_the_exact_profile_gate(self):
+        for position in (
+            "plan",
+            "warmup/0",
+            "eager",
+            "capture",
+            "first-replay",
+            "fresh",
+        ):
+            launches, ranges = self.good()
+            ranges.extend(
+                [
+                    (210, 300, "window", f"lifecycle/case/{position}"),
+                    (220, 280, "candidate", self.LAYER),
+                    (230, 240, "call", "cublas.m1.n1.k1"),
+                ]
+            )
+            # capture may record no eager kernel event; the real API scope still belongs to the candidate
+            if position != "capture":
+                launches.append((235, "cublas_single", 7, "kernel", None))
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "trace.sqlite"
+                self.build(path, launches, ranges)
+                with self.assertRaises(trace.Rejected) as rejected:
+                    self.attribute(path)
+                self.assertTrue(
+                    qualify.MUTANT_GATES["FirstUseFallbackCaptured"].matches(
+                        {
+                            "check": "profile",
+                            "reason": str(rejected.exception),
+                        }
+                    ),
+                    position,
+                )
+
+    def test_outside_window_work_is_not_silently_skipped(self):
+        for kernel in ("cublas_single", "unknown_setup_kernel"):
+            with self.subTest(kernel=kernel), self.assertRaises(trace.Rejected):
+                self.run_case(
+                    lambda launches, ranges: launches.append(
+                        (3, kernel, 7, "kernel", None)
+                    )
+                )
+        with self.assertRaisesRegex(
+            trace.Rejected, "outside a checked lifecycle window"
+        ):
+            self.run_case(
+                lambda launches, ranges: (
+                    ranges.append((210, 250, "candidate", self.LAYER)),
+                    launches.append((220, "resnet_conv", 7, "kernel", None)),
+                )
+            )
+
+    def test_side_stream_does_not_hide_unread_captured_first_use_fault(self):
+        with tempfile.TemporaryDirectory() as directory:
+            eager = Path(directory) / "profile-eager.sqlite"
+            short = Path(directory) / "profile.sqlite"
+            launches, ranges = self.good()
+            launches.append((28, "resnet_conv", 8, "kernel", None))
+            self.build(eager, launches, ranges)
+            ranges.extend(
+                [
+                    (210, 300, "window", "lifecycle/case/first-replay"),
+                    (220, 280, "candidate", self.LAYER),
+                    (230, 240, "call", "cublas.m1.n1.k1"),
+                ]
+            )
+            launches.append((235, "cublas_single", 7, "kernel", None))
+            self.build(short, launches, ranges)
+            result: dict = {
+                "profile_traces": [
+                    {
+                        "label": name,
+                        "path": str(path),
+                        "sha256": qualify.sha(path),
+                        "receipt": None,
+                    }
+                    for name, path in (("profile", short), ("profile-eager", eager))
+                ]
+            }
+            result["profile_traces"][0]["retained_for_eager"] = True
+            self.assertNotIn("short_profile", result)
+            with self.assertRaisesRegex(qualify.Rejected, "not checked"):
+                qualify.profile_trace_receipts(result)
+            with self.assertRaisesRegex(qualify.Rejected, "forbidden library kernels"):
+                qualify.check_profile_traces(
+                    result,
+                    (self.LAYER,),
+                    NONCE,
+                    self.ALLOW,
+                    frozenset({self.LAYER}),
+                    False,
+                )
+            self.assertFalse(self.receipt(result, 0)["passed"])
+            self.assertIs(result["short_profile"], result["profile_traces"][0])
+            self.assertTrue(self.receipt(result, 1)["passed"])
+            self.assertEqual(self.attribute(eager)["windows"], 2)
+
+    def test_fresh_input_exposes_a_content_keyed_library_fallback(self):
+        launches, ranges = self.good()
+        ranges.extend(
+            [
+                (210, 300, "window", "lifecycle/secret/fp32/b1/fresh"),
+                (220, 280, "candidate", self.LAYER),
+            ]
+        )
+        pinned = (1.0, 2.0)
+        fresh = (0.5, 3.0)
+        calls = []
+
+        def enqueue(values):
+            if values != pinned:
+                calls.append(values)
+                ranges.append((230, 240, "call", "cublas.content_miss"))
+                launches.append((235, "cublas_single", 7, "kernel", None))
+
+        enqueue(pinned)
+        self.assertEqual(calls, [])
+        enqueue(fresh)
+        self.assertEqual(calls, [fresh])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.sqlite"
+            self.build(path, launches, ranges)
+            with self.assertRaisesRegex(trace.Rejected, "forbidden library kernels"):
+                self.attribute(path)
+
+    def test_invalid_sqlite_has_a_failed_trace_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad.sqlite"
+            path.write_bytes(b"not sqlite")
+            result: dict = {
+                "profile_traces": [
+                    {
+                        "label": "bad",
+                        "path": str(path),
+                        "sha256": qualify.sha(path),
+                        "receipt": None,
+                    }
+                ]
+            }
+            with self.assertRaisesRegex(qualify.Rejected, "invalid SQLite"):
+                qualify.check_profile_traces(
+                    result,
+                    (self.LAYER,),
+                    NONCE,
+                    self.ALLOW,
+                    frozenset({self.LAYER}),
+                    False,
+                )
+            self.assertFalse(self.receipt(result, 0)["passed"])
+
+    def test_fresh_coverage_requires_an_actual_correlated_kernel(self):
+        name = f"lifecycle/secret/fp32/{self.LAYER}/b1/fresh"
+        coverage = qualify.Coverage.product((self.LAYER,), (1,), ("fp32",))
+        self.assertEqual(
+            qualify.fresh_profile_windows("resnet", coverage, False), frozenset({name})
+        )
+        for present, launched in ((False, False), (True, False), (True, True)):
+            launches, ranges = self.good()
+            if present:
+                ranges.extend(
+                    [(210, 300, "window", name), (220, 280, "candidate", self.LAYER)]
+                )
+            if launched:
+                launches.append((235, "resnet_conv", 7, "kernel", None))
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "trace.sqlite"
+                self.build(path, launches, ranges)
+                result: dict = {
+                    "profile_traces": [
+                        {
+                            "label": "profile",
+                            "path": str(path),
+                            "sha256": qualify.sha(path),
+                            "receipt": None,
+                        }
+                    ]
+                }
+
+                def check():
+                    return qualify.check_profile_traces(
+                        result,
+                        (self.LAYER,),
+                        NONCE,
+                        self.ALLOW,
+                        frozenset({self.LAYER}),
+                        False,
+                        fresh_windows=frozenset({name}),
+                    )
+
+                if launched:
+                    self.assertEqual(check()["checked_traces"], ["profile"])
+                else:
+                    with self.assertRaisesRegex(
+                        qualify.Rejected, "missing fresh-input kernel coverage"
+                    ):
+                        check()
+
+    def test_a_receipt_cannot_accept_changed_or_removed_trace_bytes(self):
+        for removed in (False, True):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "trace.sqlite"
+                self.build(path, *self.good())
+                result: dict = {
+                    "profile_traces": [
+                        {
+                            "label": "profile",
+                            "path": str(path),
+                            "sha256": qualify.sha(path),
+                            "receipt": None,
+                        }
+                    ]
+                }
+                self.assertEqual(
+                    qualify.check_profile_traces(
+                        result,
+                        (self.LAYER,),
+                        NONCE,
+                        self.ALLOW,
+                        frozenset({self.LAYER}),
+                        False,
+                    )["checked_traces"],
+                    ["profile"],
+                )
+                if removed:
+                    path.unlink()
+                else:
+                    path.write_bytes(b"changed after validation")
+                with self.assertRaisesRegex(
+                    qualify.Rejected, "file is missing" if removed else "bytes changed"
+                ):
+                    qualify.profile_trace_receipts(result)
+
+    def test_lifecycle_enqueues_do_not_change_eager_multisets(self):
+        launches, ranges = self.good()
+        ranges.extend(
+            [
+                (210, 300, "window", "lifecycle/case/warmup/0"),
+                (220, 280, "candidate", self.LAYER),
+            ]
+        )
+        launches.append((235, "resnet_conv", 7, "kernel", None))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.sqlite"
+            self.build(path, launches, ranges)
+            self.assertEqual(self.attribute(path)["windows"], 3)
+            self.assertEqual(
+                dict(trace.window_kernels(path, NONCE, multiset=True)["case"]),
+                {"resnet_conv": 1},
+            )
+            self.assertNotIn(
+                "lifecycle/case/warmup/0", trace.window_kernels(path, NONCE)
+            )
 
     def lstm_trace(
         self,

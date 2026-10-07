@@ -43,6 +43,7 @@ LSTM_PHASES = tuple(
 )
 # CUPTI copy kinds that stay on the device: device to device, peer to peer
 DEVICE_COPIES = {8, 10}
+LIBRARY_KERNEL = re.compile(r"cublas|cudnn|cufft|xmma|(?:^|_)s?gemm", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -125,18 +126,21 @@ def attribute(
         raise Rejected("profile: invalid nonce")
     if not path.is_file():
         raise Rejected("profile: missing SQLite export")
-    with closing(
-        sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True)
-    ) as connection:
-        connection.row_factory = sqlite3.Row
-        return _attribute(
-            connection,
-            required,
-            nonce,
-            allow,
-            declared,
-            library_control,
-        )
+    try:
+        with closing(
+            sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True)
+        ) as connection:
+            connection.row_factory = sqlite3.Row
+            return _attribute(
+                connection,
+                required,
+                nonce,
+                allow,
+                declared,
+                library_control,
+            )
+    except (sqlite3.Error, IndexError, KeyError) as error:
+        raise Rejected(f"profile: invalid SQLite trace: {error}") from error
 
 
 def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
@@ -208,6 +212,25 @@ def _events(connection, tables: set[str], names: dict):
             yield row, kind, set(), copy_kind
 
 
+def _forbidden_calls(ranges: list[Range]) -> list[str]:
+    """Capture records API calls, not eager launches; retain their real ownership."""
+    candidates = [scope for scope in ranges if scope.kind == "candidate"]
+    plans = [scope for scope in ranges if scope.kind == "plan"]
+    libraries = [scope for scope in ranges if scope.kind == "library"]
+    return [
+        call.name
+        for call in ranges
+        if call.kind == "call"
+        and (
+            any(_inside(call, candidate) for candidate in candidates)
+            or (
+                any(_inside(call, plan) for plan in plans)
+                and not any(_inside(call, library) for library in libraries)
+            )
+        )
+    ]
+
+
 def _attribute(
     connection: sqlite3.Connection,
     required: tuple[str, ...],
@@ -226,6 +249,11 @@ def _attribute(
         raise Rejected("profile: missing NVTX or kernel tables")
     names = dict(connection.execute("SELECT id, value FROM StringIds"))
     ranges = _ranges(connection, names, nonce)
+    forbidden = _forbidden_calls(ranges)
+    if forbidden:
+        raise Rejected(
+            f"profile: forbidden library kernels in a candidate scope: real API calls {forbidden[:8]}"
+        )
     # a stage also runs the other boundaries of its model on their Library paths
     for range_ in ranges:
         if range_.kind == "candidate" and range_.name not in required:
@@ -249,6 +277,7 @@ def _attribute(
     stream_events: Counter = Counter()
     stream_candidate_events: Counter = Counter()
     phase_events: Counter = Counter()
+    window_events: Counter = Counter({ranges[index].name: 0 for index in windows})
     for row, kind, event_names, copy_kind in _events(connection, tables, names):
         linked = launches.get((row["globalPid"], row["correlationId"]), [])
         if not linked:
@@ -265,6 +294,8 @@ def _attribute(
         if any(ranges[index].kind in ("candidate", "plan") for index in owners):
             stream_candidate_events[row["streamId"]] += 1
         for index in owners:
+            if ranges[index].kind == "window" and kind == "kernel":
+                window_events[ranges[index].name] += 1
             if ranges[index].kind == "phase" and kind == "kernel":
                 phase_events[index] += 1
         in_plan = any(ranges[index].kind == "plan" for index in owners)
@@ -280,7 +311,24 @@ def _attribute(
                 for launch in linked
             ):
                 violations["cross-thread work during a window"].append(kind)
-            continue
+            if not owners:
+                if kind == "kernel":
+                    reason = (
+                        "forbidden library kernels outside checked scopes"
+                        if any(LIBRARY_KERNEL.search(name) for name in event_names)
+                        else "work outside a candidate or library range"
+                    )
+                    violations[reason].append(label)
+                # host setup transfers are not candidate execution
+                continue
+            if in_plan:
+                continue
+            if any(ranges[index].kind == "candidate" for index in owners):
+                violations[
+                    "candidate execution outside a checked lifecycle window"
+                ].append(label)
+            # locked Library front ends can run outside candidate windows; their
+            # call/fixed ownership still has to pass the rules below
 
         held = [ranges[index] for index in owners if ranges[index].kind != "window"]
         if not held:
@@ -307,7 +355,12 @@ def _attribute(
             violations["forbidden library kernels in a candidate scope"].append(label)
             continue
         if candidate and kind == "kernel" and not event_names <= allow.entries:
-            violations["kernel is not on the loaded PTX allow-list"].append(label)
+            reason = (
+                "forbidden library kernels in a candidate scope"
+                if any(LIBRARY_KERNEL.search(name) for name in event_names)
+                else "kernel is not on the loaded PTX allow-list"
+            )
+            violations[reason].append(label)
             continue
         if candidate and kind == "copy" and copy_kind not in DEVICE_COPIES:
             violations["host transfer inside a candidate scope"].append(label)
@@ -392,6 +445,7 @@ def _attribute(
             for (kind, name), evidence in sorted(scopes.items())
         ],
         "windows": len(windows),
+        "window_kernel_events": dict(sorted(window_events.items())),
         "attribution": "CPU launch correlation and same-thread nonce-scoped NVTX containment",
         "eager": True,
     }
@@ -434,7 +488,15 @@ def window_kernels(path: Path, nonce: str, *, multiset: bool = False) -> dict:
                 names.get(row["mangledName"]) if "mangledName" in columns else None
             ) or names.get(row["demangledName"])
             for owner in owners:
-                if ranges[owner].kind == "window" and name:
+                if (
+                    ranges[owner].kind == "window"
+                    and name
+                    and not ranges[owner].name.startswith("lifecycle/")
+                ):
+                    if row["graphNodeId"] not in (None, 0):
+                        raise Rejected(
+                            "profile: graph node cannot count as an eager launch"
+                        )
                     if multiset:
                         counts[ranges[owner].name][name] += 1
                     else:

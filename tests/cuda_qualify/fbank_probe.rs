@@ -627,6 +627,20 @@ pub(super) fn secret(
     let constants = crate::inference::cuda::fbank::FbankConstants::new();
     for batch in 1..=32 {
         let audio = super::transformed_audio(&fixture, batch, &mut state);
+        if test_support::phase() == Some("profile") {
+            let spec = FbankSpec::new(batch, math).map_err(plan_error)?;
+            let mut candidate =
+                Operator::<Library>::new(runtime, spec, choice, [audio.clone(), audio])?;
+            {
+                let _window = test_support::window(&format!(
+                    "lifecycle/secret/{}/{LAYER}/b{batch}/fresh",
+                    super::math_name(math)
+                ));
+                candidate.run(runtime, 0, false)?;
+            }
+            candidate.output(runtime, false)?;
+            continue;
+        }
         let case = super::lock::TruthCase::new(math, batch, LAYER);
         let truth = super::lock::cpu(runtime, super::lock::CpuWork::F64(&case), || {
             let indices = super::reference::indices(&[batch, 80, 998], &mut state)

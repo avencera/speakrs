@@ -220,7 +220,10 @@ struct FirstUseCall {
 
 impl FirstUseCall {
     fn prepare(runtime: &CudaRuntime, choice: &str) -> Result<Option<Self>, CudaError> {
-        if choice != "FirstUseFallback" {
+        if super::Mutant::parse(choice)
+            .and_then(super::profile_lifecycle::FirstUse::stage)
+            .is_none()
+        {
             return Ok(None);
         }
         runtime.prepare_library(crate::inference::cuda::CudaLibrary::Cublas)?;
@@ -262,12 +265,30 @@ fn profile_case(
     layer: &str,
     mut enqueue: impl FnMut() -> Result<(), CudaError>,
 ) -> Result<(), CudaError> {
-    if std::env::var("SPEAKRS_QUALIFY_SHORT_TRACE").is_ok_and(|mode| mode == "0") {
+    use super::profile_lifecycle::{FirstUse, Stage};
+    let mut fallback = FirstUseCall::prepare(runtime, choice)?;
+    let mut hook = FirstUse::new(choice);
+    let eager_only = std::env::var("SPEAKRS_QUALIFY_SHORT_TRACE").is_ok_and(|mode| mode == "0");
+    let mut planted = |hook: &mut FirstUse, stage| -> Result<(), CudaError> {
+        if let Some(result) = hook.before(stage, || {
+            let _candidate = super::candidate(runtime.stream(), layer);
+            fallback
+                .as_mut()
+                .expect("prepared first-use fault")
+                .enqueue()
+        }) {
+            result?;
+        }
+        Ok(())
+    };
+    if eager_only {
         let _window = window(key);
+        planted(&mut hook, Stage::Eager)?;
         return enqueue();
     }
-    let mut fallback = FirstUseCall::prepare(runtime, choice)?;
-    for _ in 0..WARMUP {
+    for index in 0..WARMUP {
+        let _window = window(&format!("lifecycle/{key}/warmup/{index}"));
+        planted(&mut hook, Stage::Eager)?;
         enqueue()?;
     }
     {
@@ -277,25 +298,19 @@ fn profile_case(
     runtime.synchronize()?;
     set_label(Some(key.to_owned()));
     let graph = {
+        let _window = window(&format!("lifecycle/{key}/capture"));
         let _marker = super::library(runtime.stream(), "driver.capture");
-        capture(runtime, &mut enqueue)
+        capture(runtime, || {
+            planted(&mut hook, Stage::Captured)?;
+            enqueue()
+        })
     };
     set_label(None);
     let graph = graph?;
     {
+        let _window = window(&format!("lifecycle/{key}/first-replay"));
         let _marker = super::library(runtime.stream(), "driver.first_replay");
-        let mut first = super::FirstReplay::new();
-        if let Some(result) = first.before_library_call(choice, || {
-            // a graph has fixed nodes, so the one-shot fault belongs to this host hook
-            let _window = window(&format!("{key}/first-replay"));
-            let _candidate = super::candidate(runtime.stream(), layer);
-            fallback
-                .as_mut()
-                .expect("prepared first-replay fault")
-                .enqueue()
-        }) {
-            result?;
-        }
+        planted(&mut hook, Stage::Replay)?;
         graph.launch()?;
     }
     runtime.synchronize()?;
@@ -1301,6 +1316,18 @@ fn segmentation_secret(
             model.isolated_run(runtime, &mut op, 0)?;
             model.isolated_output(runtime, &op)
         };
+        if super::phase() == Some("profile") {
+            let mut op = candidate.isolated(runtime, batch, target, [&input, &input])?;
+            {
+                let _window = window(&format!(
+                    "lifecycle/secret/{}/{layer}/b{batch}/fresh",
+                    math_name(math)
+                ));
+                candidate.isolated_run(runtime, &mut op, 0)?;
+            }
+            candidate.isolated_output(runtime, &op)?;
+            continue;
+        }
         let case = lock::TruthCase::new(math, batch, layer);
         let snapshot = truth.f64_snapshot(runtime, target)?;
         let f64_truth = lock::cpu(runtime, lock::CpuWork::F64(&case), || {
@@ -1385,6 +1412,30 @@ fn secret(
         for (index, input) in inputs.into_iter().enumerate() {
             let block = index / 2;
             let second = index % 2 == 1;
+            if super::phase() == Some("profile") {
+                let mut op = Operator::from_host(
+                    &candidate,
+                    runtime,
+                    &[input],
+                    Vec::new(),
+                    batch,
+                    block,
+                    second,
+                )?;
+                if choice != "Library" && !op.declared() {
+                    continue;
+                }
+                {
+                    let _window = window(&format!(
+                        "lifecycle/secret/{}/{}/b{batch}/fresh",
+                        math_name(math),
+                        op.name()
+                    ));
+                    op.run(runtime, 0)?;
+                }
+                op.output(runtime)?;
+                continue;
+            }
             let nudged = HostInputs {
                 input: nudge(&input.input, &mut state),
                 residual: input
@@ -1739,6 +1790,11 @@ fn qualification_driver() -> Result<(), CudaError> {
             run.embedding(&mut rows)?;
         } else {
             run.segmentation(&mut rows)?;
+        }
+    }
+    if phase == "profile" {
+        for math in [CudaMath::Fp32, CudaMath::Tf32] {
+            secret(&runtime, &target, choice, math, &mut rows)?;
         }
     }
     if phase == "numeric" {

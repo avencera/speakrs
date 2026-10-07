@@ -67,8 +67,12 @@ pub(crate) enum Mutant {
     StageAccuracy,
     Shape,
     Fallback,
-    /// A real Library call on the first profiled replay, never during capture
-    FirstUseFallback,
+    /// A real Library call on the first eager enqueue
+    FirstUseFallbackEager,
+    /// A real Library call on the first captured enqueue
+    FirstUseFallbackCaptured,
+    /// A real Library call before the first graph replay
+    FirstUseFallbackReplay,
     Tail,
     Atomic,
     Slow,
@@ -93,7 +97,9 @@ impl Mutant {
             "Precision" => Some(Self::Precision),
             "Shape" => Some(Self::Shape),
             "Fallback" => Some(Self::Fallback),
-            "FirstUseFallback" => Some(Self::FirstUseFallback),
+            "FirstUseFallbackEager" => Some(Self::FirstUseFallbackEager),
+            "FirstUseFallbackCaptured" => Some(Self::FirstUseFallbackCaptured),
+            "FirstUseFallback" | "FirstUseFallbackReplay" => Some(Self::FirstUseFallbackReplay),
             "Tail" => Some(Self::Tail),
             "Atomic" => Some(Self::Atomic),
             "Slow" => Some(Self::Slow),
@@ -312,10 +318,8 @@ fn open(kind: Kind, name: &str, stream: Option<&CudaStream>) -> Scope {
             capture,
         })
     });
-    let trace = !CAPTURE_TRACE.with(Cell::get);
-    if let Some(nvtx) = &harness.nvtx
-        && trace
-    {
+    // capture scopes retain real API ownership; recorded nodes are checked separately
+    if let Some(nvtx) = &harness.nvtx {
         let text = CString::new(format!("qualify.{}.{}.{name}", harness.nonce, kind.label()))
             .expect("scope names have no nul bytes");
         // SAFETY: NVTX copies the terminated message during the call
@@ -324,7 +328,7 @@ fn open(kind: Kind, name: &str, stream: Option<&CudaStream>) -> Scope {
 
     Scope {
         active: true,
-        nvtx: trace && harness.nvtx.is_some(),
+        nvtx: harness.nvtx.is_some(),
         _thread: PhantomData,
     }
 }
@@ -348,7 +352,7 @@ impl Drop for Scope {
     }
 }
 
-/// Mark capture without presenting recorded nodes as correlated eager launches
+/// Guard one capture lifecycle while retaining API scopes and separate node evidence
 pub(crate) struct CaptureTrace(PhantomData<Rc<()>>);
 
 impl CaptureTrace {
@@ -364,43 +368,12 @@ impl Drop for CaptureTrace {
     }
 }
 
-/// One graph's host replay hook, separate from its immutable captured nodes
-pub(crate) struct FirstReplay(bool);
+#[path = "../../../tests/cuda_qualify/profile_lifecycle.rs"]
+pub(crate) mod profile_lifecycle;
 
-impl FirstReplay {
-    /// Start before this graph's first launch
-    pub(crate) fn new() -> Self {
-        Self(true)
-    }
-
-    /// Execute the planted fallback once; eager execution and capture never call this
-    pub(crate) fn before<T>(&mut self, choice: &str, fallback: impl FnOnce() -> T) -> Option<T> {
-        let first = std::mem::replace(&mut self.0, false);
-        (first && choice == "FirstUseFallback").then(fallback)
-    }
-
-    /// Check the real Library API count, not just the number of host callbacks
-    pub(crate) fn before_library_call<T>(
-        &mut self,
-        choice: &str,
-        fallback: impl FnOnce() -> Result<T, CudaError>,
-    ) -> Option<Result<T, CudaError>> {
-        self.before(choice, || {
-            let before = CALL_COUNT.with(Cell::get);
-            let result = fallback()?;
-            assert_eq!(
-                CALL_COUNT.with(Cell::get) - before,
-                1,
-                "first replay must issue exactly one Library API call"
-            );
-            Ok(result)
-        })
-    }
-}
-
-/// Preserve the no-fault Library route until the locked first-replay hook runs
+/// Preserve the control route except for the separate typed first-use call
 pub(crate) fn mutant_scope(stream: &CudaStream, layer: &str, mutant: Mutant) -> Scope {
-    if mutant == Mutant::FirstUseFallback {
+    if profile_lifecycle::FirstUse::stage(mutant).is_some() {
         return library(stream, layer);
     }
     candidate(stream, layer)
@@ -1369,29 +1342,6 @@ mod timing_tests {
 }
 
 #[test]
-fn first_replay_hook_runs_the_library_fallback_only_once() {
-    let mut replay = FirstReplay::new();
-    let mut calls = 0;
-    for _ in 0..3 {
-        replay.before("FirstUseFallback", || {
-            calls += 1;
-        });
-    }
-    assert_eq!(calls, 1);
-    let mut control = FirstReplay::new();
-    assert!(
-        control
-            .before("Library", || panic!("no Library-control fault"))
-            .is_none()
-    );
-    assert!(
-        control
-            .before("FirstUseFallback", || panic!("not a first replay"))
-            .is_none()
-    );
-}
-
-#[test]
 fn capture_trace_keeps_forbidden_library_call_tracking_active() {
     let saved_stack = STACK.with(|stack| stack.take());
     let saved_calls = CALL_VIOLATIONS.with(|calls| calls.take());
@@ -1413,35 +1363,4 @@ fn capture_trace_keeps_forbidden_library_call_tracking_active() {
     assert!(!CAPTURE_TRACE.with(Cell::get));
     STACK.with(|stack| *stack.borrow_mut() = saved_stack);
     CALL_VIOLATIONS.with(|calls| *calls.borrow_mut() = saved_calls);
-}
-
-#[test]
-fn first_replay_checks_exactly_one_library_api_call() {
-    let saved = CALL_COUNT.with(Cell::get);
-    let mut hook = FirstReplay::new();
-    hook.before_library_call("FirstUseFallback", || {
-        check_call("cublas.single");
-        Ok(())
-    })
-    .unwrap()
-    .unwrap();
-    assert_eq!(CALL_COUNT.with(Cell::get) - saved, 1);
-    assert!(
-        hook.before_library_call::<()>("FirstUseFallback", || panic!(
-            "second replay cannot call Library"
-        ))
-        .is_none()
-    );
-    for calls in [0, 2] {
-        let rejected = std::panic::catch_unwind(|| {
-            FirstReplay::new().before_library_call("FirstUseFallback", || {
-                for _ in 0..calls {
-                    check_call("cublas.extra");
-                }
-                Ok(())
-            })
-        });
-        assert!(rejected.is_err());
-    }
-    CALL_COUNT.with(|count| count.set(saved));
 }
