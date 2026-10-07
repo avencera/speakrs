@@ -658,17 +658,32 @@ def speed_scope(entry: dict, *, legacy: bool, capability: str, device: dict) -> 
 
 
 def unique_artifact_owners(entries: list[dict]) -> None:
-    """One production owner binds each area, tier and exact device to one artifact"""
-    owners = set()
+    """Allow repeated evidence for one binding, never conflicting overlapping loads"""
+    owners: list[tuple[str, str, dict, tuple]] = []
     for entry in entries:
+        area = entry.get("area")
+        if area not in ("resnet", "lstm", "sincnet", "fbankdft"):
+            raise Rejected("table: missing production artifact area")
+        scope = entry.get("speed_scope")
+        if not isinstance(scope, dict) or scope.get("kind") not in (
+            "Point",
+            "LegacyCapability",
+        ):
+            raise Rejected("table: missing production speed scope")
+        identity = (entry.get("tier"), entry.get("artifact"))
         for device in entry["devices"]:
-            area = entry.get("area")
-            if area not in ("resnet", "lstm", "sincnet"):
-                raise Rejected("table: missing production artifact area")
-            owner = (area, entry["tier"], device)
-            if owner in owners:
-                raise Rejected("table: duplicate production artifact owner")
-            owners.add(owner)
+            for prior_area, prior_device, prior_scope, prior_identity in owners:
+                if prior_area != area or prior_device != device:
+                    continue
+                points = scope["kind"] == prior_scope["kind"] == "Point"
+                if points and (scope.get("sm_count"), scope.get("device_name")) != (
+                    prior_scope.get("sm_count"),
+                    prior_scope.get("device_name"),
+                ):
+                    continue
+                if prior_identity != identity:
+                    raise Rejected("table: conflicting production artifact bindings")
+            owners.append((area, device, scope, identity))
 
 
 def check_table_records(

@@ -198,13 +198,34 @@ class Records(RecordsFixture):
         conflicting = copy.deepcopy(self.entry)
         conflicting["artifact"] = {"kind": "Cubin", "arch": "12.0", "sha256": "b" * 64}
         with self.assertRaisesRegex(
-            records.Rejected, "duplicate production artifact owner"
+            records.Rejected, "conflicting production artifact bindings"
         ):
             self.check([self.entry, conflicting])
         with self.assertRaisesRegex(
-            records.Rejected, "duplicate production artifact owner"
+            records.Rejected, "conflicting production artifact bindings"
         ):
             records.check_table([self.entry, conflicting], self.root)
+
+    def test_multiple_records_can_share_one_module_binding(self):
+        other = {**self.entry, "record": "b" * 64}
+        records.unique_artifact_owners([self.entry, other])
+        self.assertEqual(len(self.check([self.entry, self.entry])["entries"]), 2)
+
+    def test_different_point_scopes_can_load_different_modules(self):
+        other = copy.deepcopy(self.entry)
+        other["speed_scope"]["sm_count"] = 70
+        other["artifact"] = {"kind": "PtxJit", "sha256": "b" * 64}
+        records.unique_artifact_owners([self.entry, other])
+        legacy = {
+            **self.entry,
+            "speed_scope": {"kind": "LegacyCapability", "capability": "12.0"},
+        }
+        with self.assertRaisesRegex(records.Rejected, "conflicting production"):
+            records.unique_artifact_owners([legacy, other])
+        other["artifact"] = self.entry["artifact"]
+        other["tier"] = "sm80"
+        with self.assertRaisesRegex(records.Rejected, "conflicting production"):
+            records.unique_artifact_owners([legacy, other])
 
     def test_positive_and_four_required_negative_cases(self):
         self.assertFalse(self.check([self.entry])["entries"][0]["legacy"])

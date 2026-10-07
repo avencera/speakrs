@@ -506,6 +506,9 @@ class Scan(unittest.TestCase):
         allowed = [
             "use super::{Coverage, LstmPhases};\nuse super::layout::pack;",
             "use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, KernelModule};",
+            "use crate::inference::cuda::ComputeCapability as CC; let cc = CC::new(12, 0);",
+            "use crate::inference::cuda::device::DeviceAttributes as Device; fn sm(d: &Device) { d.multiprocessors(); }",
+            "use crate::inference::cuda::candidate::{ConfigPin, ConvPin, ConvKernel, FbankSpec}; let pin = ConfigPin::Conv(ConvPin::Kernel(ConvKernel::C64));",
             "use crate::inference::cuda::dnn::Conv2d;\nuse crate::inference::cuda::error::check_len;",
             'let e = crate::inference::cuda::CudaError::Unsupported { context: "x", reason: r };',
             "use cudarc::driver::{CudaStream, LaunchConfig, PushKernelArg};",
@@ -520,6 +523,7 @@ class Scan(unittest.TestCase):
                     [],
                 )
         refused = [
+            "use crate::inference::cuda::implementation::TupleProof;",
             "crate::inference::cuda::test_support::phase();",
             "use crate::inference::cuda::SafetensorsFile;\nSafetensorsFile::open(path);",
             "let f = crate::inference::cuda::weights::SafetensorsFile::open(p);",

@@ -84,21 +84,88 @@ fn unknown_or_reduced_context_budget_selects_sequential() {
 
 #[test]
 fn insufficient_cooperative_capacity_falls_back_only_in_library_allowed_production() {
+    use crate::inference::cuda::device::test_support::Builder;
+    use crate::inference::cuda::implementation::{BoundaryId, Selected, select};
+    use crate::inference::cuda::kernels::{ArtifactHash, LoadedArtifact, ModuleRequest};
     use crate::inference::cuda::{ComputeCapability, CudaError, CudaMath, KernelModule, PtxTier};
-    use crate::inference::cuda::implementation::{Selected, Target, select};
 
     let schedule = || layout::Schedule::new(1, layout::GROUPS - 1, Some(350));
+    let device = Builder::new(ComputeCapability::new(12, 0)).build();
+    let module = ModuleRequest::new(
+        KernelModule::Lstm,
+        PtxTier::Sm75,
+        LoadedArtifact::PtxJit {
+            sha256: ArtifactHash::of(include_str!("ptx/lstm.sm75.ptx").as_bytes()),
+        },
+    );
     let Selected::Oxide(token) = select(
-        "lstm.stack",
+        BoundaryId::named("lstm.stack"),
         1,
         CudaMath::Fp32,
-        Target { tier: PtxTier::Sm75, device: ComputeCapability::new(12, 0), artifact: super::kernels::LoadedArtifact::PtxJit { sha256: super::kernels::ArtifactHash::of(include_str!("ptx/lstm.sm75.ptx").as_bytes()) } },
-    ).unwrap() else { panic!("qualified production token") };
-    assert!(token.finish(KernelModule::Lstm, false, schedule()).unwrap().is_none());
+        &device,
+        module,
+    )
+    .unwrap() else {
+        panic!("qualified production token")
+    };
+    assert!(
+        token
+            .finish(KernelModule::Lstm, false, schedule())
+            .unwrap()
+            .is_none()
+    );
     assert!(matches!(
         token.finish(KernelModule::Lstm, true, schedule()),
         Err(CudaError::CandidateDeviceUnsupported {
-            area: "lstm", batch: 1, math: CudaMath::Fp32, tier: PtxTier::Sm75, ..
+            area: "lstm",
+            batch: 1,
+            math: CudaMath::Fp32,
+            tier: PtxTier::Sm75,
+            ..
         })
     ));
+}
+
+#[test]
+fn schedules_cover_every_tile_without_exceeding_residency() {
+    // adapted from the supplied geometry test; this branch has one fixed geometry
+    for batch in [1usize, 7, 32, 33, 64, 65] {
+        for capacity in [
+            layout::GROUPS - 1,
+            layout::GROUPS,
+            2 * layout::GROUPS,
+            140,
+            280,
+        ] {
+            for joint in [
+                None,
+                Some(0),
+                Some(layout::GROUPS),
+                Some(capacity),
+                Some(420),
+            ] {
+                let result = layout::Schedule::new(batch, capacity, joint);
+                if capacity < layout::GROUPS {
+                    assert!(result.is_err());
+                    continue;
+                }
+                let schedule = result.expect("one group fits");
+                let mut covered = Vec::new();
+                for (first, count) in schedule.launches() {
+                    assert!(count * layout::GROUPS <= capacity);
+                    covered.extend(first..first + count);
+                }
+                assert_eq!(
+                    covered,
+                    (0..batch.div_ceil(schedule.tile_rows)).collect::<Vec<_>>()
+                );
+                if schedule.concurrent {
+                    let budget = joint
+                        .expect("concurrency needs a known budget")
+                        .min(capacity);
+                    assert!(2 * schedule.tiles * layout::GROUPS <= budget);
+                }
+            }
+        }
+    }
 }

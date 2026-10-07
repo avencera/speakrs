@@ -1009,3 +1009,7 @@ mod tests {
         assert!(TierFixture::coverage(PtxTier::Sm120).entries().is_empty());
     }
 }
+
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[path = "candidate_tests.rs"]
+mod candidate_tests;
