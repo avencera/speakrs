@@ -389,8 +389,8 @@ impl Candidate {
             std::env::var("TRUNK_RESNET").as_deref(),
             Ok("tensor" | "sm80")
         ) {
-            // the capability 12.0 binding pins resnet sm75, so tensor timing loads the
-            // newest runnable tier directly
+            // load the newest runnable tier directly so the comparison does not depend
+            // on a production binding
             let area = KernelModule::Resnet;
             let device = runtime.device().capability();
             let request = area
