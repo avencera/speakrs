@@ -560,6 +560,8 @@ def check_binding(
             ):
                 raise Rejected("table: invalid source binding path")
             digest(value)
+        if any(name not in code for name in current["ptx"]):
+            raise Rejected("table: missing candidate PTX code hashes")
         ptx_prefix = f"src/inference/cuda/ptx/{area}."
         expected = {
             "ptx": {

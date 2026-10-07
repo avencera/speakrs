@@ -86,7 +86,6 @@ class RecordsFixture(unittest.TestCase):
             "code_sha256": {
                 name: value
                 for group, hashes in self.files.items()
-                if group != "ptx"
                 for name, value in hashes.items()
             },
             "loaded_ptx": {
@@ -804,14 +803,21 @@ class ArtifactEvidence(RecordsFixture):
             ):
                 self.check([self.entry])
             path.write_bytes(original)
-        raw = copy.deepcopy(self.record)
-        del raw["tiers"]["sm75"]["code_sha256"][
-            "src/inference/cuda/ptx/lstm.sm75.sm_120.cubin"
-        ]
-        with self.assertRaisesRegex(
-            records.Rejected, "missing source or manifest hashes"
+        for name in (
+            "src/inference/cuda/ptx/lstm.sm75.sm_120.cubin",
+            "src/inference/cuda/ptx/lstm.sm75.ptx",
+            "src/inference/cuda/ptx/lstm.manifest",
         ):
-            self.check([{**self.entry, "record": self.store(raw)}])
+            raw = copy.deepcopy(self.record)
+            del raw["tiers"]["sm75"]["code_sha256"][name]
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(
+                    records.Rejected,
+                    "missing source or manifest hashes|missing candidate PTX code hashes",
+                ),
+            ):
+                self.check([{**self.entry, "record": self.store(raw)}])
 
     def test_cubin_table_pin_is_checked_against_shipped_bytes(self):
         artifact = self.cubin()

@@ -191,7 +191,7 @@ def production_load(area: str, tier: str, device_capability: str, root: Path) ->
 
 
 def shipped_key(area: str, tier: str, capability: str, raw: object, root: Path) -> dict:
-    """A production key must name the exact shipped bytes, even before record adoption."""
+    """Check shipped cubin bytes; module and record bindings separately verify JIT PTX."""
     pinned = key(raw, device_capability=capability)
     if area not in ("resnet", "lstm", "sincnet") or tier not in TIERS:
         raise Rejected("artifact: invalid production area or tier")
