@@ -94,6 +94,55 @@ fn uncovered_candidate_requests_do_not_load_artifacts() {
 }
 
 #[test]
+fn sinc_stage_tail_owner_resolves_coverage_before_loading() {
+    use super::{AreaTarget, Choice, PlanRequest};
+    let device = ComputeCapability::new(12, 0);
+    let tier = PtxTier::Sm75;
+    for choice in [Choice::StageTail, Choice::StageTailControl] {
+        for (batch, math, device, expected_loads) in [
+            (1, CudaMath::Fp32, device, 1),
+            (32, CudaMath::Fp32, device, 1),
+            (7, CudaMath::Fp32, device, 0),
+            (1, CudaMath::Tf32, device, 0),
+            (32, CudaMath::Tf32, device, 0),
+            (1, CudaMath::Fp32, ComputeCapability::new(8, 9), 0),
+        ] {
+            let mut loads = 0;
+            let target = Target {
+                tier,
+                device,
+                artifact: legacy_artifact("sincnet"),
+            };
+            let selected = PlanRequest::Qualification(choice)
+                .resolve(
+                    KernelModule::Sincnet,
+                    "sincnet.conv0.abs_pool",
+                    batch,
+                    math,
+                    AreaTarget { tier, device },
+                    || {
+                        loads += 1;
+                        Ok(target)
+                    },
+                )
+                .unwrap();
+            assert_eq!(loads, expected_loads);
+            match selected {
+                Selected::Oxide(token) if expected_loads == 1 => {
+                    assert_eq!(token.target, target);
+                    assert_eq!(token.boundary, "sincnet.conv0.abs_pool");
+                    assert_eq!(token.batch, batch);
+                    assert_eq!(token.math, math);
+                    assert_eq!(token.selection, super::Selection::Production);
+                }
+                Selected::Library if expected_loads == 0 => {}
+                other => panic!("wrong fixture owner: {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
 fn covered_selection_loads_and_matches_the_actual_artifact() {
     use super::{AreaTarget, PlanRequest};
     use crate::inference::cuda::kernels::{ArtifactHash, LoadedArtifact};
