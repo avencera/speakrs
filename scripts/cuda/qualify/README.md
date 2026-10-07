@@ -1058,8 +1058,10 @@ Both input sets use the hash-pinned B32 WeSpeaker fbank snapshot. First, last an
 short select rows 0, 17 and 18. Mixed selects its first B rows. The alternate set is
 first for a short case and short for every other case. Audio, energies and features
 select the same rows. The driver checks that the two audio hashes differ. The
-energy reference is the unique ONNX MatMul output with shape `[32,998,80]`; an
-absent or ambiguous match is an error. The stage reference is `tensor/fbank`.
+energy reference is the unique matrix-multiply output with shape `[32,998,80]`.
+The pinned snapshot calls it `tensor/matmul`; operation matching accepts lowercase
+PyTorch and capitalized ONNX names. An absent or ambiguous match is an error.
+The stage reference is `tensor/fbank`.
 
 The secret check transforms audio in memory and computes 4096 stratified f64
 energy samples. It uses direct DFT sums, exact f64 Hamming and pre-emphasis, and

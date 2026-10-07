@@ -20,7 +20,7 @@ fn plan_error(error: impl std::fmt::Display) -> CudaError {
     }
 }
 
-/// Identify the mel MatMul by both its operation and complete output shape
+/// Identify mel matrix multiplication by its operation and complete output shape
 fn energy_tensor(file: &SafetensorsFile) -> String {
     let names = file.names();
     mel_energy_name(
@@ -34,14 +34,16 @@ fn mel_energy_name<'a>(tensors: impl IntoIterator<Item = (&'a str, &'a [usize])>
     let names: Vec<_> = tensors
         .into_iter()
         .filter(|(name, shape)| {
-            name.starts_with("tensor/") && name.contains("/MatMul") && *shape == [32, 998, 80]
+            name.starts_with("tensor/")
+                && name.to_ascii_lowercase().contains("/matmul")
+                && *shape == [32, 998, 80]
         })
         .map(|(name, _)| name)
         .collect();
     assert_eq!(
         names.len(),
         1,
-        "one ONNX mel MatMul output must match [32,998,80]"
+        "one mel matrix-multiply output must match [32,998,80]"
     );
     names[0].to_owned()
 }
@@ -507,8 +509,18 @@ fn mel_reference_selection_requires_unique_operation_and_shape() {
     ];
     assert_eq!(mel_energy_name(candidates), "tensor//MatMul_1_output_0");
     assert!(std::panic::catch_unwind(|| mel_energy_name(candidates[..2].iter().copied())).is_err());
+
+    // the hash-pinned snapshot names its PyTorch operation in lowercase
+    let snapshot = [
+        ("tensor/clamp_min", &[32, 998, 80][..]),
+        ("tensor/fbank", &[32, 998, 80][..]),
+        ("tensor/log", &[32, 998, 80][..]),
+        ("tensor/matmul", &[32, 998, 80][..]),
+    ];
+    assert_eq!(mel_energy_name(snapshot), "tensor/matmul");
+
     let duplicate = [
-        ("tensor//MatMul_1_output_0", &[32, 998, 80][..]),
+        ("tensor/matmul", &[32, 998, 80][..]),
         ("tensor//MatMul_2_output_0", &[32, 998, 80][..]),
     ];
     assert!(std::panic::catch_unwind(|| mel_energy_name(duplicate)).is_err());
