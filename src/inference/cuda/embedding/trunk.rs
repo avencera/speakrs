@@ -126,6 +126,19 @@ impl ConvLayer {
         self.plan.boundary
     }
 
+    /// The trunk-owned operation after this layer's convolution
+    pub(super) fn epilogue(&self, residual: bool) -> super::super::candidate::Epilogue {
+        use super::super::candidate::Epilogue;
+        if self.shape.kernel == 1 {
+            return Epilogue::Bias;
+        }
+        if residual {
+            Epilogue::BiasReluResidual
+        } else {
+            Epilogue::BiasRelu
+        }
+    }
+
     pub(super) fn weight(&self) -> &DeviceTensor {
         &self.weight
     }

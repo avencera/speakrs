@@ -153,9 +153,12 @@ const ALWAYS_ON: &[KernelModule] = &[
 /// Routes that may implement one boundary, highest precedence first; the first route
 /// with a proof for a tuple decides it, even when that proof's speed is unmeasured
 const ROUTE_PRECEDENCE: &[KernelModule] = &[
+    KernelModule::Wideconv,
     KernelModule::Resnet,
+    KernelModule::Segdense,
     KernelModule::Lstm,
     KernelModule::Sincnet,
+    KernelModule::FbankDft,
 ];
 
 // one module per area and overlapping device scope, complete pins and scoped evidence
@@ -735,6 +738,14 @@ fn explicit_request(
     math: CudaMath,
 ) -> Result<Option<ModuleRequest>, CudaError> {
     for area in ROUTE_PRECEDENCE {
+        // record-owned areas without a port have no artifact to resolve
+        if matches!(
+            area,
+            KernelModule::Wideconv | KernelModule::Segdense | KernelModule::FbankDft
+        ) {
+            continue;
+        }
+
         let request = modules.embedded_exact(*area)?;
         if candidate_coverage(*area, request.tier()).covers(boundary.name(), batch, math) {
             return Ok(Some(request));

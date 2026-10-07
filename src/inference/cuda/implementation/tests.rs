@@ -1205,6 +1205,37 @@ fn route_precedence_and_unmeasured_speed_decide_explicitly() {
         )
         .map(|route| route.module.area())
     };
+    // routing fixtures do not represent accepted evidence or candidate configurations
+    static WIDE_TABLE: [Binding; 2] = [
+        Binding {
+            module: ModuleRequest::new(
+                KernelModule::Wideconv,
+                PtxTier::Sm80,
+                RESNET_ROUTE.module.artifact(),
+            ),
+            ..RESNET_ROUTE
+        },
+        RESNET_ROUTE,
+    ];
+    static DENSE_TABLE: [Binding; 2] = [
+        Binding {
+            module: ModuleRequest::new(
+                KernelModule::Segdense,
+                PtxTier::Sm80,
+                RESNET_ROUTE.module.artifact(),
+            ),
+            ..RESNET_ROUTE
+        },
+        RESNET_ROUTE,
+    ];
+    assert_eq!(
+        route(&WIDE_TABLE, super::ROUTE_PRECEDENCE),
+        Some(KernelModule::Wideconv)
+    );
+    assert_eq!(
+        route(&DENSE_TABLE, super::ROUTE_PRECEDENCE),
+        Some(KernelModule::Resnet)
+    );
     let resnet_first = [KernelModule::Resnet, KernelModule::Lstm];
     let lstm_first = [KernelModule::Lstm, KernelModule::Resnet];
     assert_eq!(route(&TABLE, &resnet_first), Some(KernelModule::Resnet));
@@ -1389,7 +1420,11 @@ fn plan_from_pin(
             let spec = ConvLayerSpec {
                 name: proof.boundary.name(),
                 conv,
-                residual: proof.boundary.name().ends_with("conv2"),
+                epilogue: if proof.boundary.name().ends_with("conv2") {
+                    super::super::candidate::Epilogue::BiasReluResidual
+                } else {
+                    super::super::candidate::Epilogue::BiasRelu
+                },
                 weight: &weight,
                 bias: &bias,
             };
@@ -1431,6 +1466,65 @@ fn plan_from_pin(
                 filters: &filters,
             };
             Ok(token.sinc(runtime, spec)?.is_some())
+        }
+    }
+}
+
+#[test]
+fn fixed_producer_specs_preserve_shapes_and_reject_overflow() {
+    use super::super::candidate::{
+        DenseEpilogue, DenseSite, DenseSpec, SegConvSite, SegConvSpec, TEST_BATCHES,
+    };
+
+    for batch in TEST_BATCHES {
+        for (site, dimensions, epilogue) in [
+            (
+                DenseSite::Linear0,
+                (589, 128, 256),
+                DenseEpilogue::BiasLeakyRelu,
+            ),
+            (
+                DenseSite::Linear1,
+                (589, 128, 128),
+                DenseEpilogue::BiasLeakyRelu,
+            ),
+            (
+                DenseSite::Classifier,
+                (589, 7, 128),
+                DenseEpilogue::BiasLogSoftmax,
+            ),
+            (DenseSite::Embedding, (3, 256, 5120), DenseEpilogue::Bias),
+        ] {
+            let spec = DenseSpec::new(site, batch, CudaMath::Fp32).unwrap();
+            let (m, n, k) = dimensions;
+            assert_eq!(spec.dimensions(), dimensions);
+            assert_eq!(spec.epilogue(), epilogue);
+            assert_eq!(spec.input_len(), batch * m * k);
+            assert_eq!(spec.output_len(), batch * m * n);
+            assert_eq!(spec.weight_len(), n * k);
+            assert_eq!(spec.bias_len(), n);
+            assert_eq!(spec.transposed_weights(), site == DenseSite::Embedding);
+            assert_eq!(
+                spec.beta(),
+                if site == DenseSite::Embedding {
+                    1.0
+                } else {
+                    0.0
+                }
+            );
+            assert!(DenseSpec::new(site, 0, CudaMath::Fp32).is_err());
+            assert!(DenseSpec::new(site, usize::MAX, CudaMath::Fp32).is_err());
+        }
+        for (site, channels, input, output) in [
+            (SegConvSite::Conv1, 80, 5325, 5321),
+            (SegConvSite::Conv2, 60, 1773, 1769),
+        ] {
+            let spec = SegConvSpec::new(site, batch, CudaMath::Fp32).unwrap();
+            assert_eq!(spec.input_len(), batch * channels * input);
+            assert_eq!(spec.output_len(), batch * 60 * output);
+            assert_eq!(spec.weight_len(), 60 * channels * 5);
+            assert!(SegConvSpec::new(site, 0, CudaMath::Fp32).is_err());
+            assert!(SegConvSpec::new(site, usize::MAX, CudaMath::Fp32).is_err());
         }
     }
 }

@@ -249,6 +249,10 @@ pub enum KernelModule {
     Sincnet,
     /// Record-owned filterbank DFT producer, separate from always-on Fbank
     FbankDft,
+    /// Record-owned segmentation dense operators
+    Segdense,
+    /// Record-owned wide convolution operators
+    Wideconv,
 }
 
 impl KernelModule {
@@ -264,6 +268,8 @@ impl KernelModule {
             Self::Lstm => "lstm",
             Self::Sincnet => "sincnet",
             Self::FbankDft => "fbankdft",
+            Self::Segdense => "segdense",
+            Self::Wideconv => "wideconv",
         }
     }
 
@@ -280,14 +286,14 @@ impl KernelModule {
             Self::Lstm => include_str!("ptx/lstm.manifest"),
             Self::Sincnet => include_str!("ptx/sincnet.manifest"),
             // no candidate artifact exists until the separate kernel port
-            Self::FbankDft => "",
+            Self::FbankDft | Self::Segdense | Self::Wideconv => "",
         }
     }
 
     /// The PTX variants embedded in this build
     pub const fn variants(self) -> AreaPtx {
         match self {
-            Self::FbankDft => AreaPtx::baseline(None),
+            Self::FbankDft | Self::Segdense | Self::Wideconv => AreaPtx::baseline(None),
             #[cfg(test)]
             Self::Probe => AreaPtx {
                 sm75: tier_ptx!(["cuda-sm75"], "ptx/probe.sm75", [75, 80, 86, 89, 90, 120]),

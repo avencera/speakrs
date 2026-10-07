@@ -175,6 +175,8 @@ pub(crate) struct Oxide {
     output: [usize; 2],
     /// `[cin][ky][kx][cout]`, written once in `plan`
     packed: CudaSlice<f32>,
+    epilogue: super::Epilogue,
+    math: CudaMath,
 }
 
 impl Oxide {
@@ -188,6 +190,7 @@ impl Oxide {
 }
 
 impl ConvCandidate for Oxide {
+    type Pin = ConvPin;
     // cuDNN runs the 64-channel layers on TF32 tensor cores at b1 in TF32 mode, where
     // this FP32 kernel is only 1-3% faster, inside the timing noise bound
     const COVERAGE: Coverage = Coverage(&[
@@ -218,6 +221,13 @@ impl ConvCandidate for Oxide {
     };
 
     fn implemented_pin(layer: &ConvLayerSpec<'_>) -> Result<ConvPin, PlanError> {
+        if layer.epilogue == super::Epilogue::Bias {
+            return Err(PlanError::Geometry(GeometryError::Unimplemented {
+                context: "fused conv3x3 plan",
+                reason: "the fused kernel requires ReLU".into(),
+            }));
+        }
+
         ConvShape::of(&layer.conv)
             .map(ConvPin::LegacyWaves)
             .ok_or_else(|| {
@@ -234,6 +244,13 @@ impl ConvCandidate for Oxide {
         layer: ConvLayerSpec<'_>,
         pin: ConvPin,
     ) -> Result<Self, PlanError> {
+        if layer.epilogue == super::Epilogue::Bias {
+            return Err(PlanError::Geometry(GeometryError::Unimplemented {
+                context: "fused conv3x3 plan",
+                reason: "the fused kernel requires ReLU".into(),
+            }));
+        }
+
         let conv = layer.conv;
         let shape = ConvShape::of(&conv).ok_or_else(|| {
             PlanError::Geometry(GeometryError::Invalid {
@@ -286,6 +303,8 @@ impl ConvCandidate for Oxide {
             input: conv.input,
             output,
             packed,
+            epilogue: layer.epilogue,
+            math: conv.math,
         };
         // every index in the kernels is 32-bit
         to_u32(plan.input_len().max(plan.output_len()))?;
@@ -299,6 +318,19 @@ impl ConvCandidate for Oxide {
         phases: &Phases,
         stream: &CudaStream,
     ) -> Result<(), CudaError> {
+        if inputs.residual.is_some() != (self.epilogue == super::Epilogue::BiasReluResidual) {
+            return Err(CudaError::CandidateGeometry {
+                area: "resnet",
+                boundary: "fused conv3x3 residual".into(),
+                batch: self.batch,
+                math: self.math,
+                error: GeometryError::Invalid {
+                    context: "fused conv3x3 residual",
+                    reason: "residual input does not match the planned epilogue".into(),
+                },
+            });
+        }
+
         let output_len = self.output_len();
         check_len("fused conv3x3 input", self.input_len(), inputs.x.len())?;
         check_len("fused conv3x3 bias", self.out_channels, inputs.bias.len())?;

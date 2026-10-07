@@ -162,7 +162,7 @@ pub(super) fn plan_layers(
                     ConvLayerSpec {
                         name: layer.name(),
                         conv: layer.conv(batch, math),
-                        residual,
+                        epilogue: layer.epilogue(residual),
                         weight: layer.weight().data(),
                         bias: layer.bias().data(),
                     },

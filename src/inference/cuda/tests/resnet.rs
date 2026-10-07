@@ -147,7 +147,11 @@ fn resnet_candidate_matches_cudnn_on_partial_tiles() -> Result<(), CudaError> {
                     ConvLayerSpec {
                         name,
                         conv: Conv2d { math, ..fp32 },
-                        residual: add,
+                        epilogue: if add {
+                            super::super::candidate::Epilogue::BiasReluResidual
+                        } else {
+                            super::super::candidate::Epilogue::BiasRelu
+                        },
                         weight: &weight,
                         bias: &bias,
                     },
@@ -213,7 +217,7 @@ fn resnet_candidate_matches_cudnn_on_partial_tiles() -> Result<(), CudaError> {
             ConvLayerSpec {
                 name,
                 conv: fp32,
-                residual: false,
+                epilogue: super::super::candidate::Epilogue::BiasRelu,
                 weight: &weight,
                 bias: &bias,
             },

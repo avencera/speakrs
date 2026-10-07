@@ -443,16 +443,27 @@ impl Coverage {
     }
 }
 
-/// One eligible ResNet 3x3 convolution with folded batch norm, as a candidate plans it
+/// The operation after a convolution's bias addition
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Epilogue {
+    /// Bias only, as used by shortcut convolutions
+    Bias,
+    /// Bias followed by ReLU
+    BiasRelu,
+    /// Residual and bias followed by ReLU
+    BiasReluResidual,
+}
+
+/// One NCHW convolution with folded batch norm and its complete epilogue
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ConvLayerSpec<'a> {
     /// The layer name, such as `resnet.layer2.0.conv1`
     pub name: &'a str,
     /// Shape, padding, stride, batch and math mode
     pub conv: Conv2d,
-    /// Whether the output adds a residual before the ReLU
-    pub residual: bool,
-    /// Folded weights `[k, c, 3, 3]`
+    /// The bias, activation and residual operation after convolution
+    pub epilogue: Epilogue,
+    /// Folded weights `[k, c, kernel_height, kernel_width]`
     pub weight: &'a CudaSlice<f32>,
     /// Folded bias `[k]`
     pub bias: &'a CudaSlice<f32>,
@@ -465,14 +476,16 @@ pub(crate) struct ConvInputs<'a, 'b> {
     pub x: &'a CudaView<'b, f32>,
     /// `[n, k, p, q]` when the layer adds a residual
     pub residual: Option<&'a CudaView<'b, f32>>,
-    /// Folded weights `[k, c, 3, 3]`
+    /// Folded weights `[k, c, kernel_height, kernel_width]`
     pub weight: &'a CudaView<'b, f32>,
     /// Folded bias `[k]`
     pub bias: &'a CudaView<'b, f32>,
 }
 
-/// A candidate for `y = relu(conv(x, w) + bias [+ residual])`
+/// A candidate for convolution and the spec's complete bias, activation and residual epilogue
 pub(crate) trait ConvCandidate: Sized {
+    /// The complete configuration, or unit for the Library control
+    type Pin;
     /// Convolution names and batch sizes this candidate implements
     const COVERAGE: Coverage;
 
@@ -485,7 +498,7 @@ pub(crate) trait ConvCandidate: Sized {
     }
 
     /// The configuration qualification plans for this layer
-    fn implemented_pin(layer: &ConvLayerSpec<'_>) -> Result<ConvPin, PlanError>;
+    fn implemented_pin(layer: &ConvLayerSpec<'_>) -> Result<Self::Pin, PlanError>;
 
     /// Prepares one layer for one batch size from `pin`; runs once per batch class,
     /// untimed
@@ -493,7 +506,7 @@ pub(crate) trait ConvCandidate: Sized {
         runtime: &CudaRuntime,
         kernels: &LoadedKernels,
         layer: ConvLayerSpec<'_>,
-        pin: ConvPin,
+        pin: Self::Pin,
     ) -> Result<Self, PlanError>;
 
     /// Enqueues the layer on `stream`, writing every element of `y` `[n, k, p, q]`
@@ -1026,3 +1039,261 @@ mod tests {
 #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
 #[path = "candidate_tests.rs"]
 mod candidate_tests;
+
+/// A fixed dense boundary in the loaded model
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DenseSite {
+    /// First segmentation linear layer
+    Linear0,
+    /// Second segmentation linear layer
+    Linear1,
+    /// Segmentation classifier
+    Classifier,
+    /// Embedding projection
+    Embedding,
+}
+
+/// The operation after dense multiplication
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DenseEpilogue {
+    /// Add bias only
+    Bias,
+    /// Add bias and apply leaky ReLU
+    BiasLeakyRelu,
+    /// Add bias and apply row log softmax
+    BiasLogSoftmax,
+}
+
+/// Validated dense geometry; weights and epilogue follow the fixed site
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DenseSpec {
+    site: DenseSite,
+    batch: usize,
+    math: CudaMath,
+}
+
+impl DenseSpec {
+    /// Build a fixed model shape with a positive batch and bounded buffer sizes
+    pub(crate) fn new(site: DenseSite, batch: usize, math: CudaMath) -> Result<Self, PlanError> {
+        let spec = Self { site, batch, math };
+        let (m, n, k) = spec.dimensions();
+        validate_fixed_batch("dense plan", batch, &[m, n, k, m * n, m * k, n * k])?;
+        Ok(spec)
+    }
+
+    /// The fixed model boundary
+    pub(crate) const fn site(self) -> DenseSite {
+        self.site
+    }
+    /// Items in this plan
+    pub(crate) const fn batch(self) -> usize {
+        self.batch
+    }
+    /// Library multiply mode
+    pub(crate) const fn math(self) -> CudaMath {
+        self.math
+    }
+    /// Rows, output columns and input columns per batch item
+    pub(crate) const fn dimensions(self) -> (usize, usize, usize) {
+        match self.site {
+            DenseSite::Linear0 => (589, 128, 256),
+            DenseSite::Linear1 => (589, 128, 128),
+            DenseSite::Classifier => (589, 7, 128),
+            DenseSite::Embedding => (3, 256, 5120),
+        }
+    }
+    /// The fixed operation after multiplication
+    pub(crate) const fn epilogue(self) -> DenseEpilogue {
+        match self.site {
+            DenseSite::Linear0 | DenseSite::Linear1 => DenseEpilogue::BiasLeakyRelu,
+            DenseSite::Classifier => DenseEpilogue::BiasLogSoftmax,
+            DenseSite::Embedding => DenseEpilogue::Bias,
+        }
+    }
+    /// Whether weights use transposed `[n,k]` storage and output starts with bias
+    pub(crate) const fn transposed_weights(self) -> bool {
+        matches!(self.site, DenseSite::Embedding)
+    }
+    /// GEMM beta after seeding the output bias; other sites add bias afterwards
+    pub(crate) const fn beta(self) -> f32 {
+        if self.transposed_weights() { 1.0 } else { 0.0 }
+    }
+    /// Input buffer elements
+    pub(crate) fn input_len(self) -> usize {
+        let (m, _, k) = self.dimensions();
+        self.batch * m * k
+    }
+    /// Shared weight buffer elements
+    pub(crate) fn weight_len(self) -> usize {
+        let (_, n, k) = self.dimensions();
+        n * k
+    }
+    /// Shared bias buffer elements
+    pub(crate) fn bias_len(self) -> usize {
+        self.dimensions().1
+    }
+    /// Output buffer elements
+    pub(crate) fn output_len(self) -> usize {
+        let (m, n, _) = self.dimensions();
+        self.batch * m * n
+    }
+}
+
+/// A complete dense operator, including its fixed bias and activation epilogue
+pub(crate) trait DenseCandidate: Sized {
+    /// Complete candidate configuration, or unit for Library
+    type Pin;
+    /// Implemented tuples, independent of production acceptance
+    const COVERAGE: Coverage;
+    /// Numeric contract of the complete operator
+    const SPECIAL_VALUES: SpecialValues;
+    /// Implemented coverage at the actual loaded tier
+    fn coverage(_tier: PtxTier) -> Coverage {
+        Self::COVERAGE
+    }
+    /// Configuration used by qualification
+    fn implemented_pin(spec: DenseSpec) -> Result<Self::Pin, PlanError>;
+    /// Build a plan outside measured intervals
+    fn plan(runtime: &CudaRuntime, spec: DenseSpec, pin: Self::Pin) -> Result<Self, PlanError>;
+    /// Write the complete output on the runtime stream
+    fn enqueue(
+        &self,
+        x: &CudaSlice<f32>,
+        weight: &CudaSlice<f32>,
+        bias: &CudaSlice<f32>,
+        output: &mut CudaSlice<f32>,
+        phases: &Phases,
+        runtime: &CudaRuntime,
+    ) -> Result<(), CudaError>;
+}
+
+/// A fixed segmentation convolution producer
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SegConvSite {
+    /// The 80 to 60 channel convolution
+    Conv1,
+    /// The 60 to 60 channel convolution
+    Conv2,
+}
+
+/// Validated five-tap, stride-one NCW convolution without bias
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SegConvSpec {
+    site: SegConvSite,
+    batch: usize,
+    math: CudaMath,
+}
+
+impl SegConvSpec {
+    /// Build a fixed model shape with a positive batch and bounded buffer sizes
+    pub(crate) fn new(site: SegConvSite, batch: usize, math: CudaMath) -> Result<Self, PlanError> {
+        let spec = Self { site, batch, math };
+        validate_fixed_batch(
+            "segmentation conv plan",
+            batch,
+            &[
+                spec.in_channels() * spec.input_steps(),
+                spec.out_channels() * spec.output_steps(),
+            ],
+        )?;
+        Ok(spec)
+    }
+    /// The fixed model boundary
+    pub(crate) const fn site(self) -> SegConvSite {
+        self.site
+    }
+    /// Items in this plan
+    pub(crate) const fn batch(self) -> usize {
+        self.batch
+    }
+    /// Library multiply mode
+    pub(crate) const fn math(self) -> CudaMath {
+        self.math
+    }
+    /// Input channels
+    pub(crate) const fn in_channels(self) -> usize {
+        match self.site {
+            SegConvSite::Conv1 => 80,
+            SegConvSite::Conv2 => 60,
+        }
+    }
+    /// Output channels
+    pub(crate) const fn out_channels(self) -> usize {
+        60
+    }
+    /// Input steps per channel
+    pub(crate) const fn input_steps(self) -> usize {
+        match self.site {
+            SegConvSite::Conv1 => 5325,
+            SegConvSite::Conv2 => 1773,
+        }
+    }
+    /// Output steps per channel
+    pub(crate) const fn output_steps(self) -> usize {
+        self.input_steps() - 4
+    }
+    /// Filter taps
+    pub(crate) const fn kernel(self) -> usize {
+        5
+    }
+    /// Input buffer elements in NCW layout
+    pub(crate) fn input_len(self) -> usize {
+        self.batch * self.in_channels() * self.input_steps()
+    }
+    /// Shared weights in output-channel, input-channel, tap order
+    pub(crate) fn weight_len(self) -> usize {
+        self.out_channels() * self.in_channels() * self.kernel()
+    }
+    /// Output buffer elements in NCW layout
+    pub(crate) fn output_len(self) -> usize {
+        self.batch * self.out_channels() * self.output_steps()
+    }
+}
+
+/// A raw segmentation convolution; the shared pool consumer owns bias
+pub(crate) trait SegConvCandidate: Sized {
+    /// Complete candidate configuration, or unit for Library
+    type Pin;
+    /// Implemented tuples, independent of production acceptance
+    const COVERAGE: Coverage;
+    /// Numeric contract of the producer
+    const SPECIAL_VALUES: SpecialValues;
+    /// Implemented coverage at the actual loaded tier
+    fn coverage(_tier: PtxTier) -> Coverage {
+        Self::COVERAGE
+    }
+    /// Configuration used by qualification
+    fn implemented_pin(spec: SegConvSpec) -> Result<Self::Pin, PlanError>;
+    /// Build a plan outside measured intervals
+    fn plan(runtime: &CudaRuntime, spec: SegConvSpec, pin: Self::Pin) -> Result<Self, PlanError>;
+    /// Write every raw NCW output value, without bias, on the runtime stream
+    fn enqueue(
+        &self,
+        x: &CudaSlice<f32>,
+        weight: &CudaSlice<f32>,
+        output: &mut CudaSlice<f32>,
+        phases: &Phases,
+        runtime: &CudaRuntime,
+    ) -> Result<(), CudaError>;
+}
+
+fn validate_fixed_batch(
+    context: &'static str,
+    batch: usize,
+    lengths: &[usize],
+) -> Result<(), PlanError> {
+    if batch > 0
+        && lengths.iter().all(|length| {
+            batch
+                .checked_mul(*length)
+                .is_some_and(|value| value <= i32::MAX as usize)
+        })
+    {
+        return Ok(());
+    }
+
+    Err(PlanError::Geometry(GeometryError::Invalid {
+        context,
+        reason: format!("batch {batch} is zero or exceeds the buffer index range"),
+    }))
+}
