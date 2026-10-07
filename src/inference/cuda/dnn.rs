@@ -43,7 +43,6 @@ impl Conv2d {
     }
 
     /// Filter shape `[k, c, r, s]`
-    #[cfg(feature = "cuda")]
     pub fn filter_shape(&self) -> [usize; 4] {
         [
             self.out_channels,
@@ -54,7 +53,6 @@ impl Conv2d {
     }
 
     /// Output shape `[n, k, p, q]`
-    #[cfg(feature = "cuda")]
     pub fn output_shape(&self) -> [usize; 4] {
         let [p, q] = self.output();
         [self.batch, self.out_channels, p, q]

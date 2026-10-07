@@ -41,6 +41,7 @@ use super::{CudaError, CudaMath, CudaRuntime, KernelModule, LoadedKernels, PtxTi
 mod conv;
 mod lstm;
 mod sinc;
+mod wideconv;
 
 #[cfg(test)]
 pub(super) use kernel_inventory::conv_kernel_inventory;
@@ -73,6 +74,10 @@ pub(super) use sinc::REQUIRED_KERNELS as SINC_KERNELS;
 pub(crate) use conv::Oxide as ConvOxide;
 pub(crate) use lstm::Oxide as LstmOxide;
 pub(crate) use sinc::Oxide as SincOxide;
+// the GPU development checks force selections made for other devices
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+pub(crate) use wideconv::{Config as WideconvConfig, Device as WideconvDevice};
+pub(crate) use wideconv::{Oxide as WideconvOxide, Pin as WideconvPin};
 
 /// A planning refusal that is distinct from a CUDA or model error
 ///
@@ -121,6 +126,8 @@ pub(crate) const QUALIFIED_BATCHES: [usize; 2] = [1, 32];
 pub(crate) enum ConfigPin {
     /// A ResNet 3x3 convolution
     Conv(ConvPin),
+    /// A wide trunk convolution
+    Wideconv(WideconvPin),
     /// The four-layer LSTM stack
     Lstm(LstmPin),
     /// The Sinc producer
@@ -134,6 +141,7 @@ impl ConfigPin {
     pub(crate) const fn area(self) -> KernelModule {
         match self {
             Self::Conv(_) => KernelModule::Resnet,
+            Self::Wideconv(_) => KernelModule::Wideconv,
             Self::Lstm(_) => KernelModule::Lstm,
             Self::Sinc(_) => KernelModule::Sincnet,
             Self::Fbank(_) => KernelModule::FbankDft,
@@ -145,7 +153,9 @@ impl ConfigPin {
     pub(crate) const fn is_device_rule(self) -> bool {
         matches!(
             self,
-            Self::Conv(ConvPin::LegacyWaves(_)) | Self::Lstm(LstmPin::LegacyCooperative)
+            Self::Conv(ConvPin::LegacyWaves(_))
+                | Self::Wideconv(WideconvPin::DeviceRule)
+                | Self::Lstm(LstmPin::LegacyCooperative)
         )
     }
 }

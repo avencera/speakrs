@@ -4,7 +4,9 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use crate::inference::cuda::CudaMath;
-use crate::inference::cuda::candidate::{ConfigPin, ConvPin, FbankPin, LstmPin, SincPin};
+use crate::inference::cuda::candidate::{
+    ConfigPin, ConvPin, FbankPin, LstmPin, SincPin, WideconvPin,
+};
 use serde_json::{Value, json};
 
 thread_local! {
@@ -36,6 +38,9 @@ pub(crate) fn pin_json(pin: ConfigPin) -> Value {
         ConfigPin::Sinc(SincPin::ConvAbsPool) => json!({"kind":"Sinc", "selection":"ConvAbsPool"}),
         ConfigPin::Fbank(FbankPin::FftMelAccurate) => {
             json!({"kind":"Fbank", "selection":"FftMelAccurate"})
+        }
+        ConfigPin::Wideconv(WideconvPin::DeviceRule) => {
+            json!({"kind":"Wideconv", "selection":"DeviceRule"})
         }
     }
 }

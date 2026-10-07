@@ -436,8 +436,7 @@ impl EmbeddingBatch {
             let mut shortcut_out = shortcut.slice_mut(..output_len.min(shortcut.len()));
             let residual = match &block.shortcut {
                 Some(layer) => {
-                    convs.conv(layer, &input, &mut shortcut_out)?;
-                    convs.bias(layer, &mut shortcut_out)?;
+                    convs.shortcut(layer, &input, &mut shortcut_out)?;
                     tap(
                         EmbeddingTap::Shortcut { block: index },
                         &shortcut_out.as_view(),
