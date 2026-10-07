@@ -22,10 +22,11 @@
 //! token; a plan never resolves production module policy again
 //!
 //! Candidate code lives in `candidate/` and its kernels in the `resnet`, `lstm`,
-//! `sincnet` and `fbankdft` PTX areas. The harness scans those files before it builds anything; see
-//! `scripts/cuda/qualify/README.md` for what the scan refuses. This file and the
-//! dispatch files are locked. Production runs a candidate only where the locked
-//! `implementation::PRODUCTION` table selects it, which the root sets at integration
+//! `sincnet` and `fbankdft` PTX areas. The harness scans those files before it
+//! builds anything; see `scripts/cuda/qualify/README.md` for what the scan refuses.
+//! This file and the dispatch files are locked. Production runs a candidate only
+//! where the locked `implementation::PRODUCTION` table selects it, which the root
+//! sets at integration
 
 use std::cell::{RefCell, RefMut};
 use std::sync::Arc;

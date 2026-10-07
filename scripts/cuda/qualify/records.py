@@ -203,6 +203,30 @@ INFRASTRUCTURE_AMENDMENTS = [
         "infrastructure_sha256": "160e505171af5b61246c3408def5a8309a0f6f52a3a47c63995a7248c79796d7",
         "reason": "Plans receive the exact loaded module from the selection token instead of resolving production policy again; arithmetic and launch geometry are unchanged",
     },
+    {
+        "path": "src/inference/cuda/candidate.rs",
+        "acceptance_sha256": "70d700da18ac3794dbf78f81b51f053efc0c006cf91b8e651094896a20aa91ba",
+        "infrastructure_sha256": "562cb6fef345fc9dd4d8ab8e127bfafd8c15e63cf2518d4d5404ca52800240e9",
+        "reason": "Filterbank DFT candidate: the producer plan receives the selected module and the fixed fbank tables are re-exported; existing candidate algorithms are unchanged",
+    },
+    {
+        "path": "src/inference/cuda/ptx/lstm.manifest",
+        "acceptance_sha256": "09e6f3772953d81c57284baf88db917aea0a637e720b9a965e078ed0d634c3a4",
+        "infrastructure_sha256": "5489bc29ed44b76e550819cd7b595ae48b7e53089227fc4c7dae6324a76e3ed9",
+        "reason": "The kernel crate gains the fbankdft feature and module, so the shared-source hash in every manifest changes; PTX and cubin bytes are unchanged",
+    },
+    {
+        "path": "src/inference/cuda/ptx/resnet.manifest",
+        "acceptance_sha256": "734d43a71f6958fce6cdac766723e4ffba6b32c584e2ebf5accfbdfafd019031",
+        "infrastructure_sha256": "f2b07eb41228407db0f03c3aab1d49dcf34508465d7c4e3c232f4fc160133d17",
+        "reason": "The kernel crate gains the fbankdft feature and module, so the shared-source hash in every manifest changes; PTX and cubin bytes are unchanged",
+    },
+    {
+        "path": "src/inference/cuda/ptx/sincnet.manifest",
+        "acceptance_sha256": "09a4a44ef930dee6fee351fe35fe6451cc316bf08da0bdf843bbb9f785531496",
+        "infrastructure_sha256": "3a2e93ae73467a74e9a827cee7ea09741f812d4898308fe72ed85f801b9440ea",
+        "reason": "The kernel crate gains the fbankdft feature and module, so the shared-source hash in every manifest changes; PTX and cubin bytes are unchanged",
+    },
 ]
 
 
