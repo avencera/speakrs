@@ -754,4 +754,6 @@ impl LibraryNeed {
 }
 
 #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+mod golden_tests;
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
 mod tests;
