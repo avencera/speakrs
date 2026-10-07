@@ -442,22 +442,25 @@ fn every_model_boundary_has_a_driver_route_for_model_batches() {
 }
 
 #[test]
-fn tensor_core_trunk_kernels_are_selected_only_for_tf32_on_capability_8_0() {
+fn tensor_core_trunk_kernels_are_selected_only_for_tf32_on_measured_capabilities() {
     use crate::inference::cuda::candidate::{ConvKernel, ConvOxide, ConvPin};
     let a100 = Builder::new(ComputeCapability::new(8, 0))
         .multiprocessors(108)
+        .build();
+    let ada = Builder::new(ComputeCapability::new(8, 9))
+        .multiprocessors(34)
         .build();
     let pin = |name, batch, math, device: &_, tier| {
         ConvOxide::driver_pin(BoundaryId::named(name), batch, math, device, tier).unwrap()
     };
     let kernel = |kernel| ConfigPin::Conv(ConvPin::Kernel(kernel));
-    for batch in [1, 32] {
+    for (device, batch) in [(&a100, 1), (&a100, 32), (&ada, 1), (&ada, 32)] {
         assert_eq!(
             pin(
                 "resnet.layer1.0.conv1",
                 batch,
                 CudaMath::Tf32,
-                &a100,
+                device,
                 PtxTier::Sm80
             ),
             kernel(ConvKernel::C32Tensor)
@@ -467,19 +470,19 @@ fn tensor_core_trunk_kernels_are_selected_only_for_tf32_on_capability_8_0() {
                 "resnet.layer2.3.conv2",
                 batch,
                 CudaMath::Tf32,
-                &a100,
+                device,
                 PtxTier::Sm80
             ),
             kernel(ConvKernel::C64Tensor)
         );
     }
-    for batch in [1, 32] {
+    for (device, batch) in [(&a100, 1), (&a100, 32), (&ada, 1), (&ada, 32)] {
         assert_eq!(
             pin(
                 "resnet.layer2.0.conv1",
                 batch,
                 CudaMath::Tf32,
-                &a100,
+                device,
                 PtxTier::Sm80
             ),
             kernel(ConvKernel::C32Stride2Tensor)
@@ -507,7 +510,7 @@ fn tensor_core_trunk_kernels_are_selected_only_for_tf32_on_capability_8_0() {
         kernel(ConvKernel::C64)
     );
     // other sm80-tier parts keep their current selection
-    for (major, minor, sms) in [(8, 6, 84), (8, 9, 34), (9, 0, 132), (12, 0, 36)] {
+    for (major, minor, sms) in [(8, 6, 84), (9, 0, 132), (12, 0, 36)] {
         let device = Builder::new(ComputeCapability::new(major, minor))
             .multiprocessors(sms)
             .build();

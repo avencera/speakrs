@@ -16,9 +16,9 @@
 //!
 //! The sm80 tier adds single-product TF32 tensor-core kernels for the three shapes,
 //! with weights packed in `mma.sync` fragment order. Driver-only routing selects them
-//! only in TF32 mode on capability 8.0, whose TF32 rate is eight times its FP32 rate:
-//! on the A100 the FP32 kernels left these 13 layers at 4.3 s of a 4.4 s gap to cuDNN
-//! over ten VoxConverse files
+//! only in TF32 mode on the capabilities in `TENSOR_TRUNK`: on the A100 the FP32
+//! kernels left these layers at 4.3 s of a 4.4 s gap to cuDNN over ten VoxConverse
+//! files
 
 use cudarc::driver::{
     CudaFunction, CudaSlice, CudaStream, CudaViewMut, LaunchConfig, PushKernelArg,
@@ -586,10 +586,19 @@ impl super::DriverCandidate for Oxide {
     }
 }
 
+/// Capabilities whose TF32 tensor-core trunk kernels were measured faster than both the
+/// FP32 kernels and cuDNN over the 14 early layers at b1 and b32
+///
+/// The A100 (8.0) runs TF32 at eight times its FP32 rate. An RTX 4060 Ti (8.9) measured
+/// 2.18x and 1.90x of cuDNN against 1.76x and 1.47x for the FP32 kernels. Capability
+/// 12.0 measured faster too, but its PR #36 binding pins the sm75 bytes, which lack
+/// these entries
+const TENSOR_TRUNK: [ComputeCapability; 2] =
+    [ComputeCapability::new(8, 0), ComputeCapability::new(8, 9)];
+
 /// The TF32 tensor-core entry of a shape where it is the measured choice
 ///
-/// Only capability 8.0 selects it: other sm80-tier parts keep the FP32 kernels until
-/// they are measured
+/// Other sm80-tier parts keep the FP32 kernels until they are measured
 fn tensor_kernel(
     shape: ConvShape,
     math: CudaMath,
@@ -598,7 +607,7 @@ fn tensor_kernel(
 ) -> Option<ConvKernel> {
     if math != CudaMath::Tf32
         || tier < PtxTier::Sm80
-        || device.capability() != ComputeCapability::new(8, 0)
+        || !TENSOR_TRUNK.contains(&device.capability())
     {
         return None;
     }
