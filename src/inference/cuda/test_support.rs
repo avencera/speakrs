@@ -28,6 +28,9 @@ use super::candidate::Direction;
 use super::implementation::{Choice, Selection};
 use super::{CudaError, CudaRuntime, CudaSegmentation, ResNetEmbedding};
 
+#[path = "../../../tests/cuda_qualify/configuration.rs"]
+pub(crate) mod configuration;
+
 thread_local! {
     static TIMED_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -798,7 +801,7 @@ fn allowed(name: &str) -> bool {
 }
 
 /// The candidate PTX areas; their entries never run on a Library path
-pub(crate) const CANDIDATE_AREAS: [&str; 3] = ["resnet", "lstm", "sincnet"];
+pub(crate) const CANDIDATE_AREAS: [&str; 4] = ["resnet", "lstm", "sincnet", "fbankdft"];
 
 fn candidate_area_entry(name: &str) -> bool {
     let loaded = modules().lock().unwrap_or_else(PoisonError::into_inner);

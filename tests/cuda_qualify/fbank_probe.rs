@@ -93,7 +93,10 @@ struct Operator<C> {
     features: CudaSlice<f32>,
 }
 
-impl<C: FbankCandidate> Operator<C> {
+impl<C: FbankCandidate> Operator<C>
+where
+    C::Pin: test_support::configuration::FbankPinEvidence,
+{
     fn new(
         runtime: &CudaRuntime,
         spec: FbankSpec,
@@ -110,7 +113,11 @@ impl<C: FbankCandidate> Operator<C> {
                     "fbank candidate must declare this plan"
                 );
                 let pin = C::implemented_pin(spec).map_err(plan_error)?;
-                Route::Candidate(C::plan(runtime, spec, pin).map_err(plan_error)?)
+                let candidate = C::plan(runtime, spec, pin).map_err(plan_error)?;
+                let identity = test_support::configuration::FbankPinEvidence::configuration(pin)
+                    .expect("a candidate plan has a complete configuration pin");
+                test_support::configuration::record(LAYER, spec.batch(), spec.math(), identity);
+                Route::Candidate(candidate)
             }
             name => Route::Mutant(Mutant::parse(name).expect("applicable fbank mutant")),
         };

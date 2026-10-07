@@ -451,7 +451,17 @@ impl Qualified {
             #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
             PlanPin::Implemented => ConvOxide::implemented_pin(&spec),
         };
-        let plan = pin.and_then(|pin| ConvOxide::plan(runtime, spec, pin));
+        let plan = pin.and_then(|pin| {
+            let plan = ConvOxide::plan(runtime, spec, pin)?;
+            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            super::test_support::configuration::record(
+                self.boundary.name(),
+                self.batch,
+                self.math,
+                ConfigPin::Conv(pin),
+            );
+            Ok(plan)
+        });
         self.finish(area, super::driver_only(), plan)
     }
 
@@ -475,7 +485,17 @@ impl Qualified {
             #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
             PlanPin::Implemented => SincOxide::implemented_pin(&spec),
         };
-        let plan = pin.and_then(|pin| SincOxide::plan(runtime, spec, pin));
+        let plan = pin.and_then(|pin| {
+            let plan = SincOxide::plan(runtime, spec, pin)?;
+            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            super::test_support::configuration::record(
+                self.boundary.name(),
+                self.batch,
+                self.math,
+                ConfigPin::Sinc(pin),
+            );
+            Ok(plan)
+        });
         self.finish(area, super::driver_only(), plan)
     }
 
@@ -493,7 +513,17 @@ impl Qualified {
             #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
             PlanPin::Implemented => LstmOxide::implemented_pin(&spec),
         };
-        let plan = pin.and_then(|pin| LstmOxide::plan(runtime, spec, pin));
+        let plan = pin.and_then(|pin| {
+            let plan = LstmOxide::plan(runtime, spec, pin)?;
+            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            super::test_support::configuration::record(
+                self.boundary.name(),
+                self.batch,
+                self.math,
+                ConfigPin::Lstm(pin),
+            );
+            Ok(plan)
+        });
         self.finish(area, super::driver_only(), plan)
     }
 }

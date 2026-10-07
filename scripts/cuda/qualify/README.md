@@ -1114,3 +1114,20 @@ TF32 negative tests cover equal FP32/TF32 outputs with worse candidate accuracy,
 a max-absolute-error-only failure, fixture-only accuracy, invalid truth identity,
 invalid metrics or draws, and stale comparison environments. The truth rule remains
 `max(unperturbed Library error, maximum draw error)` for each metric.
+
+### Tuple configuration receipts
+
+Each production export names both its accuracy record and its speed record. If the
+hashes differ, both immutable records must qualify the tuple, artifact, device,
+source and configuration. The table never takes accuracy from a Library control
+or an unresolved record. Repeated records for one module binding are allowed;
+overlapping scopes with different tiers or artifacts are rejected.
+
+New numeric processes record the complete configuration pin supplied by locked
+code to each successful plan. Both table modes require each selected tuple to
+match its record's pin. The three exact PR #36 hashes use a separate fixed mapping:
+ResNet `LegacyWaves(shape)`, LSTM `LegacyCooperative`, and Sinc `ConvAbsPool`.
+That mapping is not read from the live production table. A fixed ResNet entry is
+not the legacy wave rule, even when it uses the same PTX artifact. The legacy map
+retains the original stride-2 B1 FP32 tuple, but does not restore its removed speed
+permission.

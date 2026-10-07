@@ -18,6 +18,30 @@
         "kind": "PtxJit",
         "sha256": "72945743a3c1b915c05d8ea21b438dfd860fa9487401c447fb24fd48802916fa"
       },
+      "configurations": [
+        {
+          "pin": {
+            "kind": "Lstm",
+            "selection": "LegacyCooperative"
+          },
+          "tuple": [
+            "lstm.stack",
+            1,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Lstm",
+            "selection": "LegacyCooperative"
+          },
+          "tuple": [
+            "lstm.stack",
+            32,
+            "fp32"
+          ]
+        }
+      ],
       "coverage_sha256": "202f2629dcc8400695eee43c7915ff5baa63fc5e8cf4472304570675eef34b25",
       "der": "8066268031afba058d93e305206d5b8225e40c6ab2ebb1052874d607e055646f",
       "device": {
@@ -456,6 +480,596 @@
         "kind": "PtxJit",
         "sha256": "dd6449c0129f9a03bf691c0338611b50b651ab714d5803caedea87de3c72b6b7"
       },
+      "configurations": [
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.0.conv1",
+            1,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.0.conv1",
+            1,
+            "tf32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.0.conv1",
+            32,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.0.conv1",
+            32,
+            "tf32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.0.conv2",
+            1,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.0.conv2",
+            1,
+            "tf32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.0.conv2",
+            32,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.0.conv2",
+            32,
+            "tf32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.1.conv1",
+            1,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.1.conv1",
+            1,
+            "tf32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.1.conv1",
+            32,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.1.conv1",
+            32,
+            "tf32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.1.conv2",
+            1,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.1.conv2",
+            1,
+            "tf32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.1.conv2",
+            32,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.1.conv2",
+            32,
+            "tf32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.2.conv1",
+            1,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.2.conv1",
+            1,
+            "tf32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.2.conv1",
+            32,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.2.conv1",
+            32,
+            "tf32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.2.conv2",
+            1,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.2.conv2",
+            1,
+            "tf32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.2.conv2",
+            32,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32"
+          },
+          "tuple": [
+            "resnet.layer1.2.conv2",
+            32,
+            "tf32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32Stride2"
+          },
+          "tuple": [
+            "resnet.layer2.0.conv1",
+            1,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32Stride2"
+          },
+          "tuple": [
+            "resnet.layer2.0.conv1",
+            1,
+            "tf32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32Stride2"
+          },
+          "tuple": [
+            "resnet.layer2.0.conv1",
+            32,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C32Stride2"
+          },
+          "tuple": [
+            "resnet.layer2.0.conv1",
+            32,
+            "tf32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C64"
+          },
+          "tuple": [
+            "resnet.layer2.0.conv2",
+            1,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C64"
+          },
+          "tuple": [
+            "resnet.layer2.0.conv2",
+            32,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C64"
+          },
+          "tuple": [
+            "resnet.layer2.0.conv2",
+            32,
+            "tf32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C64"
+          },
+          "tuple": [
+            "resnet.layer2.1.conv1",
+            1,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C64"
+          },
+          "tuple": [
+            "resnet.layer2.1.conv1",
+            32,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C64"
+          },
+          "tuple": [
+            "resnet.layer2.1.conv1",
+            32,
+            "tf32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C64"
+          },
+          "tuple": [
+            "resnet.layer2.1.conv2",
+            1,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C64"
+          },
+          "tuple": [
+            "resnet.layer2.1.conv2",
+            32,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C64"
+          },
+          "tuple": [
+            "resnet.layer2.1.conv2",
+            32,
+            "tf32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C64"
+          },
+          "tuple": [
+            "resnet.layer2.2.conv1",
+            1,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C64"
+          },
+          "tuple": [
+            "resnet.layer2.2.conv1",
+            32,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C64"
+          },
+          "tuple": [
+            "resnet.layer2.2.conv1",
+            32,
+            "tf32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C64"
+          },
+          "tuple": [
+            "resnet.layer2.2.conv2",
+            1,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C64"
+          },
+          "tuple": [
+            "resnet.layer2.2.conv2",
+            32,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C64"
+          },
+          "tuple": [
+            "resnet.layer2.2.conv2",
+            32,
+            "tf32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C64"
+          },
+          "tuple": [
+            "resnet.layer2.3.conv1",
+            1,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C64"
+          },
+          "tuple": [
+            "resnet.layer2.3.conv1",
+            32,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C64"
+          },
+          "tuple": [
+            "resnet.layer2.3.conv1",
+            32,
+            "tf32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C64"
+          },
+          "tuple": [
+            "resnet.layer2.3.conv2",
+            1,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C64"
+          },
+          "tuple": [
+            "resnet.layer2.3.conv2",
+            32,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Conv",
+            "selection": "LegacyWaves",
+            "shape": "C64"
+          },
+          "tuple": [
+            "resnet.layer2.3.conv2",
+            32,
+            "tf32"
+          ]
+        }
+      ],
       "coverage_sha256": "bb77656606952f05325946d17026dd29b7871d8b3519fa03dd65b0bd889765ca",
       "der": "8066268031afba058d93e305206d5b8225e40c6ab2ebb1052874d607e055646f",
       "device": {
@@ -1250,6 +1864,30 @@
         "kind": "PtxJit",
         "sha256": "967bc6893f80da84d8d4d288f2cf1ca3336ca09c4386495cab722beb0ac87247"
       },
+      "configurations": [
+        {
+          "pin": {
+            "kind": "Sinc",
+            "selection": "ConvAbsPool"
+          },
+          "tuple": [
+            "sincnet.conv0.abs_pool",
+            1,
+            "fp32"
+          ]
+        },
+        {
+          "pin": {
+            "kind": "Sinc",
+            "selection": "ConvAbsPool"
+          },
+          "tuple": [
+            "sincnet.conv0.abs_pool",
+            32,
+            "fp32"
+          ]
+        }
+      ],
       "coverage_sha256": "a8ac0fba42ff3351659f473397887a1156abe5cd23c8e00972d14cf98dbdb859",
       "der": "8066268031afba058d93e305206d5b8225e40c6ab2ebb1052874d607e055646f",
       "device": {

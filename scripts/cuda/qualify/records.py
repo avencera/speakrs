@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 import artifacts
+import configurations
 import environment
 from assets import cache_directory
 from gates import Rejected
@@ -705,7 +706,7 @@ def check_table_records(
         raise Rejected("table: no production entries")
     unique_artifact_owners(entries)
     evidence = []
-    for entry in entries:
+    for entry in configurations.record_entries(entries):
         record = load(entry["record"], root, records=records)
         complete_collection(record)
         tier = entry["tier"]
@@ -782,6 +783,10 @@ def check_table_records(
         outside = selected - {tuple(row) for row in accepted}
         if outside:
             raise Rejected(f"table: tuples outside accepted record: {sorted(outside)}")
+        recorded_configs = configurations.recorded(
+            entry["record"], child, entry["area"], is_legacy=legacy
+        )
+        configurations.check(entry, recorded_configs, selected)
         exported = entry.get("candidate_coverage")
         if exported is None:
             raise Rejected("table: missing Rust candidate coverage export")
@@ -811,6 +816,7 @@ def check_table_records(
                 "device_capability": capability,
                 "artifact": recorded_artifact,
                 "device": recorded_device,
+                "configurations": recorded_configs,
                 "environment": environment.collect(
                     child, legacy=legacy, recorded_device=recorded_device
                 ),
@@ -850,6 +856,7 @@ SUMMARY_FIELDS = {
     "device_capability",
     "artifact",
     "device",
+    "configurations",
     "environment",
     "legacy",
     "source_evidence_gap",
@@ -968,11 +975,12 @@ def check_table(
     unique_artifact_owners(entries)
     committed, raw = acceptance_summary(root)
     summaries = committed["records"]
-    pins = {digest(entry["record"]) for entry in entries}
+    expanded = configurations.record_entries(entries)
+    pins = {digest(entry["record"]) for entry in expanded}
     if set(summaries) != pins:
         raise Rejected("table: acceptance summaries differ from production record pins")
     evidence = []
-    for entry in entries:
+    for entry in expanded:
         pin = entry["record"]
         summary = summaries[pin]
         if (
@@ -1018,6 +1026,10 @@ def check_table(
         ):
             raise Rejected("table: invalid summary legacy binding")
         if summary["legacy"]:
+            if summary.get("configurations") != configurations.legacy(pin):
+                raise Rejected(
+                    "table: summary differs from explicit legacy configuration mapping"
+                )
             binding = LEGACY_BINDINGS[pin]
             if (
                 summary.get("files") != amended_legacy_files(binding)
@@ -1166,6 +1178,9 @@ def check_table(
                 ) from error
         if not triples(entry["coverage"]) <= accepted:
             raise Rejected("table: tuples outside accepted summary")
+        configurations.check(
+            entry, summary.get("configurations"), triples(entry["coverage"])
+        )
         evidence.append(summary)
     environment.consistent(evidence)
     if (

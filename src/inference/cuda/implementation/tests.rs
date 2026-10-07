@@ -550,9 +550,38 @@ fn records_and_integrated_evidence_are_pinned() {
 
 /// Export evaluated const entries, so Python never guesses what Rust expressions mean
 ///
-/// Each export entry is one binding's speed-accepted proofs under one record. The
-/// harness checks accuracy and speed records together, so a proof whose accuracy record
-/// differs from its speed record cannot be exported until the harness can check it
+fn measured_record_pairs(proofs: &[TupleProof]) -> Vec<(SpeedEvidence, RecordHash)> {
+    let mut records = Vec::new();
+    for proof in proofs {
+        let SpeedStatus::Measured(speed) = proof.speed else {
+            continue;
+        };
+        let pair = (speed, proof.accuracy);
+        if !records.contains(&pair) {
+            records.push(pair);
+        }
+    }
+    records
+}
+
+#[test]
+fn export_groups_distinct_accuracy_records_without_losing_speed_evidence() {
+    let first = PRODUCTION[0].proofs[0];
+    let second = TupleProof {
+        accuracy: RecordHash::from_hex(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ),
+        ..first
+    };
+    let records = measured_record_pairs(&[first, second]);
+    let SpeedStatus::Measured(speed) = first.speed else {
+        panic!("measured fixture")
+    };
+    assert_eq!(records, [(speed, first.accuracy), (speed, second.accuracy)]);
+}
+
+/// Each export entry is one binding's measured proofs with one accuracy record
+/// and one speed record; each tuple also exports its complete configuration pin
 #[test]
 fn export_production_table() {
     let Ok(path) = std::env::var("SPEAKRS_QUALIFY_TABLE_OUTPUT") else {
@@ -565,21 +594,14 @@ fn export_production_table() {
             !candidate.entries().is_empty(),
             "production area has no candidate coverage export"
         );
-        let mut records: Vec<SpeedEvidence> = Vec::new();
-        for proof in binding.proofs {
-            let SpeedStatus::Measured(speed) = proof.speed else {
-                continue;
-            };
-            assert_eq!(proof.accuracy, speed.record, "separate accuracy record");
-            if !records.contains(&speed) {
-                records.push(speed);
-            }
-        }
-        for speed in records {
+        let records = measured_record_pairs(binding.proofs);
+        for (speed, accuracy) in records {
             let tuples: Vec<_> = binding
                 .proofs
                 .iter()
-                .filter(|proof| proof.speed == SpeedStatus::Measured(speed))
+                .filter(|proof| {
+                    proof.speed == SpeedStatus::Measured(speed) && proof.accuracy == accuracy
+                })
                 .map(|proof| {
                     serde_json::json!({
                         "layers": [proof.boundary.name()],
@@ -591,6 +613,12 @@ fn export_production_table() {
                     })
                 })
                 .collect();
+            let configurations: Vec<_> = binding.proofs.iter()
+                .filter(|proof| proof.speed == SpeedStatus::Measured(speed) && proof.accuracy == accuracy)
+                .map(|proof| serde_json::json!({
+                    "tuple": [proof.boundary.name(), proof.batch, match proof.math { CudaMath::Fp32 => "fp32", CudaMath::Tf32 => "tf32" }],
+                    "pin": super::super::test_support::configuration::pin_json(proof.pin),
+                })).collect();
             let scope = match speed.scope {
                 SpeedScope::LegacyCapability { capability } => {
                     serde_json::json!({"kind": "LegacyCapability", "capability": capability.to_string()})
@@ -615,6 +643,8 @@ fn export_production_table() {
                 "speed_scope": scope,
                 "artifact": super::super::test_support::artifact_json(binding.module.artifact()),
                 "record": speed.record.to_string(),
+                "accuracy_record": accuracy.to_string(),
+                "configurations": configurations,
                 "der": speed.integrated.to_string(),
             }));
         }

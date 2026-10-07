@@ -1711,6 +1711,7 @@ fn qualification_driver() -> Result<(), CudaError> {
         "graph_violations": graph_violations(),
         "graph_evidence": graph_evidence(),
         "loaded_modules": loaded_modules(),
+        "configurations": super::configuration::planned(),
         "side_streams": registered_side_streams(),
         "coverage": coverage,
         "lstm_algorithm": "PersistStaticSmallH",

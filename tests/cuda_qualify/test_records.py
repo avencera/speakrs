@@ -21,6 +21,31 @@ def complete_fixture(raw):
     """Populate complete synthetic collection markers without GPU measurements"""
     raw["checks"] = []
     for tier, child in raw["tiers"].items():
+        if raw["schema"] != 3 and "numeric" in child:
+            child["numeric"]["candidate"] = [
+                {
+                    "device": copy.deepcopy(child["device"]),
+                    "mode": mode,
+                    "configurations": [
+                        {
+                            "tuple": row,
+                            "pin": (
+                                {
+                                    "kind": "Conv",
+                                    "selection": "LegacyWaves",
+                                    "shape": "C64",
+                                }
+                                if raw["target"] == "resnet"
+                                else {"kind": "Lstm", "selection": "LegacyCooperative"}
+                            ),
+                        }
+                        for row in child["coverage_declared"]["triples"]
+                        if row[2] == mode
+                    ],
+                }
+                for mode in ("fp32", "tf32")
+                if any(row[2] == mode for row in child["coverage_declared"]["triples"])
+            ]
         child["coverage"] = {
             "tier": tier,
             "math": ["fp32", "tf32"],
@@ -116,7 +141,18 @@ class RecordsFixture(unittest.TestCase):
         }
         self.child["numeric"] = {
             "library": [{"device": copy.deepcopy(self.child["device"])}],
-            "candidate": [{"device": copy.deepcopy(self.child["device"])}],
+            "candidate": [
+                {
+                    "device": copy.deepcopy(self.child["device"]),
+                    "mode": "fp32",
+                    "configurations": [
+                        {
+                            "tuple": ["lstm.stack", 1, "fp32"],
+                            "pin": {"kind": "Lstm", "selection": "LegacyCooperative"},
+                        }
+                    ],
+                }
+            ],
         }
         self.child.update(
             target="lstm",
@@ -157,6 +193,9 @@ class RecordsFixture(unittest.TestCase):
                 ]
             },
         }
+        self.entry["configurations"] = copy.deepcopy(
+            self.child["numeric"]["candidate"][0]["configurations"]
+        )
         self.entry["candidate_coverage"] = copy.deepcopy(self.entry["coverage"])
         self.entry["speed_scope"] = {
             "kind": "Point",
@@ -273,6 +312,126 @@ class Records(RecordsFixture):
         with self.assertRaisesRegex(records.Rejected, "different Library fingerprints"):
             records.check_table([self.entry, other], self.root)
 
+    def test_accuracy_and_speed_can_use_distinct_qualified_records(self):
+        raw = {**self.record, "accuracy_snapshot": "separate process"}
+        accuracy = self.store(raw)
+        entry = {**self.entry, "accuracy_record": accuracy}
+        checked = self.check([entry])
+        self.assertEqual(
+            {row["record"] for row in checked["entries"]},
+            {accuracy, self.entry["record"]},
+        )
+        summary = records.write_summaries(
+            [entry], self.root, records=self.cache / "records"
+        )
+        self.assertEqual(set(summary["records"]), {accuracy, self.entry["record"]})
+        self.refresh_lock()
+        self.assertEqual(
+            records.check_table([entry], self.root)["verification"], "locked-summary"
+        )
+        self.assertEqual(
+            records.check_table([entry], self.root, records=self.cache / "records")[
+                "verification"
+            ],
+            "raw-records",
+        )
+        entry["accuracy_record"] = "0" * 64
+        with self.assertRaisesRegex(records.Rejected, "unresolved"):
+            self.check([entry])
+
+    def test_swapping_a_legacy_wave_pin_for_a_fixed_entry_rejects_both_modes(self):
+        area = "resnet"
+        for old in self.files.values():
+            for name in old:
+                if name.endswith("candidate.rs"):
+                    continue
+                new = name.replace("candidate/lstm", "candidate/conv").replace(
+                    "lstm", area
+                )
+                path = self.root / new
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(new)
+        kernels = self.root / "src/inference/cuda/kernels.rs"
+        kernels.write_text(kernels.read_text().replace("ptx/lstm", "ptx/resnet"))
+        files = records.shipped_files(self.root, area)
+        boundary = "resnet.layer2.1.conv1"
+        triple = [boundary, 1, "fp32"]
+        child = copy.deepcopy(self.child)
+        child.update(
+            target=area,
+            coverage_declared={"triples": [triple]},
+            accepted_tuples=[triple],
+            code_sha256={
+                name: pin for hashes in files.values() for name, pin in hashes.items()
+            },
+        )
+        ptx_hash = files["ptx"]["src/inference/cuda/ptx/resnet.sm75.ptx"]
+        artifact = {"kind": "PtxJit", "sha256": ptx_hash}
+        child["loaded_ptx"]["modules"] = [
+            {
+                "area": area,
+                "path": "src/inference/cuda/ptx/resnet.sm75.ptx",
+                "tier": "sm75",
+                "sha256": ptx_hash,
+                "embedded_ptx_sha256": ptx_hash,
+                "artifact": artifact,
+            }
+        ]
+        raw = complete_fixture(
+            {**self.record, "target": area, "tiers": {"sm75": child}}
+        )
+        coverage = {
+            "entries": [{"layers": [boundary], "batches": [1], "maths": ["fp32"]}]
+        }
+        entry = {
+            **self.entry,
+            "area": area,
+            "artifact": artifact,
+            "record": self.store(raw),
+            "coverage": coverage,
+            "candidate_coverage": coverage,
+            "configurations": [
+                {
+                    "tuple": triple,
+                    "pin": {"kind": "Conv", "selection": "LegacyWaves", "shape": "C64"},
+                }
+            ],
+        }
+        self.check([entry])
+        records.write_summaries([entry], self.root, records=self.cache / "records")
+        self.refresh_lock()
+        records.check_table([entry], self.root)
+        entry["configurations"][0]["pin"] = {
+            "kind": "Conv",
+            "selection": "Kernel",
+            "entry": "C64",
+        }
+        with self.assertRaisesRegex(
+            records.Rejected, "configuration differs from its record pin"
+        ):
+            self.check([entry])
+        with self.assertRaisesRegex(
+            records.Rejected, "configuration differs from its record pin"
+        ):
+            records.check_table([entry], self.root)
+        with self.assertRaisesRegex(
+            records.Rejected, "configuration differs from its record pin"
+        ):
+            records.check_table([entry], self.root, records=self.cache / "records")
+
+    def test_configuration_receipts_are_required_in_records_and_exports(self):
+        missing = copy.deepcopy(self.record)
+        missing["tiers"]["sm75"]["numeric"]["candidate"][0].pop("configurations")
+        with self.assertRaisesRegex(records.Rejected, "configuration receipts"):
+            self.check([{**self.entry, "record": self.store(missing)}])
+        entry = copy.deepcopy(self.entry)
+        entry.pop("configurations")
+        with self.assertRaisesRegex(records.Rejected, "configuration receipts"):
+            self.check([entry])
+        missing["tiers"]["sm75"]["numeric"]["candidate"][0]["configurations"] = []
+        with self.assertRaisesRegex(records.Rejected, "missing planned configuration"):
+            self.check([{**self.entry, "record": self.store(missing)}])
+
     def test_positive_and_four_required_negative_cases(self):
         self.assertFalse(self.check([self.entry])["entries"][0]["legacy"])
         for field, value, reason in [
@@ -383,6 +542,10 @@ class Records(RecordsFixture):
             ]
         )
         child["accepted_tuples"].append(["lstm.stack", 32, "fp32"])
+        child["numeric"]["candidate"][0]["configurations"] = [
+            {"tuple": row, "pin": {"kind": "Lstm", "selection": "LegacyCooperative"}}
+            for row in child["coverage_declared"]["triples"]
+        ]
         entry = copy.deepcopy(self.entry)
         entry["candidate_coverage"]["entries"][0]["batches"] = "all"
         entry["record"] = self.store(
@@ -410,6 +573,7 @@ class Records(RecordsFixture):
         }
         with (
             patch.dict(records.LEGACY, {record_hash: "lstm"}),
+            patch.dict(records.configurations.LEGACY_AREAS, {record_hash: "lstm"}),
             patch.dict(records.LEGACY_BINDINGS, {record_hash: binding}),
         ):
             result = self.check([entry])["entries"][0]
@@ -419,7 +583,10 @@ class Records(RecordsFixture):
             )
             with self.assertRaisesRegex(records.Rejected, "qualification file differs"):
                 self.check([entry])
-        with patch.dict(records.LEGACY, {record_hash: "lstm"}):
+        with (
+            patch.dict(records.LEGACY, {record_hash: "lstm"}),
+            patch.dict(records.configurations.LEGACY_AREAS, {record_hash: "lstm"}),
+        ):
             with self.assertRaisesRegex(
                 records.Rejected, "invalid legacy acceptance binding"
             ):
@@ -461,6 +628,7 @@ class Records(RecordsFixture):
         }
         with (
             patch.dict(records.LEGACY, {record_hash: "lstm"}),
+            patch.dict(records.configurations.LEGACY_AREAS, {record_hash: "lstm"}),
             patch.dict(records.LEGACY_BINDINGS, {record_hash: binding}),
         ):
             for hashes in binding["files"].values():
@@ -1145,6 +1313,7 @@ class Summaries(RecordsFixture):
         self.assertEqual(len(summary["records"][pin]["accepted_tuples"]), 2)
         changed = copy.deepcopy(entry)
         changed["coverage"]["entries"][0]["batches"] = [32]
+        changed["configurations"][0]["tuple"][1] = 32
         records.check_table([changed], self.root, self.cache / "records")
         self.assertEqual(
             records.derive_summaries(
