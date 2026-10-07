@@ -939,9 +939,7 @@ fn default_production_loads_record_pinned_jit() -> Result<(), crate::inference::
         );
     }
     let modules = crate::inference::cuda::test_support::loaded_modules();
-    let modules = modules["modules"]
-        .as_array()
-        .expect("recorded module array");
+    let modules = modules.as_array().expect("recorded module array");
     assert_eq!(modules.len(), 2);
     assert!(
         modules
