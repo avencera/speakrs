@@ -236,6 +236,8 @@ pub enum KernelModule {
     /// Candidate kernels for the Sinc producer
     #[allow(dead_code)]
     Sincnet,
+    /// Record-owned filterbank DFT producer, separate from always-on Fbank
+    FbankDft,
 }
 
 impl KernelModule {
@@ -250,6 +252,7 @@ impl KernelModule {
             Self::Resnet => "resnet",
             Self::Lstm => "lstm",
             Self::Sincnet => "sincnet",
+            Self::FbankDft => "fbankdft",
         }
     }
 
@@ -265,12 +268,15 @@ impl KernelModule {
             Self::Resnet => include_str!("ptx/resnet.manifest"),
             Self::Lstm => include_str!("ptx/lstm.manifest"),
             Self::Sincnet => include_str!("ptx/sincnet.manifest"),
+            // no candidate artifact exists until the separate kernel port
+            Self::FbankDft => "",
         }
     }
 
     /// The PTX variants embedded in this build
     pub const fn variants(self) -> AreaPtx {
         match self {
+            Self::FbankDft => AreaPtx::baseline(None),
             #[cfg(test)]
             Self::Probe => AreaPtx {
                 sm75: tier_ptx!(["cuda-sm75"], "ptx/probe.sm75", [75, 80, 86, 89, 90, 120]),

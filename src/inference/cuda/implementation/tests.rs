@@ -1285,6 +1285,10 @@ fn plan_from_pin(
     let stream = runtime.stream();
     let (batch, math) = (proof.batch, proof.math);
     match proof.pin {
+        ConfigPin::Fbank(_) => Err(CudaError::Unsupported {
+            context: "fbank.dft production proof",
+            reason: "no candidate or production entry exists before the kernel port".to_owned(),
+        }),
         ConfigPin::Conv(pin) => {
             let trunk = [FBANK_MEL_BINS, FBANK_FRAMES];
             let ([in_channels, out_channels], stride, input) = match pin.shape() {

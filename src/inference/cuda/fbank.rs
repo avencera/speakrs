@@ -21,6 +21,10 @@
 
 mod constants;
 
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[path = "../../../tests/cuda_qualify/fbank.rs"]
+pub(crate) mod test_support;
+
 use cudarc::driver::{
     CudaEvent, CudaFunction, CudaSlice, CudaView, CudaViewMut, DevicePtrMut, LaunchConfig,
     PinnedHostSlice, PushKernelArg,
@@ -247,6 +251,30 @@ impl CudaFbank {
         }
 
         let frames = rows * FBANK_FRAMES;
+        self.produce(
+            runtime,
+            waveform,
+            rows,
+            &mut work.producer,
+            &mut work.energies.slice_mut(..frames * FBANK_MEL_BINS),
+        )?;
+        self.log_cmn(
+            runtime,
+            rows,
+            &work.energies.slice(..frames * FBANK_MEL_BINS),
+            &mut work.features.slice_mut(..frames * FBANK_MEL_BINS),
+        )
+    }
+
+    fn produce(
+        &self,
+        runtime: &CudaRuntime,
+        waveform: &CudaView<'_, f32>,
+        rows: usize,
+        work: &mut FbankProducerWork,
+        energies: &mut CudaViewMut<'_, f32>,
+    ) -> Result<(), CudaError> {
+        let frames = rows * FBANK_FRAMES;
         self.frame_window(
             runtime,
             waveform,
@@ -265,9 +293,8 @@ impl CudaFbank {
         )?;
 
         let spectrum = work.spectrum.slice(..frames * SPECTRUM_COLUMNS);
-        let mut energies = work.energies.slice_mut(..frames * FBANK_MEL_BINS);
         match self.projection {
-            MelProjection::Sparse => self.mel_sparse(runtime, &spectrum, &mut energies)?,
+            MelProjection::Sparse => self.mel_sparse(runtime, &spectrum, energies)?,
             MelProjection::Gemm => {
                 let power = work.power.as_mut().ok_or(CudaError::BufferLength {
                     context: "fbank power buffer",
@@ -281,16 +308,11 @@ impl CudaFbank {
                     math: self.math,
                     ..Sgemm::new(frames, FBANK_MEL_BINS, MEL_GEMM_BINS)
                 };
-                runtime.sgemm(mel, &power, &self.mel_dense, &mut energies)?;
+                runtime.sgemm(mel, &power, &self.mel_dense, energies)?;
             }
         }
 
-        self.log_cmn(
-            runtime,
-            rows,
-            &work.energies.slice(..frames * FBANK_MEL_BINS),
-            &mut work.features.slice_mut(..frames * FBANK_MEL_BINS),
-        )
+        Ok(())
     }
 
     fn frame_window(
@@ -453,16 +475,22 @@ pub struct FbankBuffers {
 /// Device intermediates and the output of one batch
 #[derive(Debug)]
 struct FbankWork {
+    producer: FbankProducerWork,
+    /// `[rows · FBANK_FRAMES, FBANK_MEL_BINS]`
+    energies: CudaSlice<f32>,
+    /// `[rows, FBANK_FRAMES, FBANK_MEL_BINS]`
+    features: CudaSlice<f32>,
+}
+
+/// Scratch owned by the frame/window, DFT and mel producer
+#[derive(Debug)]
+struct FbankProducerWork {
     /// `[rows · FBANK_FRAMES, FBANK_FRAME_LENGTH]`
     frames: CudaSlice<f32>,
     /// `[rows · FBANK_FRAMES, SPECTRUM_COLUMNS]`
     spectrum: CudaSlice<f32>,
     /// `[rows · FBANK_FRAMES, 256]`, only for [`MelProjection::Gemm`]
     power: Option<CudaSlice<f32>>,
-    /// `[rows · FBANK_FRAMES, FBANK_MEL_BINS]`
-    energies: CudaSlice<f32>,
-    /// `[rows, FBANK_FRAMES, FBANK_MEL_BINS]`
-    features: CudaSlice<f32>,
 }
 
 impl FbankBuffers {
@@ -495,9 +523,11 @@ impl FbankBuffers {
             staged: runtime.context().new_event(None)?,
             waveform: stream.alloc_zeros(samples)?,
             work: FbankWork {
-                frames: alloc(FBANK_FRAME_LENGTH)?,
-                spectrum: alloc(SPECTRUM_COLUMNS)?,
-                power,
+                producer: FbankProducerWork {
+                    frames: alloc(FBANK_FRAME_LENGTH)?,
+                    spectrum: alloc(SPECTRUM_COLUMNS)?,
+                    power,
+                },
                 energies: alloc(FBANK_MEL_BINS)?,
                 features: alloc(FBANK_MEL_BINS)?,
             },

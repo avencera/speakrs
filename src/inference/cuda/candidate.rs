@@ -124,6 +124,8 @@ pub(crate) enum ConfigPin {
     Lstm(LstmPin),
     /// The Sinc producer
     Sinc(SincPin),
+    /// The filterbank energy producer before log and temporal normalization
+    Fbank(FbankPin),
 }
 
 impl ConfigPin {
@@ -133,6 +135,7 @@ impl ConfigPin {
             Self::Conv(_) => KernelModule::Resnet,
             Self::Lstm(_) => KernelModule::Lstm,
             Self::Sinc(_) => KernelModule::Sincnet,
+            Self::Fbank(_) => KernelModule::FbankDft,
         }
     }
 
@@ -144,6 +147,82 @@ impl ConfigPin {
             Self::Conv(ConvPin::LegacyWaves(_)) | Self::Lstm(LstmPin::LegacyCooperative)
         )
     }
+}
+
+/// A complete filterbank producer configuration
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FbankPin {
+    /// Compensated FP32 FFT and mel projection, eight frames per 256-thread block
+    FftMelAccurate,
+}
+
+/// The supported filterbank batches, independent of model and stress batch sets
+pub(crate) const FBANK_BATCHES: [usize; 32] = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+    27, 28, 29, 30, 31, 32,
+];
+
+/// A validated `[batch,160000]` waveform producer shape
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FbankSpec {
+    batch: usize,
+    math: CudaMath,
+}
+
+impl FbankSpec {
+    /// Reject batches outside the boundary's independent production set
+    pub(crate) fn new(batch: usize, math: CudaMath) -> Result<Self, PlanError> {
+        if !super::implementation::BoundaryId::named("fbank.dft")
+            .batches()
+            .contains(batch)
+        {
+            return Err(PlanError::Geometry(GeometryError::Invalid {
+                context: "fbank.dft",
+                reason: format!("fbank.dft batch {batch} is outside 1..=32"),
+            }));
+        }
+        Ok(Self { batch, math })
+    }
+
+    /// Waveform rows in this plan
+    pub(crate) const fn batch(self) -> usize {
+        self.batch
+    }
+
+    /// Library multiply mode used for this comparison
+    pub(crate) const fn math(self) -> CudaMath {
+        self.math
+    }
+}
+
+/// A candidate for `fbank.dft`, including framing, windowing and mel projection
+///
+/// The producer writes every energy in `[B,998,80]`. The locked consumer owns
+/// the unchanged log/CMN pass. Enqueue uses only the runtime's stream and registered
+/// side streams; a Library control implements the same interface in locked test code
+pub(crate) trait FbankCandidate: Sized {
+    /// The plan's complete pin; the Library control has no candidate configuration
+    type Pin;
+    /// Implemented tuples; acceptance remains independent
+    const COVERAGE: Coverage;
+    /// Numeric contract of the energy producer
+    const SPECIAL_VALUES: SpecialValues;
+    /// Implemented coverage at the actual loaded tier
+    fn coverage(_tier: PtxTier) -> Coverage {
+        Self::COVERAGE
+    }
+    /// The complete configuration used by qualification
+    fn implemented_pin(spec: FbankSpec) -> Result<Self::Pin, PlanError>;
+    /// Build one validated batch plan outside measured intervals
+    fn plan(runtime: &CudaRuntime, spec: FbankSpec, pin: Self::Pin) -> Result<Self, PlanError>;
+    /// Write all energies before the shared log/CMN consumer
+    fn enqueue(
+        &self,
+        waveform: &CudaView<'_, f32>,
+        energies: &mut CudaViewMut<'_, f32>,
+        phases: &Phases,
+        runtime: &CudaRuntime,
+    ) -> Result<(), CudaError>;
 }
 
 /// A ResNet 3x3 convolution shape with fused kernels: padding 1, no dilation
@@ -240,6 +319,9 @@ pub(crate) struct SpecialValues {
 /// The input and weight bound under which finite operands give finite outputs
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FiniteContract {
+    /// Filterbank energies remain finite for waveforms with magnitude at most one,
+    /// using the fixed 400-sample window, DFT and nonnegative mel filters
+    UnitWaveform,
     /// Every output is finite when, for each output, the f64 sum of the absolute
     /// values of all its terms, `Σ|w·x| + |bias| (+ |residual|)`, is at most
     /// `f32::MAX / headroom`. The headroom covers FP32 rounding growth along the
