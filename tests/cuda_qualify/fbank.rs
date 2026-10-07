@@ -10,7 +10,7 @@ use crate::inference::cuda::candidate::{
     Phases, PlanError, SignedZeroContract, SpecialValues,
 };
 use crate::inference::cuda::error::check_len;
-use crate::inference::cuda::{CudaError, CudaRuntime};
+use crate::inference::cuda::{CudaError, CudaRuntime, KernelModule, LoadedKernels};
 
 /// A full Library producer plan, with scratch owned by this one batch plan
 pub(crate) struct Library {
@@ -33,7 +33,22 @@ impl FbankCandidate for Library {
         Ok(())
     }
 
-    fn plan(runtime: &CudaRuntime, spec: FbankSpec, (): Self::Pin) -> Result<Self, PlanError> {
+    fn plan(
+        runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
+        spec: FbankSpec,
+        (): Self::Pin,
+    ) -> Result<Self, PlanError> {
+        // the Library producer runs the always-on module's kernels and cuBLAS
+        if kernels.request().area() != KernelModule::Fbank {
+            return Err(PlanError::Cuda(CudaError::Unsupported {
+                context: "fbank Library control",
+                reason: format!(
+                    "planned with the {} module",
+                    kernels.request().area().name()
+                ),
+            }));
+        }
         let front = CudaFbank::new(runtime, spec.math())?;
         let buffers = front.buffers(runtime, spec.batch())?;
         Ok(Self {
@@ -73,6 +88,15 @@ impl FbankCandidate for Library {
 }
 
 impl Library {
+    /// Plan the Library producer with the always-on module it runs
+    pub(crate) fn new(runtime: &CudaRuntime, spec: FbankSpec) -> Result<Self, CudaError> {
+        let kernels = runtime.load_kernels(KernelModule::Fbank)?;
+        Self::plan(runtime, &kernels, spec, ()).map_err(|error| CudaError::Unsupported {
+            context: "fbank Library control",
+            reason: error.to_string(),
+        })
+    }
+
     /// Run the identical locked log/CMN consumer on energies from either producer
     pub(crate) fn consume(
         &self,
@@ -150,10 +174,7 @@ fn library_producer_and_full_control_are_identical() -> Result<(), CudaError> {
     let runtime = CudaRuntime::new(0)?;
     let spec = FbankSpec::new(1, CudaMath::Fp32).expect("supported batch");
     Library::implemented_pin(spec).expect("pin");
-    let plan = Library::plan(&runtime, spec, ()).map_err(|error| CudaError::Unsupported {
-        context: "fbank control",
-        reason: error.to_string(),
-    })?;
+    let plan = Library::new(&runtime, spec)?;
     let audio: Vec<_> = (0..FBANK_WINDOW_SAMPLES)
         .map(|i| (i as f32 * 0.007).sin() * 0.2)
         .collect();

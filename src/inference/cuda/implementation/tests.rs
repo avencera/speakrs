@@ -408,6 +408,49 @@ fn explicit_candidate_plans_its_implemented_pin_and_library_needs_no_artifact() 
 }
 
 #[test]
+fn explicit_fbank_dft_plans_the_record_owned_area_and_production_stays_library() {
+    for math in [CudaMath::Fp32, CudaMath::Tf32] {
+        for batch in 1..=32 {
+            let mut fixture = Fixture::new(ADA);
+            let token = token(
+                fixture
+                    .resolve(
+                        PlanRequest::Qualification(Choice::Oxide(Selection::Explicit)),
+                        "fbank.dft",
+                        batch,
+                        math,
+                    )
+                    .unwrap(),
+            );
+            // the route is the record-owned area, never the always-on Fbank module
+            assert_eq!(fixture.loads, [legacy_module(KernelModule::FbankDft)]);
+            assert_eq!(token.target.module.area(), KernelModule::FbankDft);
+            assert_eq!(token.pin, super::PlanPin::Implemented);
+            assert_eq!(token.evidence, TokenEvidence::Qualification);
+
+            // no binding exists, so production needs no artifact
+            let mut fixture = Fixture::new(ADA);
+            let selected = fixture
+                .resolve(PlanRequest::Production, "fbank.dft", batch, math)
+                .unwrap();
+            assert!(matches!(selected, Selected::Library));
+            assert!(fixture.loads.is_empty());
+        }
+        let mut fixture = Fixture::new(ADA);
+        let selected = fixture
+            .resolve(
+                PlanRequest::Qualification(Choice::Oxide(Selection::Explicit)),
+                "fbank.dft",
+                33,
+                math,
+            )
+            .unwrap();
+        assert!(matches!(selected, Selected::Library));
+        assert!(fixture.loads.is_empty());
+    }
+}
+
+#[test]
 fn production_tokens_require_tier_device_and_artifact_of_the_binding() {
     let device = device(BLACKWELL);
     let boundary = BoundaryId::named("resnet.layer1.0.conv1");
@@ -1406,10 +1449,15 @@ fn plan_from_pin(
     let stream = runtime.stream();
     let (batch, math) = (proof.batch, proof.math);
     match proof.pin {
-        ConfigPin::Fbank(_) => Err(CudaError::Unsupported {
-            context: "fbank.dft production proof",
-            reason: "no candidate or production entry exists before the kernel port".to_owned(),
-        }),
+        ConfigPin::Fbank(_) => {
+            let spec = crate::inference::cuda::candidate::FbankSpec::new(batch, math).map_err(
+                |error| CudaError::Unsupported {
+                    context: "fbank.dft production proof",
+                    reason: error.to_string(),
+                },
+            )?;
+            Ok(token.fbank(runtime, spec)?.is_some())
+        }
         ConfigPin::Segdense(_) => Err(CudaError::Unsupported {
             context: "segdense production proof",
             reason: "no production entry exists before the routing port".to_owned(),

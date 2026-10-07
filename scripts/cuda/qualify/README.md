@@ -1049,12 +1049,16 @@ Its batch domain is 1 through 32 in each math mode. Cases are first, last and sh
 at B1, mixed at every B2 through B32, and short at B7. Existing targets retain their
 cases, including the B33 and B64 stress cases.
 
-The Library producer implements `FbankCandidate`. The generic locked operator can
-plan a candidate through that same trait. No candidate implementation, candidate
-artifact or production entry exists yet. `FbankDft` is a record-owned module area;
-it does not replace the always-on `Fbank` module. The `Oxide` choice fails closed
-until the later kernel port supplies artifacts and declared coverage. Library and
-fault runs need no fictitious candidate artifact.
+The Library producer implements `FbankCandidate` with the always-on `Fbank` module.
+The candidate is `candidate/fbank.rs`; its kernel `fbankdft_fft_mel_accurate` is the
+`fbankdft` kernel-crate area, shipped as sm75 PTX with exact-architecture cubins.
+`FbankDft` is a record-owned module area after the three model areas in route
+precedence; it does not replace the always-on `Fbank` module, whose PTX and pinned
+JIT stay byte-identical. The `Oxide` choice selects through `plan_selection`, loads
+the explicit qualification module and builds the plan from `FbankPin::FftMelAccurate`
+in `Qualified::fbank`, as production will from an accepted record. The pin runs the
+same FP32 kernel in both math modes. No production entry exists. Library and fault
+runs load no candidate artifact.
 
 Both input sets use the hash-pinned B32 WeSpeaker fbank snapshot. First, last and
 short select rows 0, 17 and 18. Mixed selects its first B rows. The alternate set is
