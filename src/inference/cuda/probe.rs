@@ -22,7 +22,17 @@ pub struct ProbeKernels {
 impl ProbeKernels {
     /// Loads the probe module and looks up its kernels
     pub fn load(runtime: &CudaRuntime) -> Result<Self, CudaError> {
-        let kernels = runtime.load_kernels(KernelModule::Probe)?;
+        // the toolchain probe is an explicit test request, never a production owner
+        #[cfg(all(feature = "cuda", not(feature = "cuda-driver-only")))]
+        let request = super::kernels::ArtifactRequest::EmbeddedExact;
+        #[cfg(any(not(feature = "cuda"), feature = "cuda-driver-only"))]
+        let request =
+            super::kernels::ArtifactRequest::Pinned(super::kernels::LoadedArtifact::PtxJit {
+                sha256: super::kernels::ArtifactHash::of(
+                    runtime.area_ptx(KernelModule::Probe)?.1.as_bytes(),
+                ),
+            });
+        let kernels = runtime.load_requested_kernels(KernelModule::Probe, request)?;
         Ok(Self {
             tier: kernels.tier(),
             scale_add: kernels.function(REQUIRED_KERNELS[0])?,

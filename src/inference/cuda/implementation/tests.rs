@@ -938,13 +938,64 @@ fn default_production_loads_record_pinned_jit() -> Result<(), crate::inference::
             serde_json::json!({ "area": area.name(), "boundary": boundary, "batch": 1, "math": "fp32", "candidate": true, "tier": token.target.tier.to_string(), "device": token.target.device.to_string(), "artifact": crate::inference::cuda::test_support::artifact_json(loaded.artifact()), "embedded_ptx_sha256": loaded.ptx_sha256().to_string(), "record": token.record, "name": runtime.context().name()?, "sm_count": runtime.multiprocessor_count()?, "l2_bytes": runtime.l2_cache_size()? })
         );
     }
+    for area in super::ALWAYS_ON {
+        let (tier, ptx) = runtime.area_ptx(*area)?;
+        let loaded = runtime.load_kernels(*area)?;
+        let expected = LoadedArtifact::PtxJit {
+            sha256: ArtifactHash::of(ptx.as_bytes()),
+        };
+        assert_eq!(loaded.artifact(), expected);
+        for line in ptx
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(".visible .entry "))
+        {
+            loaded.function(line.split(['(', ' ', '\t']).next().unwrap())?;
+        }
+        println!(
+            "always_on_artifact_proof {}",
+            serde_json::json!({
+                "area": area.name(), "tier": tier.to_string(),
+                "device": runtime.compute_capability().to_string(),
+                "artifact": crate::inference::cuda::test_support::artifact_json(loaded.artifact()),
+                "embedded_ptx_sha256": loaded.ptx_sha256().to_string(),
+            })
+        );
+    }
     let modules = crate::inference::cuda::test_support::loaded_modules();
     let modules = modules.as_array().expect("recorded module array");
-    assert_eq!(modules.len(), 2);
+    assert_eq!(modules.len(), 5);
     assert!(
         modules
             .iter()
             .all(|module| module["artifact"]["kind"] == "PtxJit")
     );
     runtime.synchronize()
+}
+
+#[test]
+fn always_on_owners_request_embedded_ptx_jit_on_both_devices() {
+    for device in [ComputeCapability::new(12, 0), ComputeCapability::new(8, 9)] {
+        for area in super::ALWAYS_ON {
+            let (tier, ptx) = area
+                .variants()
+                .resolve(*area, PtxTier::Sm75, device)
+                .unwrap();
+            let owner = super::artifact_owner(*area, super::AreaTarget { tier, device }).unwrap();
+            assert!(matches!(
+                owner,
+                super::ProductionArtifactOwner::AlwaysOnPtxJit
+            ));
+            assert_eq!(
+                owner.request(ptx),
+                super::ArtifactRequest::Pinned(LoadedArtifact::PtxJit {
+                    sha256: ArtifactHash::of(ptx.as_bytes())
+                })
+            );
+        }
+        let location = super::AreaTarget {
+            tier: PtxTier::Sm75,
+            device,
+        };
+        assert!(super::artifact_owner(KernelModule::Probe, location).is_none());
+    }
 }

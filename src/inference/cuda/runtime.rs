@@ -199,7 +199,7 @@ impl CudaRuntime {
             .resolve(module, self.ptx_tier, self.capability)
     }
 
-    /// Load the record-pinned artifact, or the exact embedded artifact for a direct request
+    /// Load only the artifact selected by the production owner
     ///
     /// Plan selection skips uncovered areas before this call. A cached module retains
     /// its actual identity; requests for different bytes fail rather than replace it
@@ -213,8 +213,14 @@ impl CudaRuntime {
             return Ok(loaded.clone());
         }
         let location = super::implementation::AreaTarget::for_area(self, module)?;
-        let request = super::implementation::production_artifact(module, location)
-            .map_or(ArtifactRequest::EmbeddedExact, ArtifactRequest::Pinned);
+        let owner = super::implementation::artifact_owner(module, location).ok_or(
+            CudaError::TierNotQualified {
+                tier: location.tier,
+                device: location.device,
+            },
+        )?;
+        let (_, ptx) = self.area_ptx(module)?;
+        let request = owner.request(ptx);
         self.load_requested_kernels(module, request)
     }
 
@@ -238,6 +244,7 @@ impl CudaRuntime {
         } else {
             match request {
                 ArtifactRequest::Pinned(artifact) => artifact,
+                #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
                 ArtifactRequest::EmbeddedExact => {
                     cubin.map_or(LoadedArtifact::PtxJit { sha256: ptx_sha256 }, |cubin| {
                         LoadedArtifact::Cubin {

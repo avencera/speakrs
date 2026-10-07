@@ -248,6 +248,61 @@ const fn validate_production_owners(entries: &[Production]) {
     }
 }
 
+/// Production artifact policy, independent of an explicit qualification request
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ProductionArtifactOwner {
+    /// Preserve the always-on kernels' driver-JIT behavior on every device
+    AlwaysOnPtxJit,
+    /// Use exactly the artifact accepted by a production record
+    Qualified(LoadedArtifact),
+}
+
+impl ProductionArtifactOwner {
+    /// Resolve the policy with the bytes embedded in this binary
+    pub(crate) fn request(self, ptx: &str) -> ArtifactRequest {
+        let artifact = match self {
+            Self::AlwaysOnPtxJit => LoadedArtifact::PtxJit {
+                sha256: ArtifactHash::of(ptx.as_bytes()),
+            },
+            Self::Qualified(artifact) => artifact,
+        };
+        ArtifactRequest::Pinned(artifact)
+    }
+}
+
+// always-on areas retain the artifact policy used before cubins were shipped
+const ALWAYS_ON: &[KernelModule] = &[
+    KernelModule::Fbank,
+    KernelModule::Embedding,
+    KernelModule::Segmentation,
+];
+
+const _: () = {
+    let mut index = 0;
+    while index < PRODUCTION.len() {
+        let mut always = 0;
+        while always < ALWAYS_ON.len() {
+            assert!(
+                PRODUCTION[index].area as u8 != ALWAYS_ON[always] as u8,
+                "always-on policy and record owner must not overlap"
+            );
+            always += 1;
+        }
+        index += 1;
+    }
+};
+
+/// Every production module load must have an owner before it reaches the driver
+pub(crate) fn artifact_owner(
+    area: KernelModule,
+    location: AreaTarget,
+) -> Option<ProductionArtifactOwner> {
+    if ALWAYS_ON.contains(&area) {
+        return Some(ProductionArtifactOwner::AlwaysOnPtxJit);
+    }
+    production_artifact(area, location).map(ProductionArtifactOwner::Qualified)
+}
+
 /// The record owns the artifact request before any module is loaded
 pub(crate) fn production_artifact(
     area: KernelModule,

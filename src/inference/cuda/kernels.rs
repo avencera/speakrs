@@ -120,6 +120,7 @@ pub(crate) enum ArtifactRequest {
     /// The exact artifact pinned by a qualification record
     Pinned(LoadedArtifact),
     /// An explicit qualification of the best embedded artifact for this device
+    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
     EmbeddedExact,
 }
 
