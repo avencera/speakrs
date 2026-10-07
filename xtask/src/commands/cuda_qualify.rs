@@ -44,7 +44,11 @@ struct ScopeDirectory {
 /// Set `SPEAKRS_QUALIFY_OWNER_DIGEST` to the SHA256 digest kept outside the tree
 /// by the owner. A missing digest, changed harness, failed check or blocked check
 /// is a command failure. A child process exit is not qualification evidence
-pub fn run(target: &str, implementation: &str) -> Result<()> {
+pub fn run(target: &str, implementation: &str, collection: Option<&str>) -> Result<()> {
+    if (target == "segdense") != collection.is_some() {
+        bail!("segdense requires --collection; other targets must omit --collection");
+    }
+
     let root = project_root();
     let digest = verify_lock(&root)?;
     let expected = std::env::var("SPEAKRS_QUALIFY_OWNER_DIGEST")
@@ -55,12 +59,18 @@ pub fn run(target: &str, implementation: &str) -> Result<()> {
 
     // a new cache directory prevents stale untracked Python bytecode from running
     let cache = tempfile::tempdir().wrap_err("create a fresh qualification Python cache")?;
-    let status = Command::new("python3")
+    let mut command = Command::new("python3");
+    command
         .arg(root.join("scripts/cuda/qualify/qualify.py"))
         .arg(target)
         .arg(implementation)
         .env("PYTHONPYCACHEPREFIX", cache.path())
-        .current_dir(&root)
+        .current_dir(&root);
+    if let Some(collection) = collection {
+        command.arg("--collection").arg(collection);
+    }
+
+    let status = command
         .status()
         .wrap_err("start CUDA qualification harness")?;
     if !status.success() {

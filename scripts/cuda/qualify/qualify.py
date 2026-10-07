@@ -63,7 +63,7 @@ from lock import ROOT, LockError, inventory, verify
 from assets import resolve
 from records import check_table, shipped_files
 from verdict import evaluate_checks, noise_timing
-from domains import MODEL, collection
+from domains import COLLECTION_REGISTRY, MODEL, collection
 from parse_trace import AllowList, attribute, window_kernels
 from ptx import shared_initialization
 from scan import cargo_home, scan
@@ -84,6 +84,7 @@ AREAS = {
     "lstm": "lstm",
     "sincnet": "sincnet",
     "fbankdft": "fbankdft",
+    **COLLECTION_REGISTRY["AREAS"],
 }
 
 
@@ -187,7 +188,32 @@ def layers(target: str) -> tuple[str, ...]:
         return ("sincnet.conv0.abs_pool",)
     if target == "fbankdft":
         return ("fbank.dft",)
+    if target in COLLECTION_REGISTRY["LAYERS"]:
+        return COLLECTION_REGISTRY["LAYERS"][target]
     raise Rejected("unknown target")
+
+
+def resolve_target(target: str, selected: str | None) -> str:
+    """Require an explicit collection for the segmentation umbrella target"""
+    if target == "segdense":
+        if selected not in COLLECTION_REGISTRY["SEGDENSE"]:
+            raise Rejected("segdense requires --collection")
+        return f"segdense-{selected}"
+    if selected is not None:
+        raise Rejected("--collection requires target segdense")
+    if target not in AREAS:
+        raise Rejected("unknown target")
+    return target
+
+
+def preflight(target: str, implementation: str) -> None:
+    """Refuse faults that require a production plan before any collection starts"""
+    if implementation in ("StageTail", "StageTailControl") and (
+        target == "fbankdft" or target in COLLECTION_REGISTRY["LAYERS"]
+    ):
+        raise Rejected(
+            f"{target}: StageTail requires an accepted production plan; none exists before the port"
+        )
 
 
 def target_batches(target: str) -> tuple[int, ...]:
@@ -376,7 +402,11 @@ def verify_inputs(target: str) -> dict[str, str]:
     manifest = json.loads((ROOT / "tests/cuda_qualify/ASSETS.json").read_text())
     if manifest.get("schema") != 1:
         raise Rejected("unsupported input manifest")
-    model = "wespeaker-multimask-tail" if target == "resnet" else "segmentation-3.0"
+    model = (
+        "wespeaker-multimask-tail"
+        if target in COLLECTION_REGISTRY["EMBEDDING_TARGETS"]
+        else "segmentation-3.0"
+    )
     required = {str(Path("/workspace/models-native") / f"{model}.safetensors")}
     for suffix, case in (
         ("", "test_first_b1"),
@@ -387,7 +417,7 @@ def verify_inputs(target: str) -> dict[str, str]:
         required.add(
             str(Path("/workspace/ref") / f"{model}{suffix}" / f"{case}.safetensors")
         )
-    if target == "resnet":
+    if target in COLLECTION_REGISTRY["EMBEDDING_TARGETS"]:
         required.add(
             "/workspace/ref/wespeaker-fbank-b32/test_and_short_b32.safetensors"
         )
@@ -503,6 +533,8 @@ def draw_length(case: str, layer: str) -> int:
         return batch * 998 * 80
     if batch not in BATCHES:
         raise Rejected("GPU lock: invalid TF32 draw batch")
+    if layer in COLLECTION_REGISTRY["DRAW_ELEMENTS"]:
+        return batch * COLLECTION_REGISTRY["DRAW_ELEMENTS"][layer]
     if layer == "lstm.stack":
         return batch * FRAMES * 256
     if layer == "sincnet.conv0.abs_pool":
@@ -1122,7 +1154,7 @@ def missing_projection_markers(text: str) -> list[str]:
 def stage_check(result: dict, key: str, row: dict, control: dict) -> None:
     """The strict stage rule: FP32 always, TF32 when no candidate layer runs in TF32."""
     a, b = row["first"], control["first"]
-    if result["target"] == "resnet":
+    if result["target"] in COLLECTION_REGISTRY["EMBEDDING_TARGETS"]:
         check(
             result,
             f"stage:{key}",
@@ -1153,7 +1185,7 @@ def numeric(
     }
     grouped = defaultdict(list)
     band_rows = []
-    embedding = result["target"] == "resnet"
+    embedding = result["target"] in COLLECTION_REGISTRY["EMBEDDING_TARGETS"]
     secrets = [row for row in candidate if row.get("secret")]
     for row in candidate:
         if row.get("secret"):
@@ -1790,7 +1822,7 @@ def stable_modules(
             )
         )
         required = (
-            {target}
+            {AREAS[target]}
             if implementation in ("Oxide", "StageTail", "StageTailControl") and ran
             else set()
         )
@@ -1881,10 +1913,7 @@ def collect_tier(
         SPEAKRS_QUALIFY_TARGET=target,
         SPEAKRS_QUALIFY_NONCE=nonce,
     )
-    if target == "fbankdft" and implementation in ("StageTail", "StageTailControl"):
-        raise Rejected(
-            "fbankdft: StageTail requires an accepted production plan; none exists before the port"
-        )
+    preflight(target, implementation)
     # the paired fault fixture uses the archived JIT-qualified production plans
     if implementation in ("StageTail", "StageTailControl"):
         env["SPEAKRS_CUDA_FORCE_PTX_JIT"] = "1"
@@ -2564,10 +2593,9 @@ def summary(result: dict) -> str:
 def main() -> int:
     """Refuse changed harnesses before GPU work and again before writing results."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "target", nargs="?", choices=("resnet", "lstm", "sincnet", "fbankdft")
-    )
+    parser.add_argument("target", nargs="?", choices=(*AREAS, "segdense"))
     parser.add_argument("implementation", nargs="?")
+    parser.add_argument("--collection", choices=tuple(COLLECTION_REGISTRY["SEGDENSE"]))
     parser.add_argument("--tier", choices=("sm75", "sm80", "sm90", "sm120"))
     parser.add_argument("--check-table", action="store_true")
     parser.add_argument(
@@ -2630,6 +2658,11 @@ def main() -> int:
             return 1
     if args.target is None or args.implementation is None or args.table or args.records:
         parser.error("target and implementation required, or --check-table")
+    try:
+        args.target = resolve_target(args.target, args.collection)
+        preflight(args.target, args.implementation)
+    except Rejected as error:
+        parser.error(str(error))
     os.environ["SPEAKRS_QUALIFY_CPU_MODE"] = args.cpu_mode
     tier = args.tier or os.environ.get("SPEAKRS_CUDA_PTX_TIER", "sm75")
     if tier not in ("sm75", "sm80", "sm90", "sm120"):

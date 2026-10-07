@@ -1,8 +1,11 @@
 """Own production and collection batch domains independently of candidate claims."""
 
 from dataclasses import dataclass
+import collection_paths
 
 from gates import Rejected
+
+COLLECTION_REGISTRY = vars(collection_paths)
 
 
 @dataclass(frozen=True)
@@ -50,6 +53,9 @@ def collection(target: str) -> BatchDomain:
     """Reject unknown targets rather than inventing collection coverage"""
     if target == "fbankdft":
         return FBANK
-    if target in ("resnet", "lstm", "sincnet"):
+    if (
+        target in ("resnet", "lstm", "sincnet")
+        or target in COLLECTION_REGISTRY["LAYERS"]
+    ):
         return MODEL
     raise Rejected("domain: unknown collection target")

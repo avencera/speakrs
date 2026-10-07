@@ -16,7 +16,9 @@
         "inference/cuda/ptx/resnet.*",
         "inference/cuda/ptx/lstm.*",
         "inference/cuda/ptx/sincnet.*",
-        "inference/cuda/ptx/fbankdft.*"
+        "inference/cuda/ptx/fbankdft.*",
+        "inference/cuda/ptx/segdense.*",
+        "inference/cuda/ptx/wideconv.*"
       ]
     },
     {
