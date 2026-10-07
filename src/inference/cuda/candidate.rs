@@ -10,9 +10,15 @@
 //! sub-scopes only through the locked [`Phases`] and [`LstmPhases`] handles
 //!
 //! Each trait declares a [`Coverage`]: the layer and batch pairs the candidate
-//! implements, per math mode. Dispatch runs the candidate for exactly those triples and the
-//! Library path for every other triple, and the harness qualifies exactly the declared
-//! triples
+//! implements, per math mode. This is implemented coverage only. Accuracy and speed
+//! acceptance live in the production table's tuple proofs, so dispatch runs the
+//! candidate only for accepted triples and the Library path for every other triple.
+//! The harness qualifies exactly the declared triples
+//!
+//! A plan is built from a [`ConfigPin`] that names its complete execution choice.
+//! Production passes the pin its accepted record names; qualification passes the
+//! candidate's own implemented pin. Each trait also states its [`SpecialValues`]
+//! contract
 //!
 //! Candidate code lives in `candidate/` and its kernels in the `resnet`, `lstm` and
 //! `sincnet` PTX areas. The harness scans those files before it builds anything; see
@@ -28,7 +34,8 @@ use cudarc::driver::{
 };
 
 use super::dnn::Conv2d;
-use super::{CudaError, CudaMath, CudaRuntime, PtxTier, Sgemm};
+pub(crate) use super::error::{GeometryError, WeightFault};
+use super::{CudaError, CudaMath, CudaRuntime, KernelModule, PtxTier, Sgemm};
 
 mod conv;
 mod lstm;
@@ -39,7 +46,8 @@ pub(super) use kernel_inventory::conv_kernel_inventory;
 
 #[cfg(test)]
 mod kernel_inventory {
-    use super::conv::{REQUIRED_KERNELS, SMALL_BATCH_WAVES, Shape, select_tiling};
+    use super::ConvShape as Shape;
+    use super::conv::{REQUIRED_KERNELS, SMALL_BATCH_WAVES, select_tiling};
 
     pub(crate) fn conv_kernel_inventory() -> Vec<&'static str> {
         let mut entries = REQUIRED_KERNELS.to_vec();
@@ -66,14 +74,30 @@ pub(crate) use lstm::Oxide as LstmOxide;
 pub(crate) use sinc::Oxide as SincOxide;
 
 /// A planning refusal that is distinct from a CUDA or model error
+///
+/// Only production outside driver-only mode may fall back to Library, and only for
+/// refusals that do not indicate a host bug: a device capability limit, weights
+/// outside the candidate's numeric contract, or a valid geometry the candidate does
+/// not implement. An invalid geometry or violated plan invariant is a hard error
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PlanError {
-    /// The device cannot host this candidate; only production may fall back
+    /// The device cannot host this candidate, such as a resource limit
     #[error("{reason}")]
     DeviceUnsupported {
         /// The device constraint that prevents this plan
         reason: String,
     },
+    /// The weights violate the candidate's numeric contract
+    #[error("{layer}: {fault}")]
+    WeightsOutOfContract {
+        /// The weight tensor that was refused
+        layer: &'static str,
+        /// The first violation found
+        fault: WeightFault,
+    },
+    /// The requested geometry is invalid for the pin, or valid but unimplemented
+    #[error(transparent)]
+    Geometry(GeometryError),
     /// A real error, which dispatch must propagate in every selection mode
     #[error(transparent)]
     Cuda(#[from] CudaError),
@@ -87,6 +111,183 @@ impl From<cudarc::driver::DriverError> for PlanError {
 
 /// Model batches that accepted records can authorize for production
 pub(crate) const QUALIFIED_BATCHES: [usize; 2] = [1, 32];
+
+/// The complete execution choice of one candidate plan
+///
+/// A plan is constructed from its pin and validates device support; it never
+/// reselects a configuration and compares labels afterwards
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigPin {
+    /// A ResNet 3x3 convolution
+    Conv(ConvPin),
+    /// The four-layer LSTM stack
+    Lstm(LstmPin),
+    /// The Sinc producer
+    Sinc(SincPin),
+}
+
+impl ConfigPin {
+    /// The candidate area whose kernels execute this pin
+    pub(crate) const fn area(self) -> KernelModule {
+        match self {
+            Self::Conv(_) => KernelModule::Resnet,
+            Self::Lstm(_) => KernelModule::Lstm,
+            Self::Sinc(_) => KernelModule::Sincnet,
+        }
+    }
+
+    /// Whether the pin names a device-dependent selection rule rather than one fixed
+    /// configuration; only capability-wide legacy evidence may carry such a rule
+    pub(crate) const fn is_device_rule(self) -> bool {
+        matches!(
+            self,
+            Self::Conv(ConvPin::LegacyWaves(_)) | Self::Lstm(LstmPin::LegacyCooperative)
+        )
+    }
+}
+
+/// A ResNet 3x3 convolution shape with fused kernels: padding 1, no dilation
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConvShape {
+    /// 32 -> 32 channels, stride 1
+    C32,
+    /// 64 -> 64 channels, stride 1
+    C64,
+    /// 32 -> 64 channels, stride 2
+    C32Stride2,
+}
+
+/// One fused ResNet kernel entry with its fixed block and tile
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConvKernel {
+    /// `spk_resnet_conv3x3_c32`: 256 threads, 8 output rows by 64 columns
+    C32,
+    /// `spk_resnet_conv3x3_c64`: 256 threads, 4 rows by 64 columns
+    C64,
+    /// `spk_resnet_conv3x3_c64_small`: 128 threads, 1 row by 64 columns
+    C64Small,
+    /// `spk_resnet_conv3x3_c32s2`: 256 threads, 4 rows by 64 columns
+    C32Stride2,
+    /// `spk_resnet_conv3x3_c32s2_small`: 128 threads, 2 rows by 64 columns
+    C32Stride2Small,
+}
+
+impl ConvKernel {
+    /// The shape this entry computes
+    pub(crate) const fn shape(self) -> ConvShape {
+        match self {
+            Self::C32 => ConvShape::C32,
+            Self::C64 | Self::C64Small => ConvShape::C64,
+            Self::C32Stride2 | Self::C32Stride2Small => ConvShape::C32Stride2,
+        }
+    }
+}
+
+/// The execution choice of a ResNet convolution: weights packed once per plan as
+/// `[cin][ky][kx][cout]`, NCHW activations, FP32 FMA in both math modes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConvPin {
+    /// Exactly this entry and tile
+    Kernel(ConvKernel),
+    /// The PR #36 rule: the shape's small-block entry when the large entry's grid
+    /// gives fewer than two blocks per SM, otherwise the large entry
+    LegacyWaves(ConvShape),
+}
+
+impl ConvPin {
+    /// The shape every entry this pin can run computes
+    pub(crate) const fn shape(self) -> ConvShape {
+        match self {
+            Self::Kernel(kernel) => kernel.shape(),
+            Self::LegacyWaves(shape) => shape,
+        }
+    }
+}
+
+/// The execution choice of the LSTM stack
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LstmPin {
+    /// The PR #36 stack: locked cuBLAS input projections, `spk_lstm_recurrence` with
+    /// 128-thread blocks, and the cooperative tile schedule the device's resident
+    /// capacity allows
+    LegacyCooperative,
+}
+
+/// The execution choice of the Sinc producer
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SincPin {
+    /// `spk_sincnet_conv_abs_pool`: 16-channel groups, 256 pooled outputs per
+    /// 256-thread block, filters packed once per plan, pooled output
+    ConvAbsPool,
+}
+
+/// What a candidate guarantees for special values, against the f64 reference result
+/// of its operator
+///
+/// Each field is a separate contract; none implies another
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SpecialValues {
+    /// When finite inputs and weights give finite outputs
+    pub finite: FiniteContract,
+    /// NaN in an input or weight
+    pub nan: NanContract,
+    /// An infinite input or weight
+    pub infinity: InfinityContract,
+    /// The sign of zero outputs
+    pub signed_zero: SignedZeroContract,
+}
+
+/// The input and weight bound under which finite operands give finite outputs
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FiniteContract {
+    /// Every output is finite when, for each output, the f64 sum of the absolute
+    /// values of all its terms, `Σ|w·x| + |bias| (+ |residual|)`, is at most
+    /// `f32::MAX / headroom`. The headroom covers FP32 rounding growth along the
+    /// fixed accumulation order
+    AbsoluteSum {
+        /// Divisor of `f32::MAX`
+        headroom: u32,
+    },
+    /// Outputs are activations bounded by one in magnitude when every gate
+    /// pre-activation's absolute term sum is at most `f32::MAX / headroom`
+    BoundedActivation {
+        /// Divisor of `f32::MAX`
+        headroom: u32,
+    },
+}
+
+/// NaN behaviour
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NanContract {
+    /// A NaN term makes every output whose sum contains it NaN
+    Propagates,
+    /// The pooling maximum ignores a NaN term; a window of only NaN terms gives
+    /// negative infinity
+    PoolingIgnores,
+    /// Not established; NaN operands are outside the contract
+    Unspecified,
+}
+
+/// Infinity behaviour
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InfinityContract {
+    /// IEEE FP32 arithmetic in the fixed order: an infinite term gives an infinite
+    /// sum, and opposite infinities give NaN
+    Ieee,
+    /// Not established; infinite operands are outside the contract
+    Unspecified,
+}
+
+/// Signed-zero behaviour
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SignedZeroContract {
+    /// The ReLU keeps a negative-zero pre-activation as negative zero
+    ReluKeepsNegative,
+    /// Outputs are absolute values, so a zero output is positive zero
+    Positive,
+    /// Not established
+    Unspecified,
+}
 /// Test samples, including stress batches that never grant production coverage
 pub(crate) const TEST_BATCHES: [usize; 5] = [1, 7, 32, 33, 64];
 
@@ -192,13 +393,24 @@ pub(crate) trait ConvCandidate: Sized {
     /// Convolution names and batch sizes this candidate implements
     const COVERAGE: Coverage;
 
+    /// The special-value contract of every plan
+    const SPECIAL_VALUES: SpecialValues;
+
     /// Coverage for the actual loaded tier; override when variants cover different tuples
     fn coverage(_tier: PtxTier) -> Coverage {
         Self::COVERAGE
     }
 
-    /// Prepares one layer for one batch size; runs once per batch class, untimed
-    fn plan(runtime: &CudaRuntime, layer: ConvLayerSpec<'_>) -> Result<Self, PlanError>;
+    /// The configuration qualification plans for this layer
+    fn implemented_pin(layer: &ConvLayerSpec<'_>) -> Result<ConvPin, PlanError>;
+
+    /// Prepares one layer for one batch size from `pin`; runs once per batch class,
+    /// untimed
+    fn plan(
+        runtime: &CudaRuntime,
+        layer: ConvLayerSpec<'_>,
+        pin: ConvPin,
+    ) -> Result<Self, PlanError>;
 
     /// Enqueues the layer on `stream`, writing every element of `y` `[n, k, p, q]`
     fn enqueue(
@@ -253,6 +465,9 @@ pub(crate) trait SincCandidate: Sized {
     /// `sincnet.conv0.abs_pool` and the batch sizes this candidate implements
     const COVERAGE: Coverage;
 
+    /// The special-value contract of every plan
+    const SPECIAL_VALUES: SpecialValues;
+
     /// Coverage for the actual loaded tier; override when variants cover different tuples
     fn coverage(_tier: PtxTier) -> Coverage {
         Self::COVERAGE
@@ -260,8 +475,11 @@ pub(crate) trait SincCandidate: Sized {
     /// The tensor [`Self::enqueue`] writes
     const OUTPUT: SincOutput;
 
-    /// Prepares one batch size; runs once per batch class, untimed
-    fn plan(runtime: &CudaRuntime, spec: SincSpec<'_>) -> Result<Self, PlanError>;
+    /// The configuration qualification plans for this batch size
+    fn implemented_pin(spec: &SincSpec<'_>) -> Result<SincPin, PlanError>;
+
+    /// Prepares one batch size from `pin`; runs once per batch class, untimed
+    fn plan(runtime: &CudaRuntime, spec: SincSpec<'_>, pin: SincPin) -> Result<Self, PlanError>;
 
     /// Enqueues the producer on `stream`, writing every element of `output`
     fn enqueue(
@@ -305,13 +523,19 @@ pub(crate) trait LstmCandidate: Sized {
     /// `lstm.stack` and the batch sizes this candidate implements
     const COVERAGE: Coverage;
 
+    /// The special-value contract of every plan
+    const SPECIAL_VALUES: SpecialValues;
+
     /// Coverage for the actual loaded tier; override when variants cover different tuples
     fn coverage(_tier: PtxTier) -> Coverage {
         Self::COVERAGE
     }
 
-    /// Prepares one batch size; runs once per batch class, untimed
-    fn plan(runtime: &CudaRuntime, spec: LstmSpec<'_>) -> Result<Self, PlanError>;
+    /// The configuration qualification plans for this batch size
+    fn implemented_pin(spec: &LstmSpec<'_>) -> Result<LstmPin, PlanError>;
+
+    /// Prepares one batch size from `pin`; runs once per batch class, untimed
+    fn plan(runtime: &CudaRuntime, spec: LstmSpec<'_>, pin: LstmPin) -> Result<Self, PlanError>;
 
     /// Enqueues the stack on `stream`, every input projection inside
     /// [`LstmPhases::input_proj`] and every recurrence inside [`LstmPhases::recurrence`]
@@ -634,15 +858,26 @@ impl<'a> Projection<'a> {
 mod tests {
     use super::{
         Batches, Coverage, CoverageEntry, CudaError, CudaMath, CudaRuntime, CudaStream,
-        CudaViewMut, Maths, Phases, PlanError, PtxTier, SincCandidate, SincInputs, SincOutput,
-        SincSpec,
+        CudaViewMut, FiniteContract, InfinityContract, Maths, NanContract, Phases, PlanError,
+        PtxTier, SignedZeroContract, SincCandidate, SincInputs, SincOutput, SincPin, SincSpec,
+        SpecialValues,
     };
 
     struct TierFixture;
 
     impl SincCandidate for TierFixture {
         const COVERAGE: Coverage = Coverage::NONE;
+        const SPECIAL_VALUES: SpecialValues = SpecialValues {
+            finite: FiniteContract::AbsoluteSum { headroom: 2 },
+            nan: NanContract::Unspecified,
+            infinity: InfinityContract::Unspecified,
+            signed_zero: SignedZeroContract::Unspecified,
+        };
         const OUTPUT: SincOutput = SincOutput::Pooled;
+
+        fn implemented_pin(_spec: &SincSpec<'_>) -> Result<SincPin, PlanError> {
+            Ok(SincPin::ConvAbsPool)
+        }
 
         fn coverage(tier: PtxTier) -> Coverage {
             match tier {
@@ -660,7 +895,11 @@ mod tests {
             }
         }
 
-        fn plan(_runtime: &CudaRuntime, _spec: SincSpec<'_>) -> Result<Self, PlanError> {
+        fn plan(
+            _runtime: &CudaRuntime,
+            _spec: SincSpec<'_>,
+            _pin: SincPin,
+        ) -> Result<Self, PlanError> {
             unreachable!("coverage-only fixture does not construct GPU plans")
         }
 

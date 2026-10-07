@@ -25,6 +25,7 @@ mod buffer;
 // and the candidate PTX areas are unused
 #[allow(dead_code)]
 mod candidate;
+mod device;
 mod dnn;
 mod embedding;
 mod error;
@@ -57,7 +58,7 @@ pub(crate) use buffer::DeviceTensor;
 #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
 use dnn::{Conv2d, ConvPlanner};
 pub(crate) use embedding::{EMBEDDING_DIM, EmbeddingBatch, ResNetEmbedding, SPEAKERS_PER_CHUNK};
-pub use error::{CudaError, CudaLibrary};
+pub use error::{CudaError, CudaLibrary, GeometryError, WeightFault};
 pub(crate) use fbank::{
     CudaFbank, FBANK_FRAMES, FBANK_MEL_BINS, FBANK_WINDOW_SAMPLES, FbankBuffers,
 };

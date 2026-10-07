@@ -39,7 +39,9 @@ use self::trunk::{ConvLayer, STEM_SLOT, Trunk};
 use super::dnn::Residual;
 use super::error::{check_len, element_count};
 use super::fbank::{FBANK_FRAMES, FBANK_MEL_BINS};
-use super::implementation::{AreaTarget, LibraryNeed, MODEL_BATCHES, Selected, plan_selection};
+use super::implementation::{
+    AreaTarget, BoundaryId, LibraryNeed, MODEL_BATCHES, Selected, plan_selection,
+};
 use super::{CudaError, CudaMath, CudaRuntime, DeviceTensor, PtxTier, SafetensorsFile, Sgemm};
 use super::{CudaLibrary, KernelModule};
 
@@ -55,6 +57,8 @@ pub const EMBEDDING_DIM: usize = 256;
 /// Weight and bias of the embedding layer in the exported weights
 const HEAD_WEIGHT: &str = "resnet.seg_1.weight";
 const HEAD_BIAS: &str = "resnet.seg_1.bias";
+/// The embedding head GEMM
+const HEAD: BoundaryId = BoundaryId::named("resnet.seg_1");
 
 /// A point in the forward pass whose activation [`EmbeddingBatch::forward_with_taps`]
 /// exposes, for comparing layers against reference intermediates
@@ -126,8 +130,7 @@ impl ResNetEmbedding {
                 if matches!(
                     plan_selection(
                         runtime,
-                        KernelModule::Resnet,
-                        layer.name(),
+                        layer.boundary(),
                         batch,
                         math,
                         #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
@@ -136,8 +139,7 @@ impl ResNetEmbedding {
                     Selected::Library
                 ) {
                     needs.push(LibraryNeed::new(
-                        KernelModule::Resnet,
-                        layer.name(),
+                        layer.boundary(),
                         batch,
                         math,
                         target,
@@ -146,8 +148,7 @@ impl ResNetEmbedding {
                 }
             }
             needs.push(LibraryNeed::new(
-                KernelModule::Embedding,
-                "resnet.seg_1",
+                HEAD,
                 batch,
                 math,
                 AreaTarget::for_area(runtime, KernelModule::Embedding)?,
@@ -160,8 +161,7 @@ impl ResNetEmbedding {
             }
         }
         LibraryNeed::new(
-            KernelModule::Embedding,
-            "resnet.seg_1",
+            HEAD,
             1,
             math,
             AreaTarget::for_area(runtime, KernelModule::Embedding)?,

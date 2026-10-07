@@ -252,15 +252,13 @@ impl<'a> Operator<'a> {
         block: usize,
         second: bool,
     ) -> Result<bool, CudaError> {
-        use crate::inference::cuda::KernelModule;
         use crate::inference::cuda::implementation::{Selected, plan_selection};
 
         let block = &model.0.trunk.blocks[block];
         let layer = if second { &block.conv2 } else { &block.conv1 };
         let selected = plan_selection(
             runtime,
-            KernelModule::Resnet,
-            layer.name(),
+            layer.boundary(),
             batch,
             model.0.math,
             layer.override_choice(),

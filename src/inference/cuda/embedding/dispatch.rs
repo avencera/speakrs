@@ -144,8 +144,7 @@ pub(super) fn plan_layers(
     for (layer, residual) in trunk.layers() {
         let selected = plan_selection(
             runtime,
-            KernelModule::Resnet,
-            layer.name(),
+            layer.boundary(),
             batch,
             math,
             #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
@@ -173,8 +172,7 @@ pub(super) fn plan_layers(
             other => other,
         };
         LibraryNeed::new(
-            KernelModule::Resnet,
-            layer.name(),
+            layer.boundary(),
             batch,
             math,
             AreaTarget::for_area(runtime, KernelModule::Resnet)?,

@@ -8,27 +8,55 @@ use super::super::dnn::{Conv2d, ConvPlanner, Residual};
 use super::super::{CudaError, CudaMath};
 use super::runtime;
 
-/// Synthetic shapes still require explicit refusals, never production fallback
+/// Synthetic shapes plan the candidate's implemented pin and require explicit
+/// refusals, never production fallback
 fn explicit_plan(
     runtime: &super::super::CudaRuntime,
     spec: ConvLayerSpec<'_>,
 ) -> Result<ConvOxide, CudaError> {
-    let target = super::super::implementation::Target::for_area(
-        runtime,
-        super::super::KernelModule::Resnet,
-    )?;
-    ConvOxide::plan(runtime, spec).map_err(|error| match error {
-        PlanError::Cuda(error) => error,
-        PlanError::DeviceUnsupported { reason } => CudaError::CandidateDeviceUnsupported {
-            area: "resnet",
-            boundary: spec.name.to_owned(),
-            batch: spec.conv.batch,
-            math: spec.conv.math,
-            tier: target.tier,
-            device: target.device,
-            reason,
-        },
-    })
+    let tier = runtime
+        .load_kernels(super::super::KernelModule::Resnet)?
+        .tier();
+    let device = runtime.compute_capability();
+    let (area, boundary, batch, math) = (
+        "resnet",
+        spec.name.to_owned(),
+        spec.conv.batch,
+        spec.conv.math,
+    );
+    ConvOxide::implemented_pin(&spec)
+        .and_then(|pin| ConvOxide::plan(runtime, spec, pin))
+        .map_err(|error| match error {
+            PlanError::Cuda(error) => error,
+            PlanError::DeviceUnsupported { reason } => CudaError::CandidateDeviceUnsupported {
+                area,
+                boundary,
+                batch,
+                math,
+                tier,
+                device,
+                reason,
+            },
+            PlanError::WeightsOutOfContract { layer, fault } => {
+                CudaError::CandidateWeightsOutOfContract {
+                    area,
+                    boundary,
+                    batch,
+                    math,
+                    tier,
+                    device,
+                    layer,
+                    fault,
+                }
+            }
+            PlanError::Geometry(error) => CudaError::CandidateGeometry {
+                area,
+                boundary,
+                batch,
+                math,
+                error,
+            },
+        })
 }
 
 /// Seeded values in `[-1, 1)` from a 64-bit LCG, so failures reproduce

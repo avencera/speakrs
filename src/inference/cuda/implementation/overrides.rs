@@ -1,50 +1,25 @@
 //! Accuracy-backed override requests, kept separate from speed-qualified production selection
 
-use super::Target;
+use super::{BoundaryId, Target};
+use crate::inference::cuda::CudaMath;
+use crate::inference::cuda::candidate::ConfigPin;
 use crate::inference::cuda::kernels::{ArtifactHash, LoadedArtifact};
-use crate::inference::cuda::{CudaMath, KernelModule};
 
-/// A validated execution boundary, independent of an implementation choice
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A validated execution tuple, independent of an implementation choice
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Boundary {
-    area: KernelModule,
-    name: String,
+    id: BoundaryId,
     batch: usize,
     math: CudaMath,
 }
 
 impl Boundary {
-    /// Reject unsupported areas and malformed boundary tuples before evidence lookup
-    pub(crate) fn new(
-        area: KernelModule,
-        name: &str,
-        batch: usize,
-        math: CudaMath,
-    ) -> Result<Self, OverrideError> {
-        if !matches!(
-            area,
-            KernelModule::Fbank
-                | KernelModule::Embedding
-                | KernelModule::Segmentation
-                | KernelModule::Resnet
-                | KernelModule::Lstm
-                | KernelModule::Sincnet
-        ) {
-            return Err(OverrideError::InvalidArea);
-        }
-        if batch == 0
-            || name.split('.').next() != Some(area.name())
-            || name.split('.').any(str::is_empty)
-            || !name.contains('.')
-        {
+    /// Reject batch zero before evidence lookup; the identifier is already typed
+    pub(crate) fn new(id: BoundaryId, batch: usize, math: CudaMath) -> Result<Self, OverrideError> {
+        if batch == 0 {
             return Err(OverrideError::InvalidTuple);
         }
-        Ok(Self {
-            area,
-            name: name.to_owned(),
-            batch,
-            math,
-        })
+        Ok(Self { id, batch, math })
     }
 }
 
@@ -71,10 +46,10 @@ impl Evidence {
     }
 }
 
-/// One enumerated configuration with evidence bound to its exact execution tuple
+/// One complete configuration with evidence bound to its exact execution tuple
 #[derive(Debug)]
 pub(crate) struct Configuration {
-    id: String,
+    pin: ConfigPin,
     boundary: Boundary,
     target: Target,
     evidence: Evidence,
@@ -83,28 +58,32 @@ pub(crate) struct Configuration {
 impl Configuration {
     /// Bind this configuration's proofs to one target, including the loaded artifact
     pub(crate) fn new(
-        id: &str,
+        pin: ConfigPin,
         boundary: Boundary,
         target: Target,
         evidence: Evidence,
     ) -> Result<Self, OverrideError> {
         validate_target(target)?;
-        if id.is_empty() || id.trim() != id {
-            return Err(OverrideError::InvalidConfiguration);
+        if pin.area() != target.module.area() {
+            return Err(OverrideError::AreaMismatch);
         }
         Ok(Self {
-            id: id.to_owned(),
+            pin,
             boundary,
             target,
             evidence,
         })
     }
+
+    fn same_execution(&self, other: &Self) -> bool {
+        self.pin == other.pin && self.boundary == other.boundary && self.target == other.target
+    }
 }
 
 // a cubin for another device cannot be the artifact loaded at this target
 fn validate_target(target: Target) -> Result<(), OverrideError> {
-    if target.device < target.tier.min_capability()
-        || matches!(target.artifact, LoadedArtifact::Cubin { arch, .. } if arch != target.device)
+    if target.device < target.module.tier().min_capability()
+        || matches!(target.module.artifact(), LoadedArtifact::Cubin { arch, .. } if arch != target.device)
     {
         return Err(OverrideError::InvalidTarget);
     }
@@ -115,7 +94,7 @@ fn validate_target(target: Target) -> Result<(), OverrideError> {
 #[derive(Debug)]
 pub(crate) enum Choice {
     Library,
-    Configuration(String),
+    Configuration(ConfigPin),
 }
 
 /// One override request for one execution tuple
@@ -137,19 +116,19 @@ impl Request {
     }
 }
 
-/// An enumerated set with unique configuration IDs and per-configuration evidence
+/// An enumerated set with one proof per configuration and execution tuple
 #[derive(Debug)]
 pub(crate) struct ConfigurationSet(Vec<Configuration>);
 
 impl ConfigurationSet {
-    /// Reject duplicate IDs even if their execution tuples differ
+    /// Reject a second proof for the same pin, tuple and target
     pub(crate) fn new(configurations: Vec<Configuration>) -> Result<Self, OverrideError> {
         for (index, configuration) in configurations.iter().enumerate() {
             if configurations[..index]
                 .iter()
-                .any(|previous| previous.id == configuration.id)
+                .any(|previous| previous.same_execution(configuration))
             {
-                return Err(OverrideError::DuplicateId(configuration.id.clone()));
+                return Err(OverrideError::DuplicateConfiguration(configuration.pin));
             }
         }
         Ok(Self(configurations))
@@ -158,25 +137,29 @@ impl ConfigurationSet {
     /// Resolve only exact matches; no production-speed evidence is implied
     pub(crate) fn resolve(&self, request: Request) -> Result<Resolved, OverrideError> {
         validate_target(request.target)?;
-        let Choice::Configuration(id) = request.choice else {
+        let Choice::Configuration(pin) = request.choice else {
             return Ok(Resolved::Library);
         };
-        let configuration = self
-            .0
-            .iter()
-            .find(|configuration| configuration.id == id)
-            .ok_or(OverrideError::UnknownConfiguration(id))?;
-        if configuration.boundary.area != request.boundary.area {
+        if pin.area() != request.target.module.area() {
             return Err(OverrideError::AreaMismatch);
         }
-        if configuration.boundary != request.boundary {
+        let pinned: Vec<_> = self.0.iter().filter(|config| config.pin == pin).collect();
+        if pinned.is_empty() {
+            return Err(OverrideError::UnknownConfiguration(pin));
+        }
+        let tuple: Vec<_> = pinned
+            .into_iter()
+            .filter(|config| config.boundary == request.boundary)
+            .collect();
+        if tuple.is_empty() {
             return Err(OverrideError::TupleMismatch);
         }
-        if configuration.target != request.target {
-            return Err(OverrideError::TargetMismatch);
-        }
+        let configuration = tuple
+            .into_iter()
+            .find(|config| config.target == request.target)
+            .ok_or(OverrideError::TargetMismatch)?;
         Ok(Resolved::Custom(Token {
-            id: configuration.id.clone(),
+            pin,
             boundary: request.boundary,
             target: request.target,
             evidence: configuration.evidence,
@@ -187,7 +170,7 @@ impl ConfigurationSet {
 /// A custom selection that can only be created by exact evidence-backed resolution
 #[derive(Debug)]
 pub(crate) struct Token {
-    id: String,
+    pin: ConfigPin,
     boundary: Boundary,
     target: Target,
     evidence: Evidence,
@@ -195,23 +178,20 @@ pub(crate) struct Token {
 
 impl Token {
     /// Return the selected configuration without granting access to token construction
-    pub(crate) fn configuration_id(&self) -> &str {
-        &self.id
+    pub(crate) fn pin(&self) -> ConfigPin {
+        self.pin
     }
 
     /// Reject reuse of a token for a different configuration or execution tuple
     pub(crate) fn check(
         &self,
-        id: &str,
+        pin: ConfigPin,
         boundary: &Boundary,
         target: Target,
     ) -> Result<(), OverrideError> {
         validate_target(target)?;
-        if self.id != id {
-            return Err(OverrideError::InvalidConfiguration);
-        }
-        if self.boundary.area != boundary.area {
-            return Err(OverrideError::AreaMismatch);
+        if self.pin != pin {
+            return Err(OverrideError::ConfigurationMismatch);
         }
         if self.boundary != *boundary {
             return Err(OverrideError::TupleMismatch);
@@ -241,7 +221,8 @@ impl Resolved {
         match self {
             Self::Library => tracing::warn!("{}; selected Library", self.diagnostic()),
             Self::Custom(token) => tracing::warn!(
-                configuration = token.id,
+                configuration = ?token.pin,
+                boundary = %token.boundary.id,
                 accuracy = ?token.evidence.accuracy,
                 deterministic = ?token.evidence.deterministic,
                 "{}", self.diagnostic()
@@ -253,19 +234,17 @@ impl Resolved {
 /// Typed failures that cannot produce a custom override token
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum OverrideError {
-    #[error("unsupported override area")]
-    InvalidArea,
-    #[error("invalid override boundary or batch")]
+    #[error("invalid override batch")]
     InvalidTuple,
     #[error("override target cannot execute its selected artifact or tier")]
     InvalidTarget,
-    #[error("invalid override configuration")]
-    InvalidConfiguration,
-    #[error("duplicate override configuration ID: {0}")]
-    DuplicateId(String),
-    #[error("unknown override configuration ID: {0}")]
-    UnknownConfiguration(String),
-    #[error("override area does not match evidence")]
+    #[error("override token names another configuration")]
+    ConfigurationMismatch,
+    #[error("duplicate override configuration: {0:?}")]
+    DuplicateConfiguration(ConfigPin),
+    #[error("unknown override configuration: {0:?}")]
+    UnknownConfiguration(ConfigPin),
+    #[error("override configuration runs on another module area")]
     AreaMismatch,
     #[error("override tuple does not match evidence")]
     TupleMismatch,
@@ -283,64 +262,79 @@ mod tests {
         Boundary, Choice, Configuration, ConfigurationSet, Evidence, OverrideError, Request,
         Resolved, Target,
     };
-    use crate::inference::cuda::kernels::{ArtifactHash, LoadedArtifact};
+    use crate::inference::cuda::candidate::{
+        ConfigPin, ConvKernel, ConvPin, ConvShape, LstmPin, SincPin,
+    };
+    use crate::inference::cuda::implementation::BoundaryId;
+    use crate::inference::cuda::kernels::{ArtifactHash, LoadedArtifact, ModuleRequest};
     use crate::inference::cuda::{ComputeCapability, CudaMath, KernelModule, PtxTier};
 
-    fn target() -> Target {
+    const TILE_A: ConfigPin = ConfigPin::Conv(ConvPin::Kernel(ConvKernel::C32));
+    const TILE_B: ConfigPin = ConfigPin::Conv(ConvPin::LegacyWaves(ConvShape::C32));
+
+    fn module(area: KernelModule, tier: PtxTier, artifact: LoadedArtifact) -> ModuleRequest {
+        ModuleRequest::new(area, tier, artifact)
+    }
+
+    fn target_for(area: KernelModule) -> Target {
         Target {
-            tier: PtxTier::Sm75,
+            module: module(
+                area,
+                PtxTier::Sm75,
+                LoadedArtifact::PtxJit {
+                    sha256: ArtifactHash::of(b"kernel"),
+                },
+            ),
             device: ComputeCapability::new(12, 0),
-            artifact: LoadedArtifact::PtxJit {
-                sha256: ArtifactHash::of(b"kernel"),
-            },
         }
+    }
+
+    fn target() -> Target {
+        target_for(KernelModule::Resnet)
     }
 
     fn boundary(batch: usize) -> Boundary {
         Boundary::new(
-            KernelModule::Resnet,
-            "resnet.layer1.conv1",
+            BoundaryId::named("resnet.layer1.0.conv1"),
             batch,
             CudaMath::Fp32,
         )
         .unwrap()
     }
 
-    fn configuration(id: &str) -> Configuration {
-        Configuration::new(
-            id,
-            boundary(1),
-            target(),
-            Evidence::new(
-                Some(ArtifactHash::of(b"accuracy")),
-                Some(ArtifactHash::of(b"deterministic")),
-            )
-            .unwrap(),
+    fn evidence() -> Evidence {
+        Evidence::new(
+            Some(ArtifactHash::of(b"accuracy")),
+            Some(ArtifactHash::of(b"deterministic")),
         )
         .unwrap()
     }
 
+    fn configuration(pin: ConfigPin) -> Configuration {
+        Configuration::new(pin, boundary(1), target(), evidence()).unwrap()
+    }
+
     #[test]
     fn exact_selection_and_token_reuse() {
-        let set = ConfigurationSet::new(vec![configuration("tile-a")]).unwrap();
+        let set = ConfigurationSet::new(vec![configuration(TILE_A)]).unwrap();
         let selection = set
             .resolve(Request::new(
                 boundary(1),
                 target(),
-                Choice::Configuration("tile-a".to_owned()),
+                Choice::Configuration(TILE_A),
             ))
             .unwrap();
         let Resolved::Custom(token) = &selection else {
             panic!("expected custom selection")
         };
-        assert_eq!(token.configuration_id(), "tile-a");
-        assert_eq!(token.check("tile-a", &boundary(1), target()), Ok(()));
+        assert_eq!(token.pin(), TILE_A);
+        assert_eq!(token.check(TILE_A, &boundary(1), target()), Ok(()));
         assert_eq!(
-            token.check("tile-b", &boundary(1), target()),
-            Err(OverrideError::InvalidConfiguration)
+            token.check(TILE_B, &boundary(1), target()),
+            Err(OverrideError::ConfigurationMismatch)
         );
         assert_eq!(
-            token.check("tile-a", &boundary(32), target()),
+            token.check(TILE_A, &boundary(32), target()),
             Err(OverrideError::TupleMismatch)
         );
         assert!(selection.diagnostic().contains("unqualified for speed"));
@@ -349,43 +343,52 @@ mod tests {
 
     #[test]
     fn resolution_requires_exact_configuration_tuple_and_target() {
-        let set = ConfigurationSet::new(vec![configuration("tile-a")]).unwrap();
-        let resolve = |boundary, target, id: &str| {
-            set.resolve(Request::new(
-                boundary,
-                target,
-                Choice::Configuration(id.to_owned()),
-            ))
-            .unwrap_err()
+        let set = ConfigurationSet::new(vec![configuration(TILE_A)]).unwrap();
+        let resolve = |boundary, target, pin| {
+            set.resolve(Request::new(boundary, target, Choice::Configuration(pin)))
+                .unwrap_err()
         };
         assert_eq!(
-            resolve(boundary(1), target(), "unknown"),
-            OverrideError::UnknownConfiguration("unknown".to_owned())
+            resolve(boundary(1), target(), TILE_B),
+            OverrideError::UnknownConfiguration(TILE_B)
         );
         assert_eq!(
-            resolve(boundary(32), target(), "tile-a"),
+            resolve(boundary(32), target(), TILE_A),
             OverrideError::TupleMismatch
         );
-        let other_area =
-            Boundary::new(KernelModule::Lstm, "lstm.stack", 1, CudaMath::Fp32).unwrap();
+        // a pin for another module area cannot be resolved against this target
         assert_eq!(
-            resolve(other_area, target(), "tile-a"),
+            resolve(
+                boundary(1),
+                target(),
+                ConfigPin::Lstm(LstmPin::LegacyCooperative)
+            ),
             OverrideError::AreaMismatch
         );
         let other_math = Boundary::new(
-            KernelModule::Resnet,
-            "resnet.layer1.conv1",
+            BoundaryId::named("resnet.layer1.0.conv1"),
             1,
             CudaMath::Tf32,
         )
         .unwrap();
         assert_eq!(
-            resolve(other_math, target(), "tile-a"),
+            resolve(other_math, target(), TILE_A),
             OverrideError::TupleMismatch
         );
+        let other_layer = Boundary::new(
+            BoundaryId::named("resnet.layer1.0.conv2"),
+            1,
+            CudaMath::Fp32,
+        )
+        .unwrap();
+        assert_eq!(
+            resolve(other_layer, target(), TILE_A),
+            OverrideError::TupleMismatch
+        );
+        let artifact = target().module.artifact();
         let targets = [
             Target {
-                tier: PtxTier::Sm80,
+                module: module(KernelModule::Resnet, PtxTier::Sm80, artifact),
                 ..target()
             },
             Target {
@@ -393,22 +396,30 @@ mod tests {
                 ..target()
             },
             Target {
-                artifact: LoadedArtifact::PtxJit {
-                    sha256: ArtifactHash::of(b"other kernel"),
-                },
+                module: module(
+                    KernelModule::Resnet,
+                    PtxTier::Sm75,
+                    LoadedArtifact::PtxJit {
+                        sha256: ArtifactHash::of(b"other kernel"),
+                    },
+                ),
                 ..target()
             },
             Target {
-                artifact: LoadedArtifact::Cubin {
-                    arch: target().device,
-                    sha256: ArtifactHash::of(b"kernel"),
-                },
+                module: module(
+                    KernelModule::Resnet,
+                    PtxTier::Sm75,
+                    LoadedArtifact::Cubin {
+                        arch: target().device,
+                        sha256: ArtifactHash::of(b"kernel"),
+                    },
+                ),
                 ..target()
             },
         ];
         for other_target in targets {
             assert_eq!(
-                resolve(boundary(1), other_target, "tile-a"),
+                resolve(boundary(1), other_target, TILE_A),
                 OverrideError::TargetMismatch
             );
         }
@@ -417,8 +428,16 @@ mod tests {
     #[test]
     fn invalid_records_cannot_enter_the_set() {
         assert_eq!(
-            ConfigurationSet::new(vec![configuration("same"), configuration("same")]).unwrap_err(),
-            OverrideError::DuplicateId("same".to_owned())
+            ConfigurationSet::new(vec![configuration(TILE_A), configuration(TILE_A)]).unwrap_err(),
+            OverrideError::DuplicateConfiguration(TILE_A)
+        );
+        // one pin may carry proofs for several tuples
+        assert!(
+            ConfigurationSet::new(vec![
+                configuration(TILE_A),
+                Configuration::new(TILE_A, boundary(32), target(), evidence()).unwrap(),
+            ])
+            .is_ok()
         );
         assert_eq!(
             Evidence::new(None, Some(ArtifactHash::of(b"proof"))).unwrap_err(),
@@ -429,40 +448,38 @@ mod tests {
             OverrideError::MissingDeterminism
         );
         assert_eq!(
-            Boundary::new(KernelModule::Probe, "probe.layer", 1, CudaMath::Fp32).unwrap_err(),
-            OverrideError::InvalidArea
+            Boundary::new(BoundaryId::named("lstm.stack"), 0, CudaMath::Fp32).unwrap_err(),
+            OverrideError::InvalidTuple
         );
-        for (name, batch) in [
-            ("resnet.layer", 0),
-            ("lstm.stack", 1),
-            ("resnet..layer", 1),
-            ("resnet", 1),
-        ] {
-            assert_eq!(
-                Boundary::new(KernelModule::Resnet, name, batch, CudaMath::Fp32).unwrap_err(),
-                OverrideError::InvalidTuple
-            );
-        }
         assert_eq!(
-            Configuration::new(" ", boundary(1), target(), configuration("valid").evidence)
-                .unwrap_err(),
-            OverrideError::InvalidConfiguration
+            Configuration::new(
+                ConfigPin::Sinc(SincPin::ConvAbsPool),
+                boundary(1),
+                target(),
+                evidence()
+            )
+            .unwrap_err(),
+            OverrideError::AreaMismatch
         );
     }
 
     #[test]
     fn impossible_targets_are_rejected_before_selection() {
-        let set = ConfigurationSet::new(vec![configuration("tile-a")]).unwrap();
+        let set = ConfigurationSet::new(vec![configuration(TILE_A)]).unwrap();
         for invalid in [
             Target {
                 device: ComputeCapability::new(7, 0),
                 ..target()
             },
             Target {
-                artifact: LoadedArtifact::Cubin {
-                    arch: ComputeCapability::new(8, 0),
-                    sha256: ArtifactHash::of(b"kernel"),
-                },
+                module: module(
+                    KernelModule::Resnet,
+                    PtxTier::Sm75,
+                    LoadedArtifact::Cubin {
+                        arch: ComputeCapability::new(8, 0),
+                        sha256: ArtifactHash::of(b"kernel"),
+                    },
+                ),
                 ..target()
             },
         ] {
@@ -472,53 +489,37 @@ mod tests {
                 OverrideError::InvalidTarget
             );
             assert_eq!(
-                Configuration::new(
-                    "invalid",
-                    boundary(1),
-                    invalid,
-                    configuration("valid").evidence
-                )
-                .unwrap_err(),
+                Configuration::new(TILE_A, boundary(1), invalid, evidence()).unwrap_err(),
                 OverrideError::InvalidTarget
             );
         }
     }
 
     #[test]
-    fn all_production_areas_support_library_and_custom_selection() {
-        for area in [
-            KernelModule::Fbank,
-            KernelModule::Embedding,
-            KernelModule::Segmentation,
-            KernelModule::Resnet,
-            KernelModule::Lstm,
-            KernelModule::Sincnet,
+    fn every_candidate_area_supports_library_and_custom_selection() {
+        for (pin, name) in [
+            (TILE_A, "resnet.layer2.1.conv1"),
+            (ConfigPin::Lstm(LstmPin::LegacyCooperative), "lstm.stack"),
+            (
+                ConfigPin::Sinc(SincPin::ConvAbsPool),
+                "sincnet.conv0.abs_pool",
+            ),
         ] {
-            let name = format!("{}.boundary", area.name());
-            let boundary = Boundary::new(area, &name, 1, CudaMath::Fp32).unwrap();
-            let configuration = Configuration::new(
-                "area-config",
-                boundary.clone(),
-                target(),
-                configuration("proof-owner").evidence,
-            )
-            .unwrap();
+            let target = target_for(pin.area());
+            let boundary = Boundary::new(BoundaryId::named(name), 1, CudaMath::Fp32).unwrap();
+            let configuration = Configuration::new(pin, boundary, target, evidence()).unwrap();
             let set = ConfigurationSet::new(vec![configuration]).unwrap();
             let library = set
-                .resolve(Request::new(boundary.clone(), target(), Choice::Library))
+                .resolve(Request::new(boundary, target, Choice::Library))
                 .unwrap();
             assert!(matches!(library, Resolved::Library));
             let selected = set
-                .resolve(Request::new(
-                    boundary.clone(),
-                    target(),
-                    Choice::Configuration("area-config".to_owned()),
-                ))
+                .resolve(Request::new(boundary, target, Choice::Configuration(pin)))
                 .unwrap();
             let Resolved::Custom(token) = selected else {
                 panic!("expected custom selection")
             };
-            assert_eq!(token.check("area-config", &boundary, target()), Ok(()));
+            assert_eq!(token.check(pin, &boundary, target), Ok(()));
         }
     }
 

@@ -1390,9 +1390,11 @@ fn prepare_process_modules(
     }
     for (math, _, batch) in cases {
         for boundary in &boundaries {
+            let boundary = crate::inference::cuda::implementation::BoundaryId::parse(boundary)
+                .expect("fixed qualification boundary");
+            assert_eq!(boundary.area(), area);
             crate::inference::cuda::implementation::plan_selection(
                 runtime,
-                area,
                 boundary,
                 *batch,
                 *math,
@@ -1498,18 +1500,12 @@ fn qualification_driver() -> Result<(), CudaError> {
             KernelModule::Sincnet
         };
         // coverage discovery must not load a module in an undeclared TF32 process
-        let (tier, ptx) = runtime.area_ptx(area)?;
-        let location = crate::inference::cuda::implementation::AreaTarget {
-            tier,
-            device: runtime.compute_capability(),
-        };
         let pinned = crate::inference::cuda::implementation::legacy_fixture_coverage(
             area,
-            location,
-            crate::inference::cuda::kernels::ArtifactHash::of(ptx.as_bytes()),
+            runtime.device(),
+            area.variants(),
         );
         let entries: Vec<_> = pinned
-            .entries()
             .iter()
             .filter(|entry| match entry.maths {
                 Maths::All => true,

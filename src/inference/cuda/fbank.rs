@@ -109,6 +109,10 @@ pub struct CudaFbank {
     mel_width: u32,
 }
 
+/// The DFT GEMM, a Library boundary at every filterbank batch
+const DFT: super::implementation::BoundaryId =
+    super::implementation::BoundaryId::named("fbank.dft");
+
 impl CudaFbank {
     /// Loads the kernels and uploads the window, DFT basis and mel filters, with the
     /// default [`MelProjection`]
@@ -125,8 +129,7 @@ impl CudaFbank {
         let kernels = runtime.load_kernels(KernelModule::Fbank)?;
         for batch in 1..=32 {
             super::implementation::LibraryNeed::new(
-                KernelModule::Fbank,
-                "fbank.dft",
+                DFT,
                 batch,
                 math,
                 super::implementation::AreaTarget {

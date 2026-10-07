@@ -1,6 +1,6 @@
 //! Test-only stack and Sinc operators owned by the segmentation stage
 
-use super::dispatch::{LSTM_LAYER, SINC_LAYER, SincIo};
+use super::dispatch::{LSTM, LSTM_LAYER, SINC, SINC_LAYER, SincIo};
 use super::shape::WINDOW_SAMPLES;
 use super::{
     CudaSegmentation, LstmPlan, LstmStage, Network, SINC_CHANNELS, SegmentationShape, SincPlan,
@@ -370,8 +370,7 @@ impl CudaSegmentation {
         let shape = self.workspaces[index].shape;
         let selected = crate::inference::cuda::implementation::plan_selection(
             runtime,
-            crate::inference::cuda::KernelModule::Sincnet,
-            SINC_LAYER,
+            SINC,
             batch,
             self.network.options.math,
             Some(choice),
@@ -402,8 +401,7 @@ impl CudaSegmentation {
         let shape = self.workspaces[index].shape;
         let selected = crate::inference::cuda::implementation::plan_selection(
             runtime,
-            crate::inference::cuda::KernelModule::Lstm,
-            LSTM_LAYER,
+            LSTM,
             shape.batch,
             self.network.options.math,
             Some(choice),

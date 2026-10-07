@@ -11,8 +11,9 @@ use cudarc::driver::{
 };
 
 use super::{
-    Batches, Coverage, CoverageEntry, Maths, Phases, PlanError, SincCandidate, SincInputs,
-    SincOutput, SincSpec,
+    Batches, Coverage, CoverageEntry, FiniteContract, InfinityContract, Maths, NanContract, Phases,
+    PlanError, SignedZeroContract, SincCandidate, SincInputs, SincOutput, SincPin, SincSpec,
+    SpecialValues,
 };
 use crate::inference::cuda::error::check_len;
 use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, KernelModule};
@@ -65,9 +66,22 @@ impl SincCandidate for Oxide {
         batches: Batches::All,
         maths: Maths::Only(&[CudaMath::Fp32]),
     }]);
+    // the pooling maximum is PTX `max.f32`, which returns the non-NaN operand, and it
+    // starts at negative infinity over absolute values
+    const SPECIAL_VALUES: SpecialValues = SpecialValues {
+        finite: FiniteContract::AbsoluteSum { headroom: 2 },
+        nan: NanContract::PoolingIgnores,
+        infinity: InfinityContract::Ieee,
+        signed_zero: SignedZeroContract::Positive,
+    };
     const OUTPUT: SincOutput = SincOutput::Pooled;
 
-    fn plan(runtime: &CudaRuntime, spec: SincSpec<'_>) -> Result<Self, PlanError> {
+    fn implemented_pin(_spec: &SincSpec<'_>) -> Result<SincPin, PlanError> {
+        Ok(SincPin::ConvAbsPool)
+    }
+
+    fn plan(runtime: &CudaRuntime, spec: SincSpec<'_>, pin: SincPin) -> Result<Self, PlanError> {
+        let SincPin::ConvAbsPool = pin;
         check_len(CONTEXT, CHANNELS * TAPS, spec.filters.len())?;
         // every valid pooled output reads only samples of its own row when the pooled
         // length is the pooled length of a valid convolution

@@ -123,6 +123,46 @@ pub enum CudaError {
         /// Candidate's device constraint
         reason: String,
     },
+    /// A selected candidate refused weights outside its numeric contract, and fallback
+    /// is forbidden
+    #[error(
+        "CUDA candidate {area}/{boundary} b{batch} {math:?}, PTX tier {tier}, device {device}: weights `{layer}` are outside the candidate contract: {fault}"
+    )]
+    CandidateWeightsOutOfContract {
+        /// Kernel area that owns the candidate
+        area: &'static str,
+        /// Selected model boundary
+        boundary: String,
+        /// Selected batch class
+        batch: usize,
+        /// Configured precision
+        math: CudaMath,
+        /// Actual area PTX variant
+        tier: PtxTier,
+        /// Exact device capability
+        device: ComputeCapability,
+        /// The refused weight tensor
+        layer: &'static str,
+        /// The first violation
+        fault: WeightFault,
+    },
+    /// A selected candidate refused its plan geometry
+    ///
+    /// An invalid geometry is a host bug in every mode. An unimplemented geometry
+    /// reaches this error only where fallback is forbidden
+    #[error("CUDA candidate {area}/{boundary} b{batch} {math:?}: {error}")]
+    CandidateGeometry {
+        /// Kernel area that owns the candidate
+        area: &'static str,
+        /// Selected model boundary
+        boundary: String,
+        /// Selected batch class
+        batch: usize,
+        /// Configured precision
+        math: CudaMath,
+        /// The refused geometry
+        error: GeometryError,
+    },
     /// The requested device does not exist
     #[error("CUDA device {ordinal} is not available; {count} device(s) found")]
     NoDevice {
@@ -273,6 +313,48 @@ pub enum CudaError {
         /// Which operation refused
         context: &'static str,
         /// What it does not support
+        reason: String,
+    },
+}
+
+/// Why a candidate refused a weight tensor at plan time
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum WeightFault {
+    /// An element is NaN or infinite
+    #[error("element {index} is not finite")]
+    NonFinite {
+        /// Flat element index
+        index: usize,
+    },
+    /// A column's exponent range does not fit the candidate's packed format
+    #[error("column {column} has exponent {exponent}, outside the packed range")]
+    ExponentOutOfRange {
+        /// Packed column
+        column: usize,
+        /// The offending binary exponent
+        exponent: i32,
+    },
+}
+
+/// A plan geometry a candidate refused before any launch
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum GeometryError {
+    /// The geometry violates the pinned plan's invariants, which is a host bug
+    #[error("{context}: invalid geometry: {reason}")]
+    Invalid {
+        /// Which plan refused
+        context: &'static str,
+        /// The violated invariant
+        reason: String,
+    },
+    /// A valid geometry this candidate does not implement
+    #[error("{context}: unimplemented geometry: {reason}")]
+    Unimplemented {
+        /// Which plan refused
+        context: &'static str,
+        /// What the candidate lacks
         reason: String,
     },
 }

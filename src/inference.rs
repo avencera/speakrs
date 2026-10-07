@@ -25,7 +25,10 @@ pub(crate) mod coreml;
 pub use coreml::CoreMlError;
 #[cfg(feature = "_cuda")]
 #[cfg_attr(docsrs, doc(cfg(any(feature = "cuda", feature = "cuda-driver-only"))))]
-pub use cuda::{ComputeCapability, CudaError, CudaGraphs, CudaLibrary, CudaMath, PtxTier};
+pub use cuda::{
+    ComputeCapability, CudaError, CudaGraphs, CudaLibrary, CudaMath, GeometryError, PtxTier,
+    WeightFault,
+};
 
 #[cfg(feature = "cuda")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]

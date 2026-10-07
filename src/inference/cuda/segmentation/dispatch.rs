@@ -12,7 +12,7 @@ use super::super::candidate::{
     LstmCandidate, LstmLayerWeights, LstmPhases, LstmSpec, Phases, Projection, SincCandidate,
     SincInputs, SincOutput, SincOxide, SincSpec,
 };
-use super::super::implementation::{AreaTarget, LibraryNeed, Selected};
+use super::super::implementation::{AreaTarget, BoundaryId, LibraryNeed, Selected};
 use super::super::{CudaLibrary, KernelModule};
 #[cfg(feature = "cuda")]
 use super::super::{CudaLstmAlgorithm, dnn::ConvPlanner};
@@ -22,6 +22,8 @@ use super::{CudaError, CudaRuntime, LstmStage, Network, PoolNorm, RowLayout, Sin
 /// The boundary names the harness, the coverage and the production table use
 pub(super) const SINC_LAYER: &str = "sincnet.conv0.abs_pool";
 pub(super) const LSTM_LAYER: &str = "lstm.stack";
+pub(super) const SINC: BoundaryId = BoundaryId::named(SINC_LAYER);
+pub(super) const LSTM: BoundaryId = BoundaryId::named(LSTM_LAYER);
 
 /// The buffers of one Sinc call: the normalized waveform in, the stage-0 activation out
 pub(super) struct SincIo<'a> {
@@ -193,8 +195,7 @@ impl Network {
             other => other,
         };
         LibraryNeed::new(
-            KernelModule::Sincnet,
-            SINC_LAYER,
+            SINC,
             shape.batch,
             self.options.math,
             AreaTarget::for_area(runtime, KernelModule::Sincnet)?,
@@ -324,8 +325,7 @@ impl Network {
             other => other,
         };
         LibraryNeed::new(
-            KernelModule::Lstm,
-            LSTM_LAYER,
+            LSTM,
             shape.batch,
             self.options.math,
             AreaTarget::for_area(runtime, KernelModule::Lstm)?,
@@ -337,8 +337,7 @@ impl Network {
             // the NVRTC library is a dependency of the selected dynamic Library plan only
             if self.options.lstm_algo == CudaLstmAlgorithm::PersistDynamic {
                 LibraryNeed::new(
-                    KernelModule::Lstm,
-                    LSTM_LAYER,
+                    LSTM,
                     shape.batch,
                     self.options.math,
                     AreaTarget::for_area(runtime, KernelModule::Lstm)?,

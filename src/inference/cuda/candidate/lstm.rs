@@ -24,8 +24,9 @@ use self::layout::{
     GATE_COLUMNS, GROUPS, HIDDEN, KERNEL, STATE_TILE, Schedule, pack_bias, pack_directions,
 };
 use super::{
-    Batches, Coverage, CoverageEntry, Direction, LstmCandidate, LstmPhases, LstmSpec, Maths, Op,
-    PlanError, ProjectionGemm, Scratch, SideStream,
+    Batches, Coverage, CoverageEntry, Direction, FiniteContract, InfinityContract, LstmCandidate,
+    LstmPhases, LstmPin, LstmSpec, Maths, NanContract, Op, PlanError, ProjectionGemm, Scratch,
+    SideStream, SignedZeroContract, SpecialValues,
 };
 use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, KernelModule};
 
@@ -84,7 +85,21 @@ impl LstmCandidate for Oxide {
         maths: Maths::Only(&[CudaMath::Fp32]),
     }]);
 
-    fn plan(runtime: &CudaRuntime, spec: LstmSpec<'_>) -> Result<Self, PlanError> {
+    // the gates saturate, but `exp_f32` clamps its argument before the exponent, so how
+    // NaN and infinite pre-activations surface has not been established
+    const SPECIAL_VALUES: SpecialValues = SpecialValues {
+        finite: FiniteContract::BoundedActivation { headroom: 2 },
+        nan: NanContract::Unspecified,
+        infinity: InfinityContract::Unspecified,
+        signed_zero: SignedZeroContract::Unspecified,
+    };
+
+    fn implemented_pin(_spec: &LstmSpec<'_>) -> Result<LstmPin, PlanError> {
+        Ok(LstmPin::LegacyCooperative)
+    }
+
+    fn plan(runtime: &CudaRuntime, spec: LstmSpec<'_>, pin: LstmPin) -> Result<Self, PlanError> {
+        let LstmPin::LegacyCooperative = pin;
         let kernels = runtime.load_kernels(KernelModule::Lstm)?;
         let recurrence = kernels.function(KERNEL)?;
         let clear = kernels.function(SPK_LSTM_CLEAR)?;

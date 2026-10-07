@@ -3,8 +3,10 @@
 //! The expectations are literal and independent of the production table. Only
 //! `observe` and `module_request` adapt the selection API under test
 
-use super::{AreaTarget, ArtifactRequest, PlanRequest, Selected, Target};
-use crate::inference::cuda::kernels::{ArtifactHash, LoadedArtifact};
+use super::{BoundaryId, Modules, PlanRequest, Selected, TokenEvidence};
+use crate::inference::cuda::device::DeviceAttributes;
+use crate::inference::cuda::device::test_support::Builder;
+use crate::inference::cuda::kernels::{ArtifactHash, LoadedArtifact, ModuleRequest};
 use crate::inference::cuda::{ComputeCapability, CudaError, CudaMath, KernelModule, PtxTier};
 
 /// One physical device class the golden table covers
@@ -52,37 +54,40 @@ const LSTM_PTX: &str = "72945743a3c1b915c05d8ea21b438dfd860fa9487401c447fb24fd48
 const SINC_PTX: &str = "967bc6893f80da84d8d4d288f2cf1ca3336ca09c4386495cab722beb0ac87247";
 
 /// What production selection decided and which artifact it asked the loader for
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Outcome {
     Library,
     Oxide {
-        record: &'static str,
-        der: &'static str,
+        record: String,
+        der: String,
         tier: PtxTier,
         artifact: LoadedArtifact,
     },
 }
 
-/// Every boundary the models ask production selection about, with its owning area
-fn model_boundaries() -> Vec<(KernelModule, String)> {
+/// Every boundary the models ask production selection about
+fn model_boundaries() -> Vec<String> {
     // the same names and order as `Trunk::load`
-    let mut boundaries = vec![(KernelModule::Resnet, "resnet.conv1".to_owned())];
+    let mut boundaries = vec!["resnet.conv1".to_owned()];
     for (stage, blocks) in [(1, 3), (2, 4), (3, 6), (4, 3)] {
         for block in 0..blocks {
             let prefix = format!("resnet.layer{stage}.{block}");
-            boundaries.push((KernelModule::Resnet, format!("{prefix}.conv1")));
-            boundaries.push((KernelModule::Resnet, format!("{prefix}.conv2")));
+            boundaries.push(format!("{prefix}.conv1"));
+            boundaries.push(format!("{prefix}.conv2"));
             if block == 0 && stage > 1 {
-                boundaries.push((KernelModule::Resnet, format!("{prefix}.shortcut.0")));
+                boundaries.push(format!("{prefix}.shortcut.0"));
             }
         }
     }
-    boundaries.extend([
-        (KernelModule::Sincnet, "sincnet.conv0.abs_pool".to_owned()),
-        (KernelModule::Segmentation, "sincnet.conv1".to_owned()),
-        (KernelModule::Segmentation, "sincnet.conv2".to_owned()),
-        (KernelModule::Lstm, "lstm.stack".to_owned()),
-    ]);
+    boundaries.extend(
+        [
+            "sincnet.conv0.abs_pool",
+            "sincnet.conv1",
+            "sincnet.conv2",
+            "lstm.stack",
+        ]
+        .map(str::to_owned),
+    );
     boundaries
 }
 
@@ -93,8 +98,8 @@ fn batches() -> impl Iterator<Item = usize> {
 
 fn legacy(record: &'static str, ptx: &str) -> Outcome {
     Outcome::Oxide {
-        record,
-        der: INTEGRATED_DER,
+        record: record.to_owned(),
+        der: INTEGRATED_DER.to_owned(),
         tier: PtxTier::Sm75,
         artifact: LoadedArtifact::PtxJit {
             sha256: ArtifactHash::from_hex(ptx),
@@ -140,71 +145,90 @@ fn expected(device: Device, boundary: &str, batch: usize, math: CudaMath) -> Out
     selected.unwrap_or(Outcome::Library)
 }
 
+impl Device {
+    fn attributes(self) -> DeviceAttributes {
+        Builder::new(self.capability)
+            .multiprocessors(self.multiprocessors)
+            .name(self.name)
+            .build()
+    }
+}
+
+/// A host-only runtime: cached attributes, the default tier limit and a scripted loader
+struct Fixture {
+    device: DeviceAttributes,
+    limit: PtxTier,
+    loader: Loader,
+    loads: usize,
+}
+
+impl Modules for &mut Fixture {
+    fn device(&self) -> &DeviceAttributes {
+        &self.device
+    }
+
+    fn tier_limit(&self) -> PtxTier {
+        self.limit
+    }
+
+    fn load(&mut self, request: ModuleRequest) -> Result<ModuleRequest, CudaError> {
+        self.loads += 1;
+        match self.loader {
+            Loader::Exact => Ok(request),
+            Loader::Refuses => Err(CudaError::ArtifactUnavailable {
+                module: request.area().name(),
+                artifact: request.artifact(),
+            }),
+        }
+    }
+
+    fn embedded_exact(&self, _area: KernelModule) -> Result<ModuleRequest, CudaError> {
+        panic!("production never asks for the best embedded artifact")
+    }
+}
+
 /// Run production selection with a loader that succeeds exactly as requested
 fn observe(
     device: Device,
-    area: KernelModule,
     boundary: &str,
     batch: usize,
     math: CudaMath,
     loader: Loader,
 ) -> Result<(Outcome, usize), CudaError> {
-    let limit = PtxTier::select(device.capability, None)?;
-    let (tier, _) = area.variants().resolve(area, limit, device.capability)?;
-    let location = AreaTarget {
-        tier,
-        device: device.capability,
+    let mut fixture = Fixture {
+        device: device.attributes(),
+        limit: PtxTier::select(device.capability, None)?,
+        loader,
+        loads: 0,
     };
-    let mut loads = 0;
-    let selected =
-        PlanRequest::Production.resolve(area, boundary, batch, math, location, |request| {
-            loads += 1;
-            let ArtifactRequest::Pinned(artifact) = request else {
-                panic!("production requested a non-pinned artifact")
-            };
-            match loader {
-                Loader::Exact => Ok(Target {
-                    tier,
-                    device: device.capability,
-                    artifact,
-                }),
-                Loader::Refuses => Err(CudaError::ArtifactUnavailable {
-                    module: area.name(),
-                    artifact,
-                }),
-            }
-        })?;
+    let boundary = BoundaryId::parse(boundary).expect("model boundaries are in the table");
+    let selected = PlanRequest::Production.resolve(boundary, batch, math, &mut fixture)?;
     let outcome = match selected {
         Selected::Library => Outcome::Library,
-        Selected::Oxide(token) => Outcome::Oxide {
-            record: token.record,
-            der: token.der,
-            tier: token.target.tier,
-            artifact: token.target.artifact,
-        },
+        Selected::Oxide(token) => {
+            let TokenEvidence::Production { accuracy, speed } = token.evidence else {
+                panic!("production tokens carry production evidence")
+            };
+            // a PR #36 record proves accuracy and speed together
+            assert_eq!(accuracy, speed.record);
+            Outcome::Oxide {
+                record: speed.record.to_string(),
+                der: speed.integrated.to_string(),
+                tier: token.target.module.tier(),
+                artifact: token.target.module.artifact(),
+            }
+        }
         Selected::Mutant(_) => panic!("production cannot select a mutant"),
     };
-    Ok((outcome, loads))
+    Ok((outcome, fixture.loads))
 }
 
 /// The artifact a production module load requests before any driver work, if any
 fn module_request(device: Device, area: KernelModule) -> Option<(PtxTier, LoadedArtifact)> {
     let limit = PtxTier::select(device.capability, None).unwrap();
-    let (tier, ptx) = area
-        .variants()
-        .resolve(area, limit, device.capability)
-        .unwrap();
-    let owner = super::artifact_owner(
-        area,
-        AreaTarget {
-            tier,
-            device: device.capability,
-        },
-    )?;
-    let ArtifactRequest::Pinned(artifact) = owner.request(ptx) else {
-        panic!("production module requests are pinned")
-    };
-    Some((tier, artifact))
+    super::production_module(area, &device.attributes(), limit, area.variants())
+        .unwrap()
+        .map(|request| (request.tier(), request.artifact()))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -217,12 +241,12 @@ enum Loader {
 fn golden_production_selection_is_unchanged() {
     let mut selected = Vec::new();
     for device in DEVICES {
-        for (area, boundary) in model_boundaries() {
+        for boundary in model_boundaries() {
             for batch in batches() {
                 for math in [CudaMath::Fp32, CudaMath::Tf32] {
                     let expected = expected(device, &boundary, batch, math);
                     let (actual, loads) =
-                        observe(device, area, &boundary, batch, math, Loader::Exact).unwrap();
+                        observe(device, &boundary, batch, math, Loader::Exact).unwrap();
                     assert_eq!(
                         actual, expected,
                         "{} ({}, {} SMs) {boundary} b{batch} {math:?}",
@@ -237,12 +261,12 @@ fn golden_production_selection_is_unchanged() {
 
                     // production keeps today's Library fallback when the pinned load fails
                     let (refused, loads) =
-                        observe(device, area, &boundary, batch, math, Loader::Refuses).unwrap();
+                        observe(device, &boundary, batch, math, Loader::Refuses).unwrap();
                     assert_eq!((refused, loads), (Outcome::Library, 1));
                 }
             }
             for math in [CudaMath::Fp32, CudaMath::Tf32] {
-                assert!(observe(device, area, &boundary, 0, math, Loader::Exact).is_err());
+                assert!(observe(device, &boundary, 0, math, Loader::Exact).is_err());
             }
         }
     }

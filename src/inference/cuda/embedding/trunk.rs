@@ -1,4 +1,5 @@
 use super::super::dnn::Conv2d;
+use super::super::implementation::BoundaryId;
 #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
 use super::super::implementation::Choice;
 use super::super::{CudaError, CudaMath, CudaRuntime, DeviceTensor, SafetensorsFile};
@@ -65,7 +66,7 @@ pub(super) struct ConvLayer {
 struct LayerPlan {
     #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
     override_choice: Option<Choice>,
-    name: String,
+    boundary: BoundaryId,
 }
 
 impl ConvLayer {
@@ -89,6 +90,10 @@ impl ConvLayer {
             &[out_channels, in_channels, kernel, kernel],
         )?;
         let bias = weights.upload(runtime, &format!("{prefix}.weight_bias"), &[out_channels])?;
+        let boundary = BoundaryId::parse(prefix).map_err(|error| CudaError::Unsupported {
+            context: "ResNet trunk",
+            reason: error.to_string(),
+        })?;
 
         Ok(Self {
             weight,
@@ -97,7 +102,7 @@ impl ConvLayer {
             plan: LayerPlan {
                 #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
                 override_choice: None,
-                name: prefix.to_owned(),
+                boundary,
             },
         })
     }
@@ -112,8 +117,13 @@ impl ConvLayer {
         self.plan.override_choice
     }
 
-    pub(super) fn name(&self) -> &str {
-        &self.plan.name
+    pub(super) fn name(&self) -> &'static str {
+        self.plan.boundary.name()
+    }
+
+    /// The model boundary this layer computes
+    pub(super) fn boundary(&self) -> BoundaryId {
+        self.plan.boundary
     }
 
     pub(super) fn weight(&self) -> &DeviceTensor {

@@ -41,7 +41,21 @@ use super::candidate::{LstmOxide, SincCandidate, SincOutput, SincOxide};
 use super::dnn::Conv2d;
 #[cfg(feature = "cuda")]
 use super::dnn::{ConvPlan, ConvPlanner};
-use super::implementation::{AreaTarget, LibraryNeed, MODEL_BATCHES, Selected, plan_selection};
+use super::implementation::{
+    AreaTarget, BoundaryId, LibraryNeed, MODEL_BATCHES, Selected, plan_selection,
+};
+
+/// The two Library-owned temporal convolutions after the Sinc producer
+const CONV1: BoundaryId = BoundaryId::named("sincnet.conv1");
+const CONV2: BoundaryId = BoundaryId::named("sincnet.conv2");
+/// The cuBLAS input projections nested in the pinned PR #36 LSTM stack
+const LSTM_INPUT_PROJECTION: BoundaryId = BoundaryId::named("lstm.stack.input_proj");
+/// The three linear layers after the LSTM
+const LINEAR_BOUNDARIES: [BoundaryId; 3] = [
+    BoundaryId::named("linear0"),
+    BoundaryId::named("linear1"),
+    BoundaryId::named("linear2"),
+];
 use super::{CudaError, CudaMath, CudaRuntime, DeviceTensor, PtxTier, SafetensorsFile, Sgemm};
 use super::{CudaLibrary, KernelModule};
 
@@ -121,13 +135,12 @@ enum ConvStage {
 }
 
 impl ConvStage {
-    fn new(runtime: &CudaRuntime, boundary: &str, spec: Conv2d) -> Result<Self, CudaError> {
+    fn new(runtime: &CudaRuntime, boundary: BoundaryId, spec: Conv2d) -> Result<Self, CudaError> {
         LibraryNeed::new(
-            KernelModule::Segmentation,
             boundary,
             spec.batch,
             spec.math,
-            AreaTarget::for_area(runtime, KernelModule::Segmentation)?,
+            AreaTarget::for_area(runtime, boundary.area())?,
             CudaLibrary::Cudnn,
         )
         .prepare(runtime)?;
@@ -306,16 +319,10 @@ impl Network {
     ) -> Result<Self, CudaError> {
         let mut needs = Vec::new();
         for batch in MODEL_BATCHES {
-            for (area, boundary) in [
-                (KernelModule::Sincnet, dispatch::SINC_LAYER),
-                (KernelModule::Segmentation, "sincnet.conv1"),
-                (KernelModule::Segmentation, "sincnet.conv2"),
-                (KernelModule::Lstm, dispatch::LSTM_LAYER),
-            ] {
-                let target = AreaTarget::for_area(runtime, area)?;
+            for boundary in [dispatch::SINC, CONV1, CONV2, dispatch::LSTM] {
+                let target = AreaTarget::for_area(runtime, boundary.area())?;
                 let selected = plan_selection(
                     runtime,
-                    area,
                     boundary,
                     batch,
                     options.math,
@@ -324,7 +331,6 @@ impl Network {
                 )?;
                 if matches!(selected, Selected::Library) {
                     needs.push(LibraryNeed::new(
-                        area,
                         boundary,
                         batch,
                         options.math,
@@ -332,11 +338,10 @@ impl Network {
                         CudaLibrary::Cudnn,
                     ));
                     #[cfg(feature = "cuda")]
-                    if boundary == dispatch::LSTM_LAYER
+                    if boundary == dispatch::LSTM
                         && options.lstm_algo == CudaLstmAlgorithm::PersistDynamic
                     {
                         needs.push(LibraryNeed::new(
-                            area,
                             boundary,
                             batch,
                             options.math,
@@ -344,10 +349,9 @@ impl Network {
                             CudaLibrary::Nvrtc,
                         ));
                     }
-                } else if boundary == dispatch::LSTM_LAYER {
+                } else if boundary == dispatch::LSTM {
                     needs.push(LibraryNeed::new(
-                        area,
-                        "lstm.stack.input_proj",
+                        LSTM_INPUT_PROJECTION,
                         batch,
                         options.math,
                         target,
@@ -355,9 +359,8 @@ impl Network {
                     ));
                 }
             }
-            for boundary in ["linear0", "linear1", "linear2"] {
+            for boundary in LINEAR_BOUNDARIES {
                 needs.push(LibraryNeed::new(
-                    KernelModule::Segmentation,
                     boundary,
                     batch,
                     options.math,
@@ -372,8 +375,7 @@ impl Network {
             }
         }
         LibraryNeed::new(
-            KernelModule::Segmentation,
-            "linear0",
+            LINEAR_BOUNDARIES[0],
             1,
             options.math,
             AreaTarget::for_area(runtime, KernelModule::Segmentation)?,
@@ -457,8 +459,7 @@ impl Network {
 
         let sinc_selected = plan_selection(
             runtime,
-            KernelModule::Sincnet,
-            dispatch::SINC_LAYER,
+            dispatch::SINC,
             batch,
             math,
             #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
@@ -466,8 +467,7 @@ impl Network {
         )?;
         let lstm_selected = plan_selection(
             runtime,
-            KernelModule::Lstm,
-            dispatch::LSTM_LAYER,
+            dispatch::LSTM,
             batch,
             math,
             #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
@@ -476,12 +476,12 @@ impl Network {
         let sinc = self.plan_sinc(runtime, shape, sinc_selected)?;
         let conv1 = ConvStage::new(
             runtime,
-            "sincnet.conv1",
+            CONV1,
             conv([SINC_CHANNELS, FEATURES], shape.pool0, CONV_KERNEL, 1),
         )?;
         let conv2 = ConvStage::new(
             runtime,
-            "sincnet.conv2",
+            CONV2,
             conv([FEATURES, FEATURES], shape.pool1, CONV_KERNEL, 1),
         )?;
         let workspace_bytes = sinc
