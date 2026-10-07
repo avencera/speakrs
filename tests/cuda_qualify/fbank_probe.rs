@@ -14,31 +14,54 @@ const LAYER: &str = "fbank.dft";
 const ELEMENTS: usize = 998 * 80;
 const WAVEFORM_SAMPLES: usize = 160_000;
 
-/// Own the Lookup fault's first waveform before any graph captures it
+/// A prefix of the pinned B32 fixture, never the current operator's input
+struct LookupFixture(Vec<f32>);
+
+impl LookupFixture {
+    fn load(spec: FbankSpec) -> Result<Self, CudaError> {
+        let file = super::reference("fbankdft", "mixed")?;
+        let waveform = file.read_f32("input/waveform", &[32, 1, WAVEFORM_SAMPLES])?;
+        Self::from_b32(spec, &waveform)
+    }
+
+    fn from_b32(spec: FbankSpec, waveform: &[f32]) -> Result<Self, CudaError> {
+        let expected = 32 * WAVEFORM_SAMPLES;
+        if waveform.len() != expected {
+            return Err(CudaError::BufferLength {
+                context: "fbank Lookup B32 fixture",
+                expected,
+                actual: waveform.len(),
+            });
+        }
+        Ok(Self(waveform[..spec.batch() * WAVEFORM_SAMPLES].to_vec()))
+    }
+}
+
+/// Own energies computed from the fixture before capture, independent of live inputs
 struct LookupPlan<T>(T);
 
 impl<T> LookupPlan<T> {
     fn prepare(
         spec: FbankSpec,
-        first: &[f32],
-        upload: impl FnOnce(&[f32]) -> Result<T, CudaError>,
+        fixture: LookupFixture,
+        memorize: impl FnOnce(&[f32], usize) -> Result<T, CudaError>,
     ) -> Result<Self, CudaError> {
         let expected = spec.batch() * WAVEFORM_SAMPLES;
-        if first.len() != expected {
+        if fixture.0.len() != expected {
             return Err(CudaError::BufferLength {
                 context: "fbank Lookup snapshot",
                 expected,
-                actual: first.len(),
+                actual: fixture.0.len(),
             });
         }
-        // cuda slice Clone allocates; enqueue must only borrow this owned snapshot
-        upload(first)
+        // preparation receives only fixture data; secret inputs cannot refresh the answer
+        memorize(&fixture.0, spec.batch() * ELEMENTS)
             .map(Self)
-            .map_err(|error| Self::error("snapshot clone_htod before capture", error))
+            .map_err(|error| Self::error("memorize fixture energies before capture", error))
     }
 
-    fn enqueue(&self, producer: impl FnOnce(&T) -> Result<(), CudaError>) -> Result<(), CudaError> {
-        producer(&self.0).map_err(|error| Self::error("producer enqueue", error))
+    fn replay(&self, copy: impl FnOnce(&T) -> Result<(), CudaError>) -> Result<(), CudaError> {
+        copy(&self.0).map_err(|error| Self::error("replay cached fixture energies", error))
     }
 
     fn error(call: &'static str, error: CudaError) -> CudaError {
@@ -91,7 +114,7 @@ fn capture_lookup(
         // SAFETY: restore the tracking state from before capture, including on error
         unsafe { context.enable_event_tracking() };
     }
-    Ok(captured?.expect("Lookup enqueues the Library producer"))
+    Ok(captured?.expect("Lookup enqueues a cached energy copy"))
 }
 
 fn plan_error(error: impl std::fmt::Display) -> CudaError {
@@ -191,9 +214,41 @@ where
         let library = Library::plan(runtime, spec, ()).map_err(plan_error)?;
         let route = match choice {
             "Library" => Route::Library,
-            "Lookup" => Route::Lookup(LookupPlan::prepare(spec, &host[0], |first| {
-                Ok(runtime.stream().clone_htod(first)?)
-            })?),
+            "Lookup" => {
+                let fixture = LookupFixture::load(spec)?;
+                let lookup = LookupPlan::prepare(spec, fixture, |waveform, len| {
+                    let input = runtime
+                        .stream()
+                        .clone_htod(waveform)
+                        .map_err(CudaError::from)
+                        .map_err(|error| {
+                            LookupPlan::<()>::error("upload fixture waveform", error)
+                        })?;
+                    let mut energies = runtime
+                        .stream()
+                        .alloc_zeros(len)
+                        .map_err(CudaError::from)
+                        .map_err(|error| {
+                        LookupPlan::<()>::error("allocate cached energies", error)
+                    })?;
+                    let _scope = test_support::library(runtime.stream(), LAYER);
+                    library
+                        .enqueue(
+                            &input.as_view(),
+                            &mut energies.as_view_mut(),
+                            &Phases::new(),
+                            runtime,
+                        )
+                        .map_err(|error| {
+                            LookupPlan::<()>::error("compute fixture energies", error)
+                        })?;
+                    runtime.synchronize().map_err(|error| {
+                        LookupPlan::<()>::error("finish fixture computation", error)
+                    })?;
+                    Ok(energies)
+                })?;
+                Route::Lookup(lookup)
+            }
             "Oxide" => {
                 assert!(
                     C::coverage(runtime.ptx_tier()).covers(LAYER, spec.batch(), spec.math()),
@@ -268,13 +323,8 @@ where
                 test_support::poison(runtime)
                     .map_err(|error| LookupPlan::<()>::error("poison launch", error))?;
                 let _scope = test_support::mutant_scope(runtime.stream(), LAYER, Mutant::Lookup);
-                lookup.enqueue(|input| {
-                    self.library.enqueue(
-                        &input.as_view(),
-                        &mut self.energies.as_view_mut(),
-                        &phases,
-                        runtime,
-                    )
+                lookup.replay(|energies| {
+                    Ok(runtime.stream().memcpy_dtod(energies, &mut self.energies)?)
                 })?;
                 test_support::post(
                     runtime,
@@ -622,60 +672,97 @@ pub(super) fn secret(
 }
 
 #[test]
-fn lookup_plans_every_batch_before_capture_and_reuses_the_first_input() {
+fn lookup_memorizes_only_fixture_outputs_for_every_batch() {
     use std::cell::Cell;
 
     use crate::inference::cuda::implementation::BoundaryId;
 
-    // this is the same prepare/enqueue seam that the CUDA capture closure calls
-    // host callbacks check ownership and borrowing without loading a CUDA driver
+    let fixture: Vec<f32> = (0..32 * WAVEFORM_SAMPLES)
+        .map(|index| {
+            let row = index / WAVEFORM_SAMPLES;
+            let sample = index % WAVEFORM_SAMPLES;
+            ((sample as f32 * (0.034 + row as f32 * 0.013)).sin()
+                + 0.2 * (sample as f32 * 0.27).cos())
+                * (0.02 + row as f32 * 0.003)
+        })
+        .collect();
+    let constants = crate::inference::cuda::fbank::FbankConstants::new();
     for math in [CudaMath::Fp32, CudaMath::Tf32] {
         let batches = BoundaryId::named(LAYER).batches();
         for batch in (0..=64).filter(|batch| batches.contains(*batch)) {
             let spec = FbankSpec::new(batch, math).expect("declared batch");
-            let mut first = vec![batch as f32; batch * WAVEFORM_SAMPLES];
-            first[0] = -0.125;
-            let uploads = Cell::new(0);
-            let plan = LookupPlan::prepare(spec, &first, |waveform| {
-                uploads.set(uploads.get() + 1);
-                Ok(waveform.to_vec())
+            let source = LookupFixture::from_b32(spec, &fixture).expect("fixture prefix");
+            assert_eq!(source.0, fixture[..batch * WAVEFORM_SAMPLES]);
+            let indices: Vec<_> = (0..batch)
+                .map(|row| row * ELEMENTS + 37 * 80 + 31)
+                .collect();
+            let fixture_output =
+                super::reference::fbank(&source.0, constants.mel(), indices.clone());
+            let preparations = Cell::new(0);
+            let plan = LookupPlan::prepare(spec, source, |memorized, len| {
+                preparations.set(preparations.get() + 1);
+                assert_eq!(memorized, &fixture[..batch * WAVEFORM_SAMPLES]);
+                assert_eq!(len, batch * ELEMENTS);
+                let mut output = vec![0.0f64; len];
+                for (&index, &value) in indices.iter().zip(&fixture_output.values) {
+                    output[index] = value;
+                }
+                Ok(output)
             })
-            .expect("Lookup plan");
-            let pointer = plan.0.as_ptr();
-            first.fill(0.75);
-            let captures = Cell::new(0);
-            let mut replay = Vec::new();
-            for _input in 0..2 {
-                for _stage in [false, true] {
-                    plan.enqueue(|snapshot| {
-                        captures.set(captures.get() + 1);
-                        assert_eq!(snapshot.as_ptr(), pointer);
-                        replay = snapshot.clone();
-                        Ok(())
-                    })
-                    .expect("capture enqueue borrows prepared storage");
-                    assert_eq!(replay.len(), batch * WAVEFORM_SAMPLES);
-                    assert_eq!(replay[0], -0.125);
-                    assert!(replay[1..].iter().all(|value| *value == batch as f32));
-                    assert_ne!(replay, first, "switched input must not refresh Lookup");
-                    assert_eq!(
-                        uploads.get(),
-                        1,
-                        "capture must not prepare another snapshot"
-                    );
+            .expect("memorize fixture energies");
+            let address = plan.0.as_ptr();
+            for mut seed in [17, 18] {
+                // use the actual secret generator and independent Library DFT definition
+                // driver capture and the CUDA Library itself require the later box run
+                let fresh = super::transformed_audio(&fixture, batch, &mut seed);
+                assert_ne!(&fixture[..batch * WAVEFORM_SAMPLES], fresh);
+                let fresh_library =
+                    super::reference::fbank(&fresh, constants.mel(), indices.clone());
+                let mut replay = Vec::new();
+                for _input in 0..2 {
+                    for _stage in [false, true] {
+                        plan.replay(|cached| {
+                            assert_eq!(cached.as_ptr(), address);
+                            replay = indices.iter().map(|&index| cached[index]).collect();
+                            Ok(())
+                        })
+                        .expect("capture enqueue only borrows cached output");
+                        assert_eq!(replay, fixture_output.values);
+                        assert_ne!(replay, fresh_library.values);
+                        let drift: f64 = replay
+                            .iter()
+                            .zip(&fresh_library.values)
+                            .map(|(a, b)| (a - b).abs())
+                            .sum();
+                        let scale: f64 = fresh_library.values.iter().map(|value| value.abs()).sum();
+                        assert!(
+                            drift > 0.01 * scale,
+                            "fixture answers must not solve a fresh input"
+                        );
+                        assert_eq!(preparations.get(), 1, "replay cannot memorize fresh inputs");
+                    }
                 }
             }
-            assert_eq!(captures.get(), 4);
         }
     }
 }
 
 #[test]
-fn lookup_rejects_wrong_lengths_before_upload_and_reports_call_sites() {
+fn lookup_rejects_nonfixture_geometry_and_reports_replay_errors() {
     let spec = FbankSpec::new(1, CudaMath::Fp32).expect("batch");
-    let result = LookupPlan::prepare(spec, &[0.0], |_| -> Result<(), CudaError> {
-        panic!("invalid waveform must not be uploaded")
-    });
+    assert!(matches!(
+        LookupFixture::from_b32(spec, &[0.0]),
+        Err(CudaError::BufferLength {
+            context: "fbank Lookup B32 fixture",
+            expected: 5_120_000,
+            actual: 1,
+        })
+    ));
+    let result = LookupPlan::prepare(
+        spec,
+        LookupFixture(vec![0.0]),
+        |_, _| -> Result<(), CudaError> { panic!("invalid fixture must not be memorized") },
+    );
     assert!(matches!(
         result,
         Err(CudaError::BufferLength {
@@ -684,17 +771,17 @@ fn lookup_rejects_wrong_lengths_before_upload_and_reports_call_sites() {
             actual: 1,
         })
     ));
-    let error = LookupPlan(()).enqueue(|_| {
+    let error = LookupPlan(()).replay(|_| {
         Err(CudaError::BufferLength {
-            context: "injected producer error",
+            context: "injected copy error",
             expected: 2,
             actual: 1,
         })
     });
-    let message = error.expect_err("producer failure is retained").to_string();
+    let message = error.expect_err("copy failure is retained").to_string();
     assert!(message.contains("fbank Lookup injection"));
-    assert!(message.contains("producer enqueue"));
-    assert!(message.contains("injected producer error"));
+    assert!(message.contains("replay cached fixture energies"));
+    assert!(message.contains("injected copy error"));
 }
 
 #[test]
