@@ -19,6 +19,8 @@ pub mod embedding;
 pub mod fbank;
 #[cfg(feature = "lstm")]
 pub mod lstm;
+#[cfg(feature = "lstmproj")]
+pub mod lstmproj;
 #[cfg(feature = "probe")]
 pub mod probe;
 #[cfg(feature = "resnet")]

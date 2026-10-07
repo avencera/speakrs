@@ -13,6 +13,7 @@
 
 mod embedding;
 mod fbank;
+mod lstmproj;
 mod resnet;
 mod runtime;
 mod segmentation;

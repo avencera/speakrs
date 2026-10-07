@@ -24,11 +24,11 @@ use self::layout::{
     GATE_COLUMNS, GROUPS, HIDDEN, KERNEL, STATE_TILE, Schedule, pack_bias, pack_directions,
 };
 use super::{
-    Batches, Coverage, CoverageEntry, Direction, FiniteContract, InfinityContract, LstmCandidate,
-    LstmPhases, LstmPin, LstmSpec, Maths, NanContract, Op, PlanError, ProjectionGemm, Scratch,
-    SideStream, SignedZeroContract, SpecialValues,
+    Batches, Coverage, CoverageEntry, DeviceAttributes, Direction, FiniteContract, GeometryError,
+    InfinityContract, LstmCandidate, LstmPhases, LstmPin, LstmSpec, Maths, NanContract, Op,
+    PlanError, ProjectionGemm, Scratch, SideStream, SignedZeroContract, SpecialValues,
 };
-use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, LoadedKernels};
+use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, LoadedKernels, PtxTier};
 
 const SPK_LSTM_CLEAR: &str = "spk_lstm_clear";
 
@@ -98,13 +98,26 @@ impl LstmCandidate for Oxide {
         Ok(LstmPin::LegacyCooperative)
     }
 
+    fn device_pin(
+        _device: &DeviceAttributes,
+        _tier: PtxTier,
+        _spec: &LstmSpec<'_>,
+    ) -> Result<LstmPin, PlanError> {
+        Ok(LstmPin::LegacyCooperative)
+    }
+
     fn plan(
         runtime: &CudaRuntime,
         kernels: &LoadedKernels,
         spec: LstmSpec<'_>,
         pin: LstmPin,
     ) -> Result<Self, PlanError> {
-        let LstmPin::LegacyCooperative = pin;
+        let LstmPin::LegacyCooperative = pin else {
+            return Err(PlanError::Geometry(GeometryError::Invalid {
+                context: "oxide LSTM plan",
+                reason: format!("pin {pin:?} belongs to the lstmproj area"),
+            }));
+        };
         let recurrence = kernels.function(KERNEL)?;
         let clear = kernels.function(SPK_LSTM_CLEAR)?;
         let capacity = runtime.cooperative_capacity(&recurrence, THREADS, 0)?;

@@ -149,6 +149,9 @@ pub const AREAS: &[Area] = &[
     Area::new("resnet", &[Tier::Sm75]),
     Area::new("lstm", &[Tier::Sm75]),
     Area::new("sincnet", &[Tier::Sm75]),
+    // the driver-only LSTM stack; sm80 adds TF32 tensor projections, and sm120 is the
+    // same source built for the newest target
+    Area::new("lstmproj", &[Tier::Sm75, Tier::Sm80, Tier::Sm120]),
 ];
 
 /// One PTX file: an area built for one tier

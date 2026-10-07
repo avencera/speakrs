@@ -33,6 +33,13 @@ pub(crate) fn pin_json(pin: ConfigPin) -> Value {
         ConfigPin::Lstm(LstmPin::LegacyCooperative) => {
             json!({"kind":"Lstm", "selection":"LegacyCooperative"})
         }
+        ConfigPin::Lstm(LstmPin::Projected(projection)) => {
+            json!({"kind":"Lstm", "selection":"Projected", "projection": match projection {
+                crate::inference::cuda::candidate::LstmProjection::Small => "Small",
+                crate::inference::cuda::candidate::LstmProjection::Large => "Large",
+                crate::inference::cuda::candidate::LstmProjection::Tensor => "Tensor",
+            }})
+        }
         ConfigPin::Sinc(SincPin::ConvAbsPool) => json!({"kind":"Sinc", "selection":"ConvAbsPool"}),
         ConfigPin::Fbank(FbankPin::FftMelAccurate) => {
             json!({"kind":"Fbank", "selection":"FftMelAccurate"})

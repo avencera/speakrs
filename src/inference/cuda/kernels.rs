@@ -247,6 +247,8 @@ pub enum KernelModule {
     /// Candidate kernels for the Sinc producer
     #[allow(dead_code)]
     Sincnet,
+    /// The LSTM stack with its own input projections, which needs no library
+    LstmProj,
     /// Record-owned filterbank DFT producer, separate from always-on Fbank
     FbankDft,
     /// Record-owned segmentation dense operators
@@ -267,6 +269,7 @@ impl KernelModule {
             Self::Resnet => "resnet",
             Self::Lstm => "lstm",
             Self::Sincnet => "sincnet",
+            Self::LstmProj => "lstmproj",
             Self::FbankDft => "fbankdft",
             Self::Segdense => "segdense",
             Self::Wideconv => "wideconv",
@@ -285,6 +288,7 @@ impl KernelModule {
             Self::Resnet => include_str!("ptx/resnet.manifest"),
             Self::Lstm => include_str!("ptx/lstm.manifest"),
             Self::Sincnet => include_str!("ptx/sincnet.manifest"),
+            Self::LstmProj => include_str!("ptx/lstmproj.manifest"),
             // no candidate artifact exists until the separate kernel port
             Self::FbankDft | Self::Segdense | Self::Wideconv => "",
         }
@@ -335,6 +339,20 @@ impl KernelModule {
                 "ptx/sincnet.sm75",
                 [75, 80, 86, 89, 90, 120]
             )),
+            Self::LstmProj => AreaPtx {
+                sm75: tier_ptx!(
+                    ["cuda-sm75"],
+                    "ptx/lstmproj.sm75",
+                    [75, 80, 86, 89, 90, 120]
+                ),
+                sm80: tier_ptx!(
+                    ["cuda-sm80", "cuda-sm90"],
+                    "ptx/lstmproj.sm80",
+                    [80, 86, 89, 90, 120]
+                ),
+                sm90: None,
+                sm120: tier_ptx!(["cuda-sm120"], "ptx/lstmproj.sm120", [120]),
+            },
         }
     }
 }

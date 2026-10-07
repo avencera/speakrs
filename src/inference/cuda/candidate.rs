@@ -34,12 +34,14 @@ use cudarc::driver::{
     CudaEvent, CudaSlice, CudaStream, CudaView, CudaViewMut, DeviceRepr, ValidAsZeroBits,
 };
 
+use super::device::DeviceAttributes;
 use super::dnn::Conv2d;
 pub(crate) use super::error::{GeometryError, WeightFault};
 use super::{CudaError, CudaMath, CudaRuntime, KernelModule, LoadedKernels, PtxTier, Sgemm};
 
 mod conv;
 mod lstm;
+mod lstmproj;
 mod sinc;
 
 #[cfg(test)]
@@ -68,10 +70,15 @@ mod kernel_inventory {
 #[cfg(test)]
 pub(super) use lstm::REQUIRED_KERNELS as LSTM_KERNELS;
 #[cfg(test)]
+pub(super) use lstmproj::REQUIRED_KERNELS as LSTMPROJ_KERNELS;
+#[cfg(test)]
 pub(super) use sinc::REQUIRED_KERNELS as SINC_KERNELS;
 
 pub(crate) use conv::Oxide as ConvOxide;
 pub(crate) use lstm::Oxide as LstmOxide;
+// the root's routing for builds without libraries consumes this export
+#[allow(unused_imports)]
+pub(crate) use lstmproj::Oxide as LstmProjOxide;
 pub(crate) use sinc::Oxide as SincOxide;
 
 /// A planning refusal that is distinct from a CUDA or model error
@@ -134,7 +141,8 @@ impl ConfigPin {
     pub(crate) const fn area(self) -> KernelModule {
         match self {
             Self::Conv(_) => KernelModule::Resnet,
-            Self::Lstm(_) => KernelModule::Lstm,
+            Self::Lstm(LstmPin::LegacyCooperative) => KernelModule::Lstm,
+            Self::Lstm(LstmPin::Projected(_)) => KernelModule::LstmProj,
             Self::Sinc(_) => KernelModule::Sincnet,
             Self::Fbank(_) => KernelModule::FbankDft,
         }
@@ -145,7 +153,8 @@ impl ConfigPin {
     pub(crate) const fn is_device_rule(self) -> bool {
         matches!(
             self,
-            Self::Conv(ConvPin::LegacyWaves(_)) | Self::Lstm(LstmPin::LegacyCooperative)
+            Self::Conv(ConvPin::LegacyWaves(_))
+                | Self::Lstm(LstmPin::LegacyCooperative | LstmPin::Projected(_))
         )
     }
 }
@@ -291,6 +300,21 @@ pub(crate) enum LstmPin {
     /// 128-thread blocks, and the cooperative tile schedule the device's resident
     /// capacity allows
     LegacyCooperative,
+    /// The library-free stack in the `lstmproj` area: the named input projection, then
+    /// `spk_lstm_recurrence` with eight units per 256-thread block on the cooperative
+    /// tile schedule the device's resident capacity allows
+    Projected(LstmProjection),
+}
+
+/// The input projection of the library-free LSTM stack
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LstmProjection {
+    /// FP32 with a 64 by 64 tile, for row counts too small to fill the larger tiles
+    Small,
+    /// FP32 with a 128 by 128 tile
+    Large,
+    /// TF32 matrix fragments with a 128 by 256 tile; needs the sm80 tier
+    Tensor,
 }
 
 /// The execution choice of the Sinc producer
@@ -635,6 +659,14 @@ pub(crate) trait LstmCandidate: Sized {
 
     /// The configuration qualification plans for this batch size
     fn implemented_pin(spec: &LstmSpec<'_>) -> Result<LstmPin, PlanError>;
+
+    /// The configuration to run on `device` with the loaded `tier` when no accepted
+    /// record names one, such as in a build without libraries; a deterministic rule
+    fn device_pin(
+        device: &DeviceAttributes,
+        tier: PtxTier,
+        spec: &LstmSpec<'_>,
+    ) -> Result<LstmPin, PlanError>;
 
     /// Prepares one batch size from `pin`; runs once per batch class, untimed
     fn plan(
