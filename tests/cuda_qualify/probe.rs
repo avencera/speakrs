@@ -33,6 +33,8 @@ pub(crate) mod cpu;
 
 #[path = "fbank_probe.rs"]
 mod fbank_probe;
+#[path = "new_probe.rs"]
+mod new_probe;
 
 #[path = "lock.rs"]
 pub(crate) mod lock;
@@ -94,7 +96,7 @@ fn reference(target: &str, case: &str) -> Result<SafetensorsFile, CudaError> {
             "/workspace/ref/wespeaker-fbank-b32/test_and_short_b32.safetensors",
         );
     }
-    let model = if target == "resnet" {
+    let model = if target == "resnet" || new_probe::embedding(target) {
         "wespeaker-multimask-tail"
     } else {
         "segmentation-3.0"
@@ -425,6 +427,9 @@ fn declared_coverage(
     }
     if implementation != "Oxide" {
         return json!({"entries": [{"layers": "all", "batches": "all", "maths": "all"}]});
+    }
+    if new_probe::is_new(target) {
+        return new_probe::declared_coverage(target, tier);
     }
     if target == "fbankdft" {
         return coverage_json(Coverage::NONE);
@@ -1367,6 +1372,9 @@ fn secret(
     math: CudaMath,
     rows: &mut Vec<Value>,
 ) -> Result<(), CudaError> {
+    if new_probe::is_new(target) {
+        return new_probe::secret(runtime, target, choice, math, rows);
+    }
     if target == "fbankdft" {
         return fbank_probe::secret(runtime, choice, math, rows);
     }
@@ -1533,6 +1541,20 @@ fn prepare_process_modules(
     choice_name: &str,
     cases: &[(CudaMath, &str, usize)],
 ) -> Result<(), CudaError> {
+    if new_probe::is_new(target) {
+        if new_probe::embedding(target) {
+            // secret inputs use the same fbank front end in every collection phase
+            runtime.load_kernels(KernelModule::Fbank)?;
+            runtime.load_kernels(KernelModule::Embedding)?;
+        }
+        if !new_probe::embedding(target) || target == "segdense-embedding" {
+            runtime.load_kernels(KernelModule::Segmentation)?;
+        }
+        if choice_name == "Oxide" {
+            new_probe::preload_candidates(runtime, target, cases)?;
+        }
+        return Ok(());
+    }
     if target == "fbankdft" {
         runtime.load_kernels(KernelModule::Fbank)?;
         return Ok(());
@@ -1649,7 +1671,10 @@ fn qualification_driver() -> Result<(), CudaError> {
     let lock_phase = std::env::var("SPEAKRS_QUALIFY_PHASE").expect("phase");
     let gpu_lock = lock::GpuLock::from_environment(&lock_phase);
     let target = std::env::var("SPEAKRS_QUALIFY_TARGET").expect("target");
-    assert!(["resnet", "sincnet", "lstm", "fbankdft"].contains(&target.as_str()));
+    assert!(
+        ["resnet", "sincnet", "lstm", "fbankdft"].contains(&target.as_str())
+            || new_probe::is_new(&target)
+    );
     let implementation = std::env::var("SPEAKRS_QUALIFY_IMPL").expect("implementation");
     let choice = implementation.as_str();
     let phase = std::env::var("SPEAKRS_QUALIFY_PHASE").expect("phase");
@@ -1782,7 +1807,9 @@ fn qualification_driver() -> Result<(), CudaError> {
                 .find(|(declared, _)| declared == batch && *math == CudaMath::Tf32)
                 .map(|(_, layers)| layers.clone()),
         };
-        if target == "fbankdft" {
+        if new_probe::is_new(&target) {
+            run.new_boundaries(&mut rows)?;
+        } else if target == "fbankdft" {
             run.fbank(&mut rows)?;
         } else if phase == "paired" {
             run.paired(&mut rows)?;
@@ -1820,7 +1847,7 @@ fn qualification_driver() -> Result<(), CudaError> {
         "graph_evidence": graph_evidence(),
         "loaded_modules": loaded_modules(),
         "loaded_libraries": environment::loaded_libraries().map_err(|error| CudaError::Unsupported { context: "loaded Library evidence", reason: error.to_string() })?,
-        "configurations": super::configuration::planned(),
+        "configurations": new_probe::configurations()?,
         "side_streams": registered_side_streams(),
         "coverage": coverage,
         "lstm_algorithm": "PersistStaticSmallH",
