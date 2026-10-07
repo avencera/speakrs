@@ -71,10 +71,12 @@ pub(crate) struct Clocks {
     stop: Arc<AtomicBool>,
     samples: Arc<Mutex<Vec<u32>>>,
     worker: Option<JoinHandle<()>>,
+    _interval: super::super::test_support::TimedInterval,
 }
 
 impl Clocks {
     pub(crate) fn start() -> Self {
+        let interval = super::super::test_support::TimedInterval::start();
         let stop = Arc::new(AtomicBool::new(false));
         let samples = Arc::new(Mutex::new(Vec::new()));
         let worker_stop = Arc::clone(&stop);
@@ -104,6 +106,7 @@ impl Clocks {
             stop,
             samples,
             worker: Some(worker),
+            _interval: interval,
         }
     }
 

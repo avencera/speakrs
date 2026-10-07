@@ -28,6 +28,32 @@ use super::candidate::Direction;
 use super::implementation::{Choice, Selection};
 use super::{CudaError, CudaRuntime, CudaSegmentation, ResNetEmbedding};
 
+thread_local! {
+    static TIMED_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A timed interval cannot include driver module loading, even through a nested call
+pub(crate) struct TimedInterval(std::marker::PhantomData<std::rc::Rc<()>>);
+
+impl TimedInterval {
+    pub(crate) fn start() -> Self {
+        TIMED_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl Drop for TimedInterval {
+    fn drop(&mut self) {
+        TIMED_DEPTH
+            .with(|depth| depth.set(depth.get().checked_sub(1).expect("live timing interval")));
+    }
+}
+
+/// Fail before module loading can affect an event interval or sampled clock window
+pub(crate) fn assert_module_load_allowed() {
+    TIMED_DEPTH.with(|depth| assert_eq!(depth.get(), 0, "module load inside timed interval"));
+}
+
 /// The live planted faults share the real implementation seam
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mutant {
@@ -736,6 +762,7 @@ fn load_recorded(
     area: &str,
     source: &str,
 ) -> Result<std::sync::Arc<CudaModule>, CudaError> {
+    assert_module_load_allowed();
     record_module(area, "sm75", source);
     Ok(runtime
         .context()
@@ -792,6 +819,7 @@ pub(crate) fn prepare(runtime: &CudaRuntime) -> Result<(), CudaError> {
             include_str!("../../../tests/cuda_qualify/device/controls.sm75.ptx"),
         )?;
         // deliberately not recorded: the profile rule must refuse this name
+        assert_module_load_allowed();
         let unlisted = runtime
             .context()
             .load_module(Ptx::from_src(UNLISTED_PTX.to_owned()))?;
@@ -1230,5 +1258,28 @@ mod tests {
         let actual = CALL_VIOLATIONS.with(|violations| violations.replace(saved_violations));
         STACK.with(|stack| stack.replace(saved_stack));
         assert_eq!(actual, ["cublas.m589.n512.k60 inside candidate lstm.stack"]);
+    }
+}
+
+#[cfg(test)]
+mod timing_tests {
+    use super::{TimedInterval, assert_module_load_allowed};
+
+    #[test]
+    fn timed_module_loading_is_refused_before_driver_work() {
+        assert_module_load_allowed();
+        let outer = TimedInterval::start();
+        let inner = TimedInterval::start();
+        let mut driver_called = false;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_module_load_allowed();
+            driver_called = true;
+        }));
+        assert!(result.is_err());
+        assert!(!driver_called);
+        drop(inner);
+        assert!(std::panic::catch_unwind(assert_module_load_allowed).is_err());
+        drop(outer);
+        assert_module_load_allowed();
     }
 }

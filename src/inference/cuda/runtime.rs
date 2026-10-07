@@ -269,6 +269,8 @@ impl CudaRuntime {
                 })
             };
         }
+        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        super::test_support::assert_module_load_allowed();
         let (inner, artifact) = super::kernels::load_artifact(
             requested,
             cubin,

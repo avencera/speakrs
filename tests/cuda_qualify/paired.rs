@@ -103,6 +103,7 @@ fn elapsed(
     runtime: &CudaRuntime,
     launch: impl FnOnce() -> Result<(), CudaError>,
 ) -> Result<f32, CudaError> {
+    let _interval = super::super::TimedInterval::start();
     let start = runtime
         .stream()
         .record_event(Some(CUevent_flags::CU_EVENT_DEFAULT))?;

@@ -223,6 +223,7 @@ fn bursts(
     prepare(0)?;
     let mut warmup_ms = Vec::new();
     for _ in 0..WARMUP {
+        let _interval = super::TimedInterval::start();
         let start = event()?;
         launch(index)?;
         index += 1;
@@ -236,6 +237,7 @@ fn bursts(
     let mut per_launch_ms = Vec::new();
     for sample in 0..SAMPLES {
         prepare(sample)?;
+        let _interval = super::TimedInterval::start();
         let start = event()?;
         for _ in 0..burst {
             launch(index)?;
@@ -1345,6 +1347,62 @@ fn parse_band(text: &str) -> Vec<(usize, Vec<String>)> {
         .collect()
 }
 
+/// Prepare every module the process can use before its timing window opens
+fn prepare_process_modules(
+    runtime: &CudaRuntime,
+    target: &str,
+    choice_name: &str,
+    cases: &[(CudaMath, &str, usize)],
+) -> Result<(), CudaError> {
+    let area = match target {
+        "resnet" => {
+            runtime.load_kernels(KernelModule::Embedding)?;
+            KernelModule::Resnet
+        }
+        "lstm" => {
+            runtime.load_kernels(KernelModule::Segmentation)?;
+            KernelModule::Lstm
+        }
+        "sincnet" => {
+            runtime.load_kernels(KernelModule::Segmentation)?;
+            KernelModule::Sincnet
+        }
+        _ => unreachable!("fixed qualification target"),
+    };
+    let mut boundaries = Vec::new();
+    if target == "resnet" {
+        for (stage, blocks) in [(1, 3), (2, 4)] {
+            for block in 0..blocks {
+                for conv in [1, 2] {
+                    boundaries.push(format!("resnet.layer{stage}.{block}.conv{conv}"));
+                }
+            }
+        }
+    } else {
+        boundaries.push(
+            if target == "lstm" {
+                "lstm.stack"
+            } else {
+                "sincnet.conv0.abs_pool"
+            }
+            .to_owned(),
+        );
+    }
+    for (math, _, batch) in cases {
+        for boundary in &boundaries {
+            crate::inference::cuda::implementation::plan_selection(
+                runtime,
+                area,
+                boundary,
+                *batch,
+                *math,
+                Some(super::choice(choice_name)),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// The mode, case and batch triples this process measures
 fn selected_cases(phase: &str) -> Vec<(CudaMath, &'static str, usize)> {
     let all = [CudaMath::Fp32, CudaMath::Tf32]
@@ -1495,8 +1553,6 @@ fn qualification_driver() -> Result<(), CudaError> {
         paired::prepare_tail(&runtime)?;
     }
     let device = crate::inference::cuda::candidate::test_support::device(&runtime)?;
-    let clocks = matches!(phase.as_str(), "timing" | "paired")
-        .then(crate::inference::cuda::candidate::test_support::Clocks::start);
     if target == "resnet" {
         // the secret front end needs fbank only in numeric, but fixed module bytes
         // must have the same inventory in timing and eager-profile processes
@@ -1510,6 +1566,11 @@ fn qualification_driver() -> Result<(), CudaError> {
     let mut rows = Vec::new();
     let cases = selected_cases(&phase);
     assert!(!cases.is_empty(), "the process measures at least one case");
+    // the same plan owner resolves declared coverage before loading candidate bytes
+    // preload in every phase so the stable inventory gate remains unchanged
+    prepare_process_modules(&runtime, &target, choice, &cases)?;
+    let clocks = matches!(phase.as_str(), "timing" | "paired")
+        .then(crate::inference::cuda::candidate::test_support::Clocks::start);
     for (math, case, batch) in &cases {
         let name = math_name(*math);
         println!("qualify target={target} phase={phase} mode={name} case={case} batch={batch}");
@@ -1674,7 +1735,6 @@ fn compiled_tier_fixture() -> Result<(), CudaError> {
     use crate::inference::cuda::probe::ProbeKernels;
     let runtime = CudaRuntime::new(0)?;
     let device = crate::inference::cuda::candidate::test_support::device(&runtime)?;
-    let clocks = crate::inference::cuda::candidate::test_support::Clocks::start();
     let probe = ProbeKernels::load(&runtime)?;
     assert_eq!(probe.tier(), runtime.ptx_tier());
     let input: Vec<f32> = (0..1007).map(|i| i as f32).collect();
@@ -1684,6 +1744,7 @@ fn compiled_tier_fixture() -> Result<(), CudaError> {
     let graph = capture(&runtime, || {
         probe.scale_add(&runtime, 2.0, x.data(), y.data(), output.data_mut())
     })?;
+    let clocks = crate::inference::cuda::candidate::test_support::Clocks::start();
     let timing = bursts(&runtime, |_| Ok(()), |_| Ok(graph.launch()?))?;
     let actual = output.download(runtime.stream())?;
     let expected: Vec<f32> = input.iter().map(|x| 3.0 * x).collect();
