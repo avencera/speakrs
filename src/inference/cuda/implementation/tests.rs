@@ -362,7 +362,18 @@ fn stage_tail_base_coverage_is_pinned_not_candidate_declared() {
             artifact: legacy_artifact(area.name()),
             ..target
         };
-        let coverage = super::production_coverage(area, target);
+        let location = super::AreaTarget {
+            tier: target.tier,
+            device: target.device,
+        };
+        let super::LoadedArtifact::PtxJit { sha256 } = target.artifact else {
+            panic!("legacy PTX fixture")
+        };
+        assert_eq!(
+            super::legacy_fixture_coverage(area, location, super::ArtifactHash::of(b"stale PTX")),
+            crate::inference::cuda::candidate::Coverage::NONE
+        );
+        let coverage = super::legacy_fixture_coverage(area, location, sha256);
         assert!(!coverage.entries().is_empty());
         for entry in coverage.entries() {
             for layer in entry.layers {
@@ -381,22 +392,24 @@ fn stage_tail_base_coverage_is_pinned_not_candidate_declared() {
             }
         }
         assert_eq!(
-            super::production_coverage(
+            super::legacy_fixture_coverage(
                 area,
-                Target {
+                super::AreaTarget {
                     device: ComputeCapability::new(8, 0),
-                    ..target
-                }
+                    ..location
+                },
+                sha256
             ),
             crate::inference::cuda::candidate::Coverage::NONE
         );
         assert_eq!(
-            super::production_coverage(
+            super::legacy_fixture_coverage(
                 area,
-                Target {
+                super::AreaTarget {
                     tier: PtxTier::Sm80,
-                    ..target
-                }
+                    ..location
+                },
+                sha256
             ),
             crate::inference::cuda::candidate::Coverage::NONE
         );

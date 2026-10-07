@@ -1439,8 +1439,17 @@ fn qualification_driver() -> Result<(), CudaError> {
         } else {
             KernelModule::Sincnet
         };
-        let target = crate::inference::cuda::implementation::Target::for_area(&runtime, area)?;
-        let pinned = crate::inference::cuda::implementation::production_coverage(area, target);
+        // coverage discovery must not load a module in an undeclared TF32 process
+        let (tier, ptx) = runtime.area_ptx(area)?;
+        let location = crate::inference::cuda::implementation::AreaTarget {
+            tier,
+            device: runtime.compute_capability(),
+        };
+        let pinned = crate::inference::cuda::implementation::legacy_fixture_coverage(
+            area,
+            location,
+            crate::inference::cuda::kernels::ArtifactHash::of(ptx.as_bytes()),
+        );
         let entries: Vec<_> = pinned
             .entries()
             .iter()

@@ -387,12 +387,27 @@ pub(crate) fn tier_qualified(area: KernelModule, target: Target) -> bool {
         .any(|entry| entry.area == area && entry.matches_target(target))
 }
 
-/// Pinned coverage for test controls that must use the accepted production path
+/// Declare legacy fixture coverage without loading an otherwise unused module
+///
+/// This only enumerates test tuples. Actual plans still need the successful
+/// loaded artifact to obtain a production token through `plan_selection`
 #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
-pub(crate) fn production_coverage(area: KernelModule, target: Target) -> Coverage {
+pub(crate) fn legacy_fixture_coverage(
+    area: KernelModule,
+    location: AreaTarget,
+    embedded_ptx_sha256: ArtifactHash,
+) -> Coverage {
     PRODUCTION
         .iter()
-        .find(|entry| entry.area == area && entry.matches_target(target))
+        .find(|entry| {
+            entry.area == area
+                && entry.tier == location.tier
+                && entry.devices.contains(&location.device)
+                && entry.artifact
+                    == LoadedArtifact::PtxJit {
+                        sha256: embedded_ptx_sha256,
+                    }
+        })
         .map_or(Coverage::NONE, |entry| entry.coverage)
 }
 
