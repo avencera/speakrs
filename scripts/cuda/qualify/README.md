@@ -1190,7 +1190,8 @@ Only exact PR #36 records use the explicit installed-file legacy receipt; its
 missing process-loaded evidence remains a historical gap.
 
 FirstUseFallback prepares separate one-element cuBLAS operands before the profile
-warm-up. The first host replay hook issues one SGEMM under the selected boundary's
+warm-up. Its separate handle cannot change the normal stage handle's math mode.
+The first host replay hook issues one SGEMM under the selected boundary's
 candidate scope, without rerunning the operator or stage. A locked API-call counter
 requires exactly one call in that hook. Eager execution and capture never use it.
 

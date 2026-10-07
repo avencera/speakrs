@@ -211,6 +211,8 @@ fn capture(
 
 /// Prepared scratch for one real API call, independent of the normal stage enqueue
 struct FirstUseCall {
+    // a private handle keeps the hook from changing the stage handle's math mode
+    blas: cudarc::cublas::CudaBlas,
     a: cudarc::driver::CudaSlice<f32>,
     b: cudarc::driver::CudaSlice<f32>,
     c: cudarc::driver::CudaSlice<f32>,
@@ -223,19 +225,32 @@ impl FirstUseCall {
         }
         runtime.prepare_library(crate::inference::cuda::CudaLibrary::Cublas)?;
         Ok(Some(Self {
+            blas: cudarc::cublas::CudaBlas::new(std::sync::Arc::clone(runtime.stream()))?,
             a: runtime.stream().clone_htod(&[2.0])?,
             b: runtime.stream().clone_htod(&[3.0])?,
             c: runtime.stream().alloc_zeros(1)?,
         }))
     }
 
-    fn enqueue(&mut self, runtime: &CudaRuntime) -> Result<(), CudaError> {
-        runtime.sgemm(
-            crate::inference::cuda::Sgemm::new(1, 1, 1),
-            &self.a,
-            &self.b,
-            &mut self.c,
-        )
+    fn enqueue(&mut self) -> Result<(), CudaError> {
+        use cudarc::cublas::{Gemm, GemmConfig, sys::cublasOperation_t};
+        let config = GemmConfig {
+            transa: cublasOperation_t::CUBLAS_OP_N,
+            transb: cublasOperation_t::CUBLAS_OP_N,
+            m: 1,
+            n: 1,
+            k: 1,
+            lda: 1,
+            ldb: 1,
+            ldc: 1,
+            alpha: 1.0,
+            beta: 0.0,
+        };
+        let _call = super::call("cublas.m1.n1.k1");
+        // SAFETY: the three one-element buffers match the fixed GEMM shape and the
+        // prepared handle uses the same stream; the driver synchronizes before drop
+        unsafe { self.blas.gemm(config, &self.a, &self.b, &mut self.c) }?;
+        Ok(())
     }
 }
 
@@ -277,7 +292,7 @@ fn profile_case(
             fallback
                 .as_mut()
                 .expect("prepared first-replay fault")
-                .enqueue(runtime)
+                .enqueue()
         }) {
             result?;
         }
