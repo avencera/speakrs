@@ -1,39 +1,3 @@
-/// Every kernel entry a plan can launch, for the PTX inventory check
-pub(crate) const REQUIRED_KERNELS: [&str; 32] = [
-    "spk_segdense_pack",
-    "spk_segdense_pack_conv_mma",
-    "spk_segdense_conv1_b1",
-    "spk_segdense_conv1_b32",
-    "spk_segdense_conv1_b32_tc",
-    "spk_segdense_conv1_b32_x3",
-    "spk_segdense_conv2_b1",
-    "spk_segdense_conv2_b32",
-    "spk_segdense_conv2_b32_tc",
-    "spk_segdense_conv2_b32_x3",
-    "spk_segdense_linear0_b1",
-    "spk_segdense_linear0_b1_tf32",
-    "spk_segdense_linear0_b32",
-    "spk_segdense_linear0_b32_tf32",
-    "spk_segdense_linear1_b1",
-    "spk_segdense_linear1_b1_tf32",
-    "spk_segdense_linear1_b32",
-    "spk_segdense_linear1_b32_tf32",
-    "spk_segdense_classifier_b1",
-    "spk_segdense_classifier_b32",
-    "spk_segdense_embed_b1",
-    "spk_segdense_embed_b32",
-    "spk_segdense_embed_b32_tf32",
-    "spk_segdense_embed_b32_tf32_k2",
-    "spk_segdense_embed_b32_tf32_e64",
-    "spk_segdense_embed_b32_x3",
-    "spk_segdense_embed_b32_f16",
-    "spk_segdense_reduce_embed",
-    "spk_segdense_reduce_embed_flat",
-    "spk_segdense_reduce_e18",
-    "spk_segdense_reduce_e34",
-    "spk_segdense_reduce_e36",
-];
-
 use super::super::PlanError;
 
 use super::super::segdense::{

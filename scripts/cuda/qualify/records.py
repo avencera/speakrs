@@ -287,6 +287,12 @@ INFRASTRUCTURE_AMENDMENTS = [
         "infrastructure_sha256": "11a62153eb587d17a5e2b762d7b10027d820b1c3ecf7086383eb3ec30a5d823f",
         "reason": "Additive CUDA gates, library-free port registration and merged-area manifest sources; legacy arithmetic, launch choices, PTX and cubin bytes are unchanged; this is not a new GPU qualification",
     },
+    {
+        "path": "src/inference/cuda/candidate.rs",
+        "acceptance_sha256": "11a62153eb587d17a5e2b762d7b10027d820b1c3ecf7086383eb3ec30a5d823f",
+        "infrastructure_sha256": "c2141c5501cd06242babb9efe3d645f38c49e7a088ff0b1b567455a1740ba9d8",
+        "reason": "Additive CUDA gates, library-free port registration and merged-area manifest sources; legacy arithmetic, launch choices, PTX and cubin bytes are unchanged; this is not a new GPU qualification",
+    },
 ]
 
 

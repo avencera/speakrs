@@ -1,3 +1,7 @@
+// both compilation targets must use the same physical ownership map
+#[path = "../../../../crates/speakrs-cuda-kernels/src/lstmproj/exchange.rs"]
+mod device_exchange;
+
 use super::super::lstmproj::layout::{
     AlignedSpan, ExchangeLayout, GATE_COLUMNS, GROUPS, HIDDEN, ProjectionLayout, STATE_TILE,
     Schedule, THREADS, TILE_ROWS, exchange, pack_directions, pack_input_directions, padded_input,
@@ -87,9 +91,13 @@ fn aligned_span_starts_on_a_two_mebibyte_boundary_inside_its_allocation() {
 
 #[test]
 fn exchange_words_stay_inside_their_tile_and_producer_regions() {
+    assert_eq!(exchange::TILE, device_exchange::TILE);
+    assert_eq!(exchange::SLOT, device_exchange::SLOT);
+    assert_eq!(exchange::COPIES, device_exchange::COPIES);
     let mut bulk = std::collections::BTreeSet::new();
     for logical in 0..32 * HIDDEN {
         let word = exchange::bulk_word(logical);
+        assert_eq!(word, device_exchange::bulk_word(logical));
         assert!(word < exchange::SLOT);
         assert!(bulk.insert(word), "two hidden values share word {word}");
         // eight consecutive units of one row share one producer's line
@@ -104,6 +112,10 @@ fn exchange_words_stay_inside_their_tile_and_producer_regions() {
         for unit in 0..HIDDEN {
             for copy in 0..exchange::COPIES {
                 let word = exchange::single_copy(exchange::single_base(unit), copy, flag);
+                assert_eq!(
+                    word,
+                    device_exchange::single_copy(device_exchange::single_base(unit), copy, flag)
+                );
                 assert!(word < exchange::SLOT);
                 // a producer group of eight units keeps its own 4 KiB region
                 assert_eq!(word / 512, unit / 8);
