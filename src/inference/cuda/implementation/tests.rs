@@ -1198,6 +1198,10 @@ fn default_production_loads_record_pinned_jit() -> Result<(), CudaError> {
             )?);
             assert_eq!(token.target.module, binding.module);
             assert_eq!(token.pin, super::PlanPin::Pinned(proof.pin));
+            assert!(
+                plan_from_pin(&runtime, proof, token)?,
+                "{proof:?} fell back to Library at plan time"
+            );
             selected += 1;
         }
         let loaded = runtime.load_kernels(binding.area())?;
@@ -1225,6 +1229,10 @@ fn default_production_loads_record_pinned_jit() -> Result<(), CudaError> {
         );
     }
     assert_eq!(selected, 52);
+    println!(
+        "planned_from_pins {}",
+        serde_json::json!({ "tuples": selected })
+    );
     for area in super::ALWAYS_ON {
         let expected = runtime.production_module(*area)?.expect("always-on module");
         let loaded = runtime.load_kernels(*area)?;
@@ -1261,4 +1269,87 @@ fn default_production_loads_record_pinned_jit() -> Result<(), CudaError> {
             .all(|module| module["artifact"]["kind"] == "PtxJit")
     );
     runtime.synchronize()
+}
+
+/// Build one accepted tuple's plan from its pin on the live device, with zero weights
+/// at the model's shapes; `false` means production fell back to Library
+fn plan_from_pin(
+    runtime: &crate::inference::cuda::CudaRuntime,
+    proof: &TupleProof,
+    token: super::Qualified,
+) -> Result<bool, CudaError> {
+    use crate::inference::cuda::candidate::{ConvLayerSpec, LstmLayerWeights, LstmSpec, SincSpec};
+    use crate::inference::cuda::dnn::Conv2d;
+    use crate::inference::cuda::{FBANK_FRAMES, FBANK_MEL_BINS};
+
+    let stream = runtime.stream();
+    let (batch, math) = (proof.batch, proof.math);
+    match proof.pin {
+        ConfigPin::Conv(pin) => {
+            let trunk = [FBANK_MEL_BINS, FBANK_FRAMES];
+            let ([in_channels, out_channels], stride, input) = match pin.shape() {
+                ConvShape::C32 => ([32, 32], 1, trunk),
+                ConvShape::C32Stride2 => ([32, 64], 2, trunk),
+                ConvShape::C64 => ([64, 64], 1, trunk.map(|size| size.div_ceil(2))),
+            };
+            let weight = stream.alloc_zeros::<f32>(out_channels * in_channels * 9)?;
+            let bias = stream.alloc_zeros::<f32>(out_channels)?;
+            let conv = Conv2d {
+                batch,
+                in_channels,
+                out_channels,
+                input,
+                kernel: [3, 3],
+                padding: [1, 1],
+                stride: [stride; 2],
+                dilation: [1, 1],
+                math,
+            };
+            let spec = ConvLayerSpec {
+                name: proof.boundary.name(),
+                conv,
+                residual: proof.boundary.name().ends_with("conv2"),
+                weight: &weight,
+                bias: &bias,
+            };
+            Ok(token.conv(runtime, spec)?.is_some())
+        }
+        ConfigPin::Lstm(_) => {
+            let first = (vec![0.0; 2 * 512 * 60], vec![0.0; 2 * 512 * 128]);
+            let upper = (vec![0.0; 2 * 512 * 256], vec![0.0; 2 * 512 * 128]);
+            let bias = vec![0.0; 2 * 1024];
+            let (w0, r0) = (first.0.as_slice(), first.1.as_slice());
+            let (w1, r1) = (upper.0.as_slice(), upper.1.as_slice());
+            let weights = |input, w, r| LstmLayerWeights {
+                input,
+                w,
+                r,
+                b: bias.as_slice(),
+            };
+            let spec = LstmSpec {
+                batch,
+                frames: 589,
+                math,
+                layers: [
+                    weights(60, w0, r0),
+                    weights(256, w1, r1),
+                    weights(256, w1, r1),
+                    weights(256, w1, r1),
+                ],
+            };
+            Ok(token.lstm(runtime, spec)?.is_some())
+        }
+        ConfigPin::Sinc(_) => {
+            let filters = stream.alloc_zeros::<f32>(80 * 251)?;
+            let spec = SincSpec {
+                batch,
+                samples: 160_000,
+                sinc: 15_975,
+                pooled: 5_325,
+                math,
+                filters: &filters,
+            };
+            Ok(token.sinc(runtime, spec)?.is_some())
+        }
+    }
 }

@@ -332,7 +332,7 @@ class Records(RecordsFixture):
         child["reason"] = "all required checks passed"
         raw = complete_fixture({**self.record, "schema": 3, "tiers": {"sm75": child}})
         record_hash = self.store(raw)
-        entry = {
+        entry: dict = {
             **self.entry,
             "record": record_hash,
             "speed_scope": {"kind": "LegacyCapability", "capability": "12.0"},
@@ -383,7 +383,7 @@ class Records(RecordsFixture):
         record_hash = self.store(
             complete_fixture({**self.record, "schema": 3, "tiers": {"sm75": child}})
         )
-        entry = {
+        entry: dict = {
             **self.entry,
             "record": record_hash,
             "speed_scope": {"kind": "LegacyCapability", "capability": "12.0"},
