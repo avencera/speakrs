@@ -101,22 +101,9 @@ impl CudaRuntime {
             ptx_tier,
             modules: Mutex::new(HashMap::new()),
         };
-        // a forced tier in driver-only mode must leave every candidate area a binding
+        // a forced tier must leave every candidate area a binding, without JIT loading
         if super::driver_only() && requested.is_some() {
-            for area in [
-                KernelModule::Resnet,
-                KernelModule::Lstm,
-                KernelModule::Sincnet,
-            ] {
-                let request =
-                    runtime
-                        .production_module(area)?
-                        .ok_or(CudaError::TierNotQualified {
-                            tier: PtxTier::BASELINE,
-                            device: capability,
-                        })?;
-                runtime.load_module(request)?;
-            }
+            Self::validate_forced_bindings(&runtime.device, ptx_tier)?;
         }
         debug!(
             device_name = runtime.device.name(),
@@ -126,6 +113,23 @@ impl CudaRuntime {
             "CUDA device properties"
         );
         Ok(runtime)
+    }
+
+    /// Validate driver-only override coverage without a context or module loader
+    fn validate_forced_bindings(device: &DeviceAttributes, tier: PtxTier) -> Result<(), CudaError> {
+        for area in [
+            KernelModule::Resnet,
+            KernelModule::Lstm,
+            KernelModule::Sincnet,
+        ] {
+            super::implementation::production_module(area, device, tier, area.variants())?.ok_or(
+                CudaError::TierNotQualified {
+                    tier: PtxTier::BASELINE,
+                    device: device.capability(),
+                },
+            )?;
+        }
+        Ok(())
     }
 
     /// The device's compute capability
@@ -232,19 +236,11 @@ impl CudaRuntime {
         Ok(ModuleRequest::new(module, tier, artifact))
     }
 
-    /// The cached module, or the area's production module
+    /// The area's production module, reusing only a cache entry with the same identity
     ///
     /// Plan selection skips uncovered areas before a candidate plan calls this. A
-    /// cached module retains its actual identity
+    /// qualification load cannot change what a later production request loads
     pub fn load_kernels(&self, module: KernelModule) -> Result<LoadedKernels, CudaError> {
-        if let Some(loaded) = self
-            .modules
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&module)
-        {
-            return Ok(loaded.clone());
-        }
         let request = self
             .production_module(module)?
             .ok_or(CudaError::TierNotQualified {
@@ -284,11 +280,8 @@ impl CudaRuntime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(loaded) = modules.get(&module) {
-            return if loaded.request() == request {
-                Ok(loaded.clone())
-            } else {
-                Err(unavailable(requested))
-            };
+            request.check_cached(loaded.request())?;
+            return Ok(loaded.clone());
         }
         #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
         super::test_support::assert_module_load_allowed();
@@ -500,6 +493,60 @@ mod direct_request_tests {
             for invented in ["runtime/", "b1", "Fp32", "PTX tier"] {
                 assert!(!message.contains(invented));
             }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+mod module_policy_tests {
+    use super::{
+        ArtifactHash, ComputeCapability, CudaError, CudaRuntime, KernelModule, ModuleRequest,
+        PtxTier,
+    };
+    use crate::inference::cuda::device::test_support::Builder;
+    use crate::inference::cuda::kernels::LoadedArtifact;
+
+    #[test]
+    fn forced_tier_checks_bindings_without_opening_or_loading_cuda() {
+        let qualified = Builder::new(ComputeCapability::new(12, 0)).build();
+        CudaRuntime::validate_forced_bindings(&qualified, PtxTier::Sm75).unwrap();
+        let uncovered = Builder::new(ComputeCapability::new(8, 0)).build();
+        assert!(matches!(
+            CudaRuntime::validate_forced_bindings(&uncovered, PtxTier::Sm75),
+            Err(CudaError::TierNotQualified { device, .. }) if device == uncovered.capability()
+        ));
+    }
+
+    #[test]
+    fn cached_module_must_match_every_part_of_the_production_request() {
+        let artifact = LoadedArtifact::PtxJit {
+            sha256: ArtifactHash::of(b"qualified"),
+        };
+        let cached = ModuleRequest::new(KernelModule::Lstm, PtxTier::Sm75, artifact);
+        cached.check_cached(cached).unwrap();
+        for request in [
+            ModuleRequest::new(KernelModule::Resnet, PtxTier::Sm75, artifact),
+            ModuleRequest::new(KernelModule::Lstm, PtxTier::Sm80, artifact),
+            ModuleRequest::new(
+                KernelModule::Lstm,
+                PtxTier::Sm75,
+                LoadedArtifact::PtxJit {
+                    sha256: ArtifactHash::of(b"different"),
+                },
+            ),
+            ModuleRequest::new(
+                KernelModule::Lstm,
+                PtxTier::Sm75,
+                LoadedArtifact::Cubin {
+                    arch: ComputeCapability::new(12, 0),
+                    sha256: ArtifactHash::of(b"qualified"),
+                },
+            ),
+        ] {
+            assert!(matches!(request.check_cached(cached),
+                Err(CudaError::ArtifactUnavailable { module, artifact })
+                    if module == request.area().name() && artifact == request.artifact()));
+            assert_eq!(cached.artifact(), artifact);
         }
     }
 }

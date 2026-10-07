@@ -169,6 +169,17 @@ impl ModuleRequest {
         self.artifact
     }
 
+    /// Reject a different cached execution identity without replacing its module
+    pub(crate) fn check_cached(self, cached: Self) -> Result<(), CudaError> {
+        if self != cached {
+            return Err(CudaError::ArtifactUnavailable {
+                module: self.area.name(),
+                artifact: self.artifact,
+            });
+        }
+        Ok(())
+    }
+
     /// The same area and tier, loaded through driver JIT of the tier's embedded PTX
     pub(crate) const fn ptx_jit(self, sha256: ArtifactHash) -> Self {
         Self::new(self.area, self.tier, LoadedArtifact::PtxJit { sha256 })
