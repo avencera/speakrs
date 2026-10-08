@@ -1,4 +1,4 @@
-use ndarray::{Array2, Array3, ArrayView2, s};
+use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView2, ArrayViewMut1, s};
 use tracing::{debug, trace};
 
 use crate::clustering::ahc::cluster as cluster_ahc;
@@ -7,7 +7,7 @@ use crate::clustering::plda::PldaTransform;
 use crate::clustering::sphere_vbx::cluster_sphere_vbx_pf;
 use crate::clustering::vbx::cluster_vbx;
 use crate::inference::embedding::should_use_clean_mask;
-use crate::utils::cosine_similarity;
+use crate::utils::l2_normalize;
 
 use super::config::ClusteringBackend;
 use super::config::{CleanFrameDuration, MIN_SPEAKER_ACTIVITY, PipelineConfig};
@@ -213,6 +213,7 @@ pub(super) fn assign_chunk_embeddings(
     let num_speakers = embeddings.0.shape()[1];
     let num_clusters = centroids.nrows();
     let mut labels = Array2::<i32>::from_elem((num_chunks, num_speakers), -2);
+    let similarities = AssignmentCentroids::new(centroids);
 
     for chunk_idx in 0..num_chunks {
         // compute similarity scores for all active speakers against all centroids
@@ -230,10 +231,7 @@ pub(super) fn assign_chunk_embeddings(
                 continue;
             }
 
-            for cluster_idx in 0..num_clusters {
-                scores[[speaker_idx, cluster_idx]] =
-                    1.0 + cosine_similarity(&embedding, &centroids.row(cluster_idx));
-            }
+            similarities.write_scores(&embedding, scores.row_mut(speaker_idx));
         }
 
         // mask inactive/invalid speakers to min - 1 instead of NEG_INFINITY,
@@ -267,6 +265,29 @@ pub(super) fn assign_chunk_embeddings(
     }
 
     labels
+}
+
+// retain the original normalization and dot-product order; sharing normalized values
+// removes repeated allocations without replacing cosine with a different reduction
+struct AssignmentCentroids(Vec<Array1<f32>>);
+
+impl AssignmentCentroids {
+    fn new(centroids: &Array2<f32>) -> Self {
+        Self(
+            centroids
+                .rows()
+                .into_iter()
+                .map(|row| l2_normalize(&row))
+                .collect(),
+        )
+    }
+
+    fn write_scores(&self, embedding: &ArrayView1<'_, f32>, mut scores: ArrayViewMut1<'_, f32>) {
+        let normalized = l2_normalize(embedding);
+        for (score, centroid) in scores.iter_mut().zip(&self.0) {
+            *score = 1.0 + normalized.dot(centroid);
+        }
+    }
 }
 
 pub(super) fn best_assignment(
@@ -451,6 +472,27 @@ pub(crate) fn write_speaker_mask_to_slice(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reused_normalization_preserves_score_bits() {
+        let centroids = ndarray::array![[3.0, 4.0, 0.0], [0.0, 0.0, 0.0], [-2.0, 7.0, 1.0]];
+        let similarities = super::AssignmentCentroids::new(&centroids);
+        // strided embeddings match the layout of chunk/speaker views
+        let embeddings = ndarray::array![[1.25, 0.0], [-3.5, 0.0], [9.0, 0.0]];
+        for embedding in [embeddings.column(0), embeddings.column(1)] {
+            let mut scores = ndarray::Array1::zeros(centroids.nrows());
+            similarities.write_scores(&embedding, scores.view_mut());
+            for (actual, centroid) in scores.iter().zip(centroids.rows()) {
+                let expected =
+                    1.0 + crate::utils::test_support::cosine_similarity(&embedding, &centroid);
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+        }
+        let mut same = ndarray::Array1::zeros(3);
+        similarities.write_scores(&centroids.row(0), same.view_mut());
+        assert_eq!(same[0], 2.0);
+        assert_eq!(same[1], 1.0);
+    }
+
     #[cfg(feature = "_metrics")]
     use super::super::config::ClusteringConfig;
     use super::*;
