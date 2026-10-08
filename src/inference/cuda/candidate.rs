@@ -46,12 +46,57 @@ mod lstm;
 mod lstmproj;
 mod segdense;
 mod sinc;
+mod wideconv;
 
 #[cfg(test)]
 pub(super) use kernel_inventory::conv_kernel_inventory;
 
 #[cfg(test)]
 mod kernel_inventory {
+    pub(crate) const WIDECONV_KERNELS: [&str; 41] = [
+        "spk_wideconv_c128",
+        "spk_wideconv_c128s2",
+        "spk_wideconv_c256",
+        "spk_wideconv_c64s2",
+        "spk_wideconv_gemm",
+        "spk_wideconv_pack_tc",
+        "spk_wideconv_pack_tc3",
+        "spk_wideconv_pack_wbf",
+        "spk_wideconv_pack_weights",
+        "spk_wideconv_pack_winograd",
+        "spk_wideconv_pack_wtc",
+        "spk_wideconv_reduce",
+        "spk_wideconv_shortcut_c128",
+        "spk_wideconv_shortcut_c128_wide",
+        "spk_wideconv_shortcut_c32",
+        "spk_wideconv_shortcut_c64",
+        "spk_wideconv_shortcut_c64_wide",
+        "spk_wideconv_stem",
+        "spk_wideconv_stem_wide",
+        "spk_wideconv_tc3_c128s2",
+        "spk_wideconv_tc3_c128s2_wide",
+        "spk_wideconv_tc3_c64s2",
+        "spk_wideconv_tc3_c64s2_wide",
+        "spk_wideconv_tc_c128",
+        "spk_wideconv_tc_c128s2",
+        "spk_wideconv_tc_c128s2_narrow",
+        "spk_wideconv_tc_c128s2_slim",
+        "spk_wideconv_tc_c256",
+        "spk_wideconv_tc_c64s2",
+        "spk_wideconv_tc_c64s2_narrow",
+        "spk_wideconv_tc_c64s2_slim",
+        "spk_wideconv_wbf_c128",
+        "spk_wideconv_wbf_c256",
+        "spk_wideconv_wino_c128",
+        "spk_wideconv_wino_c128_sweep2",
+        "spk_wideconv_wino_c256",
+        "spk_wideconv_wino_fixup",
+        "spk_wideconv_wtc2_c128",
+        "spk_wideconv_wtc2_c256",
+        "spk_wideconv_wtc3_c128",
+        "spk_wideconv_wtc3_c256",
+    ];
+
     /// Every kernel entry a plan can launch, for the PTX inventory check
     pub(crate) const SEGDENSE_KERNELS: [&str; 32] = [
         "spk_segdense_pack",
@@ -109,7 +154,7 @@ mod kernel_inventory {
 #[cfg(test)]
 pub(super) use fbank::REQUIRED_KERNELS as FBANK_DFT_KERNELS;
 #[cfg(test)]
-pub(super) use kernel_inventory::SEGDENSE_KERNELS;
+pub(super) use kernel_inventory::{SEGDENSE_KERNELS, WIDECONV_KERNELS};
 #[cfg(test)]
 pub(super) use lstm::REQUIRED_KERNELS as LSTM_KERNELS;
 #[cfg(test)]
@@ -126,6 +171,10 @@ pub(crate) use segdense::{DenseOxide, SegConvOxide};
 // the root's routing for builds without libraries consumes this export
 pub(crate) use lstmproj::Oxide as LstmProjOxide;
 pub(crate) use sinc::Oxide as SincOxide;
+// the GPU development checks force selections made for other devices
+#[cfg(all(test, feature = "_cuda-libraries"))]
+pub(crate) use wideconv::{Config as WideconvConfig, Device as WideconvDevice};
+pub(crate) use wideconv::{Oxide as WideconvOxide, Pin as WideconvPin};
 
 /// A planning refusal that is distinct from a CUDA or model error
 ///
@@ -174,6 +223,8 @@ pub(crate) const QUALIFIED_BATCHES: [usize; 2] = [1, 32];
 pub(crate) enum ConfigPin {
     /// A ResNet 3x3 convolution
     Conv(ConvPin),
+    /// A wide trunk convolution
+    Wideconv(WideconvPin),
     /// The four-layer LSTM stack
     Lstm(LstmPin),
     /// The Sinc producer
@@ -191,6 +242,7 @@ impl ConfigPin {
             Self::Conv(_) => KernelModule::Resnet,
             Self::Lstm(LstmPin::LegacyCooperative) => KernelModule::Lstm,
             Self::Lstm(LstmPin::Projected(_)) => KernelModule::LstmProj,
+            Self::Wideconv(_) => KernelModule::Wideconv,
             Self::Sinc(_) => KernelModule::Sincnet,
             Self::Fbank(_) => KernelModule::FbankDft,
             Self::Segdense(_) => KernelModule::Segdense,
@@ -202,7 +254,9 @@ impl ConfigPin {
     pub(crate) const fn is_device_rule(self) -> bool {
         matches!(
             self,
-            Self::Conv(ConvPin::LegacyWaves(_)) | Self::Lstm(LstmPin::LegacyCooperative)
+            Self::Conv(ConvPin::LegacyWaves(_))
+                | Self::Wideconv(WideconvPin::DeviceRule)
+                | Self::Lstm(LstmPin::LegacyCooperative)
         )
     }
 }

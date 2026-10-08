@@ -53,6 +53,20 @@ const C64: [&str; 7] = [
     "resnet.layer2.3.conv2",
 ];
 
+/// Every layer, batch and mode the three fused shapes implement
+const IMPLEMENTED: Coverage = Coverage(&[
+    CoverageEntry {
+        layers: &C32_AND_STRIDED,
+        batches: Batches::All,
+        maths: Maths::All,
+    },
+    CoverageEntry {
+        layers: &C64,
+        batches: Batches::All,
+        maths: Maths::All,
+    },
+]);
+
 /// Output columns per block; must equal `CONV_TILE_COLS` in the kernel crate
 const TILE_COLS: usize = 64;
 
@@ -210,6 +224,9 @@ impl ConvCandidate for Oxide {
             maths: Maths::Only(&[CudaMath::Fp32]),
         },
     ]);
+
+    // the C64 exclusions above are speed, not implementation: a driver-only build has
+    // no cuDNN to defer to, so there every kernel covers every batch and mode
 
     // the ReLU is `if value < 0.0 { 0.0 } else { value }` after FP32 FMA sums, so NaN
     // and negative zero pass through it
@@ -449,8 +466,22 @@ fn to_u32(value: usize) -> Result<u32, CudaError> {
 impl super::DriverCandidate for Oxide {
     const AREA: super::KernelModule = super::KernelModule::Resnet;
 
-    fn driver_coverage(tier: super::PtxTier) -> Coverage {
-        <Self as ConvCandidate>::coverage(tier)
+    fn driver_coverage(_tier: super::PtxTier) -> Coverage {
+        IMPLEMENTED
+    }
+
+    fn speed_scope(
+        boundary: super::super::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        device: &super::super::device::DeviceAttributes,
+        _tier: super::PtxTier,
+    ) -> Option<super::super::implementation::SpeedScope> {
+        super::wideconv::trunk_speed_scope(boundary, batch, math, device)
+    }
+
+    fn speed_summary(_math: CudaMath) -> &'static str {
+        super::wideconv::TRUNK_SPEED_SUMMARY
     }
 
     fn driver_pin(

@@ -135,7 +135,7 @@ fn token(selected: Selected) -> super::Qualified {
     let Selected::Oxide(token) = selected else {
         panic!("expected a candidate token, got {selected:?}")
     };
-    token
+    *token
 }
 
 #[test]
@@ -335,7 +335,7 @@ fn explicit_plan_keeps_the_loaded_module_instead_of_resolving_production_again()
         let loaded_for_plan = (&mut fixture).load(request).unwrap();
         assert_eq!(loaded_for_plan, request);
         assert_eq!(fixture.loads.last(), Some(&request));
-        let production = super::production_module(
+        let production = super::qualified_module(
             KernelModule::Lstm,
             &fixture.device,
             fixture.limit,
@@ -968,7 +968,7 @@ fn always_on_areas_request_embedded_baseline_ptx_jit_on_every_device() {
             );
         }
         assert_eq!(
-            super::production_module(
+            super::qualified_module(
                 KernelModule::Probe,
                 &device,
                 PtxTier::Sm120,
@@ -1464,6 +1464,10 @@ fn plan_from_pin(
         ConfigPin::Segdense(_) => Err(CudaError::Unsupported {
             context: "segdense production proof",
             reason: "no production entry exists before the routing port".to_owned(),
+        }),
+        ConfigPin::Wideconv(_) => Err(CudaError::Unsupported {
+            context: "wideconv production proof",
+            reason: "no production entry exists for the driver-only port".to_owned(),
         }),
         ConfigPin::Conv(pin) => {
             let trunk = [FBANK_MEL_BINS, FBANK_FRAMES];
