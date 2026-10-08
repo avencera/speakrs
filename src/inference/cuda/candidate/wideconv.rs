@@ -145,8 +145,11 @@ pub(crate) enum WinogradProducts {
     /// rounded; sm80 tier, TF32 mode only
     Tf32x2,
     /// One TF32 tensor-core product per term, both operands rounded; sm80 tier, TF32
-    /// mode only, 128 channels only
+    /// mode only
     Tf32x1,
+    /// As `Tf32x1` with three raw stages and the warps in two phases, so the input
+    /// transform overlaps the products and a chunk takes one barrier
+    Tf32x1Staged,
     /// Three BF16 tensor-core products per term, both operands split into high and low
     /// BF16 parts; sm80 tier, TF32 mode only. Not selected yet: it awaits an A100
     /// timing; forced runs test it
@@ -158,11 +161,13 @@ impl WinogradProducts {
         !matches!(self, Self::Fp32 | Self::Fp32Sweep2)
     }
 
-    /// Dynamic shared bytes of a launch, as `WINO_SHARED_BYTES` and `WTC_SHARED_BYTES`
+    /// Dynamic shared bytes of a launch, as `WINO_SHARED_BYTES`, `WTC_SHARED_BYTES` and
+    /// `WTP_SHARED_BYTES`
     fn shared_bytes(self) -> u32 {
         match self {
             Self::Fp32 | Self::Fp32Sweep2 => 62_464,
             Self::Tf32x3 | Self::Tf32x2 | Self::Tf32x1 => 66_560,
+            Self::Tf32x1Staged => 71_168,
             Self::Bf16x3 => 88_064,
         }
     }
@@ -173,7 +178,7 @@ impl WinogradProducts {
         match self {
             Self::Fp32 => 4,
             Self::Fp32Sweep2 => 8,
-            Self::Tf32x3 | Self::Tf32x2 | Self::Tf32x1 => 8,
+            Self::Tf32x3 | Self::Tf32x2 | Self::Tf32x1 | Self::Tf32x1Staged => 8,
             Self::Bf16x3 => 16,
         }
     }
@@ -665,7 +670,7 @@ impl Shape {
 
     /// Fused Winograd entry for the same-channel stride-1 shapes
     fn winograd_entry(self, products: WinogradProducts) -> Option<&'static str> {
-        use WinogradProducts::{Bf16x3, Fp32, Fp32Sweep2, Tf32x1, Tf32x2, Tf32x3};
+        use WinogradProducts::{Bf16x3, Fp32, Fp32Sweep2, Tf32x1, Tf32x1Staged, Tf32x2, Tf32x3};
 
         match (self, products) {
             (Self::C128, Bf16x3) => Some("spk_wideconv_wbf_c128"),
@@ -678,6 +683,9 @@ impl Shape {
             (Self::C128, Tf32x2) => Some("spk_wideconv_wtc2_c128"),
             (Self::C256, Tf32x2) => Some("spk_wideconv_wtc2_c256"),
             (Self::C128, Tf32x1) => Some("spk_wideconv_wtc1_c128"),
+            (Self::C256, Tf32x1) => Some("spk_wideconv_wtc1_c256"),
+            (Self::C128, Tf32x1Staged) => Some("spk_wideconv_wtp1_c128"),
+            (Self::C256, Tf32x1Staged) => Some("spk_wideconv_wtp1_c256"),
             _ => None,
         }
     }
@@ -815,7 +823,10 @@ impl Layout {
             }
             if matches!(
                 products,
-                WinogradProducts::Tf32x2 | WinogradProducts::Tf32x1 | WinogradProducts::Bf16x3
+                WinogradProducts::Tf32x2
+                    | WinogradProducts::Tf32x1
+                    | WinogradProducts::Tf32x1Staged
+                    | WinogradProducts::Bf16x3
             ) && conv.math != CudaMath::Tf32
             {
                 return Err(unsupported(

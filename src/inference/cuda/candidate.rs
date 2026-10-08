@@ -50,7 +50,7 @@ pub(super) use kernel_inventory::conv_kernel_inventory;
 
 #[cfg(test)]
 mod kernel_inventory {
-    pub(crate) const WIDECONV_KERNELS: [&str; 41] = [
+    pub(crate) const WIDECONV_KERNELS: [&str; 45] = [
         "spk_wideconv_c128",
         "spk_wideconv_c128s2",
         "spk_wideconv_c256",
@@ -88,10 +88,14 @@ mod kernel_inventory {
         "spk_wideconv_wino_c128_sweep2",
         "spk_wideconv_wino_c256",
         "spk_wideconv_wino_fixup",
+        "spk_wideconv_wtc1_c128",
+        "spk_wideconv_wtc1_c256",
         "spk_wideconv_wtc2_c128",
         "spk_wideconv_wtc2_c256",
         "spk_wideconv_wtc3_c128",
         "spk_wideconv_wtc3_c256",
+        "spk_wideconv_wtp1_c128",
+        "spk_wideconv_wtp1_c256",
     ];
 
     /// Every kernel entry a plan can launch, for the PTX inventory check
@@ -172,7 +176,11 @@ pub(crate) use sinc::Oxide as SincOxide;
 #[cfg(all(test, feature = "_cuda-libraries"))]
 pub(crate) use lstmproj::RecurrencePlan;
 #[cfg(all(test, feature = "_cuda-libraries"))]
-pub(crate) use wideconv::{Config as WideconvConfig, Device as WideconvDevice};
+pub(crate) use wideconv::{
+    Algorithm as WideconvAlgorithm, Config as WideconvConfig, Device as WideconvDevice,
+    Partition as WideconvPartition, SplitCells as WideconvSplitCells,
+    TensorKernel as WideconvTensorKernel, WinogradProducts as WideconvProducts,
+};
 pub(crate) use wideconv::{Oxide as WideconvOxide, Pin as WideconvPin};
 
 /// A planning refusal that is distinct from a CUDA or model error

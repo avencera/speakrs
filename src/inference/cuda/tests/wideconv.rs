@@ -10,6 +10,9 @@
 //! library and kernel medians at batches 1 and 32, and `TRUNK_DEVICE=a100` to plan the
 //! wideconv layers with the A100 selection on any sm80-capable GPU, `TRUNK_RESNET=legacy`
 //! or `tensor` to force the ResNet FP32 or TF32 tensor-core kernels.
+//! `TRUNK_CONFIG=<kernel>[:<partition>[:<first split cell>]]` forces one wideconv
+//! configuration on every selected layer, with kernels `tc`, `fp32`, `sweep2`, `wtc1`,
+//! `wtp1`, `wtc2`, `wtc3` or `bf16x3` and partitions `whole`, `two`, `four` or `eight`
 //! `TRUNK_RESNET=sm80` uses the sm80 tier in both modes, with tensor kernels only
 //! in TF32 mode, for a direct comparison with the legacy artifact. `TRUNK_WEIGHTS`
 //! names the model weights when they are not beside the references
@@ -25,7 +28,9 @@ use serde_json::json;
 
 use super::super::candidate::{
     ConfigPin, ConvCandidate, ConvInputs, ConvKernel, ConvLayerSpec, ConvOxide, ConvPin,
-    DriverCandidate, Epilogue, Phases, PlanError, WideconvConfig, WideconvDevice, WideconvOxide,
+    DriverCandidate, Epilogue, Phases, PlanError, WideconvAlgorithm, WideconvConfig,
+    WideconvDevice, WideconvOxide, WideconvPartition, WideconvProducts, WideconvSplitCells,
+    WideconvTensorKernel,
 };
 use super::super::dnn::ConvPlanner;
 use super::super::geometry::{Conv2d, Residual};
@@ -354,6 +359,37 @@ fn bits(values: &[f32]) -> Vec<u32> {
     values.iter().map(|v| v.to_bits()).collect()
 }
 
+/// The wideconv configuration `TRUNK_CONFIG` names
+fn forced_config(text: &str) -> WideconvConfig {
+    let mut parts = text.split(':');
+    let algorithm = match parts.next().expect("TRUNK_CONFIG kernel") {
+        "tc" => WideconvAlgorithm::TensorCore(WideconvTensorKernel::Tf32),
+        "fp32" => WideconvAlgorithm::Winograd(WideconvProducts::Fp32),
+        "sweep2" => WideconvAlgorithm::Winograd(WideconvProducts::Fp32Sweep2),
+        "wtc1" => WideconvAlgorithm::Winograd(WideconvProducts::Tf32x1),
+        "wtp1" => WideconvAlgorithm::Winograd(WideconvProducts::Tf32x1Staged),
+        "wtc2" => WideconvAlgorithm::Winograd(WideconvProducts::Tf32x2),
+        "wtc3" => WideconvAlgorithm::Winograd(WideconvProducts::Tf32x3),
+        "bf16x3" => WideconvAlgorithm::Winograd(WideconvProducts::Bf16x3),
+        other => panic!("unknown TRUNK_CONFIG kernel {other}"),
+    };
+    let partition = match parts.next().unwrap_or("whole") {
+        "whole" => WideconvPartition::Whole,
+        "two" => WideconvPartition::Two,
+        "four" => WideconvPartition::Four,
+        "eight" => WideconvPartition::Eight,
+        other => panic!("unknown TRUNK_CONFIG partition {other}"),
+    };
+    let split_cells = parts.next().map_or(WideconvSplitCells::All, |cell| {
+        WideconvSplitCells::From(cell.parse().expect("TRUNK_CONFIG first split cell"))
+    });
+    WideconvConfig {
+        algorithm,
+        partition,
+        split_cells,
+    }
+}
+
 /// The candidate that owns a trunk layer
 enum Candidate {
     Resnet(ConvOxide, ConvPin),
@@ -368,7 +404,14 @@ impl Candidate {
         };
         if WideconvOxide::COVERAGE.covers(spec.name, spec.conv.batch, spec.conv.math) {
             let kernels = tier(KernelModule::Wideconv)?;
+            let forced = std::env::var("TRUNK_CONFIG")
+                .ok()
+                .map(|text| forced_config(&text));
             let plan = match std::env::var("TRUNK_DEVICE").ok().as_deref() {
+                _ if forced.is_some() => {
+                    let config = forced.expect("checked above");
+                    WideconvOxide::with_config(runtime, &kernels, spec, config)?
+                }
                 Some("a100") => {
                     let device = WideconvDevice {
                         capability: ComputeCapability::new(8, 0),
