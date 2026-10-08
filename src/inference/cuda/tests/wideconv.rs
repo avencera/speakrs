@@ -8,11 +8,13 @@
 //! `TRUNK_FORWARD` JSON line. Environment filters: `TRUNK_BATCHES` (default
 //! `1,7,32,33`), `TRUNK_MATHS`, `TRUNK_LAYERS`, `TRUNK_TIMING=1` for graph-timed
 //! library and kernel medians at batches 1 and 32, and `TRUNK_DEVICE=a100` to plan the
-//! wideconv layers with the A100 selection on any sm80-capable GPU, `TRUNK_RESNET=legacy`
+//! wideconv layers with the A100 selection on any sm80-capable GPU, `TRUNK_DEVICE=t4`
+//! with the Turing coverage and selection on any GPU, `TRUNK_RESNET=legacy`
 //! or `tensor` to force the ResNet FP32 or TF32 tensor-core kernels.
 //! `TRUNK_CONFIG=<kernel>[:<partition>[:<first split cell>]]` forces one wideconv
 //! configuration on every selected layer, with kernels `tc`, `fp32`, `sweep2`, `wtc1`,
-//! `wtp1`, `wtc2`, `wtc3` or `bf16x3` and partitions `whole`, `two`, `four` or `eight`.
+//! `wtp1`, `wtc2`, `wtc3`, `bf16x3`, `h16` or `h16n` (narrow FP16 tiles) and partitions
+//! `whole`, `two`, `four` or `eight`.
 //! `TRUNK_B1_ONLY=1` builds every batch from the batch-1 reference and skips the
 //! batch-32 embedding case.
 //! `TRUNK_RESNET=sm80` uses the sm80 tier in both modes, with tensor kernels only
@@ -31,8 +33,8 @@ use serde_json::json;
 use super::super::candidate::{
     ConfigPin, ConvCandidate, ConvInputs, ConvKernel, ConvLayerSpec, ConvOxide, ConvPin,
     DriverCandidate, Epilogue, Fp16Policy, Phases, PlanError, WideconvAlgorithm, WideconvConfig,
-    WideconvDevice, WideconvOxide, WideconvPartition, WideconvProducts, WideconvSplitCells,
-    WideconvTensorKernel,
+    WideconvDevice, WideconvFp16Tiles, WideconvOxide, WideconvPartition, WideconvProducts,
+    WideconvSplitCells, WideconvTensorKernel,
 };
 use super::super::dnn::ConvPlanner;
 use super::super::geometry::{Conv2d, Residual};
@@ -379,6 +381,8 @@ fn forced_config(text: &str) -> WideconvConfig {
         "wtc2" => WideconvAlgorithm::Winograd(WideconvProducts::Tf32x2),
         "wtc3" => WideconvAlgorithm::Winograd(WideconvProducts::Tf32x3),
         "bf16x3" => WideconvAlgorithm::Winograd(WideconvProducts::Bf16x3),
+        "h16" => WideconvAlgorithm::Fp16(WideconvFp16Tiles::Wide),
+        "h16n" => WideconvAlgorithm::Fp16(WideconvFp16Tiles::Narrow),
         other => panic!("unknown TRUNK_CONFIG kernel {other}"),
     };
     let partition = match parts.next().unwrap_or("whole") {
@@ -411,9 +415,15 @@ impl Candidate {
             runtime.load_module(runtime.embedded_exact_request(area)?)
         };
         let kernels = tier(KernelModule::Wideconv)?;
-        // device-aware coverage, so Turing plans its 64-channel layers here as routing does
-        let coverage =
-            WideconvOxide::driver_coverage(kernels.tier(), runtime.device(), Fp16Policy::Allowed);
+        // device-aware coverage, so Turing plans its 32- and 64-channel layers here as
+        // routing does
+        let turing = std::env::var("TRUNK_DEVICE").is_ok_and(|device| device == "t4");
+        let capability = if turing {
+            ComputeCapability::new(7, 5)
+        } else {
+            runtime.device().capability()
+        };
+        let coverage = WideconvOxide::coverage_on(kernels.tier(), capability, Fp16Policy::Allowed);
         if coverage.covers(spec.name, spec.conv.batch, spec.conv.math) {
             let forced = std::env::var("TRUNK_CONFIG")
                 .ok()
@@ -421,6 +431,15 @@ impl Candidate {
             let plan = match std::env::var("TRUNK_DEVICE").ok().as_deref() {
                 _ if forced.is_some() => {
                     let config = forced.expect("checked above");
+                    WideconvOxide::with_config(runtime, &kernels, spec, config)?
+                }
+                Some("t4") => {
+                    let device = WideconvDevice {
+                        capability,
+                        sms: 40,
+                        tier: kernels.tier(),
+                    };
+                    let config = WideconvConfig::select(device, spec.conv, Fp16Policy::Allowed)?;
                     WideconvOxide::with_config(runtime, &kernels, spec, config)?
                 }
                 Some("a100") => {
