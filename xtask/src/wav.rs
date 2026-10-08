@@ -126,7 +126,33 @@ fn read_wav_samples(
 #[cfg(test)]
 mod tests {
     use super::load_wav_samples;
+    use std::cell::Cell;
     use std::io::Write;
+    use std::io::{Cursor, Read, Seek, SeekFrom};
+
+    struct CancelAfterBlock<'a> {
+        bytes: Cursor<Vec<u8>>,
+        cancelled: &'a Cell<bool>,
+        body_blocks: usize,
+    }
+
+    impl Read for CancelAfterBlock<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.bytes.read(buffer)?;
+            if buffer.len() == 8192 {
+                self.body_blocks += 1;
+                self.cancelled.set(true);
+            }
+
+            Ok(count)
+        }
+    }
+
+    impl Seek for CancelAfterBlock<'_> {
+        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+            self.bytes.seek(position)
+        }
+    }
 
     #[test]
     fn short_fmt_chunk_returns_typed_error() {
@@ -179,5 +205,80 @@ mod tests {
         let (loaded, sample_rate) = load_wav_samples(path.to_str().unwrap()).unwrap();
         assert_eq!(sample_rate, 16_000);
         assert_eq!(loaded.len(), 3);
+    }
+
+    #[test]
+    fn cancellation_stops_between_body_blocks() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("two-blocks.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        for _ in 0..8192 {
+            writer.write_sample(1234_i16).unwrap();
+        }
+
+        writer.finalize().unwrap();
+        let cancelled = Cell::new(false);
+        let mut reader = CancelAfterBlock {
+            bytes: Cursor::new(std::fs::read(path).unwrap()),
+            cancelled: &cancelled,
+            body_blocks: 0,
+        };
+        let error = super::read_wav_samples(&mut reader, || cancelled.get()).unwrap_err();
+        assert_eq!(error.to_string(), "audio decode cancelled");
+        assert_eq!(reader.body_blocks, 1);
+        assert!(reader.bytes.position() < reader.bytes.get_ref().len() as u64);
+    }
+
+    fn fmt_header(chunk_size: usize) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend(b"RIFF");
+        bytes.extend((chunk_size as u32 + 12).to_le_bytes());
+        bytes.extend(b"WAVEfmt ");
+        bytes.extend((chunk_size as u32).to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn oversized_fmt_is_rejected_before_its_body_is_read() {
+        let mut reader = Cursor::new(fmt_header(super::MAX_FMT_BYTES + 1));
+        let error = super::read_wav_samples(&mut reader, || false).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "wav fmt chunk is 65537 bytes; maximum supported size is 65536"
+        );
+        assert_eq!(reader.position(), 20);
+    }
+
+    #[test]
+    fn cancellation_stops_between_fmt_body_blocks() {
+        let cancelled = Cell::new(false);
+        let mut bytes = fmt_header(32 * 1024);
+        bytes.resize(20 + 32 * 1024, 0);
+        let mut reader = CancelAfterBlock {
+            bytes: Cursor::new(bytes),
+            cancelled: &cancelled,
+            body_blocks: 0,
+        };
+        let error = super::read_wav_samples(&mut reader, || cancelled.get()).unwrap_err();
+        assert_eq!(error.to_string(), "audio decode cancelled");
+        assert_eq!(reader.body_blocks, 1);
+        assert_eq!(reader.bytes.position(), 20 + 8192);
+    }
+
+    #[test]
+    fn bounded_fmt_read_still_rejects_a_truncated_body() {
+        let mut bytes = fmt_header(16 * 1024);
+        bytes.resize(20 + 8192, 0);
+        let error = super::read_wav_samples(Cursor::new(bytes), || false).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
     }
 }
