@@ -47628,6 +47628,39 @@ $L__BB33_190:                           // %bb28
 	// end inline asm
                                         // -- End function
 }
+	// .globl	spk_wideconv_wtp1_c256  // -- Begin function spk_wideconv_wtp1_c256
+.visible .entry spk_wideconv_wtp1_c256(
+	.param .u64 .ptr .align 4 spk_wideconv_wtp1_c256_param_0,
+	.param .u64 spk_wideconv_wtp1_c256_param_1,
+	.param .u64 .ptr .align 4 spk_wideconv_wtp1_c256_param_2,
+	.param .u64 spk_wideconv_wtp1_c256_param_3,
+	.param .u64 .ptr .align 4 spk_wideconv_wtp1_c256_param_4,
+	.param .u64 spk_wideconv_wtp1_c256_param_5,
+	.param .u64 .ptr .align 4 spk_wideconv_wtp1_c256_param_6,
+	.param .u64 spk_wideconv_wtp1_c256_param_7,
+	.param .u32 spk_wideconv_wtp1_c256_param_8,
+	.param .u32 spk_wideconv_wtp1_c256_param_9,
+	.param .u32 spk_wideconv_wtp1_c256_param_10,
+	.param .u32 spk_wideconv_wtp1_c256_param_11,
+	.param .u64 .ptr .align 1 spk_wideconv_wtp1_c256_param_12,
+	.param .u64 spk_wideconv_wtp1_c256_param_13,
+	.param .u64 .ptr .align 1 spk_wideconv_wtp1_c256_param_14,
+	.param .u64 spk_wideconv_wtp1_c256_param_15
+)
+.maxntid 256, 1, 1
+.minnctapersm 1                         // @spk_wideconv_wtp1_c256
+{
+
+
+// %bb.0:                               // %entry
+	// begin inline asm
+	trap;
+	// end inline asm
+	// begin inline asm
+	exit;
+	// end inline asm
+                                        // -- End function
+}
 	// .globl	spk_wideconv_pack_wtc   // -- Begin function spk_wideconv_pack_wtc
 .visible .entry spk_wideconv_pack_wtc(
 	.param .u64 .ptr .align 4 spk_wideconv_pack_wtc_param_0,
@@ -47649,15 +47682,15 @@ $L__BB33_190:                           // %bb28
 	ld.param.b64 	%rd45, [spk_wideconv_pack_wtc_param_4];
 	cvta.to.global.u64 	%rd2, %rd45;
 	setp.lt.u32 	%p8, %r12, 8;
-	@%p8 bra 	$L__BB36_93;
-	bra.uni 	$L__BB36_1;
-$L__BB36_1:                             // %bb3
+	@%p8 bra 	$L__BB37_93;
+	bra.uni 	$L__BB37_1;
+$L__BB37_1:                             // %bb3
 	shr.u32 	%r4, %r12, 3;
 	shl.b32 	%r5, %r4, 14;
 	setp.eq.b32 	%p9, %r5, 0;
-	@%p9 bra 	$L__BB36_94;
-	bra.uni 	$L__BB36_2;
-$L__BB36_2:                             // %bb5
+	@%p9 bra 	$L__BB37_94;
+	bra.uni 	$L__BB37_2;
+$L__BB37_2:                             // %bb5
 	ld.param.b32 	%r13, [spk_wideconv_pack_wtc_param_3];
 	ld.param.b64 	%rd42, [spk_wideconv_pack_wtc_param_1];
 	mov.u32 	%r14, %ctaid.x;
@@ -47703,27 +47736,27 @@ $L__BB36_2:                             // %bb5
 	add.s64 	%rd49, %rd4, 9;
 	setp.gt.u64 	%p11, %rd49, %rd42;
 	or.pred 	%p12, %p10, %p11;
-	@%p12 bra 	$L__BB36_9;
-	bra.uni 	$L__BB36_3;
-$L__BB36_3:                             // %bb9
+	@%p12 bra 	$L__BB37_9;
+	bra.uni 	$L__BB37_3;
+$L__BB37_3:                             // %bb9
 	bfe.u32 	%r6, %r1, 12, 2;
 	shl.b64 	%rd51, %rd4, 2;
 	add.s64 	%rd5, %rd1, %rd51;
 	ld.global.b32 	%r40, [%rd5];
 	add.s32 	%r41, %r6, -1;
 	setp.lt.u32 	%p13, %r41, 2;
-	@%p13 bra 	$L__BB36_14;
-	bra.uni 	$L__BB36_4;
-$L__BB36_4:                             // %bb9
+	@%p13 bra 	$L__BB37_14;
+	bra.uni 	$L__BB37_4;
+$L__BB37_4:                             // %bb9
 	setp.eq.b32 	%p14, %r6, 0;
-	@%p14 bra 	$L__BB36_15;
-	bra.uni 	$L__BB36_5;
-$L__BB36_5:                             // %bb9
+	@%p14 bra 	$L__BB37_15;
+	bra.uni 	$L__BB37_5;
+$L__BB37_5:                             // %bb9
 	mov.b64 	%rd119, 0d0000000000000000;
 	setp.eq.b32 	%p15, %r6, 3;
-	@%p15 bra 	$L__BB36_11;
-	bra.uni 	$L__BB36_10;
-$L__BB36_6:                             // %bb21
+	@%p15 bra 	$L__BB37_11;
+	bra.uni 	$L__BB37_10;
+$L__BB37_6:                             // %bb21
 	cvt.f64.f32 	%rd6, %r40;
 	mul.f64 	%rd58, %rd119, %rd120;
 	fma.rn.f64 	%rd9, %rd58, %rd6, 0d0000000000000000;
@@ -47761,316 +47794,316 @@ $L__BB36_6:                             // %bb21
 	add.s64 	%rd41, %rd2, %rd115;
 	and.b32 	%r70, %r1, 128;
 	setp.eq.b32 	%p60, %r70, 0;
-	@%p60 bra 	$L__BB36_8;
-	bra.uni 	$L__BB36_7;
-$L__BB36_7:                             // %bb23
+	@%p60 bra 	$L__BB37_8;
+	bra.uni 	$L__BB37_7;
+$L__BB37_7:                             // %bb23
 	sub.f32 	%r71, %r10, %r75;
 	and.b32 	%r72, %r71, 2139095040;
 	setp.eq.b32 	%p61, %r72, 2139095040;
 	add.s32 	%r73, %r71, 4096;
 	and.b32 	%r74, %r73, -8192;
 	selp.f32 	%r75, %r71, %r74, %p61;
-$L__BB36_8:                             // %bb24
+$L__BB37_8:                             // %bb24
 	st.global.b32 	[%rd41], %r75;
-$L__BB36_9:                             // %bb27
+$L__BB37_9:                             // %bb27
 	ret;
-$L__BB36_10:                            // %default.unreachable74
+$L__BB37_10:                            // %default.unreachable74
 	// begin inline asm
 	exit;
 	// end inline asm
-$L__BB36_11:                            // %bb28
+$L__BB37_11:                            // %bb28
 	shr.u32 	%r3, %r1, 10;
 	and.b32 	%r7, %r3, 3;
 	add.s32 	%r42, %r7, -1;
 	setp.lt.u32 	%p16, %r42, 2;
-	@%p16 bra 	$L__BB36_91;
-	bra.uni 	$L__BB36_12;
-$L__BB36_12:                            // %bb28
+	@%p16 bra 	$L__BB37_91;
+	bra.uni 	$L__BB37_12;
+$L__BB37_12:                            // %bb28
 	setp.eq.b32 	%p17, %r7, 0;
-	@%p17 bra 	$L__BB36_92;
-	bra.uni 	$L__BB36_13;
-$L__BB36_13:                            // %bb28
+	@%p17 bra 	$L__BB37_92;
+	bra.uni 	$L__BB37_13;
+$L__BB37_13:                            // %bb28
 	mov.b64 	%rd120, 0d0000000000000000;
 	setp.eq.b32 	%p18, %r7, 3;
-	@%p18 bra 	$L__BB36_16;
-	bra.uni 	$L__BB36_10;
-$L__BB36_14:                            // %bb39
+	@%p18 bra 	$L__BB37_16;
+	bra.uni 	$L__BB37_10;
+$L__BB37_14:                            // %bb39
 	mov.b64 	%rd119, 0d3FE0000000000000;
-	bra.uni 	$L__BB36_11;
-$L__BB36_15:                            // %bb40
+	bra.uni 	$L__BB37_11;
+$L__BB37_15:                            // %bb40
 	mov.b64 	%rd119, 0d3FF0000000000000;
-	bra.uni 	$L__BB36_11;
-$L__BB36_16:                            // %bb41
+	bra.uni 	$L__BB37_11;
+$L__BB37_16:                            // %bb41
 	ld.global.b32 	%r43, [%rd5+4];
 	mov.b64 	%rd121, 0d3FE0000000000000;
-	@%p13 bra 	$L__BB36_21;
-	bra.uni 	$L__BB36_17;
-$L__BB36_17:                            // %bb41
+	@%p13 bra 	$L__BB37_21;
+	bra.uni 	$L__BB37_17;
+$L__BB37_17:                            // %bb41
 	setp.eq.b32 	%p20, %r6, 0;
-	@%p20 bra 	$L__BB36_20;
-	bra.uni 	$L__BB36_18;
-$L__BB36_18:                            // %bb41
+	@%p20 bra 	$L__BB37_20;
+	bra.uni 	$L__BB37_18;
+$L__BB37_18:                            // %bb41
 	setp.ne.b32 	%p21, %r6, 3;
-	@%p21 bra 	$L__BB36_10;
-	bra.uni 	$L__BB36_19;
-$L__BB36_19:                            // %bb34.1
+	@%p21 bra 	$L__BB37_10;
+	bra.uni 	$L__BB37_19;
+$L__BB37_19:                            // %bb34.1
 	mov.b64 	%rd121, 0d0000000000000000;
-	bra.uni 	$L__BB36_21;
-$L__BB36_20:                            // %bb40.1
+	bra.uni 	$L__BB37_21;
+$L__BB37_20:                            // %bb40.1
 	mov.b64 	%rd121, 0d3FF0000000000000;
-$L__BB36_21:                            // %bb28.1
+$L__BB37_21:                            // %bb28.1
 	setp.gt.u32 	%p22, %r7, 3;
-	@%p22 bra 	$L__BB36_10;
+	@%p22 bra 	$L__BB37_10;
 // %bb.22:                              // %bb28.1
 	mov.b64 	%rd122, 0dBFE0000000000000;
 	$L_brx_0: .branchtargets
-		$L__BB36_24,
-		$L__BB36_23,
-		$L__BB36_25,
-		$L__BB36_24;
+		$L__BB37_24,
+		$L__BB37_23,
+		$L__BB37_25,
+		$L__BB37_24;
 	brx.idx 	%r7, $L_brx_0;
-$L__BB36_23:                            // %bb49.1
+$L__BB37_23:                            // %bb49.1
 	mov.b64 	%rd122, 0d3FE0000000000000;
-	bra.uni 	$L__BB36_25;
-$L__BB36_24:                            // %bb43.1
+	bra.uni 	$L__BB37_25;
+$L__BB37_24:                            // %bb43.1
 	mov.b64 	%rd122, 0d0000000000000000;
-$L__BB36_25:                            // %bb41.1
+$L__BB37_25:                            // %bb41.1
 	ld.global.b32 	%r46, [%rd5+8];
 	mov.b64 	%rd124, 0d3FE0000000000000;
 	mov.b64 	%rd123, %rd124;
-	@%p13 bra 	$L__BB36_30;
-	bra.uni 	$L__BB36_26;
-$L__BB36_26:                            // %bb41.1
+	@%p13 bra 	$L__BB37_30;
+	bra.uni 	$L__BB37_26;
+$L__BB37_26:                            // %bb41.1
 	setp.eq.b32 	%p24, %r6, 0;
-	@%p24 bra 	$L__BB36_29;
-	bra.uni 	$L__BB36_27;
-$L__BB36_27:                            // %bb41.1
+	@%p24 bra 	$L__BB37_29;
+	bra.uni 	$L__BB37_27;
+$L__BB37_27:                            // %bb41.1
 	setp.ne.b32 	%p25, %r6, 3;
-	@%p25 bra 	$L__BB36_10;
-	bra.uni 	$L__BB36_28;
-$L__BB36_28:                            // %bb34.2
+	@%p25 bra 	$L__BB37_10;
+	bra.uni 	$L__BB37_28;
+$L__BB37_28:                            // %bb34.2
 	mov.b64 	%rd123, 0d0000000000000000;
-	bra.uni 	$L__BB36_30;
-$L__BB36_29:                            // %bb40.2
+	bra.uni 	$L__BB37_30;
+$L__BB37_29:                            // %bb40.2
 	mov.b64 	%rd123, 0d3FF0000000000000;
-$L__BB36_30:                            // %bb28.2
-	@%p16 bra 	$L__BB36_35;
-	bra.uni 	$L__BB36_31;
-$L__BB36_31:                            // %bb28.2
+$L__BB37_30:                            // %bb28.2
+	@%p16 bra 	$L__BB37_35;
+	bra.uni 	$L__BB37_31;
+$L__BB37_31:                            // %bb28.2
 	setp.eq.b32 	%p27, %r7, 3;
-	@%p27 bra 	$L__BB36_34;
-	bra.uni 	$L__BB36_32;
-$L__BB36_32:                            // %bb28.2
+	@%p27 bra 	$L__BB37_34;
+	bra.uni 	$L__BB37_32;
+$L__BB37_32:                            // %bb28.2
 	setp.ne.b32 	%p28, %r7, 0;
-	@%p28 bra 	$L__BB36_10;
-	bra.uni 	$L__BB36_33;
-$L__BB36_33:                            // %bb43.2
+	@%p28 bra 	$L__BB37_10;
+	bra.uni 	$L__BB37_33;
+$L__BB37_33:                            // %bb43.2
 	mov.b64 	%rd124, 0d0000000000000000;
-	bra.uni 	$L__BB36_35;
-$L__BB36_34:                            // %bb50.2
+	bra.uni 	$L__BB37_35;
+$L__BB37_34:                            // %bb50.2
 	mov.b64 	%rd124, 0d3FF0000000000000;
-$L__BB36_35:                            // %bb41.2
+$L__BB37_35:                            // %bb41.2
 	setp.gt.u32 	%p29, %r6, 3;
-	@%p29 bra 	$L__BB36_10;
+	@%p29 bra 	$L__BB37_10;
 // %bb.36:                              // %bb41.2
 	mov.b64 	%rd125, 0dBFE0000000000000;
 	$L_brx_1: .branchtargets
-		$L__BB36_38,
-		$L__BB36_37,
-		$L__BB36_39,
-		$L__BB36_38;
+		$L__BB37_38,
+		$L__BB37_37,
+		$L__BB37_39,
+		$L__BB37_38;
 	brx.idx 	%r6, $L_brx_1;
-$L__BB36_37:                            // %bb39.136
+$L__BB37_37:                            // %bb39.136
 	mov.b64 	%rd125, 0d3FE0000000000000;
-	bra.uni 	$L__BB36_39;
-$L__BB36_38:                            // %bb33.138
+	bra.uni 	$L__BB37_39;
+$L__BB37_38:                            // %bb33.138
 	mov.b64 	%rd125, 0d0000000000000000;
-$L__BB36_39:                            // %bb28.141
+$L__BB37_39:                            // %bb28.141
 	ld.global.b32 	%r50, [%rd5+12];
 	mov.b64 	%rd126, 0d3FE0000000000000;
-	@%p16 bra 	$L__BB36_44;
-	bra.uni 	$L__BB36_40;
-$L__BB36_40:                            // %bb28.141
+	@%p16 bra 	$L__BB37_44;
+	bra.uni 	$L__BB37_40;
+$L__BB37_40:                            // %bb28.141
 	setp.eq.b32 	%p31, %r7, 0;
-	@%p31 bra 	$L__BB36_43;
-	bra.uni 	$L__BB36_41;
-$L__BB36_41:                            // %bb28.141
+	@%p31 bra 	$L__BB37_43;
+	bra.uni 	$L__BB37_41;
+$L__BB37_41:                            // %bb28.141
 	setp.ne.b32 	%p32, %r7, 3;
-	@%p32 bra 	$L__BB36_10;
-	bra.uni 	$L__BB36_42;
-$L__BB36_42:                            // %bb44.144
+	@%p32 bra 	$L__BB37_10;
+	bra.uni 	$L__BB37_42;
+$L__BB37_42:                            // %bb44.144
 	mov.b64 	%rd126, 0d0000000000000000;
-	bra.uni 	$L__BB36_44;
-$L__BB36_43:                            // %bb50.146
+	bra.uni 	$L__BB37_44;
+$L__BB37_43:                            // %bb50.146
 	mov.b64 	%rd126, 0d3FF0000000000000;
-$L__BB36_44:                            // %bb41.151
-	@%p29 bra 	$L__BB36_10;
+$L__BB37_44:                            // %bb41.151
+	@%p29 bra 	$L__BB37_10;
 // %bb.45:                              // %bb41.151
 	mov.b64 	%rd127, 0dBFE0000000000000;
 	$L_brx_2: .branchtargets
-		$L__BB36_47,
-		$L__BB36_46,
-		$L__BB36_48,
-		$L__BB36_47;
+		$L__BB37_47,
+		$L__BB37_46,
+		$L__BB37_48,
+		$L__BB37_47;
 	brx.idx 	%r6, $L_brx_2;
-$L__BB36_46:                            // %bb39.1.1
+$L__BB37_46:                            // %bb39.1.1
 	mov.b64 	%rd127, 0d3FE0000000000000;
-	bra.uni 	$L__BB36_48;
-$L__BB36_47:                            // %bb33.1.1
+	bra.uni 	$L__BB37_48;
+$L__BB37_47:                            // %bb33.1.1
 	mov.b64 	%rd127, 0d0000000000000000;
-$L__BB36_48:                            // %bb28.1.1
-	@%p22 bra 	$L__BB36_10;
+$L__BB37_48:                            // %bb28.1.1
+	@%p22 bra 	$L__BB37_10;
 // %bb.49:                              // %bb28.1.1
 	mov.b64 	%rd128, 0dBFE0000000000000;
 	$L_brx_3: .branchtargets
-		$L__BB36_51,
-		$L__BB36_50,
-		$L__BB36_52,
-		$L__BB36_51;
+		$L__BB37_51,
+		$L__BB37_50,
+		$L__BB37_52,
+		$L__BB37_51;
 	brx.idx 	%r7, $L_brx_3;
-$L__BB36_50:                            // %bb49.1.1
+$L__BB37_50:                            // %bb49.1.1
 	mov.b64 	%rd128, 0d3FE0000000000000;
-	bra.uni 	$L__BB36_52;
-$L__BB36_51:                            // %bb43.1.1
+	bra.uni 	$L__BB37_52;
+$L__BB37_51:                            // %bb43.1.1
 	mov.b64 	%rd128, 0d0000000000000000;
-$L__BB36_52:                            // %bb41.1.1
-	@%p29 bra 	$L__BB36_10;
+$L__BB37_52:                            // %bb41.1.1
+	@%p29 bra 	$L__BB37_10;
 // %bb.53:                              // %bb41.1.1
 	mov.b64 	%rd129, 0dBFE0000000000000;
 	$L_brx_4: .branchtargets
-		$L__BB36_55,
-		$L__BB36_54,
-		$L__BB36_56,
-		$L__BB36_55;
+		$L__BB37_55,
+		$L__BB37_54,
+		$L__BB37_56,
+		$L__BB37_55;
 	brx.idx 	%r6, $L_brx_4;
-$L__BB36_54:                            // %bb39.2.1
+$L__BB37_54:                            // %bb39.2.1
 	mov.b64 	%rd129, 0d3FE0000000000000;
-	bra.uni 	$L__BB36_56;
-$L__BB36_55:                            // %bb33.2.1
+	bra.uni 	$L__BB37_56;
+$L__BB37_55:                            // %bb33.2.1
 	mov.b64 	%rd129, 0d0000000000000000;
-$L__BB36_56:                            // %bb28.2.1
+$L__BB37_56:                            // %bb28.2.1
 	ld.global.b32 	%r53, [%rd5+16];
 	ld.global.b32 	%r56, [%rd5+20];
 	mov.b64 	%rd131, 0d3FE0000000000000;
 	mov.b64 	%rd130, %rd131;
-	@%p16 bra 	$L__BB36_61;
-	bra.uni 	$L__BB36_57;
-$L__BB36_57:                            // %bb28.2.1
+	@%p16 bra 	$L__BB37_61;
+	bra.uni 	$L__BB37_57;
+$L__BB37_57:                            // %bb28.2.1
 	setp.eq.b32 	%p37, %r7, 3;
-	@%p37 bra 	$L__BB36_60;
-	bra.uni 	$L__BB36_58;
-$L__BB36_58:                            // %bb28.2.1
+	@%p37 bra 	$L__BB37_60;
+	bra.uni 	$L__BB37_58;
+$L__BB37_58:                            // %bb28.2.1
 	setp.ne.b32 	%p38, %r7, 0;
-	@%p38 bra 	$L__BB36_10;
-	bra.uni 	$L__BB36_59;
-$L__BB36_59:                            // %bb43.2.1
+	@%p38 bra 	$L__BB37_10;
+	bra.uni 	$L__BB37_59;
+$L__BB37_59:                            // %bb43.2.1
 	mov.b64 	%rd130, 0d0000000000000000;
-	bra.uni 	$L__BB36_61;
-$L__BB36_60:                            // %bb50.2.1
+	bra.uni 	$L__BB37_61;
+$L__BB37_60:                            // %bb50.2.1
 	mov.b64 	%rd130, 0d3FF0000000000000;
-$L__BB36_61:                            // %bb41.2.1
+$L__BB37_61:                            // %bb41.2.1
 	ld.global.b32 	%r58, [%rd5+24];
-	@%p13 bra 	$L__BB36_66;
-	bra.uni 	$L__BB36_62;
-$L__BB36_62:                            // %bb41.2.1
+	@%p13 bra 	$L__BB37_66;
+	bra.uni 	$L__BB37_62;
+$L__BB37_62:                            // %bb41.2.1
 	setp.eq.b32 	%p40, %r6, 3;
-	@%p40 bra 	$L__BB36_65;
-	bra.uni 	$L__BB36_63;
-$L__BB36_63:                            // %bb41.2.1
+	@%p40 bra 	$L__BB37_65;
+	bra.uni 	$L__BB37_63;
+$L__BB37_63:                            // %bb41.2.1
 	setp.ne.b32 	%p41, %r6, 0;
-	@%p41 bra 	$L__BB36_10;
-	bra.uni 	$L__BB36_64;
-$L__BB36_64:                            // %bb33.260
+	@%p41 bra 	$L__BB37_10;
+	bra.uni 	$L__BB37_64;
+$L__BB37_64:                            // %bb33.260
 	mov.b64 	%rd131, 0d0000000000000000;
-	bra.uni 	$L__BB36_66;
-$L__BB36_65:                            // %bb40.261
+	bra.uni 	$L__BB37_66;
+$L__BB37_65:                            // %bb40.261
 	mov.b64 	%rd131, 0d3FF0000000000000;
-$L__BB36_66:                            // %bb28.263
+$L__BB37_66:                            // %bb28.263
 	mov.b64 	%rd133, 0d3FE0000000000000;
 	mov.b64 	%rd132, %rd133;
-	@%p16 bra 	$L__BB36_71;
-	bra.uni 	$L__BB36_67;
-$L__BB36_67:                            // %bb28.263
+	@%p16 bra 	$L__BB37_71;
+	bra.uni 	$L__BB37_67;
+$L__BB37_67:                            // %bb28.263
 	setp.eq.b32 	%p43, %r7, 0;
-	@%p43 bra 	$L__BB36_70;
-	bra.uni 	$L__BB36_68;
-$L__BB36_68:                            // %bb28.263
+	@%p43 bra 	$L__BB37_70;
+	bra.uni 	$L__BB37_68;
+$L__BB37_68:                            // %bb28.263
 	setp.ne.b32 	%p44, %r7, 3;
-	@%p44 bra 	$L__BB36_10;
-	bra.uni 	$L__BB36_69;
-$L__BB36_69:                            // %bb44.266
+	@%p44 bra 	$L__BB37_10;
+	bra.uni 	$L__BB37_69;
+$L__BB37_69:                            // %bb44.266
 	mov.b64 	%rd132, 0d0000000000000000;
-	bra.uni 	$L__BB36_71;
-$L__BB36_70:                            // %bb50.268
+	bra.uni 	$L__BB37_71;
+$L__BB37_70:                            // %bb50.268
 	mov.b64 	%rd132, 0d3FF0000000000000;
-$L__BB36_71:                            // %bb41.273
+$L__BB37_71:                            // %bb41.273
 	ld.global.b32 	%r61, [%rd5+28];
-	@%p13 bra 	$L__BB36_76;
-	bra.uni 	$L__BB36_72;
-$L__BB36_72:                            // %bb41.273
+	@%p13 bra 	$L__BB37_76;
+	bra.uni 	$L__BB37_72;
+$L__BB37_72:                            // %bb41.273
 	setp.eq.b32 	%p46, %r6, 3;
-	@%p46 bra 	$L__BB36_75;
-	bra.uni 	$L__BB36_73;
-$L__BB36_73:                            // %bb41.273
+	@%p46 bra 	$L__BB37_75;
+	bra.uni 	$L__BB37_73;
+$L__BB37_73:                            // %bb41.273
 	setp.ne.b32 	%p47, %r6, 0;
-	@%p47 bra 	$L__BB36_10;
-	bra.uni 	$L__BB36_74;
-$L__BB36_74:                            // %bb33.1.2
+	@%p47 bra 	$L__BB37_10;
+	bra.uni 	$L__BB37_74;
+$L__BB37_74:                            // %bb33.1.2
 	mov.b64 	%rd133, 0d0000000000000000;
-	bra.uni 	$L__BB36_76;
-$L__BB36_75:                            // %bb40.1.2
+	bra.uni 	$L__BB37_76;
+$L__BB37_75:                            // %bb40.1.2
 	mov.b64 	%rd133, 0d3FF0000000000000;
-$L__BB36_76:                            // %bb28.1.2
-	@%p22 bra 	$L__BB36_10;
+$L__BB37_76:                            // %bb28.1.2
+	@%p22 bra 	$L__BB37_10;
 // %bb.77:                              // %bb28.1.2
 	mov.b64 	%rd134, 0dBFE0000000000000;
 	$L_brx_5: .branchtargets
-		$L__BB36_79,
-		$L__BB36_78,
-		$L__BB36_80,
-		$L__BB36_79;
+		$L__BB37_79,
+		$L__BB37_78,
+		$L__BB37_80,
+		$L__BB37_79;
 	brx.idx 	%r7, $L_brx_5;
-$L__BB36_78:                            // %bb49.1.2
+$L__BB37_78:                            // %bb49.1.2
 	mov.b64 	%rd134, 0d3FE0000000000000;
-	bra.uni 	$L__BB36_80;
-$L__BB36_79:                            // %bb43.1.2
+	bra.uni 	$L__BB37_80;
+$L__BB37_79:                            // %bb43.1.2
 	mov.b64 	%rd134, 0d0000000000000000;
-$L__BB36_80:                            // %bb41.1.2
+$L__BB37_80:                            // %bb41.1.2
 	ld.global.b32 	%r64, [%rd5+32];
 	mov.b64 	%rd136, 0d3FE0000000000000;
 	mov.b64 	%rd135, %rd136;
-	@%p13 bra 	$L__BB36_85;
-	bra.uni 	$L__BB36_81;
-$L__BB36_81:                            // %bb41.1.2
+	@%p13 bra 	$L__BB37_85;
+	bra.uni 	$L__BB37_81;
+$L__BB37_81:                            // %bb41.1.2
 	setp.eq.b32 	%p50, %r6, 3;
-	@%p50 bra 	$L__BB36_84;
-	bra.uni 	$L__BB36_82;
-$L__BB36_82:                            // %bb41.1.2
+	@%p50 bra 	$L__BB37_84;
+	bra.uni 	$L__BB37_82;
+$L__BB37_82:                            // %bb41.1.2
 	setp.ne.b32 	%p51, %r6, 0;
-	@%p51 bra 	$L__BB36_10;
-	bra.uni 	$L__BB36_83;
-$L__BB36_83:                            // %bb33.2.2
+	@%p51 bra 	$L__BB37_10;
+	bra.uni 	$L__BB37_83;
+$L__BB37_83:                            // %bb33.2.2
 	mov.b64 	%rd135, 0d0000000000000000;
-	bra.uni 	$L__BB36_85;
-$L__BB36_84:                            // %bb40.2.2
+	bra.uni 	$L__BB37_85;
+$L__BB37_84:                            // %bb40.2.2
 	mov.b64 	%rd135, 0d3FF0000000000000;
-$L__BB36_85:                            // %bb28.2.2
-	@%p16 bra 	$L__BB36_90;
-	bra.uni 	$L__BB36_86;
-$L__BB36_86:                            // %bb28.2.2
+$L__BB37_85:                            // %bb28.2.2
+	@%p16 bra 	$L__BB37_90;
+	bra.uni 	$L__BB37_86;
+$L__BB37_86:                            // %bb28.2.2
 	setp.eq.b32 	%p53, %r7, 3;
-	@%p53 bra 	$L__BB36_89;
-	bra.uni 	$L__BB36_87;
-$L__BB36_87:                            // %bb28.2.2
+	@%p53 bra 	$L__BB37_89;
+	bra.uni 	$L__BB37_87;
+$L__BB37_87:                            // %bb28.2.2
 	setp.ne.b32 	%p54, %r7, 0;
-	@%p54 bra 	$L__BB36_10;
-	bra.uni 	$L__BB36_88;
-$L__BB36_88:                            // %bb43.2.2
+	@%p54 bra 	$L__BB37_10;
+	bra.uni 	$L__BB37_88;
+$L__BB37_88:                            // %bb43.2.2
 	mov.b64 	%rd136, 0d0000000000000000;
-	bra.uni 	$L__BB36_90;
-$L__BB36_89:                            // %bb50.2.2
+	bra.uni 	$L__BB37_90;
+$L__BB37_89:                            // %bb50.2.2
 	mov.b64 	%rd136, 0d3FF0000000000000;
-$L__BB36_90:                            // %bb41.2.2
+$L__BB37_90:                            // %bb41.2.2
 	ld.param.b64 	%rd43, [spk_wideconv_pack_wtc_param_5];
 	setp.lt.u64 	%p56, %rd3, %rd43;
 	and.pred 	%p57, %p1, %p56;
@@ -48078,17 +48111,17 @@ $L__BB36_90:                            // %bb41.2.2
 	cvta.to.global.u64 	%rd117, %rd116;
 	setp.ne.b64 	%p58, %rd2, %rd117;
 	and.pred 	%p59, %p57, %p58;
-	@%p59 bra 	$L__BB36_6;
-	bra.uni 	$L__BB36_9;
-$L__BB36_91:                            // %bb49
+	@%p59 bra 	$L__BB37_6;
+	bra.uni 	$L__BB37_9;
+$L__BB37_91:                            // %bb49
 	mov.b64 	%rd120, 0d3FE0000000000000;
-	bra.uni 	$L__BB36_16;
-$L__BB36_92:                            // %bb50
+	bra.uni 	$L__BB37_16;
+$L__BB37_92:                            // %bb50
 	mov.b64 	%rd120, 0d3FF0000000000000;
-	bra.uni 	$L__BB36_16;
-$L__BB36_93:                            // %bb64
+	bra.uni 	$L__BB37_16;
+$L__BB37_93:                            // %bb64
 	trap; exit;
-$L__BB36_94:                            // %bb65
+$L__BB37_94:                            // %bb65
 	trap; exit;
                                         // -- End function
 }
@@ -48212,6 +48245,72 @@ $L__BB36_94:                            // %bb65
 )
 .maxntid 256, 1, 1
 .minnctapersm 1                         // @spk_wideconv_wtc1_c128
+{
+
+
+// %bb.0:                               // %entry
+	// begin inline asm
+	trap;
+	// end inline asm
+	// begin inline asm
+	exit;
+	// end inline asm
+                                        // -- End function
+}
+	// .globl	spk_wideconv_wtp1_c128  // -- Begin function spk_wideconv_wtp1_c128
+.visible .entry spk_wideconv_wtp1_c128(
+	.param .u64 .ptr .align 4 spk_wideconv_wtp1_c128_param_0,
+	.param .u64 spk_wideconv_wtp1_c128_param_1,
+	.param .u64 .ptr .align 4 spk_wideconv_wtp1_c128_param_2,
+	.param .u64 spk_wideconv_wtp1_c128_param_3,
+	.param .u64 .ptr .align 4 spk_wideconv_wtp1_c128_param_4,
+	.param .u64 spk_wideconv_wtp1_c128_param_5,
+	.param .u64 .ptr .align 4 spk_wideconv_wtp1_c128_param_6,
+	.param .u64 spk_wideconv_wtp1_c128_param_7,
+	.param .u32 spk_wideconv_wtp1_c128_param_8,
+	.param .u32 spk_wideconv_wtp1_c128_param_9,
+	.param .u32 spk_wideconv_wtp1_c128_param_10,
+	.param .u32 spk_wideconv_wtp1_c128_param_11,
+	.param .u64 .ptr .align 1 spk_wideconv_wtp1_c128_param_12,
+	.param .u64 spk_wideconv_wtp1_c128_param_13,
+	.param .u64 .ptr .align 1 spk_wideconv_wtp1_c128_param_14,
+	.param .u64 spk_wideconv_wtp1_c128_param_15
+)
+.maxntid 256, 1, 1
+.minnctapersm 1                         // @spk_wideconv_wtp1_c128
+{
+
+
+// %bb.0:                               // %entry
+	// begin inline asm
+	trap;
+	// end inline asm
+	// begin inline asm
+	exit;
+	// end inline asm
+                                        // -- End function
+}
+	// .globl	spk_wideconv_wtc1_c256  // -- Begin function spk_wideconv_wtc1_c256
+.visible .entry spk_wideconv_wtc1_c256(
+	.param .u64 .ptr .align 4 spk_wideconv_wtc1_c256_param_0,
+	.param .u64 spk_wideconv_wtc1_c256_param_1,
+	.param .u64 .ptr .align 4 spk_wideconv_wtc1_c256_param_2,
+	.param .u64 spk_wideconv_wtc1_c256_param_3,
+	.param .u64 .ptr .align 4 spk_wideconv_wtc1_c256_param_4,
+	.param .u64 spk_wideconv_wtc1_c256_param_5,
+	.param .u64 .ptr .align 4 spk_wideconv_wtc1_c256_param_6,
+	.param .u64 spk_wideconv_wtc1_c256_param_7,
+	.param .u32 spk_wideconv_wtc1_c256_param_8,
+	.param .u32 spk_wideconv_wtc1_c256_param_9,
+	.param .u32 spk_wideconv_wtc1_c256_param_10,
+	.param .u32 spk_wideconv_wtc1_c256_param_11,
+	.param .u64 .ptr .align 1 spk_wideconv_wtc1_c256_param_12,
+	.param .u64 spk_wideconv_wtc1_c256_param_13,
+	.param .u64 .ptr .align 1 spk_wideconv_wtc1_c256_param_14,
+	.param .u64 spk_wideconv_wtc1_c256_param_15
+)
+.maxntid 256, 1, 1
+.minnctapersm 1                         // @spk_wideconv_wtc1_c256
 {
 
 
