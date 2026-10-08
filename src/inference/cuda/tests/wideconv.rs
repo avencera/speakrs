@@ -12,7 +12,9 @@
 //! or `tensor` to force the ResNet FP32 or TF32 tensor-core kernels.
 //! `TRUNK_CONFIG=<kernel>[:<partition>[:<first split cell>]]` forces one wideconv
 //! configuration on every selected layer, with kernels `tc`, `fp32`, `sweep2`, `wtc1`,
-//! `wtp1`, `wtc2`, `wtc3` or `bf16x3` and partitions `whole`, `two`, `four` or `eight`
+//! `wtp1`, `wtc2`, `wtc3` or `bf16x3` and partitions `whole`, `two`, `four` or `eight`.
+//! `TRUNK_B1_ONLY=1` builds every batch from the batch-1 reference and skips the
+//! batch-32 embedding case.
 //! `TRUNK_RESNET=sm80` uses the sm80 tier in both modes, with tensor kernels only
 //! in TF32 mode, for a direct comparison with the legacy artifact. `TRUNK_WEIGHTS`
 //! names the model weights when they are not beside the references
@@ -205,6 +207,12 @@ fn weights_path(root: &Path) -> std::path::PathBuf {
         || root.join(B1_MODEL).join(format!("{B1_MODEL}.safetensors")),
         Into::into,
     )
+}
+
+/// Whether `TRUNK_B1_ONLY` asks every batch to cycle the batch-1 reference item, for
+/// boxes without the multi-gigabyte batch-32 reference; shapes and timing are unchanged
+fn b1_only() -> bool {
+    std::env::var_os("TRUNK_B1_ONLY").is_some()
 }
 
 fn selected<T: ToString>(key: &str, value: T) -> bool {
@@ -615,7 +623,7 @@ fn driver_trunk_layers_match_library() -> Result<(), CudaError> {
     let mut failures = Vec::new();
     for batch in batches() {
         // stress batches cycle the items of the b32 reference
-        let (model, case, items_in) = if batch == 1 {
+        let (model, case, items_in) = if batch == 1 || b1_only() {
             (B1_MODEL, B1_CASE, 1)
         } else {
             (B32_MODEL, B32_CASE, 32)
@@ -784,6 +792,9 @@ fn driver_trunk_embedding_matches_library() -> Result<(), CudaError> {
     let stream = runtime.stream().clone();
     let timing = std::env::var_os("TRUNK_TIMING").is_some();
     for (model, case) in [(B1_MODEL, B1_CASE), (B32_MODEL, B32_CASE)] {
+        if model == B32_MODEL && b1_only() {
+            continue;
+        }
         let mut reference = References::open(&root.join(model).join(format!("{case}.safetensors")));
         let (fbank, fbank_shape) = reference.read("input/fbank");
         let (masks, _) = reference.read("input/masks");
