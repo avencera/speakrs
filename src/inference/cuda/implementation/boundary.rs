@@ -14,6 +14,8 @@ use crate::inference::cuda::KernelModule;
 pub(crate) enum ProductionBatches {
     /// The model batch classes 1 and 32; stress batches never grant production
     Model,
+    /// Exact embedding trunk classes, independent of segmentation and dense heads
+    Embedding,
     /// Every filterbank batch from 1 to 32
     Fbank,
 }
@@ -28,6 +30,17 @@ impl ProductionBatches {
                 let mut index = 0;
                 while index < Self::MODEL.len() {
                     if Self::MODEL[index] == batch {
+                        return true;
+                    }
+                    index += 1;
+                }
+                false
+            }
+            Self::Embedding => {
+                let classes = super::super::embedding::EmbeddingBatchClass::ALL;
+                let mut index = 0;
+                while index < classes.len() {
+                    if classes[index].chunks() == batch {
                         return true;
                     }
                     index += 1;
@@ -57,7 +70,11 @@ const fn model(name: &'static str, area: KernelModule) -> Boundary {
 }
 
 const fn resnet(name: &'static str) -> Boundary {
-    model(name, KernelModule::Resnet)
+    Boundary {
+        name,
+        area: KernelModule::Resnet,
+        batches: ProductionBatches::Embedding,
+    }
 }
 
 /// Every model boundary that selection or a Library requirement can name
@@ -258,11 +275,18 @@ mod tests {
     fn batch_sets_are_per_boundary() {
         let lstm = BoundaryId::named("lstm.stack");
         let fbank = BoundaryId::named("fbank.dft");
+        let trunk = BoundaryId::named("resnet.conv1");
+        let head = BoundaryId::named("resnet.seg_1");
         assert_eq!(lstm.batches(), ProductionBatches::Model);
         assert_eq!(fbank.batches(), ProductionBatches::Fbank);
         for batch in 0..=64 {
             assert_eq!(lstm.batches().contains(batch), [1, 32].contains(&batch));
             assert_eq!(fbank.batches().contains(batch), (1..=32).contains(&batch));
+            assert_eq!(
+                trunk.batches().contains(batch),
+                [1, 4, 8, 16, 32].contains(&batch)
+            );
+            assert_eq!(head.batches().contains(batch), [1, 32].contains(&batch));
         }
     }
 

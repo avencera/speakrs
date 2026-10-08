@@ -21,6 +21,8 @@
 //! live in an [`EmbeddingBatch`], allocated once per batch class and reused, which
 //! can also hold a CUDA graph of the whole forward pass
 
+mod batch_class;
+pub(crate) use batch_class::EmbeddingBatchClass;
 mod dispatch;
 mod kernels;
 #[cfg(test)]
@@ -41,9 +43,7 @@ use super::dense::DensePlan;
 use super::error::{check_len, element_count};
 use super::fbank::{FBANK_FRAMES, FBANK_MEL_BINS};
 use super::geometry::Residual;
-use super::implementation::{
-    AreaTarget, BoundaryId, LibraryNeed, MODEL_BATCHES, Selected, plan_selection,
-};
+use super::implementation::{AreaTarget, BoundaryId, LibraryNeed, Selected, plan_selection};
 use super::{CudaError, CudaMath, CudaRuntime, DeviceTensor, PtxTier, SafetensorsFile, Sgemm};
 use super::{CudaLibrary, KernelModule};
 
@@ -127,7 +127,9 @@ impl ResNetEmbedding {
         let trunk = Trunk::load(runtime, weights, FBANK_MEL_BINS, FBANK_FRAMES)?;
         let target = AreaTarget::for_area(runtime, KernelModule::Resnet)?;
         let mut needs = Vec::new();
-        for batch in MODEL_BATCHES {
+        // retain the established load checks; intermediate classes are resolved on first use
+        for class in [EmbeddingBatchClass::One, EmbeddingBatchClass::ThirtyTwo] {
+            let batch = class.chunks();
             for (layer, _) in trunk.layers() {
                 if matches!(
                     plan_selection(
@@ -153,7 +155,7 @@ impl ResNetEmbedding {
                 plan_selection(
                     runtime,
                     HEAD,
-                    batch,
+                    EmbeddingHead::chunks_per_pass(batch),
                     math,
                     #[cfg(all(test, feature = "_cuda-libraries"))]
                     None
@@ -162,7 +164,7 @@ impl ResNetEmbedding {
             ) {
                 needs.push(LibraryNeed::new(
                     HEAD,
-                    batch,
+                    EmbeddingHead::chunks_per_pass(batch),
                     math,
                     AreaTarget::for_area(runtime, KernelModule::Embedding)?,
                     CudaLibrary::Cublas,
@@ -228,18 +230,7 @@ impl ResNetEmbedding {
         Ok(EmbeddingBatch {
             model: Arc::clone(model),
             chunks,
-            head: DensePlan::new(
-                runtime,
-                DenseSpec::new(DenseSite::Embedding, chunks, model.math).map_err(|error| {
-                    CudaError::Unsupported {
-                        context: "embedding projection",
-                        reason: error.to_string(),
-                    }
-                })?,
-                SPEAKERS_PER_CHUNK,
-                model.head_weight.data(),
-                model.head_bias.data(),
-            )?,
+            head: EmbeddingHead::new(runtime, model, chunks)?,
             fbank: DeviceTensor::zeros(stream, &[chunks, FBANK_FRAMES, FBANK_MEL_BINS])?,
             masks: DeviceTensor::zeros(stream, &[rows, MASK_FRAMES])?,
             stem_input: stream.alloc_zeros(stem_len)?,
@@ -271,7 +262,7 @@ pub struct EmbeddingBatch {
     /// the model whose weights, kernels and precision this batch runs
     model: Arc<Model>,
     chunks: usize,
-    head: DensePlan,
+    head: EmbeddingHead,
     fbank: DeviceTensor,
     masks: DeviceTensor,
     stem_input: CudaSlice<f32>,
@@ -287,6 +278,69 @@ pub struct EmbeddingBatch {
     /// cuDNN workspace shared by every plan, sized for the largest
     workspace: CudaSlice<u8>,
     graph: Option<ForwardGraph>,
+}
+
+/// Projection plans compose the compiled head classes without padding the trunk
+#[derive(Debug)]
+struct EmbeddingHead {
+    plan: DensePlan,
+    chunks_per_pass: usize,
+    columns: usize,
+}
+
+impl EmbeddingHead {
+    const fn chunks_per_pass(chunks: usize) -> usize {
+        if chunks == 32 { 32 } else { 1 }
+    }
+
+    fn new(runtime: &CudaRuntime, model: &Model, chunks: usize) -> Result<Self, CudaError> {
+        // the head kernels bake in 1 or 32 chunks; intermediate trunks reuse the
+        // single-chunk head so its reduction order and precision stay unchanged
+        let chunks_per_pass = Self::chunks_per_pass(chunks);
+        let spec =
+            DenseSpec::new(DenseSite::Embedding, chunks_per_pass, model.math).map_err(|error| {
+                CudaError::Unsupported {
+                    context: "embedding projection",
+                    reason: error.to_string(),
+                }
+            })?;
+        Ok(Self {
+            plan: DensePlan::new(
+                runtime,
+                spec,
+                SPEAKERS_PER_CHUNK,
+                model.head_weight.data(),
+                model.head_bias.data(),
+            )?,
+            chunks_per_pass,
+            columns: 2 * pool_columns(&model.trunk),
+        })
+    }
+
+    fn enqueue(
+        &self,
+        runtime: &CudaRuntime,
+        input: &CudaView<'_, f32>,
+        output: &mut cudarc::driver::CudaViewMut<'_, f32>,
+        mut library: impl FnMut(
+            usize,
+            &CudaView<'_, f32>,
+            &mut cudarc::driver::CudaViewMut<'_, f32>,
+        ) -> Result<(), CudaError>,
+    ) -> Result<(), CudaError> {
+        let rows = self.chunks_per_pass * SPEAKERS_PER_CHUNK;
+        let input_step = rows * self.columns;
+        let output_step = rows * EMBEDDING_DIM;
+        for (pass, start) in (0..input.len()).step_by(input_step).enumerate() {
+            let input = input.slice(start..start + input_step);
+            let output_start = pass * output_step;
+            let mut output = output.slice_mut(output_start..output_start + output_step);
+            self.plan.enqueue(runtime, &input, &mut output, |output| {
+                library(self.chunks_per_pass, &input, output)
+            })?;
+        }
+        Ok(())
+    }
 }
 
 /// A captured forward pass; cudarc's graph type has no `Debug`
@@ -494,25 +548,28 @@ impl EmbeddingBatch {
         )?;
         tap(EmbeddingTap::Pooled, &pooled.as_view())?;
 
-        let rows = chunks * SPEAKERS_PER_CHUNK;
         let mut embeddings = output.data_mut().as_view_mut();
 
-        head.enqueue(runtime, &pooled.as_view(), &mut embeddings, |output| {
-            let gemm = Sgemm {
-                b_transposed: true,
-                beta: 1.0,
-                math,
-                ..Sgemm::new(rows, EMBEDDING_DIM, 2 * columns)
-            };
+        head.enqueue(
+            runtime,
+            &pooled.as_view(),
+            &mut embeddings,
+            |head_chunks, input, output| {
+                let rows = head_chunks * SPEAKERS_PER_CHUNK;
+                let gemm = Sgemm {
+                    b_transposed: true,
+                    beta: 1.0,
+                    math,
+                    ..Sgemm::new(rows, EMBEDDING_DIM, 2 * columns)
+                };
 
-            {
                 model
                     .kernels
                     .broadcast_rows(runtime, &model.head_bias.data().as_view(), output)?;
-                runtime.sgemm(gemm, &pooled, model.head_weight.data(), output)?;
-            }
-            Ok(())
-        })?;
+                runtime.sgemm(gemm, input, model.head_weight.data(), output)?;
+                Ok(())
+            },
+        )?;
         tap(EmbeddingTap::Output, &embeddings.as_view())?;
 
         Ok(())
