@@ -16,11 +16,13 @@ use super::types::{ChunkEmbeddings, ChunkSpeakerClusters, DecodedSegmentations, 
 pub(super) struct TrainingEmbeddings(pub Array2<f32>);
 
 impl ChunkEmbeddings {
+    #[tracing::instrument(level = "trace", target = "speakrs::timing", skip_all)]
     pub(super) fn training_set(
         &self,
         segmentations: &DecodedSegmentations,
         clean_frame_duration: CleanFrameDuration,
     ) -> TrainingEmbeddings {
+        let start = std::time::Instant::now();
         let minimum_clean_frames = clean_frame_duration.minimum_frames();
         let mut filtered = Vec::new();
         let mut chunk_indices = Vec::new();
@@ -58,11 +60,18 @@ impl ChunkEmbeddings {
                 .slice_mut(s![row_idx, ..])
                 .assign(&ndarray::ArrayView1::from(values));
         }
+        trace!(
+            target: "speakrs::timing",
+            training_us = start.elapsed().as_micros(),
+            rows = row_count,
+            "Training set timing"
+        );
         TrainingEmbeddings(filtered_embeddings)
     }
 }
 
 impl TrainingEmbeddings {
+    #[tracing::instrument(level = "trace", target = "speakrs::timing", skip_all)]
     pub(super) fn cluster(
         &self,
         segmentations: &DecodedSegmentations,
@@ -77,7 +86,10 @@ impl TrainingEmbeddings {
             return Ok(ChunkSpeakerClusters(clusters));
         }
 
+        let ahc_start = std::time::Instant::now();
         let ahc_labels = initial_ahc_labels(&self.0, plda, config);
+        trace!(
+            target: "speakrs::timing",ahc_us = ahc_start.elapsed().as_micros(), "AHC total timing");
         debug!(
             rows = self.0.nrows(),
             cols = self.0.ncols(),
@@ -92,7 +104,13 @@ impl TrainingEmbeddings {
             }
         }
 
+        let vbx_start = std::time::Instant::now();
         let (gamma, pi) = cluster_probabilities(&ahc_labels, &self.0, plda, config)?;
+        trace!(
+            target: "speakrs::timing",
+            vbx_total_us = vbx_start.elapsed().as_micros(),
+            "VBx total timing"
+        );
 
         debug!(?pi, "VBx speaker priors");
 
@@ -114,6 +132,7 @@ impl TrainingEmbeddings {
         }
 
         debug!(?kept_speakers, "VBx kept speakers");
+        let assignment_start = std::time::Instant::now();
         let centroids = weighted_centroids(&self.0, &gamma, &kept_speakers);
         for cluster_idx in 0..centroids.nrows() {
             let norm: f32 = centroids
@@ -125,6 +144,11 @@ impl TrainingEmbeddings {
 
         let mut clusters = assign_chunk_embeddings(segmentations, embeddings, &centroids);
         mark_inactive_speakers(&segmentations.0, &mut clusters);
+        trace!(
+            target: "speakrs::timing",
+            assignment_us = assignment_start.elapsed().as_micros(),
+            "Assignment timing"
+        );
         debug!(
             rows = clusters.nrows(),
             cols = clusters.ncols(),
@@ -169,7 +193,13 @@ fn cluster_probabilities(
         )?);
     }
 
+    let projection_start = std::time::Instant::now();
     let projected = plda.project(&embeddings.view(), 128);
+    trace!(
+        target: "speakrs::timing",
+        plda_us = projection_start.elapsed().as_micros(),
+        "PLDA timing"
+    );
     Ok(cluster_vbx(
         ahc_labels,
         &projected.features(),

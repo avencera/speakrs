@@ -292,8 +292,10 @@ pub fn run(
             let batch_start = Instant::now();
             let results = pipeline.run_batch(&batch_inputs)?;
             let batch_elapsed = batch_start.elapsed();
+            tracing::trace!(batch_ms = batch_elapsed.as_millis(), "Batch timing");
 
             // output results in order
+            let output_start = Instant::now();
             for (i, result) in results.iter().enumerate() {
                 let file_id = &audio_data[i].0;
                 let audio_secs = audio_data[i].1.len() as f64 / 16_000.0;
@@ -316,6 +318,7 @@ pub fn run(
             );
 
             tracing::trace!(
+                output_us = output_start.elapsed().as_micros(),
                 startup_ms = loop_start.duration_since(command_start).as_millis(),
                 loop_ms = loop_start.elapsed().as_millis(),
                 total_ms = command_start.elapsed().as_millis(),
