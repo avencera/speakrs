@@ -2,6 +2,9 @@
 
 ## [unreleased]
 
+- Run `ExecutionMode::Cpu` with native Rust PyanNet, WeSpeaker, and filterbank models instead of ONNX Runtime (breaking); the `cpu` feature no longer compiles, links, or downloads ONNX Runtime, and CPU shared clones reuse immutable weights with private workspaces
+- Load the two native safetensors weight files, PLDA files, and embedding metadata for CPU mode; canonical ONNX paths remain family selectors, but arbitrary ONNX models are not supported. MIGraphX still uses ONNX Runtime, and `load-dynamic` retains the optional external ONNX session helpers
+
 - Use the qualified cuda-oxide ResNet, LSTM, and SincNet kernels at their tested layer, batch, and math combinations; keep cuDNN for every other combination and keep the existing CUDA runtime defaults
 - Add a locked CUDA qualification harness with content-addressed assets stored outside the source tree
 

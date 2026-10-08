@@ -22,10 +22,7 @@ pub enum InferenceError {
     Cpu(#[from] CpuError),
     /// ONNX Runtime returned an error
     #[cfg(feature = "_ort")]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(any(feature = "cpu", feature = "migraphx", feature = "load-dynamic")))
-    )]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "migraphx", feature = "load-dynamic"))))]
     #[error(transparent)]
     Ort(#[from] ort::Error),
     /// Native CoreML returned an error
@@ -122,18 +119,12 @@ pub enum ModelLoadError {
     UnsupportedExecutionMode(#[from] ExecutionModeError),
     /// ONNX Runtime could not be prepared for this process
     #[cfg(feature = "_ort")]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(any(feature = "cpu", feature = "migraphx", feature = "load-dynamic")))
-    )]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "migraphx", feature = "load-dynamic"))))]
     #[error(transparent)]
     Runtime(#[from] OrtRuntimeError),
     /// ONNX Runtime returned an error after initialization completed
     #[cfg(feature = "_ort")]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(any(feature = "cpu", feature = "migraphx", feature = "load-dynamic")))
-    )]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "migraphx", feature = "load-dynamic"))))]
     #[error(transparent)]
     Ort(#[from] ort::Error),
     /// The native CUDA backend failed while loading a model
