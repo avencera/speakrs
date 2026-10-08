@@ -23,6 +23,8 @@ pub mod lstm;
 pub mod probe;
 #[cfg(feature = "resnet")]
 pub mod resnet;
+#[cfg(feature = "segdense")]
+pub mod segdense;
 #[cfg(feature = "segmentation")]
 pub mod segmentation;
 #[cfg(feature = "sincnet")]
