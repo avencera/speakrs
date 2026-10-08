@@ -1,7 +1,12 @@
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 
+mod batch;
+pub use batch::WavBatchDecoder;
+
 use color_eyre::eyre::{Result, bail, ensure};
+
+const MAX_FMT_BYTES: usize = 64 * 1024;
 
 fn read_u16(bytes: &[u8], context: &str) -> Result<u16> {
     let raw: [u8; 2] = bytes
@@ -20,7 +25,14 @@ fn read_u32(bytes: &[u8], context: &str) -> Result<u32> {
 /// Load 16-bit PCM mono WAV samples as f32 in [-1.0, 1.0]
 pub fn load_wav_samples(path: &str) -> Result<(Vec<f32>, u32)> {
     let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
+    read_wav_samples(BufReader::new(file), || false)
+}
+
+fn read_wav_samples(
+    mut reader: impl Read + Seek,
+    cancelled: impl Fn() -> bool,
+) -> Result<(Vec<f32>, u32)> {
+    ensure!(!cancelled(), "audio decode cancelled");
     let mut riff_header = [0u8; 12];
     reader.read_exact(&mut riff_header)?;
     ensure!(&riff_header[0..4] == b"RIFF", "expected RIFF WAV");
@@ -31,6 +43,7 @@ pub fn load_wav_samples(path: &str) -> Result<(Vec<f32>, u32)> {
     let mut bits_per_sample = None;
 
     loop {
+        ensure!(!cancelled(), "audio decode cancelled");
         let mut chunk_header = [0u8; 8];
         if reader.read_exact(&mut chunk_header).is_err() {
             break;
@@ -45,8 +58,16 @@ pub fn load_wav_samples(path: &str) -> Result<(Vec<f32>, u32)> {
                     chunk_size >= 16,
                     "wav fmt chunk is {chunk_size} bytes; expected at least 16"
                 );
+                ensure!(
+                    chunk_size <= MAX_FMT_BYTES,
+                    "wav fmt chunk is {chunk_size} bytes; maximum supported size is {MAX_FMT_BYTES}"
+                );
                 let mut fmt = vec![0u8; chunk_size];
-                reader.read_exact(&mut fmt)?;
+                for block in fmt.chunks_mut(8192) {
+                    ensure!(!cancelled(), "audio decode cancelled");
+                    reader.read_exact(block)?;
+                }
+
                 let audio_format = read_u16(&fmt[0..2], "wav fmt audio format")?;
                 let chunk_channels = read_u16(&fmt[2..4], "wav fmt channels")?;
                 let chunk_sample_rate = read_u32(&fmt[4..8], "wav fmt sample rate")?;
@@ -73,6 +94,8 @@ pub fn load_wav_samples(path: &str) -> Result<(Vec<f32>, u32)> {
                 let mut buffer = [0u8; 8192];
 
                 while remaining > 0 {
+                    // bounded PCM reads let speculative work stop after an earlier failure
+                    ensure!(!cancelled(), "audio decode cancelled");
                     let to_read = remaining.min(buffer.len());
                     reader.read_exact(&mut buffer[..to_read])?;
                     for &bytes in buffer[..to_read].as_chunks::<2>().0 {
