@@ -17,6 +17,13 @@ use super::{
 use crate::inference::cuda::error::check_len;
 use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, KernelModule};
 
+const SPK_SINCNET_PACK_FILTERS: &str = "spk_sincnet_pack_filters";
+const SPK_SINCNET_CONV_ABS_POOL: &str = "spk_sincnet_conv_abs_pool";
+
+/// Kernel entries loaded by this host plan
+pub(crate) const REQUIRED_KERNELS: [&str; 2] =
+    [SPK_SINCNET_PACK_FILTERS, SPK_SINCNET_CONV_ABS_POOL];
+
 /// The boundary name
 const LAYER: &str = "sincnet.conv0.abs_pool";
 /// The error context of every check
@@ -76,7 +83,7 @@ impl SincCandidate for Oxide {
         let mut packed = runtime.stream().alloc_zeros(CHANNELS * TAPS)?;
         pack(
             runtime.stream(),
-            &kernels.function("spk_sincnet_pack_filters")?,
+            &kernels.function(SPK_SINCNET_PACK_FILTERS)?,
             &spec.filters.as_view(),
             &mut packed,
         )?;
@@ -84,7 +91,7 @@ impl SincCandidate for Oxide {
         runtime.synchronize()?;
 
         Ok(Self {
-            produce: kernels.function("spk_sincnet_conv_abs_pool")?,
+            produce: kernels.function(SPK_SINCNET_CONV_ABS_POOL)?,
             packed,
             batch: spec.batch,
             samples: spec.samples,

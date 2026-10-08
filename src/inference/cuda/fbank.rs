@@ -35,6 +35,20 @@ use constants::{
 };
 pub use constants::{FBANK_FRAMES, FBANK_MEL_BINS, FBANK_WINDOW_SAMPLES, FbankConstants};
 
+const FBANK_FRAME_WINDOW: &str = "fbank_frame_window";
+const FBANK_POWER: &str = "fbank_power";
+const FBANK_MEL_SPARSE: &str = "fbank_mel_sparse";
+const FBANK_LOG_CMN: &str = "fbank_log_cmn";
+
+/// Kernel entries loaded by this host plan
+#[cfg(test)]
+pub(crate) const REQUIRED_KERNELS: [&str; 4] = [
+    FBANK_FRAME_WINDOW,
+    FBANK_POWER,
+    FBANK_MEL_SPARSE,
+    FBANK_LOG_CMN,
+];
+
 /// Threads per block of `fbank_frame_window`, which handles one frame per warp
 const FRAME_WINDOW_THREADS: u32 = 256;
 /// Frames per block of `fbank_frame_window`
@@ -115,7 +129,7 @@ impl CudaFbank {
                 "fbank.dft",
                 batch,
                 math,
-                super::implementation::Target {
+                super::implementation::AreaTarget {
                     tier: kernels.tier(),
                     device: runtime.compute_capability(),
                 },
@@ -132,10 +146,10 @@ impl CudaFbank {
             tier: kernels.tier(),
             math,
             projection,
-            frame_window: kernels.function("fbank_frame_window")?,
-            power: kernels.function("fbank_power")?,
-            mel_sparse: kernels.function("fbank_mel_sparse")?,
-            log_cmn: kernels.function("fbank_log_cmn")?,
+            frame_window: kernels.function(FBANK_FRAME_WINDOW)?,
+            power: kernels.function(FBANK_POWER)?,
+            mel_sparse: kernels.function(FBANK_MEL_SPARSE)?,
+            log_cmn: kernels.function(FBANK_LOG_CMN)?,
             window: stream.clone_htod(constants.window())?,
             dft_basis: stream.clone_htod(constants.dft_basis())?,
             mel_dense: stream.clone_htod(mel_dense)?,

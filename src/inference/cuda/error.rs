@@ -175,6 +175,25 @@ pub enum CudaError {
         #[source]
         source: DriverError,
     },
+    /// The exact artifact pinned by a record is absent or conflicts with a cached load
+    #[error("CUDA module `{module}` cannot supply requested artifact {artifact:?}")]
+    ArtifactUnavailable {
+        /// The kernel area
+        module: &'static str,
+        /// The requested record identity
+        artifact: super::kernels::LoadedArtifact,
+    },
+    /// The driver rejected the artifact requested by qualification
+    #[error("CUDA module `{module}` rejected requested artifact {artifact:?}: {source}")]
+    ArtifactLoad {
+        /// The kernel area
+        module: &'static str,
+        /// The requested record identity
+        artifact: super::kernels::LoadedArtifact,
+        /// The driver's refusal
+        #[source]
+        source: DriverError,
+    },
     /// A PTX module has no kernel with the requested name
     #[error("PTX module `{module}` has no kernel `{kernel}`: {source}")]
     KernelMissing {

@@ -30,6 +30,8 @@ mod embedding;
 mod error;
 mod fbank;
 mod implementation;
+#[cfg(test)]
+mod kernel_inventory_tests;
 mod kernels;
 #[cfg(feature = "cuda")]
 mod libraries;

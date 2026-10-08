@@ -1,5 +1,11 @@
 //! Qualification-backed selection before any optional library state is created
 
+// runtime wiring is deferred until override policy and input ownership are defined
+#[allow(dead_code)]
+pub(crate) mod overrides;
+
+use super::kernels::{ArtifactHash, ArtifactRequest, LoadedArtifact};
+
 use super::candidate::{
     Batches, ConvCandidate, ConvLayerSpec, ConvOxide, Coverage, CoverageEntry, LstmCandidate,
     LstmOxide, LstmSpec, Maths, PlanError, SincCandidate, SincOxide, SincSpec,
@@ -13,10 +19,30 @@ use super::{
 pub(crate) struct Target {
     pub tier: PtxTier,
     pub device: ComputeCapability,
+    pub artifact: LoadedArtifact,
 }
 
 impl Target {
     /// Resolve the area's actual variant, not the runtime's upper tier limit
+    pub(crate) fn for_area(runtime: &CudaRuntime, area: KernelModule) -> Result<Self, CudaError> {
+        let loaded = runtime.load_kernels(area)?;
+        Ok(Self {
+            tier: loaded.tier(),
+            artifact: loaded.artifact(),
+            device: runtime.compute_capability(),
+        })
+    }
+}
+
+/// An embedded variant and device, without claiming that an artifact was loaded
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AreaTarget {
+    pub tier: PtxTier,
+    pub device: ComputeCapability,
+}
+
+impl AreaTarget {
+    /// Resolve Library diagnostics without loading an unused candidate module
     pub(crate) fn for_area(runtime: &CudaRuntime, area: KernelModule) -> Result<Self, CudaError> {
         Ok(Self {
             tier: runtime.area_ptx(area)?.0,
@@ -42,6 +68,10 @@ pub(crate) enum Choice {
     #[default]
     Library,
     Oxide(Selection),
+    /// The pinned FP32 production path with a stage-only timing fault
+    StageTail,
+    /// The same pinned FP32 production path without the timing fault
+    StageTailControl,
     Mutant(super::test_support::Mutant),
 }
 
@@ -61,8 +91,17 @@ struct Production {
     coverage: Coverage,
     tier: PtxTier,
     devices: &'static [ComputeCapability],
+    artifact: LoadedArtifact,
     record: &'static str,
     der: &'static str,
+}
+
+impl Production {
+    fn matches_target(&self, target: Target) -> bool {
+        self.tier == target.tier
+            && self.devices.contains(&target.device)
+            && self.artifact == target.artifact
+    }
 }
 
 /// SHA256 of qualify-resnet-Oxide-20261004T064208.284837Z.json.gz
@@ -86,7 +125,6 @@ const C32: &[&str] = &[
     "resnet.layer1.1.conv2",
     "resnet.layer1.2.conv1",
     "resnet.layer1.2.conv2",
-    "resnet.layer2.0.conv1",
 ];
 const C64: &[&str] = &[
     "resnet.layer2.0.conv2",
@@ -107,6 +145,20 @@ const PRODUCTION: &[Production] = &[
                 batches: Batches::Only(&MODEL_BATCHES),
                 maths: Maths::All,
             },
+            // the 36-SM RTX 5060 Ti control recorded a hard "candidate slower than the
+            // faster Library process" failure, then unresolved noise (min pair 0.989,
+            // spread 0.025); the legacy record used a 70-SM RTX 5070 Ti
+            // a recorded hard failure cannot be outweighed by a later pass
+            CoverageEntry {
+                layers: &["resnet.layer2.0.conv1"],
+                batches: Batches::Only(&[32]),
+                maths: Maths::All,
+            },
+            CoverageEntry {
+                layers: &["resnet.layer2.0.conv1"],
+                batches: Batches::Only(&[1]),
+                maths: Maths::Only(&[CudaMath::Tf32]),
+            },
             CoverageEntry {
                 layers: C64,
                 batches: Batches::Only(&[32]),
@@ -120,6 +172,11 @@ const PRODUCTION: &[Production] = &[
         ]),
         tier: PtxTier::Sm75,
         devices: DEVICES,
+        artifact: LoadedArtifact::PtxJit {
+            sha256: ArtifactHash::from_hex(
+                "dd6449c0129f9a03bf691c0338611b50b651ab714d5803caedea87de3c72b6b7",
+            ),
+        },
         record: RESNET_RECORD,
         der: INTEGRATED_DER,
     },
@@ -132,6 +189,11 @@ const PRODUCTION: &[Production] = &[
         }]),
         tier: PtxTier::Sm75,
         devices: DEVICES,
+        artifact: LoadedArtifact::PtxJit {
+            sha256: ArtifactHash::from_hex(
+                "72945743a3c1b915c05d8ea21b438dfd860fa9487401c447fb24fd48802916fa",
+            ),
+        },
         record: LSTM_RECORD,
         der: INTEGRATED_DER,
     },
@@ -144,10 +206,122 @@ const PRODUCTION: &[Production] = &[
         }]),
         tier: PtxTier::Sm75,
         devices: DEVICES,
+        artifact: LoadedArtifact::PtxJit {
+            sha256: ArtifactHash::from_hex(
+                "967bc6893f80da84d8d4d288f2cf1ca3336ca09c4386495cab722beb0ac87247",
+            ),
+        },
         record: SINC_RECORD,
         der: INTEGRATED_DER,
     },
 ];
+
+// one owner per area/tier/device prevents conflicting artifact requests at compile time
+const _: () = validate_production_owners(PRODUCTION);
+
+const fn validate_production_owners(entries: &[Production]) {
+    let mut i = 0;
+    while i < entries.len() {
+        let mut j = i + 1;
+        while j < entries.len() {
+            if entries[i].area as u8 == entries[j].area as u8
+                && entries[i].tier as u8 == entries[j].tier as u8
+            {
+                let mut a = 0;
+                while a < entries[i].devices.len() {
+                    let mut b = 0;
+                    while b < entries[j].devices.len() {
+                        let left = entries[i].devices[a];
+                        let right = entries[j].devices[b];
+                        assert!(
+                            left.major != right.major || left.minor != right.minor,
+                            "production area/tier/device must have one artifact owner"
+                        );
+                        b += 1;
+                    }
+                    a += 1;
+                }
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+}
+
+/// Production artifact policy, independent of an explicit qualification request
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ProductionArtifactOwner {
+    /// Preserve the always-on kernels' driver-JIT behavior on every device
+    AlwaysOnPtxJit,
+    /// Use exactly the artifact accepted by a production record
+    Qualified(LoadedArtifact),
+}
+
+impl ProductionArtifactOwner {
+    /// Resolve the policy with the bytes embedded in this binary
+    pub(crate) fn request(self, ptx: &str) -> ArtifactRequest {
+        let artifact = match self {
+            Self::AlwaysOnPtxJit => LoadedArtifact::PtxJit {
+                sha256: ArtifactHash::of(ptx.as_bytes()),
+            },
+            Self::Qualified(artifact) => artifact,
+        };
+        ArtifactRequest::Pinned(artifact)
+    }
+}
+
+// always-on areas retain the artifact policy used before cubins were shipped
+const ALWAYS_ON: &[KernelModule] = &[
+    KernelModule::Fbank,
+    KernelModule::Embedding,
+    KernelModule::Segmentation,
+];
+
+const _: () = {
+    let mut index = 0;
+    while index < PRODUCTION.len() {
+        let mut always = 0;
+        while always < ALWAYS_ON.len() {
+            assert!(
+                PRODUCTION[index].area as u8 != ALWAYS_ON[always] as u8,
+                "always-on policy and record owner must not overlap"
+            );
+            always += 1;
+        }
+        index += 1;
+    }
+};
+
+/// Every production module load must have an owner before it reaches the driver
+pub(crate) fn artifact_owner(
+    area: KernelModule,
+    location: AreaTarget,
+) -> Option<ProductionArtifactOwner> {
+    if ALWAYS_ON.contains(&area) {
+        return Some(ProductionArtifactOwner::AlwaysOnPtxJit);
+    }
+    production_artifact(area, location).map(ProductionArtifactOwner::Qualified)
+}
+
+/// The record owns the artifact request before any module is loaded
+pub(crate) fn production_artifact(
+    area: KernelModule,
+    location: AreaTarget,
+) -> Option<LoadedArtifact> {
+    production_owner(PRODUCTION, area, location).map(|entry| entry.artifact)
+}
+
+fn production_owner(
+    entries: &[Production],
+    area: KernelModule,
+    location: AreaTarget,
+) -> Option<&Production> {
+    entries.iter().find(|entry| {
+        entry.area == area
+            && entry.tier == location.tier
+            && entry.devices.contains(&location.device)
+    })
+}
 
 /// A boundary accepted by a pinned record, or an explicit qualification control
 #[derive(Debug)]
@@ -294,8 +468,7 @@ pub(crate) fn select(
         return Err(SelectionError);
     }
     let entry = PRODUCTION.iter().find(|entry| {
-        entry.tier == target.tier
-            && entry.devices.contains(&target.device)
+        entry.matches_target(target)
             && MODEL_BATCHES.contains(&batch)
             && entry.coverage.covers(boundary, batch, math)
             && boundary.split('.').next() == Some(entry.area.name())
@@ -315,10 +488,34 @@ pub(crate) fn select(
 }
 
 /// Whether a forced tier has any production evidence on this exact device
-pub(crate) fn tier_qualified(target: Target) -> bool {
+pub(crate) fn tier_qualified(area: KernelModule, target: Target) -> bool {
     PRODUCTION
         .iter()
-        .any(|entry| entry.tier == target.tier && entry.devices.contains(&target.device))
+        .any(|entry| entry.area == area && entry.matches_target(target))
+}
+
+/// Declare legacy fixture coverage without loading an otherwise unused module
+///
+/// This only enumerates test tuples. Actual plans still need the successful
+/// loaded artifact to obtain a production token through `plan_selection`
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+pub(crate) fn legacy_fixture_coverage(
+    area: KernelModule,
+    location: AreaTarget,
+    embedded_ptx_sha256: ArtifactHash,
+) -> Coverage {
+    PRODUCTION
+        .iter()
+        .find(|entry| {
+            entry.area == area
+                && entry.tier == location.tier
+                && entry.devices.contains(&location.device)
+                && entry.artifact
+                    == LoadedArtifact::PtxJit {
+                        sha256: embedded_ptx_sha256,
+                    }
+        })
+        .map_or(Coverage::NONE, |entry| entry.coverage)
 }
 
 /// Selection for a concrete plan, with test controls kept outside production
@@ -332,31 +529,130 @@ pub(crate) fn plan_selection(
         Choice,
     >,
 ) -> Result<Selected, CudaError> {
-    let target = Target::for_area(runtime, area)?;
-    let selected =
+    let request = PlanRequest::Production;
+    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    let request = override_choice.map_or_else(
+        || match super::test_support::default_choice(Choice::Oxide(Selection::Production)) {
+            Choice::Oxide(Selection::Production) => request,
+            choice => PlanRequest::Qualification(choice),
+        },
+        PlanRequest::Qualification,
+    );
+    request.resolve(
+        area,
+        boundary,
+        batch,
+        math,
+        AreaTarget::for_area(runtime, area)?,
+        |request| {
+            let loaded = runtime.load_requested_kernels(area, request)?;
+            Ok(Target {
+                tier: loaded.tier(),
+                device: runtime.compute_capability(),
+                artifact: loaded.artifact(),
+            })
+        },
+    )
+}
+
+/// Selection intent precedes artifact loading; only an Oxide token needs artifact identity
+#[derive(Debug, Clone, Copy)]
+enum PlanRequest {
+    Production,
+    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    Qualification(Choice),
+}
+
+impl PlanRequest {
+    fn resolve(
+        self,
+        area: KernelModule,
+        boundary: &str,
+        batch: usize,
+        math: CudaMath,
+        location: AreaTarget,
+        load: impl FnOnce(ArtifactRequest) -> Result<Target, CudaError>,
+    ) -> Result<Selected, CudaError> {
+        if boundary.is_empty() || batch == 0 {
+            return Err(CudaError::Unsupported {
+                context: "CUDA selection",
+                reason: SelectionError.to_string(),
+            });
+        }
+
+        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        if let Self::Qualification(choice) = self {
+            match choice {
+                Choice::Library => return Ok(Selected::Library),
+                Choice::Mutant(mutant) => return Ok(Selected::Mutant(mutant)),
+                Choice::StageTail | Choice::StageTailControl if math != CudaMath::Fp32 => {
+                    return Ok(Selected::Library);
+                }
+                Choice::Oxide(Selection::Explicit) => {
+                    if !candidate_coverage(area, location.tier).covers(boundary, batch, math) {
+                        return Ok(Selected::Library);
+                    }
+                    return qualification_selection(
+                        choice,
+                        area,
+                        boundary,
+                        batch,
+                        math,
+                        load(ArtifactRequest::EmbeddedExact)?,
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        // uncovered production tuples cannot need a loaded artifact, even for diagnostics
+        let Some(entry) = production_owner(PRODUCTION, area, location).filter(|entry| {
+            MODEL_BATCHES.contains(&batch) && entry.coverage.covers(boundary, batch, math)
+        }) else {
+            return Ok(Selected::Library);
+        };
+        let target = match load(ArtifactRequest::Pinned(entry.artifact)) {
+            Ok(target) => target,
+            Err(error) => {
+                return artifact_refusal(
+                    error,
+                    matches!(self, Self::Production) && !super::driver_only(),
+                );
+            }
+        };
         select(boundary, batch, math, target).map_err(|error| CudaError::Unsupported {
             context: "CUDA selection",
             reason: error.to_string(),
-        })?;
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
-    {
-        let choice = override_choice.unwrap_or_else(|| {
-            super::test_support::default_choice(match selected {
-                Selected::Oxide(_) => Choice::Oxide(Selection::Production),
-                _ => Choice::Library,
-            })
-        });
-        if choice == Choice::Oxide(Selection::Production) {
-            return Ok(selected);
-        }
-        qualification_selection(choice, area, boundary, batch, math, target)
+        })
     }
-    #[cfg(not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))))]
-    Ok(selected)
+}
+
+/// Only production may use the established Library policy after an artifact refusal
+fn artifact_refusal(error: CudaError, library_allowed: bool) -> Result<Selected, CudaError> {
+    if library_allowed
+        && matches!(
+            error,
+            CudaError::ArtifactLoad { .. } | CudaError::ArtifactUnavailable { .. }
+        )
+    {
+        tracing::warn!(%error, "CUDA qualified artifact unavailable; using Library");
+        return Ok(Selected::Library);
+    }
+    Err(error)
 }
 
 #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
-pub(crate) fn qualification_selection(
+fn candidate_coverage(area: KernelModule, tier: PtxTier) -> Coverage {
+    match area {
+        KernelModule::Resnet => ConvOxide::coverage(tier),
+        KernelModule::Lstm => LstmOxide::coverage(tier),
+        KernelModule::Sincnet => SincOxide::coverage(tier),
+        _ => Coverage::NONE,
+    }
+}
+
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+fn qualification_selection(
     choice: Choice,
     area: KernelModule,
     boundary: &str,
@@ -364,12 +660,7 @@ pub(crate) fn qualification_selection(
     math: CudaMath,
     target: Target,
 ) -> Result<Selected, CudaError> {
-    let coverage = match area {
-        KernelModule::Resnet => ConvOxide::coverage(target.tier),
-        KernelModule::Lstm => LstmOxide::coverage(target.tier),
-        KernelModule::Sincnet => SincOxide::coverage(target.tier),
-        _ => Coverage::NONE,
-    };
+    let coverage = candidate_coverage(area, target.tier);
     Ok(match choice {
         Choice::Oxide(selection) if coverage.covers(boundary, batch, math) => {
             Selected::Oxide(Qualified {
@@ -383,7 +674,16 @@ pub(crate) fn qualification_selection(
             })
         }
         Choice::Mutant(mutant) => Selected::Mutant(mutant),
-        _ => Selected::Library,
+        Choice::StageTail | Choice::StageTailControl if math == CudaMath::Fp32 => {
+            // isolated segmentation selectors use this owner directly, without plan_selection
+            select(boundary, batch, math, target).map_err(|error| CudaError::Unsupported {
+                context: "CUDA selection",
+                reason: error.to_string(),
+            })?
+        }
+        Choice::Library | Choice::Oxide(_) | Choice::StageTail | Choice::StageTailControl => {
+            Selected::Library
+        }
     })
 }
 
@@ -394,17 +694,18 @@ pub(crate) struct LibraryNeed {
     boundary: String,
     batch: usize,
     math: CudaMath,
-    target: Target,
+    target: AreaTarget,
     library: CudaLibrary,
 }
 
 impl LibraryNeed {
+    /// Describe required Library state without constructing a candidate artifact key
     pub(crate) fn new(
         area: KernelModule,
         boundary: &str,
         batch: usize,
         math: CudaMath,
-        target: Target,
+        target: AreaTarget,
         library: CudaLibrary,
     ) -> Self {
         Self {

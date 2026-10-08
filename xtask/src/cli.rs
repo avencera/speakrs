@@ -203,20 +203,30 @@ impl Command {
 
 #[derive(Subcommand)]
 enum CudaKernelsCmd {
-    /// Regenerate the committed PTX (GPU box only: needs cargo-oxide and CUDA 13)
+    /// Regenerate PTX and cubins (GPU box only: needs cargo-oxide and CUDA 13.0)
     Build {
         /// Areas to rebuild; all areas when empty
         areas: Vec<String>,
     },
-    /// Fail when the committed PTX is stale against the kernel sources (runs anywhere)
-    Check,
+    /// Check committed PTX and cubins against sources, hashes and pins (runs anywhere)
+    Check {
+        /// Rebuild cubins with pinned ptxas and require byte identity (GPU box only)
+        #[arg(long)]
+        rebuild: bool,
+    },
+    /// Build cubins only from committed PTX, without cuda-oxide (needs CUDA 13.0)
+    BuildCubins {
+        /// Areas to rebuild; all areas when empty
+        areas: Vec<String>,
+    },
 }
 
 impl CudaKernelsCmd {
     fn run(self) -> Result<()> {
         match self {
             Self::Build { areas } => commands::cuda_kernels::build(&areas),
-            Self::Check => commands::cuda_kernels::check(),
+            Self::Check { rebuild } => commands::cuda_kernels::check(rebuild),
+            Self::BuildCubins { areas } => commands::cuda_kernels::build_cubins(&areas),
         }
     }
 }

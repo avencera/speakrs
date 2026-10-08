@@ -16,6 +16,8 @@
 mod dispatch;
 mod graph;
 mod kernels;
+#[cfg(test)]
+pub(super) use kernels::REQUIRED_KERNELS;
 #[cfg(feature = "cuda")]
 mod rnn;
 mod shape;
@@ -39,7 +41,7 @@ use super::candidate::{LstmOxide, SincCandidate, SincOutput, SincOxide};
 use super::dnn::Conv2d;
 #[cfg(feature = "cuda")]
 use super::dnn::{ConvPlan, ConvPlanner};
-use super::implementation::{LibraryNeed, MODEL_BATCHES, Selected, Target, plan_selection, select};
+use super::implementation::{AreaTarget, LibraryNeed, MODEL_BATCHES, Selected, plan_selection};
 use super::{CudaError, CudaMath, CudaRuntime, DeviceTensor, PtxTier, SafetensorsFile, Sgemm};
 use super::{CudaLibrary, KernelModule};
 
@@ -125,7 +127,7 @@ impl ConvStage {
             boundary,
             spec.batch,
             spec.math,
-            Target::for_area(runtime, KernelModule::Segmentation)?,
+            AreaTarget::for_area(runtime, KernelModule::Segmentation)?,
             CudaLibrary::Cudnn,
         )
         .prepare(runtime)?;
@@ -310,13 +312,16 @@ impl Network {
                 (KernelModule::Segmentation, "sincnet.conv2"),
                 (KernelModule::Lstm, dispatch::LSTM_LAYER),
             ] {
-                let target = Target::for_area(runtime, area)?;
-                let selected = select(boundary, batch, options.math, target).map_err(|error| {
-                    CudaError::Unsupported {
-                        context: "segmentation selection",
-                        reason: error.to_string(),
-                    }
-                })?;
+                let target = AreaTarget::for_area(runtime, area)?;
+                let selected = plan_selection(
+                    runtime,
+                    area,
+                    boundary,
+                    batch,
+                    options.math,
+                    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+                    None,
+                )?;
                 if matches!(selected, Selected::Library) {
                     needs.push(LibraryNeed::new(
                         area,
@@ -356,7 +361,7 @@ impl Network {
                     boundary,
                     batch,
                     options.math,
-                    Target::for_area(runtime, KernelModule::Segmentation)?,
+                    AreaTarget::for_area(runtime, KernelModule::Segmentation)?,
                     CudaLibrary::Cublas,
                 ));
             }
@@ -371,7 +376,7 @@ impl Network {
             "linear0",
             1,
             options.math,
-            Target::for_area(runtime, KernelModule::Segmentation)?,
+            AreaTarget::for_area(runtime, KernelModule::Segmentation)?,
             CudaLibrary::Cublas,
         )
         .prepare(runtime)?;

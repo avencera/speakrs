@@ -3,6 +3,20 @@ use cudarc::driver::{CudaFunction, CudaView, CudaViewMut, LaunchConfig, PushKern
 use super::super::error::check_len;
 use super::super::{CudaError, CudaRuntime, KernelModule, PtxTier};
 
+const EMBEDDING_FBANK_TRANSPOSE: &str = "embedding_fbank_transpose";
+const EMBEDDING_BIAS: &str = "embedding_bias";
+const EMBEDDING_BROADCAST_ROWS: &str = "embedding_broadcast_rows";
+const EMBEDDING_MASK_POOL: &str = "embedding_mask_pool";
+
+/// Kernel entries loaded by this host plan
+#[cfg(test)]
+pub(crate) const REQUIRED_KERNELS: [&str; 4] = [
+    EMBEDDING_FBANK_TRANSPOSE,
+    EMBEDDING_BIAS,
+    EMBEDDING_BROADCAST_ROWS,
+    EMBEDDING_MASK_POOL,
+];
+
 /// Threads per block for every embedding kernel; a multiple of the warp size, as
 /// the pooling kernel requires
 const BLOCK_THREADS: u32 = 256;
@@ -57,10 +71,10 @@ impl EmbeddingKernels {
         let kernels = runtime.load_kernels(KernelModule::Embedding)?;
         Ok(Self {
             tier: kernels.tier(),
-            fbank_transpose: kernels.function("embedding_fbank_transpose")?,
-            bias: kernels.function("embedding_bias")?,
-            broadcast_rows: kernels.function("embedding_broadcast_rows")?,
-            mask_pool: kernels.function("embedding_mask_pool")?,
+            fbank_transpose: kernels.function(EMBEDDING_FBANK_TRANSPOSE)?,
+            bias: kernels.function(EMBEDDING_BIAS)?,
+            broadcast_rows: kernels.function(EMBEDDING_BROADCAST_ROWS)?,
+            mask_pool: kernels.function(EMBEDDING_MASK_POOL)?,
         })
     }
 

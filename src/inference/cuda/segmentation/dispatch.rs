@@ -12,7 +12,7 @@ use super::super::candidate::{
     LstmCandidate, LstmLayerWeights, LstmPhases, LstmSpec, Phases, Projection, SincCandidate,
     SincInputs, SincOutput, SincOxide, SincSpec,
 };
-use super::super::implementation::{LibraryNeed, Selected, Target};
+use super::super::implementation::{AreaTarget, LibraryNeed, Selected};
 use super::super::{CudaLibrary, KernelModule};
 #[cfg(feature = "cuda")]
 use super::super::{CudaLstmAlgorithm, dnn::ConvPlanner};
@@ -197,7 +197,7 @@ impl Network {
             SINC_LAYER,
             shape.batch,
             self.options.math,
-            Target::for_area(runtime, KernelModule::Sincnet)?,
+            AreaTarget::for_area(runtime, KernelModule::Sincnet)?,
             CudaLibrary::Cudnn,
         )
         .prepare(runtime)?;
@@ -328,7 +328,7 @@ impl Network {
             LSTM_LAYER,
             shape.batch,
             self.options.math,
-            Target::for_area(runtime, KernelModule::Lstm)?,
+            AreaTarget::for_area(runtime, KernelModule::Lstm)?,
             CudaLibrary::Cudnn,
         )
         .prepare(runtime)?;
@@ -341,7 +341,7 @@ impl Network {
                     LSTM_LAYER,
                     shape.batch,
                     self.options.math,
-                    Target::for_area(runtime, KernelModule::Lstm)?,
+                    AreaTarget::for_area(runtime, KernelModule::Lstm)?,
                     CudaLibrary::Nvrtc,
                 )
                 .prepare(runtime)?;

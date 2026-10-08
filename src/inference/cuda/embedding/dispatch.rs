@@ -9,7 +9,7 @@ use super::super::candidate::{ConvCandidate, ConvInputs, ConvLayerSpec, ConvOxid
 use super::super::dnn::Residual;
 #[cfg(feature = "cuda")]
 use super::super::dnn::{ConvPlan, ConvPlanner};
-use super::super::implementation::{LibraryNeed, Selected, Target, plan_selection};
+use super::super::implementation::{AreaTarget, LibraryNeed, Selected, plan_selection};
 use super::super::{CudaLibrary, CudaMath, CudaRuntime, KernelModule};
 use super::trunk::{ConvLayer, Trunk};
 use super::{Convs, CudaError};
@@ -177,7 +177,7 @@ pub(super) fn plan_layers(
             layer.name(),
             batch,
             math,
-            Target::for_area(runtime, KernelModule::Resnet)?,
+            AreaTarget::for_area(runtime, KernelModule::Resnet)?,
             CudaLibrary::Cudnn,
         )
         .prepare(runtime)?;

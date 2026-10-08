@@ -92,7 +92,7 @@ fn insufficient_cooperative_capacity_falls_back_only_in_library_allowed_producti
         "lstm.stack",
         1,
         CudaMath::Fp32,
-        Target { tier: PtxTier::Sm75, device: ComputeCapability::new(12, 0) },
+        Target { tier: PtxTier::Sm75, device: ComputeCapability::new(12, 0), artifact: super::kernels::LoadedArtifact::PtxJit { sha256: super::kernels::ArtifactHash::of(include_str!("ptx/lstm.sm75.ptx").as_bytes()) } },
     ).unwrap() else { panic!("qualified production token") };
     assert!(token.finish(KernelModule::Lstm, false, schedule()).unwrap().is_none());
     assert!(matches!(

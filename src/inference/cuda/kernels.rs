@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
+
 use cudarc::driver::{CudaFunction, CudaModule};
 
 use super::{ComputeCapability, CudaError, PtxTier};
@@ -9,13 +11,149 @@ use super::{ComputeCapability, CudaError, PtxTier};
 /// The kernel check verifies these masks so tier-only builds include each area's
 /// fallback without also including variants they do not need
 macro_rules! tier_ptx {
-    ([$($feature:literal),+], $path:literal) => {{
+    ([$($feature:literal),+], $stem:literal, [$($arch:literal),+]) => {{
         #[cfg(any($(feature = $feature),+))]
-        let ptx = Some(include_str!($path));
+        const CUBINS: &[EmbeddedCubin] = &[$(EmbeddedCubin {
+            arch: ComputeCapability::new($arch / 10, $arch % 10),
+            bytes: include_bytes!(concat!($stem, ".sm_", stringify!($arch), ".cubin")),
+        }),+];
+        #[cfg(any($(feature = $feature),+))]
+        let ptx = Some(EmbeddedPtx {
+            text: include_str!(concat!($stem, ".ptx")),
+            cubins: CUBINS,
+        });
         #[cfg(not(any($(feature = $feature),+)))]
         let ptx = None;
         ptx
     }};
+}
+
+/// Set to `1` to disable cubins and use embedded PTX JIT for diagnosis
+pub const FORCE_PTX_JIT_ENV: &str = "SPEAKRS_CUDA_FORCE_PTX_JIT";
+
+/// Content identity of bytes embedded in the running binary
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ArtifactHash([u8; 32]);
+
+impl ArtifactHash {
+    /// Hash the actual artifact bytes, not a source-tree file or manifest claim
+    pub fn of(bytes: &[u8]) -> Self {
+        Self(Sha256::digest(bytes).into())
+    }
+
+    /// Read a canonical pinned hash; invalid pins fail at compile time in constants
+    pub const fn from_hex(text: &str) -> Self {
+        const fn digit(byte: u8) -> u8 {
+            match byte {
+                b'0'..=b'9' => byte - b'0',
+                b'a'..=b'f' => byte - b'a' + 10,
+                _ => panic!("hash must use lowercase hexadecimal"),
+            }
+        }
+        assert!(
+            text.len() == 64,
+            "hash must contain 64 hexadecimal characters"
+        );
+        let mut bytes = [0; 32];
+        let mut index = 0;
+        while index < bytes.len() {
+            bytes[index] =
+                digit(text.as_bytes()[index * 2]) * 16 + digit(text.as_bytes()[index * 2 + 1]);
+            index += 1;
+        }
+        Self(bytes)
+    }
+}
+
+impl std::fmt::Display for ArtifactHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for byte in self.0 {
+            write!(f, "{byte:02x}")?;
+        }
+        Ok(())
+    }
+}
+
+/// The exact artifact accepted by the driver for a kernel area
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LoadedArtifact {
+    /// Ready SASS compiled for this exact device capability
+    Cubin {
+        /// Exact cubin architecture, never an older compatible architecture
+        arch: ComputeCapability,
+        /// Hash of the binary bytes handed to the driver
+        sha256: ArtifactHash,
+    },
+    /// Embedded PTX compiled by the device driver
+    PtxJit {
+        /// Hash of the PTX text handed to the driver
+        sha256: ArtifactHash,
+    },
+}
+
+/// One embedded binary, available only alongside its source PTX variant
+#[derive(Debug, Clone, Copy)]
+pub(super) struct EmbeddedCubin {
+    pub arch: ComputeCapability,
+    pub bytes: &'static [u8],
+}
+
+/// The PTX fallback and exact-architecture binaries for one tier
+#[derive(Debug, Clone, Copy)]
+pub(super) struct EmbeddedPtx {
+    pub text: &'static str,
+    pub cubins: &'static [EmbeddedCubin],
+}
+
+impl EmbeddedPtx {
+    pub fn cubin(self, device: ComputeCapability) -> Option<EmbeddedCubin> {
+        self.cubins
+            .iter()
+            .copied()
+            .find(|cubin| cubin.arch == device)
+    }
+}
+
+/// An artifact request resolved before the driver sees any bytes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArtifactRequest {
+    /// The exact artifact pinned by a qualification record
+    Pinned(LoadedArtifact),
+    /// An explicit qualification of the best embedded artifact for this device
+    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    EmbeddedExact,
+}
+
+/// Failure to load the requested artifact, without substituting another artifact
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum ArtifactLoadError<E> {
+    Unavailable,
+    Driver(E),
+}
+
+/// Load exactly the requested bytes; driver rejection never tries the other format
+pub(super) fn load_artifact<T, E>(
+    requested: LoadedArtifact,
+    cubin: Option<EmbeddedCubin>,
+    ptx_sha256: ArtifactHash,
+    load_cubin: impl FnOnce(&[u8]) -> Result<T, E>,
+    load_ptx: impl FnOnce() -> Result<T, E>,
+) -> Result<(T, LoadedArtifact), ArtifactLoadError<E>> {
+    let loaded = match requested {
+        LoadedArtifact::PtxJit { sha256 } if sha256 == ptx_sha256 => load_ptx(),
+        LoadedArtifact::Cubin { arch, sha256 } => {
+            let Some(cubin) =
+                cubin.filter(|cubin| cubin.arch == arch && ArtifactHash::of(cubin.bytes) == sha256)
+            else {
+                return Err(ArtifactLoadError::Unavailable);
+            };
+            load_cubin(cubin.bytes)
+        }
+        _ => return Err(ArtifactLoadError::Unavailable),
+    };
+    loaded
+        .map(|loaded| (loaded, requested))
+        .map_err(ArtifactLoadError::Driver)
 }
 
 /// A cuda-oxide kernel area, embedded as committed PTX
@@ -64,42 +202,64 @@ impl KernelModule {
         }
     }
 
+    /// The build metadata embedded beside this area's artifact bytes
+    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    pub(crate) const fn manifest(self) -> &'static str {
+        match self {
+            #[cfg(test)]
+            Self::Probe => include_str!("ptx/probe.manifest"),
+            Self::Fbank => include_str!("ptx/fbank.manifest"),
+            Self::Embedding => include_str!("ptx/embedding.manifest"),
+            Self::Segmentation => include_str!("ptx/segmentation.manifest"),
+            Self::Resnet => include_str!("ptx/resnet.manifest"),
+            Self::Lstm => include_str!("ptx/lstm.manifest"),
+            Self::Sincnet => include_str!("ptx/sincnet.manifest"),
+        }
+    }
+
     /// The PTX variants embedded in this build
     pub const fn variants(self) -> AreaPtx {
         match self {
             #[cfg(test)]
             Self::Probe => AreaPtx {
-                sm75: tier_ptx!(["cuda-sm75"], "ptx/probe.sm75.ptx"),
+                sm75: tier_ptx!(["cuda-sm75"], "ptx/probe.sm75", [75, 80, 86, 89, 90, 120]),
                 sm80: tier_ptx!(
                     ["cuda-sm80", "cuda-sm90", "cuda-sm120"],
-                    "ptx/probe.sm80.ptx"
+                    "ptx/probe.sm80",
+                    [80, 86, 89, 90, 120]
                 ),
                 sm90: None,
                 sm120: None,
             },
             Self::Fbank => AreaPtx::baseline(tier_ptx!(
                 ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120"],
-                "ptx/fbank.sm75.ptx"
+                "ptx/fbank.sm75",
+                [75, 80, 86, 89, 90, 120]
             )),
             Self::Embedding => AreaPtx::baseline(tier_ptx!(
                 ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120"],
-                "ptx/embedding.sm75.ptx"
+                "ptx/embedding.sm75",
+                [75, 80, 86, 89, 90, 120]
             )),
             Self::Segmentation => AreaPtx::baseline(tier_ptx!(
                 ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120"],
-                "ptx/segmentation.sm75.ptx"
+                "ptx/segmentation.sm75",
+                [75, 80, 86, 89, 90, 120]
             )),
             Self::Resnet => AreaPtx::baseline(tier_ptx!(
                 ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120"],
-                "ptx/resnet.sm75.ptx"
+                "ptx/resnet.sm75",
+                [75, 80, 86, 89, 90, 120]
             )),
             Self::Lstm => AreaPtx::baseline(tier_ptx!(
                 ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120"],
-                "ptx/lstm.sm75.ptx"
+                "ptx/lstm.sm75",
+                [75, 80, 86, 89, 90, 120]
             )),
             Self::Sincnet => AreaPtx::baseline(tier_ptx!(
                 ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120"],
-                "ptx/sincnet.sm75.ptx"
+                "ptx/sincnet.sm75",
+                [75, 80, 86, 89, 90, 120]
             )),
         }
     }
@@ -113,14 +273,14 @@ impl KernelModule {
 /// `cargo xtask cuda-kernels check` verifies, so the host can load any of them
 #[derive(Debug, Clone, Copy)]
 pub struct AreaPtx {
-    sm75: Option<&'static str>,
-    sm80: Option<&'static str>,
-    sm90: Option<&'static str>,
-    sm120: Option<&'static str>,
+    sm75: Option<EmbeddedPtx>,
+    sm80: Option<EmbeddedPtx>,
+    sm90: Option<EmbeddedPtx>,
+    sm120: Option<EmbeddedPtx>,
 }
 
 impl AreaPtx {
-    const fn baseline(sm75: Option<&'static str>) -> Self {
+    const fn baseline(sm75: Option<EmbeddedPtx>) -> Self {
         Self {
             sm75,
             sm80: None,
@@ -138,7 +298,17 @@ impl AreaPtx {
             (PtxTier::Sm120, self.sm120),
         ]
         .into_iter()
-        .filter_map(|(tier, ptx)| Some((tier, ptx?)))
+        .filter_map(|(tier, ptx)| Some((tier, ptx?.text)))
+    }
+
+    /// The embedded bytes for one specific tier
+    pub(super) fn embedded(&self, tier: PtxTier) -> Option<EmbeddedPtx> {
+        match tier {
+            PtxTier::Sm75 => self.sm75,
+            PtxTier::Sm80 => self.sm80,
+            PtxTier::Sm90 => self.sm90,
+            PtxTier::Sm120 => self.sm120,
+        }
     }
 
     /// The highest embedded variant at or below `limit`
@@ -170,20 +340,40 @@ pub struct LoadedKernels {
     module: KernelModule,
     tier: PtxTier,
     inner: Arc<CudaModule>,
+    artifact: LoadedArtifact,
+    ptx_sha256: ArtifactHash,
 }
 
 impl LoadedKernels {
-    pub(super) fn new(module: KernelModule, tier: PtxTier, inner: Arc<CudaModule>) -> Self {
+    pub(super) fn new(
+        module: KernelModule,
+        tier: PtxTier,
+        inner: Arc<CudaModule>,
+        artifact: LoadedArtifact,
+        ptx_sha256: ArtifactHash,
+    ) -> Self {
         Self {
             module,
             tier,
             inner,
+            artifact,
+            ptx_sha256,
         }
     }
 
     /// The PTX tier of the variant that was loaded
     pub fn tier(&self) -> PtxTier {
         self.tier
+    }
+
+    /// Identity of the artifact that the driver successfully loaded
+    pub fn artifact(&self) -> LoadedArtifact {
+        self.artifact
+    }
+
+    /// Identity of the fallback PTX text embedded alongside the loaded artifact
+    pub fn ptx_sha256(&self) -> ArtifactHash {
+        self.ptx_sha256
     }
 
     /// Looks up a kernel by its PTX entry name, which is the Rust function name
@@ -201,6 +391,197 @@ impl LoadedKernels {
 #[cfg(test)]
 mod tests {
     use super::{AreaPtx, ComputeCapability, CudaError, KernelModule, PtxTier};
+
+    #[test]
+    #[ignore = "GPU artifact proof; run under the shared GPU flock"]
+    fn driver_artifacts_resolve_every_ptx_entry() -> Result<(), CudaError> {
+        use super::{ArtifactHash, LoadedArtifact, LoadedKernels, load_artifact};
+        use crate::inference::cuda::CudaRuntime;
+        use cudarc::nvrtc::Ptx;
+        use std::fs::{OpenOptions, TryLockError};
+
+        // the proof process must be serialized, including context creation and drops
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/workspace/gpu-bench.lock")
+            .expect("proof runs under the shared GPU lock");
+        assert!(matches!(lock.try_lock(), Err(TryLockError::WouldBlock)));
+        let runtime = CudaRuntime::new(0)?;
+        let device = runtime.compute_capability();
+        let force_jit =
+            std::env::var_os(super::FORCE_PTX_JIT_ENV).is_some_and(|value| value == "1");
+        for area in [
+            KernelModule::Probe,
+            KernelModule::Fbank,
+            KernelModule::Embedding,
+            KernelModule::Segmentation,
+            KernelModule::Resnet,
+            KernelModule::Lstm,
+            KernelModule::Sincnet,
+        ] {
+            for (tier, ptx) in area.variants().iter() {
+                if tier.min_capability() > device {
+                    continue;
+                }
+                let embedded = area.variants().embedded(tier).expect("embedded variant");
+                let cubin = embedded
+                    .cubin(device)
+                    .expect("proof device has exact cubins");
+                let cubin_key = LoadedArtifact::Cubin {
+                    arch: device,
+                    sha256: ArtifactHash::of(cubin.bytes),
+                };
+                let ptx_hash = ArtifactHash::of(ptx.as_bytes());
+                let (module, artifact) = load_artifact(
+                    if force_jit {
+                        LoadedArtifact::PtxJit { sha256: ptx_hash }
+                    } else {
+                        cubin_key
+                    },
+                    Some(cubin),
+                    ptx_hash,
+                    |bytes| {
+                        runtime
+                            .context()
+                            .load_module(Ptx::from_binary(bytes.to_vec()))
+                    },
+                    || runtime.context().load_module(Ptx::from_src(ptx)),
+                )
+                .map_err(|error| match error {
+                    super::ArtifactLoadError::Driver(source) => CudaError::Driver(source),
+                    super::ArtifactLoadError::Unavailable => CudaError::ArtifactUnavailable {
+                        module: area.name(),
+                        artifact: cubin_key,
+                    },
+                })?;
+                if force_jit {
+                    assert_eq!(artifact, LoadedArtifact::PtxJit { sha256: ptx_hash });
+                    assert_ne!(artifact, cubin_key);
+                } else {
+                    // this proof must fail, not silently qualify a rejected cubin's JIT
+                    assert_eq!(artifact, cubin_key);
+                }
+                let loaded = LoadedKernels::new(area, tier, module, artifact, ptx_hash);
+                let mut entries = 0;
+                for line in ptx.lines() {
+                    let Some(entry) = line.trim().strip_prefix(".visible .entry ") else {
+                        continue;
+                    };
+                    let name = entry.split(['(', ' ', '\t']).next().expect("entry name");
+                    loaded.function(name)?;
+                    entries += 1;
+                }
+                assert!(entries > 0, "proof requires declared entry points");
+                println!(
+                    "artifact_proof area={} tier={tier} device={device} artifact={artifact:?} embedded_ptx_sha256={ptx_hash} entries={entries}",
+                    area.name()
+                );
+            }
+            let loaded = runtime.load_kernels(area)?;
+            assert_eq!(loaded.artifact(), runtime.load_kernels(area)?.artifact());
+        }
+        runtime.synchronize()
+    }
+
+    #[test]
+    fn pinned_loading_never_substitutes_artifacts() {
+        use super::{
+            ArtifactHash, ArtifactLoadError, EmbeddedCubin, LoadedArtifact, load_artifact,
+        };
+        let hash = ArtifactHash::of(b"ptx");
+        let jit = LoadedArtifact::PtxJit { sha256: hash };
+        for device in [ComputeCapability::new(8, 9), ComputeCapability::new(12, 0)] {
+            let cubin = EmbeddedCubin {
+                arch: device,
+                bytes: b"cubin",
+            };
+            let binary = LoadedArtifact::Cubin {
+                arch: device,
+                sha256: ArtifactHash::of(cubin.bytes),
+            };
+            let result = load_artifact(
+                binary,
+                Some(cubin),
+                hash,
+                |bytes| Ok::<_, &str>(bytes.to_vec()),
+                || panic!("cubin request cannot JIT"),
+            )
+            .unwrap();
+            assert_eq!(result, (cubin.bytes.to_vec(), binary));
+            assert_eq!(
+                load_artifact::<(), _>(
+                    binary,
+                    Some(cubin),
+                    hash,
+                    |_| Err("driver refusal"),
+                    || panic!("refused cubin must not JIT")
+                ),
+                Err(ArtifactLoadError::Driver("driver refusal"))
+            );
+            assert_eq!(
+                load_artifact::<(), &str>(
+                    binary,
+                    None,
+                    hash,
+                    |_| panic!("missing cubin"),
+                    || panic!("missing cubin must not JIT")
+                ),
+                Err(ArtifactLoadError::Unavailable)
+            );
+            assert_eq!(
+                load_artifact(
+                    jit,
+                    Some(cubin),
+                    hash,
+                    |_| panic!("PTX request cannot load cubin"),
+                    || Ok::<_, &str>("jit")
+                ),
+                Ok(("jit", jit))
+            );
+            assert_eq!(
+                load_artifact::<(), _>(
+                    jit,
+                    Some(cubin),
+                    hash,
+                    |_| panic!("refused PTX cannot load cubin"),
+                    || Err("PTX rejected")
+                ),
+                Err(ArtifactLoadError::Driver("PTX rejected"))
+            );
+        }
+        let wrong = LoadedArtifact::PtxJit {
+            sha256: ArtifactHash::of(b"stale ptx"),
+        };
+        assert_eq!(
+            load_artifact::<(), &str>(
+                wrong,
+                None,
+                hash,
+                |_| panic!("wrong hash"),
+                || panic!("wrong hash")
+            ),
+            Err(ArtifactLoadError::Unavailable)
+        );
+    }
+
+    #[test]
+    fn unknown_device_never_uses_an_older_cubin() {
+        let Some(tier) = KernelModule::Fbank
+            .variants()
+            .iter()
+            .next()
+            .map(|(tier, _)| tier)
+        else {
+            return;
+        };
+        let embedded = KernelModule::Fbank.variants().embedded(tier).unwrap();
+        for device in [ComputeCapability::new(8, 9), ComputeCapability::new(12, 0)] {
+            assert_eq!(embedded.cubin(device).unwrap().arch, device);
+        }
+        assert!(embedded.cubin(ComputeCapability::new(12, 1)).is_none());
+        assert!(embedded.cubin(ComputeCapability::new(10, 0)).is_none());
+    }
 
     #[test]
     fn gpu_targets_embed_each_areas_best_shipped_variant() {
@@ -241,7 +622,10 @@ mod tests {
     fn missing_area_variant_names_area_device_and_target_feature() {
         let area = AreaPtx {
             sm75: None,
-            sm80: Some("test PTX"),
+            sm80: Some(super::EmbeddedPtx {
+                text: "test PTX",
+                cubins: &[],
+            }),
             sm90: None,
             sm120: None,
         };

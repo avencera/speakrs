@@ -25,6 +25,11 @@ use super::{
 use crate::inference::cuda::dnn::Conv2d;
 use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, KernelModule};
 
+const SPK_RESNET_PACK_WEIGHTS: &str = "spk_resnet_pack_weights";
+
+/// Kernel entries loaded by this host plan
+pub(crate) const REQUIRED_KERNELS: [&str; 1] = [SPK_RESNET_PACK_WEIGHTS];
+
 /// The 32 -> 32 convolutions of `layer1` and the strided 32 -> 64 one of `layer2`
 const C32_AND_STRIDED: [&str; 7] = [
     "resnet.layer1.0.conv1",
@@ -54,11 +59,11 @@ const TILE_COLS: usize = 64;
 const PACK_THREADS: u32 = 256;
 
 /// Below this many 256-thread blocks per SM, a shape with small blocks uses them
-const SMALL_BATCH_WAVES: usize = 2;
+pub(super) const SMALL_BATCH_WAVES: usize = 2;
 
 /// The convolution shapes that have a fused kernel: 3x3, padding 1, no dilation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Shape {
+pub(super) enum Shape {
     /// 32 -> 32 channels, stride 1
     C32,
     /// 64 -> 64 channels, stride 1
@@ -90,7 +95,7 @@ impl Shape {
     }
 
     /// The 256-thread kernel, and the small-block one where it exists
-    fn tilings(self) -> (Tiling, Option<Tiling>) {
+    pub(super) fn tilings(self) -> (Tiling, Option<Tiling>) {
         match self {
             Self::C32 => (Tiling::new("spk_resnet_conv3x3_c32", 256, 8), None),
             Self::C64 => (
@@ -108,8 +113,8 @@ impl Shape {
 /// One kernel entry with its fixed block: `threads` per block covering 64 output
 /// columns of `rows` output rows; both must match the kernel crate
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Tiling {
-    entry: &'static str,
+pub(super) struct Tiling {
+    pub(super) entry: &'static str,
     threads: u32,
     rows: usize,
 }
@@ -133,9 +138,22 @@ impl Tiling {
         ))
     }
 
-    fn blocks(self, batch: usize, output: [usize; 2]) -> usize {
+    pub(super) fn blocks(self, batch: usize, output: [usize; 2]) -> usize {
         let [h, w] = output;
         w.div_ceil(TILE_COLS) * h.div_ceil(self.rows) * batch
+    }
+}
+
+pub(super) fn select_tiling(
+    large: Tiling,
+    small: Option<Tiling>,
+    batch: usize,
+    output: [usize; 2],
+    multiprocessors: usize,
+) -> Tiling {
+    match small {
+        Some(small) if large.blocks(batch, output) < SMALL_BATCH_WAVES * multiprocessors => small,
+        _ => large,
     }
 }
 
@@ -203,19 +221,16 @@ impl ConvCandidate for Oxide {
         // a batch whose 256-thread grid would leave SMs idle or doubly loaded uses
         // the small blocks, which spread the same work evenly
         let (large, small) = shape.tilings();
-        let tiling = match small {
-            Some(small)
-                if large.blocks(conv.batch, output)
-                    < SMALL_BATCH_WAVES * runtime.multiprocessor_count()? =>
-            {
-                small
-            }
-            _ => large,
+        let multiprocessors = if small.is_some() {
+            runtime.multiprocessor_count()?
+        } else {
+            0
         };
+        let tiling = select_tiling(large, small, conv.batch, output, multiprocessors);
         let weight_len = conv.out_channels * conv.in_channels * 9;
         check_len("fused conv3x3 weights", weight_len, layer.weight.len())?;
         let kernels = runtime.load_kernels(KernelModule::Resnet)?;
-        let pack = kernels.function("spk_resnet_pack_weights")?;
+        let pack = kernels.function(SPK_RESNET_PACK_WEIGHTS)?;
         let mut packed = runtime.stream().alloc_zeros::<f32>(weight_len)?;
         pack_weights(
             runtime.stream(),
