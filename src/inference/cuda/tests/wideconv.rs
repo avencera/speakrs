@@ -8,7 +8,10 @@
 //! `TRUNK_FORWARD` JSON line. Environment filters: `TRUNK_BATCHES` (default
 //! `1,7,32,33`), `TRUNK_MATHS`, `TRUNK_LAYERS`, `TRUNK_TIMING=1` for graph-timed
 //! library and kernel medians at batches 1 and 32, and `TRUNK_DEVICE=a100` to plan the
-//! wideconv layers with the A100 selection on any sm80-capable GPU. `TRUNK_WEIGHTS`
+//! wideconv layers with the A100 selection on any sm80-capable GPU, `TRUNK_RESNET=legacy`
+//! or `tensor` to force the ResNet FP32 or TF32 tensor-core kernels.
+//! `TRUNK_RESNET=sm80` uses the sm80 tier in both modes, with tensor kernels only
+//! in TF32 mode, for a direct comparison with the legacy artifact. `TRUNK_WEIGHTS`
 //! names the model weights when they are not beside the references
 
 use std::collections::BTreeMap;
@@ -21,14 +24,14 @@ use cudarc::driver::{CudaGraph, CudaSlice, CudaStream, LaunchConfig, PushKernelA
 use serde_json::json;
 
 use super::super::candidate::{
-    ConvCandidate, ConvInputs, ConvLayerSpec, ConvOxide, Epilogue, Phases, PlanError,
-    WideconvConfig, WideconvDevice, WideconvOxide,
+    ConfigPin, ConvCandidate, ConvInputs, ConvKernel, ConvLayerSpec, ConvOxide, ConvPin,
+    DriverCandidate, Epilogue, Phases, PlanError, WideconvConfig, WideconvDevice, WideconvOxide,
 };
 use super::super::dnn::ConvPlanner;
 use super::super::geometry::{Conv2d, Residual};
 use super::super::implementation::Choice;
 use super::super::{
-    ComputeCapability, CudaError, CudaMath, CudaRuntime, KernelModule, ResNetEmbedding,
+    ComputeCapability, CudaError, CudaMath, CudaRuntime, KernelModule, PtxTier, ResNetEmbedding,
     SafetensorsFile,
 };
 use super::{reference_dir, runtime};
@@ -353,7 +356,7 @@ fn bits(values: &[f32]) -> Vec<u32> {
 
 /// The candidate that owns a trunk layer
 enum Candidate {
-    Resnet(ConvOxide),
+    Resnet(ConvOxide, ConvPin),
     Wide(WideconvOxide),
 }
 
@@ -382,9 +385,67 @@ impl Candidate {
             };
             return Ok(Self::Wide(plan));
         }
-        let kernels = tier(KernelModule::Resnet)?;
-        let pin = ConvOxide::implemented_pin(&spec)?;
-        Ok(Self::Resnet(ConvOxide::plan(runtime, &kernels, spec, pin)?))
+        let kernels = if matches!(
+            std::env::var("TRUNK_RESNET").as_deref(),
+            Ok("tensor" | "sm80")
+        ) {
+            // load the newest runnable tier directly so the comparison does not depend
+            // on a production binding
+            let area = KernelModule::Resnet;
+            let device = runtime.device().capability();
+            let request = area
+                .variants()
+                .driver_request(area, runtime.ptx_tier(), device)
+                .ok_or(CudaError::AreaTierNotCompiledIn {
+                    area: area.name(),
+                    tier: runtime.ptx_tier(),
+                    device,
+                    feature: runtime.ptx_tier().feature(),
+                })?;
+            runtime.load_module(request)?
+        } else {
+            tier(KernelModule::Resnet)?
+        };
+        let pin = Self::resnet_pin(runtime, &spec, kernels.tier())?;
+        Ok(Self::Resnet(
+            ConvOxide::plan(runtime, &kernels, spec, pin)?,
+            pin,
+        ))
+    }
+
+    /// The driver-only pin on this device, or the one `TRUNK_RESNET` forces: `legacy`
+    /// for the PR #36 rule, `tensor` for the layer's TF32 tensor-core entry
+    fn resnet_pin(
+        runtime: &CudaRuntime,
+        spec: &ConvLayerSpec<'_>,
+        tier: PtxTier,
+    ) -> Result<ConvPin, PlanError> {
+        let conv = spec.conv;
+        match std::env::var("TRUNK_RESNET").ok().as_deref() {
+            Some("legacy") => ConvOxide::implemented_pin(spec),
+            Some("tensor") | Some("sm80") if conv.math == CudaMath::Tf32 => {
+                Ok(ConvPin::Kernel(match (conv.in_channels, conv.stride) {
+                    (32, [1, 1]) => ConvKernel::C32Tensor,
+                    (64, _) => ConvKernel::C64Tensor,
+                    _ => ConvKernel::C32Stride2Tensor,
+                }))
+            }
+            _ => {
+                let boundary = super::super::implementation::BoundaryId::named(spec.name);
+                match ConvOxide::driver_pin(
+                    boundary,
+                    conv.batch,
+                    conv.math,
+                    runtime.device(),
+                    tier,
+                )? {
+                    ConfigPin::Conv(pin) => Ok(pin),
+                    other => Err(PlanError::DeviceUnsupported {
+                        reason: format!("foreign pin {other:?}"),
+                    }),
+                }
+            }
+        }
     }
 
     fn enqueue(
@@ -394,14 +455,14 @@ impl Candidate {
         stream: &CudaStream,
     ) -> Result<(), CudaError> {
         match self {
-            Self::Resnet(plan) => plan.enqueue(inputs, y, &Phases::new(), stream),
+            Self::Resnet(plan, _) => plan.enqueue(inputs, y, &Phases::new(), stream),
             Self::Wide(plan) => plan.enqueue(inputs, y, &Phases::new(), stream),
         }
     }
 
     fn describe(&self) -> String {
         match self {
-            Self::Resnet(_) => "resnet LegacyWaves".into(),
+            Self::Resnet(_, pin) => format!("resnet {pin:?}"),
             Self::Wide(plan) => format!("wideconv {:?}", plan.config()),
         }
     }

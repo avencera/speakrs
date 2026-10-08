@@ -325,11 +325,22 @@ impl KernelModule {
                 "ptx/segmentation.sm75",
                 [75, 80, 86, 89, 90, 120]
             )),
-            Self::Resnet => AreaPtx::baseline(tier_ptx!(
-                ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120"],
-                "ptx/resnet.sm75",
-                [75, 80, 86, 89, 90, 120]
-            )),
+            // the capability 12.0 binding pins the sm75 bytes, so every target embeds
+            // them; the sm80 tier adds the TF32 tensor-core entries
+            Self::Resnet => AreaPtx {
+                sm75: tier_ptx!(
+                    ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120"],
+                    "ptx/resnet.sm75",
+                    [75, 80, 86, 89, 90, 120]
+                ),
+                sm80: tier_ptx!(
+                    ["cuda-sm80", "cuda-sm90", "cuda-sm120"],
+                    "ptx/resnet.sm80",
+                    [80, 86, 89, 90, 120]
+                ),
+                sm90: None,
+                sm120: None,
+            },
             Self::Lstm => AreaPtx::baseline(tier_ptx!(
                 ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120"],
                 "ptx/lstm.sm75",

@@ -144,6 +144,9 @@ pub(crate) enum WinogradProducts {
     /// Two TF32 tensor-core products per term, weights split and transformed inputs
     /// rounded; sm80 tier, TF32 mode only
     Tf32x2,
+    /// One TF32 tensor-core product per term, both operands rounded; sm80 tier, TF32
+    /// mode only, 128 channels only
+    Tf32x1,
     /// Three BF16 tensor-core products per term, both operands split into high and low
     /// BF16 parts; sm80 tier, TF32 mode only. Not selected yet: it awaits an A100
     /// timing; forced runs test it
@@ -159,7 +162,7 @@ impl WinogradProducts {
     fn shared_bytes(self) -> u32 {
         match self {
             Self::Fp32 | Self::Fp32Sweep2 => 62_464,
-            Self::Tf32x3 | Self::Tf32x2 => 66_560,
+            Self::Tf32x3 | Self::Tf32x2 | Self::Tf32x1 => 66_560,
             Self::Bf16x3 => 88_064,
         }
     }
@@ -170,7 +173,7 @@ impl WinogradProducts {
         match self {
             Self::Fp32 => 4,
             Self::Fp32Sweep2 => 8,
-            Self::Tf32x3 | Self::Tf32x2 => 8,
+            Self::Tf32x3 | Self::Tf32x2 | Self::Tf32x1 => 8,
             Self::Bf16x3 => 16,
         }
     }
@@ -420,6 +423,12 @@ impl Config {
         if device.tensor_rich() {
             return Some(match (tf32, shape) {
                 (false, _) => WinogradProducts::Tf32x3,
+                // on the A100 one product is the measured choice: the second only held
+                // per-layer error to that of a direct TF32 convolution, which DER does
+                // not need
+                (true, Shape::C128) if device.capability == ComputeCapability::new(8, 0) => {
+                    WinogradProducts::Tf32x1
+                }
                 // two products keep TF32-mode error at that of a direct TF32
                 // convolution on the 128-channel layers only
                 (true, Shape::C128) => WinogradProducts::Tf32x2,
@@ -656,7 +665,7 @@ impl Shape {
 
     /// Fused Winograd entry for the same-channel stride-1 shapes
     fn winograd_entry(self, products: WinogradProducts) -> Option<&'static str> {
-        use WinogradProducts::{Bf16x3, Fp32, Fp32Sweep2, Tf32x2, Tf32x3};
+        use WinogradProducts::{Bf16x3, Fp32, Fp32Sweep2, Tf32x1, Tf32x2, Tf32x3};
 
         match (self, products) {
             (Self::C128, Bf16x3) => Some("spk_wideconv_wbf_c128"),
@@ -668,6 +677,7 @@ impl Shape {
             (Self::C256, Tf32x3) => Some("spk_wideconv_wtc3_c256"),
             (Self::C128, Tf32x2) => Some("spk_wideconv_wtc2_c128"),
             (Self::C256, Tf32x2) => Some("spk_wideconv_wtc2_c256"),
+            (Self::C128, Tf32x1) => Some("spk_wideconv_wtc1_c128"),
             _ => None,
         }
     }
@@ -805,7 +815,7 @@ impl Layout {
             }
             if matches!(
                 products,
-                WinogradProducts::Tf32x2 | WinogradProducts::Bf16x3
+                WinogradProducts::Tf32x2 | WinogradProducts::Tf32x1 | WinogradProducts::Bf16x3
             ) && conv.math != CudaMath::Tf32
             {
                 return Err(unsupported(

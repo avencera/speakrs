@@ -453,25 +453,25 @@ fn explicit_fbank_dft_plans_the_record_owned_area_and_production_stays_library()
 #[test]
 fn production_tokens_require_tier_device_and_artifact_of_the_binding() {
     let device = device(BLACKWELL);
-    let boundary = BoundaryId::named("resnet.layer1.0.conv1");
-    let bound = legacy_module(KernelModule::Resnet);
+    let boundary = BoundaryId::named("lstm.stack");
+    let bound = legacy_module(KernelModule::Lstm);
     let token = token(select(boundary, 1, CudaMath::Fp32, &device, bound).unwrap());
     let TokenEvidence::Production { accuracy, speed } = token.evidence else {
         panic!("production evidence")
     };
-    assert_eq!(accuracy, super::production::resnet::RECORD);
-    assert_eq!(speed.record, super::production::resnet::RECORD);
+    assert_eq!(accuracy, super::production::lstm::RECORD);
+    assert_eq!(speed.record, super::production::lstm::RECORD);
     assert_eq!(speed.integrated, super::production::INTEGRATED_DER);
     assert_eq!(speed.scope, super::production::LEGACY_SCOPE);
     assert_eq!(
         token.pin,
-        super::PlanPin::Pinned(ConfigPin::Conv(ConvPin::LegacyWaves(ConvShape::C32)))
+        super::PlanPin::Pinned(ConfigPin::Lstm(LstmPin::LegacyCooperative))
     );
-    let sha256 = ArtifactHash::of(legacy_ptx(KernelModule::Resnet).as_bytes());
+    let sha256 = ArtifactHash::of(legacy_ptx(KernelModule::Lstm).as_bytes());
     for loaded in [
-        ModuleRequest::new(KernelModule::Resnet, PtxTier::Sm80, bound.artifact()),
+        ModuleRequest::new(KernelModule::Lstm, PtxTier::Sm80, bound.artifact()),
         ModuleRequest::new(
-            KernelModule::Resnet,
+            KernelModule::Lstm,
             PtxTier::Sm75,
             LoadedArtifact::Cubin {
                 arch: BLACKWELL,
@@ -479,13 +479,13 @@ fn production_tokens_require_tier_device_and_artifact_of_the_binding() {
             },
         ),
         ModuleRequest::new(
-            KernelModule::Resnet,
+            KernelModule::Lstm,
             PtxTier::Sm75,
             LoadedArtifact::PtxJit {
                 sha256: ArtifactHash::of(b"other PTX"),
             },
         ),
-        legacy_module(KernelModule::Lstm),
+        legacy_module(KernelModule::Sincnet),
     ] {
         assert!(matches!(
             select(boundary, 1, CudaMath::Fp32, &device, loaded).unwrap(),
@@ -509,36 +509,29 @@ fn production_tokens_require_tier_device_and_artifact_of_the_binding() {
 }
 
 #[test]
-fn regressed_resnet_tuple_uses_library_without_dropping_siblings() {
+fn replaced_resnet_record_grants_no_qualified_tuple() {
     let device = device(BLACKWELL);
-    let layer = BoundaryId::named("resnet.layer2.0.conv1");
-    let bound = legacy_module(KernelModule::Resnet);
-    assert!(matches!(
-        select(layer, 1, CudaMath::Fp32, &device, bound).unwrap(),
-        Selected::Library
-    ));
-    for (batch, math) in [
-        (1, CudaMath::Tf32),
-        (32, CudaMath::Fp32),
-        (32, CudaMath::Tf32),
-    ] {
-        let token = token(select(layer, batch, math, &device, bound).unwrap());
-        assert_eq!(
-            (token.boundary, token.batch, token.math),
-            (layer, batch, math)
-        );
-        assert_eq!(token.target.module, bound);
-        assert_eq!(
-            token.pin,
-            super::PlanPin::Pinned(ConfigPin::Conv(ConvPin::LegacyWaves(ConvShape::C32Stride2)))
-        );
+    for batch in [1, 32] {
+        for math in [CudaMath::Fp32, CudaMath::Tf32] {
+            assert!(matches!(
+                select(
+                    BoundaryId::named("resnet.layer2.0.conv1"),
+                    batch,
+                    math,
+                    &device,
+                    legacy_module(KernelModule::Resnet)
+                )
+                .unwrap(),
+                Selected::Library
+            ));
+        }
     }
 }
 
 #[test]
 fn stage_tail_coverage_is_pinned_not_candidate_declared() {
     let device = device(BLACKWELL);
-    for area in [KernelModule::Resnet, KernelModule::Sincnet] {
+    for area in [KernelModule::Sincnet] {
         let embedded = AreaPtx::fixture(&[(PtxTier::Sm75, legacy_ptx(area))]);
         let stale = AreaPtx::fixture(&[(PtxTier::Sm75, "stale PTX")]);
         assert!(super::legacy_fixture_coverage(area, &device, stale).is_empty());
@@ -577,10 +570,7 @@ fn stage_tail_coverage_is_pinned_not_candidate_declared() {
 fn direct_pinned_requests_use_the_production_token() {
     let device = device(BLACKWELL);
     for choice in [Choice::StageTail, Choice::StageTailControl] {
-        for (area, layer) in [
-            (KernelModule::Resnet, "resnet.layer1.0.conv1"),
-            (KernelModule::Sincnet, "sincnet.conv0.abs_pool"),
-        ] {
+        for (area, layer) in [(KernelModule::Sincnet, "sincnet.conv0.abs_pool")] {
             let boundary = BoundaryId::named(layer);
             let loaded = legacy_module(area);
             let direct = |batch, math| {
@@ -607,10 +597,6 @@ fn direct_pinned_requests_use_the_production_token() {
 #[test]
 fn records_and_integrated_evidence_are_pinned() {
     let pins = [
-        (
-            KernelModule::Resnet,
-            "8f8fa3e3c158771e354aad83f4e42fca6fac998aa192b39a966067a4b0035758",
-        ),
         (
             KernelModule::Lstm,
             "3badc1aec939b0e8f7312786d695bec6445de1dacb1f85e44124bf3ac20356f8",
@@ -889,7 +875,7 @@ fn every_production_tuple_requests_its_bound_ptx_jit() {
             selected += 1;
         }
     }
-    assert_eq!(selected, 52);
+    assert_eq!(selected, 4);
 }
 
 /// Accuracy-accepted tuples must be implemented by the candidate at the bound tier;
@@ -911,11 +897,7 @@ fn coverage_layers_nest() {
 #[test]
 fn legacy_bindings_ignore_a_newly_embedded_higher_tier() {
     // the old loader picked the highest embedded variant at or below the limit
-    for area in [
-        KernelModule::Resnet,
-        KernelModule::Lstm,
-        KernelModule::Sincnet,
-    ] {
+    for area in [KernelModule::Lstm, KernelModule::Sincnet] {
         let embedded = AreaPtx::fixture(&[
             (PtxTier::Sm75, legacy_ptx(area)),
             (PtxTier::Sm80, "// a newly shipped sm80 variant"),
@@ -939,7 +921,7 @@ fn legacy_bindings_ignore_a_newly_embedded_higher_tier() {
             selected += 1;
         }
     }
-    assert_eq!(selected, 52);
+    assert_eq!(selected, 4);
 }
 
 #[test]
@@ -1028,6 +1010,62 @@ fn validate(bindings: &[Binding]) -> bool {
 }
 
 #[test]
+fn measured_module_bindings_reject_cache_conflicts_with_qualified_bindings() {
+    use super::ModuleBinding;
+    let module = cubin(KernelModule::Resnet, PtxTier::Sm80);
+    let binding = ModuleBinding::new(POINT, module);
+    let validate = |modules: &[ModuleBinding], qualified: &[Binding]| {
+        std::panic::catch_unwind(|| {
+            super::evidence::validate_modules(
+                modules,
+                qualified,
+                super::ALWAYS_ON,
+                super::ROUTE_PRECEDENCE,
+            );
+        })
+        .is_ok()
+    };
+    static PROOF: [TupleProof; 1] = [fixture_proof(
+        "resnet.layer2.1.conv1",
+        32,
+        C64_PIN,
+        measured(POINT),
+    )];
+    let qualified = Binding {
+        scope: POINT,
+        module,
+        proofs: &PROOF,
+    };
+    assert!(validate(&[binding], &[qualified]));
+    assert!(!validate(
+        &[binding],
+        &[Binding {
+            module: cubin(KernelModule::Resnet, PtxTier::Sm75),
+            ..qualified
+        }]
+    ));
+    assert!(!validate(
+        &[
+            binding,
+            ModuleBinding::new(POINT, cubin(KernelModule::Resnet, PtxTier::Sm75))
+        ],
+        &[]
+    ));
+    let other = SpeedScope::Point {
+        capability: BLACKWELL,
+        multiprocessors: 70,
+        device_name: "NVIDIA GeForce RTX 5070 Ti",
+    };
+    assert!(validate(
+        &[
+            binding,
+            ModuleBinding::new(other, cubin(KernelModule::Resnet, PtxTier::Sm75))
+        ],
+        &[]
+    ));
+}
+
+#[test]
 fn validator_rejects_conflicting_bindings_and_allows_many_proofs() {
     static ONE: [TupleProof; 1] = [fixture_proof(
         "resnet.layer2.1.conv1",
@@ -1066,7 +1104,11 @@ fn validator_rejects_conflicting_bindings_and_allows_many_proofs() {
         }
     ]));
     assert!(!validate(&[
-        super::production::resnet::BINDING,
+        Binding {
+            scope: super::production::LEGACY_SCOPE,
+            module: legacy_module(KernelModule::Resnet),
+            proofs: &ONE,
+        },
         Binding {
             proofs: &OTHER,
             ..point
@@ -1395,7 +1437,7 @@ fn default_production_loads_record_pinned_jit() -> Result<(), CudaError> {
             })
         );
     }
-    assert_eq!(selected, 52);
+    assert_eq!(selected, 4);
     println!(
         "planned_from_pins {}",
         serde_json::json!({ "tuples": selected })

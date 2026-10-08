@@ -350,10 +350,15 @@ fn fbank_speed_scope_depends_on_math_and_segdense_requires_the_measured_tier() {
 }
 
 #[test]
-fn resnet_binding_is_the_same_across_production_and_driver_routes() {
-    use crate::inference::cuda::kernels::LoadedArtifact;
+fn resnet_point_binding_shares_one_artifact_across_routes_and_modes() {
+    use crate::inference::cuda::candidate::{ConvKernel, ConvPin};
+    use crate::inference::cuda::kernels::{ArtifactHash, LoadedArtifact};
+
     let mut fixture = Fixture::new();
-    let boundary = BoundaryId::named("resnet.layer1.0.conv1");
+    fixture.device = Builder::new(ComputeCapability::new(12, 0))
+        .multiprocessors(36)
+        .name("NVIDIA GeForce RTX 5060 Ti")
+        .build();
     let production = super::super::production_module(
         KernelModule::Resnet,
         &fixture.device,
@@ -362,19 +367,115 @@ fn resnet_binding_is_the_same_across_production_and_driver_routes() {
     )
     .unwrap()
     .unwrap();
-    let Selected::Oxide(token) = PlanRequest::DriverOnly
-        .resolve(boundary, 1, CudaMath::Fp32, &mut fixture)
-        .unwrap()
-    else {
-        panic!("missing ResNet driver plan")
-    };
-    assert_eq!(token.target.module, production);
-    assert!(matches!(
+    assert_eq!(production.tier(), PtxTier::Sm80);
+    assert_eq!(
         production.artifact(),
-        LoadedArtifact::PtxJit { .. }
-    ));
-    assert!(production.check_cached(token.target.module).is_ok());
-    assert_eq!(fixture.loads, [production]);
+        LoadedArtifact::Cubin {
+            arch: ComputeCapability::new(12, 0),
+            sha256: ArtifactHash::from_hex(
+                "0950b0d84cd9fa3d9053cd30399fce14a6aa6c3ff8777485598dd8deeba89078"
+            ),
+        }
+    );
+    for batch in [1, 32] {
+        for (name, fp32, tf32) in [
+            (
+                "resnet.layer1.0.conv1",
+                ConvKernel::C32,
+                ConvKernel::C32Tensor,
+            ),
+            (
+                "resnet.layer2.0.conv1",
+                ConvKernel::C32Stride2,
+                ConvKernel::C32Stride2Tensor,
+            ),
+            (
+                "resnet.layer2.3.conv2",
+                ConvKernel::C64,
+                ConvKernel::C64Tensor,
+            ),
+        ] {
+            for (math, kernel) in [(CudaMath::Fp32, fp32), (CudaMath::Tf32, tf32)] {
+                let requests = [
+                    PlanRequest::DriverOnly,
+                    #[cfg(feature = "_cuda-libraries")]
+                    PlanRequest::Hybrid,
+                ];
+                for request in requests {
+                    let Selected::Oxide(token) = request
+                        .resolve(BoundaryId::named(name), batch, math, &mut fixture)
+                        .unwrap()
+                    else {
+                        panic!("missing measured ResNet plan")
+                    };
+                    assert_eq!(token.target.module, production);
+                    assert_eq!(
+                        token.pin,
+                        PlanPin::Pinned(ConfigPin::Conv(ConvPin::Kernel(kernel)))
+                    );
+                    assert!(
+                        matches!(token.evidence, TokenEvidence::Port { scope, .. } if scope == crate::inference::cuda::candidate::ConvOxide::RTX50_SCOPE)
+                    );
+                    assert!(production.check_cached(token.target.module).is_ok());
+                }
+            }
+        }
+    }
+    assert!(fixture.loads.iter().all(|request| *request == production));
+}
+
+#[test]
+#[cfg(feature = "_cuda-libraries")]
+fn resnet_speed_does_not_extend_to_other_blackwell_cards_or_tiers() {
+    let boundary = BoundaryId::named("resnet.layer1.0.conv1");
+    for (sms, name) in [
+        (70, "NVIDIA GeForce RTX 5070 Ti"),
+        (36, "another card"),
+        (70, "NVIDIA GeForce RTX 5060 Ti"),
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.device = Builder::new(ComputeCapability::new(12, 0))
+            .multiprocessors(sms)
+            .name(name)
+            .build();
+        for math in [CudaMath::Fp32, CudaMath::Tf32] {
+            assert!(matches!(
+                PlanRequest::Hybrid
+                    .resolve(boundary, 1, math, &mut fixture)
+                    .unwrap(),
+                Selected::Library
+            ));
+            let Selected::Oxide(token) = PlanRequest::DriverOnly
+                .resolve(boundary, 1, math, &mut fixture)
+                .unwrap()
+            else {
+                panic!("driver route still covers unmeasured devices")
+            };
+            assert_eq!(token.evidence, TokenEvidence::Implemented);
+        }
+    }
+    let mut fixture = Fixture::new();
+    fixture.device = Builder::new(ComputeCapability::new(12, 0))
+        .multiprocessors(36)
+        .name("NVIDIA GeForce RTX 5060 Ti")
+        .build();
+    fixture.limit = PtxTier::Sm75;
+    for math in [CudaMath::Fp32, CudaMath::Tf32] {
+        assert!(matches!(
+            PlanRequest::Hybrid
+                .resolve(boundary, 1, math, &mut fixture)
+                .unwrap(),
+            Selected::Library
+        ));
+        let Selected::Oxide(token) = PlanRequest::DriverOnly
+            .resolve(boundary, 1, math, &mut fixture)
+            .unwrap()
+        else {
+            panic!("baseline implementation")
+        };
+        assert_eq!(token.target.module.tier(), PtxTier::Sm75);
+        assert_eq!(token.evidence, TokenEvidence::Implemented);
+    }
 }
 
 #[test]
@@ -386,7 +487,10 @@ fn trunk_scope_matches_measured_totals_and_library_fallbacks() {
         ComputeCapability::new(8, 9),
         ComputeCapability::new(9, 0),
     ] {
-        fixture.device = Builder::new(capability).multiprocessors(36).build();
+        fixture.device = Builder::new(capability)
+            .multiprocessors(36)
+            .name("NVIDIA GeForce RTX 5060 Ti")
+            .build();
         for batch in [1, 7, 32, 33] {
             for math in [CudaMath::Fp32, CudaMath::Tf32] {
                 for boundary in [
@@ -437,6 +541,100 @@ fn every_model_boundary_has_a_driver_route_for_model_batches() {
                     "{boundary:?} b{batch} {math:?}"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn tensor_core_trunk_kernels_are_selected_only_for_tf32_on_measured_capabilities() {
+    use crate::inference::cuda::candidate::{ConvKernel, ConvOxide, ConvPin};
+    let a100 = Builder::new(ComputeCapability::new(8, 0))
+        .multiprocessors(108)
+        .build();
+    let ada = Builder::new(ComputeCapability::new(8, 9))
+        .multiprocessors(34)
+        .build();
+    let pin = |name, batch, math, device: &_, tier| {
+        ConvOxide::driver_pin(BoundaryId::named(name), batch, math, device, tier).unwrap()
+    };
+    let kernel = |kernel| ConfigPin::Conv(ConvPin::Kernel(kernel));
+    for (device, batch) in [(&a100, 1), (&a100, 32), (&ada, 1), (&ada, 32)] {
+        assert_eq!(
+            pin(
+                "resnet.layer1.0.conv1",
+                batch,
+                CudaMath::Tf32,
+                device,
+                PtxTier::Sm80
+            ),
+            kernel(ConvKernel::C32Tensor)
+        );
+        assert_eq!(
+            pin(
+                "resnet.layer2.3.conv2",
+                batch,
+                CudaMath::Tf32,
+                device,
+                PtxTier::Sm80
+            ),
+            kernel(ConvKernel::C64Tensor)
+        );
+    }
+    for (device, batch) in [(&a100, 1), (&a100, 32), (&ada, 1), (&ada, 32)] {
+        assert_eq!(
+            pin(
+                "resnet.layer2.0.conv1",
+                batch,
+                CudaMath::Tf32,
+                device,
+                PtxTier::Sm80
+            ),
+            kernel(ConvKernel::C32Stride2Tensor)
+        );
+    }
+    // FP32 mode and the sm75 tier keep the FP32 kernels
+    assert_eq!(
+        pin(
+            "resnet.layer1.0.conv1",
+            32,
+            CudaMath::Fp32,
+            &a100,
+            PtxTier::Sm80
+        ),
+        kernel(ConvKernel::C32)
+    );
+    assert_eq!(
+        pin(
+            "resnet.layer2.1.conv1",
+            32,
+            CudaMath::Tf32,
+            &a100,
+            PtxTier::Sm75
+        ),
+        kernel(ConvKernel::C64)
+    );
+    // other sm80-tier parts keep their current selection
+    for (major, minor, sms) in [(8, 6, 84), (9, 0, 132), (12, 0, 36)] {
+        let device = Builder::new(ComputeCapability::new(major, minor))
+            .multiprocessors(sms)
+            .build();
+        for name in [
+            "resnet.layer1.0.conv1",
+            "resnet.layer2.0.conv1",
+            "resnet.layer2.1.conv1",
+        ] {
+            let selected = pin(name, 32, CudaMath::Tf32, &device, PtxTier::Sm80);
+            assert!(
+                !matches!(
+                    selected,
+                    ConfigPin::Conv(ConvPin::Kernel(
+                        ConvKernel::C32Tensor
+                            | ConvKernel::C64Tensor
+                            | ConvKernel::C32Stride2Tensor
+                    ))
+                ),
+                "{major}.{minor} {name}: {selected:?}"
+            );
         }
     }
 }
