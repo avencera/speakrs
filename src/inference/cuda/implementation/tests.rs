@@ -10,7 +10,7 @@ use crate::inference::cuda::candidate::{
 use crate::inference::cuda::device::DeviceAttributes;
 use crate::inference::cuda::device::test_support::Builder;
 use crate::inference::cuda::kernels::{AreaPtx, ArtifactHash, LoadedArtifact, ModuleRequest};
-use crate::inference::cuda::test_support::Mutant;
+
 use crate::inference::cuda::{
     ComputeCapability, CudaError, CudaLibrary, CudaMath, GeometryError, KernelModule, PtxTier,
     WeightFault,
@@ -139,37 +139,30 @@ fn token(selected: Selected) -> super::Qualified {
 }
 
 #[test]
-fn library_and_mutant_requests_do_not_load_candidate_artifacts() {
+fn library_requests_do_not_load_candidate_artifacts() {
     for boundary in [
         "resnet.layer1.0.conv1",
         "lstm.stack",
         "sincnet.conv0.abs_pool",
     ] {
-        for choice in [Choice::Library, Choice::Mutant(Mutant::Precision)] {
-            let mut fixture = Fixture::new(BLACKWELL);
-            let selected = fixture
-                .resolve(
-                    PlanRequest::Qualification(choice),
-                    boundary,
-                    1,
-                    CudaMath::Fp32,
-                )
-                .unwrap();
-            match (choice, selected) {
-                (Choice::Library, Selected::Library)
-                | (Choice::Mutant(Mutant::Precision), Selected::Mutant(Mutant::Precision)) => {}
-                other => panic!("wrong owner: {other:?}"),
-            }
-            assert!(fixture.loads.is_empty());
-        }
         let mut fixture = Fixture::new(BLACKWELL);
+        let selected = fixture
+            .resolve(
+                PlanRequest::Qualification(Choice::Library),
+                boundary,
+                1,
+                CudaMath::Fp32,
+            )
+            .unwrap();
+        assert!(matches!(selected, Selected::Library));
+        assert!(fixture.loads.is_empty());
         assert!(
             fixture
                 .resolve(
                     PlanRequest::Qualification(Choice::Library),
                     boundary,
                     0,
-                    CudaMath::Fp32
+                    CudaMath::Fp32,
                 )
                 .is_err()
         );
@@ -178,11 +171,8 @@ fn library_and_mutant_requests_do_not_load_candidate_artifacts() {
 
 #[test]
 fn uncovered_requests_do_not_load_artifacts() {
-    for choice in [
-        Choice::Oxide(Selection::Explicit),
-        Choice::StageTail,
-        Choice::StageTailControl,
-    ] {
+    {
+        let choice = Choice::Oxide(Selection::Explicit);
         let mut fixture = Fixture::new(BLACKWELL);
         let selected = fixture
             .resolve(
@@ -223,41 +213,6 @@ fn uncovered_requests_do_not_load_artifacts() {
             .unwrap(),
         Selected::Oxide(_)
     ));
-}
-
-#[test]
-fn stage_tail_resolves_pinned_coverage_before_loading() {
-    for choice in [Choice::StageTail, Choice::StageTailControl] {
-        for (batch, math, capability, expected_loads) in [
-            (1, CudaMath::Fp32, BLACKWELL, 1),
-            (32, CudaMath::Fp32, BLACKWELL, 1),
-            (7, CudaMath::Fp32, BLACKWELL, 0),
-            (1, CudaMath::Tf32, BLACKWELL, 0),
-            (32, CudaMath::Tf32, BLACKWELL, 0),
-            (1, CudaMath::Fp32, ADA, 0),
-        ] {
-            let mut fixture = Fixture::new(capability);
-            let selected = fixture
-                .resolve(
-                    PlanRequest::Qualification(choice),
-                    "sincnet.conv0.abs_pool",
-                    batch,
-                    math,
-                )
-                .unwrap();
-            assert_eq!(fixture.loads.len(), expected_loads);
-            if expected_loads == 0 {
-                assert!(matches!(selected, Selected::Library));
-                continue;
-            }
-            assert_eq!(fixture.loads, [legacy_module(KernelModule::Sincnet)]);
-            let token = token(selected);
-            assert_eq!(token.target.module, legacy_module(KernelModule::Sincnet));
-            assert_eq!(token.boundary.name(), "sincnet.conv0.abs_pool");
-            assert_eq!((token.batch, token.math), (batch, math));
-            assert_eq!(token.selection, Selection::Production);
-        }
-    }
 }
 
 #[test]
@@ -529,7 +484,7 @@ fn replaced_resnet_record_grants_no_qualified_tuple() {
 }
 
 #[test]
-fn stage_tail_coverage_is_pinned_not_candidate_declared() {
+fn legacy_coverage_is_pinned_not_candidate_declared() {
     let device = device(BLACKWELL);
     for area in [KernelModule::Sincnet] {
         let embedded = AreaPtx::fixture(&[(PtxTier::Sm75, legacy_ptx(area))]);
@@ -567,34 +522,6 @@ fn stage_tail_coverage_is_pinned_not_candidate_declared() {
 }
 
 #[test]
-fn direct_pinned_requests_use_the_production_token() {
-    let device = device(BLACKWELL);
-    for choice in [Choice::StageTail, Choice::StageTailControl] {
-        for (area, layer) in [(KernelModule::Sincnet, "sincnet.conv0.abs_pool")] {
-            let boundary = BoundaryId::named(layer);
-            let loaded = legacy_module(area);
-            let direct = |batch, math| {
-                super::qualification_selection(choice, boundary, batch, math, &device, loaded)
-                    .unwrap()
-            };
-            for batch in [1, 32] {
-                let actual = token(direct(batch, CudaMath::Fp32));
-                let expected =
-                    token(select(boundary, batch, CudaMath::Fp32, &device, loaded).unwrap());
-                assert_eq!(actual.evidence, expected.evidence);
-                assert_eq!(actual.pin, expected.pin);
-                assert_eq!((actual.boundary, actual.batch), (boundary, batch));
-                assert_eq!(actual.selection, Selection::Production);
-                assert!(matches!(direct(batch, CudaMath::Tf32), Selected::Library));
-            }
-            for batch in [7, 33, 64] {
-                assert!(matches!(direct(batch, CudaMath::Fp32), Selected::Library));
-            }
-        }
-    }
-}
-
-#[test]
 fn records_and_integrated_evidence_are_pinned() {
     let pins = [
         (
@@ -625,127 +552,6 @@ fn records_and_integrated_evidence_are_pinned() {
             assert_eq!(speed.scope, binding.scope);
         }
     }
-}
-
-/// Export evaluated const entries, so Python never guesses what Rust expressions mean
-///
-fn measured_record_pairs(proofs: &[TupleProof]) -> Vec<(SpeedEvidence, RecordHash)> {
-    let mut records = Vec::new();
-    for proof in proofs {
-        let SpeedStatus::Measured(speed) = proof.speed else {
-            continue;
-        };
-        let pair = (speed, proof.accuracy);
-        if !records.contains(&pair) {
-            records.push(pair);
-        }
-    }
-    records
-}
-
-#[test]
-fn export_groups_distinct_accuracy_records_without_losing_speed_evidence() {
-    let first = PRODUCTION[0].proofs[0];
-    let second = TupleProof {
-        accuracy: RecordHash::from_hex(
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        ),
-        ..first
-    };
-    let records = measured_record_pairs(&[first, second]);
-    let SpeedStatus::Measured(speed) = first.speed else {
-        panic!("measured fixture")
-    };
-    assert_eq!(records, [(speed, first.accuracy), (speed, second.accuracy)]);
-}
-
-/// Each export entry is one binding's measured proofs with one accuracy record
-/// and one speed record; each tuple also exports its complete configuration pin
-#[test]
-fn export_production_table() {
-    let Ok(path) = std::env::var("SPEAKRS_QUALIFY_TABLE_OUTPUT") else {
-        return;
-    };
-    let mut entries = Vec::new();
-    for binding in PRODUCTION {
-        let candidate = super::candidate_coverage(binding.area(), binding.module.tier());
-        assert!(
-            !candidate.entries().is_empty(),
-            "production area has no candidate coverage export"
-        );
-        let records = measured_record_pairs(binding.proofs);
-        for (speed, accuracy) in records {
-            let tuples: Vec<_> = binding
-                .proofs
-                .iter()
-                .filter(|proof| {
-                    proof.speed == SpeedStatus::Measured(speed) && proof.accuracy == accuracy
-                })
-                .map(|proof| {
-                    serde_json::json!({
-                        "layers": [proof.boundary.name()],
-                        "batches": [proof.batch],
-                        "maths": [match proof.math {
-                            CudaMath::Fp32 => "fp32",
-                            CudaMath::Tf32 => "tf32",
-                        }],
-                    })
-                })
-                .collect();
-            let configurations: Vec<_> = binding.proofs.iter()
-                .filter(|proof| proof.speed == SpeedStatus::Measured(speed) && proof.accuracy == accuracy)
-                .map(|proof| serde_json::json!({
-                    "tuple": [proof.boundary.name(), proof.batch, match proof.math { CudaMath::Fp32 => "fp32", CudaMath::Tf32 => "tf32" }],
-                    "pin": super::super::test_support::configuration::pin_json(proof.pin),
-                })).collect();
-            let scope = match speed.scope {
-                SpeedScope::MeasuredCapability { capability } => {
-                    serde_json::json!({ "kind": "MeasuredCapability", "capability": format!("{}.{}", capability.major, capability.minor) })
-                }
-                SpeedScope::AllDevices(evidence) => serde_json::json!({
-                    "kind": "AllDevices", "summary": evidence.summary(),
-                    "architectures": evidence.measurements().iter().map(|speed| serde_json::json!({
-                        "capability": speed.capability.to_string(), "minimum_speedup_milli": speed.minimum_speedup_milli,
-                    })).collect::<Vec<_>>(),
-                }),
-                SpeedScope::LegacyCapability { capability } => {
-                    serde_json::json!({"kind": "LegacyCapability", "capability": capability.to_string()})
-                }
-                SpeedScope::Point {
-                    capability,
-                    multiprocessors,
-                    device_name,
-                } => serde_json::json!({
-                    "kind": "Point",
-                    "capability": capability.to_string(),
-                    "sm_count": multiprocessors,
-                    "device_name": device_name,
-                }),
-            };
-            entries.push(serde_json::json!({
-                "area": binding.area().name(),
-                "candidate_coverage": super::super::test_support::qualify::coverage_json(candidate),
-                "coverage": {"entries": tuples},
-                "tier": binding.module.tier().to_string(),
-                "devices": [speed.scope.capability().to_string()],
-                "speed_scope": scope,
-                "artifact": super::super::test_support::artifact_json(binding.module.artifact()),
-                "record": speed.record.to_string(),
-                "accuracy_record": accuracy.to_string(),
-                "configurations": configurations,
-                "boundary_domain": super::super::test_support::configuration::boundary_domain(),
-                "models": super::super::test_support::configuration::model_identity(),
-                "der_inventory": super::super::test_support::configuration::der_inventory(),
-                "library_artifacts": super::super::test_support::configuration::library_artifacts(),
-                "der": speed.integrated.to_string(),
-            }));
-        }
-    }
-    std::fs::write(
-        path,
-        serde_json::to_vec_pretty(&entries).expect("finite table"),
-    )
-    .expect("table output");
 }
 
 #[test]
@@ -1371,7 +1177,6 @@ fn default_production_loads_record_pinned_jit() -> Result<(), CudaError> {
     for name in [
         crate::inference::cuda::kernels::FORCE_PTX_JIT_ENV,
         crate::inference::cuda::tier::PTX_TIER_ENV,
-        "SPEAKRS_QUALIFY_PHASE",
     ] {
         assert!(
             std::env::var_os(name).is_none(),
@@ -1427,15 +1232,6 @@ fn default_production_loads_record_pinned_jit() -> Result<(), CudaError> {
         {
             loaded.function(line.split(['(', ' ', '\t']).next().unwrap())?;
         }
-        println!(
-            "production_artifact_proof {}",
-            serde_json::json!({
-                "area": binding.area().name(), "tuples": binding.proofs.len(),
-                "tier": loaded.tier().to_string(), "device": runtime.compute_capability().to_string(),
-                "artifact": crate::inference::cuda::test_support::artifact_json(loaded.artifact()),
-                "embedded_ptx_sha256": loaded.ptx_sha256().to_string(),
-            })
-        );
     }
     assert_eq!(selected, 4);
     println!(
@@ -1459,24 +1255,7 @@ fn default_production_loads_record_pinned_jit() -> Result<(), CudaError> {
         {
             loaded.function(line.split(['(', ' ', '\t']).next().unwrap())?;
         }
-        println!(
-            "always_on_artifact_proof {}",
-            serde_json::json!({
-                "area": area.name(), "tier": loaded.tier().to_string(),
-                "device": runtime.compute_capability().to_string(),
-                "artifact": crate::inference::cuda::test_support::artifact_json(loaded.artifact()),
-                "embedded_ptx_sha256": loaded.ptx_sha256().to_string(),
-            })
-        );
     }
-    let modules = crate::inference::cuda::test_support::loaded_modules();
-    let modules = modules.as_array().expect("recorded module array");
-    assert_eq!(modules.len(), 6);
-    assert!(
-        modules
-            .iter()
-            .all(|module| module["artifact"]["kind"] == "PtxJit")
-    );
     runtime.synchronize()
 }
 

@@ -360,14 +360,9 @@ mod tests {
 
     #[test]
     fn direct_rnn_and_version_calls_have_preflight_symbols() {
-        for (source, prefix, symbols) in [
-            (include_str!("segmentation/rnn.rs"), "dnn::", CUDNN_SYMBOLS),
-            (
-                include_str!("candidate_test_support.rs"),
-                "sys::",
-                CUDNN_SYMBOLS,
-            ),
-        ] {
+        for (source, prefix, symbols) in
+            [(include_str!("segmentation/rnn.rs"), "dnn::", CUDNN_SYMBOLS)]
+        {
             for suffix in source.split(prefix).skip(1) {
                 let name = suffix
                     .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')

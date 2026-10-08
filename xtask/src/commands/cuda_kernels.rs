@@ -159,8 +159,7 @@ pub const AREAS: &[Area] = &[
     Area::new("fbank", &[Tier::Sm75]),
     Area::new("embedding", &[Tier::Sm75]),
     Area::new("segmentation", &[Tier::Sm75]),
-    // candidate areas: kernels that may replace a library call, qualified by
-    // `cargo xtask cuda-qualify` and kept apart from the Library-owned areas above
+    // candidate areas remain separate from the Library-owned areas above
     // the capability 12.0 binding pins the sm75 bytes; sm80 adds the TF32 tensor-core
     // entries that only the A100 selection plans
     Area::pinned_baseline("resnet", &[Tier::Sm75, Tier::Sm80]),

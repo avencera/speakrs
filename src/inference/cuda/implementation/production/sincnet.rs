@@ -6,7 +6,7 @@ use crate::inference::cuda::implementation::{Binding, BoundaryId, RecordHash, Tu
 use crate::inference::cuda::kernels::{ArtifactHash, LoadedArtifact, ModuleRequest};
 use crate::inference::cuda::{KernelModule, PtxTier};
 
-/// SHA256 of qualify-sincnet-Oxide-20261004T093054.587886Z.json.gz
+/// SHA256 of the archived SincNet accuracy and speed record
 pub(crate) const RECORD: RecordHash =
     RecordHash::from_hex("a4d1a2692b78a814cd2da16f084801c3641bfd11c6d095d610f3a8182ad6f675");
 

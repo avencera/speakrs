@@ -280,11 +280,6 @@ pub(super) struct LstmPlan {
 
 impl LstmPlan {
     #[cfg(all(test, feature = "_cuda-libraries"))]
-    pub(super) fn batch(&self) -> usize {
-        self.batch
-    }
-
-    #[cfg(all(test, feature = "_cuda-libraries"))]
     pub(super) fn workspace_bytes(&self) -> usize {
         self.workspace.as_ref().map_or(0, CudaSlice::len)
     }
@@ -475,8 +470,6 @@ impl CudnnLstm {
         X: DevicePtr<f32>,
         Y: DevicePtrMut<f32>,
     {
-        #[cfg(all(test, feature = "_cuda-libraries"))]
-        let _library = super::super::test_support::call("cudnn.rnn");
         let steps = plan.batch * plan.seq_len;
         check_len("cuDNN LSTM input", steps * FEATURES, x.len())?;
         check_len("cuDNN LSTM output", steps * 2 * HIDDEN, y.len())?;

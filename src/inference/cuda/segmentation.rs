@@ -96,8 +96,6 @@ pub use test_support::SegmentationTensor;
 #[derive(Debug)]
 pub struct SegmentationWorkspace {
     shape: SegmentationShape,
-    #[cfg(all(test, feature = "_cuda-libraries"))]
-    qualification: std::collections::BTreeMap<&'static str, super::test_support::boundaries::Owner>,
     sinc: SincPlan,
     conv1: ConvStage,
     conv2: ConvStage,
@@ -115,11 +113,6 @@ enum SincPlan {
     #[cfg(feature = "_cuda-libraries")]
     Library(ConvPlan),
     Oxide(SincOxide),
-    #[cfg(all(test, feature = "_cuda-libraries"))]
-    Mutant {
-        library: ConvPlan,
-        mutant: super::test_support::Mutant,
-    },
 }
 
 impl SincPlan {
@@ -128,8 +121,6 @@ impl SincPlan {
             #[cfg(feature = "_cuda-libraries")]
             Self::Library(plan) => plan.workspace_bytes(),
             Self::Oxide(_) => 0,
-            #[cfg(all(test, feature = "_cuda-libraries"))]
-            Self::Mutant { library, .. } => library.workspace_bytes(),
         }
     }
 }
@@ -227,11 +218,6 @@ enum LstmStage {
     Oxide {
         candidate: Box<LstmOxide>,
         rows: usize,
-    },
-    #[cfg(all(test, feature = "_cuda-libraries"))]
-    Mutant {
-        library: LstmPlan,
-        mutant: super::test_support::Mutant,
     },
 }
 
@@ -572,8 +558,6 @@ impl Network {
         .try_into()
         .expect("three dense sites");
         Ok(SegmentationWorkspace {
-            #[cfg(all(test, feature = "_cuda-libraries"))]
-            qualification: std::collections::BTreeMap::new(),
             shape,
             sinc,
             conv1,
@@ -622,8 +606,6 @@ impl Network {
             lstm,
             dense,
             tensors: t,
-            #[cfg(all(test, feature = "_cuda-libraries"))]
-            qualification,
             ..
         } = workspace;
         let mut conv_workspace = conv_workspace.as_view_mut();
@@ -671,39 +653,6 @@ impl Network {
 
         // the convolution bias is added inside the pooling kernel
         let [weight, bias] = &self.convs[0];
-        #[cfg(all(test, feature = "_cuda-libraries"))]
-        super::test_support::boundaries::run_slices(
-            qualification.get("sincnet.conv1"),
-            runtime,
-            super::test_support::candidate_seam::Operation::Temporal(
-                super::candidate::SegConvSpec::new(
-                    super::candidate::SegConvSite::Conv1,
-                    batch,
-                    self.options.math,
-                )
-                .map_err(|e| CudaError::Unsupported {
-                    context: "stage temporal spec",
-                    reason: e.to_string(),
-                })?,
-            ),
-            super::test_support::candidate_seam::Slices {
-                input: t.stage0.data(),
-                weight,
-                bias: None,
-                residual: None,
-            },
-            t.conv1.data_mut(),
-            |output| {
-                conv1.forward(
-                    runtime,
-                    &mut conv_workspace,
-                    &t.stage0.data().as_view(),
-                    &weight.as_view(),
-                    &mut output.as_view_mut(),
-                )
-            },
-        )?;
-        #[cfg(not(all(test, feature = "_cuda-libraries")))]
         conv1.forward(
             runtime,
             &mut conv_workspace,
@@ -724,39 +673,6 @@ impl Network {
         )?;
 
         let [weight, bias] = &self.convs[1];
-        #[cfg(all(test, feature = "_cuda-libraries"))]
-        super::test_support::boundaries::run_slices(
-            qualification.get("sincnet.conv2"),
-            runtime,
-            super::test_support::candidate_seam::Operation::Temporal(
-                super::candidate::SegConvSpec::new(
-                    super::candidate::SegConvSite::Conv2,
-                    batch,
-                    self.options.math,
-                )
-                .map_err(|e| CudaError::Unsupported {
-                    context: "stage temporal spec",
-                    reason: e.to_string(),
-                })?,
-            ),
-            super::test_support::candidate_seam::Slices {
-                input: t.stage1.data(),
-                weight,
-                bias: None,
-                residual: None,
-            },
-            t.conv2.data_mut(),
-            |output| {
-                conv2.forward(
-                    runtime,
-                    &mut conv_workspace,
-                    &t.stage1.data().as_view(),
-                    &weight.as_view(),
-                    &mut output.as_view_mut(),
-                )
-            },
-        )?;
-        #[cfg(not(all(test, feature = "_cuda-libraries")))]
         conv2.forward(
             runtime,
             &mut conv_workspace,
@@ -793,26 +709,8 @@ impl Network {
             t.linear0.data_mut(),
             |output| {
                 let [weight, bias] = &self.linear[0];
-                #[cfg(all(test, feature = "_cuda-libraries"))]
-                harness::dense(
-                    qualification.get("linear0"),
-                    runtime,
-                    gemm(0),
-                    super::candidate::DenseSite::Linear0,
-                    super::test_support::candidate_seam::Slices {
-                        input: t.lstm_output.data(),
-                        weight,
-                        bias: Some(bias),
-                        residual: None,
-                    },
-                    output,
-                    |output| k.bias_leaky(runtime, bias, LEAKY_SLOPE, output),
-                )?;
-                #[cfg(not(all(test, feature = "_cuda-libraries")))]
-                {
-                    runtime.sgemm(gemm(0), t.lstm_output.data(), weight, output)?;
-                    k.bias_leaky(runtime, bias, LEAKY_SLOPE, output)?;
-                }
+                runtime.sgemm(gemm(0), t.lstm_output.data(), weight, output)?;
+                k.bias_leaky(runtime, bias, LEAKY_SLOPE, output)?;
 
                 Ok(())
             },
@@ -820,52 +718,16 @@ impl Network {
 
         dense[1].enqueue_slice(runtime, t.linear0.data(), t.linear1.data_mut(), |output| {
             let [weight, bias] = &self.linear[1];
-            #[cfg(all(test, feature = "_cuda-libraries"))]
-            harness::dense(
-                qualification.get("linear1"),
-                runtime,
-                gemm(1),
-                super::candidate::DenseSite::Linear1,
-                super::test_support::candidate_seam::Slices {
-                    input: t.linear0.data(),
-                    weight,
-                    bias: Some(bias),
-                    residual: None,
-                },
-                output,
-                |output| k.bias_leaky(runtime, bias, LEAKY_SLOPE, output),
-            )?;
-            #[cfg(not(all(test, feature = "_cuda-libraries")))]
-            {
-                runtime.sgemm(gemm(1), t.linear0.data(), weight, output)?;
-                k.bias_leaky(runtime, bias, LEAKY_SLOPE, output)?;
-            }
+            runtime.sgemm(gemm(1), t.linear0.data(), weight, output)?;
+            k.bias_leaky(runtime, bias, LEAKY_SLOPE, output)?;
 
             Ok(())
         })?;
 
         dense[2].enqueue_slice(runtime, t.linear1.data(), t.output.data_mut(), |output| {
             let [weight, bias] = &self.linear[2];
-            #[cfg(all(test, feature = "_cuda-libraries"))]
-            harness::dense(
-                qualification.get("linear2"),
-                runtime,
-                gemm(2),
-                super::candidate::DenseSite::Classifier,
-                super::test_support::candidate_seam::Slices {
-                    input: t.linear1.data(),
-                    weight,
-                    bias: Some(bias),
-                    residual: None,
-                },
-                output,
-                |output| k.bias_log_softmax(runtime, bias, output),
-            )?;
-            #[cfg(not(all(test, feature = "_cuda-libraries")))]
-            {
-                runtime.sgemm(gemm(2), t.linear1.data(), weight, output)?;
-                k.bias_log_softmax(runtime, bias, output)?;
-            }
+            runtime.sgemm(gemm(2), t.linear1.data(), weight, output)?;
+            k.bias_log_softmax(runtime, bias, output)?;
             Ok(())
         })?;
 
@@ -890,8 +752,7 @@ impl SegmentationWorkspace {
 }
 
 #[cfg(all(test, feature = "_cuda-libraries"))]
-#[path = "../../../tests/cuda_qualify/segmentation.rs"]
-pub(crate) mod test_support;
+mod test_support;
 
 /// The pooled Sinc tensor, for a candidate whose declared output is pooled
 fn pooled_tensor(
@@ -905,7 +766,3 @@ fn pooled_tensor(
     let dims = [shape.batch, SINC_CHANNELS, shape.pool0];
     Ok(Some(DeviceTensor::zeros(runtime.stream(), &dims)?))
 }
-
-#[cfg(all(test, feature = "_cuda-libraries"))]
-#[path = "../../../tests/cuda_qualify/segdense_library.rs"]
-pub(crate) mod harness;

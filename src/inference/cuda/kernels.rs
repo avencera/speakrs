@@ -277,25 +277,6 @@ impl KernelModule {
         }
     }
 
-    /// The build metadata embedded beside this area's artifact bytes
-    #[cfg(all(test, feature = "_cuda-libraries"))]
-    pub(crate) const fn manifest(self) -> &'static str {
-        match self {
-            #[cfg(test)]
-            Self::Probe => include_str!("ptx/probe.manifest"),
-            Self::Fbank => include_str!("ptx/fbank.manifest"),
-            Self::Embedding => include_str!("ptx/embedding.manifest"),
-            Self::Segmentation => include_str!("ptx/segmentation.manifest"),
-            Self::Resnet => include_str!("ptx/resnet.manifest"),
-            Self::Lstm => include_str!("ptx/lstm.manifest"),
-            Self::Sincnet => include_str!("ptx/sincnet.manifest"),
-            Self::Segdense => include_str!("ptx/segdense.manifest"),
-            Self::FbankDft => include_str!("ptx/fbankdft.manifest"),
-            Self::Wideconv => include_str!("ptx/wideconv.manifest"),
-            Self::LstmProj => include_str!("ptx/lstmproj.manifest"),
-        }
-    }
-
     /// The PTX variants embedded in this build
     pub const fn variants(self) -> AreaPtx {
         match self {
@@ -656,7 +637,7 @@ mod tests {
                     assert_eq!(artifact, LoadedArtifact::PtxJit { sha256: ptx_hash });
                     assert_ne!(artifact, cubin_key);
                 } else {
-                    // this proof must fail, not silently qualify a rejected cubin's JIT
+                    // this proof must fail, not silently accept a rejected cubin's JIT
                     assert_eq!(artifact, cubin_key);
                 }
                 let loaded = LoadedKernels::new(

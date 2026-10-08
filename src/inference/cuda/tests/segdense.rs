@@ -4,7 +4,7 @@
 //!
 //! This is evidence for a driver-only build, not a qualification. Run it under the
 //! GPU lock with `--ignored --nocapture`; it reads the native weights from
-//! `SEGDENSE_WEIGHTS` (default `/workspace/speakrs-cuda-qualify/models-native`) and the
+//! `SEGDENSE_WEIGHTS` (default `/workspace/speakrs-cuda-ref/models-native`) and the
 //! intermediate tensors from the reference directory. `SEGDENSE_SITE`,
 //! `SEGDENSE_BATCH` and `SEGDENSE_TIERS` (such as `sm80`) narrow the cases, and
 //! `SEGDENSE_HARDWARE=a100` picks the configurations an A100 would get, which checks
@@ -79,7 +79,7 @@ fn load(reference: &std::path::Path, site: Site, batch: usize) -> Result<Data, C
         "segmentation-3.0"
     };
     let weights_dir = std::env::var("SEGDENSE_WEIGHTS")
-        .unwrap_or_else(|_| "/workspace/speakrs-cuda-qualify/models-native".into());
+        .unwrap_or_else(|_| "/workspace/speakrs-cuda-ref/models-native".into());
     let (dir, case) = if batch == 1 {
         (model.to_string(), "test_first_b1")
     } else {

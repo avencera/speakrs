@@ -83,6 +83,3 @@ impl Drop for EventTrackingPause<'_> {
         }
     }
 }
-
-#[cfg(all(test, feature = "_cuda-libraries"))]
-mod test_support;

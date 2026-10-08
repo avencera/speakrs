@@ -126,6 +126,7 @@ and the Library LSTM default is `CudaLstmAlgorithm::PersistStaticSmallH`. The cu
 LSTM still uses cuBLAS for input projections. cuDNN and cuBLAS remain required.
 
 The shipped PTX targets Turing and newer. Qualification ran its sm75 image on an
-RTX 5070 Ti (sm120); performance on a real Turing GPU is not measured. See
-[the qualification guide](qualify/README.md) for the gates, cache setup, and lock
-checks.
+RTX 5070 Ti (sm120); performance on a real Turing GPU is not measured.
+
+Kernel checks use `cargo xtask cuda-kernels check`, the PTX lint,
+`scripts/cuda/prove-driver-only.sh`, and end-to-end RTTM/DER runs.

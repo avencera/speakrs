@@ -65,9 +65,6 @@ impl CudaRuntime {
             check_len("sgemm c", spec.m.saturating_mul(spec.n), c.len())?;
             let config = spec.column_major()?;
             let _math = self.lock_blas(spec.math)?;
-            #[cfg(all(test, feature = "_cuda-libraries"))]
-            let _library =
-                super::test_support::call(&format!("cublas.m{}.n{}.k{}", spec.m, spec.n, spec.k));
 
             // SAFETY: the lengths match the dimensions and leading dimensions checked
             // above, and all buffers are device allocations that cudarc orders on the

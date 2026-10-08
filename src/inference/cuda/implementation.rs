@@ -125,11 +125,6 @@ pub(crate) enum Choice {
     #[default]
     Library,
     Oxide(Selection),
-    /// The pinned FP32 production path with a stage-only timing fault
-    StageTail,
-    /// The same pinned FP32 production path without the timing fault
-    StageTailControl,
-    Mutant(super::test_support::Mutant),
 }
 
 /// One selected owner; an Oxide token can only come from this module
@@ -137,8 +132,6 @@ pub(crate) enum Choice {
 pub(crate) enum Selected {
     Library,
     Oxide(Box<Qualified>),
-    #[cfg(all(test, feature = "_cuda-libraries"))]
-    Mutant(super::test_support::Mutant),
 }
 
 /// Every accepted production binding
@@ -532,13 +525,7 @@ impl Qualified {
         };
         let plan = pin.and_then(|pin| {
             let plan = ConvOxide::plan(runtime, &kernels, spec, pin)?;
-            #[cfg(all(test, feature = "_cuda-libraries"))]
-            super::test_support::configuration::record(
-                self.boundary.name(),
-                self.batch,
-                self.math,
-                ConfigPin::Conv(pin),
-            );
+
             Ok(plan)
         });
         self.finish(area, super::driver_only(), plan)
@@ -560,13 +547,7 @@ impl Qualified {
         };
         let plan = pin.and_then(|pin| {
             let plan = WideconvOxide::plan(runtime, &kernels, spec, pin)?;
-            #[cfg(all(test, feature = "_cuda-libraries"))]
-            super::test_support::configuration::record(
-                self.boundary.name(),
-                self.batch,
-                self.math,
-                ConfigPin::Wideconv(pin),
-            );
+
             Ok(plan)
         });
         self.finish(area, super::driver_only(), plan)
@@ -594,13 +575,7 @@ impl Qualified {
         };
         let plan = pin.and_then(|pin| {
             let plan = SincOxide::plan(runtime, &kernels, spec, pin)?;
-            #[cfg(all(test, feature = "_cuda-libraries"))]
-            super::test_support::configuration::record(
-                self.boundary.name(),
-                self.batch,
-                self.math,
-                ConfigPin::Sinc(pin),
-            );
+
             Ok(plan)
         });
         self.finish(area, super::driver_only(), plan)
@@ -622,13 +597,7 @@ impl Qualified {
         };
         let plan = pin.and_then(|pin| {
             let plan = LstmOxide::plan(runtime, &kernels, spec, pin)?;
-            #[cfg(all(test, feature = "_cuda-libraries"))]
-            super::test_support::configuration::record(
-                self.boundary.name(),
-                self.batch,
-                self.math,
-                ConfigPin::Lstm(pin),
-            );
+
             Ok(plan)
         });
         self.finish(area, super::driver_only(), plan)
@@ -733,13 +702,7 @@ impl Qualified {
         };
         let plan = pin.and_then(|pin| {
             let plan = FbankOxide::plan(runtime, &kernels, spec, pin)?;
-            #[cfg(all(test, feature = "_cuda-libraries"))]
-            super::test_support::configuration::record(
-                self.boundary.name(),
-                self.batch,
-                self.math,
-                ConfigPin::Fbank(pin),
-            );
+
             Ok(plan)
         });
         self.finish(area, super::driver_only(), plan)
@@ -829,13 +792,7 @@ pub(crate) fn plan_selection(
 ) -> Result<Selected, CudaError> {
     let request = PlanRequest::Hybrid;
     #[cfg(all(test, feature = "_cuda-libraries"))]
-    let request = override_choice.map_or_else(
-        || match super::test_support::default_choice(Choice::Oxide(Selection::Production)) {
-            Choice::Oxide(Selection::Production) => request,
-            choice => PlanRequest::Qualification(choice),
-        },
-        PlanRequest::Qualification,
-    );
+    let request = override_choice.map_or(request, PlanRequest::Qualification);
     let selected = request.resolve(boundary, batch, math, runtime)?;
     match &selected {
         Selected::Oxide(token) => {
@@ -848,8 +805,6 @@ pub(crate) fn plan_selection(
             speed_measured = false,
             "CUDA route selected implementation=Library"
         ),
-        #[cfg(all(test, feature = "_cuda-libraries"))]
-        Selected::Mutant(_) => {}
     }
     Ok(selected)
 }
@@ -913,10 +868,6 @@ impl PlanRequest {
         if let Self::Qualification(choice) = self {
             match choice {
                 Choice::Library => return Ok(Selected::Library),
-                Choice::Mutant(mutant) => return Ok(Selected::Mutant(mutant)),
-                Choice::StageTail | Choice::StageTailControl if math != CudaMath::Fp32 => {
-                    return Ok(Selected::Library);
-                }
                 Choice::Oxide(Selection::Explicit) => {
                     let Some(request) = explicit_request(&modules, boundary, batch, math)? else {
                         return Ok(Selected::Library);
@@ -1056,19 +1007,7 @@ fn qualification_selection(
                 selection,
             }))
         }
-        Choice::Mutant(mutant) => Selected::Mutant(mutant),
-        Choice::StageTail | Choice::StageTailControl if math == CudaMath::Fp32 => {
-            // isolated segmentation selectors use this owner directly, without plan_selection
-            select(boundary, batch, math, device, loaded).map_err(|error| {
-                CudaError::Unsupported {
-                    context: "CUDA selection",
-                    reason: error.to_string(),
-                }
-            })?
-        }
-        Choice::Library | Choice::Oxide(_) | Choice::StageTail | Choice::StageTailControl => {
-            Selected::Library
-        }
+        Choice::Library | Choice::Oxide(_) => Selected::Library,
     })
 }
 

@@ -242,12 +242,16 @@ fn library(
     };
     let mut model = CudaSegmentation::new(runtime, weights, options)?;
     select_lstm(&mut model, runtime, [batch, SAMPLES], "Library")?;
-    let mut op = model.isolated(runtime, batch, "lstm", [input, input])?;
-    model.isolated_run(runtime, &mut op, 0)?;
-    let output = model.isolated_output(runtime, &op)?;
-    model.isolated_run(runtime, &mut op, 1)?;
-    let bitwise = bits_equal(&output, &model.isolated_output(runtime, &op)?);
-    let time = time(runtime, || Ok(model.isolated_run(runtime, &mut op, 0)?))?;
+    let stream = runtime.stream();
+    let input = stream.clone_htod(input)?;
+    let mut device_output = stream.alloc_zeros::<f32>(batch * STEPS * OUTPUT)?;
+    model.run_lstm(runtime, batch, &input, &mut device_output)?;
+    let output = stream.clone_dtoh(&device_output)?;
+    model.run_lstm(runtime, batch, &input, &mut device_output)?;
+    let bitwise = bits_equal(&output, &stream.clone_dtoh(&device_output)?);
+    let time = time(runtime, || {
+        Ok(model.run_lstm(runtime, batch, &input, &mut device_output)?)
+    })?;
     Ok(Run {
         output,
         time,

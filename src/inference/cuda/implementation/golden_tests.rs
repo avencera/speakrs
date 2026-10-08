@@ -192,7 +192,6 @@ fn observe(
                 artifact: token.target.module.artifact(),
             }
         }
-        Selected::Mutant(_) => panic!("production cannot select a mutant"),
     };
     Ok((outcome, fixture.loads))
 }

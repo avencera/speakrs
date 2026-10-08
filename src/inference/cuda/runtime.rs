@@ -259,8 +259,7 @@ impl CudaRuntime {
             request.check_cached(loaded.request())?;
             return Ok(loaded.clone());
         }
-        #[cfg(all(test, feature = "_cuda-libraries"))]
-        super::test_support::assert_module_load_allowed();
+
         let (inner, artifact) = super::kernels::load_artifact(
             requested,
             cubin,
@@ -283,14 +282,7 @@ impl CudaRuntime {
             ptx_sha256,
         );
         debug!(embedded_ptx_sha256 = %loaded.ptx_sha256(), "CUDA embedded PTX identity");
-        #[cfg(all(test, feature = "_cuda-libraries"))]
-        super::test_support::record_artifact(
-            module,
-            tier,
-            ptx,
-            loaded.artifact(),
-            loaded.ptx_sha256(),
-        );
+
         modules.insert(module, loaded.clone());
         Ok(loaded)
     }

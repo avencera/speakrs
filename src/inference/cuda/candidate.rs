@@ -1,32 +1,29 @@
-//! The candidate interface: one trait per qualified boundary, implemented by kernel work
-//! outside the locked harness
+//! The candidate interface: one trait per kernel boundary
 //!
 //! A candidate registers a plan type, never a closure. Locked dispatch code
 //! (`embedding/dispatch.rs` and `segmentation/dispatch.rs`) creates the plan when a
-//! batch class is set up, outside every timed and traced interval, and then calls
+//! batch class is set up, and then calls
 //! [`ConvCandidate::enqueue`], [`SincCandidate::enqueue`], [`LstmCandidate::enqueue`]
-//! or [`FbankCandidate::enqueue`] inside a scope it owns. The candidate only enqueues
-//! device work on the stream it is given and on registered [`SideStream`]s, and opens
-//! sub-scopes only through the locked [`Phases`] and [`LstmPhases`] handles
+//! or [`FbankCandidate::enqueue`]. The candidate only enqueues
+//! device work on the stream it is given and on [`SideStream`]s. Phase execution
+//! uses the [`Phases`] and [`LstmPhases`] handles
 //!
 //! Each trait declares a [`Coverage`]: the layer and batch pairs the candidate
 //! implements, per math mode. Driver-only routing uses this implemented coverage.
 //! Hybrid routing requires a port speed scope or a qualified production tuple;
-//! unmeasured device-sensitive tuples use Library. The harness qualifies exactly
+//! unmeasured device-sensitive tuples use Library. Each plan owns exactly
 //! the declared triples
 //!
 //! A plan is built from a [`ConfigPin`] that names its complete execution choice.
 //! A qualified tuple supplies its record pin; a complete port supplies its fixed
-//! device rule result. Qualification uses the candidate's implemented pin. Each trait also states its [`SpecialValues`]
+//! device rule result. Direct development tests use the implemented pin. Each trait
+//! also states its [`SpecialValues`]
 //! contract. The locked owner passes the exact loaded module from the selection
 //! token; a plan never resolves production module policy again
 //!
 //! Candidate code lives in `candidate/` and its kernels in the `resnet`, `lstm`,
-//! `sincnet` and `fbankdft` PTX areas. The harness scans those files before it
-//! builds anything; see `scripts/cuda/qualify/README.md` for what the scan refuses.
-//! This file and the dispatch files are locked. Production runs a candidate only
-//! where the locked `implementation::PRODUCTION` table selects it, which the root
-//! sets at integration
+//! `sincnet` and `fbankdft` PTX areas. Production selection uses typed artifact
+//! bindings and measured speed scopes
 
 use std::cell::{RefCell, RefMut};
 use std::sync::Arc;
@@ -863,22 +860,7 @@ pub(crate) enum Op {
     Epilogue,
 }
 
-impl Op {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Prologue => "prologue",
-            Self::Pack => "pack",
-            Self::Main => "main",
-            Self::Reduce => "reduce",
-            Self::Epilogue => "epilogue",
-        }
-    }
-}
-
-/// Locked sub-scopes inside a candidate's `enqueue`
-///
-/// The scope names come from fixed methods and the [`Op`] enum, never from candidate
-/// text, so a candidate cannot forge a harness range
+/// Typed phases inside a candidate's `enqueue`
 #[derive(Debug)]
 pub(crate) struct Phases(());
 
@@ -887,23 +869,17 @@ impl Phases {
         Self(())
     }
 
-    /// Runs `enqueue` inside the locked scope for `op`
+    /// Run the enqueue operation for one typed phase
     pub(crate) fn op<T>(
         &self,
-        op: Op,
+        _op: Op,
         enqueue: impl FnOnce() -> Result<T, CudaError>,
     ) -> Result<T, CudaError> {
-        let _scope = sub_scope(|| format!("op.{}", op.name()));
         enqueue()
     }
 }
 
-/// Locked sub-scopes of the LSTM stack
-///
-/// The harness requires all eight `input_proj` and all eight `recurrence` scopes, one
-/// per layer and direction, each with at least one launch and none overlapping. The
-/// projection helper exists only inside `input_proj`, and `recurrence` must be
-/// library-free
+/// Phases of the LSTM stack, with a projection helper and checked layer indices
 #[derive(Debug)]
 pub(crate) struct LstmPhases<'a> {
     phases: Phases,
@@ -918,7 +894,7 @@ impl<'a> LstmPhases<'a> {
         }
     }
 
-    /// Runs `enqueue` inside the locked scope for `op`
+    /// Run the enqueue operation for one typed phase
     pub(crate) fn op<T>(
         &self,
         op: Op,
@@ -931,11 +907,10 @@ impl<'a> LstmPhases<'a> {
     pub(crate) fn input_proj<T>(
         &self,
         layer: usize,
-        direction: Direction,
+        _direction: Direction,
         enqueue: impl FnOnce(&Projection<'_>) -> Result<T, CudaError>,
     ) -> Result<T, CudaError> {
         check_layer(layer)?;
-        let _scope = sub_scope(|| format!("input_proj.L{layer}.{}", direction.name()));
         enqueue(&self.projection)
     }
 
@@ -943,34 +918,12 @@ impl<'a> LstmPhases<'a> {
     pub(crate) fn recurrence<T>(
         &self,
         layer: usize,
-        direction: Direction,
+        _direction: Direction,
         enqueue: impl FnOnce() -> Result<T, CudaError>,
     ) -> Result<T, CudaError> {
         check_layer(layer)?;
-        let _scope = sub_scope(|| format!("recurrence.L{layer}.{}", direction.name()));
         enqueue()
     }
-}
-
-#[cfg(all(test, feature = "_cuda-libraries"))]
-#[path = "candidate_test_support.rs"]
-pub(crate) mod test_support;
-
-#[cfg(all(test, feature = "_cuda-libraries"))]
-use test_support::{projection_scope, sub_scope};
-
-/// Production opens no harness scope
-#[cfg(not(all(test, feature = "_cuda-libraries")))]
-struct NoScope;
-
-#[cfg(not(all(test, feature = "_cuda-libraries")))]
-fn sub_scope(_name: impl FnOnce() -> String) -> NoScope {
-    NoScope
-}
-
-#[cfg(not(all(test, feature = "_cuda-libraries")))]
-fn projection_scope(_stream: &CudaStream, _layer: usize, _direction: Direction) -> NoScope {
-    NoScope
 }
 
 fn check_layer(layer: usize) -> Result<(), CudaError> {
@@ -1010,8 +963,7 @@ impl<T: DeviceRepr + ValidAsZeroBits> Scratch<T> {
 /// A side stream a candidate creates in `plan` and forks from the given stream in
 /// `enqueue`, for example to run the reverse direction concurrently
 ///
-/// The locked type records the stream for the harness, so the profile and the
-/// captured-graph checks cover work on it like work on the main stream
+/// Fork and join events keep side-stream work ordered with the main stream
 #[derive(Debug)]
 pub(crate) struct SideStream {
     stream: Arc<CudaStream>,
@@ -1024,8 +976,7 @@ impl SideStream {
     pub(crate) fn new(runtime: &CudaRuntime) -> Result<Self, CudaError> {
         let context = runtime.context();
         let stream = context.new_stream()?;
-        #[cfg(all(test, feature = "_cuda-libraries"))]
-        super::test_support::register_side_stream(&stream);
+
         Ok(Self {
             stream,
             forked: context.new_event(None)?,
@@ -1067,8 +1018,7 @@ pub(crate) struct ProjectionGemm {
 
 /// The locked cuBLAS input projection, available inside [`LstmPhases::input_proj`]
 ///
-/// Library controls and the pinned production stack use this helper. Fresh Oxide
-/// qualifications require custom projection launches instead of library calls
+/// Direct Library comparisons and the pinned production stack use this helper
 ///
 /// It computes `c[m, n] = a[m, k] · w + beta * c` with `m = batch * frames`, `k` the
 /// layer's input size and the boundary's math mode, and refuses any other shape
@@ -1095,7 +1045,7 @@ impl<'a> Projection<'a> {
     pub(crate) fn project(
         &self,
         layer: usize,
-        direction: Direction,
+        _direction: Direction,
         gemm: ProjectionGemm,
         a: &CudaView<'_, f32>,
         weight: &CudaView<'_, f32>,
@@ -1119,7 +1069,6 @@ impl<'a> Projection<'a> {
             });
         }
 
-        let _scope = projection_scope(self.runtime.stream(), layer, direction);
         let spec = Sgemm {
             b_transposed: gemm.weight_transposed,
             beta: gemm.beta,

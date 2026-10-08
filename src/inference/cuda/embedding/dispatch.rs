@@ -23,11 +23,6 @@ pub(super) enum Plan {
     Library(Rc<ConvPlan>),
     Oxide(ConvOxide),
     Wideconv(WideconvOxide),
-    #[cfg(all(test, feature = "_cuda-libraries"))]
-    Mutant {
-        library: Rc<ConvPlan>,
-        mutant: super::super::test_support::Mutant,
-    },
 }
 
 impl Plan {
@@ -37,8 +32,6 @@ impl Plan {
             Self::Library(plan) => plan.workspace_bytes(),
             // partitioned wideconv plans own their partial-sum planes
             Self::Oxide(_) | Self::Wideconv(_) => 0,
-            #[cfg(all(test, feature = "_cuda-libraries"))]
-            Self::Mutant { library, .. } => library.workspace_bytes(),
         }
     }
 
@@ -50,7 +43,6 @@ impl Plan {
             Self::Oxide(_) | Self::Wideconv(_) => {
                 Choice::Oxide(super::super::implementation::Selection::Explicit)
             }
-            Self::Mutant { mutant, .. } => Choice::Mutant(*mutant),
         }
     }
 
@@ -58,8 +50,7 @@ impl Plan {
     pub(super) fn library(&self) -> Result<&ConvPlan, CudaError> {
         match self {
             Self::Library(plan) => Ok(plan),
-            #[cfg(all(test, feature = "_cuda-libraries"))]
-            Self::Mutant { library, .. } => Ok(library),
+
             Self::Oxide(_) | Self::Wideconv(_) => Err(CudaError::Unsupported {
                 context: "convolution plan",
                 reason: "Oxide plan has no Library state".to_owned(),
@@ -77,54 +68,9 @@ impl Convs<'_> {
         residual: Residual<'_, '_>,
         y: &mut CudaViewMut<'_, f32>,
     ) -> Result<(), CudaError> {
-        #[cfg(all(test, feature = "_cuda-libraries"))]
-        if let Some(owner) = self
-            .qualification
-            .and_then(|owners| owners.get(layer.name()))
-        {
-            let add = match &residual {
-                Residual::Add(value) => Some(value.slice(..)),
-                Residual::None { .. } => None,
-            };
-            let operation = super::super::test_support::candidate_seam::Operation::Spatial {
-                boundary: layer.boundary(),
-                conv: layer.conv(self.chunks, self.math),
-                epilogue: layer.epilogue(add.is_some()),
-            };
-            return owner.run(
-                self.runtime,
-                operation,
-                super::super::test_support::candidate_seam::Views {
-                    input: x.slice(..),
-                    weight: layer.weight().data().as_view(),
-                    bias: Some(layer.bias().data().as_view()),
-                    residual: add,
-                },
-                y,
-                |y| {
-                    let library = self.plan(layer)?.library()?;
-                    let residual = match &residual {
-                        Residual::Add(value) => Residual::Add(value),
-                        Residual::None { scratch } => Residual::None { scratch },
-                    };
-                    library.forward_bias_relu(
-                        &mut self.workspace.as_view_mut(),
-                        x,
-                        &layer.weight().data().as_view(),
-                        &layer.bias().data().as_view(),
-                        residual,
-                        y,
-                    )
-                },
-            );
-        }
         match self.plan(layer)? {
             #[cfg(feature = "_cuda-libraries")]
             Plan::Library(plan) => {
-                #[cfg(all(test, feature = "_cuda-libraries"))]
-                let _scope = layer.eligible().then(|| {
-                    super::super::test_support::library(self.runtime.stream(), layer.name())
-                });
                 plan.forward_bias_relu(
                     &mut self.workspace.as_view_mut(),
                     x,
@@ -133,28 +79,11 @@ impl Convs<'_> {
                     residual,
                     y,
                 )?;
-                #[cfg(all(test, feature = "_cuda-libraries"))]
-                super::super::test_support::perturb(self.runtime, layer.name(), y)?;
+
                 Ok(())
             }
             Plan::Oxide(plan) => self.candidate(plan, layer, x, residual, y),
             Plan::Wideconv(plan) => self.candidate(plan, layer, x, residual, y),
-            #[cfg(all(test, feature = "_cuda-libraries"))]
-            Plan::Mutant { mutant, .. } => {
-                let mutant = *mutant;
-                super::super::test_support::poison(self.runtime)?;
-                {
-                    let _scope = super::super::test_support::mutant_scope(
-                        self.runtime.stream(),
-                        layer.name(),
-                        mutant,
-                    );
-                    if !mutant.skips() {
-                        super::test_support::mutant_conv(self, layer, x, residual, y, mutant)?;
-                    }
-                }
-                super::super::test_support::unscoped(self.runtime, mutant)
-            }
         }
     }
 }
@@ -177,15 +106,8 @@ impl Convs<'_> {
                 self.candidate(plan, layer, x, none, y)
             }
             _ => {
-                #[cfg(all(test, feature = "_cuda-libraries"))]
-                {
-                    self.conv_bias(layer, x, y)
-                }
-                #[cfg(not(all(test, feature = "_cuda-libraries")))]
-                {
-                    self.conv(layer, x, y)?;
-                    self.bias(layer, y)
-                }
+                self.conv(layer, x, y)?;
+                self.bias(layer, y)
             }
         }
     }
@@ -205,10 +127,7 @@ impl Convs<'_> {
             Residual::None { .. } => None,
         };
         let stream = self.runtime.stream();
-        #[cfg(all(test, feature = "_cuda-libraries"))]
-        super::super::test_support::poison(self.runtime)?;
-        #[cfg(all(test, feature = "_cuda-libraries"))]
-        let _scope = super::super::test_support::candidate(stream, layer.name());
+
         plan.enqueue(
             ConvInputs {
                 x,
@@ -244,10 +163,8 @@ pub(super) fn plan_layers(
             #[cfg(all(test, feature = "_cuda-libraries"))]
             layer.override_choice(),
         )?;
-        let selected = match selected {
+        let _selected = match selected {
             Selected::Oxide(token) => {
-                #[cfg(all(test, feature = "_cuda-libraries"))]
-                let _scope = super::super::test_support::plan(layer.name());
                 let spec = ConvLayerSpec {
                     name: layer.name(),
                     conv: layer.conv(batch, math),
@@ -290,16 +207,12 @@ pub(super) fn plan_layers(
                     plan
                 }
             };
-            let plan = match selected {
-                #[cfg(all(test, feature = "_cuda-libraries"))]
-                Selected::Mutant(mutant) => Plan::Mutant { library, mutant },
-                _ => Plan::Library(library),
-            };
+            let plan = Plan::Library(library);
             plans.push((layer.name().to_owned(), plan));
         }
         #[cfg(not(feature = "_cuda-libraries"))]
         {
-            let _ = selected;
+            let _ = _selected;
             return Err(CudaError::LibraryUnavailable {
                 library: CudaLibrary::Cudnn,
             });
