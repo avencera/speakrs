@@ -170,6 +170,8 @@ pub(crate) use lstmproj::Oxide as LstmProjOxide;
 pub(crate) use sinc::Oxide as SincOxide;
 // the GPU development checks force selections made for other devices
 #[cfg(all(test, feature = "_cuda-libraries"))]
+pub(crate) use lstmproj::RecurrencePlan;
+#[cfg(all(test, feature = "_cuda-libraries"))]
 pub(crate) use wideconv::{Config as WideconvConfig, Device as WideconvDevice};
 pub(crate) use wideconv::{Oxide as WideconvOxide, Pin as WideconvPin};
 
