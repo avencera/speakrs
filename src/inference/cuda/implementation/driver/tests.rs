@@ -868,7 +868,7 @@ fn measured_ada_sinc_recipe_matches_driver_pin_and_keeps_blackwell_binding() {
 
 #[test]
 #[cfg(feature = "_cuda-libraries")]
-fn measured_a100_recipe_retains_pins_for_every_pipeline_boundary() {
+fn measured_a100_recipe_uses_class_defaults_for_every_pipeline_boundary() {
     use super::super::policy::{Recipe, RecipeMode};
     for (name, recipe) in [
         ("NVIDIA A100-PCIE-40GB", Recipe::A100Pcie),
@@ -898,14 +898,7 @@ fn measured_a100_recipe_retains_pins_for_every_pipeline_boundary() {
                 else {
                     panic!("driver boundary")
                 };
-                let retained = recipe.fixed_pin(boundary, batch, math, Fp16Policy::Allowed);
-                let expected = retained
-                    .map(super::super::PlanPin::Pinned)
-                    .unwrap_or(driver.pin);
-                assert_eq!(hybrid.pin, expected, "{name} {boundary} b{batch}");
-                if retained.is_some() {
-                    assert_ne!(hybrid.pin, driver.pin, "{name} {boundary} b{batch}");
-                }
+                assert_eq!(hybrid.pin, driver.pin, "{name} {boundary} b{batch}");
                 assert_eq!(hybrid.target, driver.target);
                 assert_eq!(hybrid.evidence, TokenEvidence::Recipe(recipe));
             }
@@ -1665,7 +1658,7 @@ fn kernel_load_failure_is_not_a_capability_fallback() {
 
 #[test]
 #[cfg(feature = "_cuda-libraries")]
-fn rtx_hybrid_and_driver_select_the_same_kernel_for_every_covered_tuple() {
+fn measured_hybrid_and_driver_select_the_same_kernel_for_every_covered_tuple() {
     use super::super::policy::RecipeMode;
     for (cc, sms, name, tier) in [
         (
@@ -1679,6 +1672,19 @@ fn rtx_hybrid_and_driver_select_the_same_kernel_for_every_covered_tuple() {
             36,
             "NVIDIA GeForce RTX 5060 Ti",
             PtxTier::Sm120,
+        ),
+        (ComputeCapability::new(7, 5), 40, "Tesla T4", PtxTier::Sm75),
+        (
+            ComputeCapability::new(8, 0),
+            108,
+            "NVIDIA A100-PCIE-40GB",
+            PtxTier::Sm80,
+        ),
+        (
+            ComputeCapability::new(8, 0),
+            108,
+            "NVIDIA A100-SXM4-40GB",
+            PtxTier::Sm80,
         ),
     ] {
         let mut fixture = Fixture::new();

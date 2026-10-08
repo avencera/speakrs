@@ -483,34 +483,6 @@ impl Pin {
         .ok()
         .map(Self::Configured)
     }
-
-    /// The retained A100 TF32 recipe pins at the measured batch classes
-    pub(crate) fn measured_a100(name: &str, batch: usize) -> Option<Self> {
-        if !matches!(batch, 1 | 32) || !LAYERS.contains(&name) {
-            return None;
-        }
-        let (algorithm, partition) = match name {
-            "resnet.layer3.0.conv1" | "resnet.layer4.0.conv1" => return None,
-            _ if name.ends_with("shortcut.0") => return None,
-            _ if name.starts_with("resnet.layer3.") => (
-                Algorithm::Winograd(WinogradProducts::Tf32x1),
-                Partition::Whole,
-            ),
-            _ if name.starts_with("resnet.layer4.") && batch == 1 => (
-                Algorithm::Winograd(WinogradProducts::Tf32x3),
-                Partition::Two,
-            ),
-            _ if name.starts_with("resnet.layer4.") => {
-                (Algorithm::TensorCore(TensorKernel::Tf32), Partition::Whole)
-            }
-            _ => return None,
-        };
-        Some(Self::Configured(Config {
-            algorithm,
-            partition,
-            split_cells: SplitCells::All,
-        }))
-    }
 }
 
 /// Most whole waves of Winograd CTAs before which a launch splits its last, partial wave

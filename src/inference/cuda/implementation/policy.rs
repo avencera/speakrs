@@ -105,11 +105,8 @@ impl Recipe {
             Self::TeslaT4 => {
                 "FP16 stride-1 trunk at every batch; 216-file dev DER 7.0125 to 7.0118; 10-file driver 154.5x versus FP32 driver 92.2x; FP32 segmentation and TF32 embedding"
             }
-            Self::A100Pcie => {
-                "hybrid-profile cea1cbe: complete FP32 segmentation/TF32 embedding driver recipe; 10-file driver 648.06x versus hybrid 547.35x; identical RTTMs; short-file Library startup wins; not a per-layer speed claim"
-            }
-            Self::A100Sxm4 => {
-                "do-a100 de89ae2: complete FP32 segmentation/TF32 embedding driver recipe; 10-file median 9.82 s versus Library 11.32 s; identical RTTMs; not a per-layer speed claim"
+            Self::A100Pcie | Self::A100Sxm4 => {
+                "108-SM A100 class defaults; PCIe 40GB measurement: 10-file median 8.787 s versus retained pins 8.938 s, hard-file median 1.117 s versus 1.218 s; identical driver RTTMs and per-file DER; FP32 segmentation and TF32 embedding"
             }
         }
     }
@@ -131,20 +128,8 @@ impl Recipe {
         math: CudaMath,
         fp16: Fp16Policy,
     ) -> Option<ConfigPin> {
-        if let Some(pin) = self
-            .fp16_pin(boundary, batch, math)
+        self.fp16_pin(boundary, batch, math)
             .filter(|_| fp16.allows())
-        {
-            return Some(pin);
-        }
-
-        if !matches!(self, Self::A100Pcie | Self::A100Sxm4)
-            || !matches!(batch, 1 | 32)
-            || math != CudaMath::Tf32
-        {
-            return None;
-        }
-        WideconvPin::measured_a100(boundary.name(), batch).map(ConfigPin::Wideconv)
     }
 
     /// Exact measured FP16 points, also used by builds without CUDA libraries

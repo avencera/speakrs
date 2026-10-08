@@ -213,59 +213,6 @@ fn class_default_only_covers_early_tf32_trunk_on_ampere_and_newer() {
 }
 
 #[test]
-#[cfg(feature = "_cuda-libraries")]
-fn retained_a100_pins_do_not_follow_staged_winograd() {
-    use crate::inference::cuda::candidate::{
-        ConfigPin, WideconvAlgorithm, WideconvPartition, WideconvPin, WideconvProducts,
-        WideconvSplitCells, WideconvTensorKernel,
-    };
-    for recipe in [Recipe::A100Pcie, Recipe::A100Sxm4] {
-        for batch in [1, 32] {
-            let Some(ConfigPin::Wideconv(WideconvPin::Configured(c128))) = recipe.fixed_pin(
-                BoundaryId::named("resnet.layer3.1.conv1"),
-                batch,
-                CudaMath::Tf32,
-                Fp16Policy::Allowed,
-            ) else {
-                panic!("retained C128 pin")
-            };
-            assert_eq!(
-                c128.algorithm,
-                WideconvAlgorithm::Winograd(WideconvProducts::Tf32x1)
-            );
-            assert_eq!(c128.partition, WideconvPartition::Whole);
-            assert_eq!(c128.split_cells, WideconvSplitCells::All);
-        }
-        let Some(ConfigPin::Wideconv(WideconvPin::Configured(c256))) = recipe.fixed_pin(
-            BoundaryId::named("resnet.layer4.1.conv1"),
-            1,
-            CudaMath::Tf32,
-            Fp16Policy::Allowed,
-        ) else {
-            panic!("retained C256 b1 pin")
-        };
-        assert_eq!(
-            c256.algorithm,
-            WideconvAlgorithm::Winograd(WideconvProducts::Tf32x3)
-        );
-        assert_eq!(c256.partition, WideconvPartition::Two);
-        let Some(ConfigPin::Wideconv(WideconvPin::Configured(c256))) = recipe.fixed_pin(
-            BoundaryId::named("resnet.layer4.1.conv1"),
-            32,
-            CudaMath::Tf32,
-            Fp16Policy::Allowed,
-        ) else {
-            panic!("retained C256 b32 pin")
-        };
-        assert_eq!(
-            c256.algorithm,
-            WideconvAlgorithm::TensorCore(WideconvTensorKernel::Tf32)
-        );
-        assert_eq!(c256.partition, WideconvPartition::Whole);
-    }
-}
-
-#[test]
 fn rtx_whole_recipes_cover_only_measured_devices_batches_and_precision() {
     for (cc, sms, name, recipe) in [
         (
