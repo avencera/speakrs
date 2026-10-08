@@ -1,6 +1,10 @@
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::Arc;
+#[cfg(feature = "cuda")]
+use std::sync::MutexGuard;
 
+#[cfg(feature = "cuda")]
 use cudarc::cublas::CudaBlas;
+#[cfg(feature = "cuda")]
 use cudarc::cudnn::Cudnn;
 use cudarc::driver::sys::CUresult;
 use cudarc::driver::{CudaContext, CudaStream, DriverError};
@@ -8,9 +12,11 @@ use cudarc::nvrtc::Ptx;
 use tracing::debug;
 
 use super::error::CudaLibrary;
-use super::{ComputeCapability, CudaError, CudaMath, KernelModule, LoadedKernels, PtxTier};
+use super::{ComputeCapability, CudaError, KernelModule, LoadedKernels, PtxTier};
+#[cfg(feature = "cuda")]
+use super::{CudaMath, libraries::Libraries};
 
-/// One CUDA device context with a stream and the cuBLAS and cuDNN handles bound to it
+/// One CUDA device context and stream, with optional libraries prepared by plans
 ///
 /// Everything issued through one runtime runs in order on its stream. Use one runtime
 /// per worker thread; device buffers from one runtime must not be used on another
@@ -20,19 +26,17 @@ use super::{ComputeCapability, CudaError, CudaMath, KernelModule, LoadedKernels,
 /// area, the highest compiled-in PTX tier the device supports
 #[derive(Debug)]
 pub struct CudaRuntime {
-    context: Arc<CudaContext>,
+    // plans live in the session state; library handles must drop before driver state
+    #[cfg(feature = "cuda")]
+    libraries: Libraries,
     stream: Arc<CudaStream>,
-    blas: CudaBlas,
-    /// the math mode the cuBLAS handle is set to; the lock is held from setting the
-    /// mode until the GEMM is enqueued, so callers sharing the runtime cannot race
-    blas_math: Mutex<CudaMath>,
-    dnn: Arc<Cudnn>,
+    context: Arc<CudaContext>,
     capability: ComputeCapability,
     ptx_tier: PtxTier,
 }
 
 impl CudaRuntime {
-    /// Opens device `ordinal` and creates a stream, a cuBLAS handle and a cuDNN handle
+    /// Opens device `ordinal` and creates a stream without loading optional libraries
     ///
     /// Fails with [`CudaError::LibraryUnavailable`] instead of panicking when a CUDA
     /// shared library is missing. [`PTX_TIER_ENV`](super::PTX_TIER_ENV) may force a
@@ -47,7 +51,7 @@ impl CudaRuntime {
     /// [`CudaError::UnsupportedDevice`] below the `sm_75` baseline, and when
     /// `requested` is not compiled in or is above what the device supports
     pub fn with_ptx_tier(ordinal: usize, requested: Option<PtxTier>) -> Result<Self, CudaError> {
-        ensure_libraries()?;
+        ensure_driver()?;
 
         let count = device_count()?;
         if ordinal >= count {
@@ -60,7 +64,38 @@ impl CudaRuntime {
             u32::try_from(major).unwrap_or(0),
             u32::try_from(minor).unwrap_or(0),
         );
+        // target features must support the device even when an override lowers the limit
+        if super::driver_only() {
+            let compiled = PtxTier::select(capability, None)?;
+            let native = PtxTier::native(capability);
+            if compiled < native {
+                return Err(CudaError::TierNotCompiledIn {
+                    tier: native,
+                    device: capability,
+                    feature: native.feature(),
+                });
+            }
+        }
         let ptx_tier = PtxTier::select(capability, requested)?;
+        if super::driver_only() && requested.is_some() {
+            // qualification follows the area variant, not the GPU target feature
+            for area in [
+                KernelModule::Resnet,
+                KernelModule::Lstm,
+                KernelModule::Sincnet,
+            ] {
+                let (tier, _) = area.variants().resolve(area, ptx_tier, capability)?;
+                if !super::implementation::tier_qualified(super::implementation::Target {
+                    tier,
+                    device: capability,
+                }) {
+                    return Err(CudaError::TierNotQualified {
+                        tier,
+                        device: capability,
+                    });
+                }
+            }
+        }
         debug!(
             ordinal,
             %capability,
@@ -73,18 +108,11 @@ impl CudaRuntime {
         // separate runtimes do not serialize against each other
         let stream = context.new_stream()?;
 
-        let blas = CudaBlas::new(stream.clone())?;
-        // FP32 GEMMs must not drop to TF32 unless asked: embedding drift breaks
-        // PLDA/VBx (adr/001)
-        set_blas_math(&blas, CudaMath::Fp32)?;
-
-        let dnn = Cudnn::new(stream.clone())?;
         Ok(Self {
+            #[cfg(feature = "cuda")]
+            libraries: Libraries::default(),
             context,
             stream,
-            blas,
-            blas_math: Mutex::new(CudaMath::Fp32),
-            dnn,
             capability,
             ptx_tier,
         })
@@ -111,32 +139,55 @@ impl CudaRuntime {
         &self.stream
     }
 
-    /// The cuBLAS handle bound to [`Self::stream`]
-    ///
-    /// Its math mode is whatever the last [`Self::sgemm`] set; prefer
-    /// [`Self::sgemm`], which sets the mode its [`Sgemm`](super::Sgemm) asks for
-    pub fn blas(&self) -> &CudaBlas {
-        &self.blas
+    /// A direct request has no selected area, boundary, batch, math or loaded tier
+    pub(super) fn library_forbidden(library: CudaLibrary) -> CudaError {
+        CudaError::LibraryForbidden { library }
     }
 
-    /// Locks the cuBLAS handle in `math` mode until the guard drops
-    pub(super) fn lock_blas(&self, math: CudaMath) -> Result<MutexGuard<'_, CudaMath>, CudaError> {
-        // the guarded value is only a mode cache; a panic elsewhere cannot corrupt it
-        let mut current = self
-            .blas_math
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if *current != math {
-            set_blas_math(&self.blas, math)?;
-            *current = math;
+    #[cfg(feature = "cuda")]
+    fn library_policy(&self, library: CudaLibrary) -> Result<(), CudaError> {
+        if super::driver_only() {
+            return Err(Self::library_forbidden(library));
         }
-
-        Ok(current)
+        Ok(())
     }
 
-    /// The cuDNN handle bound to [`Self::stream`]
-    pub fn dnn(&self) -> &Arc<Cudnn> {
-        &self.dnn
+    /// Prepare a library during construction, never during forward or capture
+    #[cfg(feature = "cuda")]
+    pub(super) fn prepare_library(&self, library: CudaLibrary) -> Result<(), CudaError> {
+        self.library_policy(library)?;
+        self.libraries.prepare(library, &self.stream)
+    }
+
+    /// The already prepared cuBLAS handle
+    #[cfg(feature = "cuda")]
+    pub fn blas(&self) -> Result<&CudaBlas, CudaError> {
+        self.library_policy(CudaLibrary::Cublas)?;
+        self.libraries.blas()
+    }
+
+    /// Keep cuBLAS mode selection and enqueue atomic
+    #[cfg(feature = "cuda")]
+    pub(super) fn lock_blas(&self, math: CudaMath) -> Result<MutexGuard<'_, CudaMath>, CudaError> {
+        self.library_policy(CudaLibrary::Cublas)?;
+        self.libraries.lock_blas(math)
+    }
+
+    /// The already prepared cuDNN handle
+    #[cfg(feature = "cuda")]
+    pub fn dnn(&self) -> Result<&Arc<Cudnn>, CudaError> {
+        self.library_policy(CudaLibrary::Cudnn)?;
+        self.libraries.dnn()
+    }
+
+    /// Resolve an area's variant before selection or module loading
+    pub(super) fn area_ptx(
+        &self,
+        module: KernelModule,
+    ) -> Result<(PtxTier, &'static str), CudaError> {
+        module
+            .variants()
+            .resolve(module, self.ptx_tier, self.capability)
     }
 
     /// Loads the highest embedded PTX variant of `module` at or below
@@ -145,7 +196,7 @@ impl CudaRuntime {
     /// Load each module once per runtime and keep the result: JIT compilation is
     /// cached by the driver but loading still costs time
     pub fn load_kernels(&self, module: KernelModule) -> Result<LoadedKernels, CudaError> {
-        let (tier, ptx) = module.variants().select(self.ptx_tier);
+        let (tier, ptx) = self.area_ptx(module)?;
         debug!(
             area = module.name(),
             %tier,
@@ -155,7 +206,7 @@ impl CudaRuntime {
         );
 
         // the harness allow-list comes from the exact bytes handed to the driver
-        #[cfg(test)]
+        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
         super::test_support::record_module(module.name(), &tier.to_string(), ptx);
         let loaded = self
             .context
@@ -310,28 +361,15 @@ enum SmLimit {
     Unknown,
 }
 
-fn set_blas_math(blas: &CudaBlas, math: CudaMath) -> Result<(), CudaError> {
-    // SAFETY: the handle is owned by `blas` and live for its lifetime
-    unsafe { cudarc::cublas::sys::cublasSetMathMode(*blas.handle(), math.cublas()) }.result()?;
-    Ok(())
-}
-
-/// cudarc panics when a dynamically loaded library is missing, so probe each one first
-fn ensure_libraries() -> Result<(), CudaError> {
-    // SAFETY: probing loads the NVIDIA libraries, whose initializers have no
-    // preconditions on our side
-    let present = unsafe {
-        [
-            (CudaLibrary::Driver, cudarc::driver::sys::is_culib_present()),
-            (CudaLibrary::Cublas, cudarc::cublas::sys::is_culib_present()),
-            (CudaLibrary::Cudnn, cudarc::cudnn::sys::is_culib_present()),
-        ]
-    };
-
-    match present.into_iter().find(|(_, present)| !present) {
-        Some((library, _)) => Err(CudaError::LibraryUnavailable { library }),
-        None => Ok(()),
+/// Only the driver is needed before a model is selected
+fn ensure_driver() -> Result<(), CudaError> {
+    // SAFETY: driver library initializers have no caller preconditions
+    if !unsafe { cudarc::driver::sys::is_culib_present() } {
+        return Err(CudaError::LibraryUnavailable {
+            library: CudaLibrary::Driver,
+        });
     }
+    Ok(())
 }
 
 fn device_count() -> Result<usize, CudaError> {
@@ -340,5 +378,26 @@ fn device_count() -> Result<usize, CudaError> {
         // a driver with no visible GPU fails initialization instead of reporting zero
         Err(DriverError(CUresult::CUDA_ERROR_NO_DEVICE)) => Ok(0),
         Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod direct_request_tests {
+    use super::{CudaError, CudaLibrary, CudaRuntime};
+
+    #[test]
+    fn forbidden_direct_requests_do_not_invent_model_selection_context() {
+        for library in [CudaLibrary::Cublas, CudaLibrary::Cudnn, CudaLibrary::Nvrtc] {
+            let error = CudaRuntime::library_forbidden(library);
+            assert!(matches!(
+                error,
+                CudaError::LibraryForbidden { library: requested } if requested == library
+            ));
+            let message = error.to_string();
+            assert!(message.contains(&library.to_string()));
+            for invented in ["runtime/", "b1", "Fp32", "PTX tier"] {
+                assert!(!message.contains(invented));
+            }
+        }
     }
 }

@@ -32,6 +32,10 @@ use super::{CudaError, CudaRuntime, CudaSegmentation, ResNetEmbedding};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mutant {
     Precision,
+    /// Stage-only regression larger than any operator saving
+    StageSlow,
+    /// Stage-only TF32 error beyond Library truth error
+    StageAccuracy,
     Shape,
     Fallback,
     Tail,
@@ -53,6 +57,8 @@ impl Mutant {
     /// Parses only the fixed mutation inventory
     pub(crate) fn parse(name: &str) -> Option<Self> {
         match name {
+            "StageSlow" => Some(Self::StageSlow),
+            "StageAccuracy" => Some(Self::StageAccuracy),
             "Precision" => Some(Self::Precision),
             "Shape" => Some(Self::Shape),
             "Fallback" => Some(Self::Fallback),
@@ -221,7 +227,7 @@ struct Capture {
     before: BTreeSet<usize>,
 }
 
-/// Projection permissions belong to one driver capture ID, never a node address lifetime
+/// Library projection permissions belong to one capture ID, never a node address lifetime
 struct ProjectionNodes {
     capture_id: Option<u64>,
     nodes: BTreeSet<usize>,
@@ -298,25 +304,19 @@ impl Drop for Scope {
     }
 }
 
-/// A library call made while a candidate scope is open is a violation, unless it is
-/// the cuBLAS call of the locked projection helper
+/// Every library call made while a candidate scope is open is a violation
 fn check_call(name: &str) {
-    let (candidate, projection) = STACK.with(|stack| {
-        let stack = stack.borrow();
-        let candidate = stack
+    let candidate = STACK.with(|stack| {
+        stack
+            .borrow()
             .iter()
             .rev()
             .find(|frame| frame.kind == Kind::Candidate)
-            .map(|frame| frame.name.clone());
-        let projection = stack.iter().any(|frame| frame.kind == Kind::Projection);
-        (candidate, projection)
+            .map(|frame| frame.name.clone())
     });
     let Some(candidate) = candidate else {
         return;
     };
-    if projection && name.starts_with("cublas.") {
-        return;
-    }
 
     CALL_VIOLATIONS.with(|violations| {
         violations
@@ -555,7 +555,12 @@ fn close_capture(frame: Frame) {
         return;
     }
 
-    let permitted = PROJECTION_NODES.with(|nodes| nodes.borrow().nodes.clone());
+    // only Library controls may omit their projection nodes from boundary evidence
+    let permitted = if frame.kind == Kind::Candidate {
+        BTreeSet::new()
+    } else {
+        PROJECTION_NODES.with(|nodes| nodes.borrow().nodes.clone())
+    };
     let mut kernels = Vec::new();
     let mut violations = Vec::new();
     for node in added.difference(&permitted) {
@@ -1083,11 +1088,38 @@ pub(crate) fn sanitizer_control(runtime: &CudaRuntime, control: &str) -> Result<
 }
 
 mod tests {
-    use super::entries;
+    use super::{CALL_VIOLATIONS, Frame, Kind, STACK, check_call, entries};
 
     #[test]
     fn entry_names_come_from_the_loaded_bytes() {
         let ptx = ".visible .entry first(\n.param .u64 a)\n{}\n.entry  second_2()\n{}";
         assert_eq!(entries(ptx), ["first", "second_2"]);
+    }
+
+    #[test]
+    fn projections_cannot_hide_candidate_library_calls() {
+        let saved_stack = STACK.with(|stack| stack.take());
+        let saved_violations = CALL_VIOLATIONS.with(|violations| violations.take());
+        for kind in [Kind::Library, Kind::Candidate] {
+            STACK.with(|stack| {
+                *stack.borrow_mut() = vec![
+                    Frame {
+                        kind,
+                        name: "lstm.stack".to_owned(),
+                        capture: None,
+                    },
+                    Frame {
+                        kind: Kind::Projection,
+                        name: "L0.forward".to_owned(),
+                        capture: None,
+                    },
+                ];
+            });
+            check_call("cublas.m589.n512.k60");
+        }
+
+        let actual = CALL_VIOLATIONS.with(|violations| violations.replace(saved_violations));
+        STACK.with(|stack| stack.replace(saved_stack));
+        assert_eq!(actual, ["cublas.m589.n512.k60 inside candidate lstm.stack"]);
     }
 }

@@ -196,11 +196,11 @@ impl OwnedDiarizationPipeline {
     /// through inference, output validation, and output copying. In CUDA modes it loads
     /// its own copy of the models on a new CUDA stream, because CUDA state is used by
     /// one thread at a time
-    #[cfg(all(any(feature = "_ort", feature = "cuda"), not(feature = "coreml")))]
+    #[cfg(all(any(feature = "_ort", feature = "_cuda"), not(feature = "coreml")))]
     #[cfg_attr(
         docsrs,
         doc(cfg(all(
-            any(feature = "cpu", feature = "cuda", feature = "migraphx"),
+            any(feature = "cpu", feature = "_cuda", feature = "migraphx"),
             not(feature = "coreml")
         )))
     )]

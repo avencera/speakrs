@@ -83,37 +83,22 @@ fn unknown_or_reduced_context_budget_selects_sequential() {
 }
 
 #[test]
-fn insufficient_cooperative_capacity_falls_back_only_in_production() {
-    use crate::inference::cuda::CudaError;
-    use crate::inference::cuda::dispatch::candidate_plan;
-    use crate::inference::cuda::implementation::{Choice, Selection};
+fn insufficient_cooperative_capacity_falls_back_only_in_library_allowed_production() {
+    use crate::inference::cuda::{ComputeCapability, CudaError, CudaMath, KernelModule, PtxTier};
+    use crate::inference::cuda::implementation::{Selected, Target, select};
 
     let schedule = || layout::Schedule::new(1, layout::GROUPS - 1, Some(350));
-    assert!(matches!(
-        schedule(),
-        Err(super::PlanError::DeviceUnsupported { .. })
-    ));
-    let production = crate::inference::cuda::implementation::production(
+    let Selected::Oxide(token) = select(
         "lstm.stack",
         1,
-        crate::inference::cuda::CudaMath::Fp32,
-    );
-    assert!(
-        candidate_plan(production, "lstm.stack", 1, schedule())
-            .unwrap()
-            .is_none()
-    );
-    let explicit = candidate_plan(
-        Choice::Oxide(Selection::Explicit),
-        "lstm.stack",
-        1,
-        schedule(),
-    );
+        CudaMath::Fp32,
+        Target { tier: PtxTier::Sm75, device: ComputeCapability::new(12, 0) },
+    ).unwrap() else { panic!("qualified production token") };
+    assert!(token.finish(KernelModule::Lstm, false, schedule()).unwrap().is_none());
     assert!(matches!(
-        explicit,
-        Err(CudaError::Unsupported {
-            context: "explicit CUDA candidate plan",
-            ..
+        token.finish(KernelModule::Lstm, true, schedule()),
+        Err(CudaError::CandidateDeviceUnsupported {
+            area: "lstm", batch: 1, math: CudaMath::Fp32, tier: PtxTier::Sm75, ..
         })
     ));
 }

@@ -84,5 +84,5 @@ impl Drop for EventTrackingPause<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
 mod test_support;

@@ -1,12 +1,14 @@
 use std::fmt;
 use std::path::PathBuf;
 
+#[cfg(feature = "cuda")]
 use cudarc::cublas::result::CublasError;
+#[cfg(feature = "cuda")]
 use cudarc::cudnn::CudnnError;
 use cudarc::driver::DriverError;
 use safetensors::SafeTensorError;
 
-use super::{ComputeCapability, PtxTier};
+use super::{ComputeCapability, CudaMath, PtxTier};
 
 /// A CUDA shared library that the native backend loads at run time
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +20,8 @@ pub enum CudaLibrary {
     Cublas,
     /// cuDNN 9
     Cudnn,
+    /// Runtime compilation used by the cuDNN dynamic LSTM
+    Nvrtc,
 }
 
 impl fmt::Display for CudaLibrary {
@@ -26,6 +30,7 @@ impl fmt::Display for CudaLibrary {
             Self::Driver => "CUDA driver (libcuda)",
             Self::Cublas => "cuBLAS",
             Self::Cudnn => "cuDNN",
+            Self::Nvrtc => "NVRTC",
         })
     }
 }
@@ -34,11 +39,89 @@ impl fmt::Display for CudaLibrary {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum CudaError {
-    /// A CUDA shared library could not be loaded
+    /// A CUDA shared library is absent or lacks a required symbol
     #[error("could not load the {library} shared library")]
     LibraryUnavailable {
         /// The library that failed to load
         library: CudaLibrary,
+    },
+    /// A direct optional-library request is forbidden by the driver-only policy
+    #[error("driver-only CUDA prohibits a direct request for {library}")]
+    LibraryForbidden {
+        /// The library requested without a selected model boundary
+        library: CudaLibrary,
+    },
+    /// A required PTX tier is absent from this build
+    #[error("PTX tier {tier} for device {device} is not compiled in; enable `{feature}`")]
+    TierNotCompiledIn {
+        /// Required PTX tier
+        tier: PtxTier,
+        /// Exact device capability
+        device: ComputeCapability,
+        /// Cargo feature that embeds the tier
+        feature: &'static str,
+    },
+    /// An area has no embedded variant that the device can run within the tier limit
+    #[error(
+        "CUDA area {area} has no runnable PTX at tier {tier} for device {device}; enable `{feature}`"
+    )]
+    AreaTierNotCompiledIn {
+        /// Kernel area without a runnable variant
+        area: &'static str,
+        /// Runtime's PTX tier limit
+        tier: PtxTier,
+        /// Exact device capability
+        device: ComputeCapability,
+        /// Cargo feature that embeds a runnable variant
+        feature: &'static str,
+    },
+    /// A forced tier has no accepted record for this device
+    #[error("PTX tier {tier} is not qualified for device {device}")]
+    TierNotQualified {
+        /// Forced tier
+        tier: PtxTier,
+        /// Exact device capability
+        device: ComputeCapability,
+    },
+    /// A selected model boundary requires an optional library
+    #[error(
+        "driver-only CUDA: {area}/{boundary} b{batch} {math:?}, PTX tier {tier}, device {device} requires {library}"
+    )]
+    NotDriverOnly {
+        /// Kernel area that owns the boundary
+        area: &'static str,
+        /// Boundary without a library-free qualified implementation
+        boundary: String,
+        /// Production batch class
+        batch: usize,
+        /// Configured precision
+        math: CudaMath,
+        /// Area's selected PTX variant
+        tier: PtxTier,
+        /// Exact device capability
+        device: ComputeCapability,
+        /// Required library
+        library: CudaLibrary,
+    },
+    /// A selected candidate cannot run on this device and fallback is forbidden
+    #[error(
+        "CUDA candidate {area}/{boundary} b{batch} {math:?}, PTX tier {tier}, device {device}: {reason}"
+    )]
+    CandidateDeviceUnsupported {
+        /// Kernel area that owns the candidate
+        area: &'static str,
+        /// Selected model boundary
+        boundary: String,
+        /// Selected batch class
+        batch: usize,
+        /// Configured precision
+        math: CudaMath,
+        /// Actual area PTX variant
+        tier: PtxTier,
+        /// Exact device capability
+        device: ComputeCapability,
+        /// Candidate's device constraint
+        reason: String,
     },
     /// The requested device does not exist
     #[error("CUDA device {ordinal} is not available; {count} device(s) found")]
@@ -64,14 +147,6 @@ pub enum CudaError {
         /// The rejected value
         value: String,
     },
-    /// The requested PTX tier is not compiled into this build
-    #[error(
-        "PTX tier {tier} is not compiled in; enable the `cuda-{tier}` feature or request a lower tier"
-    )]
-    PtxTierNotCompiled {
-        /// The requested tier
-        tier: PtxTier,
-    },
     /// The requested PTX tier needs a newer GPU than the device
     #[error("PTX tier {tier} needs compute capability {}, but the GPU has {capability}", tier.min_capability())]
     PtxTierAboveDevice {
@@ -85,9 +160,11 @@ pub enum CudaError {
     Driver(#[from] DriverError),
     /// cuBLAS returned an error
     #[error("cuBLAS: {0}")]
+    #[cfg(feature = "cuda")]
     Cublas(#[from] CublasError),
     /// cuDNN returned an error
     #[error("cuDNN: {0}")]
+    #[cfg(feature = "cuda")]
     Cudnn(#[from] CudnnError),
     /// The driver could not load an embedded PTX module
     #[error("loading PTX module `{module}`: {source}")]
@@ -200,6 +277,7 @@ impl CudaError {
 }
 
 /// Converts a dimension for a cuBLAS or cuDNN call
+#[cfg(feature = "cuda")]
 pub(super) fn to_c_int(context: &'static str, value: usize) -> Result<i32, CudaError> {
     i32::try_from(value).map_err(|_| CudaError::DimensionOverflow { context, value })
 }

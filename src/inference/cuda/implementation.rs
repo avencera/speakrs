@@ -1,67 +1,456 @@
-//! Which implementation runs at each of the three qualified operator boundaries
-//!
-//! The boundaries are every eligible ResNet 3x3 convolution, the Sinc producer and the
-//! complete four-layer bidirectional LSTM stack. Locked dispatch code in
-//! `embedding/dispatch.rs` and `segmentation/dispatch.rs` reads the choice; the
-//! candidate interface lives in `candidate.rs`
+//! Qualification-backed selection before any optional library state is created
 
-use super::CudaMath;
 use super::candidate::{
-    ConvCandidate, ConvOxide, Coverage, LstmCandidate, LstmOxide, SincCandidate, SincOxide,
+    Batches, ConvCandidate, ConvLayerSpec, ConvOxide, Coverage, CoverageEntry, LstmCandidate,
+    LstmOxide, LstmSpec, Maths, PlanError, SincCandidate, SincOxide, SincSpec,
+};
+use super::{
+    ComputeCapability, CudaError, CudaLibrary, CudaMath, CudaRuntime, KernelModule, PtxTier,
 };
 
-/// The implementation selected for one boundary
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Choice {
-    /// The current cuDNN path
-    #[default]
-    Library,
-    /// The registered candidate, for the layer, batch and math triples its coverage
-    /// declares; every other triple still runs the Library path
-    Oxide(Selection),
-    /// Planted faults exist only in the qualification test binary
-    #[cfg(test)]
-    Mutant(super::test_support::Mutant),
+/// The variant an area loads and the exact device that executes it
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Target {
+    pub tier: PtxTier,
+    pub device: ComputeCapability,
 }
 
-/// Why the candidate was selected; explicit qualification cannot fall back
+impl Target {
+    /// Resolve the area's actual variant, not the runtime's upper tier limit
+    pub(crate) fn for_area(runtime: &CudaRuntime, area: KernelModule) -> Result<Self, CudaError> {
+        Ok(Self {
+            tier: runtime.area_ptx(area)?.0,
+            device: runtime.compute_capability(),
+        })
+    }
+}
+
+/// Why a candidate was selected; only production permits a device fallback
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Selection {
-    /// Selected from the qualified production coverage
+    /// An accepted production-table entry
     Production,
-    /// Selected by the qualification harness
-    #[cfg(test)]
+    /// An explicit or qualification request
+    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
     Explicit,
 }
 
-impl Choice {
-    /// Whether dispatch should plan a registered candidate
-    pub(crate) fn is_candidate(self) -> bool {
-        matches!(self, Self::Oxide(_))
-    }
+/// Implementation requests used only by the qualification controls
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Choice {
+    #[default]
+    Library,
+    Oxide(Selection),
+    Mutant(super::test_support::Mutant),
 }
 
-/// Qualified production coverage, shared with the harness candidate declarations
-///
-/// Selection includes the boundary, batch class and math mode. Sharing coverage
-/// prevents production from selecting an unqualified triple
-const PRODUCTION: &[Coverage] = &[
-    ConvOxide::COVERAGE,
-    LstmOxide::COVERAGE,
-    SincOxide::COVERAGE,
+/// One selected owner; an Oxide token can only come from this module
+#[derive(Debug)]
+pub(crate) enum Selected {
+    Library,
+    Oxide(Qualified),
+    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    Mutant(super::test_support::Mutant),
+}
+
+/// An accepted production record, separate from candidate implementation coverage
+#[derive(Debug)]
+struct Production {
+    area: KernelModule,
+    coverage: Coverage,
+    tier: PtxTier,
+    devices: &'static [ComputeCapability],
+    record: &'static str,
+    der: &'static str,
+}
+
+/// SHA256 of qualify-resnet-Oxide-20261004T064208.284837Z.json.gz
+const RESNET_RECORD: &str = "8f8fa3e3c158771e354aad83f4e42fca6fac998aa192b39a966067a4b0035758";
+/// SHA256 of qualify-lstm-Oxide-20261004T095844.546766Z.json.gz
+const LSTM_RECORD: &str = "3badc1aec939b0e8f7312786d695bec6445de1dacb1f85e44124bf3ac20356f8";
+/// SHA256 of qualify-sincnet-Oxide-20261004T093054.587886Z.json.gz
+const SINC_RECORD: &str = "a4d1a2692b78a814cd2da16f084801c3641bfd11c6d095d610f3a8182ad6f675";
+/// SHA256 of int-k/ab-summary.json for the integrated configuration
+const INTEGRATED_DER: &str = "8066268031afba058d93e305206d5b8225e40c6ab2ebb1052874d607e055646f";
+
+/// Production model batches, excluding the harness stress classes
+pub(crate) const MODEL_BATCHES: [usize; 2] = [1, 32];
+const DEVICES: &[ComputeCapability] = &[ComputeCapability::new(12, 0)];
+
+// these layers and modes are pinned evidence, not candidate declarations
+const C32: &[&str] = &[
+    "resnet.layer1.0.conv1",
+    "resnet.layer1.0.conv2",
+    "resnet.layer1.1.conv1",
+    "resnet.layer1.1.conv2",
+    "resnet.layer1.2.conv1",
+    "resnet.layer1.2.conv2",
+    "resnet.layer2.0.conv1",
+];
+const C64: &[&str] = &[
+    "resnet.layer2.0.conv2",
+    "resnet.layer2.1.conv1",
+    "resnet.layer2.1.conv2",
+    "resnet.layer2.2.conv1",
+    "resnet.layer2.2.conv2",
+    "resnet.layer2.3.conv1",
+    "resnet.layer2.3.conv2",
 ];
 
-/// The production choice for one boundary, batch class and math mode
-pub(crate) fn production(boundary: &str, batch: usize, math: CudaMath) -> Choice {
-    if PRODUCTION
-        .iter()
-        .any(|coverage| coverage.covers(boundary, batch, math))
-    {
-        Choice::Oxide(Selection::Production)
-    } else {
-        Choice::Library
+const PRODUCTION: &[Production] = &[
+    Production {
+        area: KernelModule::Resnet,
+        coverage: Coverage(&[
+            CoverageEntry {
+                layers: C32,
+                batches: Batches::Only(&MODEL_BATCHES),
+                maths: Maths::All,
+            },
+            CoverageEntry {
+                layers: C64,
+                batches: Batches::Only(&[32]),
+                maths: Maths::All,
+            },
+            CoverageEntry {
+                layers: C64,
+                batches: Batches::Only(&[1]),
+                maths: Maths::Only(&[CudaMath::Fp32]),
+            },
+        ]),
+        tier: PtxTier::Sm75,
+        devices: DEVICES,
+        record: RESNET_RECORD,
+        der: INTEGRATED_DER,
+    },
+    Production {
+        area: KernelModule::Lstm,
+        coverage: Coverage(&[CoverageEntry {
+            layers: &["lstm.stack"],
+            batches: Batches::Only(&MODEL_BATCHES),
+            maths: Maths::Only(&[CudaMath::Fp32]),
+        }]),
+        tier: PtxTier::Sm75,
+        devices: DEVICES,
+        record: LSTM_RECORD,
+        der: INTEGRATED_DER,
+    },
+    Production {
+        area: KernelModule::Sincnet,
+        coverage: Coverage(&[CoverageEntry {
+            layers: &["sincnet.conv0.abs_pool"],
+            batches: Batches::Only(&MODEL_BATCHES),
+            maths: Maths::Only(&[CudaMath::Fp32]),
+        }]),
+        tier: PtxTier::Sm75,
+        devices: DEVICES,
+        record: SINC_RECORD,
+        der: INTEGRATED_DER,
+    },
+];
+
+/// A boundary accepted by a pinned record, or an explicit qualification control
+#[derive(Debug)]
+pub(crate) struct Qualified {
+    boundary: String,
+    batch: usize,
+    math: CudaMath,
+    target: Target,
+    record: &'static str,
+    der: &'static str,
+    selection: Selection,
+}
+
+impl Qualified {
+    fn check(
+        &self,
+        runtime: &CudaRuntime,
+        area: KernelModule,
+        boundary: &str,
+        batch: usize,
+        math: CudaMath,
+    ) -> Result<(), CudaError> {
+        if self.boundary != boundary
+            || self.batch != batch
+            || self.math != math
+            || self.target != Target::for_area(runtime, area)?
+        {
+            return Err(CudaError::Unsupported {
+                context: "qualified plan",
+                reason: "qualification token does not match the requested plan".to_owned(),
+            });
+        }
+        debug_assert!(!self.record.is_empty() && !self.der.is_empty());
+        Ok(())
+    }
+
+    /// Resolve a refusal without constructing a dormant Library plan
+    pub(super) fn finish<T>(
+        &self,
+        area: KernelModule,
+        driver_only: bool,
+        result: Result<T, PlanError>,
+    ) -> Result<Option<T>, CudaError> {
+        match result {
+            Ok(plan) => Ok(Some(plan)),
+            Err(PlanError::Cuda(error)) => Err(error),
+            Err(PlanError::DeviceUnsupported { reason }) => {
+                if self.selection == Selection::Production && !driver_only {
+                    tracing::warn!(
+                        boundary = self.boundary,
+                        batch = self.batch,
+                        "CUDA candidate unavailable reason={reason}; using Library"
+                    );
+                    return Ok(None);
+                }
+
+                Err(CudaError::CandidateDeviceUnsupported {
+                    area: area.name(),
+                    boundary: self.boundary.clone(),
+                    batch: self.batch,
+                    math: self.math,
+                    tier: self.target.tier,
+                    device: self.target.device,
+                    reason,
+                })
+            }
+        }
+    }
+
+    /// Build exactly the accepted convolution
+    pub(crate) fn conv(
+        self,
+        runtime: &CudaRuntime,
+        spec: ConvLayerSpec<'_>,
+    ) -> Result<Option<ConvOxide>, CudaError> {
+        self.check(
+            runtime,
+            KernelModule::Resnet,
+            spec.name,
+            spec.conv.batch,
+            spec.conv.math,
+        )?;
+        self.finish(
+            KernelModule::Resnet,
+            super::driver_only(),
+            ConvOxide::plan(runtime, spec),
+        )
+    }
+
+    /// Build exactly the accepted Sinc producer
+    pub(crate) fn sinc(
+        self,
+        runtime: &CudaRuntime,
+        spec: SincSpec<'_>,
+    ) -> Result<Option<SincOxide>, CudaError> {
+        self.check(
+            runtime,
+            KernelModule::Sincnet,
+            "sincnet.conv0.abs_pool",
+            spec.batch,
+            spec.math,
+        )?;
+        self.finish(
+            KernelModule::Sincnet,
+            super::driver_only(),
+            SincOxide::plan(runtime, spec),
+        )
+    }
+
+    /// Build the accepted stack; qualification forbids nested library calls
+    pub(crate) fn lstm(
+        self,
+        runtime: &CudaRuntime,
+        spec: LstmSpec<'_>,
+    ) -> Result<Option<LstmOxide>, CudaError> {
+        self.check(
+            runtime,
+            KernelModule::Lstm,
+            "lstm.stack",
+            spec.batch,
+            spec.math,
+        )?;
+        self.finish(
+            KernelModule::Lstm,
+            super::driver_only(),
+            LstmOxide::plan(runtime, spec),
+        )
     }
 }
 
-#[cfg(test)]
+/// Invalid selection requests cannot create an Oxide token
+#[derive(Debug, thiserror::Error)]
+#[error("cannot select a CUDA boundary with an empty name or batch zero")]
+pub(crate) struct SelectionError;
+
+/// Select a pinned tuple; uncovered tuples use a Library plan
+pub(crate) fn select(
+    boundary: &str,
+    batch: usize,
+    math: CudaMath,
+    target: Target,
+) -> Result<Selected, SelectionError> {
+    if boundary.is_empty() || batch == 0 {
+        return Err(SelectionError);
+    }
+    let entry = PRODUCTION.iter().find(|entry| {
+        entry.tier == target.tier
+            && entry.devices.contains(&target.device)
+            && MODEL_BATCHES.contains(&batch)
+            && entry.coverage.covers(boundary, batch, math)
+            && boundary.split('.').next() == Some(entry.area.name())
+    });
+    Ok(match entry {
+        Some(entry) => Selected::Oxide(Qualified {
+            boundary: boundary.to_owned(),
+            batch,
+            math,
+            target,
+            record: entry.record,
+            der: entry.der,
+            selection: Selection::Production,
+        }),
+        None => Selected::Library,
+    })
+}
+
+/// Whether a forced tier has any production evidence on this exact device
+pub(crate) fn tier_qualified(target: Target) -> bool {
+    PRODUCTION
+        .iter()
+        .any(|entry| entry.tier == target.tier && entry.devices.contains(&target.device))
+}
+
+/// Selection for a concrete plan, with test controls kept outside production
+pub(crate) fn plan_selection(
+    runtime: &CudaRuntime,
+    area: KernelModule,
+    boundary: &str,
+    batch: usize,
+    math: CudaMath,
+    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))] override_choice: Option<
+        Choice,
+    >,
+) -> Result<Selected, CudaError> {
+    let target = Target::for_area(runtime, area)?;
+    let selected =
+        select(boundary, batch, math, target).map_err(|error| CudaError::Unsupported {
+            context: "CUDA selection",
+            reason: error.to_string(),
+        })?;
+    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    {
+        let choice = override_choice.unwrap_or_else(|| {
+            super::test_support::default_choice(match selected {
+                Selected::Oxide(_) => Choice::Oxide(Selection::Production),
+                _ => Choice::Library,
+            })
+        });
+        if choice == Choice::Oxide(Selection::Production) {
+            return Ok(selected);
+        }
+        qualification_selection(choice, area, boundary, batch, math, target)
+    }
+    #[cfg(not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))))]
+    Ok(selected)
+}
+
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+pub(crate) fn qualification_selection(
+    choice: Choice,
+    area: KernelModule,
+    boundary: &str,
+    batch: usize,
+    math: CudaMath,
+    target: Target,
+) -> Result<Selected, CudaError> {
+    let coverage = match area {
+        KernelModule::Resnet => ConvOxide::coverage(target.tier),
+        KernelModule::Lstm => LstmOxide::coverage(target.tier),
+        KernelModule::Sincnet => SincOxide::coverage(target.tier),
+        _ => Coverage::NONE,
+    };
+    Ok(match choice {
+        Choice::Oxide(selection) if coverage.covers(boundary, batch, math) => {
+            Selected::Oxide(Qualified {
+                boundary: boundary.to_owned(),
+                batch,
+                math,
+                target,
+                record: "qualification-control",
+                der: "qualification-control",
+                selection,
+            })
+        }
+        Choice::Mutant(mutant) => Selected::Mutant(mutant),
+        _ => Selected::Library,
+    })
+}
+
+/// A required library at a specific boundary, including nested products
+#[derive(Debug, Clone)]
+pub(crate) struct LibraryNeed {
+    area: KernelModule,
+    boundary: String,
+    batch: usize,
+    math: CudaMath,
+    target: Target,
+    library: CudaLibrary,
+}
+
+impl LibraryNeed {
+    pub(crate) fn new(
+        area: KernelModule,
+        boundary: &str,
+        batch: usize,
+        math: CudaMath,
+        target: Target,
+        library: CudaLibrary,
+    ) -> Self {
+        Self {
+            area,
+            boundary: boundary.to_owned(),
+            batch,
+            math,
+            target,
+            library,
+        }
+    }
+
+    pub(crate) fn error(&self) -> CudaError {
+        CudaError::NotDriverOnly {
+            area: self.area.name(),
+            boundary: self.boundary.clone(),
+            batch: self.batch,
+            math: self.math,
+            tier: self.target.tier,
+            device: self.target.device,
+            library: self.library,
+        }
+    }
+
+    /// Resolve optional libraries before buffers, forward execution or graph capture
+    pub(crate) fn prepare(&self, runtime: &CudaRuntime) -> Result<(), CudaError> {
+        if super::driver_only() {
+            return Err(self.error());
+        }
+        #[cfg(feature = "cuda")]
+        return runtime.prepare_library(self.library);
+        #[cfg(not(feature = "cuda"))]
+        {
+            let _ = runtime;
+            Err(self.error())
+        }
+    }
+
+    /// Prepare selected handles before model buffers, leaving NVRTC to its Library RNN plan
+    pub(crate) fn prepare_handle(&self, runtime: &CudaRuntime) -> Result<(), CudaError> {
+        match self.library {
+            CudaLibrary::Nvrtc if !super::driver_only() => Ok(()),
+            _ => self.prepare(runtime),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
 mod tests;

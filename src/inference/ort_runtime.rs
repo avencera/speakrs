@@ -80,7 +80,7 @@ fn session_provider(backend: InferenceBackend) -> OrtProvider {
         InferenceBackend::Ort(provider) => provider,
         #[cfg(feature = "coreml")]
         InferenceBackend::CoreMl => OrtProvider::Cpu,
-        #[cfg(feature = "cuda")]
+        #[cfg(feature = "_cuda")]
         InferenceBackend::Cuda => OrtProvider::Cpu,
     }
 }

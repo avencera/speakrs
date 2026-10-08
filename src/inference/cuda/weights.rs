@@ -94,8 +94,8 @@ impl SafetensorsFile {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
 mod test_support;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
 pub(crate) use test_support::uniform;

@@ -125,7 +125,7 @@ impl SegmentationModel {
             SegmentationBackend::Ort(backend) => backend.has_batched(),
             #[cfg(feature = "coreml")]
             SegmentationBackend::CoreMl(_) => true,
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda")]
             SegmentationBackend::Cuda(_) => true,
         }
     }
@@ -136,7 +136,7 @@ impl SegmentationModel {
             SegmentationBackend::Ort(backend) => backend.run_window(window),
             #[cfg(feature = "coreml")]
             SegmentationBackend::CoreMl(backend) => backend.run_window(window),
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda")]
             SegmentationBackend::Cuda(backend) => backend.run_window(window),
         }
     }
@@ -147,7 +147,7 @@ impl SegmentationModel {
             SegmentationBackend::Ort(backend) => backend.run_batch(windows),
             #[cfg(feature = "coreml")]
             SegmentationBackend::CoreMl(backend) => backend.run_batch(windows),
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda")]
             SegmentationBackend::Cuda(backend) => backend.run_batch(windows),
         }
     }

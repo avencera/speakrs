@@ -1,4 +1,6 @@
+#[cfg(feature = "cuda")]
 use cudarc::cublas::sys::cublasMath_t;
+#[cfg(feature = "cuda")]
 use cudarc::cudnn::sys::cudnnMathType_t;
 
 /// Arithmetic precision of the CUDA modes' cuBLAS and cuDNN work on FP32 data
@@ -20,6 +22,7 @@ pub enum CudaMath {
     Tf32,
 }
 
+#[cfg(feature = "cuda")]
 impl CudaMath {
     pub(super) fn cublas(self) -> cublasMath_t {
         match self {
