@@ -938,3 +938,16 @@ winograd3x3! {
     w = 250,
     sweeps = 2,
 }
+
+winograd3x3! {
+    /// Fused Winograd 64 -> 64 3x3 convolution, stride 1, on 40x499 inputs, with
+    /// optional residual, folded bias and ReLU, or raw input-channel partial sums
+    ///
+    /// Launch as `spk_wideconv_wino_c128` with `cells = batch * 20 * 8`, grid x 1 and
+    /// `splits` dividing 16. The odd output width takes the scalar store path
+    spk_wideconv_wino_c64,
+    channels = 64,
+    h = 40,
+    w = 499,
+    sweeps = 1,
+}

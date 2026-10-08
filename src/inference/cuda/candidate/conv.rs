@@ -528,7 +528,10 @@ fn to_u32(value: usize) -> Result<u32, CudaError> {
 impl super::DriverCandidate for Oxide {
     const AREA: super::KernelModule = super::KernelModule::Resnet;
 
-    fn driver_coverage(_tier: super::PtxTier) -> Coverage {
+    fn driver_coverage(
+        _tier: super::PtxTier,
+        _device: &super::super::device::DeviceAttributes,
+    ) -> Coverage {
         IMPLEMENTED
     }
 

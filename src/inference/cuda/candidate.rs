@@ -176,6 +176,8 @@ pub(crate) use segdense::{DenseOxide, SegConvOxide};
 pub(crate) use lstmproj::Oxide as LstmProjOxide;
 pub(crate) use sinc::Oxide as SincOxide;
 // the GPU development checks force selections made for other devices
+#[cfg(test)]
+pub(crate) use wideconv::{Algorithm as WideconvAlgorithm, WinogradProducts};
 #[cfg(all(test, feature = "_cuda-libraries"))]
 pub(crate) use wideconv::{
     Algorithm as WideconvAlgorithm, Config as WideconvConfig, Device as WideconvDevice,
@@ -1560,8 +1562,8 @@ fn validate_fixed_batch(
 pub(crate) trait DriverCandidate {
     /// The kernel module that owns this candidate
     const AREA: KernelModule;
-    /// Only tuples whose complete operation needs no numerical library
-    fn driver_coverage(tier: PtxTier) -> Coverage;
+    /// Only tuples whose complete operation needs no numerical library on `device`
+    fn driver_coverage(tier: PtxTier, device: &DeviceAttributes) -> Coverage;
     /// Structural speed evidence, if this complete port is accepted on all devices
     fn broad_evidence() -> Option<&'static super::implementation::BroadEvidence> {
         None

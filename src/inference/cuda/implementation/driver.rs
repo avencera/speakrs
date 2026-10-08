@@ -12,7 +12,7 @@ use crate::inference::cuda::{CudaError, CudaMath, KernelModule, PtxTier};
 pub(super) struct Area {
     area: KernelModule,
     hybrid: HybridPolicy,
-    coverage: fn(PtxTier) -> Coverage,
+    coverage: fn(PtxTier, &DeviceAttributes) -> Coverage,
     scope: fn(BoundaryId, usize, CudaMath, &DeviceAttributes, PtxTier) -> Option<super::SpeedScope>,
     summary: fn(CudaMath) -> &'static str,
     pin:
@@ -127,7 +127,11 @@ pub(super) fn select_from(
         else {
             continue;
         };
-        if !(candidate.coverage)(request.tier()).covers(boundary.name(), batch, math) {
+        if !(candidate.coverage)(request.tier(), modules.device()).covers(
+            boundary.name(),
+            batch,
+            math,
+        ) {
             continue;
         }
         let scope = (candidate.scope)(boundary, batch, math, modules.device(), request.tier())

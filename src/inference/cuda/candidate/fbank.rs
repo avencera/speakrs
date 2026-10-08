@@ -310,7 +310,10 @@ impl FbankCandidate for Oxide {
 
 impl super::DriverCandidate for Oxide {
     const AREA: KernelModule = KernelModule::FbankDft;
-    fn driver_coverage(tier: PtxTier) -> Coverage {
+    fn driver_coverage(
+        tier: PtxTier,
+        _device: &crate::inference::cuda::device::DeviceAttributes,
+    ) -> Coverage {
         Self::coverage(tier)
     }
     fn broad_evidence() -> Option<&'static crate::inference::cuda::implementation::BroadEvidence> {

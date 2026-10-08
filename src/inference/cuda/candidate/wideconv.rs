@@ -58,6 +58,24 @@ const LAYERS: [&str; 22] = [
     "resnet.layer4.2.conv2",
 ];
 
+/// The 64-channel same-shape trunk convolutions, which wideconv runs only on Turing
+///
+/// On a T4 at batch 32 the direct ResNet kernel ran these at 0.85-0.89x of cuDNN,
+/// which picks its non-fused Winograd there; FFMA Winograd F(2x2, 3x3) cuts their
+/// multiplies 2.25x. Other parts keep the direct kernel, so their routes do not move
+const TURING_C64_LAYERS: [&str; 7] = [
+    "resnet.layer2.0.conv2",
+    "resnet.layer2.1.conv1",
+    "resnet.layer2.1.conv2",
+    "resnet.layer2.2.conv1",
+    "resnet.layer2.2.conv2",
+    "resnet.layer2.3.conv1",
+    "resnet.layer2.3.conv2",
+];
+
+/// The capability whose driver route adds `TURING_C64_LAYERS`
+const TURING: ComputeCapability = ComputeCapability::new(7, 5);
+
 /// Fixed input-channel partitions, reduced without atomics
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Partition {
@@ -360,6 +378,21 @@ impl Config {
                 split_cells: SplitCells::All,
             },
             Shape::C64Stride2 | Shape::C128Stride2 => whole(Algorithm::Spatial),
+            // only FFMA Winograd covers this shape, and only Turing routes it here
+            Shape::C64 if device.capability != TURING => {
+                return Err(unsupported(
+                    "64-channel Winograd is selected only on Turing",
+                ));
+            }
+            Shape::C64 => {
+                let products = WinogradProducts::Fp32;
+                let (partition, split_cells) = Self::winograd_split(device, conv, products)?;
+                Self {
+                    algorithm: Algorithm::Winograd(products),
+                    partition,
+                    split_cells,
+                }
+            }
             Shape::C128 | Shape::C256 => {
                 let products = Self::winograd_products(device, shape, conv);
                 let Some(products) = products else {
@@ -593,6 +626,7 @@ struct Operands<'a, 'b> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Shape {
     Stem,
+    C64,
     C128,
     C256,
     C64Stride2,
@@ -620,6 +654,7 @@ impl Shape {
         }
         match (conv.in_channels, conv.out_channels, conv.stride) {
             (1, 32, [1, 1]) => Ok(Self::Stem),
+            (64, 64, [1, 1]) => Ok(Self::C64),
             (128, 128, [1, 1]) => Ok(Self::C128),
             (256, 256, [1, 1]) => Ok(Self::C256),
             (64, 128, [2, 2]) => Ok(Self::C64Stride2),
@@ -628,21 +663,24 @@ impl Shape {
         }
     }
 
-    fn entry(self, in_channels: u32, batch: u32) -> &'static str {
-        match self {
+    /// Spatial-tile entry; the 64-channel shape has only its Winograd kernel
+    fn entry(self, in_channels: u32, batch: u32) -> Option<&'static str> {
+        Some(match self {
             Self::Stem => "spk_wideconv_stem",
+            Self::C64 => return None,
             Self::C128 => "spk_wideconv_c128",
             Self::C256 => "spk_wideconv_c256",
             Self::C64Stride2 => "spk_wideconv_c64s2",
             Self::C128Stride2 => "spk_wideconv_c128s2",
             Self::Shortcut => shortcut_tile(in_channels, batch).0,
-        }
+        })
     }
 
     /// Input size compiled into the tensor-core and shortcut-tile kernels
     fn compiled_input(self, in_channels: usize) -> Option<[usize; 2]> {
         match (self, in_channels) {
             (Self::C128 | Self::C128Stride2, _) | (Self::Shortcut, 128) => Some([20, 250]),
+            (Self::C64, _) => Some([40, 499]),
             (Self::C256, _) => Some([10, 125]),
             (Self::C64Stride2, _) | (Self::Shortcut, 64) => Some([40, 499]),
             (Self::Shortcut, 32) => Some([80, 998]),
@@ -679,7 +717,7 @@ impl Shape {
             Self::C64Stride2 => Some("spk_wideconv_tc_c64s2"),
             Self::C128Stride2 if batch < TC_WIDE_BATCH => Some("spk_wideconv_tc_c128s2_narrow"),
             Self::C128Stride2 => Some("spk_wideconv_tc_c128s2"),
-            Self::Stem | Self::Shortcut => None,
+            Self::Stem | Self::C64 | Self::Shortcut => None,
         }
     }
 
@@ -690,6 +728,7 @@ impl Shape {
         match (self, products) {
             (Self::C128, Bf16x3) => Some("spk_wideconv_wbf_c128"),
             (Self::C256, Bf16x3) => Some("spk_wideconv_wbf_c256"),
+            (Self::C64, Fp32) => Some("spk_wideconv_wino_c64"),
             (Self::C128, Fp32) => Some("spk_wideconv_wino_c128"),
             (Self::C256, Fp32) => Some("spk_wideconv_wino_c256"),
             (Self::C128, Fp32Sweep2) => Some("spk_wideconv_wino_c128_sweep2"),
@@ -816,6 +855,16 @@ impl Layout {
                 .is_some_and(|input| input != conv.input)
         {
             return Err(unsupported("the kernel is compiled for another input size"));
+        }
+        if algorithm == Algorithm::Spatial
+            && shape
+                .entry(conv.in_channels as u32, conv.batch as u32)
+                .is_none()
+        {
+            return Err(unsupported("no spatial tiles for this shape"));
+        }
+        if algorithm == Algorithm::ImplicitGemm && shape == Shape::C64 {
+            return Err(unsupported("the 64-channel shape has only Winograd tiles"));
         }
         if let Algorithm::TensorCore(products) = algorithm {
             if shape.tensor_entry(products, conv.batch as u32).is_none() {
@@ -964,9 +1013,11 @@ impl Oxide {
         let shape = layout.shape;
         let entry = match algorithm {
             Algorithm::ImplicitGemm => "spk_wideconv_gemm",
-            Algorithm::Spatial => shape.entry(conv.in_channels as u32, conv.batch as u32),
+            // checked by `Layout::new`, as are the tensor-core and Winograd entries
+            Algorithm::Spatial => shape
+                .entry(conv.in_channels as u32, conv.batch as u32)
+                .unwrap_or_default(),
             Algorithm::WideStem => "spk_wideconv_stem_wide",
-            // checked by `Layout::new`
             Algorithm::TensorCore(products) => shape
                 .tensor_entry(products, conv.batch as u32)
                 .unwrap_or_default(),
@@ -1656,7 +1707,23 @@ pub(super) fn trunk_speed_scope(
 impl super::DriverCandidate for Oxide {
     const AREA: super::KernelModule = super::KernelModule::Wideconv;
 
-    fn driver_coverage(tier: PtxTier) -> Coverage {
+    fn driver_coverage(tier: PtxTier, device: &DeviceAttributes) -> Coverage {
+        const TURING_COVERAGE: Coverage = Coverage(&[
+            CoverageEntry {
+                layers: &LAYERS,
+                batches: Batches::All,
+                maths: Maths::All,
+            },
+            CoverageEntry {
+                layers: &TURING_C64_LAYERS,
+                batches: Batches::All,
+                maths: Maths::All,
+            },
+        ]);
+        if device.capability() == TURING {
+            return TURING_COVERAGE;
+        }
+
         <Self as ConvCandidate>::coverage(tier)
     }
 
@@ -1687,9 +1754,10 @@ impl super::DriverCandidate for Oxide {
     }
 }
 
-/// Geometry compiled into the model's 22 wide convolution boundaries
+/// Geometry compiled into the model's 22 wide convolution boundaries and the Turing
+/// 64-channel ones
 fn model_conv(name: &str, batch: usize, math: CudaMath) -> Result<Conv2d, PlanError> {
-    if !LAYERS.contains(&name) {
+    if !LAYERS.contains(&name) && !TURING_C64_LAYERS.contains(&name) {
         return Err(PlanError::Geometry(GeometryError::Unimplemented {
             context: "wideconv boundary",
             reason: name.into(),
@@ -1702,6 +1770,7 @@ fn model_conv(name: &str, batch: usize, math: CudaMath) -> Result<Conv2d, PlanEr
         "resnet.layer4.0.shortcut.0" => (128, 256, [20, 250], 1, 2),
         "resnet.layer3.0.conv1" => (64, 128, [40, 499], 3, 2),
         "resnet.layer4.0.conv1" => (128, 256, [20, 250], 3, 2),
+        _ if TURING_C64_LAYERS.contains(&name) => (64, 64, [40, 499], 3, 1),
         _ if name.starts_with("resnet.layer3.") => (128, 128, [20, 250], 3, 1),
         _ => (256, 256, [10, 125], 3, 1),
     };

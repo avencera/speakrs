@@ -412,8 +412,10 @@ impl Candidate {
         let tier = |area| -> Result<_, CudaError> {
             runtime.load_module(runtime.embedded_exact_request(area)?)
         };
-        if WideconvOxide::COVERAGE.covers(spec.name, spec.conv.batch, spec.conv.math) {
-            let kernels = tier(KernelModule::Wideconv)?;
+        let kernels = tier(KernelModule::Wideconv)?;
+        // device-aware coverage, so Turing plans its 64-channel layers here as routing does
+        let coverage = WideconvOxide::driver_coverage(kernels.tier(), runtime.device());
+        if coverage.covers(spec.name, spec.conv.batch, spec.conv.math) {
             let forced = std::env::var("TRUNK_CONFIG")
                 .ok()
                 .map(|text| forced_config(&text));
