@@ -3,7 +3,8 @@
 //!
 //! A batch of 10 s waveform rows becomes `[rows, FBANK_FRAMES, FBANK_MEL_BINS]` log-mel
 //! features with temporal mean normalization, the `fbank` input layout of the
-//! multi-mask embedding tail. Per batch:
+//! multi-mask embedding tail. A selected FFT/mel candidate writes the energies
+//! directly, then uses the same log/CMN consumer. The Library route runs these steps:
 //!
 //! 1. `fbank_frame_window` scales to 16-bit range, frames (400 samples, hop 160),
 //!    removes each frame's mean, pre-emphasizes (0.97) and applies the Hamming window
@@ -30,7 +31,9 @@ use cudarc::driver::{
     PinnedHostSlice, PushKernelArg,
 };
 
+use super::candidate::{FbankCandidate, FbankOxide, FbankSpec, Phases};
 use super::error::check_len;
+use super::implementation::{Selected, plan_selection};
 use super::{CudaError, CudaMath, CudaRuntime, KernelModule, PtxTier, Sgemm};
 
 use constants::{
@@ -93,6 +96,7 @@ pub enum MelProjection {
 /// [`FbankBuffers`]
 #[derive(Debug)]
 pub struct CudaFbank {
+    plans: Vec<Option<FbankOxide>>,
     tier: PtxTier,
     math: CudaMath,
     projection: MelProjection,
@@ -128,18 +132,39 @@ impl CudaFbank {
         projection: MelProjection,
     ) -> Result<Self, CudaError> {
         let kernels = runtime.load_kernels(KernelModule::Fbank)?;
+        let mut plans = Vec::new();
         for batch in 1..=32 {
-            super::implementation::LibraryNeed::new(
+            let selected = plan_selection(
+                runtime,
                 DFT,
                 batch,
                 math,
-                super::implementation::AreaTarget {
-                    tier: kernels.tier(),
-                    device: runtime.compute_capability(),
-                },
-                super::CudaLibrary::Cublas,
-            )
-            .prepare(runtime)?;
+                #[cfg(all(test, feature = "_cuda-libraries"))]
+                None,
+            )?;
+            let plan = if let Selected::Oxide(token) = selected {
+                let spec = FbankSpec::new(batch, math).map_err(|error| CudaError::Unsupported {
+                    context: "fbank shape",
+                    reason: error.to_string(),
+                })?;
+                token.fbank(runtime, spec)?
+            } else {
+                None
+            };
+            if plan.is_none() {
+                super::implementation::LibraryNeed::new(
+                    DFT,
+                    batch,
+                    math,
+                    super::implementation::AreaTarget {
+                        tier: kernels.tier(),
+                        device: runtime.compute_capability(),
+                    },
+                    super::CudaLibrary::Cublas,
+                )
+                .prepare(runtime)?;
+            }
+            plans.push(plan);
         }
         let constants = FbankConstants::new();
         let table = constants.mel_table();
@@ -147,6 +172,7 @@ impl CudaFbank {
         let mel_dense = &constants.mel()[..MEL_GEMM_BINS * FBANK_MEL_BINS];
 
         Ok(Self {
+            plans,
             tier: kernels.tier(),
             math,
             projection,
@@ -271,6 +297,16 @@ impl CudaFbank {
         work: &mut FbankProducerWork,
         energies: &mut CudaViewMut<'_, f32>,
     ) -> Result<(), CudaError> {
+        if let Some(Some(plan)) = rows.checked_sub(1).and_then(|index| self.plans.get(index)) {
+            return plan.enqueue(waveform, energies, &Phases::new(), runtime);
+        }
+        if super::driver_only() {
+            return Err(CudaError::MissingKernel {
+                boundary: DFT.name().to_owned(),
+                batch: rows,
+                math: self.math,
+            });
+        }
         let frames = rows * FBANK_FRAMES;
         self.frame_window(
             runtime,

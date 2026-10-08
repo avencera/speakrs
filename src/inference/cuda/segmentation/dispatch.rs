@@ -245,6 +245,15 @@ impl Network {
         match stage {
             #[cfg(feature = "_cuda-libraries")]
             LstmStage::Library(plan) => self.lstm_library(runtime, plan, input, output),
+            LstmStage::Projected { candidate, rows } => {
+                let phases = LstmPhases::new(Projection::new(runtime, *rows, self.options.math));
+                candidate.enqueue(
+                    &input.as_view(),
+                    &mut output.as_view_mut(),
+                    &phases,
+                    runtime.stream(),
+                )
+            }
             LstmStage::Oxide { candidate, rows } => {
                 let stream = runtime.stream();
                 let phases = LstmPhases::new(Projection::new(runtime, *rows, self.options.math));
@@ -320,7 +329,14 @@ impl Network {
                 };
                 #[cfg(all(test, feature = "_cuda-libraries"))]
                 let _scope = super::super::test_support::plan(LSTM_LAYER);
-                if let Some(candidate) = token.lstm(runtime, spec)? {
+                if token.area() == KernelModule::LstmProj {
+                    if let Some(candidate) = token.projected_lstm(runtime, spec)? {
+                        return Ok(LstmStage::Projected {
+                            candidate: Box::new(candidate),
+                            rows: shape.batch * shape.frames,
+                        });
+                    }
+                } else if let Some(candidate) = token.lstm(runtime, spec)? {
                     return Ok(LstmStage::Oxide {
                         candidate: Box::new(candidate),
                         rows: shape.batch * shape.frames,

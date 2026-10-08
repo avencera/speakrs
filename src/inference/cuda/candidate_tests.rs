@@ -339,3 +339,44 @@ fn fbank_tables_satisfy_the_staged_kernel_layout() {
     let (starts, counts) = with(79, 240, 16);
     assert!(Tables::checked(window, starts, counts, 16, mel.weights.clone()).is_ok());
 }
+
+#[path = "candidate_tests/segdense.rs"]
+pub(super) mod segdense;
+
+#[path = "candidate_tests/lstmproj.rs"]
+mod lstmproj;
+
+#[path = "candidate_tests/lstmproj_layout.rs"]
+mod lstmproj_layout;
+
+#[test]
+fn fixed_dense_and_temporal_ports_refuse_other_window_lengths_before_enqueue() {
+    use super::{DenseSite, DenseSpec, GeometryError, PlanError, SegConvSite, SegConvSpec};
+    use crate::inference::cuda::{CudaMath, geometry::Conv2d};
+    let dense = DenseSpec::new(DenseSite::Linear0, 1, CudaMath::Fp32).unwrap();
+    assert!(dense.check_rows(589).is_ok());
+    assert!(matches!(
+        dense.check_rows(590),
+        Err(PlanError::Geometry(GeometryError::Unimplemented { .. }))
+    ));
+    let temporal = SegConvSpec::new(SegConvSite::Conv1, 1, CudaMath::Fp32).unwrap();
+    let conv = Conv2d {
+        batch: 1,
+        in_channels: 80,
+        out_channels: 60,
+        input: [1, 5325],
+        kernel: [1, 5],
+        padding: [0, 0],
+        stride: [1, 1],
+        dilation: [1, 1],
+        math: CudaMath::Fp32,
+    };
+    assert!(temporal.check_conv(conv).is_ok());
+    assert!(matches!(
+        temporal.check_conv(Conv2d {
+            input: [1, 5326],
+            ..conv
+        }),
+        Err(PlanError::Geometry(GeometryError::Unimplemented { .. }))
+    ));
+}

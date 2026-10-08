@@ -10,14 +10,14 @@
 //! sub-scopes only through the locked [`Phases`] and [`LstmPhases`] handles
 //!
 //! Each trait declares a [`Coverage`]: the layer and batch pairs the candidate
-//! implements, per math mode. This is implemented coverage only. Accuracy and speed
-//! acceptance live in the production table's tuple proofs, so dispatch runs the
-//! candidate only for accepted triples and the Library path for every other triple.
-//! The harness qualifies exactly the declared triples
+//! implements, per math mode. Driver-only routing uses this implemented coverage.
+//! Hybrid routing requires a port speed scope or a qualified production tuple;
+//! unmeasured device-sensitive tuples use Library. The harness qualifies exactly
+//! the declared triples
 //!
 //! A plan is built from a [`ConfigPin`] that names its complete execution choice.
-//! Production passes the pin its accepted record names; qualification passes the
-//! candidate's own implemented pin. Each trait also states its [`SpecialValues`]
+//! A qualified tuple supplies its record pin; a complete port supplies its fixed
+//! device rule result. Qualification uses the candidate's implemented pin. Each trait also states its [`SpecialValues`]
 //! contract. The locked owner passes the exact loaded module from the selection
 //! token; a plan never resolves production module policy again
 //!
@@ -43,8 +43,8 @@ use super::{CudaError, CudaMath, CudaRuntime, KernelModule, LoadedKernels, PtxTi
 mod conv;
 mod fbank;
 mod lstm;
-mod segdense;
 mod lstmproj;
+mod segdense;
 mod sinc;
 
 #[cfg(test)]
@@ -52,6 +52,42 @@ pub(super) use kernel_inventory::conv_kernel_inventory;
 
 #[cfg(test)]
 mod kernel_inventory {
+    /// Every kernel entry a plan can launch, for the PTX inventory check
+    pub(crate) const SEGDENSE_KERNELS: [&str; 32] = [
+        "spk_segdense_pack",
+        "spk_segdense_pack_conv_mma",
+        "spk_segdense_conv1_b1",
+        "spk_segdense_conv1_b32",
+        "spk_segdense_conv1_b32_tc",
+        "spk_segdense_conv1_b32_x3",
+        "spk_segdense_conv2_b1",
+        "spk_segdense_conv2_b32",
+        "spk_segdense_conv2_b32_tc",
+        "spk_segdense_conv2_b32_x3",
+        "spk_segdense_linear0_b1",
+        "spk_segdense_linear0_b1_tf32",
+        "spk_segdense_linear0_b32",
+        "spk_segdense_linear0_b32_tf32",
+        "spk_segdense_linear1_b1",
+        "spk_segdense_linear1_b1_tf32",
+        "spk_segdense_linear1_b32",
+        "spk_segdense_linear1_b32_tf32",
+        "spk_segdense_classifier_b1",
+        "spk_segdense_classifier_b32",
+        "spk_segdense_embed_b1",
+        "spk_segdense_embed_b32",
+        "spk_segdense_embed_b32_tf32",
+        "spk_segdense_embed_b32_tf32_k2",
+        "spk_segdense_embed_b32_tf32_e64",
+        "spk_segdense_embed_b32_x3",
+        "spk_segdense_embed_b32_f16",
+        "spk_segdense_reduce_embed",
+        "spk_segdense_reduce_embed_flat",
+        "spk_segdense_reduce_e18",
+        "spk_segdense_reduce_e34",
+        "spk_segdense_reduce_e36",
+    ];
+
     use super::ConvShape as Shape;
     use super::conv::{REQUIRED_KERNELS, SMALL_BATCH_WAVES, select_tiling};
 
@@ -73,9 +109,9 @@ mod kernel_inventory {
 #[cfg(test)]
 pub(super) use fbank::REQUIRED_KERNELS as FBANK_DFT_KERNELS;
 #[cfg(test)]
-pub(super) use lstm::REQUIRED_KERNELS as LSTM_KERNELS;
+pub(super) use kernel_inventory::SEGDENSE_KERNELS;
 #[cfg(test)]
-pub(super) use segdense::REQUIRED_KERNELS as SEGDENSE_KERNELS;
+pub(super) use lstm::REQUIRED_KERNELS as LSTM_KERNELS;
 #[cfg(test)]
 pub(super) use lstmproj::REQUIRED_KERNELS as LSTMPROJ_KERNELS;
 #[cfg(test)]
@@ -85,11 +121,9 @@ pub(crate) use conv::Oxide as ConvOxide;
 pub(crate) use fbank::Oxide as FbankOxide;
 pub(crate) use lstm::Oxide as LstmOxide;
 // the routing port selects these plans
-pub(crate) use segdense::SegdensePin;
-#[allow(unused_imports)]
+pub(crate) use segdense::{Area as SegdenseArea, SegdensePin};
 pub(crate) use segdense::{DenseOxide, SegConvOxide};
 // the root's routing for builds without libraries consumes this export
-#[allow(unused_imports)]
 pub(crate) use lstmproj::Oxide as LstmProjOxide;
 pub(crate) use sinc::Oxide as SincOxide;
 
@@ -168,8 +202,7 @@ impl ConfigPin {
     pub(crate) const fn is_device_rule(self) -> bool {
         matches!(
             self,
-            Self::Conv(ConvPin::LegacyWaves(_))
-                | Self::Lstm(LstmPin::LegacyCooperative | LstmPin::Projected(_))
+            Self::Conv(ConvPin::LegacyWaves(_)) | Self::Lstm(LstmPin::LegacyCooperative)
         )
     }
 }
@@ -1113,6 +1146,18 @@ pub(crate) enum DenseSite {
     Embedding,
 }
 
+impl DenseSite {
+    /// The fixed model boundary implemented by this site
+    pub(crate) fn boundary(self) -> super::implementation::BoundaryId {
+        super::implementation::BoundaryId::named(match self {
+            Self::Linear0 => "linear0",
+            Self::Linear1 => "linear1",
+            Self::Classifier => "linear2",
+            Self::Embedding => "resnet.seg_1",
+        })
+    }
+}
+
 /// The operation after dense multiplication
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DenseEpilogue {
@@ -1139,6 +1184,21 @@ impl DenseSpec {
         let (m, n, k) = spec.dimensions();
         validate_fixed_batch("dense plan", batch, &[m, n, k, m * n, m * k, n * k])?;
         Ok(spec)
+    }
+
+    /// Refuse a valid variable-length window that this fixed kernel does not implement
+    pub(crate) fn check_rows(self, rows: usize) -> Result<(), PlanError> {
+        if rows == self.dimensions().0 {
+            return Ok(());
+        }
+        Err(PlanError::Geometry(GeometryError::Unimplemented {
+            context: "dense plan",
+            reason: format!(
+                "{} requires {} rows per item, got {rows}",
+                self.site.boundary(),
+                self.dimensions().0
+            ),
+        }))
     }
 
     /// The fixed model boundary
@@ -1230,8 +1290,8 @@ pub(crate) trait DenseCandidate: Sized {
     /// Write the complete output on the runtime stream, with the planned weights
     fn enqueue(
         &self,
-        x: &CudaSlice<f32>,
-        output: &mut CudaSlice<f32>,
+        x: &CudaView<'_, f32>,
+        output: &mut CudaViewMut<'_, f32>,
         phases: &Phases,
         runtime: &CudaRuntime,
     ) -> Result<(), CudaError>;
@@ -1244,6 +1304,16 @@ pub(crate) enum SegConvSite {
     Conv1,
     /// The 60 to 60 channel convolution
     Conv2,
+}
+
+impl SegConvSite {
+    /// The fixed model boundary implemented by this site
+    pub(crate) fn boundary(self) -> super::implementation::BoundaryId {
+        super::implementation::BoundaryId::named(match self {
+            Self::Conv1 => "sincnet.conv1",
+            Self::Conv2 => "sincnet.conv2",
+        })
+    }
 }
 
 /// Validated five-tap, stride-one NCW convolution without bias
@@ -1268,6 +1338,26 @@ impl SegConvSpec {
         )?;
         Ok(spec)
     }
+    /// Verify that the model's temporal shape is the fixed kernel shape
+    pub(crate) fn check_conv(self, conv: Conv2d) -> Result<(), PlanError> {
+        if conv.batch == self.batch
+            && conv.math == self.math
+            && conv.in_channels == self.in_channels()
+            && conv.out_channels == self.out_channels()
+            && conv.input == [1, self.input_steps()]
+            && conv.kernel == [1, self.kernel()]
+            && conv.padding == [0, 0]
+            && conv.stride == [1, 1]
+            && conv.dilation == [1, 1]
+        {
+            return Ok(());
+        }
+        Err(PlanError::Geometry(GeometryError::Unimplemented {
+            context: "temporal plan",
+            reason: format!("{} does not implement shape {conv:?}", self.site.boundary()),
+        }))
+    }
+
     /// The fixed model boundary
     pub(crate) const fn site(self) -> SegConvSite {
         self.site
@@ -1351,8 +1441,8 @@ pub(crate) trait SegConvCandidate: Sized {
     /// the planned weights
     fn enqueue(
         &self,
-        x: &CudaSlice<f32>,
-        output: &mut CudaSlice<f32>,
+        x: &CudaView<'_, f32>,
+        output: &mut CudaViewMut<'_, f32>,
         phases: &Phases,
         runtime: &CudaRuntime,
     ) -> Result<(), CudaError>;
@@ -1391,6 +1481,22 @@ pub(crate) trait DriverCandidate {
     /// Structural speed evidence, if this complete port is accepted on all devices
     fn broad_evidence() -> Option<&'static super::implementation::BroadEvidence> {
         None
+    }
+    /// Speed policy of the complete port, separate from implemented coverage
+    fn speed_scope(
+        _boundary: super::implementation::BoundaryId,
+        _batch: usize,
+        _math: CudaMath,
+        _device: &DeviceAttributes,
+        _tier: PtxTier,
+    ) -> Option<super::implementation::SpeedScope> {
+        Self::broad_evidence().map(super::implementation::SpeedScope::AllDevices)
+    }
+    /// The development reports supporting this port's speed policy
+    fn speed_summary(_math: CudaMath) -> &'static str {
+        Self::broad_evidence().map_or("device-sensitive port measurements", |evidence| {
+            evidence.summary()
+        })
     }
     /// One complete pin, selected from cached device facts without GPU allocation
     fn driver_pin(

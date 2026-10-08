@@ -26,6 +26,7 @@ mod buffer;
 // and the candidate PTX areas are unused
 #[allow(dead_code)]
 mod candidate;
+mod dense;
 mod device;
 #[cfg(feature = "_cuda-libraries")]
 mod dnn;
