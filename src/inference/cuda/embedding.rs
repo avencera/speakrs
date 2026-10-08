@@ -371,11 +371,15 @@ impl EmbeddingBatch {
     /// then replays instead of issuing each launch
     ///
     /// The graph bakes in the batch's buffer addresses and its model's weights,
-    /// both of which the batch keeps alive. Runs one eager pass first so cuDNN and
-    /// cuBLAS finish their lazy setup outside the capture
+    /// both of which the batch keeps alive. Library builds run one eager pass first
+    /// so cuDNN and cuBLAS finish their lazy setup outside the capture. Driver-only
+    /// plans are prepared by batch construction and do not need this extra pass
     pub fn capture_graph(&mut self, runtime: &CudaRuntime) -> Result<(), CudaError> {
         self.graph = None;
-        self.run(runtime, &mut |_, _| Ok(()))?;
+        if !super::driver_only() {
+            self.run(runtime, &mut |_, _| Ok(()))?;
+        }
+        // finish weight packing and prior buffer work before capture drops their events
         runtime.synchronize()?;
 
         let context = runtime.context();
