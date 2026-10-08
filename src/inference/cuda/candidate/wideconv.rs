@@ -715,11 +715,8 @@ impl Config {
                 {
                     WinogradProducts::Tf32x1Staged
                 }
-                // two products keep TF32-mode error at that of a direct TF32
-                // convolution on the 128-channel layers only
-                (true, Shape::C128) => WinogradProducts::Tf32x2,
-                (true, _) if conv.batch < WINOGRAD_TENSOR_BATCH => WinogradProducts::Tf32x3,
-                (true, _) => return None,
+                // unmeasured tensor-rich parts use the approved staged product
+                (true, _) => WinogradProducts::Tf32x1Staged,
             });
         }
         // on parts with TF32 at the FP32 rate one staged product still beats both FFMA
@@ -835,11 +832,6 @@ impl Config {
         Ok(partition.map_or(whole, |partition| (partition, SplitCells::From(from))))
     }
 }
-
-/// Batch from which the direct tensor-core kernel replaces Winograd in TF32 mode on the
-/// 256-channel layers of TF32-rich parts other than the A100; production runs batches 1
-/// and 32, and the crossover between them is not measured
-const WINOGRAD_TENSOR_BATCH: usize = 8;
 
 /// The convolution contract and immutable folded weights used to create a plan
 struct Spec<'a, 'b> {
@@ -2200,6 +2192,26 @@ impl super::DriverCandidate for Oxide {
             return Ok(Some(startup));
         }
         Ok(Some(super::ConfigPin::Wideconv(wide)))
+    }
+
+    fn tuning_fp32_pin(
+        boundary: super::super::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        _device: &DeviceAttributes,
+        _tier: PtxTier,
+    ) -> Result<Option<super::ConfigPin>, PlanError> {
+        let conv = model_conv(boundary.name(), batch, math)?;
+        let config = Config {
+            algorithm: Algorithm::Spatial,
+            partition: Partition::Whole,
+            split_cells: SplitCells::All,
+        };
+        if Layout::new(conv, config.partition, config.split_cells, config.algorithm).is_err() {
+            return Ok(None);
+        }
+
+        Ok(Some(super::ConfigPin::Wideconv(Pin::Configured(config))))
     }
 
     fn driver_pin(

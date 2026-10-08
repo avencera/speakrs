@@ -295,7 +295,11 @@ pub(super) fn run(
     )?;
     let mut runtimes = vec![first_runtime];
     for kind in catalogue.benchmark_kinds().skip(1) {
-        runtimes.push(CudaRuntime::for_tuning(options.device, kind)?);
+        runtimes.push(CudaRuntime::for_tuning(
+            options.device,
+            kind,
+            options.include_library,
+        )?);
     }
 
     let mut measurements = Vec::new();

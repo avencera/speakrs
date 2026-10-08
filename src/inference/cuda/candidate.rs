@@ -1521,7 +1521,8 @@ pub(crate) trait DriverCandidate {
     }
     /// A conservative FP32 algorithm with a pin valid for the requested math mode
     ///
-    /// This is tuner-only enumeration, not a change to normal driver selection
+    /// Tuning enumerates this pin; unmeasured defaults use it when the normal
+    /// pin has no accuracy approval
     fn tuning_fp32_pin(
         _boundary: super::implementation::BoundaryId,
         _batch: usize,

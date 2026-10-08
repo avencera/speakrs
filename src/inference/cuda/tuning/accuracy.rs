@@ -9,18 +9,22 @@ use crate::inference::cuda::implementation::BoundaryId;
 
 /// End-to-end evidence for an algorithm in the requested pipeline math mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Approval {
+pub(crate) enum Approval {
     DirectFp32,
     DirectTf32,
+    ThreeProductSegmentation,
     StagedWinograd,
     C64FfmaWinograd,
     Fp16Trunk,
 }
 
 impl Approval {
-    pub(super) const fn description(self) -> &'static str {
+    pub(crate) const fn description(self) -> &'static str {
         match self {
             Self::DirectFp32 => "reviewed direct FP32 end-to-end accuracy",
+            Self::ThreeProductSegmentation => {
+                "reviewed A100 three-product segmentation end-to-end accuracy"
+            }
             Self::DirectTf32 => "reviewed direct TF32 end-to-end accuracy",
             Self::StagedWinograd => "reviewed wtp1 end-to-end accuracy",
             Self::Fp16Trunk => {
@@ -32,15 +36,15 @@ impl Approval {
 }
 
 /// The tuner cannot promote implementation coverage or a recipe into approval
-pub(super) struct Policy;
+pub(crate) struct Policy;
 
 impl Policy {
     // bump when the reviewed algorithm set or its math-mode limits change
-    pub(super) const IDENTITY: &'static str = "end-to-end-algorithms-v2";
+    pub(crate) const IDENTITY: &'static str = "end-to-end-algorithms-v3";
 
     /// PR 3 and the C128/T4 branch reports establish unchanged per-file DER or
     /// byte-identical RTTMs for these algorithms; device support is checked separately
-    pub(super) fn approve(
+    pub(crate) fn approve(
         boundary: BoundaryId,
         math: CudaMath,
         pin: ConfigPin,
@@ -86,6 +90,11 @@ impl Policy {
             // segmentation end-to-end evidence uses FP32, even on TF32-capable devices
             ConfigPin::Sinc(SincPin::ConvAbsPool) if math == CudaMath::Fp32 => Approval::DirectFp32,
             ConfigPin::Segdense(pin) => match pin.entry() {
+                // unmeasured cc 8.0/9.0 FP32 defaults use these three-product kernels
+                // the A100 check established identical RTTMs and per-file DER
+                SegdenseEntry::Conv1B32X3 | SegdenseEntry::Conv2B32X3 => {
+                    Approval::ThreeProductSegmentation
+                }
                 SegdenseEntry::Conv1B1
                 | SegdenseEntry::Conv1B32
                 | SegdenseEntry::Conv2B1
@@ -106,7 +115,11 @@ impl Policy {
             _ => return None,
         };
         match (math, approval) {
-            (_, Approval::DirectFp32) | (CudaMath::Tf32, _) => Some(approval),
+            (_, Approval::DirectFp32) | (CudaMath::Fp32, Approval::ThreeProductSegmentation) => {
+                Some(approval)
+            }
+            (CudaMath::Tf32, Approval::ThreeProductSegmentation) => None,
+            (CudaMath::Tf32, _) => Some(approval),
             _ => None,
         }
     }

@@ -29,7 +29,7 @@ coreml = [
     "_backend",
 ]
 # Linux-only native NVIDIA backend; CUDA is never part of default
-# cuda includes all target kernels plus cuDNN and cuBLAS for hybrid selection
+# cuda defaults to speakrs kernels on every GPU, with cuDNN/cuBLAS fallback
 cuda = ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120", "_cuda-libraries"]
 # internal: optional numerical libraries, added only by cuda
 _cuda-libraries = ["_cuda", "cudarc/cublas", "cudarc/cudnn"]

@@ -1,6 +1,6 @@
-//! Driver-only routing uses complete implemented coverage, never speed acceptance
+//! Kernel routing uses complete implemented coverage, never speed acceptance
 
-use super::policy::{DeviceDefault, Recipe, RecipeChoice};
+use super::policy::{DeviceDefault, Recipe};
 use super::{BoundaryId, Modules, PlanPin, Qualified, Selected, Selection, Target, TokenEvidence};
 use crate::inference::cuda::candidate::{
     ConfigPin, ConvOxide, Coverage, DriverCandidate, FbankOxide, Fp16Policy, LstmProjOxide,
@@ -12,6 +12,15 @@ use crate::inference::cuda::{CudaError, CudaMath, KernelModule, PtxTier};
 /// Candidate-owned distinct tuning choices, independent of startup routing
 type TuningPins =
     fn(BoundaryId, usize, CudaMath, &DeviceAttributes, PtxTier) -> Vec<(ConfigPin, &'static str)>;
+
+/// Candidate-owned scalar alternative for independent production accuracy checks
+type TuningFp32Pin = fn(
+    BoundaryId,
+    usize,
+    CudaMath,
+    &DeviceAttributes,
+    PtxTier,
+) -> Result<Option<ConfigPin>, PlanError>;
 
 /// Candidate-owned pin construction under a selection's FP16 policy
 type DriverPin = fn(
@@ -29,20 +38,13 @@ type HybridFp16 = fn(&DeviceAttributes, PtxTier, Option<Recipe>, Fp16Policy) -> 
 /// One area's library-free candidate interface, independent of artifact loading
 pub(super) struct Area {
     area: KernelModule,
-    hybrid: HybridPolicy,
     coverage: fn(PtxTier, &DeviceAttributes, Fp16Policy) -> Coverage,
     hybrid_fp16: HybridFp16,
     scope: fn(BoundaryId, usize, CudaMath, &DeviceAttributes, PtxTier) -> Option<super::SpeedScope>,
     summary: fn(CudaMath) -> &'static str,
     pin: DriverPin,
     tuning_pins: TuningPins,
-}
-
-/// A port either owns speed selection or retains the frozen qualified table
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum HybridPolicy {
-    Scoped,
-    QualifiedTable,
+    tuning_fp32_pin: TuningFp32Pin,
 }
 
 impl Area {
@@ -50,21 +52,13 @@ impl Area {
     pub(super) fn candidate<C: DriverCandidate>() -> Self {
         Self {
             area: C::AREA,
-            hybrid: HybridPolicy::Scoped,
             coverage: C::driver_coverage,
             hybrid_fp16: C::hybrid_fp16,
             scope: C::speed_scope,
             summary: C::speed_summary,
             pin: C::driver_pin,
             tuning_pins: C::tuning_pins,
-        }
-    }
-
-    /// Register implementation coverage without replacing qualified-table speed policy
-    fn qualified<C: DriverCandidate>() -> Self {
-        Self {
-            hybrid: HybridPolicy::QualifiedTable,
-            ..Self::candidate::<C>()
+            tuning_fp32_pin: C::tuning_fp32_pin,
         }
     }
 }
@@ -74,7 +68,7 @@ pub(super) fn areas() -> [Area; 6] {
     [
         Area::candidate::<WideconvOxide>(),
         Area::candidate::<ConvOxide>(),
-        Area::qualified::<SincOxide>(),
+        Area::candidate::<SincOxide>(),
         Area::candidate::<SegdenseArea>(),
         Area::candidate::<FbankOxide>(),
         Area::candidate::<LstmProjOxide>(),
@@ -125,21 +119,24 @@ pub(super) fn missing(boundary: BoundaryId, batch: usize, math: CudaMath) -> Cud
     }
 }
 
-pub(super) fn select(
+/// Apply production default accuracy policy without permitting a Library result
+pub(super) fn select_default(
     boundary: BoundaryId,
     batch: usize,
     math: CudaMath,
     mut modules: impl Modules,
 ) -> Result<Selected, CudaError> {
-    select_from(
+    match select_from(
         &areas(),
         boundary,
         batch,
         math,
         &mut modules,
-        Selection::DriverOnly,
-    )
-    .map(|selected| selected.expect("driver route returns a selection or an error"))
+        Selection::Production,
+    )? {
+        Some(selected @ Selected::Oxide(_)) => Ok(selected),
+        _ => Err(missing(boundary, batch, math)),
+    }
 }
 
 pub(super) fn select_ports(
@@ -180,22 +177,11 @@ pub(super) fn select_from(
         })
         .flatten();
     let fp16 = modules.fp16();
-    let recipe_choice = recipe.map(|recipe| recipe.choice(boundary, batch, math, fp16));
-    if recipe_choice == Some(RecipeChoice::Library) {
-        return Ok(Some(Selected::Library));
-    }
-
     for area in super::ROUTE_PRECEDENCE {
         let Some(candidate) = areas.iter().find(|candidate| candidate.area == *area) else {
             continue;
         };
 
-        if selection == Selection::Production
-            && candidate.hybrid == HybridPolicy::QualifiedTable
-            && recipe.is_none()
-        {
-            continue;
-        }
         let Some(request) = super::production_module(
             *area,
             modules.device(),
@@ -234,25 +220,21 @@ pub(super) fn select_from(
                 )
             })
             .flatten();
-        if selection == Selection::Production
-            && recipe.is_none()
-            && scope.is_none()
-            && default.is_none()
-        {
-            // a complete port owns its covered tuple even when speed is unmeasured
-            return Ok(Some(Selected::Library));
-        }
-        let pin = match recipe_choice {
-            Some(RecipeChoice::FixedPin(pin)) => Ok(pin),
-            _ => (candidate.pin)(
-                boundary,
-                batch,
-                math,
-                modules.device(),
-                request.tier(),
-                fp16,
-            ),
-        };
+        let pin = recipe
+            .and_then(|recipe| recipe.fixed_pin(boundary, batch, math, fp16))
+            .map_or_else(
+                || {
+                    (candidate.pin)(
+                        boundary,
+                        batch,
+                        math,
+                        modules.device(),
+                        request.tier(),
+                        fp16,
+                    )
+                },
+                Ok,
+            );
         if selection == Selection::Production
             && matches!(
                 &pin,
@@ -265,7 +247,7 @@ pub(super) fn select_from(
         {
             return Ok(Some(Selected::Library));
         }
-        let pin = pin.map_err(|error| match error {
+        let pin_error = |error| match error {
             PlanError::Cuda(error) => error,
             PlanError::Geometry(error) => CudaError::CandidateGeometry {
                 area: area.name(),
@@ -283,20 +265,41 @@ pub(super) fn select_from(
                 device: modules.device().capability(),
                 reason: other.to_string(),
             },
-        })?;
+        };
+        let mut pin = pin.map_err(pin_error)?;
+
+        if selection == Selection::Production
+            && !Recipe::measured_device(modules.device(), modules.tier_limit())
+            && crate::inference::cuda::tuning::accuracy::Policy::approve(boundary, math, pin)
+                .is_none()
+        {
+            // class defaults cannot inherit accuracy from implementation coverage
+            let alternate = (candidate.tuning_fp32_pin)(
+                boundary,
+                batch,
+                math,
+                modules.device(),
+                request.tier(),
+            )
+            .map_err(pin_error)?;
+            let Some(approved) = alternate else {
+                continue;
+            };
+            if crate::inference::cuda::tuning::accuracy::Policy::approve(boundary, math, approved)
+                .is_none()
+            {
+                continue;
+            }
+
+            pin = approved;
+        }
         if pin.area() != *area {
             return Err(CudaError::Unsupported {
                 context: "driver-only route",
                 reason: "candidate returned a foreign area pin".to_owned(),
             });
         }
-        let loaded = match modules.load(request) {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                return super::artifact_refusal(error, selection == Selection::Production)
-                    .map(Some);
-            }
-        };
+        let loaded = modules.load(request)?;
         if loaded != request {
             return Err(CudaError::Unsupported {
                 context: "driver-only route",
@@ -335,5 +338,7 @@ pub(super) fn select_from(
     Err(missing(boundary, batch, math))
 }
 
+#[cfg(test)]
+pub(super) mod test_support;
 #[cfg(test)]
 mod tests;

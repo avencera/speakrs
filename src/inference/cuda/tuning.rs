@@ -14,7 +14,7 @@ use super::implementation::{self, BoundaryId};
 use super::kernels::ModuleRequest;
 use super::{CudaError, CudaMath, CudaRuntime, KernelModule, PtxTier};
 
-mod accuracy;
+pub(crate) mod accuracy;
 mod bench;
 mod driver_version;
 mod file;
@@ -30,6 +30,10 @@ pub struct CudaTuneOptions {
     pub device: usize,
     /// Measure and report without writing or changing an existing tuning file
     pub dry_run: bool,
+    /// Also measure Library; excludes its load and handle initialization costs
+    ///
+    /// Requires the `cuda` feature; defaults to kernels only
+    pub include_library: bool,
     /// Segmentation arithmetic; defaults to FP32
     pub segmentation_math: CudaMath,
     /// Embedding arithmetic; defaults to TF32, while filterbank remains FP32
@@ -43,6 +47,7 @@ impl Default for CudaTuneOptions {
             output_path: None,
             device: 0,
             dry_run: false,
+            include_library: false,
             segmentation_math: CudaMath::Fp32,
             embedding_math: CudaMath::Tf32,
         }
@@ -124,9 +129,15 @@ impl From<file::FileError> for CudaTuneError {
 /// order, and compares CUDA-event medians. It never adds configurations or
 /// changes arithmetic policy. Startup only reads a matching file; it never tunes.
 /// The caller must serialize GPU benchmarking against other workloads.
-/// Set `dry_run` to keep the existing file unchanged.
+/// Set `dry_run` to keep the existing file unchanged. Library candidates require
+/// `include_library`; their load and handle initialization costs are not timed.
 pub fn tune_cuda(options: &CudaTuneOptions) -> Result<CudaTuneReport, CudaTuneError> {
-    let runtime = CudaRuntime::for_tuning(options.device, BenchKind::CatalogueSlot(0))?;
+    options.validate_library()?;
+    let runtime = CudaRuntime::for_tuning(
+        options.device,
+        BenchKind::CatalogueSlot(0),
+        options.include_library,
+    )?;
     let driver = driver_version::DriverIdentity::read()?.require_release()?;
     let catalogue = Catalogue::new(runtime.device(), runtime.ptx_tier())?;
     let key = device_key(&runtime, Some(&catalogue), driver)?;
@@ -311,12 +322,24 @@ pub(crate) enum BenchKind {
     CatalogueSlot(usize),
 }
 
+impl CudaTuneOptions {
+    fn validate_library(&self) -> Result<(), CudaTuneError> {
+        if self.include_library && super::driver_only() {
+            return Err(CudaTuneError::Invalid(
+                "Library tuning requires the cuda feature".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 enum TuneSelection {
     File(file::ValidatedFile),
     Bench {
         kind: BenchKind,
         catalogue: Catalogue,
+        include_library: bool,
     },
 }
 
@@ -330,12 +353,14 @@ pub(crate) struct TuneControl {
 impl TuneControl {
     pub(crate) fn benchmark(
         kind: BenchKind,
+        include_library: bool,
         device: &DeviceAttributes,
         tier: PtxTier,
     ) -> Result<Self, CudaError> {
         Ok(Self {
             selection: TuneSelection::Bench {
                 kind,
+                include_library,
                 catalogue: Catalogue::new(device, tier)?,
             },
             collecting: AtomicBool::new(false),
@@ -407,10 +432,18 @@ impl TuneControl {
         let tuple = Tuple::new(boundary, batch, math).ok()?;
         match &self.selection {
             TuneSelection::File(file) => file.choice(tuple),
-            TuneSelection::Bench { kind, catalogue } => {
+            TuneSelection::Bench {
+                kind,
+                catalogue,
+                include_library,
+            } => {
                 let choices = catalogue.choices(tuple);
                 let BenchKind::CatalogueSlot(index) = kind;
-                choices.get(*index).cloned()
+                choices
+                    .iter()
+                    .filter(|choice| *include_library || !matches!(choice, ApprovedChoice::Library))
+                    .nth(*index)
+                    .cloned()
             }
         }
     }
@@ -422,12 +455,21 @@ impl TuneControl {
         math: CudaMath,
     ) -> Option<ApprovedChoice> {
         self.choice(boundary, batch, math).or_else(|| {
-            let TuneSelection::Bench { catalogue, .. } = &self.selection else {
+            let TuneSelection::Bench {
+                catalogue,
+                include_library,
+                ..
+            } = &self.selection
+            else {
                 return None;
             };
             let tuple = Tuple::new(boundary, batch, math).ok()?;
             // untimed boundaries need an approved plan to complete the model pass
-            catalogue.choices(tuple).first().cloned()
+            catalogue
+                .choices(tuple)
+                .iter()
+                .find(|choice| *include_library || !matches!(choice, ApprovedChoice::Library))
+                .cloned()
         })
     }
 

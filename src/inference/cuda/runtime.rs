@@ -12,6 +12,8 @@ use cudarc::driver::{CudaContext, CudaStream, DriverError};
 use cudarc::nvrtc::Ptx;
 use tracing::debug;
 
+mod tune_hint;
+
 use super::CudaMath;
 use super::device::DeviceAttributes;
 use super::error::CudaLibrary;
@@ -132,8 +134,17 @@ impl CudaRuntime {
         Ok(runtime)
     }
 
+    /// Suggest explicit tuning only when this model has no measured device choices
+    pub(crate) fn log_tune_hint(&self) {
+        tune_hint::log(&self.device, self.ptx_tier, self.tuning.is_some());
+    }
+
     /// The tuner never reads old measurements or inherits the force-Library policy
-    pub(crate) fn for_tuning(ordinal: usize, kind: BenchKind) -> Result<Self, CudaError> {
+    pub(crate) fn for_tuning(
+        ordinal: usize,
+        kind: BenchKind,
+        include_library: bool,
+    ) -> Result<Self, CudaError> {
         if std::env::var_os(super::kernels::FORCE_PTX_JIT_ENV).is_some_and(|value| value == "1") {
             return Err(super::tuning::invalid(
                 "unset SPEAKRS_CUDA_FORCE_PTX_JIT before tuning",
@@ -143,6 +154,7 @@ impl CudaRuntime {
         runtime.force_library = false;
         runtime.tuning = Some(TuneControl::benchmark(
             kind,
+            include_library,
             &runtime.device,
             runtime.ptx_tier,
         )?);

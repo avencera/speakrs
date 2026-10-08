@@ -183,7 +183,7 @@ fn an_implemented_unapproved_algorithm_rejects_a_tune_file() {
 fn a_changed_accuracy_policy_rejects_the_old_file() {
     let (catalogue, file) = fixture();
     let mut next_policy = key();
-    next_policy.accuracy_policy = "end-to-end-algorithms-v3".into();
+    next_policy.accuracy_policy = format!("{}-changed", next_policy.accuracy_policy);
     let old_file: TuneFile = serde_json::from_slice(&serde_json::to_vec(&file).unwrap()).unwrap();
     assert!(matches!(
         old_file.validate(&next_policy, &catalogue),

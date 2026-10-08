@@ -108,25 +108,21 @@ uv run --group dev ruff format scripts/cuda
 uv run --group dev ty check --python .venv scripts/cuda
 ```
 
-## Qualified custom kernels
+## Native kernels
 
-The native CUDA backend uses the shipped sm75 cuda-oxide kernels only for qualified
-(layer, batch, math) combinations. Other combinations use the Library path. The
-qualified batch classes are 1, 7, 32, 33, and 64.
+The `cuda` build uses speakrs kernels on every GPU. Selection uses a matching tune
+file, then a built-in kernel recipe, then a device-class or portable kernel default.
+cuDNN and cuBLAS remain available only for a capability refusal, a coverage gap,
+or an explicit Library choice. They load only when needed. Target-only builds do
+not include these libraries.
 
-| Boundary | FP32 | TF32 |
-| --- | --- | --- |
-| ResNet stage 1 C32 and stage 2 strided convolution | All qualified batches | All qualified batches |
-| ResNet stage 2 C64 convolutions | All qualified batches | 7, 32, 33, 64 |
-| Four-layer bidirectional LSTM stack | All qualified batches | Library |
-| SincNet convolution, absolute value, and pool | All qualified batches | Library |
+Segmentation defaults to FP32. Embedding defaults to TF32. CUDA graphs are enabled.
+The kernels cover full LSTM input projections without cuBLAS. The shipped kernels
+support Turing and newer GPUs.
 
-Segmentation defaults to FP32. Embedding defaults to TF32. CUDA graphs are enabled,
-and the Library LSTM default is `CudaLstmAlgorithm::PersistStaticSmallH`. The custom
-LSTM still uses cuBLAS for input projections. cuDNN and cuBLAS remain required.
-
-The shipped PTX targets Turing and newer. Qualification ran its sm75 image on an
-RTX 5070 Ti (sm120); performance on a real Turing GPU is not measured.
+`speakrs cuda tune` measures approved speakrs kernels by default. In a `cuda`
+build, use `--include-library` to also measure Library. Those per-layer times do
+not include library load or handle initialization costs.
 
 Kernel checks use `cargo xtask cuda-kernels check`, the PTX lint,
 `scripts/cuda/prove-driver-only.sh`, and end-to-end RTTM/DER runs.

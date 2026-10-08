@@ -133,6 +133,7 @@ pub(crate) enum Selection {
     /// A benchmark must run the named implementation or return its refusal
     Tuning,
     /// Complete implemented coverage; speed is not a selection gate
+    #[cfg(test)]
     DriverOnly,
     /// An explicit development request
     #[cfg(all(test, feature = "_cuda-libraries"))]
@@ -1035,7 +1036,11 @@ impl PlanRequest {
             }
         }
         if driver {
-            return driver::select(boundary, batch, math, modules);
+            #[cfg(test)]
+            if matches!(self, Self::DriverOnly) {
+                return driver::test_support::select(boundary, batch, math, modules);
+            }
+            return driver::select_default(boundary, batch, math, modules);
         }
 
         if matches!(self, Self::Hybrid)
@@ -1077,15 +1082,7 @@ impl PlanRequest {
             return Ok(Selected::Library);
         };
         let request = modules.effective_request(route.module)?;
-        let loaded = match modules.load(request) {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                return artifact_refusal(
-                    error,
-                    matches!(self, Self::Production | Self::Hybrid) && !super::driver_only(),
-                );
-            }
-        };
+        let loaded = modules.load(request)?;
         if loaded != request {
             return Ok(Selected::Library);
         }
@@ -1122,22 +1119,14 @@ fn tuned_selection(
             "tuned configuration does not match this execution tuple",
         ));
     }
-    let fallback_allowed = library_allowed && !modules.is_tuning();
-    // a forced PTX JIT load must reach tuned boundaries too, or the area cache
-    // would hold the cubin and refuse the PTX request of a later boundary
+    // forced JIT must reach tuned boundaries before the shared area cache is loaded
     let request = modules.effective_request(config.module())?;
-    let loaded = match modules.load(request) {
-        Ok(loaded) => loaded,
-        Err(error) => return artifact_refusal(error, fallback_allowed),
-    };
+    let loaded = modules.load(request)?;
     if loaded != request {
-        return artifact_refusal(
-            CudaError::ArtifactUnavailable {
-                module: request.area().name(),
-                artifact: request.artifact(),
-            },
-            fallback_allowed,
-        );
+        return Err(CudaError::ArtifactUnavailable {
+            module: request.area().name(),
+            artifact: request.artifact(),
+        });
     }
     // the tune file timed the saved artifact, not a diagnostic PTX load of it
     let evidence = if request == config.module() {
@@ -1163,20 +1152,6 @@ fn tuned_selection(
             Selection::Production
         },
     })))
-}
-
-/// Only production may use the established Library policy after an artifact refusal
-fn artifact_refusal(error: CudaError, library_allowed: bool) -> Result<Selected, CudaError> {
-    if library_allowed
-        && matches!(
-            error,
-            CudaError::ArtifactLoad { .. } | CudaError::ArtifactUnavailable { .. }
-        )
-    {
-        tracing::warn!(%error, "CUDA qualified artifact unavailable; using Library");
-        return Ok(Selected::Library);
-    }
-    Err(error)
 }
 
 #[cfg(all(test, feature = "_cuda-libraries"))]

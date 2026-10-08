@@ -53,15 +53,21 @@ pub(crate) enum Recipe {
     A100Sxm4,
 }
 
-/// A measured recipe can keep Library, follow the driver rule, or fix a pin
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RecipeChoice {
-    Library,
-    DriverPin,
-    FixedPin(ConfigPin),
-}
-
 impl Recipe {
+    /// Whether this device has a built-in recipe at the compiled tier
+    pub(crate) fn measured_device(device: &DeviceAttributes, tier: PtxTier) -> bool {
+        [
+            Self::Rtx4060TiSinc,
+            Self::Rtx4060Ti,
+            Self::Rtx5060Ti,
+            Self::TeslaT4,
+            Self::A100Pcie,
+            Self::A100Sxm4,
+        ]
+        .into_iter()
+        .any(|recipe| recipe.scope().contains(device) && recipe.allows_tier_limit(tier))
+    }
+
     pub(crate) const fn scope(self) -> SpeedScope {
         let (capability, multiprocessors, name) = match self {
             Self::Rtx4060TiSinc | Self::Rtx4060Ti => (
@@ -115,47 +121,6 @@ impl Recipe {
             Self::TeslaT4 => cfg!(feature = "cuda-sm75"),
             _ => tier >= PtxTier::Sm80 && cfg!(feature = "cuda-sm80"),
         }
-    }
-
-    /// Choose execution from the measured boundary, batch and arithmetic mode; an
-    /// excluded FP16 pin leaves the recipe's choice without it
-    pub(crate) fn choice(
-        self,
-        boundary: BoundaryId,
-        batch: usize,
-        math: CudaMath,
-        fp16: Fp16Policy,
-    ) -> RecipeChoice {
-        if let Some(pin) = self
-            .fp16_pin(boundary, batch, math)
-            .filter(|_| fp16.allows())
-        {
-            return RecipeChoice::FixedPin(pin);
-        }
-
-        if self == Self::TeslaT4 {
-            let library = match math {
-                CudaMath::Tf32 => matches!(
-                    (boundary.name(), batch),
-                    ("resnet.conv1", 16 | 32)
-                        | (
-                            "resnet.layer2.0.conv1"
-                                | "resnet.layer3.0.conv1"
-                                | "resnet.layer4.0.conv1",
-                            1 | 4 | 8 | 16 | 32
-                        )
-                        | ("resnet.layer3.0.shortcut.0", 1)
-                        | ("resnet.layer4.0.shortcut.0", 4)
-                ),
-                CudaMath::Fp32 => matches!((boundary.name(), batch), ("linear0" | "linear1", 1)),
-            };
-            if library {
-                return RecipeChoice::Library;
-            }
-        }
-
-        self.fixed_pin(boundary, batch, math, fp16)
-            .map_or(RecipeChoice::DriverPin, RecipeChoice::FixedPin)
     }
 
     /// Fixed measured exceptions to the current device configuration rule

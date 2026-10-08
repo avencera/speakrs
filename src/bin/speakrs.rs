@@ -16,6 +16,7 @@ Options:
   --output PATH              Output file
   --device N                 CUDA device number
   --dry-run                  Measure without writing a file
+  --include-library          Also time Library (excludes load and handle costs)
   --segmentation-math MODE   fp32 or tf32
   --embedding-math MODE      fp32 or tf32
   --help                    Show this help";
@@ -72,6 +73,7 @@ fn run() -> Result<(), String> {
                     .ok_or("--device must be a non-negative whole number")?;
             }
             "--dry-run" => options.dry_run = true,
+            "--include-library" => options.include_library = true,
             "--segmentation-math" => {
                 options.segmentation_math = math(value(&mut args, flag)?, flag)?
             }

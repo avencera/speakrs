@@ -232,18 +232,16 @@ fn production_token_requires_the_bound_module_identity() {
         assert_eq!(fixture.loads, [legacy_module(KernelModule::Lstm)]);
         assert_eq!(matches!(result, Selected::Oxide(_)), selected);
     }
-    // production keeps today's Library fallback after a refusal; the explicit request errors
+    // artifact load errors must propagate in both production and explicit requests
     let mut fixture = Fixture::new(BLACKWELL).loader(Loader::Refuses);
     assert!(matches!(
-        fixture
-            .resolve(
-                PlanRequest::Production,
-                "sincnet.conv0.abs_pool",
-                1,
-                CudaMath::Fp32
-            )
-            .unwrap(),
-        Selected::Library
+        fixture.resolve(
+            PlanRequest::Production,
+            "sincnet.conv0.abs_pool",
+            1,
+            CudaMath::Fp32
+        ),
+        Err(CudaError::ArtifactLoad { .. })
     ));
     assert!(matches!(
         fixture.resolve(
@@ -253,16 +251,6 @@ fn production_token_requires_the_bound_module_identity() {
             CudaMath::Fp32
         ),
         Err(CudaError::ArtifactLoad { .. })
-    ));
-    assert!(matches!(
-        super::artifact_refusal(
-            CudaError::ArtifactUnavailable {
-                module: "sincnet",
-                artifact: legacy_module(KernelModule::Sincnet).artifact(),
-            },
-            false
-        ),
-        Err(CudaError::ArtifactUnavailable { .. })
     ));
 }
 
