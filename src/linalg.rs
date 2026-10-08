@@ -647,7 +647,7 @@ mod tests {
 
     #[test]
     fn shipped_plda_inputs_and_reduced_matrix_need_no_scaling() {
-        let models = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/models");
+        let models = crate::test_support::model_fixture_dir();
         let raw: Array2<f64> = ndarray_npy::read_npy(models.join("plda_tr.npy")).unwrap();
         let psi: ndarray::Array1<f64> = ndarray_npy::read_npy(models.join("plda_psi.npy")).unwrap();
         let b = inverse_spd(&raw.t().dot(&raw)).unwrap();

@@ -87,27 +87,6 @@ enum Command {
         /// WAV files to diarize
         wav_files: Vec<PathBuf>,
     },
-    /// Profile ORT embedding inference strategies
-    #[cfg(feature = "cpu")]
-    ProfileOrtEmbedding {
-        /// Mode: borrow, owned, prealloc, stream-borrow, stream-owned, stream-prealloc, stream-batched
-        mode: String,
-        /// Path to WAV file
-        wav_path: PathBuf,
-        #[arg(long, default_value_t = 100)]
-        iterations: usize,
-        #[arg(long, default_value_t = 100)]
-        log_every: usize,
-        /// Path to ONNX embedding model
-        #[arg(long)]
-        model_path: Option<PathBuf>,
-        /// Batch size for stream-batched mode
-        #[arg(long)]
-        batch_size: Option<usize>,
-        /// Use the default ORT session config
-        #[arg(long)]
-        ort_defaults: bool,
-    },
     /// Profile pipeline stages on the CPU
     #[cfg(feature = "cpu")]
     ProfileStages {
@@ -153,27 +132,6 @@ impl Command {
                     cuda_embedding_math,
                 },
                 wav_files,
-            ),
-            #[cfg(feature = "cpu")]
-            Self::ProfileOrtEmbedding {
-                mode,
-                wav_path,
-                iterations,
-                log_every,
-                model_path,
-                batch_size,
-                ort_defaults,
-            } => commands::profile_ort_embedding::run(
-                crate::counts::parse_ort_embedding_mode(&mode)?,
-                &wav_path.to_string_lossy(),
-                iterations,
-                log_every,
-                model_path,
-                batch_size
-                    .map(|value| crate::counts::nonzero_usize("batch-size", value))
-                    .transpose()?
-                    .map(|value| value.get()),
-                ort_defaults,
             ),
             #[cfg(feature = "cpu")]
             Self::ProfileStages {

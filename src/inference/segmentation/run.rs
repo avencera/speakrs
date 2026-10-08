@@ -1,15 +1,24 @@
+use std::num::NonZeroUsize;
+
 use crossbeam_channel::Sender;
 use ndarray::Array2;
 use tracing::debug;
 
-use super::{PRIMARY_BATCH_SIZE, SegmentationBackend, SegmentationError, SegmentationModel};
+#[cfg(any(feature = "migraphx", feature = "coreml", feature = "cuda"))]
+use super::PRIMARY_BATCH_SIZE;
+use super::{SegmentationBackend, SegmentationError, SegmentationModel};
 use crate::inference::segmentation::tensor::SegmentationWindows;
+
+mod batching;
+
+use batching::{BatchPlan, Batching, Delivery};
 
 impl SegmentationModel {
     /// Run segmentation on audio, streaming raw logits through a channel
     ///
-    /// Same logic as `run()`, but sends each decoded window through `tx` as it's produced
-    /// instead of collecting into a Vec. Returns total window count
+    /// Sends raw logits through `tx` as each window is produced
+    /// Fixed-size backends pad multi-window tails; [`Self::run`] uses single-window tails
+    /// Returns the total window count
     pub fn run_streaming(
         &mut self,
         audio: &[f32],
@@ -26,53 +35,25 @@ impl SegmentationModel {
         let mut seg_batched = 0u32;
         let mut seg_single = 0u32;
 
-        let has_batched = self.has_batched();
+        let batching = self.batching();
         let zeros = vec![0.0f32; self.window_samples()];
 
         let mut next_idx = 0;
-        while next_idx < total_windows {
-            let remaining = total_windows - next_idx;
-
-            if remaining >= PRIMARY_BATCH_SIZE && has_batched {
-                let batch: Vec<&[f32]> = (next_idx..next_idx + PRIMARY_BATCH_SIZE)
-                    .map(|idx| windows.window(idx, "streaming segmentation batch"))
-                    .collect::<Result<_, _>>()?;
-
-                let t = std::time::Instant::now();
-                let results = self.run_batch(&batch)?;
-                seg_infer_time += t.elapsed();
-                seg_batched += 1;
-                for r in results {
-                    tx.send(r)?;
-                }
-                next_idx += PRIMARY_BATCH_SIZE;
-                continue;
-            }
-
-            if remaining > 1 && has_batched {
-                let mut batch: Vec<&[f32]> = (next_idx..total_windows)
-                    .map(|idx| windows.window(idx, "streaming segmentation tail batch"))
-                    .collect::<Result<_, _>>()?;
-                batch.resize(PRIMARY_BATCH_SIZE, &zeros[..]);
-
-                let t = std::time::Instant::now();
-                let results = self.run_batch(&batch)?;
-                seg_infer_time += t.elapsed();
-                seg_batched += 1;
-                for r in results.into_iter().take(remaining) {
-                    tx.send(r)?;
-                }
-                next_idx = total_windows;
-                continue;
-            }
-
+        while let Some(remaining) = NonZeroUsize::new(total_windows - next_idx) {
+            let plan = batching.plan(remaining, Delivery::Streaming);
             let t = std::time::Instant::now();
-            let result =
-                self.run_window(windows.window(next_idx, "streaming segmentation single")?)?;
+            let results = self.run_planned(&windows, next_idx, plan, &zeros)?;
             seg_infer_time += t.elapsed();
-            seg_single += 1;
-            tx.send(result)?;
-            next_idx += 1;
+            if plan.is_single() {
+                seg_single += 1;
+            } else {
+                seg_batched += 1;
+            }
+
+            for result in results {
+                tx.send(result)?;
+            }
+            next_idx += plan.useful();
         }
 
         let total_seg = seg_start.elapsed();
@@ -95,44 +76,79 @@ impl SegmentationModel {
     pub fn run(&mut self, audio: &[f32]) -> Result<Vec<Array2<f32>>, SegmentationError> {
         let windows = SegmentationWindows::collect(audio, self.window_spec());
         let total_windows = windows.total_windows();
-        let has_batched = self.has_batched();
+        let batching = self.batching();
         let mut results = Vec::with_capacity(total_windows);
         let mut next_idx = 0;
 
-        while next_idx < total_windows {
-            let remaining = total_windows - next_idx;
-            if remaining >= PRIMARY_BATCH_SIZE && has_batched {
-                let batch: Vec<&[f32]> = (next_idx..next_idx + PRIMARY_BATCH_SIZE)
-                    .map(|idx| windows.window(idx, "segmentation run batch window"))
-                    .collect::<Result<_, _>>()?;
-                results.extend(self.run_batch(&batch)?);
-                next_idx += PRIMARY_BATCH_SIZE;
-                continue;
-            }
-
-            let window = windows.window(next_idx, "segmentation run tail window")?;
-            results.push(self.run_window(window)?);
-            next_idx += 1;
+        while let Some(remaining) = NonZeroUsize::new(total_windows - next_idx) {
+            let plan = batching.plan(remaining, Delivery::Collected);
+            results.extend(self.run_planned(&windows, next_idx, plan, &[])?);
+            next_idx += plan.useful();
         }
 
         Ok(results)
     }
 
-    /// Whether the backend has a batch-32 model for full and padded tail batches
-    fn has_batched(&self) -> bool {
+    /// Batch geometry owned by the loaded backend
+    fn batching(&self) -> Batching {
+        #[cfg(any(feature = "migraphx", feature = "coreml", feature = "cuda"))]
+        let fixed = Batching::Fixed(
+            NonZeroUsize::new(PRIMARY_BATCH_SIZE).expect("nonzero fixed batch size"),
+        );
         match &self.backend {
-            #[cfg(feature = "_ort")]
-            SegmentationBackend::Ort(backend) => backend.has_batched(),
+            #[cfg(feature = "cpu")]
+            SegmentationBackend::Cpu(backend) => Batching::Useful(
+                NonZeroUsize::new(backend.capacity()).expect("native CPU capacity is nonzero"),
+            ),
+            #[cfg(feature = "migraphx")]
+            SegmentationBackend::Ort(backend) => {
+                if backend.has_batched() {
+                    fixed
+                } else {
+                    Batching::Single
+                }
+            }
             #[cfg(feature = "coreml")]
-            SegmentationBackend::CoreMl(_) => true,
+            SegmentationBackend::CoreMl(_) => fixed,
             #[cfg(feature = "cuda")]
-            SegmentationBackend::Cuda(_) => true,
+            SegmentationBackend::Cuda(_) => fixed,
         }
+    }
+
+    fn run_planned(
+        &mut self,
+        windows: &SegmentationWindows<'_>,
+        next: usize,
+        plan: BatchPlan,
+        zeros: &[f32],
+    ) -> Result<Vec<Array2<f32>>, SegmentationError> {
+        if plan.is_single() {
+            return self
+                .run_window(windows.window(next, "segmentation single window")?)
+                .map(|output| vec![output]);
+        }
+
+        let mut batch = (next..next + plan.useful())
+            .map(|idx| windows.window(idx, "segmentation batch window"))
+            .collect::<Result<Vec<_>, _>>()?;
+        batch.resize(plan.model(), zeros);
+        let mut outputs = self.run_batch(&batch)?;
+        if outputs.len() != plan.model() {
+            return Err(SegmentationError::MalformedOutput {
+                context: "segmentation batch output count",
+                message: format!("expected {} windows, got {}", plan.model(), outputs.len()),
+            });
+        }
+
+        outputs.truncate(plan.useful());
+        Ok(outputs)
     }
 
     fn run_window(&mut self, window: &[f32]) -> Result<Array2<f32>, SegmentationError> {
         match &mut self.backend {
-            #[cfg(feature = "_ort")]
+            #[cfg(feature = "cpu")]
+            SegmentationBackend::Cpu(backend) => backend.run_window(window),
+            #[cfg(feature = "migraphx")]
             SegmentationBackend::Ort(backend) => backend.run_window(window),
             #[cfg(feature = "coreml")]
             SegmentationBackend::CoreMl(backend) => backend.run_window(window),
@@ -143,7 +159,9 @@ impl SegmentationModel {
 
     fn run_batch(&mut self, windows: &[&[f32]]) -> Result<Vec<Array2<f32>>, SegmentationError> {
         match &mut self.backend {
-            #[cfg(feature = "_ort")]
+            #[cfg(feature = "cpu")]
+            SegmentationBackend::Cpu(backend) => backend.run_batch(windows),
+            #[cfg(feature = "migraphx")]
             SegmentationBackend::Ort(backend) => backend.run_batch(windows),
             #[cfg(feature = "coreml")]
             SegmentationBackend::CoreMl(backend) => backend.run_batch(windows),

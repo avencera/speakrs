@@ -14,11 +14,10 @@ const EMBEDDING_MIN_SAMPLES: &str = "wespeaker-voxceleb-resnet34.min_num_samples
 /// Resolved model paths for the speakrs pipeline
 ///
 /// Captures the three root paths needed by [`SegmentationModel`], [`EmbeddingModel`],
-/// and `PldaTransform`. Variant models (batched, CoreML, split, CUDA weights) are
-/// derived internally by each model constructor from the base ONNX path. CoreML and CUDA
-/// modes use only that path's directory and stem, so the ONNX files do not need to exist
-/// for them: CUDA modes load `segmentation-3.0.safetensors` and
-/// `wespeaker-multimask-tail.safetensors` from the same directory.
+/// and `PldaTransform`. Native CPU, CUDA and CoreML models use the base ONNX paths
+/// as family selectors; the ONNX files do not need to exist for those modes. CPU and
+/// CUDA load `segmentation-3.0.safetensors` and `wespeaker-multimask-tail.safetensors`
+/// from the same directory. MIGraphX loads the ONNX files
 ///
 /// [`SegmentationModel`]: crate::inference::segmentation::SegmentationModel
 /// [`EmbeddingModel`]: crate::inference::embedding::EmbeddingModel
@@ -55,12 +54,12 @@ impl ModelBundle {
         Self::from_dir(dir)
     }
 
-    /// Base ONNX path for the segmentation model, which CoreML modes use only as a stem
+    /// Segmentation family selector, or the ONNX model path for MIGraphX
     pub fn segmentation_path(&self) -> &Path {
         &self.segmentation_onnx
     }
 
-    /// Base ONNX path for the embedding model, which CoreML modes use only as a stem
+    /// Embedding family selector, or the ONNX model path for MIGraphX
     pub fn embedding_path(&self) -> &Path {
         &self.embedding_onnx
     }
@@ -189,17 +188,10 @@ const PLDA_FILES: &[&str] = &[
     EMBEDDING_MIN_SAMPLES,
 ];
 
-#[cfg(feature = "online")]
-const ONNX_FILES: &[&str] = &[
-    "segmentation-3.0.onnx",
-    "wespeaker-voxceleb-resnet34.onnx",
-    "wespeaker-voxceleb-resnet34.onnx.data",
-];
-
-/// The safetensors weights the native CUDA modes load, exported by
+/// The safetensors weights the native CPU and CUDA modes load, exported by
 /// `scripts/cuda/export_weights.py --runtime-assets`
 #[cfg(feature = "online")]
-const CUDA_WEIGHT_FILES: &[(&str, ModelFamily)] = &[
+const NATIVE_WEIGHT_FILES: &[(&str, ModelFamily)] = &[
     ("segmentation-3.0.safetensors", ModelFamily::Segmentation),
     (
         "wespeaker-multimask-tail.safetensors",
@@ -276,6 +268,8 @@ pub(crate) enum ModelFamily {
 #[cfg(feature = "online")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ModelBackend {
+    SharedData,
+    Cpu,
     Onnx,
     CoreMl,
     Cuda,
@@ -425,7 +419,7 @@ fn catalog_assets(mode: ExecutionMode) -> Vec<ModelAsset> {
             ModelAsset::new(
                 name,
                 family,
-                ModelBackend::Onnx,
+                ModelBackend::SharedData,
                 ModelPrecision::Fp32,
                 None,
                 AssetRequirement::Required,
@@ -434,25 +428,18 @@ fn catalog_assets(mode: ExecutionMode) -> Vec<ModelAsset> {
         .collect();
 
     match mode {
-        ExecutionMode::Cpu => {
-            assets.extend(ONNX_FILES.iter().copied().map(|name| {
-                onnx_asset(
-                    name,
-                    if name.starts_with("segmentation") {
-                        ModelFamily::Segmentation
-                    } else {
-                        ModelFamily::Embedding
-                    },
-                )
-            }));
-        }
-        // native weights only: CUDA modes never read the ONNX files
-        ExecutionMode::Cuda | ExecutionMode::CudaFast => {
-            assets.extend(CUDA_WEIGHT_FILES.iter().map(|&(name, family)| {
+        // native modes share the deployed FP32 weights and never read ONNX graphs
+        ExecutionMode::Cpu | ExecutionMode::Cuda | ExecutionMode::CudaFast => {
+            let backend = if matches!(mode, ExecutionMode::Cpu) {
+                ModelBackend::Cpu
+            } else {
+                ModelBackend::Cuda
+            };
+            assets.extend(NATIVE_WEIGHT_FILES.iter().map(|&(name, family)| {
                 ModelAsset::new(
                     name,
                     family,
-                    ModelBackend::Cuda,
+                    backend,
                     ModelPrecision::Fp32,
                     None,
                     AssetRequirement::Required,
@@ -667,38 +654,22 @@ mod tests {
     }
 
     #[test]
-    fn catalog_records_batch_32_coreml_tail() {
-        let tail = ModelAsset::new(
-            "wespeaker-voxceleb-resnet34-tail-b32.mlmodelc",
-            ModelFamily::EmbeddingTail,
-            ModelBackend::CoreMl,
-            ModelPrecision::Fp32,
-            Some(32),
-            AssetRequirement::Required,
-        );
+    fn catalog_selects_required_batch_32_coreml_tail() {
+        let tail = catalog_assets(ExecutionMode::CoreMl)
+            .into_iter()
+            .find(|asset| asset.family() == ModelFamily::EmbeddingTail && asset.batch() == Some(32))
+            .expect("required batch-32 CoreML tail");
+        assert_eq!(tail.backend(), ModelBackend::CoreMl);
+        assert_eq!(tail.precision(), ModelPrecision::Fp32);
+        assert_eq!(tail.requirement(), AssetRequirement::Required);
         assert_eq!(
             tail.file_name(),
             "wespeaker-voxceleb-resnet34-tail-b32.mlmodelc"
         );
-        assert_eq!(tail.family(), ModelFamily::EmbeddingTail);
-        assert_eq!(tail.backend(), ModelBackend::CoreMl);
-        assert_eq!(tail.precision(), ModelPrecision::Fp32);
-        assert_eq!(tail.batch(), Some(32));
         assert_eq!(
             tail.remote_paths()[0],
             "wespeaker-voxceleb-resnet34-tail-b32.mlmodelc/model.mil"
         );
-    }
-
-    #[test]
-    fn cpu_required_files_include_plda_metadata_and_onnx() {
-        let files = required_files(ExecutionMode::Cpu);
-        for name in PLDA_FILES.iter().chain(ONNX_FILES) {
-            assert!(
-                files.contains(&name.to_string()),
-                "cpu catalog missing {name}"
-            );
-        }
     }
 
     #[test]
@@ -713,20 +684,38 @@ mod tests {
     }
 
     #[test]
-    fn cuda_modes_download_only_native_weights_plda_and_metadata() {
-        for mode in [ExecutionMode::Cuda, ExecutionMode::CudaFast] {
-            let files = required_files(mode);
-            assert!(
-                files.iter().all(|path| !path.contains(".onnx")),
-                "{mode} downloads ONNX files: {files:?}"
-            );
-            for name in PLDA_FILES {
-                assert!(files.contains(&name.to_string()), "{mode} misses {name}");
-            }
-            for (name, _) in CUDA_WEIGHT_FILES {
-                assert!(files.contains(&name.to_string()), "{mode} misses {name}");
-            }
-            assert_eq!(files.len(), PLDA_FILES.len() + CUDA_WEIGHT_FILES.len());
+    fn native_modes_download_weights_plda_and_metadata_without_onnx() {
+        let mut expected: Vec<String> = PLDA_FILES
+            .iter()
+            .map(|name| name.to_string())
+            .chain([
+                "segmentation-3.0.safetensors".to_owned(),
+                "wespeaker-multimask-tail.safetensors".to_owned(),
+            ])
+            .collect();
+        expected.sort();
+
+        for mode in [
+            ExecutionMode::Cpu,
+            ExecutionMode::Cuda,
+            ExecutionMode::CudaFast,
+        ] {
+            let mut files = required_files(mode);
+            files.sort();
+            assert_eq!(files, expected, "unexpected assets for {mode}");
+
+            let backend = if matches!(mode, ExecutionMode::Cpu) {
+                ModelBackend::Cpu
+            } else {
+                ModelBackend::Cuda
+            };
+            let assets = catalog_assets(mode);
+            assert!(assets.iter().any(|asset| {
+                asset.family() == ModelFamily::Segmentation && asset.backend() == backend
+            }));
+            assert!(assets.iter().any(|asset| {
+                asset.family() == ModelFamily::MultiMaskTail && asset.backend() == backend
+            }));
         }
     }
 

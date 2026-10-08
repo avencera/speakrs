@@ -1,8 +1,14 @@
+#[cfg(feature = "cpu")]
+pub(crate) mod cpu;
+#[cfg(feature = "cpu")]
+pub use cpu::{CpuError, CpuModelFamily};
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda;
 pub(crate) mod embedding;
 mod error;
 pub(crate) mod geometry;
+#[cfg(any(feature = "cpu", feature = "cuda"))]
+pub(crate) mod native_model;
 #[cfg(feature = "_ort")]
 mod ort_runtime;
 pub(crate) mod segmentation;
@@ -12,9 +18,11 @@ use std::fmt;
 pub use embedding::EmbeddingModel;
 pub use error::{ExecutionModeError, InferenceError, ModelLoadError};
 pub use geometry::TensorShapeError;
+#[cfg(any(feature = "cpu", feature = "cuda"))]
+pub use native_model::NativeWeightsError;
 #[cfg(feature = "_ort")]
 pub use ort_runtime::{DynamicRuntimeError, OrtRuntimeError, with_execution_mode};
-#[cfg(feature = "_ort")]
+#[cfg(feature = "migraphx")]
 pub(crate) use ort_runtime::{OrtProvider, SharedSession, ensure_ort_ready};
 pub use segmentation::{SegmentationError, SegmentationModel};
 
@@ -56,7 +64,7 @@ impl CoreMlComputeUnits {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ExecutionMode {
-    /// CPU-only via ORT (portable, slowest)
+    /// Native CPU inference with Rust operators and safetensors weights
     #[cfg_attr(docsrs, doc(cfg(feature = "cpu")))]
     Cpu,
     /// Native CoreML with FP32 precision and ~1s step
@@ -101,7 +109,7 @@ impl ExecutionMode {
     pub(crate) fn backend(self) -> Result<InferenceBackend, ExecutionModeError> {
         match self {
             #[cfg(feature = "cpu")]
-            Self::Cpu => Ok(InferenceBackend::Ort(OrtProvider::Cpu)),
+            Self::Cpu => Ok(InferenceBackend::Cpu),
             #[cfg(not(feature = "cpu"))]
             Self::Cpu => Err(ExecutionModeError {
                 mode: self,
@@ -156,8 +164,11 @@ impl fmt::Display for ExecutionMode {
 /// `segmentation` and `embedding`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InferenceBackend {
+    /// Native CPU model owners and private scratch
+    #[cfg(feature = "cpu")]
+    Cpu,
     /// ONNX Runtime with one execution provider
-    #[cfg(feature = "_ort")]
+    #[cfg(feature = "migraphx")]
     Ort(OrtProvider),
     /// Native CoreML models
     #[cfg(feature = "coreml")]

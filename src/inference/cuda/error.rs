@@ -230,3 +230,27 @@ pub(super) fn element_count(context: &'static str, shape: &[usize]) -> Result<us
         })
     })
 }
+
+impl From<crate::inference::native_model::NativeWeightsError> for CudaError {
+    fn from(error: crate::inference::native_model::NativeWeightsError) -> Self {
+        use crate::inference::native_model::NativeWeightsError;
+
+        match error {
+            NativeWeightsError::WeightsIo { path, source } => Self::WeightsIo { path, source },
+            NativeWeightsError::WeightsFormat { path, source } => {
+                Self::WeightsFormat { path, source }
+            }
+            NativeWeightsError::MissingTensor { path, name } => Self::MissingTensor { path, name },
+            NativeWeightsError::TensorDtype { name, dtype } => Self::TensorDtype { name, dtype },
+            NativeWeightsError::TensorShape {
+                name,
+                expected,
+                actual,
+            } => Self::TensorShape {
+                name,
+                expected,
+                actual,
+            },
+        }
+    }
+}

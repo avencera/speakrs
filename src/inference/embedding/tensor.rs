@@ -1,9 +1,9 @@
 use ndarray::{Array1, Array2, Array3};
-#[cfg(feature = "_ort")]
+#[cfg(feature = "migraphx")]
 use ort::memory::Allocator;
-#[cfg(feature = "_ort")]
+#[cfg(feature = "migraphx")]
 use ort::session::{HasSelectedOutputs, OutputSelector, RunOptions};
-#[cfg(feature = "_ort")]
+#[cfg(feature = "migraphx")]
 use ort::value::Tensor;
 
 use super::{EMBEDDING_WIDTH, FBANK_FEATURES};
@@ -63,7 +63,7 @@ fn embedding_vector(
     Ok(Array1::from_vec(data.to_vec()))
 }
 
-#[cfg(feature = "_ort")]
+#[cfg(feature = "migraphx")]
 pub(super) fn embedding_vector_from_ort(
     shape: &ort::value::Shape,
     data: &[f32],
@@ -136,7 +136,7 @@ fn embedding_batch(
     )
 }
 
-#[cfg(feature = "_ort")]
+#[cfg(feature = "migraphx")]
 pub(super) fn embedding_batch_from_ort(
     shape: &ort::value::Shape,
     data: &[f32],
@@ -184,7 +184,7 @@ pub(super) fn fbank_hw_from_shape(
     fbank_hw_from_layout(&TensorLayout::from_dims(shape, context)?, context)
 }
 
-#[cfg(feature = "_ort")]
+#[cfg(feature = "migraphx")]
 pub(super) fn fbank_hw_from_i64(
     shape: &[i64],
     context: &'static str,
@@ -214,7 +214,7 @@ pub(super) fn push_fbank_batch_results(
     Ok(())
 }
 
-#[cfg(feature = "_ort")]
+#[cfg(feature = "migraphx")]
 pub(super) fn first_output<T>(
     outputs: impl IntoIterator<Item = T>,
     context: &'static str,
@@ -225,7 +225,7 @@ pub(super) fn first_output<T>(
         .ok_or(InferenceError::MissingOutput { context })
 }
 
-#[cfg(feature = "_ort")]
+#[cfg(feature = "migraphx")]
 pub(super) fn preallocated_run_options(
     rows: usize,
     cols: usize,
@@ -241,15 +241,15 @@ mod tests {
     use super::{
         EMBEDDING_WIDTH, FBANK_FEATURES, embedding_vector_from_coreml, fbank_hw_from_shape,
     };
-    #[cfg(feature = "_ort")]
+    #[cfg(feature = "migraphx")]
     use super::{
         embedding_batch_from_ort, embedding_vector_from_ort, fbank_hw_from_i64, first_output,
     };
     use crate::inference::geometry::CoreMlTensor;
-    #[cfg(feature = "_ort")]
+    #[cfg(feature = "migraphx")]
     use crate::inference::{InferenceError, TensorShapeError};
 
-    #[cfg(feature = "_ort")]
+    #[cfg(feature = "migraphx")]
     #[test]
     fn first_output_reports_missing_tensor() {
         let error = first_output(Vec::<()>::new(), "embedding test").unwrap_err();
@@ -257,7 +257,7 @@ mod tests {
         assert_eq!(error.to_string(), "embedding test: missing output tensor");
     }
 
-    #[cfg(feature = "_ort")]
+    #[cfg(feature = "migraphx")]
     #[test]
     fn embedding_vector_from_ort_rejects_wrong_rank_and_width_with_matching_element_count() {
         let rank = ort::value::Shape::from([EMBEDDING_WIDTH as i64]);
@@ -280,7 +280,7 @@ mod tests {
         assert!(width_error.to_string().contains("got [2, 128]"));
     }
 
-    #[cfg(feature = "_ort")]
+    #[cfg(feature = "migraphx")]
     #[test]
     fn embedding_vector_from_ort_rejects_short_and_excess_output() {
         let shape = ort::value::Shape::from([1_i64, EMBEDDING_WIDTH as i64]);
@@ -301,7 +301,7 @@ mod tests {
         assert!(excess.to_string().contains("expected 256 values, got 257"));
     }
 
-    #[cfg(feature = "_ort")]
+    #[cfg(feature = "migraphx")]
     #[test]
     fn embedding_vector_from_ort_accepts_the_model_output_shape() {
         let shape = ort::value::Shape::from([1_i64, EMBEDDING_WIDTH as i64]);
@@ -362,7 +362,7 @@ mod tests {
         assert!(short_error.to_string().contains("expected shape [1, 256]"));
     }
 
-    #[cfg(feature = "_ort")]
+    #[cfg(feature = "migraphx")]
     #[test]
     fn embedding_batch_rejects_short_and_excess_output() {
         let shape = ort::value::Shape::from([2_i64, EMBEDDING_WIDTH as i64]);
@@ -377,7 +377,7 @@ mod tests {
         assert!(excess.to_string().contains("expected 512 values, got 513"));
     }
 
-    #[cfg(feature = "_ort")]
+    #[cfg(feature = "migraphx")]
     #[test]
     fn embedding_batch_rejects_wrong_rank_and_width_with_matching_element_count() {
         let rank = ort::value::Shape::from([1_i64, 2, EMBEDDING_WIDTH as i64]);
@@ -394,7 +394,7 @@ mod tests {
         assert!(width_error.to_string().contains("got [4, 128]"));
     }
 
-    #[cfg(feature = "_ort")]
+    #[cfg(feature = "migraphx")]
     #[test]
     fn embedding_batch_selects_useful_rows_from_a_padded_model_output() {
         let shape = ort::value::Shape::from([4_i64, EMBEDDING_WIDTH as i64]);
@@ -411,7 +411,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "_ort")]
+    #[cfg(feature = "migraphx")]
     #[test]
     fn embedding_batch_rejects_useful_rows_above_capacity_and_overflow() {
         let shape = ort::value::Shape::from([2_i64, EMBEDDING_WIDTH as i64]);
@@ -443,7 +443,7 @@ mod tests {
         assert!(features.to_string().contains(&format!(
             "expected axis 2 to have length {FBANK_FEATURES}, got 40"
         )));
-        #[cfg(feature = "_ort")]
+        #[cfg(feature = "migraphx")]
         {
             let negative = fbank_hw_from_i64(&[1, -1, 80], "chunk fbank output").unwrap_err();
             assert!(negative.to_string().contains("non-negative"));

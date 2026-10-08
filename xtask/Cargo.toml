@@ -17,11 +17,12 @@ required-features = ["cuda"]
 
 [features]
 default = ["cpu"]
-# enables the ONNX Runtime CPU backend and the ORT-only profiling commands
-cpu = ["speakrs/cpu", "dep:ort"]
+# enables the native CPU backend and CPU profiling commands
+cpu = ["speakrs/cpu"]
 coreml = ["speakrs/coreml"]
 cuda = ["speakrs/cuda"]
-load-dynamic = ["speakrs/load-dynamic", "ort?/load-dynamic"]
+migraphx = ["speakrs/migraphx"]
+load-dynamic = ["speakrs/load-dynamic"]
 _metrics = ["speakrs/_metrics"]
 
 [dependencies]
@@ -32,7 +33,6 @@ hound = "3.5.1"
 libc = "0.2"
 mimalloc = "0.1.48"
 ndarray = "0.17.2"
-ort = { version = "2.0.0-rc.13", features = ["ndarray"], optional = true }
 roxmltree = "0.21"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"

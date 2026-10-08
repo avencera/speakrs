@@ -1,8 +1,8 @@
-# CUDA weights and CPU references
+# Native weights and CPU references
 
 ## Runtime assets
 
-The CUDA modes load two safetensors files instead of ONNX models. Export them, with the
+The CPU and CUDA modes load two safetensors files instead of ONNX models. Export them, with the
 PLDA and embedding metadata files they share with the other modes, into one directory:
 
 ```sh

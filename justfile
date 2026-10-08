@@ -26,6 +26,9 @@ lint: clippy python-lint
 test *args:
     cargo test --workspace {{args}}
 
+check-cpu-dependencies:
+    bash scripts/check_cpu_dependencies.sh
+
 test-gpuq-workload:
     tests/gpuq-workload.sh
 

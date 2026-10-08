@@ -11,13 +11,16 @@ use speakrs::pipeline::{
 
 mod support;
 
-use support::{build_pipeline_or_skip, fixture_path, load_wav_samples};
+#[path = "../src/test_support.rs"]
+mod model_fixtures;
 
-fn make_pipeline() -> Option<OwnedDiarizationPipeline> {
-    build_pipeline_or_skip(
-        PipelineBuilder::from_dir(fixture_path("models"), ExecutionMode::Cpu)
-            .and_then(PipelineBuilder::build),
-    )
+use model_fixtures::model_fixture_dir;
+use support::{fixture_path, load_wav_samples};
+
+fn make_pipeline() -> OwnedDiarizationPipeline {
+    PipelineBuilder::from_dir(model_fixture_dir(), ExecutionMode::Cpu)
+        .and_then(PipelineBuilder::build)
+        .unwrap()
 }
 
 fn single_speaker_config() -> PipelineConfig {
@@ -46,9 +49,7 @@ fn config_candidates() -> Vec<PipelineConfig> {
 #[test]
 fn queued_basic_round_trip() {
     let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
-    let Some((tx, mut rx)) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
-        return;
-    };
+    let (tx, mut rx) = make_pipeline().into_queued().unwrap();
 
     tx.try_push(QueuedDiarizationRequest::new("file_a", samples.clone()))
         .unwrap();
@@ -69,9 +70,7 @@ fn queued_basic_round_trip() {
 #[test]
 fn queued_shared_senders_across_threads() {
     let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
-    let Some((tx, mut rx)) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
-        return;
-    };
+    let (tx, mut rx) = make_pipeline().into_queued().unwrap();
 
     let handles: Vec<_> = ["thread_a", "thread_b", "thread_c"]
         .into_iter()
@@ -106,9 +105,7 @@ fn queued_shared_senders_across_threads() {
 #[test]
 fn queued_job_ids_are_monotonic_across_sender_clones() {
     let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
-    let Some((tx, mut rx)) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
-        return;
-    };
+    let (tx, mut rx) = make_pipeline().into_queued().unwrap();
     let tx_clone = tx.clone();
 
     let id0 = tx
@@ -137,9 +134,7 @@ fn queued_job_ids_are_monotonic_across_sender_clones() {
 #[test]
 fn queued_clean_shutdown() {
     let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
-    let Some((tx, mut rx)) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
-        return;
-    };
+    let (tx, mut rx) = make_pipeline().into_queued().unwrap();
 
     tx.try_push(QueuedDiarizationRequest::new("only", samples))
         .unwrap();
@@ -153,9 +148,7 @@ fn queued_clean_shutdown() {
 #[test]
 fn queued_drop_sender_unblocks_iteration() {
     let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
-    let Some((tx, rx)) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
-        return;
-    };
+    let (tx, rx) = make_pipeline().into_queued().unwrap();
 
     tx.try_push(QueuedDiarizationRequest::new("iter", samples))
         .unwrap();
@@ -169,9 +162,7 @@ fn queued_drop_sender_unblocks_iteration() {
 #[test]
 fn queued_handles_short_and_normal_audio() {
     let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
-    let Some((tx, rx)) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
-        return;
-    };
+    let (tx, rx) = make_pipeline().into_queued().unwrap();
 
     tx.try_push(QueuedDiarizationRequest::new("normal", samples))
         .unwrap();
@@ -192,9 +183,7 @@ fn queued_handles_short_and_normal_audio() {
 #[test]
 fn queued_isolates_per_file_failures() {
     let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
-    let Some((tx, rx)) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
-        return;
-    };
+    let (tx, rx) = make_pipeline().into_queued().unwrap();
 
     tx.try_push(QueuedDiarizationRequest::new("bad", Vec::new()))
         .unwrap();
@@ -216,9 +205,7 @@ fn queued_isolates_per_file_failures() {
 
 #[test]
 fn queued_rejects_zero_capacity() {
-    let Some(pipeline) = make_pipeline() else {
-        return;
-    };
+    let pipeline = make_pipeline();
 
     assert!(matches!(
         pipeline.into_queued_with_queue_config(QueueConfig { capacity: 0 }),
@@ -228,13 +215,9 @@ fn queued_rejects_zero_capacity() {
 
 #[test]
 fn queued_exposes_configured_capacity() {
-    let Some((tx, _rx)) = make_pipeline().map(|pipeline| {
-        pipeline
-            .into_queued_with_queue_config(QueueConfig::new(2).unwrap())
-            .unwrap()
-    }) else {
-        return;
-    };
+    let (tx, _rx) = make_pipeline()
+        .into_queued_with_queue_config(QueueConfig::new(2).unwrap())
+        .unwrap();
 
     assert_eq!(tx.capacity(), 2);
 }
@@ -243,14 +226,10 @@ fn queued_exposes_configured_capacity() {
 fn queued_results_match_sync() {
     let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
 
-    let Some(mut pipeline) = make_pipeline() else {
-        return;
-    };
+    let mut pipeline = make_pipeline();
     let sync_result = pipeline.run_with_file_id(&samples, "compare").unwrap();
 
-    let Some((tx, mut rx)) = make_pipeline().map(|pipeline| pipeline.into_queued().unwrap()) else {
-        return;
-    };
+    let (tx, mut rx) = make_pipeline().into_queued().unwrap();
     tx.try_push(QueuedDiarizationRequest::new("compare", samples))
         .unwrap();
     drop(tx);
@@ -265,9 +244,7 @@ fn queued_results_match_sync() {
 fn build_queued_preserves_custom_pipeline_config() {
     let (samples, _) = load_wav_samples(&fixture_path("test.wav"));
 
-    let Some(mut default_pipeline) = make_pipeline() else {
-        return;
-    };
+    let mut default_pipeline = make_pipeline();
     let default_result = default_pipeline
         .run_with_file_id(&samples, "compare")
         .unwrap();
@@ -275,23 +252,19 @@ fn build_queued_preserves_custom_pipeline_config() {
     let (custom_config, custom_result) = config_candidates()
         .into_iter()
         .find_map(|config| {
-            let mut pipeline = build_pipeline_or_skip(
-                PipelineBuilder::from_dir(fixture_path("models"), ExecutionMode::Cpu)
-                    .map(|builder| builder.pipeline(config.clone()))
-                    .and_then(PipelineBuilder::build),
-            )?;
+            let mut pipeline = PipelineBuilder::from_dir(model_fixture_dir(), ExecutionMode::Cpu)
+                .map(|builder| builder.pipeline(config.clone()))
+                .and_then(PipelineBuilder::build)
+                .unwrap();
             let result = pipeline.run_with_file_id(&samples, "compare").unwrap();
             (result.segments != default_result.segments).then_some((config, result))
         })
         .expect("expected at least one custom pipeline config to change fixture output");
 
-    let Some((tx, mut rx)) = build_pipeline_or_skip(
-        PipelineBuilder::from_dir(fixture_path("models"), ExecutionMode::Cpu)
-            .map(|builder| builder.pipeline(custom_config))
-            .and_then(PipelineBuilder::build_queued),
-    ) else {
-        return;
-    };
+    let (tx, mut rx) = PipelineBuilder::from_dir(model_fixture_dir(), ExecutionMode::Cpu)
+        .map(|builder| builder.pipeline(custom_config))
+        .and_then(PipelineBuilder::build_queued)
+        .unwrap();
     tx.try_push(QueuedDiarizationRequest::new("compare", samples))
         .unwrap();
     drop(tx);

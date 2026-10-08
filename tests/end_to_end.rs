@@ -8,7 +8,8 @@ use speakrs::OwnedDiarizationPipeline;
 use speakrs::inference::{EmbeddingModel, ExecutionMode, SegmentationModel};
 #[cfg(any(feature = "cpu", all(feature = "coreml", feature = "_metrics")))]
 use speakrs::pipeline::DiarizationPipeline;
-use speakrs::pipeline::{FRAME_STEP_SECONDS, SEGMENTATION_STEP_SECONDS};
+#[cfg(any(feature = "cpu", all(feature = "coreml", feature = "_metrics")))]
+use speakrs::pipeline::SEGMENTATION_STEP_SECONDS;
 
 #[cfg(all(feature = "coreml", feature = "_metrics"))]
 use speakrs::metrics::{compute_der, parse_rttm};
@@ -19,11 +20,15 @@ use std::time::{Duration, Instant};
 
 mod support;
 
-#[cfg(feature = "cpu")]
-use support::build_pipeline_or_skip;
+#[cfg(any(feature = "cpu", all(feature = "coreml", feature = "_metrics")))]
+#[path = "../src/test_support.rs"]
+mod model_fixtures;
+
+#[cfg(any(feature = "cpu", all(feature = "coreml", feature = "_metrics")))]
+use model_fixtures::model_fixture_dir;
 use support::fixture_path;
 #[cfg(any(feature = "cpu", all(feature = "coreml", feature = "_metrics")))]
-use support::{load_model_or_skip, load_wav_samples};
+use support::load_wav_samples;
 
 #[test]
 fn pipeline_fixture_shapes_are_available() {
@@ -45,27 +50,17 @@ fn pipeline_fixture_shapes_are_available() {
     assert_eq!(embeddings.shape()[2], 256);
 }
 
-#[test]
-fn segmentation_step_matches_pyannote_fixture() {
-    assert_eq!(SEGMENTATION_STEP_SECONDS, 1.0);
-    assert_eq!(FRAME_STEP_SECONDS, 0.016875);
-}
-
 #[cfg(feature = "cpu")]
 #[test]
 fn pipeline_runs_on_main_fixture_audio() {
-    let models_dir = fixture_path("models");
-    let Some(mut seg_model) = load_model_or_skip(SegmentationModel::new(
+    let models_dir = model_fixture_dir();
+    let mut seg_model = SegmentationModel::new(
         models_dir.join("segmentation-3.0.onnx"),
         SEGMENTATION_STEP_SECONDS as f32,
-    )) else {
-        return;
-    };
-    let Some(mut emb_model) = load_model_or_skip(EmbeddingModel::new(
-        models_dir.join("wespeaker-voxceleb-resnet34.onnx"),
-    )) else {
-        return;
-    };
+    )
+    .unwrap();
+    let mut emb_model =
+        EmbeddingModel::new(models_dir.join("wespeaker-voxceleb-resnet34.onnx")).unwrap();
     let (samples, sr) = load_wav_samples(&fixture_path("test.wav"));
     assert_eq!(sr, 16_000);
 
@@ -91,13 +86,8 @@ fn pipeline_runs_on_main_fixture_audio() {
 #[cfg(all(feature = "cpu", not(feature = "coreml")))]
 #[test]
 fn shared_pipeline_handles_match_when_run_concurrently() {
-    let models_dir = fixture_path("models");
-    let Some(mut baseline) = build_pipeline_or_skip(OwnedDiarizationPipeline::from_dir(
-        &models_dir,
-        ExecutionMode::Cpu,
-    )) else {
-        return;
-    };
+    let models_dir = model_fixture_dir();
+    let mut baseline = OwnedDiarizationPipeline::from_dir(&models_dir, ExecutionMode::Cpu).unwrap();
     let (first_audio, first_sample_rate) = load_wav_samples(&fixture_path("test.wav"));
     let (second_audio, second_sample_rate) = load_wav_samples(&fixture_path("test_short.wav"));
     assert_eq!(first_sample_rate, 16_000);
@@ -157,17 +147,14 @@ const VOXCONVERSE_TEST_FILES: &[&str] = &[
 ];
 
 #[cfg(all(feature = "coreml", feature = "_metrics"))]
-fn voxconverse_der(mode: ExecutionMode, step: f64) -> Option<(Vec<(String, f64)>, Duration)> {
-    let models_dir = fixture_path("models");
-    let mut seg_model = load_model_or_skip(SegmentationModel::with_mode(
-        models_dir.join("segmentation-3.0.onnx"),
-        step as f32,
-        mode,
-    ))?;
-    let mut emb_model = load_model_or_skip(EmbeddingModel::with_mode(
-        models_dir.join("wespeaker-voxceleb-resnet34.onnx"),
-        mode,
-    ))?;
+fn voxconverse_der(mode: ExecutionMode, step: f64) -> (Vec<(String, f64)>, Duration) {
+    let models_dir = model_fixture_dir();
+    let mut seg_model =
+        SegmentationModel::with_mode(models_dir.join("segmentation-3.0.onnx"), step as f32, mode)
+            .unwrap();
+    let mut emb_model =
+        EmbeddingModel::with_mode(models_dir.join("wespeaker-voxceleb-resnet34.onnx"), mode)
+            .unwrap();
     let start = Instant::now();
     let mut results = Vec::new();
     let mut pipeline =
@@ -199,17 +186,13 @@ fn voxconverse_der(mode: ExecutionMode, step: f64) -> Option<(Vec<(String, f64)>
         results.push((name.to_string(), der_result.der()));
     }
     let elapsed = start.elapsed();
-    Some((results, elapsed))
+    (results, elapsed)
 }
 
 #[test]
 #[cfg(all(feature = "coreml", feature = "_metrics"))]
 fn der_coreml_fp32() {
-    let Some((results, elapsed)) =
-        voxconverse_der(ExecutionMode::CoreMl, SEGMENTATION_STEP_SECONDS)
-    else {
-        return;
-    };
+    let (results, elapsed) = voxconverse_der(ExecutionMode::CoreMl, SEGMENTATION_STEP_SECONDS);
     let avg_der: f64 = results.iter().map(|(_, d)| d).sum::<f64>() / results.len() as f64;
     eprintln!(
         "CoreML FP32 avg DER: {:.1}%, total: {:.1}s",
@@ -234,11 +217,8 @@ fn der_coreml_fp32() {
 #[test]
 #[cfg(all(feature = "coreml", feature = "_metrics"))]
 fn der_coreml_fast() {
-    let Some((results, elapsed)) =
-        voxconverse_der(ExecutionMode::CoreMlFast, FAST_SEGMENTATION_STEP_SECONDS)
-    else {
-        return;
-    };
+    let (results, elapsed) =
+        voxconverse_der(ExecutionMode::CoreMlFast, FAST_SEGMENTATION_STEP_SECONDS);
     let avg_der: f64 = results.iter().map(|(_, d)| d).sum::<f64>() / results.len() as f64;
     eprintln!(
         "CoreML Fast (FP32+2s) avg DER: {:.1}%, total: {:.1}s",
@@ -263,18 +243,14 @@ fn der_coreml_fast() {
 #[cfg(feature = "cpu")]
 #[test]
 fn pipeline_handles_short_audio_fixture() {
-    let models_dir = fixture_path("models");
-    let Some(mut seg_model) = load_model_or_skip(SegmentationModel::new(
+    let models_dir = model_fixture_dir();
+    let mut seg_model = SegmentationModel::new(
         models_dir.join("segmentation-3.0.onnx"),
         SEGMENTATION_STEP_SECONDS as f32,
-    )) else {
-        return;
-    };
-    let Some(mut emb_model) = load_model_or_skip(EmbeddingModel::new(
-        models_dir.join("wespeaker-voxceleb-resnet34.onnx"),
-    )) else {
-        return;
-    };
+    )
+    .unwrap();
+    let mut emb_model =
+        EmbeddingModel::new(models_dir.join("wespeaker-voxceleb-resnet34.onnx")).unwrap();
     let (samples, sr) = load_wav_samples(&fixture_path("test_short.wav"));
     assert_eq!(sr, 16_000);
 
@@ -282,6 +258,9 @@ fn pipeline_handles_short_audio_fixture() {
         DiarizationPipeline::new(&mut seg_model, &mut emb_model, &models_dir).unwrap();
     let result = pipeline.run_with_file_id(&samples, "short").unwrap();
 
+    assert_eq!(result.segments.len(), 2);
+    assert!(result.discrete_diarization.nrows() > 0);
+    assert!(result.discrete_diarization.ncols() > 0);
     assert!(
         result
             .discrete_diarization
@@ -294,13 +273,8 @@ fn pipeline_handles_short_audio_fixture() {
 #[cfg(feature = "cpu")]
 #[test]
 fn owned_pipeline_from_dir() {
-    let models_dir = fixture_path("models");
-    let Some(mut pipeline) = build_pipeline_or_skip(OwnedDiarizationPipeline::from_dir(
-        &models_dir,
-        ExecutionMode::Cpu,
-    )) else {
-        return;
-    };
+    let models_dir = model_fixture_dir();
+    let mut pipeline = OwnedDiarizationPipeline::from_dir(&models_dir, ExecutionMode::Cpu).unwrap();
 
     let (samples, sr) = load_wav_samples(&fixture_path("test.wav"));
     assert_eq!(sr, 16_000);
@@ -323,11 +297,7 @@ fn owned_pipeline_from_dir() {
 #[test]
 #[ignore]
 fn online_pipeline_downloads_and_runs() {
-    let Some(mut pipeline) = build_pipeline_or_skip(OwnedDiarizationPipeline::from_pretrained(
-        ExecutionMode::Cpu,
-    )) else {
-        return;
-    };
+    let mut pipeline = OwnedDiarizationPipeline::from_pretrained(ExecutionMode::Cpu).unwrap();
 
     let (samples, sr) = load_wav_samples(&fixture_path("test.wav"));
     assert_eq!(sr, 16_000);

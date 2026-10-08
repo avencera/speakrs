@@ -88,4 +88,10 @@ jobs:
           }
 
           check_consumer cpu "{ path = \"$package_path\", features = [\"cpu\"] }"
+          cargo tree --manifest-path "$RUNNER_TEMP/speakrs-package-consumer-cpu/Cargo.toml" \
+            --edges normal,build --prefix none > cpu-dependencies.log
+          if awk '$1 == "ort" || $1 == "ort-sys" { found = 1 } END { exit !found }' cpu-dependencies.log; then
+            echo "the packaged CPU consumer includes ONNX Runtime" >&2
+            exit 1
+          fi
           check_consumer load-dynamic "{ path = \"$package_path\", features = [\"cpu\", \"load-dynamic\"] }"

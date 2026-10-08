@@ -314,7 +314,7 @@ mod tests {
 
     #[test]
     fn model_eigenpairs_are_ordered_and_b_orthonormal() {
-        let models_dir = fixture_path("models");
+        let models_dir = crate::test_support::model_fixture_dir();
         if !models_dir.join("plda_tr.npy").is_file() {
             eprintln!("skipping PLDA eigenpair test because model fixtures are missing");
             return;
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn projected_feature_signs_do_not_change_vbx() {
-        let models_dir = fixture_path("models");
+        let models_dir = crate::test_support::model_fixture_dir();
         if !models_dir.join("plda_tr.npy").is_file() {
             eprintln!("skipping PLDA sign test because model fixtures are missing");
             return;
@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn transform_from_models_has_expected_shapes() {
-        let models_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/models");
+        let models_dir = crate::test_support::model_fixture_dir();
         let plda = PldaTransform::from_dir(&models_dir).unwrap();
         let sample = Array2::<f32>::zeros((2, 256));
 
@@ -403,7 +403,7 @@ mod tests {
 
     #[test]
     fn batch_matches_single() {
-        let models_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/models");
+        let models_dir = crate::test_support::model_fixture_dir();
         let plda = PldaTransform::from_dir(&models_dir).unwrap();
         let sample = Array2::<f32>::ones((2, 256));
 
@@ -425,7 +425,7 @@ mod tests {
 
     #[test]
     fn transform_matches_python_fixture() {
-        let models_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/models");
+        let models_dir = crate::test_support::model_fixture_dir();
         let plda = PldaTransform::from_dir(&models_dir).unwrap();
         let train_embeddings: Array2<f32> =
             Array2::read_npy(File::open(fixture_path("pipeline_train_embeddings.npy")).unwrap())

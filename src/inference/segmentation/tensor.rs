@@ -5,7 +5,7 @@ use ndarray::{Array2, Array3};
 
 use super::SegmentationError;
 
-#[cfg(feature = "_ort")]
+#[cfg(feature = "migraphx")]
 pub(super) type OutputShape3 = (usize, usize, usize);
 
 /// Non-zero sliding-window length and step used by segmentation
@@ -214,7 +214,7 @@ pub(super) fn padded_window<'a>(
         })
 }
 
-#[cfg(feature = "_ort")]
+#[cfg(feature = "migraphx")]
 pub(super) fn first_output<T>(
     outputs: impl IntoIterator<Item = T>,
     context: &'static str,
@@ -228,7 +228,7 @@ pub(super) fn first_output<T>(
         })
 }
 
-#[cfg(feature = "_ort")]
+#[cfg(feature = "migraphx")]
 pub(super) fn output_shape3(
     shape: &ort::value::Shape,
     context: &'static str,
@@ -286,7 +286,7 @@ pub(super) fn worker_panic(worker: &'static str) -> SegmentationError {
 #[cfg(test)]
 mod tests {
     use super::{SegmentationWindows, WindowSpec, segmentation_window_count};
-    #[cfg(feature = "_ort")]
+    #[cfg(feature = "migraphx")]
     use super::{first_output, output_shape3};
 
     #[test]
@@ -319,37 +319,7 @@ mod tests {
         WindowSpec::new(window_samples, step_samples).expect("non-zero window spec")
     }
 
-    #[test]
-    fn window_count_keeps_the_padded_tail_at_control_lengths() {
-        let spec_16k = window_spec(WINDOW, 16_000);
-        let spec_16640 = window_spec(WINDOW, 16_640);
-        assert_eq!(segmentation_window_count(WINDOW, spec_16k), 1);
-        assert_eq!(segmentation_window_count(30 * 16_000, spec_16k), 22);
-        assert_eq!(segmentation_window_count(120 * 16_000, spec_16k), 112);
-        assert_eq!(segmentation_window_count(30 * 16_000, spec_16640), 21);
-    }
-
-    #[test]
-    fn window_count_matches_collected_full_and_padded_windows() {
-        let spec = window_spec(WINDOW, 16_640);
-        for audio_samples in [
-            WINDOW - 1,
-            WINDOW,
-            WINDOW + 1,
-            30 * 16_000,
-            120 * 16_000 + 731,
-        ] {
-            let audio = vec![0.0; audio_samples];
-            let windows = SegmentationWindows::collect(&audio, spec);
-
-            assert_eq!(
-                segmentation_window_count(audio_samples, spec),
-                windows.total_windows()
-            );
-        }
-    }
-
-    #[cfg(feature = "_ort")]
+    #[cfg(feature = "migraphx")]
     #[test]
     fn first_output_reports_missing_tensor() {
         let error = first_output(Vec::<()>::new(), "segmentation test").unwrap_err();
@@ -360,7 +330,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "_ort")]
+    #[cfg(feature = "migraphx")]
     #[test]
     fn output_shape3_reports_low_rank_tensor() {
         let shape = ort::value::Shape::from([10_i64, 3]);
@@ -394,16 +364,50 @@ mod tests {
     }
 
     #[test]
-    fn window_count_matches_collected_windows() {
-        let spec = window_spec(16, 8);
-        for audio_len in [0, 1, 8, 15, 16, 17, 23, 24, 31, 32, 40] {
-            let audio = vec![1.0_f32; audio_len];
-            let windows = SegmentationWindows::collect(&audio, spec);
-            assert_eq!(
-                segmentation_window_count(audio_len, spec),
-                windows.total_windows(),
-                "window count drifted from collect at audio_len={audio_len}"
-            );
+    fn window_counts_match_expected_boundary_results() {
+        let small = [
+            (0, 0),
+            (1, 1),
+            (8, 1),
+            (15, 1),
+            (16, 1),
+            (17, 2),
+            (23, 2),
+            (24, 3),
+            (31, 3),
+            (32, 4),
+            (40, 5),
+        ];
+        let standard = [(WINDOW, 1), (30 * 16_000, 22), (120 * 16_000, 112)];
+        let accelerated = [
+            (WINDOW - 1, 1),
+            (WINDOW, 1),
+            (WINDOW + 1, 2),
+            (30 * 16_000, 21),
+            (120 * 16_000 + 731, 107),
+        ];
+
+        for (spec, cases) in [
+            (window_spec(16, 8), small.as_slice()),
+            (window_spec(WINDOW, 16_000), standard.as_slice()),
+            (window_spec(WINDOW, 16_640), accelerated.as_slice()),
+        ] {
+            for &(samples, expected) in cases {
+                let audio = vec![1.0_f32; samples];
+                let windows = SegmentationWindows::collect(&audio, spec);
+                assert_eq!(
+                    segmentation_window_count(samples, spec),
+                    expected,
+                    "count at samples={samples}, step={}",
+                    spec.step_samples()
+                );
+                assert_eq!(
+                    windows.total_windows(),
+                    expected,
+                    "collected windows at samples={samples}, step={}",
+                    spec.step_samples()
+                );
+            }
         }
     }
 

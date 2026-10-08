@@ -1,11 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use speakrs::PipelineError;
-use speakrs::inference::ModelLoadError;
-#[cfg(feature = "load-dynamic")]
-use speakrs::inference::{DynamicRuntimeError, OrtRuntimeError};
-
 pub fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures")
@@ -36,34 +31,4 @@ pub fn load_wav_samples(path: &Path) -> (Vec<f32>, u32) {
     }
 
     panic!("no data chunk found in WAV");
-}
-
-#[allow(dead_code)]
-pub fn load_model_or_skip<T>(result: Result<T, ModelLoadError>) -> Option<T> {
-    match result {
-        Ok(value) => Some(value),
-        #[cfg(feature = "load-dynamic")]
-        Err(ModelLoadError::Runtime(OrtRuntimeError::Dynamic(DynamicRuntimeError::Missing {
-            ..
-        }))) => {
-            eprintln!("skipping model-loading test because ORT_DYLIB_PATH is not configured");
-            None
-        }
-        Err(error) => panic!("failed to load model: {error}"),
-    }
-}
-
-#[allow(dead_code)]
-pub fn build_pipeline_or_skip<T>(result: Result<T, PipelineError>) -> Option<T> {
-    match result {
-        Ok(value) => Some(value),
-        #[cfg(feature = "load-dynamic")]
-        Err(PipelineError::ModelLoad(ModelLoadError::Runtime(OrtRuntimeError::Dynamic(
-            DynamicRuntimeError::Missing { .. },
-        )))) => {
-            eprintln!("skipping pipeline test because ORT_DYLIB_PATH is not configured");
-            None
-        }
-        Err(error) => panic!("failed to build pipeline: {error}"),
-    }
 }

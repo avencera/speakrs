@@ -1,5 +1,7 @@
+#[cfg(feature = "cpu")]
+mod cpu;
 use std::path::Path;
-#[cfg(any(feature = "_ort", feature = "coreml"))]
+#[cfg(any(feature = "migraphx", feature = "coreml"))]
 use std::path::PathBuf;
 
 use ndarray::Array2;
@@ -13,18 +15,20 @@ use crate::pipeline::RuntimeConfig;
 mod cuda;
 #[cfg(feature = "coreml")]
 mod native;
-#[cfg(feature = "_ort")]
+#[cfg(feature = "migraphx")]
 mod onnx;
 #[cfg(feature = "coreml")]
 mod parallel;
 mod run;
 mod tensor;
 
+#[cfg(feature = "cpu")]
+use cpu::CpuSegmentationBackend;
 #[cfg(feature = "cuda")]
 use cuda::CudaSegmentationBackend;
 #[cfg(feature = "coreml")]
 use native::CoreMlSegmentation;
-#[cfg(feature = "_ort")]
+#[cfg(feature = "migraphx")]
 use onnx::OrtSegmentation;
 pub(crate) use tensor::{InvalidWindowGeometry, WindowSpec, segmentation_window_count};
 
@@ -77,6 +81,7 @@ impl From<CoreMlError> for SegmentationError {
 }
 
 // seg models exported with EnumeratedShapes for batch 1-32 and b64
+#[cfg(any(feature = "migraphx", feature = "coreml", feature = "cuda"))]
 const PRIMARY_BATCH_SIZE: usize = 32;
 #[cfg(feature = "coreml")]
 const LARGE_BATCH_SIZE: usize = 64;
@@ -91,17 +96,19 @@ pub struct SegmentationModel {
 
 /// Sessions for the one runtime chosen from the execution mode at load time
 enum SegmentationBackend {
-    #[cfg(feature = "_ort")]
+    #[cfg(feature = "cpu")]
+    Cpu(Box<CpuSegmentationBackend>),
+    #[cfg(feature = "migraphx")]
     Ort(OrtSegmentation),
     #[cfg(feature = "coreml")]
-    CoreMl(CoreMlSegmentation),
+    CoreMl(Box<CoreMlSegmentation>),
     // boxed because the CUDA backend carries its session and staging inline
     #[cfg(feature = "cuda")]
     Cuda(Box<CudaSegmentationBackend>),
 }
 
 impl SegmentationModel {
-    /// Load a segmentation-3.0 ONNX model on the CPU
+    /// Load native segmentation-3.0 weights for CPU inference
     ///
     /// Requires the `cpu` feature
     pub fn new(model_path: impl AsRef<Path>, step_duration: f32) -> Result<Self, ModelLoadError> {
@@ -111,8 +118,9 @@ impl SegmentationModel {
     /// Load a segmentation-3.0 model with the requested execution mode
     ///
     /// `model_path` names the base `segmentation-3.0.onnx` file. CoreML modes load the
-    /// compiled bundles next to it, and CUDA modes load `segmentation-3.0.safetensors`
-    /// next to it; neither reads the ONNX file
+    /// compiled bundles next to it. CPU and CUDA modes load
+    /// `segmentation-3.0.safetensors`; they do not read the ONNX file. CPU also accepts
+    /// that native filename directly and rejects other model families
     pub fn with_mode(
         model_path: impl AsRef<Path>,
         step_duration: f32,
@@ -143,18 +151,20 @@ impl SegmentationModel {
         let window_samples = window_spec.window_samples();
 
         let backend = match backend {
-            #[cfg(feature = "_ort")]
+            #[cfg(feature = "cpu")]
+            InferenceBackend::Cpu => SegmentationBackend::Cpu(Box::new(
+                CpuSegmentationBackend::load(model_path, window_samples)?,
+            )),
+            #[cfg(feature = "migraphx")]
             InferenceBackend::Ort(provider) => SegmentationBackend::Ort(OrtSegmentation::load(
                 model_path,
                 provider,
                 window_samples,
             )?),
             #[cfg(feature = "coreml")]
-            InferenceBackend::CoreMl => SegmentationBackend::CoreMl(CoreMlSegmentation::load(
-                model_path,
-                mode,
-                window_samples,
-            )?),
+            InferenceBackend::CoreMl => SegmentationBackend::CoreMl(Box::new(
+                CoreMlSegmentation::load(model_path, mode, window_samples)?,
+            )),
             #[cfg(feature = "cuda")]
             InferenceBackend::Cuda => SegmentationBackend::Cuda(Box::new(
                 CudaSegmentationBackend::load(model_path, mode, window_samples, config)?,
@@ -208,10 +218,15 @@ impl SegmentationModel {
     /// ORT session weights and arenas are shared, and each inference call locks only the
     /// session that it uses. A CUDA handle gets its own stream and device copy of the
     /// weights, because CUDA state is used by one thread at a time
-    #[cfg(all(any(feature = "_ort", feature = "cuda"), not(feature = "coreml")))]
+    #[cfg(all(
+        any(feature = "cpu", feature = "migraphx", feature = "cuda"),
+        not(feature = "coreml")
+    ))]
     pub(crate) fn clone_shared(&self) -> Result<Self, InferenceError> {
         let backend = match &self.backend {
-            #[cfg(feature = "_ort")]
+            #[cfg(feature = "cpu")]
+            SegmentationBackend::Cpu(backend) => SegmentationBackend::Cpu(backend.clone()),
+            #[cfg(feature = "migraphx")]
             SegmentationBackend::Ort(backend) => {
                 SegmentationBackend::Ort(backend.clone_shared(self.window_samples()))
             }
@@ -233,7 +248,9 @@ impl SegmentationModel {
     fn coreml_backend(&self) -> Option<&CoreMlSegmentation> {
         match &self.backend {
             SegmentationBackend::CoreMl(backend) => Some(backend),
-            #[cfg(feature = "_ort")]
+            #[cfg(feature = "cpu")]
+            SegmentationBackend::Cpu(_) => None,
+            #[cfg(feature = "migraphx")]
             SegmentationBackend::Ort(_) => None,
             #[cfg(feature = "cuda")]
             SegmentationBackend::Cuda(_) => None,
@@ -241,7 +258,7 @@ impl SegmentationModel {
     }
 }
 
-#[cfg(any(feature = "_ort", feature = "coreml"))]
+#[cfg(any(feature = "migraphx", feature = "coreml"))]
 fn batched_model_path(model_path: &Path, batch_size: usize) -> Option<PathBuf> {
     let path = model_path;
     let file_name = path.file_name()?.to_str()?;

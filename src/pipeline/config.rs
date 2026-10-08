@@ -651,7 +651,7 @@ pub enum OrtThreadCountError {
     TooLarge(usize),
 }
 
-/// CPU filterbank session pool policy
+/// ONNX Runtime CPU filterbank session pool policy for MIGraphX
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum FbankSessionPool {
     /// Size the pool from host parallelism and the per-session thread count
@@ -694,7 +694,7 @@ impl FbankSessionPool {
         }
     }
 
-    #[cfg(feature = "_ort")]
+    #[cfg(feature = "migraphx")]
     pub(crate) fn resolve(self, threads: OrtThreadCount) -> usize {
         match self {
             Self::Automatic => {
@@ -728,9 +728,13 @@ pub enum FbankSessionPoolSizeError {
 // the CUDA modes need per-stage defaults that differ from their field types' defaults
 #[cfg_attr(not(feature = "cuda"), derive(Default))]
 pub struct RuntimeConfig {
-    /// CPU filterbank session pool policy for the ONNX Runtime modes' split inference
+    /// ONNX Runtime CPU filterbank pool for MIGraphX split inference
+    ///
+    /// Native CPU inference ignores this setting
     pub fbank_pool: FbankSessionPool,
-    /// Intra-operation threads used by each CPU filterbank session (ONNX Runtime modes only)
+    /// Intra-operation threads for each MIGraphX ONNX Runtime CPU filterbank session
+    ///
+    /// Native CPU inference ignores this setting
     pub fbank_threads: OrtThreadCount,
     /// CoreML compute units for native embedding models (CoreML modes only)
     ///
@@ -795,13 +799,13 @@ impl Default for RuntimeConfig {
 }
 
 impl RuntimeConfig {
-    /// Select the CPU filterbank session pool policy
+    /// Select the ONNX Runtime CPU filterbank session pool for MIGraphX
     pub const fn with_fbank_pool(mut self, pool: FbankSessionPool) -> Self {
         self.fbank_pool = pool;
         self
     }
 
-    /// Select the intra-operation thread count for each CPU filterbank session
+    /// Select the thread count for each MIGraphX ONNX Runtime CPU filterbank session
     pub const fn with_fbank_threads(mut self, threads: OrtThreadCount) -> Self {
         self.fbank_threads = threads;
         self
@@ -977,7 +981,7 @@ mod clean_frame_duration_tests {
         );
     }
 
-    #[cfg(feature = "_ort")]
+    #[cfg(feature = "migraphx")]
     #[test]
     fn fbank_pool_models_disabled_automatic_and_fixed_policies() {
         let threads = OrtThreadCount::new(i32::MAX as usize).unwrap();
