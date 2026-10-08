@@ -1,9 +1,20 @@
+# the coreml feature builds only on macOS, where clippy checks it next to the cpu backend
+backend_features := if os() == "macos" { "coreml cpu" } else { "cpu" }
+
 fmt:
     cargo fmt --all
     uv run --group dev ruff format scripts fixtures
 
 clippy:
-    cargo clippy --all --all-targets --workspace --features "coreml cuda load-dynamic _metrics" -- -D warnings
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo clippy --all --all-targets --workspace --features "{{backend_features}} cuda load-dynamic _metrics" -- -D warnings
+    # the CUDA-only build has no ONNX Runtime either
+    cargo clippy -p speakrs --all-targets --no-default-features --features "online cuda" -- -D warnings
+    if [[ "$(uname)" == "Darwin" ]]; then
+        # the CoreML-only build has no ONNX Runtime, so check it for dead code separately
+        cargo clippy -p speakrs --all-targets --no-default-features --features "online coreml" -- -D warnings
+    fi
 
 python-lint:
     uv run --group dev ty check --python .venv --exclude 'scripts/pyannote_rs_bench/target' --exclude 'scripts/extract_hf_dataset.py' --exclude 'scripts/speakerkit-bench/Packages' --exclude 'scripts/native_coreml' --exclude 'scripts/pyannote-bench' --exclude 'scripts/convert_fp16.py' scripts fixtures

@@ -14,8 +14,11 @@ const EMBEDDING_MIN_SAMPLES: &str = "wespeaker-voxceleb-resnet34.min_num_samples
 /// Resolved model paths for the speakrs pipeline
 ///
 /// Captures the three root paths needed by [`SegmentationModel`], [`EmbeddingModel`],
-/// and `PldaTransform`. Variant models (batched, CoreML, split) are derived
-/// internally by each model constructor from the base ONNX path.
+/// and `PldaTransform`. Variant models (batched, CoreML, split, CUDA weights) are
+/// derived internally by each model constructor from the base ONNX path. CoreML and CUDA
+/// modes use only that path's directory and stem, so the ONNX files do not need to exist
+/// for them: CUDA modes load `segmentation-3.0.safetensors` and
+/// `wespeaker-multimask-tail.safetensors` from the same directory.
 ///
 /// [`SegmentationModel`]: crate::inference::segmentation::SegmentationModel
 /// [`EmbeddingModel`]: crate::inference::embedding::EmbeddingModel
@@ -46,16 +49,18 @@ impl ModelBundle {
     #[cfg_attr(docsrs, doc(cfg(feature = "online")))]
     pub fn from_pretrained(mode: ExecutionMode) -> Result<Self, crate::inference::ModelLoadError> {
         let manager = ModelManager::new()?;
-        let dir = manager.ensure(mode)?;
+        let dir = manager
+            .ensure(mode)
+            .map_err(|source| download_error(mode, source))?;
         Self::from_dir(dir)
     }
 
-    /// Base ONNX path for the segmentation model
+    /// Base ONNX path for the segmentation model, which CoreML modes use only as a stem
     pub fn segmentation_path(&self) -> &Path {
         &self.segmentation_onnx
     }
 
-    /// Base ONNX path for the embedding model
+    /// Base ONNX path for the embedding model, which CoreML modes use only as a stem
     pub fn embedding_path(&self) -> &Path {
         &self.embedding_onnx
     }
@@ -66,11 +71,26 @@ impl ModelBundle {
     }
 }
 
+/// Names the CUDA weights in the error when they cannot be downloaded
+#[cfg(feature = "online")]
+fn download_error(
+    mode: ExecutionMode,
+    source: hf_hub::api::sync::ApiError,
+) -> crate::inference::ModelLoadError {
+    #[cfg(feature = "cuda")]
+    if mode.is_cuda() {
+        return crate::inference::ModelLoadError::CudaAssetsUnavailable { mode, source };
+    }
+
+    let _ = mode;
+    source.into()
+}
+
 #[cfg(feature = "online")]
 const HF_REPO: &str = "avencera/speakrs-models";
 #[cfg(feature = "online")]
 // CI downloads fixtures from this same revision via SPEAKRS_MODEL_FIXTURE_REV
-const HF_REVISION: &str = "a785ebdbe6313868088c36c93d9efa71c470bd34";
+const HF_REVISION: &str = "67f963b6a1d94fcd4678948237b3cc8bd69bf1d8";
 
 #[cfg(feature = "online")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -112,7 +132,7 @@ impl PinnedModelRepository {
 #[cfg(feature = "online")]
 const PINNED_MODEL_REPOSITORY: PinnedModelRepository = PinnedModelRepository::speakrs_models();
 
-/// Manages downloading and caching speakrs ONNX models from HuggingFace
+/// Manages downloading and caching speakrs models from HuggingFace
 #[cfg(feature = "online")]
 #[cfg_attr(docsrs, doc(cfg(feature = "online")))]
 pub struct ModelManager {
@@ -174,6 +194,17 @@ const ONNX_FILES: &[&str] = &[
     "segmentation-3.0.onnx",
     "wespeaker-voxceleb-resnet34.onnx",
     "wespeaker-voxceleb-resnet34.onnx.data",
+];
+
+/// The safetensors weights the native CUDA modes load, exported by
+/// `scripts/cuda/export_weights.py --runtime-assets`
+#[cfg(feature = "online")]
+const CUDA_WEIGHT_FILES: &[(&str, ModelFamily)] = &[
+    ("segmentation-3.0.safetensors", ModelFamily::Segmentation),
+    (
+        "wespeaker-multimask-tail.safetensors",
+        ModelFamily::MultiMaskTail,
+    ),
 ];
 
 #[cfg(feature = "online")]
@@ -247,6 +278,7 @@ pub(crate) enum ModelFamily {
 pub(crate) enum ModelBackend {
     Onnx,
     CoreMl,
+    Cuda,
 }
 
 /// Weight precision recorded for a catalog asset
@@ -414,7 +446,20 @@ fn catalog_assets(mode: ExecutionMode) -> Vec<ModelAsset> {
                 )
             }));
         }
-        ExecutionMode::Cuda | ExecutionMode::CudaFast | ExecutionMode::MiGraphX => {
+        // native weights only: CUDA modes never read the ONNX files
+        ExecutionMode::Cuda | ExecutionMode::CudaFast => {
+            assets.extend(CUDA_WEIGHT_FILES.iter().map(|&(name, family)| {
+                ModelAsset::new(
+                    name,
+                    family,
+                    ModelBackend::Cuda,
+                    ModelPrecision::Fp32,
+                    None,
+                    AssetRequirement::Required,
+                )
+            }));
+        }
+        ExecutionMode::MiGraphX => {
             assets.push(onnx_asset(
                 "segmentation-3.0.onnx",
                 ModelFamily::Segmentation,
@@ -449,40 +494,8 @@ fn catalog_assets(mode: ExecutionMode) -> Vec<ModelAsset> {
                 ModelFamily::Embedding,
             ));
         }
+        // compiled bundles only: CoreML modes never read the ONNX files
         ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => {
-            assets.push(onnx_asset(
-                "segmentation-3.0.onnx",
-                ModelFamily::Segmentation,
-            ));
-            assets.push(onnx_asset(
-                "wespeaker-voxceleb-resnet34.onnx",
-                ModelFamily::Embedding,
-            ));
-            assets.push(onnx_asset(
-                "wespeaker-voxceleb-resnet34.onnx.data",
-                ModelFamily::Embedding,
-            ));
-            assets.push(onnx_asset(
-                "segmentation-3.0-b32.onnx",
-                ModelFamily::Segmentation,
-            ));
-            assets.push(onnx_asset("wespeaker-fbank.onnx", ModelFamily::Filterbank));
-            assets.push(onnx_asset(
-                "wespeaker-fbank-b32.onnx",
-                ModelFamily::Filterbank,
-            ));
-            assets.push(onnx_asset(
-                "wespeaker-voxceleb-resnet34-tail.onnx",
-                ModelFamily::EmbeddingTail,
-            ));
-            assets.push(onnx_asset(
-                "wespeaker-voxceleb-resnet34-tail-b3.onnx",
-                ModelFamily::EmbeddingTail,
-            ));
-            assets.push(onnx_asset(
-                "wespeaker-voxceleb-resnet34-tail-b32.onnx",
-                ModelFamily::EmbeddingTail,
-            ));
             assets.extend(COREML_COMMON_MODEL_STEMS.iter().map(|&name| {
                 ModelAsset::new(
                     name,
@@ -597,7 +610,7 @@ mod tests {
     use super::*;
 
     const MODEL_FILENAME: &str = "segmentation-3.0.onnx";
-    const EXPECTED_MODEL_URL: &str = "https://huggingface.co/avencera/speakrs-models/resolve/a785ebdbe6313868088c36c93d9efa71c470bd34/segmentation-3.0.onnx";
+    const EXPECTED_MODEL_URL: &str = "https://huggingface.co/avencera/speakrs-models/resolve/67f963b6a1d94fcd4678948237b3cc8bd69bf1d8/segmentation-3.0.onnx";
 
     #[test]
     fn pinned_repository_selects_model_card_revision() {
@@ -630,6 +643,19 @@ mod tests {
         assert!(files.contains(&"wespeaker-fbank-30s.mlmodelc/model.mil".to_string()));
         assert!(files.contains(&"wespeaker-multimask-tail-b32.mlmodelc/model.mil".to_string()));
         assert!(files.contains(&"wespeaker-chunk-emb-p1s-w111.mlmodelc/model.mil".to_string()));
+    }
+
+    #[test]
+    fn coreml_modes_download_no_onnx_files() {
+        for mode in [ExecutionMode::CoreMl, ExecutionMode::CoreMlFast] {
+            let files = required_files(mode);
+            assert!(
+                files.iter().all(|path| !path.contains(".onnx")),
+                "{mode} downloads ONNX files: {files:?}"
+            );
+            assert!(files.contains(&EMBEDDING_MIN_SAMPLES.to_string()));
+            assert!(files.contains(&"wespeaker-fbank.mlmodelc/model.mil".to_string()));
+        }
     }
 
     #[test]
@@ -684,6 +710,24 @@ mod tests {
         assert_eq!(optional.requirement(), AssetRequirement::Optional);
         let files = required_files(ExecutionMode::CoreMl);
         assert!(!files.iter().any(|path| path.contains("tail-b64")));
+    }
+
+    #[test]
+    fn cuda_modes_download_only_native_weights_plda_and_metadata() {
+        for mode in [ExecutionMode::Cuda, ExecutionMode::CudaFast] {
+            let files = required_files(mode);
+            assert!(
+                files.iter().all(|path| !path.contains(".onnx")),
+                "{mode} downloads ONNX files: {files:?}"
+            );
+            for name in PLDA_FILES {
+                assert!(files.contains(&name.to_string()), "{mode} misses {name}");
+            }
+            for (name, _) in CUDA_WEIGHT_FILES {
+                assert!(files.contains(&name.to_string()), "{mode} misses {name}");
+            }
+            assert_eq!(files.len(), PLDA_FILES.len() + CUDA_WEIGHT_FILES.len());
+        }
     }
 
     #[test]

@@ -7,6 +7,13 @@ use crate::python::{uv_run, uv_run_project};
 
 pub fn export() -> Result<()> {
     uv_run(&["scripts/export_models.py", "fixtures/models"])?;
+    // the CUDA modes' safetensors weights come from the ONNX models just exported
+    uv_run(&[
+        "--no-project",
+        "scripts/cuda/export_weights.py",
+        "--runtime-assets",
+        "fixtures/models",
+    ])?;
 
     if cfg!(target_os = "macos") {
         export_coreml()?;
@@ -55,6 +62,8 @@ pub fn deploy() -> Result<()> {
         "wespeaker-multimask-tail.onnx",
         "wespeaker-multimask-tail-b32.onnx",
         "wespeaker-multimask-tail*.mlmodelc/**",
+        "segmentation-3.0.safetensors",
+        "wespeaker-multimask-tail.safetensors",
     ];
 
     let mut cmd = Command::new("hf");

@@ -6,10 +6,13 @@
 //! pipeline in Rust: segmentation, powerset decode, overlap-add aggregation,
 //! binarization, embedding, PLDA, and VBx clustering.
 //!
-//! There is no Python runtime in the library path. Inference runs on ONNX
-//! Runtime or native CoreML, and the rest of the pipeline stays in Rust.
+//! There is no Python runtime in the library path. Inference runs on native CUDA
+//! (NVIDIA), native CoreML (macOS), or ONNX Runtime (CPU, AMD), and the rest of the
+//! pipeline stays in Rust.
 //!
 //! # Usage
+//!
+//! No inference backend is enabled by default. Pick the one for your platform:
 //!
 //! ```toml
 //! # macOS (CoreML)
@@ -18,15 +21,15 @@
 //! # NVIDIA GPU
 //! speakrs = { version = "0.6", features = ["cuda"] }
 //!
-//! # CPU only
-//! speakrs = "0.6"
-//!
-//! # System OpenBLAS
-//! speakrs = { version = "0.6", default-features = false, features = ["online", "openblas-system"] }
+//! # CPU
+//! speakrs = { version = "0.6", features = ["cpu"] }
 //!
 //! # AMD GPU
 //! speakrs = { version = "0.6", features = ["migraphx"] }
 //! ```
+//!
+//! The `coreml` and `cuda` features run native backends, so a build with only those
+//! features does not compile, link, or download ONNX Runtime.
 //!
 //! ## Quick start
 //!
@@ -124,9 +127,13 @@
 //! | `cpu` | ONNX Runtime CPU | 1s | CPU runs and widest compatibility |
 //! | `coreml` | Native CoreML | 1s | macOS with CoreML acceleration |
 //! | `coreml-fast` | Native CoreML | 2s | macOS with CoreML acceleration and higher throughput |
-//! | `cuda` | ONNX Runtime CUDA | 1s | NVIDIA GPU |
-//! | `cuda-fast` | ONNX Runtime CUDA | 2s | NVIDIA GPU for higher throughput |
+//! | `cuda` | Native CUDA | 1s | NVIDIA GPU |
+//! | `cuda-fast` | Native CUDA | 2s | NVIDIA GPU for higher throughput |
 //! | `migraphx` | ONNX Runtime MIGraphX | 1s | AMD GPU |
+//!
+//! Each mode needs its Cargo feature: `cpu`, `coreml` for both CoreML modes, `cuda` for both
+//! CUDA modes, or `migraphx`. Requesting a mode whose feature is off returns
+//! `ModelLoadError::UnsupportedExecutionMode`.
 //!
 //! The `*-fast` modes move the segmentation window every 2 seconds instead of
 //! every 1 second. That gives the pipeline fewer windows to score, so it can be much faster, but speaker changes
@@ -156,8 +163,9 @@
 //! [benchmarks/](https://github.com/avencera/speakrs/tree/master/benchmarks) for
 //! the full tables across all datasets.
 //!
-//! CoreML and ONNX Runtime can differ slightly even in FP32 because the runtime
-//! graphs are not identical and floating-point reduction order changes rounding.
+//! The RTX 4090 rows were measured with the ONNX Runtime CUDA backend that the native
+//! CUDA backend replaced. CoreML, CUDA and ONNX Runtime can differ slightly even in FP32,
+//! because floating-point reduction order changes rounding.
 //!
 //! # Why not pyannote-rs?
 //!
@@ -221,26 +229,34 @@
 //!
 //! # Features and build notes
 //!
-//! Common features:
+//! Enable at least one inference backend; the build fails with a clear error otherwise:
+//!
+//! - `coreml`: native CoreML backend on macOS, without ONNX Runtime
+//! - `cpu`: CPU backend via ONNX Runtime
+//! - `cuda`: native NVIDIA backend (cuBLAS, cuDNN and speakrs kernels), without ONNX
+//!   Runtime
+//! - `migraphx`: AMD GPU backend via ONNX Runtime MIGraphX
+//!
+//! Other features:
 //!
 //! - `online` (default): model download via [`ModelManager`]
-//! - `coreml`: native CoreML backend on macOS
-//! - `cuda`: NVIDIA CUDA backend via ONNX Runtime
-//! - `migraphx`: AMD GPU backend via ONNX Runtime MIGraphX
-//! - `load-dynamic`: load the ONNX Runtime library at startup instead of static linking
+//! - `load-dynamic`: load the ONNX Runtime library at startup instead of static linking; use it
+//!   with `cpu` or `migraphx`
+//! - `cuda-sm80`, `cuda-sm90`, `cuda-sm120`: also embed native CUDA kernels built for newer
+//!   NVIDIA GPUs (Ampere, Hopper, consumer Blackwell); each implies `cuda`. Without them the
+//!   native kernels target Turing (`sm_75`), and the driver compiles them for newer GPUs when
+//!   they load. At run time speakrs uses the highest compiled-in tier the GPU supports, and
+//!   `SPEAKRS_CUDA_PTX_TIER=sm75` forces a lower one
 //!
-//! BLAS backends matter if you disable default features:
+//! The `cuda` feature compiles without a CUDA toolkit: it loads the NVIDIA driver, cuBLAS,
+//! cuDNN 9 and (only for the `PersistDynamic` LSTM algorithm) NVRTC at run time, and needs
+//! a Turing (compute capability 7.5) or newer GPU. CUDA modes load
+//! `segmentation-3.0.safetensors` and `wespeaker-multimask-tail.safetensors` instead of
+//! ONNX models. [`RuntimeConfig`] selects their precision (FP32 by default for segmentation,
+//! TF32 for embedding, always FP32 for the filterbank), the segmentation LSTM algorithm, and CUDA graphs.
 //!
-//! - `x86_64` defaults to statically linked Intel MKL
-//! - non-`x86_64` defaults to statically linked OpenBLAS and needs a C toolchain
-//! - no-default builds must enable exactly one of `intel-mkl`, `openblas-static`, or `openblas-system`
-//!
-//! ```toml
-//! speakrs = { version = "0.6", default-features = false, features = ["online", "intel-mkl"] }
-//! speakrs = { version = "0.6", default-features = false, features = ["online", "openblas-system"] }
-//! ```
-//!
-//! The ONNX Runtime dependency (`ort` 2.0.0-rc.13) is still pre-release.
+//! The ONNX Runtime dependency behind `cpu` and `migraphx` (`ort` 2.0.0-rc.13) is still
+//! pre-release.
 //!
 //! # Public API
 //!
@@ -257,30 +273,66 @@
 #[cfg(all(feature = "coreml", not(target_os = "macos")))]
 compile_error!("the `coreml` feature is only supported on macOS");
 
+#[cfg(not(feature = "_backend"))]
+compile_error!(
+    "speakrs needs an inference backend; enable at least one of these Cargo features:\n\
+     - macOS (Apple Silicon): `coreml`\n\
+     - NVIDIA GPU: `cuda` (native, no ONNX Runtime)\n\
+     - AMD GPU: `migraphx`\n\
+     - CPU (ONNX Runtime): `cpu`\n\
+     for example: speakrs = { version = \"0.6\", features = [\"coreml\"] }"
+);
+
+#[cfg(all(
+    feature = "load-dynamic",
+    not(any(feature = "cpu", feature = "migraphx"))
+))]
+compile_error!(
+    "the `load-dynamic` feature loads ONNX Runtime at run time and only applies to the `cpu` and \
+     `migraphx` backends; the `cuda` and `coreml` backends do not use ONNX Runtime"
+);
+
+// a build without a backend reports only the `compile_error!` above: every crate item is gated
+// on `_backend`, which each backend feature enables, so no follow-on type errors appear
+#[cfg(feature = "_backend")]
 pub(crate) mod binarize;
+#[cfg(feature = "_backend")]
 pub(crate) mod clustering;
 /// Segmentation and embedding model wrappers
+#[cfg(feature = "_backend")]
 pub mod inference;
+#[cfg(feature = "_backend")]
 pub(crate) mod linalg;
 /// Diarization error rate (DER) evaluation utilities
 #[cfg(feature = "_metrics")]
+#[cfg(feature = "_backend")]
 pub mod metrics;
 /// Model paths and HuggingFace download support
+#[cfg(feature = "_backend")]
 pub mod models;
 /// High-level diarization pipeline and result types
+#[cfg(feature = "_backend")]
 pub mod pipeline;
+#[cfg(feature = "_backend")]
 pub(crate) mod powerset;
+#[cfg(feature = "_backend")]
 pub(crate) mod reconstruct;
 /// Speaker segments, merging, and RTTM output
+#[cfg(feature = "_backend")]
 pub mod segment;
+#[cfg(feature = "_backend")]
 pub(crate) mod utils;
 
 // crate-root re-exports for the main import path
+#[cfg(feature = "_backend")]
 pub use inference::{CoreMlComputeUnits, ExecutionMode};
+#[cfg(feature = "_backend")]
 pub use models::ModelBundle;
 #[cfg(feature = "online")]
 #[cfg_attr(docsrs, doc(cfg(feature = "online")))]
+#[cfg(feature = "_backend")]
 pub use models::ModelManager;
+#[cfg(feature = "_backend")]
 pub use pipeline::{
     ActivityCleanup, AhcConfig, AhcConfigError, BatchInput, ClusteringBackend, ClusteringConfig,
     ClusteringConfigError, DiarizationPipeline, DiarizationResult, FbankSessionPool,
@@ -290,8 +342,10 @@ pub use pipeline::{
     QueuedDiarizationRequest, QueuedDiarizationResult, ReconstructError,
     ResponsibilityInitialization, RuntimeConfig, VbxConfig, VbxConfigError,
 };
+#[cfg(feature = "_backend")]
 pub use segment::Segment;
 
 #[cfg(feature = "_metrics")]
 #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
+#[cfg(feature = "_backend")]
 pub use powerset::{PowersetDecodeError, PowersetMapping};

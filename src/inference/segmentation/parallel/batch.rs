@@ -174,10 +174,7 @@ impl<'ctx, 'a> BatchWorker<'ctx, 'a> {
     ) -> Result<(Vec<f32>, usize, usize, usize), SegmentationError> {
         let actual_batch = task.end - task.start;
         let batch_start = std::time::Instant::now();
-        let tensor = task
-            .model
-            .predict_cached(&[(cached_batch, batch_buf)])
-            .map_err(|error| SegmentationError::Ort(ort::Error::new(error.to_string())))?;
+        let tensor = task.model.predict_cached(&[(cached_batch, batch_buf)])?;
         let batch_us = batch_start.elapsed().as_micros() as u64;
         self.profile
             .record_batch(task.batch_idx, task.batch_capacity, actual_batch, batch_us);

@@ -15,3 +15,7 @@ fixtures/dataset-instructions.md
 scripts/speakerkit-bench/Package.resolved
 
 bindings
+
+.wrangler/
+/tests/cuda_qualify/baselines/lstm-source-*.json
+/tests/cuda_qualify/control.tar.gz

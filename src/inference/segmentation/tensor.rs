@@ -5,6 +5,7 @@ use ndarray::{Array2, Array3};
 
 use super::SegmentationError;
 
+#[cfg(feature = "_ort")]
 pub(super) type OutputShape3 = (usize, usize, usize);
 
 /// Non-zero sliding-window length and step used by segmentation
@@ -213,6 +214,7 @@ pub(super) fn padded_window<'a>(
         })
 }
 
+#[cfg(feature = "_ort")]
 pub(super) fn first_output<T>(
     outputs: impl IntoIterator<Item = T>,
     context: &'static str,
@@ -226,6 +228,7 @@ pub(super) fn first_output<T>(
         })
 }
 
+#[cfg(feature = "_ort")]
 pub(super) fn output_shape3(
     shape: &ort::value::Shape,
     context: &'static str,
@@ -282,9 +285,9 @@ pub(super) fn worker_panic(worker: &'static str) -> SegmentationError {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        SegmentationWindows, WindowSpec, first_output, output_shape3, segmentation_window_count,
-    };
+    use super::{SegmentationWindows, WindowSpec, segmentation_window_count};
+    #[cfg(feature = "_ort")]
+    use super::{first_output, output_shape3};
 
     #[test]
     fn from_seconds_rejects_non_positive_and_non_finite_steps() {
@@ -346,6 +349,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "_ort")]
     #[test]
     fn first_output_reports_missing_tensor() {
         let error = first_output(Vec::<()>::new(), "segmentation test").unwrap_err();
@@ -356,6 +360,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "_ort")]
     #[test]
     fn output_shape3_reports_low_rank_tensor() {
         let shape = ort::value::Shape::from([10_i64, 3]);

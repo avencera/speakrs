@@ -9,6 +9,9 @@ pub struct PowersetMapping {
 
 /// Invalid powerset logits at the decode boundary
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+// the variant names are public API when `_metrics` re-exports this type, and clippy only
+// exempts exported enums from this lint
+#[cfg_attr(not(feature = "_metrics"), allow(clippy::enum_variant_names))]
 pub enum PowersetDecodeError {
     /// Logits had no class columns
     #[error("powerset logits have zero class columns")]

@@ -1,44 +1,33 @@
+#[cfg(feature = "cuda")]
+pub(crate) mod cuda;
 pub(crate) mod embedding;
+mod error;
 pub(crate) mod geometry;
+#[cfg(feature = "_ort")]
+mod ort_runtime;
 pub(crate) mod segmentation;
 
-#[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
-use std::ffi::CStr;
 use std::fmt;
-#[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
-use std::path::Path;
-use std::path::PathBuf;
-#[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
-use std::sync::OnceLock;
 
 pub use embedding::EmbeddingModel;
+pub use error::{ExecutionModeError, InferenceError, ModelLoadError};
+pub use geometry::TensorShapeError;
+#[cfg(feature = "_ort")]
+pub use ort_runtime::{DynamicRuntimeError, OrtRuntimeError, with_execution_mode};
+#[cfg(feature = "_ort")]
+pub(crate) use ort_runtime::{OrtProvider, SharedSession, ensure_ort_ready};
 pub use segmentation::{SegmentationError, SegmentationModel};
 
 #[cfg(feature = "coreml")]
 pub(crate) mod coreml;
-
-use ort::ep;
-use ort::session::Session;
-use ort::session::builder::SessionBuilder;
-
-/// Shared ownership of one ONNX Runtime session
-#[derive(Clone)]
-pub(crate) struct SharedSession(std::sync::Arc<std::sync::Mutex<Session>>);
-
-impl SharedSession {
-    pub(crate) fn new(session: Session) -> Self {
-        Self(std::sync::Arc::new(std::sync::Mutex::new(session)))
-    }
-
-    pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, Session>, ort::Error> {
-        self.0
-            .lock()
-            .map_err(|_| ort::Error::new("shared ONNX Runtime session lock was poisoned"))
-    }
-}
-
-#[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
-static ORT_RUNTIME_INIT: OnceLock<Result<(), OrtRuntimeError>> = OnceLock::new();
+#[cfg(feature = "coreml")]
+#[cfg_attr(docsrs, doc(cfg(feature = "coreml")))]
+pub use coreml::CoreMlError;
+#[cfg(feature = "cuda")]
+#[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
+pub use cuda::{
+    ComputeCapability, CudaError, CudaGraphs, CudaLibrary, CudaLstmAlgorithm, CudaMath, PtxTier,
+};
 
 /// CoreML compute unit selection for native embedding
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -68,6 +57,7 @@ impl CoreMlComputeUnits {
 #[non_exhaustive]
 pub enum ExecutionMode {
     /// CPU-only via ORT (portable, slowest)
+    #[cfg_attr(docsrs, doc(cfg(feature = "cpu")))]
     Cpu,
     /// Native CoreML with FP32 precision and ~1s step
     #[cfg_attr(docsrs, doc(cfg(feature = "coreml")))]
@@ -75,10 +65,11 @@ pub enum ExecutionMode {
     /// Native CoreML with W8A16 segmentation and ~2s step
     #[cfg_attr(docsrs, doc(cfg(feature = "coreml")))]
     CoreMlFast,
-    /// NVIDIA GPU with concurrent fused seg+emb via crossbeam
+    /// Native NVIDIA GPU backend (cuBLAS, cuDNN and custom kernels, no ONNX Runtime)
+    /// with concurrent segmentation and embedding and ~1s step
     #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
     Cuda,
-    /// NVIDIA GPU with concurrent fused seg+emb and ~2s step
+    /// Native NVIDIA GPU backend with concurrent segmentation and embedding and ~2s step
     #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
     CudaFast,
     /// AMD GPU via ONNX Runtime's MIGraphX execution provider
@@ -92,7 +83,7 @@ impl ExecutionMode {
         matches!(self, Self::CoreMl | Self::CoreMlFast)
     }
 
-    /// Returns true when this mode uses CUDA execution
+    /// Returns true when this mode uses the native CUDA backend
     pub const fn is_cuda(self) -> bool {
         matches!(self, Self::Cuda | Self::CudaFast)
     }
@@ -103,53 +94,40 @@ impl ExecutionMode {
     }
 
     pub(crate) fn validate(self) -> Result<(), ExecutionModeError> {
-        if self == Self::Cpu {
-            return Ok(());
-        }
+        self.backend().map(|_| ())
+    }
 
-        if self.is_coreml() {
+    /// Resolve the inference backend that owns this mode in the current build
+    pub(crate) fn backend(self) -> Result<InferenceBackend, ExecutionModeError> {
+        match self {
+            #[cfg(feature = "cpu")]
+            Self::Cpu => Ok(InferenceBackend::Ort(OrtProvider::Cpu)),
+            #[cfg(not(feature = "cpu"))]
+            Self::Cpu => Err(ExecutionModeError {
+                mode: self,
+                feature: "cpu",
+            }),
             #[cfg(feature = "coreml")]
-            {
-                return Ok(());
-            }
-
+            Self::CoreMl | Self::CoreMlFast => Ok(InferenceBackend::CoreMl),
             #[cfg(not(feature = "coreml"))]
-            {
-                return Err(ExecutionModeError {
-                    mode: self,
-                    feature: "coreml",
-                });
-            }
-        }
-
-        if self.is_migraphx() {
-            #[cfg(feature = "migraphx")]
-            {
-                return Ok(());
-            }
-
-            #[cfg(not(feature = "migraphx"))]
-            {
-                return Err(ExecutionModeError {
-                    mode: self,
-                    feature: "migraphx",
-                });
-            }
-        }
-
-        debug_assert!(self.is_cuda(), "unsupported execution mode: {self:?}");
-
-        #[cfg(feature = "cuda")]
-        {
-            Ok(())
-        }
-
-        #[cfg(not(feature = "cuda"))]
-        {
-            Err(ExecutionModeError {
+            Self::CoreMl | Self::CoreMlFast => Err(ExecutionModeError {
+                mode: self,
+                feature: "coreml",
+            }),
+            #[cfg(feature = "cuda")]
+            Self::Cuda | Self::CudaFast => Ok(InferenceBackend::Cuda),
+            #[cfg(not(feature = "cuda"))]
+            Self::Cuda | Self::CudaFast => Err(ExecutionModeError {
                 mode: self,
                 feature: "cuda",
-            })
+            }),
+            #[cfg(feature = "migraphx")]
+            Self::MiGraphX => Ok(InferenceBackend::Ort(OrtProvider::MiGraphX)),
+            #[cfg(not(feature = "migraphx"))]
+            Self::MiGraphX => Err(ExecutionModeError {
+                mode: self,
+                feature: "migraphx",
+            }),
         }
     }
 
@@ -172,353 +150,39 @@ impl fmt::Display for ExecutionMode {
     }
 }
 
-/// Errors that can occur while loading a model or initializing ONNX Runtime
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum ModelLoadError {
-    /// Hugging Face Hub could not resolve a required model asset
-    #[cfg(feature = "online")]
-    #[error(transparent)]
-    HfHub(#[from] hf_hub::api::sync::ApiError),
-    /// Requested execution mode is not supported by this build
-    #[error(transparent)]
-    UnsupportedExecutionMode(#[from] ExecutionModeError),
-    /// ONNX Runtime could not be prepared for this process
-    #[error(transparent)]
-    Runtime(#[from] OrtRuntimeError),
-    /// ONNX Runtime returned an error after initialization completed
-    #[error(transparent)]
-    Ort(#[from] ort::Error),
-    /// A required native model asset is missing for the selected execution mode
-    #[error("{mode} requires native asset `{path}`")]
-    MissingNativeAsset {
-        /// The execution mode that requires the asset
-        mode: ExecutionMode,
-        /// The missing compiled CoreML bundle path
-        path: PathBuf,
-    },
-    /// A required native model asset exists but failed to load
-    #[error("{mode} failed to load native asset `{path}`: {message}")]
-    NativeAssetLoad {
-        /// The execution mode that requires the asset
-        mode: ExecutionMode,
-        /// The compiled CoreML bundle path that failed to load
-        path: PathBuf,
-        /// The backend load error
-        message: String,
-    },
-    /// A typed model or execution configuration is invalid
-    #[error("invalid model configuration: {message}")]
-    InvalidConfiguration {
-        /// Boundary validation error
-        message: String,
-    },
-}
-
-/// Errors that can occur while preparing the process-wide ONNX Runtime environment
-#[derive(Debug, Clone, thiserror::Error)]
-#[non_exhaustive]
-pub enum OrtRuntimeError {
-    /// Dynamic runtime discovery or validation failed before `ort` could initialize
-    #[error(transparent)]
-    Dynamic(#[from] DynamicRuntimeError),
-    /// `ort::init_from` failed after runtime validation succeeded
-    #[error("failed to initialize ONNX Runtime: {message}")]
-    Initialization {
-        /// The initialization error returned by `ort`
-        message: String,
-    },
-}
-
-/// Errors from locating or validating the dynamic ONNX Runtime library
-#[derive(Debug, Clone, thiserror::Error)]
-#[non_exhaustive]
-pub enum DynamicRuntimeError {
-    /// No candidate runtime library was found
-    #[error(
-        "missing ONNX Runtime dynamic library `{library_name}`; set `ORT_DYLIB_PATH` or place it next to the test/binary\nsearched: {searched}"
-    )]
-    Missing {
-        /// The platform-specific dynamic library filename
-        library_name: &'static str,
-        /// The candidate paths checked before giving up
-        searched: String,
-    },
-    /// Loading the requested runtime library failed
-    #[error("failed to load ONNX Runtime dynamic library at `{path}`: {message}")]
-    Load {
-        /// The path that failed to load
-        path: PathBuf,
-        /// The dynamic loader error
-        message: String,
-    },
-    /// The requested runtime library does not export `OrtGetApiBase`
-    #[error("ONNX Runtime dynamic library at `{path}` does not export `OrtGetApiBase`")]
-    MissingApiBase {
-        /// The path that was missing the required symbol
-        path: PathBuf,
-    },
-    /// The requested runtime library returned a null API base pointer
-    #[error("ONNX Runtime dynamic library at `{path}` returned a null `OrtApiBase`")]
-    NullApiBase {
-        /// The path that returned a null API pointer
-        path: PathBuf,
-    },
-    /// The requested runtime library is older than the `ort` crate expects
-    #[error(
-        "ONNX Runtime dynamic library at `{path}` is too old; expected >= 1.{required_minor}.x, got `{found_version}`"
-    )]
-    IncompatibleVersion {
-        /// The incompatible runtime library path
-        path: PathBuf,
-        /// The minimum ONNX Runtime minor version required by `ort`
-        required_minor: u32,
-        /// The version reported by the discovered runtime library
-        found_version: String,
-    },
-}
-
-/// Errors from requesting an execution mode that is not supported in the current build
-#[derive(Debug, Clone, thiserror::Error)]
-#[non_exhaustive]
-#[error("{mode} requires the `{feature}` Cargo feature")]
-pub struct ExecutionModeError {
-    mode: ExecutionMode,
-    feature: &'static str,
-}
-
-impl From<ExecutionModeError> for ort::Error {
-    fn from(error: ExecutionModeError) -> Self {
-        ort::Error::new(error.to_string())
-    }
-}
-
-/// Map an execution mode to ORT execution providers
+/// Inference runtime that owns a model's sessions for one execution mode
 ///
-/// CoreML modes use ORT CPU for any sessions that still go through ORT such as FBANK,
-/// While segmentation and embedding tail sessions use native CoreML directly
-pub fn with_execution_mode(
-    builder: SessionBuilder,
-    mode: ExecutionMode,
-) -> Result<SessionBuilder, ort::Error> {
-    mode.validate()?;
-
-    match mode {
-        ExecutionMode::Cpu | ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => Ok(builder
-            .with_execution_providers([ep::CPU::default().with_arena_allocator(false).build()])?),
-        ExecutionMode::Cuda | ExecutionMode::CudaFast => {
-            #[cfg(feature = "cuda")]
-            {
-                Ok(builder.with_execution_providers([ep::CUDA::default()
-                    .with_device_id(0)
-                    .with_tf32(true)
-                    .with_conv_algorithm_search(ep::cuda::ConvAlgorithmSearch::Exhaustive)
-                    .with_conv_max_workspace(true)
-                    .with_arena_extend_strategy(ep::ArenaExtendStrategy::SameAsRequested)
-                    .with_prefer_nhwc(true)
-                    .build()
-                    .error_on_failure()])?)
-            }
-
-            #[cfg(not(feature = "cuda"))]
-            {
-                unreachable!("mode validation rejects CUDA modes without the `cuda` feature")
-            }
-        }
-        ExecutionMode::MiGraphX => {
-            #[cfg(feature = "migraphx")]
-            {
-                Ok(builder.with_execution_providers([ep::MIGraphX::default()
-                    .with_device_id(0)
-                    .with_arena_extend_strategy(ep::ArenaExtendStrategy::SameAsRequested)
-                    .build()
-                    .error_on_failure()])?)
-            }
-
-            #[cfg(not(feature = "migraphx"))]
-            {
-                unreachable!("mode validation rejects MIGraphX mode without the `migraphx` feature")
-            }
-        }
-    }
-}
-
-pub(crate) fn ensure_ort_ready() -> Result<(), ModelLoadError> {
-    #[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
-    {
-        let init_result = ORT_RUNTIME_INIT.get_or_init(|| OrtRuntimeLoader::new().initialize());
-        init_result.clone()?;
-    }
-
-    Ok(())
-}
-
-#[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
-struct OrtRuntimeLoader {
-    library_name: &'static str,
-}
-
-#[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
-impl OrtRuntimeLoader {
-    fn new() -> Self {
-        Self {
-            library_name: Self::default_library_name(),
-        }
-    }
-
-    fn initialize(&self) -> Result<(), OrtRuntimeError> {
-        let path = self.resolve_library_path()?;
-        self.validate_library(&path)?;
-
-        ort::init_from(&path)
-            .map(|builder| {
-                builder.commit();
-            })
-            .map_err(|error| OrtRuntimeError::Initialization {
-                message: error.to_string(),
-            })
-    }
-
-    fn resolve_library_path(&self) -> Result<PathBuf, DynamicRuntimeError> {
-        if let Ok(path) = std::env::var("ORT_DYLIB_PATH")
-            && !path.is_empty()
-        {
-            let path = PathBuf::from(path);
-            return path.exists().then_some(path.clone()).ok_or_else(|| {
-                DynamicRuntimeError::Missing {
-                    library_name: self.library_name,
-                    searched: path.display().to_string(),
-                }
-            });
-        }
-
-        let candidates = self.candidate_paths();
-        candidates
-            .iter()
-            .find(|path| path.exists())
-            .cloned()
-            .ok_or_else(|| DynamicRuntimeError::Missing {
-                library_name: self.library_name,
-                searched: Self::format_paths(&candidates),
-            })
-    }
-
-    fn candidate_paths(&self) -> Vec<PathBuf> {
-        let mut candidates = Vec::new();
-
-        if let Ok(exe) = std::env::current_exe()
-            && let Some(exe_dir) = exe.parent()
-        {
-            candidates.push(exe_dir.join(self.library_name));
-            if let Some(parent) = exe_dir.parent() {
-                candidates.push(parent.join(self.library_name));
-            }
-        }
-
-        if let Ok(cwd) = std::env::current_dir() {
-            candidates.push(cwd.join(self.library_name));
-            candidates.push(cwd.join("target/debug").join(self.library_name));
-            candidates.push(cwd.join("target/debug/deps").join(self.library_name));
-            candidates.push(cwd.join("target/release").join(self.library_name));
-            candidates.push(cwd.join("target/release/deps").join(self.library_name));
-        }
-
-        dedup_paths(candidates)
-    }
-
-    fn validate_library(&self, path: &Path) -> Result<(), DynamicRuntimeError> {
-        // safety: we only open the candidate runtime long enough to validate its exported API
-        let library = unsafe { libloading::Library::new(path) }.map_err(|error| {
-            DynamicRuntimeError::Load {
-                path: path.to_path_buf(),
-                message: error.to_string(),
-            }
-        })?;
-
-        // safety: the library handle stays alive while the retrieved symbol is used below
-        let get_api_base: libloading::Symbol<
-            unsafe extern "C" fn() -> *const ort::sys::OrtApiBase,
-        > = unsafe { library.get(b"OrtGetApiBase") }.map_err(|_| {
-            DynamicRuntimeError::MissingApiBase {
-                path: path.to_path_buf(),
-            }
-        })?;
-
-        // safety: `OrtGetApiBase` has the stable ONNX Runtime entrypoint signature
-        let api_base = unsafe { get_api_base() };
-        if api_base.is_null() {
-            return Err(DynamicRuntimeError::NullApiBase {
-                path: path.to_path_buf(),
-            });
-        }
-
-        // safety: the validated runtime exposes a process-stable version string pointer
-        let version_ptr = unsafe { ((*api_base).GetVersionString)() };
-        // safety: ONNX Runtime documents the version string as a null-terminated C string
-        let version = unsafe { CStr::from_ptr(version_ptr) }
-            .to_string_lossy()
-            .into_owned();
-        let minor = version
-            .split('.')
-            .nth(1)
-            .and_then(|value| value.parse::<u32>().ok())
-            .unwrap_or(0);
-        if minor < ort::MINOR_VERSION {
-            return Err(DynamicRuntimeError::IncompatibleVersion {
-                path: path.to_path_buf(),
-                required_minor: ort::MINOR_VERSION,
-                found_version: version,
-            });
-        }
-
-        Ok(())
-    }
-
-    const fn default_library_name() -> &'static str {
-        #[cfg(target_os = "windows")]
-        {
-            "onnxruntime.dll"
-        }
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        {
-            "libonnxruntime.so"
-        }
-        #[cfg(any(target_os = "macos", target_os = "ios"))]
-        {
-            "libonnxruntime.dylib"
-        }
-    }
-
-    fn format_paths(paths: &[PathBuf]) -> String {
-        paths
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    }
-}
-
-#[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
-fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
-    let mut unique = Vec::with_capacity(paths.len());
-    for path in paths {
-        if !unique.contains(&path) {
-            unique.push(path);
-        }
-    }
-    unique
+/// Another accelerator backend adds a variant here and a matching model backend in
+/// `segmentation` and `embedding`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InferenceBackend {
+    /// ONNX Runtime with one execution provider
+    #[cfg(feature = "_ort")]
+    Ort(OrtProvider),
+    /// Native CoreML models
+    #[cfg(feature = "coreml")]
+    CoreMl,
+    /// Native CUDA models (cudarc, cuBLAS, cuDNN and cuda-oxide kernels)
+    #[cfg(feature = "cuda")]
+    Cuda,
 }
 
 #[cfg(test)]
 mod tests {
     #[cfg(any(
+        not(feature = "cpu"),
         not(feature = "coreml"),
         not(feature = "cuda"),
         not(feature = "migraphx")
     ))]
     use super::ExecutionMode;
-    #[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
-    use super::{DynamicRuntimeError, OrtRuntimeError, ensure_ort_ready};
+
+    #[cfg(not(feature = "cpu"))]
+    #[test]
+    fn cpu_mode_requires_feature() {
+        let error = ExecutionMode::Cpu.validate().unwrap_err();
+        assert_eq!(error.to_string(), "cpu requires the `cpu` Cargo feature");
+    }
 
     #[cfg(not(feature = "coreml"))]
     #[test]
@@ -557,32 +221,5 @@ mod tests {
             error.to_string(),
             "migraphx requires the `migraphx` Cargo feature"
         );
-    }
-
-    #[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
-    #[test]
-    fn dynamic_runtime_preflight_fails_instead_of_hanging() {
-        let original = std::env::var_os("ORT_DYLIB_PATH");
-        let missing = std::env::temp_dir().join("missing-ort-runtime/libonnxruntime.dylib");
-        // safety: this test mutates a process-global env var and restores it before returning
-        unsafe {
-            std::env::set_var("ORT_DYLIB_PATH", &missing);
-        }
-
-        let error = ensure_ort_ready().unwrap_err();
-        assert!(matches!(
-            error,
-            super::ModelLoadError::Runtime(OrtRuntimeError::Dynamic(
-                DynamicRuntimeError::Missing { .. }
-            ))
-        ));
-
-        // safety: this test restores the original process-global env var before returning
-        unsafe {
-            match original {
-                Some(value) => std::env::set_var("ORT_DYLIB_PATH", value),
-                None => std::env::remove_var("ORT_DYLIB_PATH"),
-            }
-        }
     }
 }

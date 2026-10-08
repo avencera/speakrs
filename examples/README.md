@@ -8,7 +8,7 @@ These examples cover the basic pyannote-style workflows:
 - reconcile transcript chunks with diarization output
 - submit queued diarization jobs from cloned senders across threads
 
-All examples expect:
+All examples run in `ExecutionMode::Cpu`, so they need the `cpu` feature. They expect:
 
 - a models directory containing `segmentation-3.0.onnx`, `wespeaker-voxceleb-resnet34.onnx`, and the PLDA `.npy` files
 - a mono 16kHz 16-bit PCM WAV input
@@ -22,13 +22,13 @@ just export-models
 ## Run diarization and print RTTM
 
 ```bash
-cargo run --example diarize_wav -- fixtures/models fixtures/test.wav
+cargo run --features cpu --example diarize_wav -- fixtures/models fixtures/test.wav
 ```
 
 Optional file id:
 
 ```bash
-cargo run --example diarize_wav -- fixtures/models fixtures/test.wav meeting-42
+cargo run --features cpu --example diarize_wav -- fixtures/models fixtures/test.wav meeting-42
 ```
 
 ## Print speaker turns
@@ -36,7 +36,7 @@ cargo run --example diarize_wav -- fixtures/models fixtures/test.wav meeting-42
 This matches pyannote's `for turn, speaker in output.speaker_diarization` pattern.
 
 ```bash
-cargo run --example print_turns -- fixtures/models fixtures/test.wav
+cargo run --features cpu --example print_turns -- fixtures/models fixtures/test.wav
 ```
 
 Output:
@@ -53,7 +53,7 @@ start   end     speaker
 Useful if you want per-speaker totals.
 
 ```bash
-cargo run --example speaker_airtime -- fixtures/models fixtures/test.wav
+cargo run --features cpu --example speaker_airtime -- fixtures/models fixtures/test.wav
 ```
 
 Output:
@@ -84,7 +84,7 @@ Example transcript:
 Run it with:
 
 ```bash
-cargo run --example assign_transcript_speakers -- fixtures/models fixtures/test.wav transcript.tsv
+cargo run --features cpu --example assign_transcript_speakers -- fixtures/models fixtures/test.wav transcript.tsv
 ```
 
 Output:
@@ -98,5 +98,5 @@ start   end     speaker     text
 ## Queue files from multiple sender threads
 
 ```bash
-cargo run --example queued -- fixtures/models fixtures/test.wav fixtures/test.wav
+cargo run --features cpu --example queued -- fixtures/models fixtures/test.wav fixtures/test.wav
 ```

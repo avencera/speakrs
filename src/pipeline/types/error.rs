@@ -1,15 +1,15 @@
-use crate::inference::{ExecutionModeError, ModelLoadError};
+use crate::inference::{ExecutionModeError, InferenceError, ModelLoadError};
 
 /// Errors that can occur during the diarization pipeline
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum PipelineError {
-    /// Model construction or ONNX Runtime initialization error
+    /// Model construction or inference runtime initialization error
     #[error(transparent)]
     ModelLoad(#[from] ModelLoadError),
-    /// ONNX Runtime error
+    /// Embedding or segmentation inference error
     #[error(transparent)]
-    Ort(#[from] ort::Error),
+    Inference(#[from] InferenceError),
     /// Requested execution mode is not supported by this build
     #[error(transparent)]
     UnsupportedExecutionMode(#[from] ExecutionModeError),

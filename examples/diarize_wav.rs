@@ -10,7 +10,9 @@ fn main() -> ExampleResult<()> {
     support::init_tracing();
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 || args.len() > 4 {
-        eprintln!("Usage: cargo run --example diarize_wav -- <models-dir> <audio.wav> [file-id]");
+        eprintln!(
+            "Usage: cargo run --features cpu --example diarize_wav -- <models-dir> <audio.wav> [file-id]"
+        );
         std::process::exit(1);
     }
 

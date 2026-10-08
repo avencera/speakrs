@@ -3,7 +3,7 @@ use std::path::Path;
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, s};
 use ndarray_npy::read_npy;
 
-use crate::linalg::{Eigh, Inverse, LinalgError, UPLO};
+use crate::linalg::{LinalgError, generalized_eigh, inverse, inverse_spd};
 use crate::utils::l2_normalize_rows_f64;
 
 /// PLDA transform computed entirely in f64 to match pyannote's numpy precision
@@ -48,6 +48,7 @@ struct PldaParameters {
 }
 
 impl PldaTransform {
+    /// Load model parameters and build the PLDA transform
     pub fn from_dir(models_dir: &Path) -> Result<Self, PldaError> {
         Self::from_parameters(PldaParameters {
             mean1: read_array1_f64(models_dir.join("plda_mean1.npy"))?,
@@ -70,23 +71,25 @@ impl PldaTransform {
         } = parameters;
         validate_plda_parameters(&mean1, &mean2, &lda, &mu, &raw_transform, &psi)?;
 
-        let precision_matrix = raw_transform.t().dot(&raw_transform).inv()?;
+        let precision_matrix = inverse_spd(&raw_transform.t().dot(&raw_transform))?;
 
         let mut tr_over_psi = raw_transform.t().to_owned();
         for column_idx in 0..raw_transform.nrows() {
             let mut column = tr_over_psi.column_mut(column_idx);
             column /= psi[column_idx];
         }
-        let between_class_covariance = tr_over_psi.dot(&raw_transform).inv()?;
+        let between_class_covariance = inverse(&tr_over_psi.dot(&raw_transform))?;
 
-        let (eigenvalues, (eigenvectors, _)) =
-            (between_class_covariance, precision_matrix).eigh(UPLO::Lower)?;
+        let (eigenvalues, eigenvectors) =
+            generalized_eigh(&between_class_covariance, &precision_matrix)?;
         if eigenvalues.len() != lda.ncols() || eigenvectors.nrows() != lda.ncols() {
             return Err(PldaError::Shape(
                 "eigensystem does not match LDA output dimension".to_owned(),
             ));
         }
 
+        // eigenvector signs do not affect VBx: feature and speaker-model signs
+        // cancel in dot products, while squared terms are unchanged
         let dim = lda.ncols();
         let mut phi = Array1::<f64>::zeros(dim);
         let mut transform = Array2::<f64>::zeros((dim, dim));
@@ -260,7 +263,11 @@ mod tests {
     use ndarray_npy::ReadNpyExt;
     use std::fs::File;
 
-    use super::*;
+    use super::{PldaError, PldaParameters, PldaTransform, read_array1_f64, read_array2_f64};
+    use crate::clustering::vbx::{VbxConfig, cluster_vbx};
+    use crate::linalg::{inverse, inverse_spd};
+    use ndarray::{Array1, Array2};
+    use std::path::Path;
 
     fn fixture_path(name: &str) -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -283,6 +290,102 @@ mod tests {
             raw_transform,
             psi,
         }
+    }
+
+    #[test]
+    fn singular_transform_returns_a_linear_algebra_error() {
+        let result = PldaTransform::from_parameters(parameters_for(
+            Array2::eye(2),
+            array![[1.0, 1.0], [1.0, 1.0]],
+            array![2.0, 3.0],
+        ));
+        assert!(matches!(result, Err(PldaError::Linalg(_))));
+    }
+
+    #[test]
+    fn general_inverse_does_not_assume_symmetry() {
+        let matrix = array![[2.0, 3.0], [0.0, 4.0]];
+        let identity = matrix.dot(&inverse(&matrix).unwrap());
+        for ((row, col), value) in identity.indexed_iter() {
+            assert_abs_diff_eq!(*value, f64::from(row == col), epsilon = 1e-14);
+        }
+        assert!(inverse(&array![[1.0, 2.0], [2.0, 4.0]]).is_err());
+    }
+
+    #[test]
+    fn model_eigenpairs_are_ordered_and_b_orthonormal() {
+        let models_dir = fixture_path("models");
+        if !models_dir.join("plda_tr.npy").is_file() {
+            eprintln!("skipping PLDA eigenpair test because model fixtures are missing");
+            return;
+        }
+        let plda = PldaTransform::from_dir(&models_dir).unwrap();
+        let raw = read_array2_f64(models_dir.join("plda_tr.npy")).unwrap();
+        let psi = read_array1_f64(models_dir.join("plda_psi.npy")).unwrap();
+        let b = inverse_spd(&raw.t().dot(&raw)).unwrap();
+        let mut weighted = raw.t().to_owned();
+        for (mut column, value) in weighted.columns_mut().into_iter().zip(&psi) {
+            column /= *value;
+        }
+        let a = inverse(&weighted.dot(&raw)).unwrap();
+        // the solver reads only the lower triangles, as LAPACK did
+        let symmetric = |matrix: &Array2<f64>| {
+            Array2::from_shape_fn(matrix.dim(), |(row, col)| {
+                matrix[(row.max(col), row.min(col))]
+            })
+        };
+        let a = symmetric(&a);
+        let b = symmetric(&b);
+        assert!(
+            plda.phi
+                .windows(2)
+                .into_iter()
+                .all(|pair| pair[0] >= pair[1])
+        );
+        let x = plda.transform.t();
+        let ax = a.dot(&x);
+        let mut bx_lambda = b.dot(&x);
+        for (mut column, value) in bx_lambda.columns_mut().into_iter().zip(&plda.phi) {
+            column *= *value;
+        }
+        let norm = |matrix: &Array2<f64>| matrix.iter().map(|v| v * v).sum::<f64>().sqrt();
+        let residual = norm(&(&ax - &bx_lambda)) / (norm(&ax) + norm(&bx_lambda));
+        assert!(residual < 1e-12, "relative eigenpair residual {residual}");
+        let gram = x.t().dot(&b.dot(&x));
+        let orthogonality = (&gram - &Array2::<f64>::eye(x.ncols()))
+            .iter()
+            .map(|value: &f64| value.abs())
+            .fold(0.0, f64::max);
+        assert!(
+            orthogonality < 1e-12,
+            "B-orthogonality error {orthogonality}"
+        );
+    }
+
+    #[test]
+    fn projected_feature_signs_do_not_change_vbx() {
+        let models_dir = fixture_path("models");
+        if !models_dir.join("plda_tr.npy").is_file() {
+            eprintln!("skipping PLDA sign test because model fixtures are missing");
+            return;
+        }
+        let plda = PldaTransform::from_dir(&models_dir).unwrap();
+        let embeddings: Array2<f32> =
+            ndarray_npy::read_npy(fixture_path("pipeline_train_embeddings.npy")).unwrap();
+        let projected = plda.project(&embeddings.view(), 128);
+        let mut flipped = projected.features().to_owned();
+        for (idx, mut column) in flipped.columns_mut().into_iter().enumerate() {
+            if idx % 2 == 0 {
+                column *= -1.0;
+            }
+        }
+        let labels: Vec<usize> = (0..flipped.nrows()).map(|idx| idx % 3).collect();
+        let config = VbxConfig::default();
+        let (gamma, pi) = cluster_vbx(&labels, &projected.features(), &projected.phi(), &config);
+        let (flipped_gamma, flipped_pi) =
+            cluster_vbx(&labels, &flipped.view(), &projected.phi(), &config);
+        assert_eq!(gamma, flipped_gamma);
+        assert_eq!(pi, flipped_pi);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [workspace]
 members = ["xtask"]
-exclude = ["scripts/"]
+exclude = ["scripts/", "crates/speakrs-cuda-kernels"]
 
 [package]
 name = "speakrs"
@@ -18,27 +18,37 @@ categories = ["multimedia::audio", "science"]
 include = ["/src/**", "/examples/**", "/README.md", "/LICENSE", "/Cargo.toml"]
 
 [features]
-default = ["online", "default-linalg"]
-default-linalg = ["dep:ndarray-linalg-default"]
+default = ["online"]
 online = ["dep:hf-hub", "hf-hub/ureq", "hf-hub/native-tls"]
+cpu = ["_ort", "_backend"]
 coreml = [
     "dep:block2",
     "dep:objc2",
     "dep:objc2-core-ml",
     "dep:objc2-foundation",
+    "_backend",
 ]
-cuda = ["ort/cuda"]
-migraphx = ["ort/migraphx"]
-load-dynamic = ["ort/load-dynamic", "dep:libloading"]
+# native NVIDIA backend: cuBLAS, cuDNN and committed cuda-oxide PTX through cudarc, with
+# safetensors weights; no ONNX Runtime
+cuda = ["dep:cudarc", "dep:safetensors", "_backend"]
+# native CUDA kernels for newer GPUs, off by default: without them the binary carries
+# only sm_75 PTX, which the driver JIT-compiles for Turing and every newer GPU
+cuda-sm80 = ["cuda"]
+cuda-sm90 = ["cuda"]
+cuda-sm120 = ["cuda"]
+migraphx = ["_ort", "ort/migraphx", "_backend"]
+# load ONNX Runtime at run time instead of linking it; only for the `cpu` and `migraphx`
+# backends
+load-dynamic = ["_ort", "ort/load-dynamic", "dep:libloading"]
 
-intel-mkl = ["dep:ndarray-linalg-mkl"]
-openblas-static = ["dep:ndarray-linalg-static"]
-openblas-system = ["dep:ndarray-linalg-system"]
-
+# internal: enabled by every backend that runs on ONNX Runtime
+_ort = ["dep:ort"]
+# internal: enabled by every inference backend; gates the crate items in `lib.rs`
+_backend = []
 _metrics = []
 
 [package.metadata.docs.rs]
-features = ["cuda", "migraphx", "load-dynamic", "_metrics"]
+features = ["cpu", "cuda", "migraphx", "load-dynamic", "_metrics"]
 
 [dependencies]
 hf-hub = { version = "0.5", optional = true, default-features = false }
@@ -46,12 +56,25 @@ hf-hub = { version = "0.5", optional = true, default-features = false }
 # math
 kodama = "0.3.0"
 ndarray = { version = "0.17.2", features = ["matrixmultiply-threading"] }
-ndarray-linalg-mkl = { package = "ndarray-linalg", version = "0.18.1", features = ["intel-mkl-static"], optional = true }
-ndarray-linalg-static = { package = "ndarray-linalg", version = "0.18.1", features = ["openblas-static"], optional = true }
-ndarray-linalg-system = { package = "ndarray-linalg", version = "0.18.1", features = ["openblas-system"], optional = true }
 ndarray-npy = "0.10.0"
 
-ort = { version = "2.0.0-rc.13", features = ["ndarray"] }
+ort = { version = "2.0.0-rc.13", features = ["ndarray"], optional = true }
+
+# native CUDA: libcuda, cuBLAS and cuDNN are loaded at run time, so the crate builds
+# without a CUDA toolkit (including on macOS). The 12.4 API floor keeps the CUDA 12.4
+# canary image working; the PTX itself is JIT-compiled by the installed driver
+cudarc = { version = "0.19.10", optional = true, default-features = false, features = [
+    "std",
+    "driver",
+    # the `Ptx` type that module loading takes, and the probe for the NVRTC library that
+    # cuDNN's persistent-dynamic LSTM needs; speakrs itself never compiles with NVRTC
+    "nvrtc",
+    "cublas",
+    "cudnn",
+    "dynamic-loading",
+    "cuda-12040",
+] }
+safetensors = { version = "0.8.0", optional = true, default-features = false, features = ["alloc"] }
 libloading = { version = "0.9.0", optional = true }
 
 # logging
@@ -63,12 +86,6 @@ thiserror = "2.0.18"
 # concurrency
 crossbeam-channel = "0.5"
 rayon = "1.11.0"
-
-[target.'cfg(target_arch = "x86_64")'.dependencies]
-ndarray-linalg-default = { package = "ndarray-linalg", version = "0.18.1", features = ["intel-mkl-static"], optional = true }
-
-[target.'cfg(not(target_arch = "x86_64"))'.dependencies]
-ndarray-linalg-default = { package = "ndarray-linalg", version = "0.18.1", features = ["openblas-static"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6", optional = true }
@@ -98,7 +115,30 @@ objc2-foundation = { version = "0.3", optional = true, features = [
     "NSObjCRuntime",
 ] }
 
+# the examples load ONNX models in `ExecutionMode::Cpu`
+[[example]]
+name = "assign_transcript_speakers"
+required-features = ["cpu"]
+
+[[example]]
+name = "diarize_wav"
+required-features = ["cpu"]
+
+[[example]]
+name = "print_turns"
+required-features = ["cpu"]
+
+[[example]]
+name = "queued"
+required-features = ["cpu"]
+
+[[example]]
+name = "speaker_airtime"
+required-features = ["cpu"]
+
 [dev-dependencies]
+sha2 = "0.10"
+libloading = "0.9.0"
 approx = "0.5.1"
 serde_json = "1"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }

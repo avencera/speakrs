@@ -1,0 +1,10 @@
+[package]
+name = "speakrs-qualify-device"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git", rev = "918bbde123671153b29a89542f1781f1c7494c14" }

@@ -3,12 +3,17 @@ use ndarray::s;
 use ndarray::{Array1, Array2, Array3, array};
 use ndarray_npy::ReadNpyExt;
 use std::fs::File;
-use std::path::{Path, PathBuf};
+#[cfg(any(feature = "cpu", feature = "coreml"))]
+use std::path::Path;
+use std::path::PathBuf;
 
 use super::*;
 #[cfg(feature = "coreml")]
 use crate::inference::ExecutionMode;
-use crate::inference::{DynamicRuntimeError, ModelLoadError, OrtRuntimeError};
+#[cfg(any(feature = "cpu", feature = "coreml"))]
+use crate::inference::ModelLoadError;
+#[cfg(all(feature = "load-dynamic", any(feature = "cpu", feature = "coreml")))]
+use crate::inference::{DynamicRuntimeError, OrtRuntimeError};
 
 #[cfg(feature = "coreml")]
 #[test]
@@ -29,6 +34,7 @@ fn decode_windows(raw_windows: Vec<Array2<f32>>, powerset: &PowersetMapping) -> 
         .0
 }
 
+#[cfg(any(feature = "cpu", feature = "coreml"))]
 fn extract_embeddings(
     seg_model: &SegmentationModel,
     emb_model: &mut EmbeddingModel,
@@ -92,8 +98,26 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn models_dir() -> PathBuf {
-    fixture_path("models")
+/// Model directory for the CoreML model-backed tests
+///
+/// CI fixtures hold only the ONNX and PLDA files that the CPU tests compare against. Point
+/// `SPEAKRS_TEST_MODELS_DIR` at a full model snapshot, such as the `ModelManager` cache, to run
+/// the CoreML tests against real bundles
+#[cfg(feature = "coreml")]
+fn coreml_models_dir() -> PathBuf {
+    std::env::var_os("SPEAKRS_TEST_MODELS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| fixture_path("models"))
+}
+
+#[cfg(any(feature = "cpu", feature = "coreml"))]
+fn segmentation_model_path(models_dir: &Path) -> PathBuf {
+    models_dir.join("segmentation-3.0.onnx")
+}
+
+#[cfg(any(feature = "cpu", feature = "coreml"))]
+fn embedding_model_path(models_dir: &Path) -> PathBuf {
+    models_dir.join("wespeaker-voxceleb-resnet34.onnx")
 }
 
 fn load_fixture_array1<T>(name: &str) -> Array1<T>
@@ -117,15 +141,18 @@ where
     Array3::read_npy(File::open(fixture_path(name)).unwrap()).unwrap()
 }
 
+#[cfg(any(feature = "cpu", feature = "coreml"))]
 fn load_test_audio() -> (Vec<f32>, u32) {
     load_wav_samples(&fixture_path("test.wav"))
 }
 
+#[cfg(any(feature = "cpu", feature = "coreml"))]
 struct TestAudio {
     samples: Vec<f32>,
     sample_rate: u32,
 }
 
+#[cfg(any(feature = "cpu", feature = "coreml"))]
 impl TestAudio {
     fn load() -> Self {
         let (samples, sample_rate) = load_test_audio();
@@ -144,15 +171,23 @@ impl TestAudio {
     }
 }
 
+#[cfg(any(feature = "cpu", feature = "coreml"))]
 struct PipelineTestHarness {
-    models_dir: PathBuf,
+    #[cfg(feature = "cpu")]
+    cpu_models_dir: PathBuf,
+    #[cfg(feature = "coreml")]
+    coreml_models_dir: PathBuf,
     audio: TestAudio,
 }
 
+#[cfg(any(feature = "cpu", feature = "coreml"))]
 impl PipelineTestHarness {
     fn load() -> Self {
         Self {
-            models_dir: models_dir(),
+            #[cfg(feature = "cpu")]
+            cpu_models_dir: fixture_path("models"),
+            #[cfg(feature = "coreml")]
+            coreml_models_dir: coreml_models_dir(),
             audio: TestAudio::load(),
         }
     }
@@ -162,40 +197,43 @@ impl PipelineTestHarness {
         self.audio.samples()
     }
 
-    fn models_dir(&self) -> &Path {
-        &self.models_dir
+    #[cfg(feature = "cpu")]
+    fn cpu_models_dir(&self) -> &Path {
+        &self.cpu_models_dir
     }
 
-    fn segmentation_model_path(&self) -> PathBuf {
-        self.models_dir.join("segmentation-3.0.onnx")
-    }
-
-    fn embedding_model_path(&self) -> PathBuf {
-        self.models_dir.join("wespeaker-voxceleb-resnet34.onnx")
-    }
-
+    #[cfg(feature = "cpu")]
     fn cpu_seg_model(&self) -> Option<SegmentationModel> {
         load_model_or_skip(SegmentationModel::new(
-            self.segmentation_model_path(),
+            segmentation_model_path(&self.cpu_models_dir),
             SEGMENTATION_STEP_SECONDS as f32,
         ))
     }
 
+    #[cfg(feature = "cpu")]
     fn cpu_emb_model(&self) -> Option<EmbeddingModel> {
-        load_model_or_skip(EmbeddingModel::new(self.embedding_model_path()))
+        load_model_or_skip(EmbeddingModel::new(embedding_model_path(
+            &self.cpu_models_dir,
+        )))
     }
 
+    #[cfg(feature = "cpu")]
     fn cpu_pipeline(&self) -> Option<OwnedDiarizationPipeline> {
         build_pipeline_or_skip(
-            PipelineBuilder::from_dir(self.models_dir(), ExecutionMode::Cpu)
+            PipelineBuilder::from_dir(self.cpu_models_dir(), ExecutionMode::Cpu)
                 .and_then(PipelineBuilder::build),
         )
     }
 
     #[cfg(feature = "coreml")]
+    fn coreml_embedding_model_path(&self) -> PathBuf {
+        embedding_model_path(&self.coreml_models_dir)
+    }
+
+    #[cfg(feature = "coreml")]
     fn coreml_seg_model(&self) -> Option<SegmentationModel> {
         load_model_or_skip(SegmentationModel::with_mode(
-            self.segmentation_model_path(),
+            segmentation_model_path(&self.coreml_models_dir),
             SEGMENTATION_STEP_SECONDS as f32,
             ExecutionMode::CoreMl,
         ))
@@ -204,7 +242,7 @@ impl PipelineTestHarness {
     #[cfg(feature = "coreml")]
     fn coreml_emb_model(&self) -> Option<EmbeddingModel> {
         load_model_or_skip(EmbeddingModel::with_mode(
-            self.embedding_model_path(),
+            self.coreml_embedding_model_path(),
             ExecutionMode::CoreMl,
         ))
     }
@@ -212,12 +250,13 @@ impl PipelineTestHarness {
     #[cfg(feature = "coreml")]
     fn coreml_pipeline(&self) -> Option<OwnedDiarizationPipeline> {
         build_pipeline_or_skip(
-            PipelineBuilder::from_dir(self.models_dir(), ExecutionMode::CoreMl)
+            PipelineBuilder::from_dir(&self.coreml_models_dir, ExecutionMode::CoreMl)
                 .and_then(PipelineBuilder::build),
         )
     }
 }
 
+#[cfg(feature = "cpu")]
 fn custom_pipeline_config() -> PipelineConfig {
     PipelineConfig {
         merge_gap: 0.75,
@@ -229,6 +268,7 @@ fn custom_pipeline_config() -> PipelineConfig {
     }
 }
 
+#[cfg(any(feature = "cpu", feature = "coreml"))]
 fn load_wav_samples(path: &Path) -> (Vec<f32>, u32) {
     let data = std::fs::read(path).unwrap();
     let sample_rate = u32::from_le_bytes(data[24..28].try_into().unwrap());
@@ -254,12 +294,14 @@ fn load_wav_samples(path: &Path) -> (Vec<f32>, u32) {
     panic!("no data chunk found in WAV");
 }
 
+#[cfg(any(feature = "cpu", feature = "coreml"))]
 fn load_model_or_skip<T>(result: Result<T, ModelLoadError>) -> Option<T> {
     match result {
         Ok(value) => Some(value),
+        #[cfg(feature = "load-dynamic")]
         Err(ModelLoadError::Runtime(OrtRuntimeError::Dynamic(DynamicRuntimeError::Missing {
             ..
-        }))) if cfg!(feature = "load-dynamic") => {
+        }))) => {
             eprintln!("skipping model-loading test because ORT_DYLIB_PATH is not configured");
             None
         }
@@ -267,12 +309,14 @@ fn load_model_or_skip<T>(result: Result<T, ModelLoadError>) -> Option<T> {
     }
 }
 
+#[cfg(any(feature = "cpu", feature = "coreml"))]
 fn build_pipeline_or_skip<T>(result: Result<T, PipelineError>) -> Option<T> {
     match result {
         Ok(value) => Some(value),
+        #[cfg(feature = "load-dynamic")]
         Err(PipelineError::ModelLoad(ModelLoadError::Runtime(OrtRuntimeError::Dynamic(
             DynamicRuntimeError::Missing { .. },
-        )))) if cfg!(feature = "load-dynamic") => {
+        )))) => {
             eprintln!("skipping pipeline test because ORT_DYLIB_PATH is not configured");
             None
         }
@@ -280,6 +324,7 @@ fn build_pipeline_or_skip<T>(result: Result<T, PipelineError>) -> Option<T> {
     }
 }
 
+#[cfg(any(feature = "cpu", feature = "coreml"))]
 fn assert_embedding_tensor_close(actual: &Array3<f32>, expected: &Array3<f32>, epsilon: f32) {
     let mut largest_difference = (0.0_f32, 0, 0, 0, 0.0_f32, 0.0_f32);
     for chunk_idx in 0..actual.shape()[0] {
@@ -491,6 +536,7 @@ fn assign_embeddings_matches_python_fixture() {
     }
 }
 
+#[cfg(feature = "cpu")]
 #[test]
 fn extract_embeddings_matches_python_fixture() {
     let harness = PipelineTestHarness::load();
@@ -527,7 +573,7 @@ fn fast_apple_segmentation_matches_python_fixture() {
 #[test]
 fn fast_apple_cpu_embeddings_match_python_fixture() {
     let harness = PipelineTestHarness::load();
-    let Some(seg_model) = harness.cpu_seg_model() else {
+    let Some(seg_model) = harness.coreml_seg_model() else {
         return;
     };
     let runtime = RuntimeConfig {
@@ -535,7 +581,7 @@ fn fast_apple_cpu_embeddings_match_python_fixture() {
         ..RuntimeConfig::default()
     };
     let Some(mut emb_model) = load_model_or_skip(EmbeddingModel::with_mode_and_config(
-        harness.embedding_model_path(),
+        harness.coreml_embedding_model_path(),
         ExecutionMode::CoreMl,
         &runtime,
     )) else {
@@ -553,7 +599,7 @@ fn fast_apple_cpu_embeddings_match_python_fixture() {
 #[test]
 fn fast_apple_gpu_embeddings_stay_within_documented_fixture_bounds() {
     let harness = PipelineTestHarness::load();
-    let Some(seg_model) = harness.cpu_seg_model() else {
+    let Some(seg_model) = harness.coreml_seg_model() else {
         return;
     };
     let Some(mut emb_model) = harness.coreml_emb_model() else {
@@ -573,8 +619,8 @@ fn fast_apple_gpu_embeddings_stay_within_documented_fixture_bounds() {
 #[ignore = "pinned revision has no batch-64 CoreML tail (DEC-04); absence is not a pass"]
 fn fast_apple_split_primary_batch_matches_single_tail_path() {
     let harness = PipelineTestHarness::load();
-    let Some(seg_model) = harness.cpu_seg_model() else {
-        panic!("CPU segmentation model is required for the batch-64 tail comparison");
+    let Some(seg_model) = harness.coreml_seg_model() else {
+        panic!("CoreML segmentation model is required for the batch-64 tail comparison");
     };
     let Some(mut emb_model) = harness.coreml_emb_model() else {
         panic!("CoreML embedding model is required for the batch-64 tail comparison");
@@ -690,7 +736,7 @@ fn fast_apple_split_primary_batch_matches_single_tail_path() {
 #[test]
 fn fast_apple_single_embedding_matches_python_fixture() {
     let harness = PipelineTestHarness::load();
-    let Some(seg_model) = harness.cpu_seg_model() else {
+    let Some(seg_model) = harness.coreml_seg_model() else {
         return;
     };
     let Some(mut emb_model) = harness.coreml_emb_model() else {
@@ -721,6 +767,7 @@ fn fast_apple_single_embedding_matches_python_fixture() {
     }
 }
 
+#[cfg(feature = "cpu")]
 #[test]
 fn run_inference_only_plus_finish_matches_run_with_config() {
     let harness = PipelineTestHarness::load();
@@ -742,12 +789,13 @@ fn run_inference_only_plus_finish_matches_run_with_config() {
     assert_eq!(repeated.segments, split.segments);
 }
 
+#[cfg(feature = "cpu")]
 #[test]
 fn pipeline_builder_applies_custom_default_config_to_build() {
     let harness = PipelineTestHarness::load();
     let expected = custom_pipeline_config();
     let Some(pipeline) = build_pipeline_or_skip(
-        PipelineBuilder::from_dir(harness.models_dir(), ExecutionMode::Cpu)
+        PipelineBuilder::from_dir(harness.cpu_models_dir(), ExecutionMode::Cpu)
             .map(|builder| builder.pipeline(expected.clone()))
             .and_then(PipelineBuilder::build),
     ) else {
@@ -763,6 +811,7 @@ fn pipeline_builder_applies_custom_default_config_to_build() {
     assert_eq!(actual.reconstruct_method, expected.reconstruct_method);
 }
 
+#[cfg(feature = "cpu")]
 #[test]
 fn borrowed_pipeline_new_with_config_stores_custom_default_config() {
     let harness = PipelineTestHarness::load();
@@ -776,7 +825,7 @@ fn borrowed_pipeline_new_with_config_stores_custom_default_config() {
     let pipeline = DiarizationPipeline::new_with_config(
         &mut seg_model,
         &mut emb_model,
-        harness.models_dir(),
+        harness.cpu_models_dir(),
         expected.clone(),
     )
     .unwrap();

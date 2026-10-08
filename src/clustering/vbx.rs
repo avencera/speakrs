@@ -6,8 +6,8 @@ use crate::utils::logsumexp_f64;
 
 /// How AHC labels initialize Gaussian VBx responsibilities.
 ///
-/// Negative smoothing maps to [`Hard`], zero to [`Uniform`], and a positive
-/// finite value to [`Smoothed`].
+/// Negative smoothing maps to [`Self::Hard`], zero to [`Self::Uniform`], and a positive
+/// finite value to [`Self::Smoothed`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ResponsibilityInitialization {
     /// One-hot responsibilities from AHC labels

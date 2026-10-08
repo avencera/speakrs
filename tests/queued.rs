@@ -1,3 +1,5 @@
+#![cfg(feature = "cpu")]
+
 use std::collections::HashMap;
 use std::thread;
 

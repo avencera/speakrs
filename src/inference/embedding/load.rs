@@ -1,24 +1,59 @@
 use std::path::Path;
 
-use crate::inference::{ExecutionMode, ModelLoadError, ensure_ort_ready};
+use crate::inference::{ExecutionMode, InferenceBackend, ModelLoadError};
+use crate::pipeline::RuntimeConfig;
 
-use super::EmbeddingModel;
-
-mod sessions;
-
-use sessions::LoadedSessions;
+#[cfg(feature = "coreml")]
+use super::CoreMlEmbedding;
+#[cfg(feature = "cuda")]
+use super::CudaEmbedding;
+#[cfg(feature = "_ort")]
+use super::OrtEmbedding;
+use super::{EmbeddingBackend, EmbeddingMeta, EmbeddingModel, MASK_FRAMES, read_min_num_samples};
 
 impl EmbeddingModel {
     /// Load the WeSpeaker embedding model with the requested execution mode and runtime config
     pub fn with_mode_and_config(
         model_path: impl AsRef<Path>,
         mode: ExecutionMode,
-        config: &crate::pipeline::RuntimeConfig,
+        config: &RuntimeConfig,
     ) -> Result<Self, ModelLoadError> {
-        mode.validate()?;
-        ensure_ort_ready()?;
+        let backend = mode.backend()?;
+
+        #[cfg(feature = "_metrics")]
+        if let Some(experiment) = config.experiment {
+            experiment
+                .validate(mode)
+                .map_err(|error| ModelLoadError::InvalidConfiguration {
+                    message: error.to_string(),
+                })?;
+        }
 
         let model_path = model_path.as_ref();
-        LoadedSessions::load(model_path, mode, config)?.into_model(model_path, mode)
+        let backend = match backend {
+            #[cfg(feature = "_ort")]
+            InferenceBackend::Ort(provider) => {
+                EmbeddingBackend::Ort(Box::new(OrtEmbedding::load(model_path, provider, config)?))
+            }
+            #[cfg(feature = "coreml")]
+            InferenceBackend::CoreMl => {
+                EmbeddingBackend::CoreMl(Box::new(CoreMlEmbedding::load(model_path, mode, config)?))
+            }
+            #[cfg(feature = "cuda")]
+            InferenceBackend::Cuda => {
+                EmbeddingBackend::Cuda(Box::new(CudaEmbedding::load(model_path, mode, config)?))
+            }
+        };
+
+        let metadata_path = model_path.with_extension("min_num_samples.txt");
+        Ok(Self {
+            meta: EmbeddingMeta {
+                sample_rate: 16_000,
+                window_samples: 160_000,
+                mask_frames: MASK_FRAMES,
+                min_num_samples: read_min_num_samples(&metadata_path)?.get(),
+            },
+            backend,
+        })
     }
 }

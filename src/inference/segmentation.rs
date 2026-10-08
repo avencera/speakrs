@@ -1,29 +1,40 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(any(feature = "_ort", feature = "coreml"))]
+use std::path::PathBuf;
 
 use ndarray::Array2;
-use ort::session::Session;
 
 #[cfg(feature = "coreml")]
-use crate::inference::coreml::{CachedInputShape, SharedCoreMlModel};
-use crate::inference::{
-    ExecutionMode, ModelLoadError, SharedSession, ensure_ort_ready, with_execution_mode,
-};
+use crate::inference::CoreMlError;
+use crate::inference::{ExecutionMode, InferenceBackend, InferenceError, ModelLoadError};
+use crate::pipeline::RuntimeConfig;
+
+#[cfg(feature = "cuda")]
+mod cuda;
 #[cfg(feature = "coreml")]
 mod native;
+#[cfg(feature = "_ort")]
+mod onnx;
 #[cfg(feature = "coreml")]
 mod parallel;
 mod run;
 mod tensor;
 
+#[cfg(feature = "cuda")]
+use cuda::CudaSegmentationBackend;
+#[cfg(feature = "coreml")]
+use native::CoreMlSegmentation;
+#[cfg(feature = "_ort")]
+use onnx::OrtSegmentation;
 pub(crate) use tensor::{InvalidWindowGeometry, WindowSpec, segmentation_window_count};
 
 /// Errors that can occur during segmentation inference
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SegmentationError {
-    /// ONNX Runtime error
+    /// The inference backend failed
     #[error(transparent)]
-    Ort(#[from] ort::Error),
+    Inference(#[from] InferenceError),
     /// Streaming channel was closed before all windows were sent
     #[error("receiver disconnected")]
     Disconnected(#[from] crossbeam_channel::SendError<Array2<f32>>),
@@ -51,6 +62,20 @@ pub enum SegmentationError {
     },
 }
 
+#[cfg(feature = "_ort")]
+impl From<ort::Error> for SegmentationError {
+    fn from(error: ort::Error) -> Self {
+        Self::Inference(error.into())
+    }
+}
+
+#[cfg(feature = "coreml")]
+impl From<CoreMlError> for SegmentationError {
+    fn from(error: CoreMlError) -> Self {
+        Self::Inference(error.into())
+    }
+}
+
 // seg models exported with EnumeratedShapes for batch 1-32 and b64
 const PRIMARY_BATCH_SIZE: usize = 32;
 #[cfg(feature = "coreml")]
@@ -59,44 +84,54 @@ const LARGE_BATCH_SIZE: usize = 64;
 /// Sliding-window segmentation model (pyannote segmentation-3.0)
 pub struct SegmentationModel {
     mode: ExecutionMode,
-    session: SharedSession,
-    primary_batched_session: Option<SharedSession>,
-    #[cfg(feature = "coreml")]
-    native_session: Option<SharedCoreMlModel>,
-    #[cfg(feature = "coreml")]
-    native_batched_session: Option<SharedCoreMlModel>,
-    #[cfg(feature = "coreml")]
-    native_large_batched_session: Option<SharedCoreMlModel>,
-    #[cfg(feature = "coreml")]
-    cached_single_input_shape: CachedInputShape,
-    #[cfg(feature = "coreml")]
-    cached_batch_input_shape: CachedInputShape,
-    input_buffer: ndarray::Array3<f32>,
-    primary_batch_input_buffer: ndarray::Array3<f32>,
+    backend: SegmentationBackend,
     window_spec: WindowSpec,
     sample_rate: usize,
 }
 
-// SAFETY: SegmentationModel is only used from one thread at a time via &mut self
-// SAFETY: the non-Send fields contain Objective-C objects that are only moved, not shared
-// SAFETY: SharedCoreMlModel is already Send + Sync
-#[cfg(feature = "coreml")]
-unsafe impl Send for SegmentationModel {}
+/// Sessions for the one runtime chosen from the execution mode at load time
+enum SegmentationBackend {
+    #[cfg(feature = "_ort")]
+    Ort(OrtSegmentation),
+    #[cfg(feature = "coreml")]
+    CoreMl(CoreMlSegmentation),
+    // boxed because the CUDA backend carries its session and staging inline
+    #[cfg(feature = "cuda")]
+    Cuda(Box<CudaSegmentationBackend>),
+}
 
 impl SegmentationModel {
-    /// Load a segmentation-3.0 ONNX model
+    /// Load a segmentation-3.0 ONNX model on the CPU
+    ///
+    /// Requires the `cpu` feature
     pub fn new(model_path: impl AsRef<Path>, step_duration: f32) -> Result<Self, ModelLoadError> {
         Self::with_mode(model_path, step_duration, ExecutionMode::Cpu)
     }
 
-    /// Load a segmentation-3.0 ONNX model with the requested execution mode
+    /// Load a segmentation-3.0 model with the requested execution mode
+    ///
+    /// `model_path` names the base `segmentation-3.0.onnx` file. CoreML modes load the
+    /// compiled bundles next to it, and CUDA modes load `segmentation-3.0.safetensors`
+    /// next to it; neither reads the ONNX file
     pub fn with_mode(
         model_path: impl AsRef<Path>,
         step_duration: f32,
         mode: ExecutionMode,
     ) -> Result<Self, ModelLoadError> {
-        mode.validate()?;
-        ensure_ort_ready()?;
+        Self::with_mode_and_config(model_path, step_duration, mode, &RuntimeConfig::default())
+    }
+
+    /// Load a segmentation-3.0 model with the requested execution mode and runtime config
+    ///
+    /// The runtime config selects the CUDA modes' precision, LSTM algorithm and CUDA
+    /// graphs; other modes ignore it
+    pub fn with_mode_and_config(
+        model_path: impl AsRef<Path>,
+        step_duration: f32,
+        mode: ExecutionMode,
+        #[cfg_attr(not(feature = "cuda"), allow(unused_variables))] config: &RuntimeConfig,
+    ) -> Result<Self, ModelLoadError> {
+        let backend = mode.backend()?;
 
         let model_path = model_path.as_ref();
         let sample_rate = 16000;
@@ -107,114 +142,28 @@ impl SegmentationModel {
         )?;
         let window_samples = window_spec.window_samples();
 
-        #[cfg(feature = "coreml")]
-        if matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
-            Self::validate_native_coreml_assets(model_path, mode)?;
-        }
-
-        macro_rules! timed {
-            ($expr:expr) => {{
-                let start = std::time::Instant::now();
-                let value = $expr;
-                (value, start.elapsed())
-            }};
-        }
-
-        let (session, session_elapsed) =
-            timed!(SharedSession::new(Self::build_session(model_path, mode)?));
-        let (primary_batched_session, primary_batched_elapsed) = timed!(
-            batched_model_path(model_path, PRIMARY_BATCH_SIZE)
-                .filter(|path| path.exists())
-                .map(|path| Self::build_session(&path, mode).map(SharedSession::new))
-                .transpose()?
-        );
-        #[cfg(feature = "coreml")]
-        let (native_session, native_session_elapsed) =
-            timed!(Self::load_native_coreml(model_path, mode)?);
-        #[cfg(feature = "coreml")]
-        let (native_batched_session, native_batched_elapsed) =
-            timed!(Self::load_native_coreml_batched(model_path, mode)?);
-        #[cfg(feature = "coreml")]
-        let (native_large_batched_session, native_large_batched_elapsed) =
-            timed!(Self::load_native_coreml_large_batched(model_path, mode)?);
-
-        #[cfg(feature = "coreml")]
-        if matches!(mode, ExecutionMode::CoreMl | ExecutionMode::CoreMlFast) {
-            if native_session.is_none() {
-                return Err(ModelLoadError::MissingNativeAsset {
-                    mode,
-                    path: Self::resolve_coreml_path(model_path, mode)
-                        .unwrap_or_else(|| model_path.to_path_buf()),
-                });
-            }
-            if native_batched_session.is_none() {
-                return Err(ModelLoadError::MissingNativeAsset {
-                    mode,
-                    path: Self::resolve_batched_coreml_path(model_path, mode, PRIMARY_BATCH_SIZE)
-                        .unwrap_or_else(|| model_path.to_path_buf()),
-                });
-            }
-            if native_large_batched_session.is_none() {
-                return Err(ModelLoadError::MissingNativeAsset {
-                    mode,
-                    path: Self::resolve_batched_coreml_path(model_path, mode, LARGE_BATCH_SIZE)
-                        .unwrap_or_else(|| model_path.to_path_buf()),
-                });
-            }
-        }
-
-        #[cfg(feature = "coreml")]
-        {
-            let total_ms = (session_elapsed
-                + primary_batched_elapsed
-                + native_session_elapsed
-                + native_batched_elapsed
-                + native_large_batched_elapsed)
-                .as_millis();
-            tracing::trace!(
-                ort_single_ms = session_elapsed.as_millis(),
-                ort_batched_ms = primary_batched_elapsed.as_millis(),
-                native_single_ms = native_session_elapsed.as_millis(),
-                native_b32_ms = native_batched_elapsed.as_millis(),
-                native_b64_ms = native_large_batched_elapsed.as_millis(),
-                total_ms,
-                "Segmentation model init",
-            );
-        }
-        #[cfg(not(feature = "coreml"))]
-        {
-            let total_ms = (session_elapsed + primary_batched_elapsed).as_millis();
-            tracing::trace!(
-                ort_single_ms = session_elapsed.as_millis(),
-                ort_batched_ms = primary_batched_elapsed.as_millis(),
-                total_ms,
-                "Segmentation model init",
-            );
-        }
+        let backend = match backend {
+            #[cfg(feature = "_ort")]
+            InferenceBackend::Ort(provider) => SegmentationBackend::Ort(OrtSegmentation::load(
+                model_path,
+                provider,
+                window_samples,
+            )?),
+            #[cfg(feature = "coreml")]
+            InferenceBackend::CoreMl => SegmentationBackend::CoreMl(CoreMlSegmentation::load(
+                model_path,
+                mode,
+                window_samples,
+            )?),
+            #[cfg(feature = "cuda")]
+            InferenceBackend::Cuda => SegmentationBackend::Cuda(Box::new(
+                CudaSegmentationBackend::load(model_path, mode, window_samples, config)?,
+            )),
+        };
 
         Ok(Self {
             mode,
-            session,
-            primary_batched_session,
-            #[cfg(feature = "coreml")]
-            native_session,
-            #[cfg(feature = "coreml")]
-            native_batched_session,
-            #[cfg(feature = "coreml")]
-            native_large_batched_session,
-            #[cfg(feature = "coreml")]
-            cached_single_input_shape: CachedInputShape::new("input", &[1, 1, window_samples]),
-            #[cfg(feature = "coreml")]
-            cached_batch_input_shape: CachedInputShape::new(
-                "input",
-                &[PRIMARY_BATCH_SIZE, 1, window_samples],
-            ),
-            input_buffer: ndarray::Array3::zeros((1, 1, window_samples)),
-            primary_batch_input_buffer: ndarray::Array3::zeros((
-                PRIMARY_BATCH_SIZE,
-                1,
-                window_samples,
-            )),
+            backend,
             window_spec,
             sample_rate,
         })
@@ -223,22 +172,6 @@ impl SegmentationModel {
     #[cfg_attr(not(feature = "coreml"), allow(dead_code))]
     pub(crate) fn window_count(&self, audio_samples: usize) -> usize {
         segmentation_window_count(audio_samples, self.window_spec())
-    }
-
-    fn build_session(model_path: &Path, mode: ExecutionMode) -> Result<Session, ort::Error> {
-        let builder = Session::builder()?
-            .with_independent_thread_pool()?
-            .with_intra_threads(Self::available_threads().min(6))?
-            .with_inter_threads(1)?
-            .with_memory_pattern(true)?;
-        let mut builder = with_execution_mode(builder, mode)?;
-        builder.commit_from_file(model_path)
-    }
-
-    fn available_threads() -> usize {
-        std::thread::available_parallelism()
-            .map(usize::from)
-            .unwrap_or(1)
     }
 
     /// Audio sample rate in Hz (16000)
@@ -270,30 +203,45 @@ impl SegmentationModel {
         self.mode
     }
 
-    /// Create a handle that shares ORT sessions and owns new scratch buffers
+    /// Create a handle that can run on another thread and owns new scratch buffers
     ///
-    /// Session weights and arenas are shared. Each inference call locks only the
-    /// session that it uses.
-    #[cfg(not(feature = "coreml"))]
-    pub(crate) fn clone_shared(&self) -> Self {
-        let window_samples = self.window_samples();
+    /// ORT session weights and arenas are shared, and each inference call locks only the
+    /// session that it uses. A CUDA handle gets its own stream and device copy of the
+    /// weights, because CUDA state is used by one thread at a time
+    #[cfg(all(any(feature = "_ort", feature = "cuda"), not(feature = "coreml")))]
+    pub(crate) fn clone_shared(&self) -> Result<Self, InferenceError> {
+        let backend = match &self.backend {
+            #[cfg(feature = "_ort")]
+            SegmentationBackend::Ort(backend) => {
+                SegmentationBackend::Ort(backend.clone_shared(self.window_samples()))
+            }
+            #[cfg(feature = "cuda")]
+            SegmentationBackend::Cuda(backend) => {
+                SegmentationBackend::Cuda(Box::new(backend.reload()?))
+            }
+        };
 
-        Self {
+        Ok(Self {
             mode: self.mode,
-            session: self.session.clone(),
-            primary_batched_session: self.primary_batched_session.clone(),
-            input_buffer: ndarray::Array3::zeros((1, 1, window_samples)),
-            primary_batch_input_buffer: ndarray::Array3::zeros((
-                PRIMARY_BATCH_SIZE,
-                1,
-                window_samples,
-            )),
+            backend,
             window_spec: self.window_spec,
             sample_rate: self.sample_rate,
+        })
+    }
+
+    #[cfg(feature = "coreml")]
+    fn coreml_backend(&self) -> Option<&CoreMlSegmentation> {
+        match &self.backend {
+            SegmentationBackend::CoreMl(backend) => Some(backend),
+            #[cfg(feature = "_ort")]
+            SegmentationBackend::Ort(_) => None,
+            #[cfg(feature = "cuda")]
+            SegmentationBackend::Cuda(_) => None,
         }
     }
 }
 
+#[cfg(any(feature = "_ort", feature = "coreml"))]
 fn batched_model_path(model_path: &Path, batch_size: usize) -> Option<PathBuf> {
     let path = model_path;
     let file_name = path.file_name()?.to_str()?;
@@ -301,7 +249,7 @@ fn batched_model_path(model_path: &Path, batch_size: usize) -> Option<PathBuf> {
     Some(path.with_file_name(format!("{stem}-b{batch_size}.onnx")))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "cpu"))]
 mod tests {
     use super::SegmentationModel;
     use crate::inference::{ExecutionMode, ModelLoadError};

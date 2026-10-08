@@ -48,6 +48,31 @@ pub enum ChunkEmbeddingComputeUnits {
     CpuOnly,
 }
 
+/// Arithmetic precision of a CUDA-mode stage
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CudaPrecision {
+    Tf32,
+    Fp32,
+}
+
+#[cfg(feature = "cuda")]
+impl CudaPrecision {
+    const fn into_runtime(self) -> speakrs::inference::CudaMath {
+        match self {
+            Self::Tf32 => speakrs::inference::CudaMath::Tf32,
+            Self::Fp32 => speakrs::inference::CudaMath::Fp32,
+        }
+    }
+}
+
+/// Runtime options the diarize command passes to the models
+#[derive(Debug, Clone, Copy)]
+pub struct RuntimeOptions {
+    pub chunk_emb_compute_units: ChunkEmbeddingComputeUnits,
+    pub cuda_segmentation_math: CudaPrecision,
+    pub cuda_embedding_math: CudaPrecision,
+}
+
 impl ChunkEmbeddingComputeUnits {
     const fn into_runtime(self) -> CoreMlComputeUnits {
         match self {
@@ -127,9 +152,14 @@ impl fmt::Display for DiarizeMode {
 pub fn run(
     mode: DiarizeMode,
     models_dir: Option<PathBuf>,
-    chunk_emb_compute_units: ChunkEmbeddingComputeUnits,
+    options: RuntimeOptions,
     wav_files: Vec<PathBuf>,
 ) -> Result<()> {
+    let RuntimeOptions {
+        chunk_emb_compute_units,
+        cuda_segmentation_math,
+        cuda_embedding_math,
+    } = options;
     let command_start = Instant::now();
 
     ensure!(!wav_files.is_empty(), "no WAV files specified");
@@ -147,9 +177,20 @@ pub fn run(
             let runtime_config = RuntimeConfig {
                 #[cfg(feature = "coreml")]
                 chunk_emb_compute_units: compute_units,
+                #[cfg(feature = "cuda")]
+                cuda_segmentation_math: cuda_segmentation_math.into_runtime(),
+                #[cfg(feature = "cuda")]
+                cuda_embedding_math: cuda_embedding_math.into_runtime(),
                 experiment: None,
                 ..RuntimeConfig::default()
             };
+            #[cfg(not(feature = "cuda"))]
+            let _ = (cuda_segmentation_math, cuda_embedding_math);
+            if speakrs_mode.execution_mode().is_cuda() {
+                eprintln!(
+                    "runtime config: cuda_segmentation_math={cuda_segmentation_math:?} cuda_embedding_math={cuda_embedding_math:?}"
+                );
+            }
             if compute_units != CoreMlComputeUnits::All {
                 eprintln!("runtime config: compute_units={chunk_emb_compute_units:?}");
             }
@@ -160,10 +201,11 @@ pub fn run(
 
             let step = speakrs_mode.step_seconds();
             let seg_model_start = Instant::now();
-            let mut seg_model = SegmentationModel::with_mode(
+            let mut seg_model = SegmentationModel::with_mode_and_config(
                 models_dir.join("segmentation-3.0.onnx"),
                 step as f32,
                 execution_mode,
+                &runtime_config,
             )?;
             let seg_model_elapsed = seg_model_start.elapsed();
 

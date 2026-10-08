@@ -147,8 +147,7 @@ impl<'ctx, 'a> SingleWorker<'ctx, 'a> {
         let predict_start = std::time::Instant::now();
         let tensor = self
             .model
-            .predict_cached(&[(&scratch.cached_shape, scratch.input_data()?)])
-            .map_err(|error| SegmentationError::Ort(ort::Error::new(error.to_string())))?;
+            .predict_cached(&[(&scratch.cached_shape, scratch.input_data()?)])?;
         let predict_us = predict_start.elapsed().as_micros() as u64;
         self.profile.record_single(self.worker_idx, predict_us);
         let (data, frames, classes) =

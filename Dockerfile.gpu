@@ -8,19 +8,6 @@
 FROM ghcr.io/avencera/speakrs-gpu-base:latest AS base
 
 # =============================================================================
-# Download Microsoft's official ORT GPU shared lib (CUDA EP providers)
-# =============================================================================
-FROM base AS ort-download
-
-ARG ORT_VERSION=1.24.2
-RUN curl -fSL -o /tmp/ort.tgz \
-        "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-gpu-${ORT_VERSION}.tgz" && \
-    mkdir -p /opt/ort-libs && \
-    tar xzf /tmp/ort.tgz --strip-components=2 -C /opt/ort-libs \
-        --wildcards "*/lib/*.so*" && \
-    rm /tmp/ort.tgz
-
-# =============================================================================
 # cargo-chef: compute dependency recipe from lock file
 # =============================================================================
 FROM base AS planner
@@ -41,7 +28,7 @@ RUN cargo install cargo-chef --locked
 COPY --from=planner /build/recipe.json recipe.json
 RUN --mount=type=cache,target=/root/.cargo/registry,id=speakrs-gpu-cargo-registry \
     --mount=type=cache,target=/root/.cargo/git,id=speakrs-gpu-cargo-git \
-    cargo chef cook --release --recipe-path recipe.json --features cuda -p xtask
+    cargo chef cook --release --recipe-path recipe.json --no-default-features --features cuda -p xtask
 
 # =============================================================================
 # Build the real speakrs-bm binary (deps are cached, only project code compiles)
@@ -53,20 +40,21 @@ COPY xtask/Cargo.toml xtask/Cargo.toml
 COPY src/ ./src/
 COPY xtask/ ./xtask/
 
-RUN cargo build --release -p xtask --features cuda --bin speakrs-bm && \
+RUN cargo build --release -p xtask --no-default-features --features cuda --bin speakrs-bm && \
     mkdir -p /opt/bin && \
     cp -P target/release/speakrs-bm /opt/bin/
 
 # =============================================================================
-# Slim runtime: binary + ORT libs + pyannote script only
-# Models and datasets are downloaded from S3 (Tigris) at startup
+# Slim runtime: binary + pyannote script only
+# Models are downloaded from Hugging Face and datasets from public archives at startup
+# The native CUDA backend loads cuBLAS and NVRTC from the CUDA runtime base image and cuDNN 9 from its
+# libcudnn9-cuda-12 package (docker/runtime.Dockerfile)
 #
 # Pre-built runtime base: just gpu-runtime-image
 # =============================================================================
 FROM ghcr.io/avencera/speakrs-gpu-runtime:latest
 
 COPY --from=builder /opt/bin/speakrs-bm /usr/local/bin/
-COPY --from=ort-download /opt/ort-libs/ /usr/local/lib/
 COPY scripts/pyannote-bench/ /opt/pyannote-bench/
 
 # pre-install pyannote venv (torch 2.10+cu128 matches PyPI torchcodec 0.10 ABI)

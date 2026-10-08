@@ -114,8 +114,12 @@ impl PipelineBuilder {
         #[cfg(not(feature = "_metrics"))]
         let step = segmentation_step_seconds(self.mode);
 
-        let seg_model =
-            SegmentationModel::with_mode(self.bundle.segmentation_path(), step as f32, self.mode)?;
+        let seg_model = SegmentationModel::with_mode_and_config(
+            self.bundle.segmentation_path(),
+            step as f32,
+            self.mode,
+            &runtime,
+        )?;
         let emb_model = EmbeddingModel::with_mode_and_config(
             self.bundle.embedding_path(),
             self.mode,

@@ -46,7 +46,7 @@ jobs:
       - name: Package crate
         run: |
           rm -rf target/package
-          cargo package --locked
+          cargo package --locked --features cpu
 
       - name: Check packaged crate as a dependency
         shell: bash
@@ -87,6 +87,5 @@ jobs:
             cargo check --manifest-path "$consumer/Cargo.toml"
           }
 
-          check_consumer default "{ path = \"$package_path\" }"
-          check_consumer load-dynamic "{ path = \"$package_path\", features = [\"load-dynamic\"] }"
-          check_consumer custom-linalg "{ path = \"$package_path\", default-features = false, features = [\"online\", \"intel-mkl\"] }"
+          check_consumer cpu "{ path = \"$package_path\", features = [\"cpu\"] }"
+          check_consumer load-dynamic "{ path = \"$package_path\", features = [\"cpu\", \"load-dynamic\"] }"

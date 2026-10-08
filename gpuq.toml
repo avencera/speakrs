@@ -13,13 +13,7 @@ command = [
   "1",
 ]
 allowed_env = ["RUST_BACKTRACE", "RUST_LOG", "SPEAKRS_RUN_ID"]
-required_secret_env = [
-  "AWS_ACCESS_KEY_ID",
-  "AWS_SECRET_ACCESS_KEY",
-  "AWS_ENDPOINT_URL",
-  "AWS_REGION",
-  "HF_TOKEN",
-]
+required_secret_env = []
 
 [deployments.speakrs-canary-beam-rtx4090]
 workload = "speakrs-cuda-canary"
@@ -33,13 +27,7 @@ max_log_bytes = 16777216
 [deployments.speakrs-canary-beam-rtx4090.provider]
 kind = "beam"
 gpu = "RTX4090"
-secret_sources = [
-  "AWS_ACCESS_KEY_ID",
-  "AWS_SECRET_ACCESS_KEY",
-  "AWS_ENDPOINT_URL",
-  "AWS_REGION",
-  "HF_TOKEN",
-]
+secret_sources = []
 
 [deployments.speakrs-canary-modal-l40s]
 workload = "speakrs-cuda-canary"
@@ -53,4 +41,4 @@ max_log_bytes = 16777216
 [deployments.speakrs-canary-modal-l40s.provider]
 kind = "modal"
 gpu = "L40S"
-secret_sources = ["speakrs-tigris", "speakrs-huggingface"]
+secret_sources = []

@@ -1,40 +1,21 @@
-#![cfg(feature = "coreml")]
-
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use objc2_core_ml::MLComputeUnits;
 
-#[cfg(test)]
-use crate::inference::coreml::CoreMlModel;
-use crate::inference::coreml::{CachedInputShape, GpuPrecision, SharedCoreMlModel};
+use crate::inference::coreml::{CachedInputShape, CoreMlError, GpuPrecision, SharedCoreMlModel};
 use crate::inference::{ExecutionMode, ModelLoadError};
 use crate::pipeline::RuntimeConfig;
 #[cfg(feature = "_metrics")]
 use crate::pipeline::{CoreMlChunkLayout, CoreMlShapeLadder};
 
-use super::super::{
-    CHUNK_SPEAKER_BATCH_SIZE, ChunkEmbeddingSession, ChunkSessionSpec, EmbeddingModel,
-    FBANK_FEATURES, MASK_FRAMES, fp32_coreml_path, split_fbank_batched_model_path,
-    split_fbank_model_path, split_tail_model_path,
+use super::super::paths::{
+    fp32_coreml_path, split_fbank_batched_model_path, split_fbank_model_path, split_tail_model_path,
 };
-
-#[cfg(test)]
-fn load_shared_or_warn(
-    path: &Path,
-    mode: ExecutionMode,
-    compute_units: MLComputeUnits,
-    error_context: &str,
-) -> Result<SharedCoreMlModel, ModelLoadError> {
-    EmbeddingModel::require_native_asset(path.to_path_buf(), mode)?;
-    SharedCoreMlModel::load(path, compute_units, "output", GpuPrecision::Low).map_err(|error| {
-        ModelLoadError::NativeAssetLoad {
-            mode,
-            path: path.to_path_buf(),
-            message: format!("{error_context}: {error}"),
-        }
-    })
-}
+use super::super::{
+    CHUNK_SPEAKER_BATCH_SIZE, ChunkEmbeddingSession, ChunkSessionSpec, FBANK_FEATURES, MASK_FRAMES,
+    PRIMARY_BATCH_SIZE,
+};
 
 const CHUNK_WINDOW_FBANK_FRAMES: usize = 1000;
 const ONE_SECOND_FBANK_FRAMES: usize = 100;
@@ -127,183 +108,151 @@ const COREML_REDUCED_CHUNK_CONFIGS: &[ChunkSessionConfig] = &[
     ChunkSessionConfig::one_second_phased(111),
 ];
 
-impl EmbeddingModel {
-    fn require_native_asset(
-        path: std::path::PathBuf,
-        mode: ExecutionMode,
-    ) -> Result<(), ModelLoadError> {
-        if path.exists() {
-            Ok(())
-        } else {
-            Err(ModelLoadError::MissingNativeAsset { mode, path })
-        }
-    }
+/// Compiled CoreML embedding bundles derived from the base embedding ONNX path
+///
+/// Only file stems are used, so the ONNX files do not need to exist. Required bundles are
+/// plain paths; optional ones are present only when the bundle exists
+pub(super) struct CoreMlEmbeddingAssets {
+    pub(super) fbank: PathBuf,
+    pub(super) fbank_batched: PathBuf,
+    pub(super) fbank_30s: Option<PathBuf>,
+    pub(super) tail: PathBuf,
+    pub(super) tail_batched: PathBuf,
+    pub(super) tail_primary_batched: Option<PathBuf>,
+    pub(super) multi_mask: PathBuf,
+    pub(super) chunk_sessions: Vec<ChunkSessionSpec>,
+}
 
-    pub(in crate::inference::embedding) fn validate_native_coreml_assets(
+impl CoreMlEmbeddingAssets {
+    pub(super) fn resolve(
         model_path: &Path,
         mode: ExecutionMode,
-        _runtime: &RuntimeConfig,
-    ) -> Result<(), ModelLoadError> {
-        if !mode.is_coreml() {
-            return Ok(());
-        }
-
-        Self::require_native_asset(fp32_coreml_path(&split_fbank_model_path(model_path)), mode)?;
-        Self::require_native_asset(
+        runtime: &RuntimeConfig,
+    ) -> Result<Self, ModelLoadError> {
+        let fbank =
+            require_native_asset(fp32_coreml_path(&split_fbank_model_path(model_path)), mode)?;
+        let fbank_batched = require_native_asset(
             fp32_coreml_path(&split_fbank_batched_model_path(model_path)),
             mode,
         )?;
-        Self::require_native_asset(
+        let tail = require_native_asset(
             fp32_coreml_path(&split_tail_model_path(model_path, 1)),
             mode,
         )?;
-        Self::require_native_asset(
+        let tail_batched = require_native_asset(
             fp32_coreml_path(&split_tail_model_path(model_path, CHUNK_SPEAKER_BATCH_SIZE)),
             mode,
         )?;
-        Self::require_native_asset(
+        let multi_mask = require_native_asset(
             fp32_coreml_path(&model_path.with_file_name("wespeaker-multimask-tail-b32.onnx")),
             mode,
         )?;
 
-        if runtime_uses_native_chunk_sessions(mode, _runtime) {
-            Self::require_native_asset(
-                model_path.with_file_name("wespeaker-fbank-30s.mlmodelc"),
-                mode,
-            )?;
+        let fbank_30s = model_path.with_file_name("wespeaker-fbank-30s.mlmodelc");
+        if runtime_uses_native_chunk_sessions(mode, runtime) {
+            require_native_asset(fbank_30s.clone(), mode)?;
 
-            for config in Self::chunk_session_config(mode, _runtime) {
+            for config in chunk_session_config(mode, runtime) {
                 require_chunk_native_asset(model_path, *config, mode)?;
             }
         }
 
-        Ok(())
-    }
-
-    #[cfg(test)]
-    pub(in crate::inference::embedding) fn load_native_tail(
-        model_path: &Path,
-        mode: ExecutionMode,
-        batch_size: usize,
-        compute_units: MLComputeUnits,
-    ) -> Result<Option<CoreMlModel>, ModelLoadError> {
-        match mode {
-            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast => {}
-            _ => return Ok(None),
-        }
-        let tail_onnx = split_tail_model_path(model_path, batch_size);
-        let coreml_path = fp32_coreml_path(&tail_onnx);
-        Self::require_native_asset(coreml_path.clone(), mode)?;
-        let model = CoreMlModel::load(&coreml_path, compute_units, "output", GpuPrecision::Low)
-            .map_err(|error| ModelLoadError::NativeAssetLoad {
-                mode,
-                path: coreml_path,
-                message: format!(
-                    "Failed to load native CoreML tail (batch_size={batch_size}): {error}"
-                ),
-            })?;
-        Ok(Some(model))
-    }
-
-    #[cfg(test)]
-    pub(in crate::inference::embedding) fn load_native_fbank(
-        model_path: &Path,
-        mode: ExecutionMode,
-        batch_size: usize,
-    ) -> Result<Option<SharedCoreMlModel>, ModelLoadError> {
-        if !mode.is_coreml() {
-            return Ok(None);
-        }
-        let fbank_onnx = if batch_size == 1 {
-            split_fbank_model_path(model_path)
-        } else {
-            split_fbank_batched_model_path(model_path)
-        };
-        let coreml_path = fp32_coreml_path(&fbank_onnx);
-        load_shared_or_warn(
-            &coreml_path,
-            mode,
-            CoreMlModel::default_compute_units(),
-            &format!("Failed to load native CoreML fbank (batch_size={batch_size})"),
-        )
-        .map(Some)
-    }
-
-    fn chunk_session_config(
-        mode: ExecutionMode,
-        _runtime: &RuntimeConfig,
-    ) -> &'static [ChunkSessionConfig] {
-        #[cfg(feature = "_metrics")]
-        if let Some(experiment) = _runtime.experiment {
-            return match (experiment.coreml_chunk_layout(), experiment.shape_ladder()) {
-                (CoreMlChunkLayout::OneSecondPhased, CoreMlShapeLadder::Full) => {
-                    COREML_CHUNK_CONFIGS
-                }
-                (CoreMlChunkLayout::OneSecondPhased, CoreMlShapeLadder::Reduced) => {
-                    COREML_REDUCED_CHUNK_CONFIGS
-                }
-                (CoreMlChunkLayout::FastS25, CoreMlShapeLadder::Full) => COREML_FAST_CHUNK_CONFIGS,
-                (CoreMlChunkLayout::PerWindow, CoreMlShapeLadder::Full) => &[],
-                (_, CoreMlShapeLadder::Reduced) => &[],
-            };
-        }
-
-        match mode {
-            ExecutionMode::CoreMlFast => COREML_FAST_CHUNK_CONFIGS,
-            ExecutionMode::CoreMl => COREML_CHUNK_CONFIGS,
-            _ => &[],
-        }
-    }
-
-    pub(in crate::inference::embedding) fn chunk_session_specs(
-        model_path: &Path,
-        mode: ExecutionMode,
-        runtime: &RuntimeConfig,
-    ) -> Vec<ChunkSessionSpec> {
-        if !mode.is_coreml() {
-            return Vec::new();
-        }
-
-        Self::chunk_session_config(mode, runtime)
-            .iter()
-            .filter_map(|&config| {
-                let coreml_path = chunk_native_asset_path(model_path, config)?;
-
-                Some(ChunkSessionSpec {
-                    coreml_path,
-                    num_windows: config.num_windows,
-                    fbank_frames: config.fbank_frames(),
-                    num_masks: config.num_masks(),
-                })
-            })
-            .collect()
-    }
-
-    pub(in crate::inference::embedding) fn load_chunk_session(
-        spec: &ChunkSessionSpec,
-        compute_units: MLComputeUnits,
-    ) -> Result<ChunkEmbeddingSession, crate::inference::coreml::CoreMlError> {
-        let model = SharedCoreMlModel::load(
-            &spec.coreml_path,
-            compute_units,
-            "output",
-            GpuPrecision::Low,
-        )?;
-        Ok(ChunkEmbeddingSession {
-            model: Arc::new(model),
-            num_windows: spec.num_windows,
-            fbank_frames: spec.fbank_frames,
-            num_masks: spec.num_masks,
-            cached_fbank_shape: Arc::new(CachedInputShape::new(
-                "fbank",
-                &[1, spec.fbank_frames, FBANK_FEATURES],
-            )),
-            cached_masks_shape: Arc::new(CachedInputShape::new(
-                "masks",
-                &[spec.num_masks, MASK_FRAMES],
-            )),
+        Ok(Self {
+            fbank,
+            fbank_batched,
+            fbank_30s: existing(fbank_30s),
+            tail,
+            tail_batched,
+            tail_primary_batched: existing(fp32_coreml_path(&split_tail_model_path(
+                model_path,
+                PRIMARY_BATCH_SIZE,
+            ))),
+            multi_mask,
+            chunk_sessions: chunk_session_specs(model_path, mode, runtime),
         })
     }
+}
+
+fn existing(path: PathBuf) -> Option<PathBuf> {
+    path.exists().then_some(path)
+}
+
+fn require_native_asset(path: PathBuf, mode: ExecutionMode) -> Result<PathBuf, ModelLoadError> {
+    if path.exists() {
+        Ok(path)
+    } else {
+        Err(ModelLoadError::MissingNativeAsset { mode, path })
+    }
+}
+
+fn chunk_session_config(
+    mode: ExecutionMode,
+    _runtime: &RuntimeConfig,
+) -> &'static [ChunkSessionConfig] {
+    #[cfg(feature = "_metrics")]
+    if let Some(experiment) = _runtime.experiment {
+        return match (experiment.coreml_chunk_layout(), experiment.shape_ladder()) {
+            (CoreMlChunkLayout::OneSecondPhased, CoreMlShapeLadder::Full) => COREML_CHUNK_CONFIGS,
+            (CoreMlChunkLayout::OneSecondPhased, CoreMlShapeLadder::Reduced) => {
+                COREML_REDUCED_CHUNK_CONFIGS
+            }
+            (CoreMlChunkLayout::FastS25, CoreMlShapeLadder::Full) => COREML_FAST_CHUNK_CONFIGS,
+            (CoreMlChunkLayout::PerWindow, CoreMlShapeLadder::Full) => &[],
+            (_, CoreMlShapeLadder::Reduced) => &[],
+        };
+    }
+
+    match mode {
+        ExecutionMode::CoreMlFast => COREML_FAST_CHUNK_CONFIGS,
+        ExecutionMode::CoreMl => COREML_CHUNK_CONFIGS,
+        _ => &[],
+    }
+}
+
+fn chunk_session_specs(
+    model_path: &Path,
+    mode: ExecutionMode,
+    runtime: &RuntimeConfig,
+) -> Vec<ChunkSessionSpec> {
+    chunk_session_config(mode, runtime)
+        .iter()
+        .filter_map(|&config| {
+            let coreml_path = chunk_native_asset_path(model_path, config)?;
+
+            Some(ChunkSessionSpec {
+                coreml_path,
+                num_windows: config.num_windows,
+                fbank_frames: config.fbank_frames(),
+                num_masks: config.num_masks(),
+            })
+        })
+        .collect()
+}
+
+pub(super) fn load_chunk_session(
+    spec: &ChunkSessionSpec,
+    compute_units: MLComputeUnits,
+) -> Result<ChunkEmbeddingSession, CoreMlError> {
+    let model = SharedCoreMlModel::load(
+        &spec.coreml_path,
+        compute_units,
+        "output",
+        GpuPrecision::Low,
+    )?;
+    Ok(ChunkEmbeddingSession {
+        model: Arc::new(model),
+        num_windows: spec.num_windows,
+        fbank_frames: spec.fbank_frames,
+        num_masks: spec.num_masks,
+        cached_fbank_shape: Arc::new(CachedInputShape::new(
+            "fbank",
+            &[1, spec.fbank_frames, FBANK_FEATURES],
+        )),
+        cached_masks_shape: Arc::new(CachedInputShape::new(
+            "masks",
+            &[spec.num_masks, MASK_FRAMES],
+        )),
+    })
 }
 
 fn runtime_uses_native_chunk_sessions(mode: ExecutionMode, _runtime: &RuntimeConfig) -> bool {
@@ -317,10 +266,7 @@ fn runtime_uses_native_chunk_sessions(mode: ExecutionMode, _runtime: &RuntimeCon
     mode.is_coreml()
 }
 
-fn chunk_native_asset_path(
-    model_path: &Path,
-    config: ChunkSessionConfig,
-) -> Option<std::path::PathBuf> {
+fn chunk_native_asset_path(model_path: &Path, config: ChunkSessionConfig) -> Option<PathBuf> {
     let stem = config.model_stem();
     let fp32_path = model_path.with_file_name(format!("{stem}.mlmodelc"));
     if fp32_path.exists() {
@@ -388,51 +334,69 @@ mod tests {
         }
     }
 
-    #[test]
-    fn load_native_fbank_errors_when_bundle_is_invalid() {
-        let dir = TestDir::new("emb-fbank-invalid");
-        let model_path = dir.path().join("wespeaker-voxceleb-resnet34.onnx");
-        fs::write(&model_path, b"placeholder").unwrap();
-        dir.write_invalid_mlmodelc("wespeaker-fbank.mlmodelc");
+    const REQUIRED_BUNDLES: &[&str] = &[
+        "wespeaker-fbank.mlmodelc",
+        "wespeaker-fbank-b32.mlmodelc",
+        "wespeaker-voxceleb-resnet34-tail.mlmodelc",
+        "wespeaker-voxceleb-resnet34-tail-b3.mlmodelc",
+        "wespeaker-multimask-tail-b32.mlmodelc",
+    ];
 
-        let error = match EmbeddingModel::load_native_fbank(&model_path, ExecutionMode::CoreMl, 1) {
-            Ok(_) => panic!("invalid fbank bundle should error"),
-            Err(error) => error,
-        };
-
-        assert!(matches!(
-            error,
-            ModelLoadError::NativeAssetLoad {
+    fn expect_missing(model_path: &Path) -> PathBuf {
+        let result = CoreMlEmbeddingAssets::resolve(
+            model_path,
+            ExecutionMode::CoreMl,
+            &RuntimeConfig::default(),
+        );
+        match result {
+            Err(ModelLoadError::MissingNativeAsset {
                 mode: ExecutionMode::CoreMl,
-                ..
-            }
-        ));
+                path,
+            }) => path,
+            Err(other) => panic!("unexpected error: {other}"),
+            Ok(_) => panic!("missing bundles should error"),
+        }
     }
 
     #[test]
-    fn load_native_tail_errors_when_bundle_is_invalid() {
-        let dir = TestDir::new("emb-tail-invalid");
+    fn resolve_requires_bundles_without_onnx_files() {
+        let dir = TestDir::new("emb-assets");
+        // the ONNX files are never read in CoreML modes, so none exist here
         let model_path = dir.path().join("wespeaker-voxceleb-resnet34.onnx");
-        fs::write(&model_path, b"placeholder").unwrap();
-        dir.write_invalid_mlmodelc("wespeaker-voxceleb-resnet34-tail.mlmodelc");
 
-        let error = match EmbeddingModel::load_native_tail(
+        assert_eq!(
+            expect_missing(&model_path),
+            dir.path().join("wespeaker-fbank.mlmodelc")
+        );
+
+        for bundle in REQUIRED_BUNDLES {
+            dir.write_invalid_mlmodelc(bundle);
+        }
+        assert_eq!(
+            expect_missing(&model_path),
+            dir.path().join("wespeaker-fbank-30s.mlmodelc")
+        );
+
+        dir.write_invalid_mlmodelc("wespeaker-fbank-30s.mlmodelc");
+        for config in COREML_CHUNK_CONFIGS {
+            dir.write_invalid_mlmodelc(&format!("{}.mlmodelc", config.model_stem()));
+        }
+        let assets = CoreMlEmbeddingAssets::resolve(
             &model_path,
             ExecutionMode::CoreMl,
-            1,
-            MLComputeUnits::All,
-        ) {
-            Ok(_) => panic!("invalid tail bundle should error"),
-            Err(error) => error,
-        };
+            &RuntimeConfig::default(),
+        )
+        .unwrap();
 
-        assert!(matches!(
-            error,
-            ModelLoadError::NativeAssetLoad {
-                mode: ExecutionMode::CoreMl,
-                ..
-            }
-        ));
+        assert_eq!(assets.fbank, dir.path().join("wespeaker-fbank.mlmodelc"));
+        assert_eq!(
+            assets.multi_mask,
+            dir.path().join("wespeaker-multimask-tail-b32.mlmodelc")
+        );
+        assert!(assets.fbank_30s.is_some());
+        assert!(assets.tail_primary_batched.is_none());
+        assert_eq!(assets.chunk_sessions.len(), COREML_CHUNK_CONFIGS.len());
+        assert!(!model_path.exists());
     }
 
     #[test]
@@ -516,7 +480,7 @@ mod tests {
 
         for &(layout, mode, expected) in cases {
             let runtime = runtime_with_layout(layout);
-            let actual: Vec<_> = EmbeddingModel::chunk_session_config(mode, &runtime)
+            let actual: Vec<_> = chunk_session_config(mode, &runtime)
                 .iter()
                 .map(|config| {
                     (
@@ -541,7 +505,7 @@ mod tests {
     fn per_window_layouts_select_no_chunk_sessions() {
         let runtime = runtime_with_layout(CoreMlChunkLayout::PerWindow);
 
-        assert!(EmbeddingModel::chunk_session_config(ExecutionMode::CoreMl, &runtime).is_empty());
+        assert!(chunk_session_config(ExecutionMode::CoreMl, &runtime).is_empty());
         assert!(!runtime_uses_native_chunk_sessions(
             ExecutionMode::CoreMl,
             &runtime

@@ -55,7 +55,9 @@ Fused model on GPU, concurrent pipeline, 2s step. Same relationship as CoreMlFas
 | Cuda | Fused GPU | Concurrent | 1s | Default CUDA — best accuracy |
 | CudaFast | Fused GPU | Concurrent | 2s | Speed-optimized, acceptable DER |
 
-All three share the same CUDA EP config: tf32=false, Exhaustive conv search, max workspace, SameAsRequested arena strategy.
+Both modes shared the same ONNX Runtime CUDA EP config: TF32 enabled, NHWC preferred, Exhaustive conv search, max workspace, SameAsRequested arena strategy.
+
+> **Update:** the CUDA modes no longer use ONNX Runtime. They run on the native CUDA backend, where math precision is set per model through `RuntimeConfig`: segmentation runs in FP32 and embedding in TF32 by default.
 
 ## Supersedes
 

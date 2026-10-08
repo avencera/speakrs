@@ -1,10 +1,11 @@
-//! Checked tensor layout used by inference adapters before native or ORT work.
+//! Checked tensor layout used by inference adapters before native or ORT work
 
 use std::fmt;
 
-/// Shape, length, rank, and CoreML output-type failures
+/// Tensor shape, length, rank, or output-type mismatch found while binding inputs or decoding outputs
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum GeometryError {
+#[non_exhaustive]
+pub enum TensorShapeError {
     /// Multiplying dimensions overflowed `usize`
     Overflow {
         /// Which bind or decode step failed
@@ -46,8 +47,20 @@ pub(crate) enum GeometryError {
         /// Observed dimensions
         actual: Vec<usize>,
     },
+    /// One tensor axis did not match the model contract
+    AxisMismatch {
+        /// Which decode step failed
+        context: &'static str,
+        /// Zero-based axis index
+        axis: usize,
+        /// Required axis length
+        expected: usize,
+        /// Observed axis length
+        actual: usize,
+    },
     /// CoreML output was not Float16 or Float32
     #[cfg(any(test, feature = "coreml"))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "coreml")))]
     UnsupportedDType {
         /// Which decode step failed
         context: &'static str,
@@ -56,7 +69,7 @@ pub(crate) enum GeometryError {
     },
 }
 
-impl fmt::Display for GeometryError {
+impl fmt::Display for TensorShapeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Overflow { context } => {
@@ -95,6 +108,15 @@ impl fmt::Display for GeometryError {
                 formatter,
                 "{context}: expected shape {expected:?}, got {actual:?}"
             ),
+            Self::AxisMismatch {
+                context,
+                axis,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "{context}: expected axis {axis} to have length {expected}, got {actual}"
+            ),
             #[cfg(any(test, feature = "coreml"))]
             Self::UnsupportedDType { context, dtype } => write!(
                 formatter,
@@ -104,13 +126,7 @@ impl fmt::Display for GeometryError {
     }
 }
 
-impl std::error::Error for GeometryError {}
-
-impl GeometryError {
-    pub(crate) fn into_ort(self) -> ort::Error {
-        ort::Error::new(self.to_string())
-    }
-}
+impl std::error::Error for TensorShapeError {}
 
 /// CoreML output types that adapters may decode
 #[cfg(any(test, feature = "coreml"))]
@@ -147,24 +163,24 @@ impl CoreMlOutputDType {
     pub(crate) fn try_from_tag(
         tag: CoreMlDTypeTag,
         context: &'static str,
-    ) -> Result<Self, GeometryError> {
+    ) -> Result<Self, TensorShapeError> {
         match tag {
             CoreMlDTypeTag::Float16 => Ok(Self::Float16),
             CoreMlDTypeTag::Float32 => Ok(Self::Float32),
-            CoreMlDTypeTag::Float64 => Err(GeometryError::UnsupportedDType {
+            CoreMlDTypeTag::Float64 => Err(TensorShapeError::UnsupportedDType {
                 context,
                 dtype: "Float64",
             }),
-            CoreMlDTypeTag::Int32 => Err(GeometryError::UnsupportedDType {
+            CoreMlDTypeTag::Int32 => Err(TensorShapeError::UnsupportedDType {
                 context,
                 dtype: "Int32",
             }),
-            CoreMlDTypeTag::Int8 => Err(GeometryError::UnsupportedDType {
+            CoreMlDTypeTag::Int8 => Err(TensorShapeError::UnsupportedDType {
                 context,
                 dtype: "Int8",
             }),
             #[cfg(feature = "coreml")]
-            CoreMlDTypeTag::Other => Err(GeometryError::UnsupportedDType {
+            CoreMlDTypeTag::Other => Err(TensorShapeError::UnsupportedDType {
                 context,
                 dtype: "unsupported",
             }),
@@ -172,6 +188,7 @@ impl CoreMlOutputDType {
     }
 }
 
+#[cfg(any(test, feature = "_ort", feature = "coreml"))]
 /// Declared dimensions plus their checked element count
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TensorLayout {
@@ -179,9 +196,13 @@ pub(crate) struct TensorLayout {
     element_count: usize,
 }
 
+#[cfg(any(test, feature = "_ort", feature = "coreml"))]
 impl TensorLayout {
     /// Build a layout with a checked shape product
-    pub(crate) fn from_dims(dims: &[usize], context: &'static str) -> Result<Self, GeometryError> {
+    pub(crate) fn from_dims(
+        dims: &[usize],
+        context: &'static str,
+    ) -> Result<Self, TensorShapeError> {
         Ok(Self {
             dims: dims.to_vec(),
             element_count: checked_element_count(dims, context)?,
@@ -189,16 +210,17 @@ impl TensorLayout {
     }
 
     /// Build a layout from an ORT shape after checking signed dimensions
+    #[cfg(feature = "_ort")]
     pub(crate) fn from_ort_shape(
         shape: &[i64],
         context: &'static str,
-    ) -> Result<Self, GeometryError> {
+    ) -> Result<Self, TensorShapeError> {
         let dims = shape
             .iter()
             .copied()
             .map(|dimension| {
                 usize::try_from(dimension)
-                    .map_err(|_| GeometryError::InvalidDimension { context, dimension })
+                    .map_err(|_| TensorShapeError::InvalidDimension { context, dimension })
             })
             .collect::<Result<Vec<_>, _>>()?;
         Self::from_dims(&dims, context)
@@ -215,7 +237,7 @@ impl TensorLayout {
 
     /// Require `data` to have exactly this layout's element count
     #[cfg(any(test, feature = "coreml"))]
-    pub(crate) fn bind<'a>(&self, data: &'a [f32]) -> Result<&'a [f32], GeometryError> {
+    pub(crate) fn bind<'a>(&self, data: &'a [f32]) -> Result<&'a [f32], TensorShapeError> {
         require_exact_len(data.len(), self.element_count, "coreml input")?;
         Ok(data)
     }
@@ -224,11 +246,11 @@ impl TensorLayout {
         &self,
         expected: usize,
         context: &'static str,
-    ) -> Result<&[usize], GeometryError> {
+    ) -> Result<&[usize], TensorShapeError> {
         if self.dims.len() == expected {
             Ok(&self.dims)
         } else {
-            Err(GeometryError::RankMismatch {
+            Err(TensorShapeError::RankMismatch {
                 context,
                 expected,
                 actual: self.dims.len(),
@@ -240,21 +262,22 @@ impl TensorLayout {
     pub(crate) fn try_rank3(
         &self,
         context: &'static str,
-    ) -> Result<(usize, usize, usize), GeometryError> {
+    ) -> Result<(usize, usize, usize), TensorShapeError> {
         let dims = self.try_rank(3, context)?;
         Ok((dims[0], dims[1], dims[2]))
     }
 
     /// Require dimensions to match a model's exact output contract
+    #[cfg(any(feature = "_ort", feature = "coreml"))]
     pub(crate) fn try_exact_dims(
         &self,
         expected: &[usize],
         context: &'static str,
-    ) -> Result<(), GeometryError> {
+    ) -> Result<(), TensorShapeError> {
         if self.dims == expected {
             Ok(())
         } else {
-            Err(GeometryError::ShapeMismatch {
+            Err(TensorShapeError::ShapeMismatch {
                 context,
                 expected: expected.to_vec(),
                 actual: self.dims.clone(),
@@ -278,7 +301,7 @@ impl CoreMlTensor {
         data: Vec<f32>,
         shape: Vec<usize>,
         context: &'static str,
-    ) -> Result<Self, GeometryError> {
+    ) -> Result<Self, TensorShapeError> {
         let layout = TensorLayout::from_dims(&shape, context)?;
         require_exact_len(data.len(), layout.element_count(), context)?;
         Ok(Self { data, layout })
@@ -292,7 +315,7 @@ impl CoreMlTensor {
     pub(crate) fn try_rank3(
         &self,
         context: &'static str,
-    ) -> Result<(usize, usize, usize), GeometryError> {
+    ) -> Result<(usize, usize, usize), TensorShapeError> {
         self.layout.try_rank3(context)
     }
 
@@ -301,7 +324,7 @@ impl CoreMlTensor {
         self.data
     }
 
-    #[cfg(any(test, feature = "coreml"))]
+    #[cfg(any(feature = "coreml", all(test, feature = "_ort")))]
     pub(crate) fn into_parts(self) -> (TensorLayout, Vec<f32>) {
         (self.layout, self.data)
     }
@@ -310,34 +333,36 @@ impl CoreMlTensor {
     pub(crate) fn rank3_hw(
         self,
         context: &'static str,
-    ) -> Result<(Vec<f32>, usize, usize), GeometryError> {
+    ) -> Result<(Vec<f32>, usize, usize), TensorShapeError> {
         let (_, frames, classes) = self.try_rank3(context)?;
         Ok((self.data, frames, classes))
     }
 }
 
+#[cfg(any(test, feature = "_ort", feature = "coreml"))]
 pub(crate) fn checked_element_count(
     dims: &[usize],
     context: &'static str,
-) -> Result<usize, GeometryError> {
+) -> Result<usize, TensorShapeError> {
     let mut count = 1usize;
     for &dim in dims {
         count = count
             .checked_mul(dim)
-            .ok_or(GeometryError::Overflow { context })?;
+            .ok_or(TensorShapeError::Overflow { context })?;
     }
     Ok(count)
 }
 
+#[cfg(any(test, feature = "_ort", feature = "coreml"))]
 pub(crate) fn require_exact_len(
     actual: usize,
     expected: usize,
     context: &'static str,
-) -> Result<(), GeometryError> {
+) -> Result<(), TensorShapeError> {
     if actual == expected {
         Ok(())
     } else {
-        Err(GeometryError::LengthMismatch {
+        Err(TensorShapeError::LengthMismatch {
             context,
             expected,
             actual,
@@ -348,7 +373,7 @@ pub(crate) fn require_exact_len(
 #[cfg(test)]
 mod tests {
     use super::{
-        CoreMlDTypeTag, CoreMlOutputDType, CoreMlTensor, GeometryError, TensorLayout,
+        CoreMlDTypeTag, CoreMlOutputDType, CoreMlTensor, TensorLayout, TensorShapeError,
         checked_element_count,
     };
 
@@ -365,7 +390,7 @@ mod tests {
         let error = layout.bind(&[1.0, 2.0, 3.0]).unwrap_err();
         assert_eq!(
             error,
-            GeometryError::LengthMismatch {
+            TensorShapeError::LengthMismatch {
                 context: "coreml input",
                 expected: 4,
                 actual: 3,
@@ -379,7 +404,7 @@ mod tests {
         let error = layout.bind(&[1.0, 2.0, 3.0, 4.0, 5.0]).unwrap_err();
         assert_eq!(
             error,
-            GeometryError::LengthMismatch {
+            TensorShapeError::LengthMismatch {
                 context: "coreml input",
                 expected: 4,
                 actual: 5,
@@ -392,7 +417,7 @@ mod tests {
         let error = checked_element_count(&[usize::MAX, 2], "coreml input").unwrap_err();
         assert_eq!(
             error,
-            GeometryError::Overflow {
+            TensorShapeError::Overflow {
                 context: "coreml input"
             }
         );
@@ -409,7 +434,7 @@ mod tests {
             let error = CoreMlOutputDType::try_from_tag(tag, "coreml output").unwrap_err();
             assert_eq!(
                 error,
-                GeometryError::UnsupportedDType {
+                TensorShapeError::UnsupportedDType {
                     context: "coreml output",
                     dtype,
                 }
@@ -430,7 +455,7 @@ mod tests {
         let rank0 = CoreMlTensor::try_from_decoded(vec![1.0], vec![], "coreml output").unwrap();
         assert!(matches!(
             rank0.try_rank3("coreml output"),
-            Err(GeometryError::RankMismatch {
+            Err(TensorShapeError::RankMismatch {
                 expected: 3,
                 actual: 0,
                 ..
@@ -441,7 +466,7 @@ mod tests {
             CoreMlTensor::try_from_decoded(vec![1.0, 2.0], vec![1, 2], "coreml output").unwrap();
         assert!(matches!(
             rank2.try_rank3("coreml output"),
-            Err(GeometryError::RankMismatch {
+            Err(TensorShapeError::RankMismatch {
                 expected: 3,
                 actual: 2,
                 ..
@@ -460,7 +485,7 @@ mod tests {
             CoreMlTensor::try_from_decoded(vec![1.0], vec![1, 2, 2], "coreml output").unwrap_err();
         assert_eq!(
             error,
-            GeometryError::LengthMismatch {
+            TensorShapeError::LengthMismatch {
                 context: "coreml output",
                 expected: 4,
                 actual: 1,
