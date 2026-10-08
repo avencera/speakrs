@@ -1,6 +1,6 @@
 #[cfg(any(feature = "coreml", feature = "_metrics"))]
 use crate::inference::CoreMlComputeUnits;
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 use crate::inference::CudaLstmAlgorithm;
 use crate::inference::ExecutionMode;
 #[cfg(feature = "_cuda")]
@@ -748,7 +748,7 @@ pub struct RuntimeConfig {
     /// GPUs, but it moves the segmentation logits by up to about 0.23 and, on
     /// VoxConverse-dev, made one file's DER 4.5 points worse
     #[cfg(feature = "_cuda")]
-    #[cfg_attr(docsrs, doc(cfg(any(feature = "cuda", feature = "cuda-driver-only"))))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "_cuda")))]
     pub cuda_segmentation_math: CudaMath,
     /// Precision of the embedding model's cuDNN convolutions and cuBLAS embedding layer
     /// (CUDA modes only)
@@ -760,15 +760,15 @@ pub struct RuntimeConfig {
     /// looks off, since embedding drift can change PLDA/VBx clustering. The filterbank
     /// always runs in FP32, because TF32 moves its log-mel values by up to 2.7
     #[cfg(feature = "_cuda")]
-    #[cfg_attr(docsrs, doc(cfg(any(feature = "cuda", feature = "cuda-driver-only"))))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "_cuda")))]
     pub cuda_embedding_math: CudaMath,
     /// cuDNN RNN algorithm for the segmentation model's LSTM layers (CUDA modes only)
-    #[cfg(feature = "cuda")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
+    #[cfg(feature = "_cuda-libraries")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "_cuda-libraries")))]
     pub cuda_lstm_algorithm: CudaLstmAlgorithm,
     /// Whether the CUDA modes capture and replay CUDA graphs (CUDA modes only)
     #[cfg(feature = "_cuda")]
-    #[cfg_attr(docsrs, doc(cfg(any(feature = "cuda", feature = "cuda-driver-only"))))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "_cuda")))]
     pub cuda_graphs: CudaGraphs,
     /// Optional typed inference layout for metrics experiments
     #[cfg(feature = "_metrics")]
@@ -788,7 +788,7 @@ impl Default for RuntimeConfig {
             // embedding TF32 and the persistent LSTM passed, see the CUDA DER report
             cuda_segmentation_math: CudaMath::Fp32,
             cuda_embedding_math: CudaMath::Tf32,
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda-libraries")]
             cuda_lstm_algorithm: CudaLstmAlgorithm::PersistStaticSmallH,
             cuda_graphs: CudaGraphs::Enabled,
             #[cfg(feature = "_metrics")]
@@ -812,7 +812,7 @@ impl RuntimeConfig {
 
     /// Select the segmentation precision of the CUDA modes
     #[cfg(feature = "_cuda")]
-    #[cfg_attr(docsrs, doc(cfg(any(feature = "cuda", feature = "cuda-driver-only"))))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "_cuda")))]
     pub const fn with_cuda_segmentation_math(mut self, math: CudaMath) -> Self {
         self.cuda_segmentation_math = math;
         self
@@ -820,15 +820,15 @@ impl RuntimeConfig {
 
     /// Select the embedding precision of the CUDA modes
     #[cfg(feature = "_cuda")]
-    #[cfg_attr(docsrs, doc(cfg(any(feature = "cuda", feature = "cuda-driver-only"))))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "_cuda")))]
     pub const fn with_cuda_embedding_math(mut self, math: CudaMath) -> Self {
         self.cuda_embedding_math = math;
         self
     }
 
     /// Select the segmentation LSTM algorithm of the CUDA modes
-    #[cfg(feature = "cuda")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
+    #[cfg(feature = "_cuda-libraries")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "_cuda-libraries")))]
     pub const fn with_cuda_lstm_algorithm(mut self, algorithm: CudaLstmAlgorithm) -> Self {
         self.cuda_lstm_algorithm = algorithm;
         self
@@ -836,7 +836,7 @@ impl RuntimeConfig {
 
     /// Turn CUDA graph capture on or off in the CUDA modes
     #[cfg(feature = "_cuda")]
-    #[cfg_attr(docsrs, doc(cfg(any(feature = "cuda", feature = "cuda-driver-only"))))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "_cuda")))]
     pub const fn with_cuda_graphs(mut self, graphs: CudaGraphs) -> Self {
         self.cuda_graphs = graphs;
         self

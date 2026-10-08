@@ -1,21 +1,24 @@
 use std::collections::HashMap;
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 use std::sync::MutexGuard;
 use std::sync::{Arc, Mutex};
 
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 use cudarc::cublas::CudaBlas;
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 use cudarc::cudnn::Cudnn;
 use cudarc::driver::sys::CUresult;
 use cudarc::driver::{CudaContext, CudaStream, DriverError};
 use cudarc::nvrtc::Ptx;
 use tracing::debug;
 
+use super::device::DeviceAttributes;
 use super::error::CudaLibrary;
-use super::kernels::{ArtifactHash, ArtifactLoadError, ArtifactRequest, LoadedArtifact};
+#[cfg(all(test, feature = "_cuda-libraries"))]
+use super::kernels::LoadedArtifact;
+use super::kernels::{ArtifactHash, ArtifactLoadError, ModuleRequest};
 use super::{ComputeCapability, CudaError, KernelModule, LoadedKernels, PtxTier};
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 use super::{CudaMath, libraries::Libraries};
 
 /// One CUDA device context and stream, with optional libraries prepared by plans
@@ -24,18 +27,19 @@ use super::{CudaMath, libraries::Libraries};
 /// per worker thread; device buffers from one runtime must not be used on another
 /// runtime's stream without explicit synchronization
 ///
-/// The runtime reads the device's compute capability once and loads, for each kernel
-/// area, the highest compiled-in PTX tier the device supports
+/// The runtime queries the device's attributes once. Each kernel area loads the module
+/// request its production policy names, never a tier inferred from what is embedded
 #[derive(Debug)]
 pub struct CudaRuntime {
     // plans live in the session state; library handles must drop before driver state
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     libraries: Libraries,
     stream: Arc<CudaStream>,
     context: Arc<CudaContext>,
-    capability: ComputeCapability,
+    device: DeviceAttributes,
     ptx_tier: PtxTier,
     modules: Mutex<HashMap<KernelModule, LoadedKernels>>,
+    force_library: bool,
 }
 
 impl CudaRuntime {
@@ -62,11 +66,8 @@ impl CudaRuntime {
         }
 
         let context = CudaContext::new(ordinal)?;
-        let (major, minor) = context.compute_capability()?;
-        let capability = ComputeCapability::new(
-            u32::try_from(major).unwrap_or(0),
-            u32::try_from(minor).unwrap_or(0),
-        );
+        let device = DeviceAttributes::query(&context)?;
+        let capability = device.capability();
         // target features must support the device even when an override lowers the limit
         if super::driver_only() {
             let compiled = PtxTier::select(capability, None)?;
@@ -93,47 +94,41 @@ impl CudaRuntime {
         let stream = context.new_stream()?;
 
         let runtime = Self {
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda-libraries")]
             libraries: Libraries::default(),
             context,
             stream,
-            capability,
+            device,
             ptx_tier,
             modules: Mutex::new(HashMap::new()),
+            force_library: !super::driver_only() && force_library_from_env(),
         };
-        if super::driver_only() && requested.is_some() {
-            for area in [
-                KernelModule::Resnet,
-                KernelModule::Lstm,
-                KernelModule::Sincnet,
-            ] {
-                let location = super::implementation::AreaTarget::for_area(&runtime, area)?;
-                if super::implementation::production_artifact(area, location).is_none() {
-                    return Err(CudaError::TierNotQualified {
-                        tier: location.tier,
-                        device: capability,
-                    });
-                }
-                let target = super::implementation::Target::for_area(&runtime, area)?;
-                if !super::implementation::tier_qualified(area, target) {
-                    return Err(CudaError::TierNotQualified {
-                        tier: target.tier,
-                        device: capability,
-                    });
-                }
-            }
-        }
-        debug!(device_name = %runtime.context.name()?, sm_count = runtime.multiprocessor_count()?, l2_bytes = runtime.l2_cache_size()?, "CUDA device properties");
+        debug!(
+            device_name = runtime.device.name(),
+            sm_count = runtime.device.multiprocessors(),
+            l2_bytes = runtime.device.l2_bytes(),
+            shared_optin_bytes = runtime.device.shared_optin_bytes(),
+            "CUDA device properties"
+        );
         Ok(runtime)
+    }
+
+    /// The model-load policy snapshot, shared by all boundary plans
+    pub(crate) fn force_library(&self) -> bool {
+        self.force_library
     }
 
     /// The device's compute capability
     pub fn compute_capability(&self) -> ComputeCapability {
-        self.capability
+        self.device.capability()
     }
 
-    /// The highest PTX tier this runtime loads; each area loads its highest variant at
-    /// or below it
+    /// The device attributes queried when the runtime opened
+    pub(crate) fn device(&self) -> &DeviceAttributes {
+        &self.device
+    }
+
+    /// The PTX tier limit: a production binding whose tier is above it is not loaded
     pub fn ptx_tier(&self) -> PtxTier {
         self.ptx_tier
     }
@@ -153,7 +148,7 @@ impl CudaRuntime {
         CudaError::LibraryForbidden { library }
     }
 
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     fn library_policy(&self, library: CudaLibrary) -> Result<(), CudaError> {
         if super::driver_only() {
             return Err(Self::library_forbidden(library));
@@ -162,113 +157,120 @@ impl CudaRuntime {
     }
 
     /// Prepare a library during construction, never during forward or capture
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     pub(super) fn prepare_library(&self, library: CudaLibrary) -> Result<(), CudaError> {
         self.library_policy(library)?;
         self.libraries.prepare(library, &self.stream)
     }
 
     /// The already prepared cuBLAS handle
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     pub fn blas(&self) -> Result<&CudaBlas, CudaError> {
         self.library_policy(CudaLibrary::Cublas)?;
         self.libraries.blas()
     }
 
     /// Keep cuBLAS mode selection and enqueue atomic
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     pub(super) fn lock_blas(&self, math: CudaMath) -> Result<MutexGuard<'_, CudaMath>, CudaError> {
         self.library_policy(CudaLibrary::Cublas)?;
         self.libraries.lock_blas(math)
     }
 
     /// The already prepared cuDNN handle
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     pub fn dnn(&self) -> Result<&Arc<Cudnn>, CudaError> {
         self.library_policy(CudaLibrary::Cudnn)?;
         self.libraries.dnn()
     }
 
-    /// Resolve an area's variant before selection or module loading
-    pub(super) fn area_ptx(
+    /// The module production loads for `module` on this device, resolved before any
+    /// load; `None` when no binding covers this device within the tier limit
+    pub(crate) fn production_module(
         &self,
         module: KernelModule,
-    ) -> Result<(PtxTier, &'static str), CudaError> {
-        module
-            .variants()
-            .resolve(module, self.ptx_tier, self.capability)
+    ) -> Result<Option<ModuleRequest>, CudaError> {
+        super::implementation::production_module(
+            module,
+            &self.device,
+            self.ptx_tier,
+            module.variants(),
+        )
     }
 
-    /// Load only the artifact selected by the production owner
-    ///
-    /// Plan selection skips uncovered areas before this call. A cached module retains
-    /// its actual identity; requests for different bytes fail rather than replace it
-    pub fn load_kernels(&self, module: KernelModule) -> Result<LoadedKernels, CudaError> {
-        if let Some(loaded) = self
-            .modules
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&module)
-        {
-            return Ok(loaded.clone());
-        }
-        let location = super::implementation::AreaTarget::for_area(self, module)?;
-        let owner = super::implementation::artifact_owner(module, location).ok_or(
-            CudaError::TierNotQualified {
-                tier: location.tier,
-                device: location.device,
+    /// The best embedded artifact an explicit qualification asks for: the highest
+    /// embedded variant within the tier limit, as the device's exact cubin when
+    /// embedded, otherwise PTX JIT
+    #[cfg(all(test, feature = "_cuda-libraries"))]
+    pub(crate) fn embedded_exact_request(
+        &self,
+        module: KernelModule,
+    ) -> Result<ModuleRequest, CudaError> {
+        let capability = self.device.capability();
+        let variants = module.variants();
+        let (tier, ptx) = variants.resolve(module, self.ptx_tier, capability)?;
+        let embedded = variants.embedded(tier).expect("resolved embedded tier");
+        let artifact = embedded.cubin(capability).map_or(
+            LoadedArtifact::PtxJit {
+                sha256: ArtifactHash::of(ptx.as_bytes()),
             },
-        )?;
-        let (_, ptx) = self.area_ptx(module)?;
-        let request = owner.request(ptx);
-        self.load_requested_kernels(module, request)
+            |cubin| LoadedArtifact::Cubin {
+                arch: cubin.arch,
+                sha256: ArtifactHash::of(cubin.bytes),
+            },
+        );
+        Ok(ModuleRequest::new(module, tier, artifact))
     }
 
-    /// Resolve a declaration to actual embedded bytes before a strict driver load
-    pub(crate) fn load_requested_kernels(
-        &self,
-        module: KernelModule,
-        request: ArtifactRequest,
-    ) -> Result<LoadedKernels, CudaError> {
-        let (tier, ptx) = self.area_ptx(module)?;
+    /// The area's production module, reusing only a cache entry with the same identity
+    ///
+    /// Plan selection skips uncovered areas before a candidate plan calls this. A
+    /// qualification load cannot change what a later production request loads
+    pub fn load_kernels(&self, module: KernelModule) -> Result<LoadedKernels, CudaError> {
+        let request = self
+            .production_module(module)?
+            .ok_or(CudaError::TierNotQualified {
+                tier: PtxTier::BASELINE,
+                device: self.device.capability(),
+            })?;
+        self.load_module(request)
+    }
+
+    /// Load exactly `request`; a cached module with another identity is an error, never
+    /// a replacement, and a driver refusal never tries the other artifact format
+    pub(crate) fn load_module(&self, request: ModuleRequest) -> Result<LoadedKernels, CudaError> {
+        let module = request.area();
+        let tier = request.tier();
+        let unavailable = |artifact| CudaError::ArtifactUnavailable {
+            module: module.name(),
+            artifact,
+        };
         let embedded = module
             .variants()
             .embedded(tier)
-            .expect("resolved embedded tier");
+            .ok_or_else(|| unavailable(request.artifact()))?;
+        let ptx = embedded.text;
         let ptx_sha256 = ArtifactHash::of(ptx.as_bytes());
-        let cubin = embedded.cubin(self.capability);
+        let cubin = embedded.cubin(self.device.capability());
         let force_jit =
             std::env::var_os(super::kernels::FORCE_PTX_JIT_ENV).is_some_and(|value| value == "1");
-        let requested = if force_jit {
-            LoadedArtifact::PtxJit { sha256: ptx_sha256 }
+        // the diagnostic override keeps the tier and changes only the artifact format
+        let request = if force_jit {
+            request.ptx_jit(ptx_sha256)
         } else {
-            match request {
-                ArtifactRequest::Pinned(artifact) => artifact,
-                #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
-                ArtifactRequest::EmbeddedExact => {
-                    cubin.map_or(LoadedArtifact::PtxJit { sha256: ptx_sha256 }, |cubin| {
-                        LoadedArtifact::Cubin {
-                            arch: cubin.arch,
-                            sha256: ArtifactHash::of(cubin.bytes),
-                        }
-                    })
-                }
-            }
+            request
         };
+        let requested = request.artifact();
         let mut modules = self
             .modules
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(loaded) = modules.get(&module) {
-            return if loaded.artifact() == requested {
-                Ok(loaded.clone())
-            } else {
-                Err(CudaError::ArtifactUnavailable {
-                    module: module.name(),
-                    artifact: requested,
-                })
-            };
+            request.check_cached(loaded.request())?;
+            return Ok(loaded.clone());
         }
+        #[cfg(all(test, feature = "_cuda-libraries"))]
+        super::test_support::assert_module_load_allowed();
         let (inner, artifact) = super::kernels::load_artifact(
             requested,
             cubin,
@@ -277,20 +279,21 @@ impl CudaRuntime {
             || self.context.load_module(Ptx::from_src(ptx)),
         )
         .map_err(|error| match error {
-            ArtifactLoadError::Unavailable => CudaError::ArtifactUnavailable {
-                module: module.name(),
-                artifact: requested,
-            },
+            ArtifactLoadError::Unavailable => unavailable(requested),
             ArtifactLoadError::Driver(source) => CudaError::ArtifactLoad {
                 module: module.name(),
                 artifact: requested,
                 source,
             },
         })?;
-        debug!(area = module.name(), %tier, capability = %self.capability, ?artifact, "Loaded CUDA artifact");
-        let loaded = LoadedKernels::new(module, tier, inner, artifact, ptx_sha256);
+        debug!(area = module.name(), %tier, capability = %self.device.capability(), ?artifact, "Loaded CUDA artifact");
+        let loaded = LoadedKernels::new(
+            ModuleRequest::new(module, tier, artifact),
+            inner,
+            ptx_sha256,
+        );
         debug!(embedded_ptx_sha256 = %loaded.ptx_sha256(), "CUDA embedded PTX identity");
-        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        #[cfg(all(test, feature = "_cuda-libraries"))]
         super::test_support::record_artifact(
             module,
             tier,
@@ -303,22 +306,9 @@ impl CudaRuntime {
     }
 
     /// Streaming multiprocessors this context may use: the device's, or the client's
-    /// share under MPS active-thread limits
+    /// share under MPS active-thread limits, as queried when the runtime opened
     pub fn multiprocessor_count(&self) -> Result<usize, CudaError> {
-        // under per-context MPS partitioning the attribute follows the current context
-        self.context.bind_to_thread()?;
-        let count = self.context.attribute(
-            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
-        )?;
-        Ok(usize::try_from(count).unwrap_or(0))
-    }
-
-    /// L2 cache capacity in bytes for this device
-    pub fn l2_cache_size(&self) -> Result<usize, CudaError> {
-        let bytes = self.context.attribute(
-            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE,
-        )?;
-        Ok(usize::try_from(bytes).unwrap_or(0))
+        Ok(self.device.multiprocessors().get() as usize)
     }
 
     /// Whether the device supports cooperative kernel launches
@@ -472,6 +462,11 @@ fn device_count() -> Result<usize, CudaError> {
     }
 }
 
+/// Read once per runtime so graph capture and execution do not consult the environment
+pub(super) fn force_library_from_env() -> bool {
+    std::env::var_os("SPEAKRS_CUDA_FORCE_LIBRARY").is_some_and(|value| value == "1")
+}
+
 #[cfg(test)]
 mod direct_request_tests {
     use super::{CudaError, CudaLibrary, CudaRuntime};
@@ -489,6 +484,45 @@ mod direct_request_tests {
             for invented in ["runtime/", "b1", "Fp32", "PTX tier"] {
                 assert!(!message.contains(invented));
             }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "_cuda-libraries"))]
+mod module_policy_tests {
+    use super::{ArtifactHash, ComputeCapability, CudaError, KernelModule, ModuleRequest, PtxTier};
+    use crate::inference::cuda::kernels::LoadedArtifact;
+
+    #[test]
+    fn cached_module_must_match_every_part_of_the_production_request() {
+        let artifact = LoadedArtifact::PtxJit {
+            sha256: ArtifactHash::of(b"qualified"),
+        };
+        let cached = ModuleRequest::new(KernelModule::Lstm, PtxTier::Sm75, artifact);
+        cached.check_cached(cached).unwrap();
+        for request in [
+            ModuleRequest::new(KernelModule::Resnet, PtxTier::Sm75, artifact),
+            ModuleRequest::new(KernelModule::Lstm, PtxTier::Sm80, artifact),
+            ModuleRequest::new(
+                KernelModule::Lstm,
+                PtxTier::Sm75,
+                LoadedArtifact::PtxJit {
+                    sha256: ArtifactHash::of(b"different"),
+                },
+            ),
+            ModuleRequest::new(
+                KernelModule::Lstm,
+                PtxTier::Sm75,
+                LoadedArtifact::Cubin {
+                    arch: ComputeCapability::new(12, 0),
+                    sha256: ArtifactHash::of(b"qualified"),
+                },
+            ),
+        ] {
+            assert!(matches!(request.check_cached(cached),
+                Err(CudaError::ArtifactUnavailable { module, artifact })
+                    if module == request.area().name() && artifact == request.artifact()));
+            assert_eq!(cached.artifact(), artifact);
         }
     }
 }

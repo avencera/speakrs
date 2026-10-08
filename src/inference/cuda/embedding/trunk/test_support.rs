@@ -6,11 +6,11 @@ use crate::inference::cuda::implementation::Choice;
 impl ConvLayer {
     /// Whether this is one of the 14 qualified convolutions
     pub(crate) fn eligible(&self) -> bool {
-        eligible(&self.plan.name, self.shape)
+        eligible(self.plan.boundary.name(), self.shape)
     }
 
     pub(crate) fn select(&mut self, name: &str, choice: Choice) -> bool {
-        if self.plan.name != name || !self.eligible() {
+        if self.plan.boundary.name() != name || !self.eligible() {
             return false;
         }
 

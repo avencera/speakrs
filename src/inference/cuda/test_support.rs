@@ -5,7 +5,7 @@
 //! nonce that the locked driver passes in `SPEAKRS_QUALIFY_NONCE`, which candidate code
 //! cannot read, so a range a candidate pushes itself never counts
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::ffi::{CStr, CString, c_char};
 use std::marker::PhantomData;
@@ -28,6 +28,35 @@ use super::candidate::Direction;
 use super::implementation::{Choice, Selection};
 use super::{CudaError, CudaRuntime, CudaSegmentation, ResNetEmbedding};
 
+#[path = "../../../tests/cuda_qualify/configuration.rs"]
+pub(crate) mod configuration;
+
+thread_local! {
+    static TIMED_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A timed interval cannot include driver module loading, even through a nested call
+pub(crate) struct TimedInterval(std::marker::PhantomData<std::rc::Rc<()>>);
+
+impl TimedInterval {
+    pub(crate) fn start() -> Self {
+        TIMED_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self(std::marker::PhantomData)
+    }
+}
+
+impl Drop for TimedInterval {
+    fn drop(&mut self) {
+        TIMED_DEPTH
+            .with(|depth| depth.set(depth.get().checked_sub(1).expect("live timing interval")));
+    }
+}
+
+/// Fail before module loading can affect an event interval or sampled clock window
+pub(crate) fn assert_module_load_allowed() {
+    TIMED_DEPTH.with(|depth| assert_eq!(depth.get(), 0, "module load inside timed interval"));
+}
+
 /// The live planted faults share the real implementation seam
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mutant {
@@ -38,6 +67,12 @@ pub(crate) enum Mutant {
     StageAccuracy,
     Shape,
     Fallback,
+    /// A real Library call on the first eager enqueue
+    FirstUseFallbackEager,
+    /// A real Library call on the first captured enqueue
+    FirstUseFallbackCaptured,
+    /// A real Library call before the first graph replay
+    FirstUseFallbackReplay,
     Tail,
     Atomic,
     Slow,
@@ -62,6 +97,9 @@ impl Mutant {
             "Precision" => Some(Self::Precision),
             "Shape" => Some(Self::Shape),
             "Fallback" => Some(Self::Fallback),
+            "FirstUseFallbackEager" => Some(Self::FirstUseFallbackEager),
+            "FirstUseFallbackCaptured" => Some(Self::FirstUseFallbackCaptured),
+            "FirstUseFallback" | "FirstUseFallbackReplay" => Some(Self::FirstUseFallbackReplay),
             "Tail" => Some(Self::Tail),
             "Atomic" => Some(Self::Atomic),
             "Slow" => Some(Self::Slow),
@@ -237,11 +275,13 @@ struct ProjectionNodes {
 
 thread_local! {
     static STACK: RefCell<Vec<Frame>> = const { RefCell::new(Vec::new()) };
+    static CALL_COUNT: Cell<u64> = const { Cell::new(0) };
     static CALL_VIOLATIONS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static GRAPH_VIOLATIONS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static PROJECTION_NODES: RefCell<ProjectionNodes> = const { RefCell::new(ProjectionNodes { capture_id: None, nodes: BTreeSet::new() }) };
     static GRAPH_EVIDENCE: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
     static LABEL: RefCell<Option<String>> = const { RefCell::new(None) };
+    static CAPTURE_TRACE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Labels the graph captures that follow with the driver's case id, so each case's
@@ -253,6 +293,7 @@ pub(crate) fn set_label(label: Option<String>) {
 /// One open harness scope; closes its NVTX range and checks captured nodes on drop
 pub(crate) struct Scope {
     active: bool,
+    nvtx: bool,
     _thread: PhantomData<Rc<()>>,
 }
 
@@ -260,6 +301,7 @@ fn open(kind: Kind, name: &str, stream: Option<&CudaStream>) -> Scope {
     let Some(harness) = harness() else {
         return Scope {
             active: false,
+            nvtx: false,
             _thread: PhantomData,
         };
     };
@@ -276,6 +318,7 @@ fn open(kind: Kind, name: &str, stream: Option<&CudaStream>) -> Scope {
             capture,
         })
     });
+    // capture scopes retain real API ownership; recorded nodes are checked separately
     if let Some(nvtx) = &harness.nvtx {
         let text = CString::new(format!("qualify.{}.{}.{name}", harness.nonce, kind.label()))
             .expect("scope names have no nul bytes");
@@ -285,6 +328,7 @@ fn open(kind: Kind, name: &str, stream: Option<&CudaStream>) -> Scope {
 
     Scope {
         active: true,
+        nvtx: harness.nvtx.is_some(),
         _thread: PhantomData,
     }
 }
@@ -295,7 +339,9 @@ impl Drop for Scope {
             return;
         }
 
-        if let Some(nvtx) = harness().and_then(|harness| harness.nvtx.as_ref()) {
+        if self.nvtx
+            && let Some(nvtx) = harness().and_then(|harness| harness.nvtx.as_ref())
+        {
             // SAFETY: this guard closes exactly one range on the thread that opened it
             unsafe { (nvtx.pop)() };
         }
@@ -306,8 +352,36 @@ impl Drop for Scope {
     }
 }
 
+/// Guard one capture lifecycle while retaining API scopes and separate node evidence
+pub(crate) struct CaptureTrace(PhantomData<Rc<()>>);
+
+impl CaptureTrace {
+    pub(crate) fn start() -> Self {
+        CAPTURE_TRACE.with(|state| assert!(!state.replace(true), "non-nested trace capture"));
+        Self(PhantomData)
+    }
+}
+
+impl Drop for CaptureTrace {
+    fn drop(&mut self) {
+        CAPTURE_TRACE.with(|state| assert!(state.replace(false), "live trace capture"));
+    }
+}
+
+#[path = "../../../tests/cuda_qualify/profile_lifecycle.rs"]
+pub(crate) mod profile_lifecycle;
+
+/// Preserve the control route except for the separate typed first-use call
+pub(crate) fn mutant_scope(stream: &CudaStream, layer: &str, mutant: Mutant) -> Scope {
+    if profile_lifecycle::FirstUse::stage(mutant).is_some() {
+        return library(stream, layer);
+    }
+    candidate(stream, layer)
+}
+
 /// Every library call made while a candidate scope is open is a violation
 fn check_call(name: &str) {
+    CALL_COUNT.with(|count| count.set(count.get() + 1));
     let candidate = STACK.with(|stack| {
         stack
             .borrow()
@@ -720,7 +794,9 @@ fn allowed(name: &str) -> bool {
 }
 
 /// The candidate PTX areas; their entries never run on a Library path
-pub(crate) const CANDIDATE_AREAS: [&str; 3] = ["resnet", "lstm", "sincnet"];
+pub(crate) const CANDIDATE_AREAS: [&str; 6] = [
+    "resnet", "lstm", "sincnet", "fbankdft", "segdense", "wideconv",
+];
 
 fn candidate_area_entry(name: &str) -> bool {
     let loaded = modules().lock().unwrap_or_else(PoisonError::into_inner);
@@ -736,6 +812,7 @@ fn load_recorded(
     area: &str,
     source: &str,
 ) -> Result<std::sync::Arc<CudaModule>, CudaError> {
+    assert_module_load_allowed();
     record_module(area, "sm75", source);
     Ok(runtime
         .context()
@@ -792,6 +869,7 @@ pub(crate) fn prepare(runtime: &CudaRuntime) -> Result<(), CudaError> {
             include_str!("../../../tests/cuda_qualify/device/controls.sm75.ptx"),
         )?;
         // deliberately not recorded: the profile rule must refuse this name
+        assert_module_load_allowed();
         let unlisted = runtime
             .context()
             .load_module(Ptx::from_src(UNLISTED_PTX.to_owned()))?;
@@ -879,12 +957,21 @@ pub(crate) fn poison(runtime: &CudaRuntime) -> Result<(), CudaError> {
 }
 
 thread_local! {
-    static BAND: RefCell<Option<(u32, Vec<String>)>> = const { RefCell::new(None) };
+    static BAND: RefCell<Option<(String, u32, Vec<String>)>> = const { RefCell::new(None) };
 }
 
 /// Turns the TF32 stage noise band on with a seed and the declared layers, or off
-pub(crate) fn set_band(band: Option<(u32, Vec<String>)>) {
+pub(crate) fn set_band(band: Option<(String, u32, Vec<String>)>) {
     BAND.with(|cell| *cell.borrow_mut() = band);
+}
+
+/// Whether the active TF32 draw includes this producer
+pub(crate) fn band_enabled(layer: &str) -> bool {
+    BAND.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|(_, _, layers)| layers.iter().any(|name| name == layer))
+    })
 }
 
 /// Moves a seeded random two thirds of a Library output by one unit in the last place,
@@ -894,22 +981,26 @@ pub(crate) fn perturb<Y: DevicePtrMut<f32>>(
     layer: &str,
     output: &mut Y,
 ) -> Result<(), CudaError> {
-    let seed = BAND.with(|cell| {
+    let draw = BAND.with(|cell| {
         let band = cell.borrow();
-        let (seed, layers) = band.as_ref()?;
+        let (case, seed, layers) = band.as_ref()?;
         layers.iter().any(|name| name == layer).then(|| {
             // FNV-1a of the layer name keeps each layer's pattern independent
-            layer.bytes().fold(*seed ^ 0x811c_9dc5, |hash, byte| {
+            let derived_seed = layer.bytes().fold(*seed ^ 0x811c_9dc5, |hash, byte| {
                 (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
-            })
+            });
+            (
+                qualify::lock::DrawCase::new(case, layer, *seed, output.len()),
+                derived_seed,
+            )
         })
     });
-    let Some(seed) = seed else {
+    let Some((draw, seed)) = draw else {
         return Ok(());
     };
 
     let count = output.len();
-    let draws = qualify::lock::cpu(runtime, qualify::lock::CpuWork::Tf32Draws, || {
+    let draws = qualify::lock::cpu(runtime, qualify::lock::CpuWork::Tf32Draws(&draw), || {
         band_draws(seed, count)
     })?;
     let draws = runtime.stream().clone_htod(&draws)?;
@@ -932,8 +1023,8 @@ pub(crate) fn perturb<Y: DevicePtrMut<f32>>(
 /// Exact per-index integer draws of the original qualify_perturb PTX
 fn band_draws(seed: u32, len: usize) -> Vec<u8> {
     assert!(u32::try_from(len).is_ok(), "noise band output fits a grid");
-    (0..len)
-        .map(|index| {
+    qualify::cpu::evaluate(|mode| {
+        qualify::cpu::ordered_map(mode, len, |index| {
             let mut hash = (index as u32).wrapping_mul(0x9e37_79b1) ^ seed;
             hash ^= hash >> 16;
             hash = hash.wrapping_mul(0x85eb_ca6b);
@@ -942,7 +1033,7 @@ fn band_draws(seed: u32, len: usize) -> Vec<u8> {
             hash ^= hash >> 16;
             (hash % 3) as u8
         })
-        .collect()
+    })
 }
 
 /// The precision mutant changes the real input in place; the driver restores it
@@ -1228,3 +1319,56 @@ mod tests {
         assert_eq!(actual, ["cublas.m589.n512.k60 inside candidate lstm.stack"]);
     }
 }
+
+#[cfg(test)]
+mod timing_tests {
+    use super::{TimedInterval, assert_module_load_allowed};
+
+    #[test]
+    fn timed_module_loading_is_refused_before_driver_work() {
+        assert_module_load_allowed();
+        let outer = TimedInterval::start();
+        let inner = TimedInterval::start();
+        let mut driver_called = false;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert_module_load_allowed();
+            driver_called = true;
+        }));
+        assert!(result.is_err());
+        assert!(!driver_called);
+        drop(inner);
+        assert!(std::panic::catch_unwind(assert_module_load_allowed).is_err());
+        drop(outer);
+        assert_module_load_allowed();
+    }
+}
+
+#[test]
+fn capture_trace_keeps_forbidden_library_call_tracking_active() {
+    let saved_stack = STACK.with(|stack| stack.take());
+    let saved_calls = CALL_VIOLATIONS.with(|calls| calls.take());
+    {
+        let _trace = CaptureTrace::start();
+        STACK.with(|stack| {
+            stack.borrow_mut().push(Frame {
+                kind: Kind::Candidate,
+                name: "fbank.dft".to_owned(),
+                capture: None,
+            })
+        });
+        check_call("cublasSgemm");
+    }
+    assert_eq!(
+        library_call_violations(),
+        ["cublasSgemm inside candidate fbank.dft"]
+    );
+    assert!(!CAPTURE_TRACE.with(Cell::get));
+    STACK.with(|stack| *stack.borrow_mut() = saved_stack);
+    CALL_VIOLATIONS.with(|calls| *calls.borrow_mut() = saved_calls);
+}
+
+#[path = "../../../tests/cuda_qualify/boundaries.rs"]
+pub(crate) mod boundaries;
+
+#[path = "../../../tests/cuda_qualify/candidate_seam.rs"]
+pub(crate) mod candidate_seam;

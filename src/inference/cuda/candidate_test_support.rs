@@ -61,7 +61,7 @@ pub(crate) fn device(runtime: &CudaRuntime) -> Result<Value, CudaError> {
         .to_owned();
     Ok(
         json!({"name": runtime.context().name()?, "compute_capability": runtime.compute_capability().to_string(),
-              "sm_count": runtime.multiprocessor_count()?, "l2_bytes": runtime.l2_cache_size()?, "driver_api_version": driver, "driver_version":driver_release,
+              "sm_count": runtime.multiprocessor_count()?, "l2_bytes": runtime.device().l2_bytes(), "driver_api_version": driver, "driver_version":driver_release,
               "cuda_version": cuda, "cudnn_version": dnn, "cublas_version": blas}),
     )
 }
@@ -71,10 +71,12 @@ pub(crate) struct Clocks {
     stop: Arc<AtomicBool>,
     samples: Arc<Mutex<Vec<u32>>>,
     worker: Option<JoinHandle<()>>,
+    _interval: super::super::test_support::TimedInterval,
 }
 
 impl Clocks {
     pub(crate) fn start() -> Self {
+        let interval = super::super::test_support::TimedInterval::start();
         let stop = Arc::new(AtomicBool::new(false));
         let samples = Arc::new(Mutex::new(Vec::new()));
         let worker_stop = Arc::clone(&stop);
@@ -104,6 +106,7 @@ impl Clocks {
             stop,
             samples,
             worker: Some(worker),
+            _interval: interval,
         }
     }
 

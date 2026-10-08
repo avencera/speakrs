@@ -1,9 +1,9 @@
 use std::fmt;
 use std::path::PathBuf;
 
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 use cudarc::cublas::result::CublasError;
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 use cudarc::cudnn::CudnnError;
 use cudarc::driver::DriverError;
 use safetensors::SafeTensorError;
@@ -83,6 +83,16 @@ pub enum CudaError {
         /// Exact device capability
         device: ComputeCapability,
     },
+    /// A model boundary has no complete library-free candidate for this tuple
+    #[error("driver-only CUDA missing kernel: {boundary} b{batch} {math:?}")]
+    MissingKernel {
+        /// The model operation without a complete candidate
+        boundary: String,
+        /// Requested batch class
+        batch: usize,
+        /// Requested arithmetic mode
+        math: CudaMath,
+    },
     /// A selected model boundary requires an optional library
     #[error(
         "driver-only CUDA: {area}/{boundary} b{batch} {math:?}, PTX tier {tier}, device {device} requires {library}"
@@ -123,6 +133,46 @@ pub enum CudaError {
         /// Candidate's device constraint
         reason: String,
     },
+    /// A selected candidate refused weights outside its numeric contract, and fallback
+    /// is forbidden
+    #[error(
+        "CUDA candidate {area}/{boundary} b{batch} {math:?}, PTX tier {tier}, device {device}: weights `{layer}` are outside the candidate contract: {fault}"
+    )]
+    CandidateWeightsOutOfContract {
+        /// Kernel area that owns the candidate
+        area: &'static str,
+        /// Selected model boundary
+        boundary: String,
+        /// Selected batch class
+        batch: usize,
+        /// Configured precision
+        math: CudaMath,
+        /// Actual area PTX variant
+        tier: PtxTier,
+        /// Exact device capability
+        device: ComputeCapability,
+        /// The refused weight tensor
+        layer: &'static str,
+        /// The first violation
+        fault: WeightFault,
+    },
+    /// A selected candidate refused its plan geometry
+    ///
+    /// An invalid geometry is a host bug in every mode. An unimplemented geometry
+    /// reaches this error only where fallback is forbidden
+    #[error("CUDA candidate {area}/{boundary} b{batch} {math:?}: {error}")]
+    CandidateGeometry {
+        /// Kernel area that owns the candidate
+        area: &'static str,
+        /// Selected model boundary
+        boundary: String,
+        /// Selected batch class
+        batch: usize,
+        /// Configured precision
+        math: CudaMath,
+        /// The refused geometry
+        error: GeometryError,
+    },
     /// The requested device does not exist
     #[error("CUDA device {ordinal} is not available; {count} device(s) found")]
     NoDevice {
@@ -160,11 +210,11 @@ pub enum CudaError {
     Driver(#[from] DriverError),
     /// cuBLAS returned an error
     #[error("cuBLAS: {0}")]
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     Cublas(#[from] CublasError),
     /// cuDNN returned an error
     #[error("cuDNN: {0}")]
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     Cudnn(#[from] CudnnError),
     /// The driver could not load an embedded PTX module
     #[error("loading PTX module `{module}`: {source}")]
@@ -277,6 +327,48 @@ pub enum CudaError {
     },
 }
 
+/// Why a candidate refused a weight tensor at plan time
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum WeightFault {
+    /// An element is NaN or infinite
+    #[error("element {index} is not finite")]
+    NonFinite {
+        /// Flat element index
+        index: usize,
+    },
+    /// A column's exponent range does not fit the candidate's packed format
+    #[error("column {column} has exponent {exponent}, outside the packed range")]
+    ExponentOutOfRange {
+        /// Packed column
+        column: usize,
+        /// The offending binary exponent
+        exponent: i32,
+    },
+}
+
+/// A plan geometry a candidate refused before any launch
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum GeometryError {
+    /// The geometry violates the pinned plan's invariants, which is a host bug
+    #[error("{context}: invalid geometry: {reason}")]
+    Invalid {
+        /// Which plan refused
+        context: &'static str,
+        /// The violated invariant
+        reason: String,
+    },
+    /// A valid geometry this candidate does not implement
+    #[error("{context}: unimplemented geometry: {reason}")]
+    Unimplemented {
+        /// Which plan refused
+        context: &'static str,
+        /// What the candidate lacks
+        reason: String,
+    },
+}
+
 impl CudaError {
     /// Returns true when this machine has no usable NVIDIA GPU: the driver library is
     /// missing, the driver reports no device, or the GPU is older than the `sm_75`
@@ -296,7 +388,7 @@ impl CudaError {
 }
 
 /// Converts a dimension for a cuBLAS or cuDNN call
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 pub(super) fn to_c_int(context: &'static str, value: usize) -> Result<i32, CudaError> {
     i32::try_from(value).map_err(|_| CudaError::DimensionOverflow { context, value })
 }

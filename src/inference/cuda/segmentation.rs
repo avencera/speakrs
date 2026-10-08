@@ -18,7 +18,7 @@ mod graph;
 mod kernels;
 #[cfg(test)]
 pub(super) use kernels::REQUIRED_KERNELS;
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 mod rnn;
 mod shape;
 mod weights;
@@ -27,21 +27,35 @@ use cudarc::driver::CudaSlice;
 
 use self::graph::CapturedGraph;
 use self::kernels::{PoolNorm, RowLayout, SegmentationKernels};
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 use self::rnn::{CudnnLstm, LstmPlan};
 use self::shape::{
     CONV_KERNEL, FEATURES, HIDDEN, LEAKY_SLOPE, LINEAR, NORM_EPSILON, POOL, SINC_CHANNELS,
 };
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 use self::shape::{SINC_KERNEL, SINC_STRIDE};
 use self::weights::{LstmLayer, SegmentationWeights};
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 use super::CudaLstmAlgorithm;
 use super::candidate::{LstmOxide, SincCandidate, SincOutput, SincOxide};
-use super::dnn::Conv2d;
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda-libraries")]
 use super::dnn::{ConvPlan, ConvPlanner};
-use super::implementation::{AreaTarget, LibraryNeed, MODEL_BATCHES, Selected, plan_selection};
+use super::geometry::Conv2d;
+use super::implementation::{
+    AreaTarget, BoundaryId, LibraryNeed, MODEL_BATCHES, Selected, plan_selection,
+};
+
+/// The two Library-owned temporal convolutions after the Sinc producer
+const CONV1: BoundaryId = BoundaryId::named("sincnet.conv1");
+const CONV2: BoundaryId = BoundaryId::named("sincnet.conv2");
+/// The cuBLAS input projections nested in the pinned PR #36 LSTM stack
+const LSTM_INPUT_PROJECTION: BoundaryId = BoundaryId::named("lstm.stack.input_proj");
+/// The three linear layers after the LSTM
+const LINEAR_BOUNDARIES: [BoundaryId; 3] = [
+    BoundaryId::named("linear0"),
+    BoundaryId::named("linear1"),
+    BoundaryId::named("linear2"),
+];
 use super::{CudaError, CudaMath, CudaRuntime, DeviceTensor, PtxTier, SafetensorsFile, Sgemm};
 use super::{CudaLibrary, KernelModule};
 
@@ -54,7 +68,7 @@ pub struct SegmentationOptions {
     /// Precision of every cuBLAS, cuDNN convolution and cuDNN RNN call
     pub math: CudaMath,
     /// cuDNN RNN algorithm for the LSTM stack
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     pub lstm_algo: CudaLstmAlgorithm,
     /// Capture the forward pass of each workspace as a CUDA graph on its first run and
     /// replay it afterwards
@@ -71,13 +85,15 @@ pub struct CudaSegmentation {
     network: Network,
 }
 
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 pub use test_support::SegmentationTensor;
 
 /// Buffers, convolution plans, LSTM plan and captured graph for one batch shape
 #[derive(Debug)]
 pub struct SegmentationWorkspace {
     shape: SegmentationShape,
+    #[cfg(all(test, feature = "_cuda-libraries"))]
+    qualification: std::collections::BTreeMap<&'static str, super::test_support::boundaries::Owner>,
     sinc: SincPlan,
     conv1: ConvStage,
     conv2: ConvStage,
@@ -91,10 +107,10 @@ pub struct SegmentationWorkspace {
 /// One owner for the Sinc producer
 #[derive(Debug)]
 enum SincPlan {
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     Library(ConvPlan),
     Oxide(SincOxide),
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     Mutant {
         library: ConvPlan,
         mutant: super::test_support::Mutant,
@@ -104,10 +120,10 @@ enum SincPlan {
 impl SincPlan {
     fn workspace_bytes(&self) -> usize {
         match self {
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda-libraries")]
             Self::Library(plan) => plan.workspace_bytes(),
             Self::Oxide(_) => 0,
-            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            #[cfg(all(test, feature = "_cuda-libraries"))]
             Self::Mutant { library, .. } => library.workspace_bytes(),
         }
     }
@@ -116,24 +132,23 @@ impl SincPlan {
 /// Learned convolutions have no qualified Oxide implementation yet
 #[derive(Debug)]
 enum ConvStage {
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     Library(ConvPlan),
 }
 
 impl ConvStage {
-    fn new(runtime: &CudaRuntime, boundary: &str, spec: Conv2d) -> Result<Self, CudaError> {
+    fn new(runtime: &CudaRuntime, boundary: BoundaryId, spec: Conv2d) -> Result<Self, CudaError> {
         LibraryNeed::new(
-            KernelModule::Segmentation,
             boundary,
             spec.batch,
             spec.math,
-            AreaTarget::for_area(runtime, KernelModule::Segmentation)?,
+            AreaTarget::for_area(runtime, boundary.area())?,
             CudaLibrary::Cudnn,
         )
         .prepare(runtime)?;
-        #[cfg(feature = "cuda")]
+        #[cfg(feature = "_cuda-libraries")]
         return Ok(Self::Library(ConvPlanner::new(runtime)?.plan(spec)?));
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(feature = "_cuda-libraries"))]
         Err(CudaError::LibraryUnavailable {
             library: CudaLibrary::Cudnn,
         })
@@ -141,7 +156,7 @@ impl ConvStage {
 
     fn workspace_bytes(&self) -> usize {
         match *self {
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda-libraries")]
             Self::Library(ref plan) => plan.workspace_bytes(),
         }
     }
@@ -153,10 +168,10 @@ impl ConvStage {
         weight: &cudarc::driver::CudaView<'_, f32>,
         output: &mut cudarc::driver::CudaViewMut<'_, f32>,
     ) -> Result<(), CudaError> {
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(feature = "_cuda-libraries"))]
         let _ = (workspace, input, weight, output);
         match *self {
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda-libraries")]
             Self::Library(ref plan) => plan.forward(workspace, input, weight, output),
         }
     }
@@ -165,13 +180,13 @@ impl ConvStage {
 /// One owner for the complete LSTM stack
 #[derive(Debug)]
 enum LstmStage {
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     Library(LstmPlan),
     Oxide {
         candidate: Box<LstmOxide>,
         rows: usize,
     },
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     Mutant {
         library: LstmPlan,
         mutant: super::test_support::Mutant,
@@ -202,7 +217,7 @@ struct Tensors {
 struct Network {
     options: SegmentationOptions,
     kernels: SegmentationKernels,
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda-libraries")]
     lstm: Option<CudnnLstm>,
     /// Waveform normalization scale and shift, one value each
     wav_norm: [CudaSlice<f32>; 2],
@@ -306,37 +321,29 @@ impl Network {
     ) -> Result<Self, CudaError> {
         let mut needs = Vec::new();
         for batch in MODEL_BATCHES {
-            for (area, boundary) in [
-                (KernelModule::Sincnet, dispatch::SINC_LAYER),
-                (KernelModule::Segmentation, "sincnet.conv1"),
-                (KernelModule::Segmentation, "sincnet.conv2"),
-                (KernelModule::Lstm, dispatch::LSTM_LAYER),
-            ] {
-                let target = AreaTarget::for_area(runtime, area)?;
+            for boundary in [dispatch::SINC, CONV1, CONV2, dispatch::LSTM] {
+                let target = AreaTarget::for_area(runtime, boundary.area())?;
                 let selected = plan_selection(
                     runtime,
-                    area,
                     boundary,
                     batch,
                     options.math,
-                    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+                    #[cfg(all(test, feature = "_cuda-libraries"))]
                     None,
                 )?;
                 if matches!(selected, Selected::Library) {
                     needs.push(LibraryNeed::new(
-                        area,
                         boundary,
                         batch,
                         options.math,
                         target,
                         CudaLibrary::Cudnn,
                     ));
-                    #[cfg(feature = "cuda")]
-                    if boundary == dispatch::LSTM_LAYER
+                    #[cfg(feature = "_cuda-libraries")]
+                    if boundary == dispatch::LSTM
                         && options.lstm_algo == CudaLstmAlgorithm::PersistDynamic
                     {
                         needs.push(LibraryNeed::new(
-                            area,
                             boundary,
                             batch,
                             options.math,
@@ -344,10 +351,9 @@ impl Network {
                             CudaLibrary::Nvrtc,
                         ));
                     }
-                } else if boundary == dispatch::LSTM_LAYER {
+                } else if boundary == dispatch::LSTM {
                     needs.push(LibraryNeed::new(
-                        area,
-                        "lstm.stack.input_proj",
+                        LSTM_INPUT_PROJECTION,
                         batch,
                         options.math,
                         target,
@@ -355,9 +361,8 @@ impl Network {
                     ));
                 }
             }
-            for boundary in ["linear0", "linear1", "linear2"] {
+            for boundary in LINEAR_BOUNDARIES {
                 needs.push(LibraryNeed::new(
-                    KernelModule::Segmentation,
                     boundary,
                     batch,
                     options.math,
@@ -372,8 +377,7 @@ impl Network {
             }
         }
         LibraryNeed::new(
-            KernelModule::Segmentation,
-            "linear0",
+            LINEAR_BOUNDARIES[0],
             1,
             options.math,
             AreaTarget::for_area(runtime, KernelModule::Segmentation)?,
@@ -395,7 +399,7 @@ impl Network {
         Ok(Self {
             options,
             kernels: SegmentationKernels::load(runtime)?,
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda-libraries")]
             lstm: None,
             wav_norm: pair(&weights.wav_norm.gamma, &weights.wav_norm.beta)?,
             sinc_filters: upload(&weights.sinc_filters)?,
@@ -457,31 +461,29 @@ impl Network {
 
         let sinc_selected = plan_selection(
             runtime,
-            KernelModule::Sincnet,
-            dispatch::SINC_LAYER,
+            dispatch::SINC,
             batch,
             math,
-            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            #[cfg(all(test, feature = "_cuda-libraries"))]
             None,
         )?;
         let lstm_selected = plan_selection(
             runtime,
-            KernelModule::Lstm,
-            dispatch::LSTM_LAYER,
+            dispatch::LSTM,
             batch,
             math,
-            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            #[cfg(all(test, feature = "_cuda-libraries"))]
             None,
         )?;
         let sinc = self.plan_sinc(runtime, shape, sinc_selected)?;
         let conv1 = ConvStage::new(
             runtime,
-            "sincnet.conv1",
+            CONV1,
             conv([SINC_CHANNELS, FEATURES], shape.pool0, CONV_KERNEL, 1),
         )?;
         let conv2 = ConvStage::new(
             runtime,
-            "sincnet.conv2",
+            CONV2,
             conv([FEATURES, FEATURES], shape.pool1, CONV_KERNEL, 1),
         )?;
         let workspace_bytes = sinc
@@ -496,6 +498,8 @@ impl Network {
         let conv_workspace = stream.alloc_zeros(workspace_bytes.max(1))?;
         let lstm = self.plan_lstm(runtime, shape, lstm_selected)?;
         Ok(SegmentationWorkspace {
+            #[cfg(all(test, feature = "_cuda-libraries"))]
+            qualification: std::collections::BTreeMap::new(),
             shape,
             sinc,
             conv1,
@@ -542,6 +546,8 @@ impl Network {
             conv_workspace,
             lstm,
             tensors: t,
+            #[cfg(all(test, feature = "_cuda-libraries"))]
+            qualification,
             ..
         } = workspace;
         let mut conv_workspace = conv_workspace.as_view_mut();
@@ -589,6 +595,38 @@ impl Network {
 
         // the convolution bias is added inside the pooling kernel
         let [weight, bias] = &self.convs[0];
+        #[cfg(all(test, feature = "_cuda-libraries"))]
+        super::test_support::boundaries::run_slices(
+            qualification.get("sincnet.conv1"),
+            runtime,
+            super::test_support::candidate_seam::Operation::Temporal(
+                super::candidate::SegConvSpec::new(
+                    super::candidate::SegConvSite::Conv1,
+                    batch,
+                    self.options.math,
+                )
+                .map_err(|e| CudaError::Unsupported {
+                    context: "stage temporal spec",
+                    reason: e.to_string(),
+                })?,
+            ),
+            super::test_support::candidate_seam::Slices {
+                input: t.stage0.data(),
+                weight,
+                bias: None,
+                residual: None,
+            },
+            t.conv1.data_mut(),
+            |output| {
+                conv1.forward(
+                    &mut conv_workspace,
+                    &t.stage0.data().as_view(),
+                    &weight.as_view(),
+                    &mut output.as_view_mut(),
+                )
+            },
+        )?;
+        #[cfg(not(all(test, feature = "_cuda-libraries")))]
         conv1.forward(
             &mut conv_workspace,
             &t.stage0.data().as_view(),
@@ -608,6 +646,38 @@ impl Network {
         )?;
 
         let [weight, bias] = &self.convs[1];
+        #[cfg(all(test, feature = "_cuda-libraries"))]
+        super::test_support::boundaries::run_slices(
+            qualification.get("sincnet.conv2"),
+            runtime,
+            super::test_support::candidate_seam::Operation::Temporal(
+                super::candidate::SegConvSpec::new(
+                    super::candidate::SegConvSite::Conv2,
+                    batch,
+                    self.options.math,
+                )
+                .map_err(|e| CudaError::Unsupported {
+                    context: "stage temporal spec",
+                    reason: e.to_string(),
+                })?,
+            ),
+            super::test_support::candidate_seam::Slices {
+                input: t.stage1.data(),
+                weight,
+                bias: None,
+                residual: None,
+            },
+            t.conv2.data_mut(),
+            |output| {
+                conv2.forward(
+                    &mut conv_workspace,
+                    &t.stage1.data().as_view(),
+                    &weight.as_view(),
+                    &mut output.as_view_mut(),
+                )
+            },
+        )?;
+        #[cfg(not(all(test, feature = "_cuda-libraries")))]
         conv2.forward(
             &mut conv_workspace,
             &t.stage1.data().as_view(),
@@ -638,16 +708,71 @@ impl Network {
             ..Sgemm::new(rows, LINEAR[index][1], LINEAR[index][0])
         };
         let [weight, bias] = &self.linear[0];
-        runtime.sgemm(gemm(0), t.lstm_output.data(), weight, t.linear0.data_mut())?;
-        k.bias_leaky(runtime, bias, LEAKY_SLOPE, t.linear0.data_mut())?;
+        #[cfg(all(test, feature = "_cuda-libraries"))]
+        harness::dense(
+            qualification.get("linear0"),
+            runtime,
+            gemm(0),
+            super::candidate::DenseSite::Linear0,
+            super::test_support::candidate_seam::Slices {
+                input: t.lstm_output.data(),
+                weight,
+                bias: Some(bias),
+                residual: None,
+            },
+            t.linear0.data_mut(),
+            |output| k.bias_leaky(runtime, bias, LEAKY_SLOPE, output),
+        )?;
+        #[cfg(not(all(test, feature = "_cuda-libraries")))]
+        {
+            runtime.sgemm(gemm(0), t.lstm_output.data(), weight, t.linear0.data_mut())?;
+            k.bias_leaky(runtime, bias, LEAKY_SLOPE, t.linear0.data_mut())?;
+        };
 
         let [weight, bias] = &self.linear[1];
-        runtime.sgemm(gemm(1), t.linear0.data(), weight, t.linear1.data_mut())?;
-        k.bias_leaky(runtime, bias, LEAKY_SLOPE, t.linear1.data_mut())?;
+        #[cfg(all(test, feature = "_cuda-libraries"))]
+        harness::dense(
+            qualification.get("linear1"),
+            runtime,
+            gemm(1),
+            super::candidate::DenseSite::Linear1,
+            super::test_support::candidate_seam::Slices {
+                input: t.linear0.data(),
+                weight,
+                bias: Some(bias),
+                residual: None,
+            },
+            t.linear1.data_mut(),
+            |output| k.bias_leaky(runtime, bias, LEAKY_SLOPE, output),
+        )?;
+        #[cfg(not(all(test, feature = "_cuda-libraries")))]
+        {
+            runtime.sgemm(gemm(1), t.linear0.data(), weight, t.linear1.data_mut())?;
+            k.bias_leaky(runtime, bias, LEAKY_SLOPE, t.linear1.data_mut())?;
+        };
 
         let [weight, bias] = &self.linear[2];
-        runtime.sgemm(gemm(2), t.linear1.data(), weight, t.output.data_mut())?;
-        k.bias_log_softmax(runtime, bias, t.output.data_mut())
+        #[cfg(all(test, feature = "_cuda-libraries"))]
+        harness::dense(
+            qualification.get("linear2"),
+            runtime,
+            gemm(2),
+            super::candidate::DenseSite::Classifier,
+            super::test_support::candidate_seam::Slices {
+                input: t.linear1.data(),
+                weight,
+                bias: Some(bias),
+                residual: None,
+            },
+            t.output.data_mut(),
+            |output| k.bias_log_softmax(runtime, bias, output),
+        )?;
+        #[cfg(not(all(test, feature = "_cuda-libraries")))]
+        {
+            runtime.sgemm(gemm(2), t.linear1.data(), weight, t.output.data_mut())?;
+            k.bias_log_softmax(runtime, bias, t.output.data_mut())?;
+        }
+        Ok(())
     }
 }
 
@@ -667,7 +792,7 @@ impl SegmentationWorkspace {
     }
 }
 
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 #[path = "../../../tests/cuda_qualify/segmentation.rs"]
 pub(crate) mod test_support;
 
@@ -683,3 +808,7 @@ fn pooled_tensor(
     let dims = [shape.batch, SINC_CHANNELS, shape.pool0];
     Ok(Some(DeviceTensor::zeros(runtime.stream(), &dims)?))
 }
+
+#[cfg(all(test, feature = "_cuda-libraries"))]
+#[path = "../../../tests/cuda_qualify/segdense_library.rs"]
+pub(crate) mod harness;

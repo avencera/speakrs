@@ -1,5 +1,6 @@
-use super::super::dnn::Conv2d;
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+use super::super::geometry::Conv2d;
+use super::super::implementation::BoundaryId;
+#[cfg(all(test, feature = "_cuda-libraries"))]
 use super::super::implementation::Choice;
 use super::super::{CudaError, CudaMath, CudaRuntime, DeviceTensor, SafetensorsFile};
 
@@ -63,9 +64,9 @@ pub(super) struct ConvLayer {
 /// Per-layer ownership is separate from the shared cuDNN shape plans
 #[derive(Debug)]
 struct LayerPlan {
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     override_choice: Option<Choice>,
-    name: String,
+    boundary: BoundaryId,
 }
 
 impl ConvLayer {
@@ -89,15 +90,19 @@ impl ConvLayer {
             &[out_channels, in_channels, kernel, kernel],
         )?;
         let bias = weights.upload(runtime, &format!("{prefix}.weight_bias"), &[out_channels])?;
+        let boundary = BoundaryId::parse(prefix).map_err(|error| CudaError::Unsupported {
+            context: "ResNet trunk",
+            reason: error.to_string(),
+        })?;
 
         Ok(Self {
             weight,
             bias,
             shape,
             plan: LayerPlan {
-                #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+                #[cfg(all(test, feature = "_cuda-libraries"))]
                 override_choice: None,
-                name: prefix.to_owned(),
+                boundary,
             },
         })
     }
@@ -107,13 +112,31 @@ impl ConvLayer {
         self.shape.conv(batch, math)
     }
 
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     pub(super) fn override_choice(&self) -> Option<Choice> {
         self.plan.override_choice
     }
 
-    pub(super) fn name(&self) -> &str {
-        &self.plan.name
+    pub(super) fn name(&self) -> &'static str {
+        self.plan.boundary.name()
+    }
+
+    /// The model boundary this layer computes
+    pub(super) fn boundary(&self) -> BoundaryId {
+        self.plan.boundary
+    }
+
+    /// The trunk-owned operation after this layer's convolution
+    pub(super) fn epilogue(&self, residual: bool) -> super::super::candidate::Epilogue {
+        use super::super::candidate::Epilogue;
+        if self.shape.kernel == 1 {
+            return Epilogue::Bias;
+        }
+        if residual {
+            Epilogue::BiasReluResidual
+        } else {
+            Epilogue::BiasRelu
+        }
     }
 
     pub(super) fn weight(&self) -> &DeviceTensor {
@@ -140,7 +163,7 @@ impl ConvLayer {
     }
 }
 
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 mod test_support;
 
 /// A ResNet basic block: two 3x3 convolutions and a residual connection, with a

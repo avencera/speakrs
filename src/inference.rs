@@ -24,11 +24,14 @@ pub(crate) mod coreml;
 #[cfg_attr(docsrs, doc(cfg(feature = "coreml")))]
 pub use coreml::CoreMlError;
 #[cfg(feature = "_cuda")]
-#[cfg_attr(docsrs, doc(cfg(any(feature = "cuda", feature = "cuda-driver-only"))))]
-pub use cuda::{ComputeCapability, CudaError, CudaGraphs, CudaLibrary, CudaMath, PtxTier};
+#[cfg_attr(docsrs, doc(cfg(feature = "_cuda")))]
+pub use cuda::{
+    ComputeCapability, CudaError, CudaGraphs, CudaLibrary, CudaMath, GeometryError, PtxTier,
+    WeightFault,
+};
 
-#[cfg(feature = "cuda")]
-#[cfg_attr(docsrs, doc(cfg(feature = "cuda")))]
+#[cfg(feature = "_cuda-libraries")]
+#[cfg_attr(docsrs, doc(cfg(feature = "_cuda-libraries")))]
 pub use cuda::CudaLstmAlgorithm;
 
 /// CoreML compute unit selection for native embedding
@@ -69,10 +72,10 @@ pub enum ExecutionMode {
     CoreMlFast,
     /// Native NVIDIA GPU backend (cuBLAS, cuDNN and custom kernels, no ONNX Runtime)
     /// with concurrent segmentation and embedding and ~1s step
-    #[cfg_attr(docsrs, doc(cfg(any(feature = "cuda", feature = "cuda-driver-only"))))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "_cuda")))]
     Cuda,
     /// Native NVIDIA GPU backend with concurrent segmentation and embedding and ~2s step
-    #[cfg_attr(docsrs, doc(cfg(any(feature = "cuda", feature = "cuda-driver-only"))))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "_cuda")))]
     CudaFast,
     /// AMD GPU via ONNX Runtime's MIGraphX execution provider
     #[cfg_attr(docsrs, doc(cfg(feature = "migraphx")))]

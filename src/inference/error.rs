@@ -28,7 +28,7 @@ pub enum InferenceError {
     CoreMl(#[from] CoreMlError),
     /// The native CUDA backend returned an error
     #[cfg(feature = "_cuda")]
-    #[cfg_attr(docsrs, doc(cfg(any(feature = "cuda", feature = "cuda-driver-only"))))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "_cuda")))]
     #[error(transparent)]
     Cuda(#[from] CudaError),
     /// A model input or output did not match its tensor shape contract
@@ -126,7 +126,7 @@ pub enum ModelLoadError {
     Ort(#[from] ort::Error),
     /// The native CUDA backend failed while loading a model
     #[cfg(feature = "_cuda")]
-    #[cfg_attr(docsrs, doc(cfg(any(feature = "cuda", feature = "cuda-driver-only"))))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "_cuda")))]
     #[error(transparent)]
     Cuda(#[from] CudaError),
     /// A required native model asset is missing for the selected execution mode
@@ -139,7 +139,7 @@ pub enum ModelLoadError {
     },
     /// The safetensors weights that the CUDA modes load are missing
     #[cfg(feature = "_cuda")]
-    #[cfg_attr(docsrs, doc(cfg(any(feature = "cuda", feature = "cuda-driver-only"))))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "_cuda")))]
     #[error(
         "{mode} requires the CUDA weights `{path}`; export them with `scripts/cuda/export_weights.py --runtime-assets <dir>`"
     )]
@@ -151,13 +151,7 @@ pub enum ModelLoadError {
     },
     /// The CUDA model assets could not be downloaded from Hugging Face
     #[cfg(all(feature = "_cuda", feature = "online"))]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(all(
-            any(feature = "cuda", feature = "cuda-driver-only"),
-            feature = "online"
-        )))
-    )]
+    #[cfg_attr(docsrs, doc(cfg(all(feature = "_cuda", feature = "online"))))]
     #[error(
         "could not download the CUDA model assets for {mode} from Hugging Face: {source}; export them with `scripts/cuda/export_weights.py --runtime-assets <dir>` and load that directory with `from_dir`"
     )]

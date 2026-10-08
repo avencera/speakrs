@@ -19,11 +19,12 @@ use cudarc::driver::{
 };
 
 use super::{
-    Batches, ConvCandidate, ConvInputs, ConvLayerSpec, Coverage, CoverageEntry, Maths, Op, Phases,
-    PlanError,
+    Batches, ConvCandidate, ConvInputs, ConvKernel, ConvLayerSpec, ConvPin, ConvShape, Coverage,
+    CoverageEntry, FiniteContract, GeometryError, InfinityContract, Maths, NanContract, Op, Phases,
+    PlanError, SignedZeroContract, SpecialValues,
 };
-use crate::inference::cuda::dnn::Conv2d;
-use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, KernelModule};
+use crate::inference::cuda::geometry::Conv2d;
+use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, LoadedKernels};
 
 const SPK_RESNET_PACK_WEIGHTS: &str = "spk_resnet_pack_weights";
 
@@ -61,18 +62,7 @@ const PACK_THREADS: u32 = 256;
 /// Below this many 256-thread blocks per SM, a shape with small blocks uses them
 pub(super) const SMALL_BATCH_WAVES: usize = 2;
 
-/// The convolution shapes that have a fused kernel: 3x3, padding 1, no dilation
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Shape {
-    /// 32 -> 32 channels, stride 1
-    C32,
-    /// 64 -> 64 channels, stride 1
-    C64,
-    /// 32 -> 64 channels, stride 2
-    C32Stride2,
-}
-
-impl Shape {
+impl ConvShape {
     /// The fused shape of `conv`, if it has one
     fn of(conv: &Conv2d) -> Option<Self> {
         if conv.kernel != [3, 3] || conv.padding != [1, 1] || conv.dilation != [1, 1] {
@@ -97,15 +87,28 @@ impl Shape {
     /// The 256-thread kernel, and the small-block one where it exists
     pub(super) fn tilings(self) -> (Tiling, Option<Tiling>) {
         match self {
-            Self::C32 => (Tiling::new("spk_resnet_conv3x3_c32", 256, 8), None),
+            Self::C32 => (ConvKernel::C32.tiling(), None),
             Self::C64 => (
-                Tiling::new("spk_resnet_conv3x3_c64", 256, 4),
-                Some(Tiling::new("spk_resnet_conv3x3_c64_small", 128, 1)),
+                ConvKernel::C64.tiling(),
+                Some(ConvKernel::C64Small.tiling()),
             ),
             Self::C32Stride2 => (
-                Tiling::new("spk_resnet_conv3x3_c32s2", 256, 4),
-                Some(Tiling::new("spk_resnet_conv3x3_c32s2_small", 128, 2)),
+                ConvKernel::C32Stride2.tiling(),
+                Some(ConvKernel::C32Stride2Small.tiling()),
             ),
+        }
+    }
+}
+
+impl ConvKernel {
+    /// The entry's fixed block and tile
+    fn tiling(self) -> Tiling {
+        match self {
+            Self::C32 => Tiling::new("spk_resnet_conv3x3_c32", 256, 8),
+            Self::C64 => Tiling::new("spk_resnet_conv3x3_c64", 256, 4),
+            Self::C64Small => Tiling::new("spk_resnet_conv3x3_c64_small", 128, 1),
+            Self::C32Stride2 => Tiling::new("spk_resnet_conv3x3_c32s2", 256, 4),
+            Self::C32Stride2Small => Tiling::new("spk_resnet_conv3x3_c32s2_small", 128, 2),
         }
     }
 }
@@ -172,6 +175,8 @@ pub(crate) struct Oxide {
     output: [usize; 2],
     /// `[cin][ky][kx][cout]`, written once in `plan`
     packed: CudaSlice<f32>,
+    epilogue: super::Epilogue,
+    math: CudaMath,
 }
 
 impl Oxide {
@@ -185,6 +190,7 @@ impl Oxide {
 }
 
 impl ConvCandidate for Oxide {
+    type Pin = ConvPin;
     // cuDNN runs the 64-channel layers on TF32 tensor cores at b1 in TF32 mode, where
     // this FP32 kernel is only 1-3% faster, inside the timing noise bound
     const COVERAGE: Coverage = Coverage(&[
@@ -205,31 +211,79 @@ impl ConvCandidate for Oxide {
         },
     ]);
 
-    fn plan(runtime: &CudaRuntime, layer: ConvLayerSpec<'_>) -> Result<Self, PlanError> {
+    // the ReLU is `if value < 0.0 { 0.0 } else { value }` after FP32 FMA sums, so NaN
+    // and negative zero pass through it
+    const SPECIAL_VALUES: SpecialValues = SpecialValues {
+        finite: FiniteContract::AbsoluteSum { headroom: 2 },
+        nan: NanContract::Propagates,
+        infinity: InfinityContract::Ieee,
+        signed_zero: SignedZeroContract::ReluKeepsNegative,
+    };
+
+    fn implemented_pin(layer: &ConvLayerSpec<'_>) -> Result<ConvPin, PlanError> {
+        if layer.epilogue == super::Epilogue::Bias {
+            return Err(PlanError::Geometry(GeometryError::Unimplemented {
+                context: "fused conv3x3 plan",
+                reason: "the fused kernel requires ReLU".into(),
+            }));
+        }
+
+        ConvShape::of(&layer.conv)
+            .map(ConvPin::LegacyWaves)
+            .ok_or_else(|| {
+                PlanError::Geometry(GeometryError::Unimplemented {
+                    context: "fused conv3x3 plan",
+                    reason: unfused(layer),
+                })
+            })
+    }
+
+    fn plan(
+        runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
+        layer: ConvLayerSpec<'_>,
+        pin: ConvPin,
+    ) -> Result<Self, PlanError> {
+        if layer.epilogue == super::Epilogue::Bias {
+            return Err(PlanError::Geometry(GeometryError::Unimplemented {
+                context: "fused conv3x3 plan",
+                reason: "the fused kernel requires ReLU".into(),
+            }));
+        }
+
         let conv = layer.conv;
-        let shape = Shape::of(&conv).ok_or_else(|| CudaError::Unsupported {
-            context: "fused conv3x3 plan",
-            reason: format!(
-                "{} has no fused kernel for {} -> {} channels, kernel {:?}, stride {:?}",
-                layer.name, conv.in_channels, conv.out_channels, conv.kernel, conv.stride
-            ),
+        let shape = ConvShape::of(&conv).ok_or_else(|| {
+            PlanError::Geometry(GeometryError::Invalid {
+                context: "fused conv3x3 plan",
+                reason: unfused(&layer),
+            })
         })?;
+        if shape != pin.shape() {
+            return Err(PlanError::Geometry(GeometryError::Invalid {
+                context: "fused conv3x3 plan",
+                reason: format!("{} is {shape:?}, but its pin is {pin:?}", layer.name),
+            }));
+        }
         let output = conv
             .input
             .map(|size| size.saturating_sub(1) / shape.stride() + 1);
 
-        // a batch whose 256-thread grid would leave SMs idle or doubly loaded uses
-        // the small blocks, which spread the same work evenly
-        let (large, small) = shape.tilings();
-        let multiprocessors = if small.is_some() {
-            runtime.multiprocessor_count()?
-        } else {
-            0
+        let tiling = match pin {
+            ConvPin::Kernel(kernel) => kernel.tiling(),
+            ConvPin::LegacyWaves(_) => {
+                // a batch whose 256-thread grid would leave SMs idle or doubly loaded
+                // uses the small blocks, which spread the same work evenly
+                let (large, small) = shape.tilings();
+                let multiprocessors = if small.is_some() {
+                    runtime.multiprocessor_count()?
+                } else {
+                    0
+                };
+                select_tiling(large, small, conv.batch, output, multiprocessors)
+            }
         };
-        let tiling = select_tiling(large, small, conv.batch, output, multiprocessors);
         let weight_len = conv.out_channels * conv.in_channels * 9;
         check_len("fused conv3x3 weights", weight_len, layer.weight.len())?;
-        let kernels = runtime.load_kernels(KernelModule::Resnet)?;
         let pack = kernels.function(SPK_RESNET_PACK_WEIGHTS)?;
         let mut packed = runtime.stream().alloc_zeros::<f32>(weight_len)?;
         pack_weights(
@@ -249,6 +303,8 @@ impl ConvCandidate for Oxide {
             input: conv.input,
             output,
             packed,
+            epilogue: layer.epilogue,
+            math: conv.math,
         };
         // every index in the kernels is 32-bit
         to_u32(plan.input_len().max(plan.output_len()))?;
@@ -262,6 +318,19 @@ impl ConvCandidate for Oxide {
         phases: &Phases,
         stream: &CudaStream,
     ) -> Result<(), CudaError> {
+        if inputs.residual.is_some() != (self.epilogue == super::Epilogue::BiasReluResidual) {
+            return Err(CudaError::CandidateGeometry {
+                area: "resnet",
+                boundary: "fused conv3x3 residual".into(),
+                batch: self.batch,
+                math: self.math,
+                error: GeometryError::Invalid {
+                    context: "fused conv3x3 residual",
+                    reason: "residual input does not match the planned epilogue".into(),
+                },
+            });
+        }
+
         let output_len = self.output_len();
         check_len("fused conv3x3 input", self.input_len(), inputs.x.len())?;
         check_len("fused conv3x3 bias", self.out_channels, inputs.bias.len())?;
@@ -317,6 +386,14 @@ impl ConvCandidate for Oxide {
     }
 }
 
+fn unfused(layer: &ConvLayerSpec<'_>) -> String {
+    let conv = layer.conv;
+    format!(
+        "{} has no fused kernel for {} -> {} channels, kernel {:?}, stride {:?}",
+        layer.name, conv.in_channels, conv.out_channels, conv.kernel, conv.stride
+    )
+}
+
 /// Packs `weight` `[cout][cin][3][3]` into `packed` `[cin][3][3][cout]`, both
 /// holding `cout * cin * 9` elements
 fn pack_weights(
@@ -367,4 +444,56 @@ fn to_u32(value: usize) -> Result<u32, CudaError> {
         context: "fused conv3x3 launch",
         value,
     })
+}
+
+impl super::DriverCandidate for Oxide {
+    const AREA: super::KernelModule = super::KernelModule::Resnet;
+
+    fn driver_coverage(tier: super::PtxTier) -> Coverage {
+        <Self as ConvCandidate>::coverage(tier)
+    }
+
+    fn driver_pin(
+        boundary: super::super::implementation::BoundaryId,
+        batch: usize,
+        _math: CudaMath,
+        device: &super::super::device::DeviceAttributes,
+        _tier: super::PtxTier,
+    ) -> Result<super::ConfigPin, PlanError> {
+        let name = boundary.name();
+        let shape = if name == "resnet.layer2.0.conv1" {
+            ConvShape::C32Stride2
+        } else if C32_AND_STRIDED.contains(&name) {
+            ConvShape::C32
+        } else if C64.contains(&name) {
+            ConvShape::C64
+        } else {
+            return Err(PlanError::Geometry(GeometryError::Unimplemented {
+                context: "driver convolution pin",
+                reason: name.to_owned(),
+            }));
+        };
+        // these are the fixed model outputs, not a shape supplied by the caller
+        let output = if shape == ConvShape::C32 {
+            [80, 998]
+        } else {
+            [40, 499]
+        };
+        let (large, small) = shape.tilings();
+        let tiling = select_tiling(
+            large,
+            small,
+            batch,
+            output,
+            device.multiprocessors().get() as usize,
+        );
+        let kernel = match (shape, tiling.threads) {
+            (ConvShape::C32, _) => ConvKernel::C32,
+            (ConvShape::C64, 128) => ConvKernel::C64Small,
+            (ConvShape::C64, _) => ConvKernel::C64,
+            (ConvShape::C32Stride2, 128) => ConvKernel::C32Stride2Small,
+            (ConvShape::C32Stride2, _) => ConvKernel::C32Stride2,
+        };
+        Ok(super::ConfigPin::Conv(ConvPin::Kernel(kernel)))
+    }
 }

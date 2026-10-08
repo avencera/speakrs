@@ -65,6 +65,20 @@ impl ArtifactHash {
     }
 }
 
+impl ArtifactHash {
+    /// Byte equality usable in compile-time table validation
+    pub(crate) const fn const_eq(self, other: Self) -> bool {
+        let mut index = 0;
+        while index < self.0.len() {
+            if self.0[index] != other.0[index] {
+                return false;
+            }
+            index += 1;
+        }
+        true
+    }
+}
+
 impl std::fmt::Display for ArtifactHash {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for byte in self.0 {
@@ -114,14 +128,62 @@ impl EmbeddedPtx {
     }
 }
 
-/// An artifact request resolved before the driver sees any bytes
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ArtifactRequest {
-    /// The exact artifact pinned by a qualification record
-    Pinned(LoadedArtifact),
-    /// An explicit qualification of the best embedded artifact for this device
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
-    EmbeddedExact,
+/// A complete module identity, resolved before the driver sees any bytes
+///
+/// Loading, the runtime's module cache and qualification tokens compare whole
+/// requests: the area, the PTX tier whose bytes are loaded, and the exact artifact
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ModuleRequest {
+    area: KernelModule,
+    tier: PtxTier,
+    artifact: LoadedArtifact,
+}
+
+impl ModuleRequest {
+    /// A request whose cubin, if any, can run the tier; invalid constants fail to compile
+    pub(crate) const fn new(area: KernelModule, tier: PtxTier, artifact: LoadedArtifact) -> Self {
+        if let LoadedArtifact::Cubin { arch, .. } = artifact {
+            let minimum = tier.min_capability();
+            assert!(
+                arch.major > minimum.major
+                    || arch.major == minimum.major && arch.minor >= minimum.minor,
+                "a cubin cannot be older than its PTX tier"
+            );
+        }
+        Self {
+            area,
+            tier,
+            artifact,
+        }
+    }
+
+    pub(crate) const fn area(self) -> KernelModule {
+        self.area
+    }
+
+    pub(crate) const fn tier(self) -> PtxTier {
+        self.tier
+    }
+
+    pub(crate) const fn artifact(self) -> LoadedArtifact {
+        self.artifact
+    }
+
+    /// Reject a different cached execution identity without replacing its module
+    pub(crate) fn check_cached(self, cached: Self) -> Result<(), CudaError> {
+        if self != cached {
+            return Err(CudaError::ArtifactUnavailable {
+                module: self.area.name(),
+                artifact: self.artifact,
+            });
+        }
+        Ok(())
+    }
+
+    /// The same area and tier, loaded through driver JIT of the tier's embedded PTX
+    pub(crate) const fn ptx_jit(self, sha256: ArtifactHash) -> Self {
+        Self::new(self.area, self.tier, LoadedArtifact::PtxJit { sha256 })
+    }
 }
 
 /// Failure to load the requested artifact, without substituting another artifact
@@ -161,7 +223,7 @@ pub(super) fn load_artifact<T, E>(
 /// `cargo xtask cuda-kernels build` regenerates `ptx/<area>.<tier>.ptx` on a GPU box,
 /// and `cargo xtask cuda-kernels check` fails when that PTX is stale. Each GPU tier
 /// feature embeds the best shipped variant of each area for that target. The `cuda`
-/// and `cuda-driver-only` features enable all four targets and embed all variants
+/// feature enables all four targets and embeds all shipped variants
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum KernelModule {
@@ -185,6 +247,12 @@ pub enum KernelModule {
     /// Candidate kernels for the Sinc producer
     #[allow(dead_code)]
     Sincnet,
+    /// Record-owned filterbank DFT producer, separate from always-on Fbank
+    FbankDft,
+    /// Record-owned segmentation dense operators
+    Segdense,
+    /// Record-owned wide convolution operators
+    Wideconv,
 }
 
 impl KernelModule {
@@ -199,11 +267,14 @@ impl KernelModule {
             Self::Resnet => "resnet",
             Self::Lstm => "lstm",
             Self::Sincnet => "sincnet",
+            Self::FbankDft => "fbankdft",
+            Self::Segdense => "segdense",
+            Self::Wideconv => "wideconv",
         }
     }
 
     /// The build metadata embedded beside this area's artifact bytes
-    #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+    #[cfg(all(test, feature = "_cuda-libraries"))]
     pub(crate) const fn manifest(self) -> &'static str {
         match self {
             #[cfg(test)]
@@ -214,12 +285,15 @@ impl KernelModule {
             Self::Resnet => include_str!("ptx/resnet.manifest"),
             Self::Lstm => include_str!("ptx/lstm.manifest"),
             Self::Sincnet => include_str!("ptx/sincnet.manifest"),
+            // no candidate artifact exists until the separate kernel port
+            Self::FbankDft | Self::Segdense | Self::Wideconv => "",
         }
     }
 
     /// The PTX variants embedded in this build
     pub const fn variants(self) -> AreaPtx {
         match self {
+            Self::FbankDft | Self::Segdense | Self::Wideconv => AreaPtx::baseline(None),
             #[cfg(test)]
             Self::Probe => AreaPtx {
                 sm75: tier_ptx!(["cuda-sm75"], "ptx/probe.sm75", [75, 80, 86, 89, 90, 120]),
@@ -280,6 +354,22 @@ pub struct AreaPtx {
 }
 
 impl AreaPtx {
+    /// Embedded variants without cubins, for host-only tests such as a fake higher tier
+    #[cfg(all(test, feature = "_cuda-libraries"))]
+    pub(crate) fn fixture(variants: &[(PtxTier, &'static str)]) -> Self {
+        let mut area = Self::baseline(None);
+        for (tier, text) in variants {
+            let ptx = Some(EmbeddedPtx { text, cubins: &[] });
+            match tier {
+                PtxTier::Sm75 => area.sm75 = ptx,
+                PtxTier::Sm80 => area.sm80 = ptx,
+                PtxTier::Sm90 => area.sm90 = ptx,
+                PtxTier::Sm120 => area.sm120 = ptx,
+            }
+        }
+        area
+    }
+
     const fn baseline(sm75: Option<EmbeddedPtx>) -> Self {
         Self {
             sm75,
@@ -290,6 +380,7 @@ impl AreaPtx {
     }
 
     /// The embedded variants, lowest tier first
+    #[cfg(test)]
     pub fn iter(&self) -> impl Iterator<Item = (PtxTier, &'static str)> {
         [
             (PtxTier::Sm75, self.sm75),
@@ -311,12 +402,39 @@ impl AreaPtx {
         }
     }
 
+    /// Resolve the best runnable driver-only module without loading it
+    pub(crate) fn driver_request(
+        self,
+        area: KernelModule,
+        limit: PtxTier,
+        device: ComputeCapability,
+    ) -> Option<ModuleRequest> {
+        [PtxTier::Sm120, PtxTier::Sm90, PtxTier::Sm80, PtxTier::Sm75]
+            .into_iter()
+            .filter(|tier| *tier <= limit && tier.min_capability() <= device)
+            .find_map(|tier| {
+                let ptx = self.embedded(tier)?;
+                Some(ModuleRequest::new(
+                    area,
+                    tier,
+                    LoadedArtifact::PtxJit {
+                        sha256: ArtifactHash::of(ptx.text.as_bytes()),
+                    },
+                ))
+            })
+    }
+
     /// The highest embedded variant at or below `limit`
+    ///
+    /// Production never resolves a tier this way: a binding names its tier. Only tests
+    /// and explicit qualification requests ask for the best embedded variant
+    #[cfg(test)]
     pub fn select(&self, limit: PtxTier) -> Option<(PtxTier, &'static str)> {
         self.iter().filter(|(tier, _)| *tier <= limit).last()
     }
 
     /// Resolve a runnable variant or name the target feature that is missing
+    #[cfg(test)]
     pub(super) fn resolve(
         &self,
         area: KernelModule,
@@ -337,38 +455,38 @@ impl AreaPtx {
 /// A kernel module loaded into a CUDA context
 #[derive(Debug, Clone)]
 pub struct LoadedKernels {
-    module: KernelModule,
-    tier: PtxTier,
+    request: ModuleRequest,
     inner: Arc<CudaModule>,
-    artifact: LoadedArtifact,
     ptx_sha256: ArtifactHash,
 }
 
 impl LoadedKernels {
     pub(super) fn new(
-        module: KernelModule,
-        tier: PtxTier,
+        request: ModuleRequest,
         inner: Arc<CudaModule>,
-        artifact: LoadedArtifact,
         ptx_sha256: ArtifactHash,
     ) -> Self {
         Self {
-            module,
-            tier,
+            request,
             inner,
-            artifact,
             ptx_sha256,
         }
     }
 
+    /// The complete identity the driver accepted
+    pub(crate) fn request(&self) -> ModuleRequest {
+        self.request
+    }
+
     /// The PTX tier of the variant that was loaded
     pub fn tier(&self) -> PtxTier {
-        self.tier
+        self.request.tier
     }
 
     /// Identity of the artifact that the driver successfully loaded
+    #[cfg(test)]
     pub fn artifact(&self) -> LoadedArtifact {
-        self.artifact
+        self.request.artifact
     }
 
     /// Identity of the fallback PTX text embedded alongside the loaded artifact
@@ -381,7 +499,7 @@ impl LoadedKernels {
         self.inner
             .load_function(kernel)
             .map_err(|source| CudaError::KernelMissing {
-                module: self.module.name(),
+                module: self.request.area.name(),
                 kernel: kernel.to_string(),
                 source,
             })
@@ -462,7 +580,11 @@ mod tests {
                     // this proof must fail, not silently qualify a rejected cubin's JIT
                     assert_eq!(artifact, cubin_key);
                 }
-                let loaded = LoadedKernels::new(area, tier, module, artifact, ptx_hash);
+                let loaded = LoadedKernels::new(
+                    super::ModuleRequest::new(area, tier, artifact),
+                    module,
+                    ptx_hash,
+                );
                 let mut entries = 0;
                 for line in ptx.lines() {
                     let Some(entry) = line.trim().strip_prefix(".visible .entry ") else {

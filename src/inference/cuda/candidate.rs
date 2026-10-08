@@ -10,9 +10,16 @@
 //! sub-scopes only through the locked [`Phases`] and [`LstmPhases`] handles
 //!
 //! Each trait declares a [`Coverage`]: the layer and batch pairs the candidate
-//! implements, per math mode. Dispatch runs the candidate for exactly those triples and the
-//! Library path for every other triple, and the harness qualifies exactly the declared
-//! triples
+//! implements, per math mode. This is implemented coverage only. Accuracy and speed
+//! acceptance live in the production table's tuple proofs, so dispatch runs the
+//! candidate only for accepted triples and the Library path for every other triple.
+//! The harness qualifies exactly the declared triples
+//!
+//! A plan is built from a [`ConfigPin`] that names its complete execution choice.
+//! Production passes the pin its accepted record names; qualification passes the
+//! candidate's own implemented pin. Each trait also states its [`SpecialValues`]
+//! contract. The locked owner passes the exact loaded module from the selection
+//! token; a plan never resolves production module policy again
 //!
 //! Candidate code lives in `candidate/` and its kernels in the `resnet`, `lstm` and
 //! `sincnet` PTX areas. The harness scans those files before it builds anything; see
@@ -27,8 +34,9 @@ use cudarc::driver::{
     CudaEvent, CudaSlice, CudaStream, CudaView, CudaViewMut, DeviceRepr, ValidAsZeroBits,
 };
 
-use super::dnn::Conv2d;
-use super::{CudaError, CudaMath, CudaRuntime, PtxTier, Sgemm};
+pub(crate) use super::error::{GeometryError, WeightFault};
+use super::geometry::Conv2d;
+use super::{CudaError, CudaMath, CudaRuntime, KernelModule, LoadedKernels, PtxTier, Sgemm};
 
 mod conv;
 mod lstm;
@@ -39,7 +47,8 @@ pub(super) use kernel_inventory::conv_kernel_inventory;
 
 #[cfg(test)]
 mod kernel_inventory {
-    use super::conv::{REQUIRED_KERNELS, SMALL_BATCH_WAVES, Shape, select_tiling};
+    use super::ConvShape as Shape;
+    use super::conv::{REQUIRED_KERNELS, SMALL_BATCH_WAVES, select_tiling};
 
     pub(crate) fn conv_kernel_inventory() -> Vec<&'static str> {
         let mut entries = REQUIRED_KERNELS.to_vec();
@@ -66,14 +75,30 @@ pub(crate) use lstm::Oxide as LstmOxide;
 pub(crate) use sinc::Oxide as SincOxide;
 
 /// A planning refusal that is distinct from a CUDA or model error
+///
+/// Only production outside driver-only mode may fall back to Library, and only for
+/// refusals that do not indicate a host bug: a device capability limit, weights
+/// outside the candidate's numeric contract, or a valid geometry the candidate does
+/// not implement. An invalid geometry or violated plan invariant is a hard error
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PlanError {
-    /// The device cannot host this candidate; only production may fall back
+    /// The device cannot host this candidate, such as a resource limit
     #[error("{reason}")]
     DeviceUnsupported {
         /// The device constraint that prevents this plan
         reason: String,
     },
+    /// The weights violate the candidate's numeric contract
+    #[error("{layer}: {fault}")]
+    WeightsOutOfContract {
+        /// The weight tensor that was refused
+        layer: &'static str,
+        /// The first violation found
+        fault: WeightFault,
+    },
+    /// The requested geometry is invalid for the pin, or valid but unimplemented
+    #[error(transparent)]
+    Geometry(GeometryError),
     /// A real error, which dispatch must propagate in every selection mode
     #[error(transparent)]
     Cuda(#[from] CudaError),
@@ -87,6 +112,265 @@ impl From<cudarc::driver::DriverError> for PlanError {
 
 /// Model batches that accepted records can authorize for production
 pub(crate) const QUALIFIED_BATCHES: [usize; 2] = [1, 32];
+
+/// The complete execution choice of one candidate plan
+///
+/// A plan is constructed from its pin and validates device support; it never
+/// reselects a configuration and compares labels afterwards
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfigPin {
+    /// A ResNet 3x3 convolution
+    Conv(ConvPin),
+    /// The four-layer LSTM stack
+    Lstm(LstmPin),
+    /// The Sinc producer
+    Sinc(SincPin),
+    /// The filterbank energy producer before log and temporal normalization
+    Fbank(FbankPin),
+}
+
+impl ConfigPin {
+    /// The candidate area whose kernels execute this pin
+    pub(crate) const fn area(self) -> KernelModule {
+        match self {
+            Self::Conv(_) => KernelModule::Resnet,
+            Self::Lstm(_) => KernelModule::Lstm,
+            Self::Sinc(_) => KernelModule::Sincnet,
+            Self::Fbank(_) => KernelModule::FbankDft,
+        }
+    }
+
+    /// Whether the pin names a device-dependent selection rule rather than one fixed
+    /// configuration; only capability-wide legacy evidence may carry such a rule
+    pub(crate) const fn is_device_rule(self) -> bool {
+        matches!(
+            self,
+            Self::Conv(ConvPin::LegacyWaves(_)) | Self::Lstm(LstmPin::LegacyCooperative)
+        )
+    }
+}
+
+/// A complete filterbank producer configuration
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FbankPin {
+    /// Compensated FP32 FFT and mel projection, eight frames per 256-thread block
+    FftMelAccurate,
+}
+
+/// The supported filterbank batches, independent of model and stress batch sets
+pub(crate) const FBANK_BATCHES: [usize; 32] = [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+    27, 28, 29, 30, 31, 32,
+];
+
+/// A validated `[batch,160000]` waveform producer shape
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FbankSpec {
+    batch: usize,
+    math: CudaMath,
+}
+
+impl FbankSpec {
+    /// Reject batches outside the boundary's independent production set
+    pub(crate) fn new(batch: usize, math: CudaMath) -> Result<Self, PlanError> {
+        if !super::implementation::BoundaryId::named("fbank.dft")
+            .batches()
+            .contains(batch)
+        {
+            return Err(PlanError::Geometry(GeometryError::Invalid {
+                context: "fbank.dft",
+                reason: format!("fbank.dft batch {batch} is outside 1..=32"),
+            }));
+        }
+        Ok(Self { batch, math })
+    }
+
+    /// Waveform rows in this plan
+    pub(crate) const fn batch(self) -> usize {
+        self.batch
+    }
+
+    /// Library multiply mode used for this comparison
+    pub(crate) const fn math(self) -> CudaMath {
+        self.math
+    }
+}
+
+/// A candidate for `fbank.dft`, including framing, windowing and mel projection
+///
+/// The producer writes every energy in `[B,998,80]`. The locked consumer owns
+/// the unchanged log/CMN pass. Enqueue uses only the runtime's stream and registered
+/// side streams; a Library control implements the same interface in locked test code
+pub(crate) trait FbankCandidate: Sized {
+    /// The plan's complete pin; the Library control has no candidate configuration
+    type Pin;
+    /// Implemented tuples; acceptance remains independent
+    const COVERAGE: Coverage;
+    /// Numeric contract of the energy producer
+    const SPECIAL_VALUES: SpecialValues;
+    /// Implemented coverage at the actual loaded tier
+    fn coverage(_tier: PtxTier) -> Coverage {
+        Self::COVERAGE
+    }
+    /// The complete configuration used by qualification
+    fn implemented_pin(spec: FbankSpec) -> Result<Self::Pin, PlanError>;
+    /// Build one validated batch plan outside measured intervals
+    fn plan(runtime: &CudaRuntime, spec: FbankSpec, pin: Self::Pin) -> Result<Self, PlanError>;
+    /// Write all energies before the shared log/CMN consumer
+    fn enqueue(
+        &self,
+        waveform: &CudaView<'_, f32>,
+        energies: &mut CudaViewMut<'_, f32>,
+        phases: &Phases,
+        runtime: &CudaRuntime,
+    ) -> Result<(), CudaError>;
+}
+
+/// A ResNet 3x3 convolution shape with fused kernels: padding 1, no dilation
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConvShape {
+    /// 32 -> 32 channels, stride 1
+    C32,
+    /// 64 -> 64 channels, stride 1
+    C64,
+    /// 32 -> 64 channels, stride 2
+    C32Stride2,
+}
+
+/// One fused ResNet kernel entry with its fixed block and tile
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConvKernel {
+    /// `spk_resnet_conv3x3_c32`: 256 threads, 8 output rows by 64 columns
+    C32,
+    /// `spk_resnet_conv3x3_c64`: 256 threads, 4 rows by 64 columns
+    C64,
+    /// `spk_resnet_conv3x3_c64_small`: 128 threads, 1 row by 64 columns
+    C64Small,
+    /// `spk_resnet_conv3x3_c32s2`: 256 threads, 4 rows by 64 columns
+    C32Stride2,
+    /// `spk_resnet_conv3x3_c32s2_small`: 128 threads, 2 rows by 64 columns
+    C32Stride2Small,
+}
+
+impl ConvKernel {
+    /// The shape this entry computes
+    pub(crate) const fn shape(self) -> ConvShape {
+        match self {
+            Self::C32 => ConvShape::C32,
+            Self::C64 | Self::C64Small => ConvShape::C64,
+            Self::C32Stride2 | Self::C32Stride2Small => ConvShape::C32Stride2,
+        }
+    }
+}
+
+/// The execution choice of a ResNet convolution: weights packed once per plan as
+/// `[cin][ky][kx][cout]`, NCHW activations, FP32 FMA in both math modes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConvPin {
+    /// Exactly this entry and tile
+    Kernel(ConvKernel),
+    /// The PR #36 rule: the shape's small-block entry when the large entry's grid
+    /// gives fewer than two blocks per SM, otherwise the large entry
+    LegacyWaves(ConvShape),
+}
+
+impl ConvPin {
+    /// The shape every entry this pin can run computes
+    pub(crate) const fn shape(self) -> ConvShape {
+        match self {
+            Self::Kernel(kernel) => kernel.shape(),
+            Self::LegacyWaves(shape) => shape,
+        }
+    }
+}
+
+/// The execution choice of the LSTM stack
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LstmPin {
+    /// The PR #36 stack: locked cuBLAS input projections, `spk_lstm_recurrence` with
+    /// 128-thread blocks, and the cooperative tile schedule the device's resident
+    /// capacity allows
+    LegacyCooperative,
+}
+
+/// The execution choice of the Sinc producer
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SincPin {
+    /// `spk_sincnet_conv_abs_pool`: 16-channel groups, 256 pooled outputs per
+    /// 256-thread block, filters packed once per plan, pooled output
+    ConvAbsPool,
+}
+
+/// What a candidate guarantees for special values, against the f64 reference result
+/// of its operator
+///
+/// Each field is a separate contract; none implies another
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SpecialValues {
+    /// When finite inputs and weights give finite outputs
+    pub finite: FiniteContract,
+    /// NaN in an input or weight
+    pub nan: NanContract,
+    /// An infinite input or weight
+    pub infinity: InfinityContract,
+    /// The sign of zero outputs
+    pub signed_zero: SignedZeroContract,
+}
+
+/// The input and weight bound under which finite operands give finite outputs
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FiniteContract {
+    /// Filterbank energies remain finite for waveforms with magnitude at most one,
+    /// using the fixed 400-sample window, DFT and nonnegative mel filters
+    UnitWaveform,
+    /// Every output is finite when, for each output, the f64 sum of the absolute
+    /// values of all its terms, `Σ|w·x| + |bias| (+ |residual|)`, is at most
+    /// `f32::MAX / headroom`. The headroom covers FP32 rounding growth along the
+    /// fixed accumulation order
+    AbsoluteSum {
+        /// Divisor of `f32::MAX`
+        headroom: u32,
+    },
+    /// Outputs are activations bounded by one in magnitude when every gate
+    /// pre-activation's absolute term sum is at most `f32::MAX / headroom`
+    BoundedActivation {
+        /// Divisor of `f32::MAX`
+        headroom: u32,
+    },
+}
+
+/// NaN behaviour
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NanContract {
+    /// A NaN term makes every output whose sum contains it NaN
+    Propagates,
+    /// The pooling maximum ignores a NaN term; a window of only NaN terms gives
+    /// negative infinity
+    PoolingIgnores,
+    /// Not established; NaN operands are outside the contract
+    Unspecified,
+}
+
+/// Infinity behaviour
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InfinityContract {
+    /// IEEE FP32 arithmetic in the fixed order: an infinite term gives an infinite
+    /// sum, and opposite infinities give NaN
+    Ieee,
+    /// Not established; infinite operands are outside the contract
+    Unspecified,
+}
+
+/// Signed-zero behaviour
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SignedZeroContract {
+    /// The ReLU keeps a negative-zero pre-activation as negative zero
+    ReluKeepsNegative,
+    /// Outputs are absolute values, so a zero output is positive zero
+    Positive,
+    /// Not established
+    Unspecified,
+}
 /// Test samples, including stress batches that never grant production coverage
 pub(crate) const TEST_BATCHES: [usize; 5] = [1, 7, 32, 33, 64];
 
@@ -159,16 +443,27 @@ impl Coverage {
     }
 }
 
-/// One eligible ResNet 3x3 convolution with folded batch norm, as a candidate plans it
+/// The operation after a convolution's bias addition
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Epilogue {
+    /// Bias only, as used by shortcut convolutions
+    Bias,
+    /// Bias followed by ReLU
+    BiasRelu,
+    /// Residual and bias followed by ReLU
+    BiasReluResidual,
+}
+
+/// One NCHW convolution with folded batch norm and its complete epilogue
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ConvLayerSpec<'a> {
     /// The layer name, such as `resnet.layer2.0.conv1`
     pub name: &'a str,
     /// Shape, padding, stride, batch and math mode
     pub conv: Conv2d,
-    /// Whether the output adds a residual before the ReLU
-    pub residual: bool,
-    /// Folded weights `[k, c, 3, 3]`
+    /// The bias, activation and residual operation after convolution
+    pub epilogue: Epilogue,
+    /// Folded weights `[k, c, kernel_height, kernel_width]`
     pub weight: &'a CudaSlice<f32>,
     /// Folded bias `[k]`
     pub bias: &'a CudaSlice<f32>,
@@ -181,24 +476,38 @@ pub(crate) struct ConvInputs<'a, 'b> {
     pub x: &'a CudaView<'b, f32>,
     /// `[n, k, p, q]` when the layer adds a residual
     pub residual: Option<&'a CudaView<'b, f32>>,
-    /// Folded weights `[k, c, 3, 3]`
+    /// Folded weights `[k, c, kernel_height, kernel_width]`
     pub weight: &'a CudaView<'b, f32>,
     /// Folded bias `[k]`
     pub bias: &'a CudaView<'b, f32>,
 }
 
-/// A candidate for `y = relu(conv(x, w) + bias [+ residual])`
+/// A candidate for convolution and the spec's complete bias, activation and residual epilogue
 pub(crate) trait ConvCandidate: Sized {
+    /// The complete configuration, or unit for the Library control
+    type Pin;
     /// Convolution names and batch sizes this candidate implements
     const COVERAGE: Coverage;
+
+    /// The special-value contract of every plan
+    const SPECIAL_VALUES: SpecialValues;
 
     /// Coverage for the actual loaded tier; override when variants cover different tuples
     fn coverage(_tier: PtxTier) -> Coverage {
         Self::COVERAGE
     }
 
-    /// Prepares one layer for one batch size; runs once per batch class, untimed
-    fn plan(runtime: &CudaRuntime, layer: ConvLayerSpec<'_>) -> Result<Self, PlanError>;
+    /// The configuration qualification plans for this layer
+    fn implemented_pin(layer: &ConvLayerSpec<'_>) -> Result<Self::Pin, PlanError>;
+
+    /// Prepares one layer for one batch size from `pin`; runs once per batch class,
+    /// untimed
+    fn plan(
+        runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
+        layer: ConvLayerSpec<'_>,
+        pin: Self::Pin,
+    ) -> Result<Self, PlanError>;
 
     /// Enqueues the layer on `stream`, writing every element of `y` `[n, k, p, q]`
     fn enqueue(
@@ -253,6 +562,9 @@ pub(crate) trait SincCandidate: Sized {
     /// `sincnet.conv0.abs_pool` and the batch sizes this candidate implements
     const COVERAGE: Coverage;
 
+    /// The special-value contract of every plan
+    const SPECIAL_VALUES: SpecialValues;
+
     /// Coverage for the actual loaded tier; override when variants cover different tuples
     fn coverage(_tier: PtxTier) -> Coverage {
         Self::COVERAGE
@@ -260,8 +572,16 @@ pub(crate) trait SincCandidate: Sized {
     /// The tensor [`Self::enqueue`] writes
     const OUTPUT: SincOutput;
 
-    /// Prepares one batch size; runs once per batch class, untimed
-    fn plan(runtime: &CudaRuntime, spec: SincSpec<'_>) -> Result<Self, PlanError>;
+    /// The configuration qualification plans for this batch size
+    fn implemented_pin(spec: &SincSpec<'_>) -> Result<SincPin, PlanError>;
+
+    /// Prepares one batch size from `pin`; runs once per batch class, untimed
+    fn plan(
+        runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
+        spec: SincSpec<'_>,
+        pin: SincPin,
+    ) -> Result<Self, PlanError>;
 
     /// Enqueues the producer on `stream`, writing every element of `output`
     fn enqueue(
@@ -305,13 +625,24 @@ pub(crate) trait LstmCandidate: Sized {
     /// `lstm.stack` and the batch sizes this candidate implements
     const COVERAGE: Coverage;
 
+    /// The special-value contract of every plan
+    const SPECIAL_VALUES: SpecialValues;
+
     /// Coverage for the actual loaded tier; override when variants cover different tuples
     fn coverage(_tier: PtxTier) -> Coverage {
         Self::COVERAGE
     }
 
-    /// Prepares one batch size; runs once per batch class, untimed
-    fn plan(runtime: &CudaRuntime, spec: LstmSpec<'_>) -> Result<Self, PlanError>;
+    /// The configuration qualification plans for this batch size
+    fn implemented_pin(spec: &LstmSpec<'_>) -> Result<LstmPin, PlanError>;
+
+    /// Prepares one batch size from `pin`; runs once per batch class, untimed
+    fn plan(
+        runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
+        spec: LstmSpec<'_>,
+        pin: LstmPin,
+    ) -> Result<Self, PlanError>;
 
     /// Enqueues the stack on `stream`, every input projection inside
     /// [`LstmPhases::input_proj`] and every recurrence inside [`LstmPhases::recurrence`]
@@ -452,23 +783,23 @@ impl<'a> LstmPhases<'a> {
     }
 }
 
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 #[path = "candidate_test_support.rs"]
 pub(crate) mod test_support;
 
-#[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 use test_support::{projection_scope, sub_scope};
 
 /// Production opens no harness scope
-#[cfg(not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))))]
+#[cfg(not(all(test, feature = "_cuda-libraries")))]
 struct NoScope;
 
-#[cfg(not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))))]
+#[cfg(not(all(test, feature = "_cuda-libraries")))]
 fn sub_scope(_name: impl FnOnce() -> String) -> NoScope {
     NoScope
 }
 
-#[cfg(not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))))]
+#[cfg(not(all(test, feature = "_cuda-libraries")))]
 fn projection_scope(_stream: &CudaStream, _layer: usize, _direction: Direction) -> NoScope {
     NoScope
 }
@@ -524,7 +855,7 @@ impl SideStream {
     pub(crate) fn new(runtime: &CudaRuntime) -> Result<Self, CudaError> {
         let context = runtime.context();
         let stream = context.new_stream()?;
-        #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+        #[cfg(all(test, feature = "_cuda-libraries"))]
         super::test_support::register_side_stream(&stream);
         Ok(Self {
             stream,
@@ -634,15 +965,26 @@ impl<'a> Projection<'a> {
 mod tests {
     use super::{
         Batches, Coverage, CoverageEntry, CudaError, CudaMath, CudaRuntime, CudaStream,
-        CudaViewMut, Maths, Phases, PlanError, PtxTier, SincCandidate, SincInputs, SincOutput,
-        SincSpec,
+        CudaViewMut, FiniteContract, InfinityContract, LoadedKernels, Maths, NanContract, Phases,
+        PlanError, PtxTier, SignedZeroContract, SincCandidate, SincInputs, SincOutput, SincPin,
+        SincSpec, SpecialValues,
     };
 
     struct TierFixture;
 
     impl SincCandidate for TierFixture {
         const COVERAGE: Coverage = Coverage::NONE;
+        const SPECIAL_VALUES: SpecialValues = SpecialValues {
+            finite: FiniteContract::AbsoluteSum { headroom: 2 },
+            nan: NanContract::Unspecified,
+            infinity: InfinityContract::Unspecified,
+            signed_zero: SignedZeroContract::Unspecified,
+        };
         const OUTPUT: SincOutput = SincOutput::Pooled;
+
+        fn implemented_pin(_spec: &SincSpec<'_>) -> Result<SincPin, PlanError> {
+            Ok(SincPin::ConvAbsPool)
+        }
 
         fn coverage(tier: PtxTier) -> Coverage {
             match tier {
@@ -660,7 +1002,12 @@ mod tests {
             }
         }
 
-        fn plan(_runtime: &CudaRuntime, _spec: SincSpec<'_>) -> Result<Self, PlanError> {
+        fn plan(
+            _runtime: &CudaRuntime,
+            _kernels: &LoadedKernels,
+            _spec: SincSpec<'_>,
+            _pin: SincPin,
+        ) -> Result<Self, PlanError> {
             unreachable!("coverage-only fixture does not construct GPU plans")
         }
 
@@ -687,4 +1034,299 @@ mod tests {
         assert!(!higher.covers(layer, 1, CudaMath::Fp32));
         assert!(TierFixture::coverage(PtxTier::Sm120).entries().is_empty());
     }
+}
+
+#[cfg(all(test, feature = "_cuda-libraries"))]
+#[path = "candidate_tests.rs"]
+mod candidate_tests;
+
+/// A fixed dense boundary in the loaded model
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DenseSite {
+    /// First segmentation linear layer
+    Linear0,
+    /// Second segmentation linear layer
+    Linear1,
+    /// Segmentation classifier
+    Classifier,
+    /// Embedding projection
+    Embedding,
+}
+
+/// The operation after dense multiplication
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DenseEpilogue {
+    /// Add bias only
+    Bias,
+    /// Add bias and apply leaky ReLU
+    BiasLeakyRelu,
+    /// Add bias and apply row log softmax
+    BiasLogSoftmax,
+}
+
+/// Validated dense geometry; weights and epilogue follow the fixed site
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DenseSpec {
+    site: DenseSite,
+    batch: usize,
+    math: CudaMath,
+}
+
+impl DenseSpec {
+    /// Build a fixed model shape with a positive batch and bounded buffer sizes
+    pub(crate) fn new(site: DenseSite, batch: usize, math: CudaMath) -> Result<Self, PlanError> {
+        let spec = Self { site, batch, math };
+        let (m, n, k) = spec.dimensions();
+        validate_fixed_batch("dense plan", batch, &[m, n, k, m * n, m * k, n * k])?;
+        Ok(spec)
+    }
+
+    /// The fixed model boundary
+    pub(crate) const fn site(self) -> DenseSite {
+        self.site
+    }
+    /// Items in this plan
+    pub(crate) const fn batch(self) -> usize {
+        self.batch
+    }
+    /// Library multiply mode
+    pub(crate) const fn math(self) -> CudaMath {
+        self.math
+    }
+    /// Rows, output columns and input columns per batch item
+    pub(crate) const fn dimensions(self) -> (usize, usize, usize) {
+        match self.site {
+            DenseSite::Linear0 => (589, 128, 256),
+            DenseSite::Linear1 => (589, 128, 128),
+            DenseSite::Classifier => (589, 7, 128),
+            DenseSite::Embedding => (3, 256, 5120),
+        }
+    }
+    /// The fixed operation after multiplication
+    pub(crate) const fn epilogue(self) -> DenseEpilogue {
+        match self.site {
+            DenseSite::Linear0 | DenseSite::Linear1 => DenseEpilogue::BiasLeakyRelu,
+            DenseSite::Classifier => DenseEpilogue::BiasLogSoftmax,
+            DenseSite::Embedding => DenseEpilogue::Bias,
+        }
+    }
+    /// Whether weights use transposed `[n,k]` storage and output starts with bias
+    pub(crate) const fn transposed_weights(self) -> bool {
+        matches!(self.site, DenseSite::Embedding)
+    }
+    /// GEMM beta after seeding the output bias; other sites add bias afterwards
+    pub(crate) const fn beta(self) -> f32 {
+        if self.transposed_weights() { 1.0 } else { 0.0 }
+    }
+    /// Input buffer elements
+    pub(crate) fn input_len(self) -> usize {
+        let (m, _, k) = self.dimensions();
+        self.batch * m * k
+    }
+    /// Shared weight buffer elements
+    pub(crate) fn weight_len(self) -> usize {
+        let (_, n, k) = self.dimensions();
+        n * k
+    }
+    /// Shared bias buffer elements
+    pub(crate) fn bias_len(self) -> usize {
+        self.dimensions().1
+    }
+    /// Output buffer elements
+    pub(crate) fn output_len(self) -> usize {
+        let (m, n, _) = self.dimensions();
+        self.batch * m * n
+    }
+}
+
+/// A complete dense operator, including its fixed bias and activation epilogue
+pub(crate) trait DenseCandidate: Sized {
+    /// Complete candidate configuration, or unit for Library
+    type Pin;
+    /// Implemented tuples, independent of production acceptance
+    const COVERAGE: Coverage;
+    /// Numeric contract of the complete operator
+    const SPECIAL_VALUES: SpecialValues;
+    /// Implemented coverage at the actual loaded tier
+    fn coverage(_tier: PtxTier) -> Coverage {
+        Self::COVERAGE
+    }
+    /// Configuration used by qualification
+    fn implemented_pin(spec: DenseSpec) -> Result<Self::Pin, PlanError>;
+    /// Build outside measured intervals from the owner-supplied loaded module
+    fn plan(
+        runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
+        spec: DenseSpec,
+        pin: Self::Pin,
+    ) -> Result<Self, PlanError>;
+    /// Write the complete output on the runtime stream
+    fn enqueue(
+        &self,
+        x: &CudaView<'_, f32>,
+        weight: &CudaView<'_, f32>,
+        bias: &CudaView<'_, f32>,
+        output: &mut CudaViewMut<'_, f32>,
+        phases: &Phases,
+        runtime: &CudaRuntime,
+    ) -> Result<(), CudaError>;
+}
+
+/// A fixed segmentation convolution producer
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SegConvSite {
+    /// The 80 to 60 channel convolution
+    Conv1,
+    /// The 60 to 60 channel convolution
+    Conv2,
+}
+
+/// Validated five-tap, stride-one NCW convolution without bias
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SegConvSpec {
+    site: SegConvSite,
+    batch: usize,
+    math: CudaMath,
+}
+
+impl SegConvSpec {
+    /// Build a fixed model shape with a positive batch and bounded buffer sizes
+    pub(crate) fn new(site: SegConvSite, batch: usize, math: CudaMath) -> Result<Self, PlanError> {
+        let spec = Self { site, batch, math };
+        validate_fixed_batch(
+            "segmentation conv plan",
+            batch,
+            &[
+                spec.in_channels() * spec.input_steps(),
+                spec.out_channels() * spec.output_steps(),
+            ],
+        )?;
+        Ok(spec)
+    }
+    /// The fixed model boundary
+    pub(crate) const fn site(self) -> SegConvSite {
+        self.site
+    }
+    /// Items in this plan
+    pub(crate) const fn batch(self) -> usize {
+        self.batch
+    }
+    /// Library multiply mode
+    pub(crate) const fn math(self) -> CudaMath {
+        self.math
+    }
+    /// Input channels
+    pub(crate) const fn in_channels(self) -> usize {
+        match self.site {
+            SegConvSite::Conv1 => 80,
+            SegConvSite::Conv2 => 60,
+        }
+    }
+    /// Output channels
+    pub(crate) const fn out_channels(self) -> usize {
+        60
+    }
+    /// Input steps per channel
+    pub(crate) const fn input_steps(self) -> usize {
+        match self.site {
+            SegConvSite::Conv1 => 5325,
+            SegConvSite::Conv2 => 1773,
+        }
+    }
+    /// Output steps per channel
+    pub(crate) const fn output_steps(self) -> usize {
+        self.input_steps() - 4
+    }
+    /// Filter taps
+    pub(crate) const fn kernel(self) -> usize {
+        5
+    }
+    /// Input buffer elements in NCW layout
+    pub(crate) fn input_len(self) -> usize {
+        self.batch * self.in_channels() * self.input_steps()
+    }
+    /// Shared weights in output-channel, input-channel, tap order
+    pub(crate) fn weight_len(self) -> usize {
+        self.out_channels() * self.in_channels() * self.kernel()
+    }
+    /// Output buffer elements in NCW layout
+    pub(crate) fn output_len(self) -> usize {
+        self.batch * self.out_channels() * self.output_steps()
+    }
+}
+
+/// A raw segmentation convolution; the shared pool consumer owns bias
+pub(crate) trait SegConvCandidate: Sized {
+    /// Complete candidate configuration, or unit for Library
+    type Pin;
+    /// Implemented tuples, independent of production acceptance
+    const COVERAGE: Coverage;
+    /// Numeric contract of the producer
+    const SPECIAL_VALUES: SpecialValues;
+    /// Implemented coverage at the actual loaded tier
+    fn coverage(_tier: PtxTier) -> Coverage {
+        Self::COVERAGE
+    }
+    /// Configuration used by qualification
+    fn implemented_pin(spec: SegConvSpec) -> Result<Self::Pin, PlanError>;
+    /// Build outside measured intervals from the owner-supplied loaded module
+    fn plan(
+        runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
+        spec: SegConvSpec,
+        pin: Self::Pin,
+    ) -> Result<Self, PlanError>;
+    /// Write every raw NCW output value, without bias, on the runtime stream
+    fn enqueue(
+        &self,
+        x: &CudaView<'_, f32>,
+        weight: &CudaView<'_, f32>,
+        output: &mut CudaViewMut<'_, f32>,
+        phases: &Phases,
+        runtime: &CudaRuntime,
+    ) -> Result<(), CudaError>;
+}
+
+fn validate_fixed_batch(
+    context: &'static str,
+    batch: usize,
+    lengths: &[usize],
+) -> Result<(), PlanError> {
+    if batch > 0
+        && lengths.iter().all(|length| {
+            batch
+                .checked_mul(*length)
+                .is_some_and(|value| value <= i32::MAX as usize)
+        })
+    {
+        return Ok(());
+    }
+
+    Err(PlanError::Geometry(GeometryError::Invalid {
+        context,
+        reason: format!("batch {batch} is zero or exceeds the buffer index range"),
+    }))
+}
+
+/// Library-free coverage and a deterministic configuration chosen before module loading
+///
+/// Area ports implement this next to their candidate trait implementation and register
+/// it in `implementation::driver::areas`. Library-dependent legacy plans do not opt in
+pub(crate) trait DriverCandidate {
+    /// The kernel module that owns this candidate
+    const AREA: KernelModule;
+    /// Only tuples whose complete operation needs no numerical library
+    fn driver_coverage(tier: PtxTier) -> Coverage;
+    /// Structural speed evidence, if this complete port is accepted on all devices
+    fn broad_evidence() -> Option<&'static super::implementation::BroadEvidence> {
+        None
+    }
+    /// One complete pin, selected from cached device facts without GPU allocation
+    fn driver_pin(
+        boundary: super::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        device: &super::device::DeviceAttributes,
+        tier: PtxTier,
+    ) -> Result<ConfigPin, PlanError>;
 }
