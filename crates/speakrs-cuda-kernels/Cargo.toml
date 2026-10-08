@@ -23,6 +23,8 @@ segmentation = []
 # candidate areas, one per qualified boundary
 resnet = []
 lstm = []
+# the LSTM stack with its own input projections, so it needs no library
+lstmproj = []
 sincnet = []
 segdense = []
 fbankdft = []

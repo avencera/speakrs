@@ -21,6 +21,8 @@ pub mod fbank;
 pub mod fbankdft;
 #[cfg(feature = "lstm")]
 pub mod lstm;
+#[cfg(feature = "lstmproj")]
+pub mod lstmproj;
 #[cfg(feature = "probe")]
 pub mod probe;
 #[cfg(feature = "resnet")]
