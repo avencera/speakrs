@@ -75,7 +75,7 @@ use super::candidate::{
 };
 use super::device::DeviceAttributes;
 use super::error::GeometryError;
-use super::kernels::{AreaPtx, ArtifactHash, LoadedArtifact, ModuleRequest};
+use super::kernels::{AreaPtx, LoadedArtifact, ModuleRequest};
 use super::{
     ComputeCapability, CudaError, CudaLibrary, CudaMath, CudaRuntime, KernelModule, PtxTier,
 };
@@ -205,7 +205,7 @@ fn qualified_module(
         area,
         tier,
         LoadedArtifact::PtxJit {
-            sha256: ArtifactHash::of(ptx.text.as_bytes()),
+            sha256: ptx.sha256(),
         },
     )))
 }
@@ -1029,7 +1029,7 @@ pub(crate) fn legacy_fixture_coverage(
             variants.embedded(binding.module.tier()).is_some_and(|ptx| {
                 binding.module.artifact()
                     == LoadedArtifact::PtxJit {
-                        sha256: ArtifactHash::of(ptx.text.as_bytes()),
+                        sha256: ptx.sha256(),
                     }
             })
         })

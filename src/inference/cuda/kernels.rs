@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use sha2::{Digest, Sha256};
 
@@ -88,6 +89,23 @@ impl std::fmt::Display for ArtifactHash {
     }
 }
 
+/// Immutable bytes whose content identity can be reused across plans and runtimes
+struct EmbeddedArtifact(&'static [u8]);
+
+impl EmbeddedArtifact {
+    fn sha256(self) -> ArtifactHash {
+        static HASHES: OnceLock<Mutex<HashMap<(usize, usize), ArtifactHash>>> = OnceLock::new();
+        let mut hashes = HASHES
+            .get_or_init(Mutex::default)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // static slices cannot change or reuse their address; length distinguishes subviews
+        *hashes
+            .entry((self.0.as_ptr() as usize, self.0.len()))
+            .or_insert_with(|| ArtifactHash::of(self.0))
+    }
+}
+
 /// The exact artifact accepted by the driver for a kernel area
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LoadedArtifact {
@@ -112,6 +130,12 @@ pub(super) struct EmbeddedCubin {
     pub bytes: &'static [u8],
 }
 
+impl EmbeddedCubin {
+    pub(super) fn sha256(self) -> ArtifactHash {
+        EmbeddedArtifact(self.bytes).sha256()
+    }
+}
+
 /// The PTX fallback and exact-architecture binaries for one tier
 #[derive(Debug, Clone, Copy)]
 pub(super) struct EmbeddedPtx {
@@ -120,6 +144,10 @@ pub(super) struct EmbeddedPtx {
 }
 
 impl EmbeddedPtx {
+    pub(super) fn sha256(self) -> ArtifactHash {
+        EmbeddedArtifact(self.text.as_bytes()).sha256()
+    }
+
     pub fn cubin(self, device: ComputeCapability) -> Option<EmbeddedCubin> {
         self.cubins
             .iter()
@@ -204,8 +232,7 @@ pub(super) fn load_artifact<T, E>(
     let loaded = match requested {
         LoadedArtifact::PtxJit { sha256 } if sha256 == ptx_sha256 => load_ptx(),
         LoadedArtifact::Cubin { arch, sha256 } => {
-            let Some(cubin) =
-                cubin.filter(|cubin| cubin.arch == arch && ArtifactHash::of(cubin.bytes) == sha256)
+            let Some(cubin) = cubin.filter(|cubin| cubin.arch == arch && cubin.sha256() == sha256)
             else {
                 return Err(ArtifactLoadError::Unavailable);
             };
@@ -472,11 +499,11 @@ impl AreaPtx {
         let ptx = self.embedded(tier)?;
         let artifact = ptx.cubin(device).map_or_else(
             || LoadedArtifact::PtxJit {
-                sha256: ArtifactHash::of(ptx.text.as_bytes()),
+                sha256: ptx.sha256(),
             },
             |cubin| LoadedArtifact::Cubin {
                 arch: device,
-                sha256: ArtifactHash::of(cubin.bytes),
+                sha256: cubin.sha256(),
             },
         );
         Some(ModuleRequest::new(area, tier, artifact))
@@ -567,6 +594,25 @@ impl LoadedKernels {
 #[cfg(test)]
 mod tests {
     use super::{AreaPtx, ComputeCapability, CudaError, KernelModule, PtxTier};
+
+    #[test]
+    fn embedded_hash_cache_preserves_content_and_subview_identity() {
+        use super::{ArtifactHash, EmbeddedArtifact};
+
+        static FIRST: &[u8] = b"first artifact";
+        static SECOND: &[u8] = b"other artifact";
+        for bytes in [FIRST, SECOND, &FIRST[..5], FIRST, SECOND] {
+            assert_eq!(EmbeddedArtifact(bytes).sha256(), ArtifactHash::of(bytes));
+        }
+        assert_ne!(
+            EmbeddedArtifact(FIRST).sha256(),
+            EmbeddedArtifact(SECOND).sha256()
+        );
+        assert_ne!(
+            EmbeddedArtifact(FIRST).sha256(),
+            EmbeddedArtifact(&FIRST[..5]).sha256()
+        );
+    }
 
     #[test]
     #[ignore = "GPU artifact proof; run under the shared GPU flock"]
