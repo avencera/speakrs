@@ -145,7 +145,8 @@ pub(crate) enum WinogradProducts {
     /// rounded; sm80 tier, TF32 mode only
     Tf32x2,
     /// One TF32 tensor-core product per term, both operands rounded; sm80 tier, TF32
-    /// mode only
+    /// mode only. Not selected: `Tf32x1Staged` ran faster on every measured part;
+    /// forced runs keep it as the unstaged baseline
     Tf32x1,
     /// As `Tf32x1` with three raw stages and the warps in two phases, so the input
     /// transform overlaps the products and a chunk takes one barrier
@@ -429,11 +430,16 @@ impl Config {
         if device.tensor_rich() {
             return Some(match (tf32, shape) {
                 (false, _) => WinogradProducts::Tf32x3,
-                // on the A100 one product is the measured choice: the second only held
-                // per-layer error to that of a direct TF32 convolution, which DER does
-                // not need
-                (true, Shape::C128) if device.capability == ComputeCapability::new(8, 0) => {
-                    WinogradProducts::Tf32x1
+                // on the A100 one staged product is the measured choice at both widths
+                // and batches: a second product only held per-layer error to that of a
+                // direct TF32 convolution, which DER does not need. The 128-channel
+                // layers ran 2-4% faster than unstaged; the 256-channel layers ran
+                // 0.031 ms at batch 1 against 0.051 ms for 3xTF32 in two partitions, and
+                // 0.50-0.52 ms at batch 32 against 0.54-0.60 ms direct
+                (true, Shape::C128 | Shape::C256)
+                    if device.capability == ComputeCapability::new(8, 0) =>
+                {
+                    WinogradProducts::Tf32x1Staged
                 }
                 // two products keep TF32-mode error at that of a direct TF32
                 // convolution on the 128-channel layers only
@@ -557,8 +563,8 @@ impl Config {
 }
 
 /// Batch from which the direct tensor-core kernel replaces Winograd in TF32 mode on the
-/// 256-channel layers of TF32-rich parts; production runs batches 1 and 32, and the
-/// crossover between them is not measured
+/// 256-channel layers of TF32-rich parts other than the A100; production runs batches 1
+/// and 32, and the crossover between them is not measured
 const WINOGRAD_TENSOR_BATCH: usize = 8;
 
 /// The convolution contract and immutable folded weights used to create a plan
