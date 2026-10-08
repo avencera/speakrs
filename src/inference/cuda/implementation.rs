@@ -12,6 +12,7 @@ pub(crate) mod overrides;
 mod boundary;
 mod driver;
 mod evidence;
+pub(crate) mod policy;
 
 /// Accepted production bindings, one file per candidate area
 mod production {
@@ -313,6 +314,10 @@ pub(crate) enum TokenEvidence {
     },
     /// Implemented library-free coverage, without a speed claim
     Implemented,
+    /// A measured device recipe, with no independent per-layer speed claim
+    Recipe(policy::Recipe),
+    /// A device-class choice, separate from measured device recipes
+    DeviceDefault(policy::DeviceDefault),
     /// A complete broad-winner port, carrying its structural speed evidence
     Port {
         scope: SpeedScope,
@@ -336,6 +341,21 @@ pub(crate) struct Qualified {
 }
 
 impl Qualified {
+    fn source(&self) -> policy::Source {
+        match self.evidence {
+            TokenEvidence::Recipe(_) | TokenEvidence::Production { .. } => policy::Source::Recipe,
+            TokenEvidence::Port {
+                scope: SpeedScope::AllDevices(_),
+                ..
+            }
+            | TokenEvidence::DeviceDefault(_)
+            | TokenEvidence::Implemented => policy::Source::Default,
+            TokenEvidence::Port { .. } => policy::Source::Recipe,
+            #[cfg(all(test, feature = "_cuda-libraries"))]
+            TokenEvidence::Qualification => policy::Source::Default,
+        }
+    }
+
     /// The area that owns this selected plan
     pub(crate) fn area(&self) -> KernelModule {
         self.target.module.area()
@@ -347,6 +367,7 @@ impl Qualified {
                 speed.scope.measured_on_device(self.target.device)
             }
             TokenEvidence::Port { scope, .. } => scope.measured_on_device(self.target.device),
+            TokenEvidence::Recipe(_) => true,
             _ => false,
         }
     }
@@ -426,6 +447,13 @@ impl Qualified {
                 }
             }
             TokenEvidence::Implemented => {}
+            TokenEvidence::Recipe(recipe) => {
+                tracing::debug!(summary = recipe.summary(), "CUDA measured recipe evidence")
+            }
+            TokenEvidence::DeviceDefault(default) => tracing::debug!(
+                summary = default.summary(),
+                "CUDA device-class default evidence"
+            ),
             #[cfg(all(test, feature = "_cuda-libraries"))]
             TokenEvidence::Qualification => {}
         }
@@ -448,7 +476,7 @@ impl Qualified {
             Ok(plan) => {
                 let measured = self.speed_measured();
                 tracing::info!(boundary = self.boundary.name(), batch = self.batch,
-                    math = ?self.math, area = area.name(), speed_measured = measured,
+                    math = ?self.math, area = area.name(), source = self.source().name(), speed_measured = measured,
                     evidence = ?self.evidence, "CUDA route implementation=Oxide");
                 Ok(Some(plan))
             }
@@ -460,6 +488,7 @@ impl Qualified {
                 tracing::warn!(
                     boundary = self.boundary.name(),
                     batch = self.batch,
+                    source = policy::Source::Library.name(),
                     "CUDA candidate unavailable reason={refusal}; using Library"
                 );
                 Ok(None)
@@ -742,6 +771,11 @@ pub(crate) trait Modules {
     /// The runtime's cached device attributes
     fn device(&self) -> &DeviceAttributes;
 
+    /// Whole-pipeline precision required by end-to-end recipes
+    fn recipe_mode(&self) -> policy::RecipeMode {
+        policy::RecipeMode::Disabled
+    }
+
     /// The runtime's PTX tier limit
     fn tier_limit(&self) -> PtxTier;
 
@@ -760,6 +794,10 @@ pub(crate) trait Modules {
 }
 
 impl Modules for &CudaRuntime {
+    fn recipe_mode(&self) -> policy::RecipeMode {
+        CudaRuntime::recipe_mode(self)
+    }
+
     fn force_library(&self) -> bool {
         CudaRuntime::force_library(self)
     }
@@ -796,13 +834,14 @@ pub(crate) fn plan_selection(
     let selected = request.resolve(boundary, batch, math, runtime)?;
     match &selected {
         Selected::Oxide(token) => {
-            tracing::info!(boundary = boundary.name(), batch, ?math, area = token.area().name(), speed_measured = token.speed_measured(), evidence = ?token.evidence, "CUDA route selected implementation=Oxide")
+            tracing::info!(boundary = boundary.name(), batch, ?math, area = token.area().name(), source = token.source().name(), speed_measured = token.speed_measured(), evidence = ?token.evidence, "CUDA route selected implementation=Oxide")
         }
         Selected::Library => tracing::info!(
             boundary = boundary.name(),
             batch,
             ?math,
             speed_measured = false,
+            source = policy::Source::Library.name(),
             "CUDA route selected implementation=Library"
         ),
     }

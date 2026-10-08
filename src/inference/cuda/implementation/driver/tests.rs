@@ -15,6 +15,7 @@ struct Fixture {
     device: DeviceAttributes,
     loads: Vec<ModuleRequest>,
     limit: PtxTier,
+    recipe_mode: super::super::policy::RecipeMode,
 }
 
 impl Fixture {
@@ -27,11 +28,16 @@ impl Fixture {
                 .build(),
             loads: vec![],
             limit: PtxTier::Sm120,
+            recipe_mode: super::super::policy::RecipeMode::Disabled,
         }
     }
 }
 
 impl Modules for &mut Fixture {
+    fn recipe_mode(&self) -> super::super::policy::RecipeMode {
+        self.recipe_mode
+    }
+
     fn device(&self) -> &DeviceAttributes {
         &self.device
     }
@@ -426,7 +432,7 @@ fn resnet_point_binding_shares_one_artifact_across_routes_and_modes() {
 
 #[test]
 #[cfg(feature = "_cuda-libraries")]
-fn resnet_speed_does_not_extend_to_other_blackwell_cards_or_tiers() {
+fn resnet_recipe_does_not_extend_but_tf32_class_default_does() {
     let boundary = BoundaryId::named("resnet.layer1.0.conv1");
     for (sms, name) in [
         (70, "NVIDIA GeForce RTX 5070 Ti"),
@@ -439,12 +445,19 @@ fn resnet_speed_does_not_extend_to_other_blackwell_cards_or_tiers() {
             .name(name)
             .build();
         for math in [CudaMath::Fp32, CudaMath::Tf32] {
-            assert!(matches!(
-                PlanRequest::Hybrid
-                    .resolve(boundary, 1, math, &mut fixture)
-                    .unwrap(),
-                Selected::Library
-            ));
+            let selected = PlanRequest::Hybrid
+                .resolve(boundary, 1, math, &mut fixture)
+                .unwrap();
+            match (math, selected) {
+                (CudaMath::Fp32, Selected::Library) => {}
+                (CudaMath::Tf32, Selected::Oxide(token)) => assert_eq!(
+                    token.evidence,
+                    TokenEvidence::DeviceDefault(
+                        super::super::policy::DeviceDefault::AmpereTf32EarlyTrunk
+                    )
+                ),
+                (_, selected) => panic!("unexpected class selection: {selected:?}"),
+            }
             let Selected::Oxide(token) = PlanRequest::DriverOnly
                 .resolve(boundary, 1, math, &mut fixture)
                 .unwrap()
@@ -504,7 +517,10 @@ fn trunk_scope_matches_measured_totals_and_library_fallbacks() {
                     let expected = matches!(batch, 1 | 32)
                         && (capability == ComputeCapability::new(12, 0)
                             || capability == ComputeCapability::new(8, 9)
-                                && (batch == 32 || math == CudaMath::Tf32));
+                                && (batch == 32 || math == CudaMath::Tf32)
+                            || capability >= ComputeCapability::new(8, 0)
+                                && math == CudaMath::Tf32
+                                && boundary == "resnet.layer2.0.conv2");
                     assert_eq!(
                         matches!(selected, Selected::Oxide(_)),
                         expected,
@@ -546,7 +562,7 @@ fn every_model_boundary_has_a_driver_route_for_model_batches() {
 }
 
 #[test]
-fn tensor_core_trunk_kernels_are_selected_only_for_tf32_on_measured_capabilities() {
+fn tensor_core_trunk_kernels_are_selected_only_for_tf32_on_ampere_and_newer() {
     use crate::inference::cuda::candidate::{ConvKernel, ConvOxide, ConvPin};
     let a100 = Builder::new(ComputeCapability::new(8, 0))
         .multiprocessors(108)
@@ -613,7 +629,7 @@ fn tensor_core_trunk_kernels_are_selected_only_for_tf32_on_measured_capabilities
         ),
         kernel(ConvKernel::C64)
     );
-    // other sm80-tier parts keep their current selection
+    // unmeasured Ampere and newer parts use the same class-default tensor entries
     for (major, minor, sms) in [(8, 6, 84), (9, 0, 132), (12, 0, 36)] {
         let device = Builder::new(ComputeCapability::new(major, minor))
             .multiprocessors(sms)
@@ -625,7 +641,7 @@ fn tensor_core_trunk_kernels_are_selected_only_for_tf32_on_measured_capabilities
         ] {
             let selected = pin(name, 32, CudaMath::Tf32, &device, PtxTier::Sm80);
             assert!(
-                !matches!(
+                matches!(
                     selected,
                     ConfigPin::Conv(ConvPin::Kernel(
                         ConvKernel::C32Tensor
@@ -717,4 +733,217 @@ fn only_turing_routes_the_64_channel_layers_to_ffma_winograd() {
         };
         assert_eq!(token.area(), KernelModule::Resnet);
     }
+}
+
+#[test]
+#[cfg(feature = "_cuda-libraries")]
+fn measured_ada_sinc_recipe_matches_driver_pin_and_keeps_blackwell_binding() {
+    use super::super::policy::Recipe;
+    let mut fixture = Fixture::new();
+    fixture.device = Builder::new(ComputeCapability::new(8, 9))
+        .multiprocessors(34)
+        .name("NVIDIA GeForce RTX 4060 Ti")
+        .build();
+    let boundary = BoundaryId::named("sincnet.conv0.abs_pool");
+    for batch in [1, 32] {
+        let Selected::Oxide(hybrid) = PlanRequest::Hybrid
+            .resolve(boundary, batch, CudaMath::Fp32, &mut fixture)
+            .unwrap()
+        else {
+            panic!("measured Ada recipe")
+        };
+        let Selected::Oxide(driver) = PlanRequest::DriverOnly
+            .resolve(boundary, batch, CudaMath::Fp32, &mut fixture)
+            .unwrap()
+        else {
+            panic!("driver recipe")
+        };
+        assert_eq!(hybrid.pin, driver.pin);
+        assert_eq!(hybrid.target, driver.target);
+        assert_eq!(
+            hybrid.evidence,
+            TokenEvidence::Recipe(Recipe::Rtx4060TiSinc)
+        );
+    }
+    fixture.device = Builder::new(ComputeCapability::new(12, 0)).build();
+    let Selected::Oxide(token) = PlanRequest::Hybrid
+        .resolve(boundary, 32, CudaMath::Fp32, &mut fixture)
+        .unwrap()
+    else {
+        panic!("legacy binding")
+    };
+    assert!(matches!(token.evidence, TokenEvidence::Production { .. }));
+}
+
+#[test]
+#[cfg(feature = "_cuda-libraries")]
+fn measured_a100_recipe_retains_pins_for_every_pipeline_boundary() {
+    use super::super::policy::{Recipe, RecipeMode};
+    for (name, recipe) in [
+        ("NVIDIA A100-PCIE-40GB", Recipe::A100Pcie),
+        ("NVIDIA A100-SXM4-40GB", Recipe::A100Sxm4),
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.device = Builder::new(ComputeCapability::new(8, 0))
+            .multiprocessors(108)
+            .name(name)
+            .build();
+        fixture.recipe_mode = RecipeMode::Fp32SegmentationTf32Embedding;
+        for boundary in BoundaryId::all().filter(|id| id.name() != "lstm.stack.input_proj") {
+            let math = match boundary.area() {
+                KernelModule::Resnet | KernelModule::Embedding => CudaMath::Tf32,
+                _ => CudaMath::Fp32,
+            };
+            for batch in [1, 32] {
+                let Selected::Oxide(hybrid) = PlanRequest::Hybrid
+                    .resolve(boundary, batch, math, &mut fixture)
+                    .unwrap()
+                else {
+                    panic!("{name} {boundary} b{batch}")
+                };
+                let Selected::Oxide(driver) = PlanRequest::DriverOnly
+                    .resolve(boundary, batch, math, &mut fixture)
+                    .unwrap()
+                else {
+                    panic!("driver boundary")
+                };
+                let retained = recipe.fixed_pin(boundary, batch, math);
+                let expected = retained
+                    .map(super::super::PlanPin::Pinned)
+                    .unwrap_or(driver.pin);
+                assert_eq!(hybrid.pin, expected, "{name} {boundary} b{batch}");
+                if retained.is_some() {
+                    assert_ne!(hybrid.pin, driver.pin, "{name} {boundary} b{batch}");
+                }
+                assert_eq!(hybrid.target, driver.target);
+                assert_eq!(hybrid.evidence, TokenEvidence::Recipe(recipe));
+            }
+        }
+        fixture.recipe_mode = RecipeMode::Disabled;
+        for boundary in [
+            "sincnet.conv0.abs_pool",
+            "lstm.stack",
+            "resnet.layer3.1.conv1",
+        ] {
+            let boundary = BoundaryId::named(boundary);
+            assert!(matches!(
+                PlanRequest::Hybrid
+                    .resolve(boundary, 32, CudaMath::Fp32, &mut fixture)
+                    .unwrap(),
+                Selected::Library
+            ));
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "_cuda-libraries")]
+fn measured_rtx_recipes_route_intermediate_batches_and_ada_scalar_choice() {
+    use super::super::policy::RecipeMode;
+    use crate::inference::cuda::candidate::{
+        ConvKernel, ConvPin, WideconvAlgorithm, WideconvPin, WideconvProducts,
+    };
+    for (cc, sms, name) in [
+        (
+            ComputeCapability::new(8, 9),
+            34,
+            "NVIDIA GeForce RTX 4060 Ti",
+        ),
+        (
+            ComputeCapability::new(12, 0),
+            36,
+            "NVIDIA GeForce RTX 5060 Ti",
+        ),
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.device = Builder::new(cc).multiprocessors(sms).name(name).build();
+        fixture.recipe_mode = RecipeMode::Fp32SegmentationTf32Embedding;
+        for batch in [1, 4, 8, 16, 32] {
+            let Selected::Oxide(wide) = PlanRequest::Hybrid
+                .resolve(
+                    BoundaryId::named("resnet.layer3.1.conv1"),
+                    batch,
+                    CudaMath::Tf32,
+                    &mut fixture,
+                )
+                .unwrap()
+            else {
+                panic!("measured wide trunk")
+            };
+            let PlanPin::Pinned(ConfigPin::Wideconv(WideconvPin::Configured(config))) = wide.pin
+            else {
+                panic!("fixed Winograd configuration")
+            };
+            assert_eq!(
+                config.algorithm,
+                WideconvAlgorithm::Winograd(WideconvProducts::Tf32x1Staged)
+            );
+            let Selected::Oxide(c32) = PlanRequest::Hybrid
+                .resolve(
+                    BoundaryId::named("resnet.layer1.0.conv2"),
+                    batch,
+                    CudaMath::Tf32,
+                    &mut fixture,
+                )
+                .unwrap()
+            else {
+                panic!("measured C32 trunk")
+            };
+            let expected = if cc == ComputeCapability::new(8, 9) {
+                ConvKernel::C32
+            } else {
+                ConvKernel::C32Tensor
+            };
+            assert_eq!(
+                c32.pin,
+                PlanPin::Pinned(ConfigPin::Conv(ConvPin::Kernel(expected)))
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg(all(feature = "_cuda-libraries", feature = "cuda-sm75"))]
+fn measured_t4_recipe_routes_mixed_choices_without_changing_driver_only() {
+    use super::super::policy::{Recipe, RecipeMode};
+    let mut fixture = Fixture::new();
+    fixture.device = Builder::new(ComputeCapability::new(7, 5))
+        .multiprocessors(40)
+        .shared_optin_bytes(64 << 10)
+        .name("Tesla T4")
+        .build();
+    fixture.limit = PtxTier::Sm75;
+    fixture.recipe_mode = RecipeMode::Fp32SegmentationTf32Embedding;
+    let mut counts = (0, 0);
+    for boundary in BoundaryId::all().filter(|id| id.name() != "lstm.stack.input_proj") {
+        let math = match boundary.area() {
+            KernelModule::Resnet | KernelModule::Embedding => CudaMath::Tf32,
+            _ => CudaMath::Fp32,
+        };
+        for batch in boundary.batches().iter() {
+            let before = fixture.loads.len();
+            let hybrid = PlanRequest::Hybrid
+                .resolve(boundary, batch, math, &mut fixture)
+                .unwrap();
+            if matches!(hybrid, Selected::Library) {
+                assert_eq!(fixture.loads.len(), before);
+            }
+            let Selected::Oxide(driver) = PlanRequest::DriverOnly
+                .resolve(boundary, batch, math, &mut fixture)
+                .unwrap()
+            else {
+                panic!("driver {boundary} b{batch}")
+            };
+            match hybrid {
+                Selected::Library => counts.1 += 1,
+                Selected::Oxide(hybrid) => {
+                    counts.0 += 1;
+                    assert_eq!(hybrid.pin, driver.pin, "{boundary} b{batch}");
+                    assert_eq!(hybrid.target, driver.target);
+                    assert_eq!(hybrid.evidence, TokenEvidence::Recipe(Recipe::TeslaT4));
+                }
+            }
+        }
+    }
+    assert_eq!(counts, (173, 55));
 }

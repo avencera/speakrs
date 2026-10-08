@@ -38,6 +38,7 @@ pub struct CudaRuntime {
     ptx_tier: PtxTier,
     modules: Mutex<HashMap<KernelModule, LoadedKernels>>,
     force_library: bool,
+    recipe_mode: super::implementation::policy::RecipeMode,
 }
 
 impl CudaRuntime {
@@ -100,6 +101,7 @@ impl CudaRuntime {
             ptx_tier,
             modules: Mutex::new(HashMap::new()),
             force_library: !super::driver_only() && force_library_from_env(),
+            recipe_mode: super::implementation::policy::RecipeMode::Disabled,
         };
         debug!(
             device_name = runtime.device.name(),
@@ -109,6 +111,20 @@ impl CudaRuntime {
             "CUDA device properties"
         );
         Ok(runtime)
+    }
+
+    /// Bind whole-pipeline precision before any model plans are built
+    pub(crate) fn with_recipe_mode(
+        mut self,
+        mode: super::implementation::policy::RecipeMode,
+    ) -> Self {
+        self.recipe_mode = mode;
+        self
+    }
+
+    /// Whole-plan recipe eligibility, fixed for this model session
+    pub(crate) fn recipe_mode(&self) -> super::implementation::policy::RecipeMode {
+        self.recipe_mode
     }
 
     /// The model-load policy snapshot, shared by all boundary plans

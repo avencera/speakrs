@@ -35,7 +35,7 @@ mod error;
 mod fbank;
 mod gemm;
 mod geometry;
-mod implementation;
+pub(crate) mod implementation;
 #[cfg(test)]
 mod kernel_inventory_tests;
 mod kernels;

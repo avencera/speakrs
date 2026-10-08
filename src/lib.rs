@@ -264,9 +264,21 @@
 //! The FP32 fbank FFT/mel producer is a broad winner on cc 8.0 and newer; segdense is a broad
 //! winner on cc 8.0 and newer with the sm80 tier. These fused kernels won by at least
 //! 1.05x in every measured case on at least two architectures. Full `cuda` embeds all
-//! target kernels alongside cuDNN and cuBLAS. LSTM and the ResNet trunk use kernels only
-//! where their speed was measured faster; other devices use Library. TF32 fbank uses
-//! the kernel only on cc 8.9, where it was measured faster.
+//! target kernels alongside cuDNN and cuBLAS. Measured recipes take precedence over
+//! class defaults. The RTX 4060 Ti recipe (cc 8.9, 34 SMs, exact device name) uses the
+//! fused SincNet conv0 kernel in FP32 at batches 1 and 32. The existing cc 12.0 SincNet
+//! binding and the RTX 5060 Ti ResNet binding (cc 12.0, 36 SMs) remain in use.
+//!
+//! The A100 PCIe-40GB and SXM4-40GB recipes (cc 8.0, 108 SMs, exact device names) use
+//! the complete driver plan with FP32 segmentation and TF32 embedding. Their measured
+//! whole-pipeline gains do not imply that each layer is faster. These recipes do not
+//! apply to other cc 8.0 devices or to FP32 embedding.
+//!
+//! On Ampere and newer GPUs without a measured recipe, TF32 early-trunk C32/C64
+//! convolutions use the tensor-core class default. Other boundaries use existing
+//! measured choices and broad-winner defaults, or Library when no such evidence applies.
+//! Turing and FP32 keep their current choices. Target-only builds always use kernels.
+//! TF32 fbank uses the kernel only on cc 8.9, where it was measured faster.
 //! `SPEAKRS_CUDA_FORCE_LIBRARY=1` makes a `cuda` build use Library at each replaceable
 //! boundary. The choice is logged when the model loads.
 //!

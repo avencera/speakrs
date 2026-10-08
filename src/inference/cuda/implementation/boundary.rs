@@ -2,7 +2,7 @@
 //! them
 //!
 //! A boundary is a model operation such as `resnet.layer1.0.conv1`. Its name is the
-//! stable string that records and the harness use. Which candidate module implements
+//! stable string that logs and tune files use. Which candidate module implements
 //! it, if any, comes only from a production binding, never from the name
 
 use std::fmt;
@@ -23,6 +23,11 @@ pub(crate) enum ProductionBatches {
 impl ProductionBatches {
     /// The model batch classes
     pub(crate) const MODEL: [usize; 2] = [1, 32];
+
+    /// Enumerate only batches supported by this model boundary
+    pub(crate) fn iter(self) -> impl Iterator<Item = usize> {
+        (1..=32).filter(move |batch| self.contains(*batch))
+    }
 
     pub(crate) const fn contains(self, batch: usize) -> bool {
         match self {
@@ -224,7 +229,6 @@ impl BoundaryId {
     }
 
     /// Every boundary, in table order
-    #[cfg(test)]
     pub(crate) fn all() -> impl Iterator<Item = Self> {
         (0..BOUNDARIES.len()).map(|index| Self(index as u8))
     }

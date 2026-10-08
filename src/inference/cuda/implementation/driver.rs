@@ -1,5 +1,6 @@
 //! Driver-only routing uses complete implemented coverage, never speed acceptance
 
+use super::policy::{DeviceDefault, Recipe, RecipeChoice};
 use super::{BoundaryId, Modules, PlanPin, Qualified, Selected, Selection, Target, TokenEvidence};
 use crate::inference::cuda::candidate::{
     ConfigPin, ConvOxide, Coverage, DriverCandidate, FbankOxide, LstmProjOxide, PlanError,
@@ -110,12 +111,31 @@ pub(super) fn select_from(
     modules: &mut impl Modules,
     selection: Selection,
 ) -> Result<Option<Selected>, CudaError> {
+    let recipe = (selection == Selection::Production)
+        .then(|| {
+            Recipe::select(
+                boundary,
+                batch,
+                math,
+                modules.device(),
+                modules.recipe_mode(),
+            )
+        })
+        .flatten();
+    let recipe_choice = recipe.map(|recipe| recipe.choice(boundary, batch, math));
+    if recipe_choice == Some(RecipeChoice::Library) {
+        return Ok(Some(Selected::Library));
+    }
+
     for area in super::ROUTE_PRECEDENCE {
         let Some(candidate) = areas.iter().find(|candidate| candidate.area == *area) else {
             continue;
         };
 
-        if selection == Selection::Production && candidate.hybrid == HybridPolicy::QualifiedTable {
+        if selection == Selection::Production
+            && candidate.hybrid == HybridPolicy::QualifiedTable
+            && recipe.is_none()
+        {
             continue;
         }
         let Some(request) = super::production_module(
@@ -136,11 +156,21 @@ pub(super) fn select_from(
         }
         let scope = (candidate.scope)(boundary, batch, math, modules.device(), request.tier())
             .filter(|scope| scope.contains(modules.device()) && scope.allows_tier(request.tier()));
-        if selection == Selection::Production && scope.is_none() {
+        let default = (selection == Selection::Production)
+            .then(|| DeviceDefault::select(*area, batch, math, modules.device(), request.tier()))
+            .flatten();
+        if selection == Selection::Production
+            && recipe.is_none()
+            && scope.is_none()
+            && default.is_none()
+        {
             // a complete port owns its covered tuple even when speed is unmeasured
             return Ok(Some(Selected::Library));
         }
-        let pin = (candidate.pin)(boundary, batch, math, modules.device(), request.tier());
+        let pin = match recipe_choice {
+            Some(RecipeChoice::FixedPin(pin)) => Ok(pin),
+            _ => (candidate.pin)(boundary, batch, math, modules.device(), request.tier()),
+        };
         if selection == Selection::Production
             && matches!(
                 &pin,
@@ -200,10 +230,20 @@ pub(super) fn select_from(
                 device: modules.device().capability(),
             },
             pin: PlanPin::Pinned(pin),
-            evidence: scope.map_or(TokenEvidence::Implemented, |scope| TokenEvidence::Port {
-                scope,
-                summary: (candidate.summary)(math),
-            }),
+            evidence: if selection == Selection::Production
+                && let Some(recipe) = recipe
+            {
+                TokenEvidence::Recipe(recipe)
+            } else if let Some(scope) = scope {
+                TokenEvidence::Port {
+                    scope,
+                    summary: (candidate.summary)(math),
+                }
+            } else if let Some(default) = default {
+                TokenEvidence::DeviceDefault(default)
+            } else {
+                TokenEvidence::Implemented
+            },
             selection,
         }))));
     }
