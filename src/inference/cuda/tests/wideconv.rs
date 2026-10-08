@@ -208,9 +208,11 @@ fn weights_path(root: &Path) -> std::path::PathBuf {
 }
 
 fn selected<T: ToString>(key: &str, value: T) -> bool {
-    std::env::var(key)
-        .ok()
-        .is_none_or(|items| items.split(',').any(|item| item == value.to_string()))
+    std::env::var(key).ok().is_none_or(|items| {
+        items
+            .split(',')
+            .any(|item| item.eq_ignore_ascii_case(&value.to_string()))
+    })
 }
 
 fn batches() -> Vec<usize> {
@@ -445,7 +447,7 @@ impl Candidate {
                     device,
                     feature: runtime.ptx_tier().feature(),
                 })?;
-            runtime.load_module(request)?
+            runtime.load_module(runtime.execution_request(request)?)?
         } else {
             tier(KernelModule::Resnet)?
         };
@@ -612,7 +614,13 @@ fn driver_trunk_layers_match_library() -> Result<(), CudaError> {
     let weights = SafetensorsFile::open(weights_path(&root))?;
     let stream = runtime.stream();
     let timing = std::env::var_os("TRUNK_TIMING").is_some();
+    let store_rounder = runtime
+        .fp16emu()
+        .map(|experiment| experiment.store_rounder(&runtime))
+        .transpose()?
+        .flatten();
     let mut failures = Vec::new();
+    let mut cases = 0;
     for batch in batches() {
         // stress batches cycle the items of the b32 reference
         let (model, case, items_in) = if batch == 1 {
@@ -636,7 +644,6 @@ fn driver_trunk_layers_match_library() -> Result<(), CudaError> {
                 &[layer.co, layer.ci, kernel, kernel],
             )?;
             let bh = weights.read_f32(&format!("{}.weight_bias", layer.name), &[layer.co])?;
-            let xd = stream.clone_htod(&xh)?;
             let wd = stream.clone_htod(&wh)?;
             let bd = stream.clone_htod(&bh)?;
             let rd = rh.as_ref().map(|v| stream.clone_htod(v)).transpose()?;
@@ -644,6 +651,7 @@ fn driver_trunk_layers_match_library() -> Result<(), CudaError> {
                 if !selected("TRUNK_MATHS", format!("{math:?}")) {
                     continue;
                 }
+                let mut xd = stream.clone_htod(&xh)?;
                 let conv = Conv2d {
                     batch,
                     in_channels: layer.ci,
@@ -677,6 +685,12 @@ fn driver_trunk_layers_match_library() -> Result<(), CudaError> {
                 let lib_graph = capture(stream, &mut enqueue_library)?;
                 let lib_values = stream.clone_dtoh(&lib_out)?;
 
+                if layer.second
+                    && let Some(rounder) = &store_rounder
+                {
+                    rounder.round(&runtime, &mut xd.as_view_mut())?;
+                }
+
                 let mut out = stream.alloc_zeros::<f32>(output_len)?;
                 let residual = rd.as_ref().map(|value| value.as_view());
                 let mut enqueue = || {
@@ -689,7 +703,15 @@ fn driver_trunk_layers_match_library() -> Result<(), CudaError> {
                         },
                         &mut out.as_view_mut(),
                         stream,
-                    )
+                    )?;
+                    if layer.block.is_some()
+                        && !layer.second
+                        && !layer.shortcut
+                        && let Some(rounder) = &store_rounder
+                    {
+                        rounder.round(&runtime, &mut out.as_view_mut())?;
+                    }
+                    Ok(())
                 };
                 enqueue()?;
                 let graph = capture(stream, &mut enqueue)?;
@@ -730,12 +752,14 @@ fn driver_trunk_layers_match_library() -> Result<(), CudaError> {
                         "library_ms": library_ms, "kernel_ms": kernel_ms,
                     })
                 );
+                cases += 1;
                 if !pass {
                     failures.push(format!("{} b{batch} {math:?}", layer.name));
                 }
             }
         }
     }
+    assert!(cases > 0, "no trunk cases matched the diagnostic filters");
     assert!(failures.is_empty(), "gross mismatches: {failures:?}");
     Ok(())
 }

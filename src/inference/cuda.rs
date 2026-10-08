@@ -33,6 +33,7 @@ mod dnn;
 mod embedding;
 mod error;
 mod fbank;
+mod fp16emu;
 mod gemm;
 mod geometry;
 mod implementation;

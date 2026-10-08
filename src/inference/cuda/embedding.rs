@@ -22,6 +22,7 @@
 //! can also hold a CUDA graph of the whole forward pass
 
 mod dispatch;
+mod fp16emu;
 mod kernels;
 #[cfg(test)]
 pub(super) use kernels::REQUIRED_KERNELS;
@@ -110,6 +111,8 @@ struct Model {
     head_bias: DeviceTensor,
     kernels: EmbeddingKernels,
     math: CudaMath,
+    range_probe: Option<fp16emu::RangeProbe>,
+    store_rounder: Option<super::fp16emu::StoreRounder>,
 }
 
 impl ResNetEmbedding {
@@ -125,6 +128,23 @@ impl ResNetEmbedding {
         math: CudaMath,
     ) -> Result<Self, CudaError> {
         let trunk = Trunk::load(runtime, weights, FBANK_MEL_BINS, FBANK_FRAMES)?;
+        if runtime.fp16emu().is_some() && math != CudaMath::Tf32 {
+            return Err(CudaError::Unsupported {
+                context: "FP16 operand experiment",
+                reason: "the embedding math must remain TF32".to_owned(),
+            });
+        }
+        let store_rounder = runtime
+            .fp16emu()
+            .map(|experiment| experiment.store_rounder(runtime))
+            .transpose()?
+            .flatten();
+        let range_probe = fp16emu::RangeProbe::load(runtime)?;
+        if let Some(probe) = &range_probe {
+            for (layer, _) in trunk.layers() {
+                probe.observe(runtime, layer, 1, &layer.weight().data().as_view(), true)?;
+            }
+        }
         let target = AreaTarget::for_area(runtime, KernelModule::Resnet)?;
         let mut needs = Vec::new();
         for batch in MODEL_BATCHES {
@@ -185,6 +205,8 @@ impl ResNetEmbedding {
             head_bias,
             kernels,
             math,
+            range_probe,
+            store_rounder,
         })))
     }
 
@@ -325,6 +347,9 @@ impl EmbeddingBatch {
     /// cuBLAS finish their lazy setup outside the capture
     pub fn capture_graph(&mut self, runtime: &CudaRuntime) -> Result<(), CudaError> {
         self.graph = None;
+        if self.model.range_probe.is_some() {
+            return Ok(());
+        }
         self.run(runtime, &mut |_, _| Ok(()))?;
         runtime.synchronize()?;
 
@@ -395,6 +420,7 @@ impl EmbeddingBatch {
         let mut convs = Convs {
             runtime,
             kernels: &model.kernels,
+            range_probe: model.range_probe.as_ref(),
             plans,
             #[cfg(feature = "_cuda-libraries")]
             workspace,
@@ -459,6 +485,9 @@ impl EmbeddingBatch {
                 },
                 &mut hidden_out,
             )?;
+            if let Some(rounder) = &model.store_rounder {
+                rounder.round(runtime, &mut hidden_out)?;
+            }
             tap(EmbeddingTap::Hidden { block: index }, &hidden_out.as_view())?;
 
             // only read for a block with a shortcut, where the buffer holds the whole
@@ -577,6 +606,7 @@ impl EmbeddingBatch {
 
 /// Convolution plus epilogue launches for one forward pass
 struct Convs<'a> {
+    range_probe: Option<&'a fp16emu::RangeProbe>,
     #[cfg(all(test, feature = "_cuda-libraries"))]
     qualification: Option<
         &'a std::collections::BTreeMap<&'static str, super::test_support::boundaries::Owner>,

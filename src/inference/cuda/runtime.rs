@@ -38,6 +38,7 @@ pub struct CudaRuntime {
     ptx_tier: PtxTier,
     modules: Mutex<HashMap<KernelModule, LoadedKernels>>,
     force_library: bool,
+    fp16emu: Option<super::fp16emu::Experiment>,
 }
 
 impl CudaRuntime {
@@ -100,6 +101,7 @@ impl CudaRuntime {
             ptx_tier,
             modules: Mutex::new(HashMap::new()),
             force_library: !super::driver_only() && force_library_from_env(),
+            fp16emu: super::fp16emu::Experiment::from_env()?,
         };
         debug!(
             device_name = runtime.device.name(),
@@ -114,6 +116,10 @@ impl CudaRuntime {
     /// The model-load policy snapshot, shared by all boundary plans
     pub(crate) fn force_library(&self) -> bool {
         self.force_library
+    }
+
+    pub(super) fn fp16emu(&self) -> Option<&super::fp16emu::Experiment> {
+        self.fp16emu.as_ref()
     }
 
     /// The device's compute capability
@@ -193,7 +199,23 @@ impl CudaRuntime {
             &self.device,
             self.ptx_tier,
             module.variants(),
-        )
+        )?
+        .map(|request| self.execution_request(request))
+        .transpose()
+    }
+
+    /// Resolve the private alternate bytes before a plan receives its token
+    pub(crate) fn execution_request(
+        &self,
+        request: ModuleRequest,
+    ) -> Result<ModuleRequest, CudaError> {
+        let Some(experiment) = &self.fp16emu else {
+            return Ok(request);
+        };
+        let Some(ptx) = experiment.ptx(request.area(), request.tier())? else {
+            return Ok(request);
+        };
+        Ok(request.ptx_jit(ArtifactHash::of(ptx.as_bytes())))
     }
 
     /// The same area artifact for explicit and production plans, so their cache
@@ -239,13 +261,22 @@ impl CudaRuntime {
             .variants()
             .embedded(tier)
             .ok_or_else(|| unavailable(request.artifact()))?;
-        let ptx = embedded.text;
+        let alternate = self
+            .fp16emu
+            .as_ref()
+            .map(|experiment| experiment.ptx(module, tier))
+            .transpose()?
+            .flatten();
+        let ptx = alternate.as_deref().unwrap_or(embedded.text);
         let ptx_sha256 = ArtifactHash::of(ptx.as_bytes());
         let cubin = embedded.cubin(self.device.capability());
         let force_jit =
             std::env::var_os(super::kernels::FORCE_PTX_JIT_ENV).is_some_and(|value| value == "1");
         // the diagnostic override keeps the tier and changes only the artifact format
-        let request = if force_jit {
+        if alternate.is_some() {
+            request.check_cached(request.ptx_jit(ptx_sha256))?;
+        }
+        let request = if force_jit && alternate.is_none() {
             request.ptx_jit(ptx_sha256)
         } else {
             request

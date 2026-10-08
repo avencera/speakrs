@@ -35,3 +35,6 @@ pub mod segmentation;
 pub mod sincnet;
 #[cfg(feature = "wideconv")]
 pub mod wideconv;
+
+#[cfg(any(feature = "wideconv", all(feature = "resnet", feature = "tier-sm80")))]
+mod fp16emu;

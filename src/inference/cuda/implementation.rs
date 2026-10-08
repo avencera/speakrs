@@ -113,6 +113,8 @@ pub(crate) enum Selection {
     Production,
     /// Complete implemented coverage; speed is not a selection gate
     DriverOnly,
+    /// Private precision experiment with no production accuracy evidence
+    Experiment,
     /// An explicit or qualification request
     #[cfg(all(test, feature = "_cuda-libraries"))]
     Explicit,
@@ -787,6 +789,11 @@ pub(crate) trait Modules {
         false
     }
 
+    /// Resolve an explicit private experiment before selecting an execution identity
+    fn execution_request(&self, request: ModuleRequest) -> Result<ModuleRequest, CudaError> {
+        Ok(request)
+    }
+
     /// Load exactly `request` and return the identity the driver accepted
     fn load(&mut self, request: ModuleRequest) -> Result<ModuleRequest, CudaError>;
 
@@ -797,6 +804,10 @@ pub(crate) trait Modules {
 }
 
 impl Modules for &CudaRuntime {
+    fn execution_request(&self, request: ModuleRequest) -> Result<ModuleRequest, CudaError> {
+        CudaRuntime::execution_request(self, request)
+    }
+
     fn force_library(&self) -> bool {
         CudaRuntime::force_library(self)
     }

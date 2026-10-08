@@ -173,6 +173,10 @@ fn filter_transform(a: u32, p: u32) -> f64 {
 #[cfg(feature = "tier-sm80")]
 #[inline(always)]
 fn high_bits(value: f32) -> u32 {
+    if crate::fp16emu::enabled() {
+        return crate::fp16emu::round(value).to_bits();
+    }
+
     value.to_bits().wrapping_add(0x1000) & 0xffff_e000
 }
 

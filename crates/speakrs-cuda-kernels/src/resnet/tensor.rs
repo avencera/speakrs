@@ -34,6 +34,10 @@ const THREADS: u32 = 128;
 /// Infinities and NaNs keep their bits; folded weights are finite
 #[inline(always)]
 fn round_tf32(value: f32) -> f32 {
+    if crate::fp16emu::enabled() {
+        return crate::fp16emu::round(value);
+    }
+
     let bits = value.to_bits();
     if bits & 0x7f80_0000 == 0x7f80_0000 {
         return value;
@@ -149,6 +153,10 @@ unsafe fn lds(address: u32) -> f32 {
 
 #[inline(always)]
 fn tf32(value: f32) -> u32 {
+    if crate::fp16emu::enabled() {
+        return crate::fp16emu::round(value).to_bits();
+    }
+
     let bits: u32;
     // safety: a register conversion with no memory access
     unsafe {

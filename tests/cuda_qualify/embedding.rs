@@ -296,6 +296,7 @@ impl<'a> Operator<'a> {
 
     pub(crate) fn run(&mut self, runtime: &CudaRuntime, which: usize) -> Result<(), CudaError> {
         let mut convs = Convs {
+            range_probe: None,
             runtime,
             kernels: &self.model.0.kernels,
             plans: &self.plans,

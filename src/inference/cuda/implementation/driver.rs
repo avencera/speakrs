@@ -174,11 +174,17 @@ pub(super) fn select_from(
                 reason: "candidate returned a foreign area pin".to_owned(),
             });
         }
+        let normal_request = request;
+        let request = modules.execution_request(request)?;
+        let experiment = request != normal_request;
         let loaded = match modules.load(request) {
             Ok(loaded) => loaded,
             Err(error) => {
-                return super::artifact_refusal(error, selection == Selection::Production)
-                    .map(Some);
+                return super::artifact_refusal(
+                    error,
+                    selection == Selection::Production && !experiment,
+                )
+                .map(Some);
             }
         };
         if loaded != request {
@@ -196,11 +202,19 @@ pub(super) fn select_from(
                 device: modules.device().capability(),
             },
             pin: PlanPin::Pinned(pin),
-            evidence: scope.map_or(TokenEvidence::Implemented, |scope| TokenEvidence::Port {
-                scope,
-                summary: (candidate.summary)(math),
-            }),
-            selection,
+            evidence: if experiment {
+                TokenEvidence::Implemented
+            } else {
+                scope.map_or(TokenEvidence::Implemented, |scope| TokenEvidence::Port {
+                    scope,
+                    summary: (candidate.summary)(math),
+                })
+            },
+            selection: if experiment {
+                Selection::Experiment
+            } else {
+                selection
+            },
         }))));
     }
     if selection == Selection::Production {

@@ -53,6 +53,10 @@ pub const TC_C128S2_SLIM_COLUMNS: u32 = 32;
 /// Infinities and NaNs keep their bits; folded weights are finite
 #[inline(always)]
 pub(super) fn round_tf32(value: f32) -> f32 {
+    if crate::fp16emu::enabled() {
+        return crate::fp16emu::round(value);
+    }
+
     let bits = value.to_bits();
     if bits & 0x7f80_0000 == 0x7f80_0000 {
         return value;
@@ -193,6 +197,10 @@ pub(super) mod ops {
 
     #[inline(always)]
     pub(crate) fn tf32(value: f32) -> u32 {
+        if crate::fp16emu::enabled() {
+            return crate::fp16emu::round(value).to_bits();
+        }
+
         let bits: u32;
         // safety: a register conversion with no memory access
         unsafe {

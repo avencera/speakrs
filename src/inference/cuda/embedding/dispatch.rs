@@ -77,6 +77,9 @@ impl Convs<'_> {
         residual: Residual<'_, '_>,
         y: &mut CudaViewMut<'_, f32>,
     ) -> Result<(), CudaError> {
+        if let Some(probe) = self.range_probe {
+            probe.observe(self.runtime, layer, self.chunks, x, false)?;
+        }
         #[cfg(all(test, feature = "_cuda-libraries"))]
         if let Some(owner) = self
             .qualification
@@ -168,6 +171,9 @@ impl Convs<'_> {
         x: &CudaView<'_, f32>,
         y: &mut CudaViewMut<'_, f32>,
     ) -> Result<(), CudaError> {
+        if let Some(probe) = self.range_probe {
+            probe.observe(self.runtime, layer, self.chunks, x, false)?;
+        }
         match self.plan(layer)? {
             Plan::Wideconv(plan) => {
                 let none = Residual::None {

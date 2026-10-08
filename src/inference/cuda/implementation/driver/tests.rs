@@ -8,13 +8,15 @@ use crate::inference::cuda::device::{DeviceAttributes, test_support::Builder};
 use crate::inference::cuda::implementation::{
     BoundaryId, Modules, PlanPin, PlanRequest, Selected, TokenEvidence,
 };
-use crate::inference::cuda::kernels::ModuleRequest;
+use crate::inference::cuda::kernels::{ArtifactHash, LoadedArtifact, ModuleRequest};
 use crate::inference::cuda::{ComputeCapability, CudaError, CudaMath, KernelModule, PtxTier};
 
 struct Fixture {
     device: DeviceAttributes,
     loads: Vec<ModuleRequest>,
     limit: PtxTier,
+    experiment: Option<ArtifactHash>,
+    refuse_load: bool,
 }
 
 impl Fixture {
@@ -27,11 +29,19 @@ impl Fixture {
                 .build(),
             loads: vec![],
             limit: PtxTier::Sm120,
+            experiment: None,
+            refuse_load: false,
         }
     }
 }
 
 impl Modules for &mut Fixture {
+    fn execution_request(&self, request: ModuleRequest) -> Result<ModuleRequest, CudaError> {
+        Ok(self
+            .experiment
+            .map_or(request, |hash| request.ptx_jit(hash)))
+    }
+
     fn device(&self) -> &DeviceAttributes {
         &self.device
     }
@@ -40,6 +50,13 @@ impl Modules for &mut Fixture {
     }
     fn load(&mut self, request: ModuleRequest) -> Result<ModuleRequest, CudaError> {
         self.loads.push(request);
+        if self.refuse_load {
+            return Err(CudaError::ArtifactUnavailable {
+                module: request.area().name(),
+                artifact: request.artifact(),
+            });
+        }
+
         Ok(request)
     }
     #[cfg(feature = "_cuda-libraries")]
@@ -637,4 +654,54 @@ fn tensor_core_trunk_kernels_are_selected_only_for_tf32_on_measured_capabilities
             );
         }
     }
+}
+
+#[test]
+fn private_experiment_selects_its_exact_identity_without_production_evidence() {
+    let mut fixture = Fixture::new();
+    let hash = ArtifactHash::of(b"alternate operand PTX");
+    fixture.experiment = Some(hash);
+    let selected = select_from(
+        &[Area::candidate::<Stub>()],
+        BoundaryId::named("sincnet.conv0.abs_pool"),
+        1,
+        CudaMath::Fp32,
+        &mut &mut fixture,
+        super::Selection::DriverOnly,
+    )
+    .unwrap();
+    let Some(Selected::Oxide(token)) = selected else {
+        panic!("the covered experiment must select its candidate")
+    };
+    assert_eq!(
+        token.target.module.artifact(),
+        LoadedArtifact::PtxJit { sha256: hash }
+    );
+    assert_eq!(fixture.loads, [token.target.module]);
+    assert_eq!(token.evidence, TokenEvidence::Implemented);
+    assert_eq!(token.selection, super::Selection::Experiment);
+}
+
+#[test]
+fn private_experiment_refuses_artifact_fallback_in_hybrid_selection() {
+    let mut fixture = Fixture::new();
+    let hash = ArtifactHash::of(b"unavailable alternate PTX");
+    fixture.experiment = Some(hash);
+    fixture.refuse_load = true;
+    let result = select_from(
+        &[Area::candidate::<BroadStub>()],
+        BoundaryId::named("sincnet.conv0.abs_pool"),
+        1,
+        CudaMath::Fp32,
+        &mut &mut fixture,
+        super::Selection::Production,
+    );
+    assert!(
+        matches!(result, Err(CudaError::ArtifactUnavailable { artifact: LoadedArtifact::PtxJit { sha256 }, .. }) if sha256 == hash)
+    );
+    assert_eq!(fixture.loads.len(), 1);
+    assert_eq!(
+        fixture.loads[0].artifact(),
+        LoadedArtifact::PtxJit { sha256: hash }
+    );
 }
