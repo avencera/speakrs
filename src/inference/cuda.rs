@@ -12,7 +12,8 @@
 //!   [`CudaMath`] defaults to FP32 with TF32 disabled
 //! - [`CudaFbank`], [`ResNetEmbedding`] and [`CudaSegmentation`] are the three models
 //!
-//! Only the option and error types are public; everything else is internal
+//! Public options and errors describe inference policy; [`tune_cuda`] measures
+//! approved boundary choices on an explicitly requested device
 
 /// Target-only builds contain no optional numerical libraries
 const fn driver_only() -> bool {
@@ -51,6 +52,7 @@ mod runtime;
 mod segmentation;
 mod session;
 mod tier;
+mod tuning;
 mod weights;
 
 #[cfg(test)]
@@ -82,4 +84,7 @@ pub(crate) use runtime::CudaRuntime;
 pub(crate) use segmentation::{CudaSegmentation, SegmentationOptions};
 pub(crate) use session::CudaSession;
 pub use tier::{ComputeCapability, PtxTier};
+pub use tuning::{
+    CudaTuneError, CudaTuneMeasurement, CudaTuneOptions, CudaTuneReport, CudaTuneRow, tune_cuda,
+};
 pub(crate) use weights::SafetensorsFile;

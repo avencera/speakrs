@@ -78,7 +78,7 @@ impl LstmCandidate for Oxide {
     // FP32 only: the recurrence computes in FP32 in both modes, so in TF32 its logits
     // leave the TF32 Library's 1-ulp noise band even where they are more accurate, and
     // segmentation runs FP32 in production. Measured faster than cuDNN Standard and
-    // PersistStaticSmallH at every harness batch
+    // PersistStaticSmallH at every measured batch
     const COVERAGE: Coverage = Coverage(&[CoverageEntry {
         layers: &["lstm.stack"],
         batches: Batches::All,

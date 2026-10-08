@@ -360,8 +360,8 @@ const WINOGRAD_WAVES: u32 = 3;
 /// the partial wave
 ///
 /// The partition count also bounds the length of the FP32 accumulation chains, and the
-/// harness compares error per layer over its batches. On a 4060 Ti the 256-channel
-/// batch-1 layers (40 CTAs on 34 SMs) ran 1.56x cuDNN with four partitions on the
+/// development check compares error per layer over its batches. On a 4060 Ti the
+/// 256-channel batch-1 layers (40 CTAs on 34 SMs) ran 1.56x cuDNN with four partitions on the
 /// partial wave only, at cuDNN's maximum error, and 1.30x with every cell in four
 /// partitions at 0.4-0.6x of it. The 128-channel layers (80 CTAs) take two whole waves,
 /// where splitting every cell in two ran no faster than cuDNN

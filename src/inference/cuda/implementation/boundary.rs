@@ -182,7 +182,7 @@ impl BoundaryId {
         }
     }
 
-    /// Resolve a name from outside the table, such as a harness argument
+    /// Resolve a name from outside the table, such as a tune-file row
     pub(crate) fn parse(name: &str) -> Result<Self, UnknownBoundary> {
         Self::find(name).ok_or_else(|| UnknownBoundary(name.to_owned()))
     }
@@ -207,7 +207,7 @@ impl BoundaryId {
         &BOUNDARIES[self.0 as usize]
     }
 
-    /// The stable record and harness name
+    /// The stable boundary name
     pub(crate) const fn name(self) -> &'static str {
         self.row().name
     }

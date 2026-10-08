@@ -320,6 +320,17 @@ impl CudaSegmentation {
         workspace.download_output(runtime)
     }
 
+    /// Queues an eager pass on the existing tuner workspace without host transfers
+    pub(crate) fn enqueue_for_tuning(
+        &mut self,
+        runtime: &CudaRuntime,
+        batch: usize,
+        samples: usize,
+    ) -> Result<(), CudaError> {
+        let index = self.workspace_index(runtime, batch, samples)?;
+        self.network.enqueue(runtime, &mut self.workspaces[index])
+    }
+
     fn workspace_index(
         &mut self,
         runtime: &CudaRuntime,
@@ -638,96 +649,117 @@ impl Network {
             t.wave_norm.data_mut(),
         )?;
 
-        self.sinc_forward(
-            runtime,
-            shape,
-            sinc,
-            &mut conv_workspace,
-            dispatch::SincIo {
-                input: t.wave_norm.data(),
-                raw: t.sinc.data_mut(),
-                pooled: t.sinc_pooled.as_mut().map(DeviceTensor::data_mut),
-                stage0: t.stage0.data_mut(),
-            },
-        )?;
+        runtime.record_boundary(dispatch::SINC, batch, self.options.math, || {
+            self.sinc_forward(
+                runtime,
+                shape,
+                sinc,
+                &mut conv_workspace,
+                dispatch::SincIo {
+                    input: t.wave_norm.data(),
+                    raw: t.sinc.data_mut(),
+                    pooled: t.sinc_pooled.as_mut().map(DeviceTensor::data_mut),
+                    stage0: t.stage0.data_mut(),
+                },
+            )?;
+            Ok(())
+        })?;
 
-        // the convolution bias is added inside the pooling kernel
-        let [weight, bias] = &self.convs[0];
-        conv1.forward(
-            runtime,
-            &mut conv_workspace,
-            &t.stage0.data().as_view(),
-            &weight.as_view(),
-            &mut t.conv1.data_mut().as_view_mut(),
-        )?;
-        let stage1 = norm(FEATURES, shape.conv1, POOL);
-        let [gamma, beta] = &self.norms[1];
-        k.pool_norm(
-            runtime,
-            stage1,
-            t.conv1.data(),
-            bias,
-            gamma,
-            beta,
-            t.stage1.data_mut(),
-        )?;
+        runtime.record_boundary(CONV1, batch, self.options.math, || {
+            // the convolution bias is added inside the pooling kernel
+            let [weight, bias] = &self.convs[0];
+            conv1.forward(
+                runtime,
+                &mut conv_workspace,
+                &t.stage0.data().as_view(),
+                &weight.as_view(),
+                &mut t.conv1.data_mut().as_view_mut(),
+            )?;
+            let stage1 = norm(FEATURES, shape.conv1, POOL);
+            let [gamma, beta] = &self.norms[1];
+            k.pool_norm(
+                runtime,
+                stage1,
+                t.conv1.data(),
+                bias,
+                gamma,
+                beta,
+                t.stage1.data_mut(),
+            )?;
+            Ok(())
+        })?;
 
-        let [weight, bias] = &self.convs[1];
-        conv2.forward(
-            runtime,
-            &mut conv_workspace,
-            &t.stage1.data().as_view(),
-            &weight.as_view(),
-            &mut t.conv2.data_mut().as_view_mut(),
-        )?;
-        // the last stage writes the batch-major `[batch, frames, 60]` LSTM input
-        let stage2 = PoolNorm {
-            layout: RowLayout::time_major_rows(FEATURES, shape.frames),
-            ..norm(FEATURES, shape.conv2, POOL)
-        };
-        let [gamma, beta] = &self.norms[2];
-        k.pool_norm(
-            runtime,
-            stage2,
-            t.conv2.data(),
-            bias,
-            gamma,
-            beta,
-            t.lstm_input.data_mut(),
-        )?;
+        runtime.record_boundary(CONV2, batch, self.options.math, || {
+            let [weight, bias] = &self.convs[1];
+            conv2.forward(
+                runtime,
+                &mut conv_workspace,
+                &t.stage1.data().as_view(),
+                &weight.as_view(),
+                &mut t.conv2.data_mut().as_view_mut(),
+            )?;
+            // the last stage writes the batch-major `[batch, frames, 60]` LSTM input
+            let stage2 = PoolNorm {
+                layout: RowLayout::time_major_rows(FEATURES, shape.frames),
+                ..norm(FEATURES, shape.conv2, POOL)
+            };
+            let [gamma, beta] = &self.norms[2];
+            k.pool_norm(
+                runtime,
+                stage2,
+                t.conv2.data(),
+                bias,
+                gamma,
+                beta,
+                t.lstm_input.data_mut(),
+            )?;
+            Ok(())
+        })?;
 
-        self.lstm_forward(runtime, lstm, t.lstm_input.data(), t.lstm_output.data_mut())?;
+        runtime.record_boundary(dispatch::LSTM, batch, self.options.math, || {
+            self.lstm_forward(runtime, lstm, t.lstm_input.data(), t.lstm_output.data_mut())?;
+            Ok(())
+        })?;
 
         let rows = batch * shape.frames;
         let gemm = |index: usize| Sgemm {
             math: self.options.math,
             ..Sgemm::new(rows, LINEAR[index][1], LINEAR[index][0])
         };
-        dense[0].enqueue_slice(
-            runtime,
-            t.lstm_output.data(),
-            t.linear0.data_mut(),
-            |output| {
-                let [weight, bias] = &self.linear[0];
-                runtime.sgemm(gemm(0), t.lstm_output.data(), weight, output)?;
-                k.bias_leaky(runtime, bias, LEAKY_SLOPE, output)?;
+        runtime.record_boundary(LINEAR_BOUNDARIES[0], batch, self.options.math, || {
+            dense[0].enqueue_slice(
+                runtime,
+                t.lstm_output.data(),
+                t.linear0.data_mut(),
+                |output| {
+                    let [weight, bias] = &self.linear[0];
+                    runtime.sgemm(gemm(0), t.lstm_output.data(), weight, output)?;
+                    k.bias_leaky(runtime, bias, LEAKY_SLOPE, output)?;
 
-                Ok(())
-            },
-        )?;
-
-        dense[1].enqueue_slice(runtime, t.linear0.data(), t.linear1.data_mut(), |output| {
-            let [weight, bias] = &self.linear[1];
-            runtime.sgemm(gemm(1), t.linear0.data(), weight, output)?;
-            k.bias_leaky(runtime, bias, LEAKY_SLOPE, output)?;
-
+                    Ok(())
+                },
+            )?;
             Ok(())
         })?;
 
-        dense[2].enqueue_slice(runtime, t.linear1.data(), t.output.data_mut(), |output| {
-            let [weight, bias] = &self.linear[2];
-            runtime.sgemm(gemm(2), t.linear1.data(), weight, output)?;
-            k.bias_log_softmax(runtime, bias, output)?;
+        runtime.record_boundary(LINEAR_BOUNDARIES[1], batch, self.options.math, || {
+            dense[1].enqueue_slice(runtime, t.linear0.data(), t.linear1.data_mut(), |output| {
+                let [weight, bias] = &self.linear[1];
+                runtime.sgemm(gemm(1), t.linear0.data(), weight, output)?;
+                k.bias_leaky(runtime, bias, LEAKY_SLOPE, output)?;
+
+                Ok(())
+            })?;
+            Ok(())
+        })?;
+
+        runtime.record_boundary(LINEAR_BOUNDARIES[2], batch, self.options.math, || {
+            dense[2].enqueue_slice(runtime, t.linear1.data(), t.output.data_mut(), |output| {
+                let [weight, bias] = &self.linear[2];
+                runtime.sgemm(gemm(2), t.linear1.data(), weight, output)?;
+                k.bias_log_softmax(runtime, bias, output)?;
+                Ok(())
+            })?;
             Ok(())
         })?;
 

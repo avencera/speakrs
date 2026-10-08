@@ -451,6 +451,7 @@ impl EmbeddingBatch {
             #[cfg(feature = "_cuda-libraries")]
             workspace,
             chunks,
+            math: model.math,
         };
 
         let mut stem_input = stem_input.as_view_mut();
@@ -554,26 +555,30 @@ impl EmbeddingBatch {
 
         let mut embeddings = output.data_mut().as_view_mut();
 
-        head.enqueue(
-            runtime,
-            &pooled.as_view(),
-            &mut embeddings,
-            |head_chunks, input, output| {
-                let rows = head_chunks * SPEAKERS_PER_CHUNK;
-                let gemm = Sgemm {
-                    b_transposed: true,
-                    beta: 1.0,
-                    math,
-                    ..Sgemm::new(rows, EMBEDDING_DIM, 2 * columns)
-                };
+        runtime.record_boundary(HEAD, EmbeddingHead::chunks_per_pass(chunks), math, || {
+            head.enqueue(
+                runtime,
+                &pooled.as_view(),
+                &mut embeddings,
+                |head_chunks, input, output| {
+                    let rows = head_chunks * SPEAKERS_PER_CHUNK;
+                    let gemm = Sgemm {
+                        b_transposed: true,
+                        beta: 1.0,
+                        math,
+                        ..Sgemm::new(rows, EMBEDDING_DIM, 2 * columns)
+                    };
 
-                model
-                    .kernels
-                    .broadcast_rows(runtime, &model.head_bias.data().as_view(), output)?;
-                runtime.sgemm(gemm, input, model.head_weight.data(), output)?;
-                Ok(())
-            },
-        )?;
+                    model.kernels.broadcast_rows(
+                        runtime,
+                        &model.head_bias.data().as_view(),
+                        output,
+                    )?;
+                    runtime.sgemm(gemm, input, model.head_weight.data(), output)?;
+                    Ok(())
+                },
+            )
+        })?;
         tap(EmbeddingTap::Output, &embeddings.as_view())?;
 
         Ok(())
@@ -597,6 +602,7 @@ impl EmbeddingBatch {
 
 /// Convolution plus epilogue launches for one forward pass
 struct Convs<'a> {
+    math: CudaMath,
     runtime: &'a CudaRuntime,
     kernels: &'a EmbeddingKernels,
     plans: &'a [(String, Plan)],

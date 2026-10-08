@@ -558,6 +558,20 @@ impl super::DriverCandidate for Oxide {
         )
     }
 
+    fn tuning_fp32_pin(
+        boundary: super::super::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        device: &super::super::device::DeviceAttributes,
+        tier: PtxTier,
+    ) -> Result<Option<super::ConfigPin>, PlanError> {
+        if math == CudaMath::Fp32 {
+            return Ok(None);
+        }
+
+        Self::driver_pin(boundary, batch, CudaMath::Fp32, device, tier).map(Some)
+    }
+
     fn driver_pin(
         boundary: super::super::implementation::BoundaryId,
         batch: usize,

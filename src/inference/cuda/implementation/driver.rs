@@ -9,6 +9,15 @@ use crate::inference::cuda::candidate::{
 use crate::inference::cuda::device::DeviceAttributes;
 use crate::inference::cuda::{CudaError, CudaMath, KernelModule, PtxTier};
 
+/// Candidate-owned scalar pin construction for the requested pipeline tuple
+type TuningFp32Pin = fn(
+    BoundaryId,
+    usize,
+    CudaMath,
+    &DeviceAttributes,
+    PtxTier,
+) -> Result<Option<ConfigPin>, PlanError>;
+
 /// One area's library-free candidate interface, independent of artifact loading
 pub(super) struct Area {
     area: KernelModule,
@@ -18,6 +27,7 @@ pub(super) struct Area {
     summary: fn(CudaMath) -> &'static str,
     pin:
         fn(BoundaryId, usize, CudaMath, &DeviceAttributes, PtxTier) -> Result<ConfigPin, PlanError>,
+    tuning_fp32_pin: TuningFp32Pin,
 }
 
 /// A port either owns speed selection or retains the frozen qualified table
@@ -37,6 +47,7 @@ impl Area {
             scope: C::speed_scope,
             summary: C::speed_summary,
             pin: C::driver_pin,
+            tuning_fp32_pin: C::tuning_fp32_pin,
         }
     }
 
@@ -59,6 +70,51 @@ pub(super) fn areas() -> [Area; 6] {
         Area::candidate::<FbankOxide>(),
         Area::candidate::<LstmProjOxide>(),
     ]
+}
+
+/// Enumerate fixed port pins without treating implemented coverage as approval
+pub(super) fn tuning_configurations(
+    device: &DeviceAttributes,
+    limit: PtxTier,
+) -> Result<Vec<super::TuningConfiguration>, CudaError> {
+    let mut configurations = Vec::new();
+    for area in areas() {
+        let Some(module) =
+            super::production_module(area.area, device, limit, area.area.variants())?
+        else {
+            continue;
+        };
+        for boundary in
+            BoundaryId::all().filter(|id| *id != BoundaryId::named("lstm.stack.input_proj"))
+        {
+            let batches = boundary.batches().iter();
+            for batch in batches {
+                for math in [CudaMath::Fp32, CudaMath::Tf32] {
+                    // sincnet tf32 has no retained accuracy evidence for tuning
+                    if area.area == KernelModule::Sincnet && math == CudaMath::Tf32 {
+                        continue;
+                    }
+                    if !(area.coverage)(module.tier(), device).covers(boundary.name(), batch, math)
+                    {
+                        continue;
+                    }
+                    let Ok(pin) = (area.pin)(boundary, batch, math, device, module.tier()) else {
+                        continue;
+                    };
+                    configurations.push((boundary, batch, math, module, pin, "default"));
+                    // only the candidate owner can construct a pin for this math mode;
+                    // the independent policy still has to approve its arithmetic
+                    if let Ok(Some(fp32)) =
+                        (area.tuning_fp32_pin)(boundary, batch, math, device, module.tier())
+                        && fp32 != pin
+                    {
+                        configurations.push((boundary, batch, math, module, fp32, "fp32"));
+                    }
+                }
+            }
+        }
+    }
+    Ok(configurations)
 }
 
 pub(super) fn missing(boundary: BoundaryId, batch: usize, math: CudaMath) -> CudaError {

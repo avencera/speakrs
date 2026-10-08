@@ -137,7 +137,7 @@ fn set_math(blas: &CudaBlas, math: CudaMath) -> Result<(), CublasError> {
 }
 
 // these are the functions reached by speakrs and its cudarc wrappers, including
-// handle/descriptors' destructors and the qualification version queries
+// handle/descriptors' destructors and development version queries
 const CUBLAS_SYMBOLS: &[&CStr] = &[
     c"cublasCreate_v2",
     c"cublasDestroy_v2",

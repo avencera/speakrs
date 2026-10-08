@@ -158,7 +158,7 @@ impl EmbeddedPtx {
 
 /// A complete module identity, resolved before the driver sees any bytes
 ///
-/// Loading, the runtime's module cache and qualification tokens compare whole
+/// Loading, the runtime's module cache and selection tokens compare whole
 /// requests: the area, the PTX tier whose bytes are loaded, and the exact artifact
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct ModuleRequest {
@@ -264,7 +264,7 @@ pub enum KernelModule {
     /// Segmentation kernels
     Segmentation,
     /// Candidate kernels for the ResNet convolutions, kept apart from the Library-owned
-    /// areas so the harness can tell them apart
+    /// areas so module identities cannot overlap
     // the candidate areas are unused until a candidate plan loads one
     #[allow(dead_code)]
     Resnet,
@@ -301,6 +301,24 @@ impl KernelModule {
             Self::FbankDft => "fbankdft",
             Self::Segdense => "segdense",
             Self::Wideconv => "wideconv",
+        }
+    }
+
+    /// The build metadata embedded beside this area's artifact bytes
+    pub(crate) const fn manifest(self) -> &'static str {
+        match self {
+            #[cfg(test)]
+            Self::Probe => include_str!("ptx/probe.manifest"),
+            Self::Fbank => include_str!("ptx/fbank.manifest"),
+            Self::Embedding => include_str!("ptx/embedding.manifest"),
+            Self::Segmentation => include_str!("ptx/segmentation.manifest"),
+            Self::Resnet => include_str!("ptx/resnet.manifest"),
+            Self::Lstm => include_str!("ptx/lstm.manifest"),
+            Self::Sincnet => include_str!("ptx/sincnet.manifest"),
+            Self::Segdense => include_str!("ptx/segdense.manifest"),
+            Self::FbankDft => include_str!("ptx/fbankdft.manifest"),
+            Self::Wideconv => include_str!("ptx/wideconv.manifest"),
+            Self::LstmProj => include_str!("ptx/lstmproj.manifest"),
         }
     }
 
@@ -453,7 +471,6 @@ impl AreaPtx {
     }
 
     /// The embedded variants, lowest tier first
-    #[cfg(test)]
     pub fn iter(&self) -> impl Iterator<Item = (PtxTier, &'static str)> {
         [
             (PtxTier::Sm75, self.sm75),
@@ -512,7 +529,7 @@ impl AreaPtx {
     /// The highest embedded variant at or below `limit`
     ///
     /// Production never resolves a tier this way: a binding names its tier. Only tests
-    /// and explicit qualification requests ask for the best embedded variant
+    /// and explicit development requests ask for the best embedded variant
     #[cfg(test)]
     pub fn select(&self, limit: PtxTier) -> Option<(PtxTier, &'static str)> {
         self.iter().filter(|(tier, _)| *tier <= limit).last()

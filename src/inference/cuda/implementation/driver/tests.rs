@@ -14,8 +14,11 @@ use crate::inference::cuda::{ComputeCapability, CudaError, CudaMath, KernelModul
 struct Fixture {
     device: DeviceAttributes,
     loads: Vec<ModuleRequest>,
+    refuse_load: bool,
+    benchmarking: bool,
     limit: PtxTier,
     recipe_mode: super::super::policy::RecipeMode,
+    tuned: Option<crate::inference::cuda::tuning::ApprovedChoice>,
 }
 
 impl Fixture {
@@ -27,13 +30,28 @@ impl Fixture {
                 .name("unmeasured GPU")
                 .build(),
             loads: vec![],
+            refuse_load: false,
+            benchmarking: false,
             limit: PtxTier::Sm120,
             recipe_mode: super::super::policy::RecipeMode::Disabled,
+            tuned: None,
         }
     }
 }
 
 impl Modules for &mut Fixture {
+    fn is_tuning(&self) -> bool {
+        self.benchmarking
+    }
+
+    fn tune_choice(
+        &self,
+        _boundary: BoundaryId,
+        _batch: usize,
+        _math: CudaMath,
+    ) -> Result<Option<crate::inference::cuda::tuning::ApprovedChoice>, CudaError> {
+        Ok(self.tuned.clone())
+    }
     fn recipe_mode(&self) -> super::super::policy::RecipeMode {
         self.recipe_mode
     }
@@ -46,6 +64,12 @@ impl Modules for &mut Fixture {
     }
     fn load(&mut self, request: ModuleRequest) -> Result<ModuleRequest, CudaError> {
         self.loads.push(request);
+        if self.refuse_load {
+            return Err(CudaError::ArtifactUnavailable {
+                module: request.area().name(),
+                artifact: request.artifact(),
+            });
+        }
         Ok(request)
     }
     #[cfg(feature = "_cuda-libraries")]
@@ -838,6 +862,172 @@ fn measured_a100_recipe_retains_pins_for_every_pipeline_boundary() {
 
 #[test]
 #[cfg(feature = "_cuda-libraries")]
+fn tune_file_wins_over_recipe_and_class_default_before_artifact_loading() {
+    use crate::inference::cuda::tuning::ApprovedChoice;
+    let mut fixture = Fixture::new();
+    fixture.device = Builder::new(ComputeCapability::new(8, 9))
+        .multiprocessors(34)
+        .name("NVIDIA GeForce RTX 4060 Ti")
+        .build();
+    fixture.tuned = Some(ApprovedChoice::Library);
+    let sinc = BoundaryId::named("sincnet.conv0.abs_pool");
+    assert!(matches!(
+        PlanRequest::Hybrid
+            .resolve(sinc, 32, CudaMath::Fp32, &mut fixture)
+            .unwrap(),
+        Selected::Library
+    ));
+    assert!(fixture.loads.is_empty());
+    fixture.device = Builder::new(ComputeCapability::new(9, 0))
+        .multiprocessors(132)
+        .name("NVIDIA H100")
+        .build();
+    let conv = BoundaryId::named("resnet.layer1.0.conv1");
+    assert!(matches!(
+        PlanRequest::Hybrid
+            .resolve(conv, 32, CudaMath::Tf32, &mut fixture)
+            .unwrap(),
+        Selected::Library
+    ));
+    assert!(fixture.loads.is_empty());
+    fixture.tuned = None;
+    let Selected::Oxide(token) = PlanRequest::Hybrid
+        .resolve(conv, 32, CudaMath::Tf32, &mut fixture)
+        .unwrap()
+    else {
+        panic!("class default")
+    };
+    assert_eq!(token.source(), super::super::policy::Source::Default);
+}
+
+#[test]
+fn validated_tune_pin_wins_and_cannot_be_reused_for_another_batch() {
+    let mut fixture = Fixture::new();
+    fixture.device = Builder::new(ComputeCapability::new(8, 9))
+        .multiprocessors(34)
+        .name("NVIDIA GeForce RTX 4060 Ti")
+        .build();
+    let boundary = BoundaryId::named("resnet.layer1.0.conv1");
+    let approved = crate::inference::cuda::tuning::tests::approved_choice(
+        &fixture.device,
+        boundary,
+        32,
+        CudaMath::Tf32,
+        fixture.limit,
+    );
+    let crate::inference::cuda::tuning::ApprovedChoice::Kernel(config) = &approved else {
+        panic!("approved kernel")
+    };
+    let pin = config.pin();
+    fixture.tuned = Some(approved);
+    let Selected::Oxide(token) = PlanRequest::Hybrid
+        .resolve(boundary, 32, CudaMath::Tf32, &mut fixture)
+        .unwrap()
+    else {
+        panic!("tuned kernel")
+    };
+    assert_eq!(token.pin, PlanPin::Pinned(pin));
+    assert_eq!(token.source(), super::super::policy::Source::TuneFile);
+    assert!(matches!(token.evidence, TokenEvidence::Tuned { .. }));
+    assert!(
+        PlanRequest::Hybrid
+            .resolve(boundary, 1, CudaMath::Tf32, &mut fixture)
+            .is_err()
+    );
+}
+
+#[test]
+#[cfg(feature = "_cuda-libraries")]
+fn tuner_cannot_time_an_artifact_fallback_as_the_selected_kernel() {
+    use crate::inference::cuda::tuning::tests::approved_choice;
+
+    let mut fixture = Fixture::new();
+    let boundary = BoundaryId::named("resnet.layer1.0.conv1");
+    fixture.tuned = Some(approved_choice(
+        &fixture.device,
+        boundary,
+        32,
+        CudaMath::Tf32,
+        fixture.limit,
+    ));
+    fixture.refuse_load = true;
+    assert!(matches!(
+        PlanRequest::Hybrid
+            .resolve(boundary, 32, CudaMath::Tf32, &mut fixture)
+            .unwrap(),
+        Selected::Library
+    ));
+
+    fixture.benchmarking = true;
+    assert!(matches!(
+        PlanRequest::Hybrid.resolve(boundary, 32, CudaMath::Tf32, &mut fixture),
+        Err(CudaError::ArtifactUnavailable { .. })
+    ));
+}
+
+#[test]
+#[cfg(feature = "_cuda-libraries")]
+fn a100_lower_tier_cannot_claim_the_measured_whole_plan() {
+    use super::super::policy::RecipeMode;
+    for name in ["NVIDIA A100-PCIE-40GB", "NVIDIA A100-SXM4-40GB"] {
+        let mut fixture = Fixture::new();
+        fixture.device = Builder::new(ComputeCapability::new(8, 0))
+            .multiprocessors(108)
+            .name(name)
+            .build();
+        fixture.recipe_mode = RecipeMode::Fp32SegmentationTf32Embedding;
+        fixture.limit = PtxTier::Sm75;
+        for (name, math) in [
+            ("resnet.layer1.0.conv1", CudaMath::Tf32),
+            ("sincnet.conv0.abs_pool", CudaMath::Fp32),
+            ("lstm.stack", CudaMath::Fp32),
+        ] {
+            let boundary = BoundaryId::named(name);
+            assert!(matches!(
+                PlanRequest::Hybrid
+                    .resolve(boundary, 32, math, &mut fixture)
+                    .unwrap(),
+                Selected::Library
+            ));
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "_cuda-libraries")]
+fn tuner_plan_refusal_after_loading_cannot_be_a_library_timing() {
+    use crate::inference::cuda::tuning::tests::approved_choice;
+    let mut fixture = Fixture::new();
+    let boundary = BoundaryId::named("resnet.layer1.0.conv1");
+    fixture.tuned = Some(approved_choice(
+        &fixture.device,
+        boundary,
+        32,
+        CudaMath::Tf32,
+        fixture.limit,
+    ));
+    fixture.benchmarking = true;
+    let Selected::Oxide(token) = PlanRequest::Hybrid
+        .resolve(boundary, 32, CudaMath::Tf32, &mut fixture)
+        .unwrap()
+    else {
+        panic!("approved benchmark token")
+    };
+    assert_eq!(fixture.loads.len(), 1);
+    assert!(matches!(
+        token.finish::<()>(
+            KernelModule::Resnet,
+            false,
+            Err(PlanError::DeviceUnsupported {
+                reason: "test plan refusal".into(),
+            })
+        ),
+        Err(CudaError::CandidateDeviceUnsupported { .. })
+    ));
+}
+
+#[test]
+#[cfg(feature = "_cuda-libraries")]
 fn measured_rtx_recipes_route_intermediate_batches_and_ada_scalar_choice() {
     use super::super::policy::RecipeMode;
     use crate::inference::cuda::candidate::{
@@ -946,32 +1136,21 @@ fn measured_t4_recipe_routes_mixed_choices_without_changing_driver_only() {
         }
     }
     assert_eq!(counts, (173, 55));
-}
 
-#[test]
-#[cfg(feature = "_cuda-libraries")]
-fn a100_lower_tier_cannot_claim_the_measured_whole_plan() {
-    use super::super::policy::RecipeMode;
-    for name in ["NVIDIA A100-PCIE-40GB", "NVIDIA A100-SXM4-40GB"] {
-        let mut fixture = Fixture::new();
-        fixture.device = Builder::new(ComputeCapability::new(8, 0))
-            .multiprocessors(108)
-            .name(name)
-            .build();
-        fixture.recipe_mode = RecipeMode::Fp32SegmentationTf32Embedding;
-        fixture.limit = PtxTier::Sm75;
-        for (name, math) in [
-            ("resnet.layer1.0.conv1", CudaMath::Tf32),
-            ("sincnet.conv0.abs_pool", CudaMath::Fp32),
-            ("lstm.stack", CudaMath::Fp32),
-        ] {
-            let boundary = BoundaryId::named(name);
-            assert!(matches!(
-                PlanRequest::Hybrid
-                    .resolve(boundary, 32, math, &mut fixture)
-                    .unwrap(),
-                Selected::Library
-            ));
-        }
-    }
+    // an exact user tune choice still has priority over a recipe's Library choice
+    let boundary = BoundaryId::named("resnet.conv1");
+    fixture.tuned = Some(crate::inference::cuda::tuning::tests::approved_choice(
+        &fixture.device,
+        boundary,
+        32,
+        CudaMath::Tf32,
+        fixture.limit,
+    ));
+    let Selected::Oxide(tuned) = PlanRequest::Hybrid
+        .resolve(boundary, 32, CudaMath::Tf32, &mut fixture)
+        .unwrap()
+    else {
+        panic!("tune file overrides Library recipe")
+    };
+    assert_eq!(tuned.source(), super::super::policy::Source::TuneFile);
 }
