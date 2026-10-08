@@ -264,7 +264,8 @@ impl Device {
     /// more of their FP32 rate, so 3xTF32 Winograd beats FFMA Winograd there. GeForce
     /// and workstation Ampere and Ada (8.6, 8.9) and consumer Blackwell (12.x) run TF32
     /// at one or two times their FP32 rate, where three products lose; they keep the
-    /// FP32 kernels. Unknown capabilities fall back to FP32, which is never wrong
+    /// FP32 kernels in FP32 mode and run one product in TF32 mode. Unknown
+    /// capabilities fall back to FP32, which is never wrong
     fn tensor_rich(self) -> bool {
         self.tier >= PtxTier::Sm80
             && matches!(
@@ -441,10 +442,14 @@ impl Config {
                 (true, _) => return None,
             });
         }
-        // on parts with TF32 at the FP32 rate, the direct tensor-core kernel beats FFMA
-        // Winograd at batch 32 in TF32 mode; batch 1 has too few CTAs for its tiles
-        if tf32 && device.tier >= PtxTier::Sm80 && conv.batch >= WINOGRAD_TENSOR_BATCH {
-            return None;
+        // on parts with TF32 at the FP32 rate one staged product still beats both FFMA
+        // Winograd and the direct tensor-core kernel at both batches: on a 5060 Ti the
+        // 128-channel layers ran 1.73-1.75 ms at batch 32 against 2.46-2.49 ms direct,
+        // and 0.064 ms at batch 1 against 0.101 ms FFMA; the 256-channel layers 1.57 ms
+        // against 2.41-2.42 ms and 0.059 ms against 0.121-0.123 ms. A 4060 Ti gained
+        // the same. The unstaged kernel ran 2-5% slower at every point
+        if tf32 && device.tier >= PtxTier::Sm80 {
+            return Some(WinogradProducts::Tf32x1Staged);
         }
         Some(WinogradProducts::Fp32)
     }
@@ -518,7 +523,11 @@ impl Config {
             let partition = partition.or(floor).unwrap_or(Partition::Whole);
             return Ok((partition, SplitCells::All));
         }
-        if tiles < WINOGRAD_FULL_SPLIT_WAVES * sms {
+        // one tensor-core wave and a partial one keep the tail split below: on a 5060 Ti
+        // the 256-channel batch-1 layers (40 one-product CTAs on 36 SMs) ran 0.059 ms
+        // with eight partitions on the partial wave, against 0.082-0.084 ms with every
+        // cell in four
+        if tiles < WINOGRAD_FULL_SPLIT_WAVES * sms && !products.tensor() {
             let target = WINOGRAD_WAVES * sms;
             let mut partition = Partition::Whole;
             for next in splits {
@@ -548,8 +557,8 @@ impl Config {
 }
 
 /// Batch from which the direct tensor-core kernel replaces Winograd in TF32 mode on the
-/// 256-channel layers of TF32-rich parts and on every same-channel layer elsewhere;
-/// production runs batches 1 and 32, and the crossover between them is not measured
+/// 256-channel layers of TF32-rich parts; production runs batches 1 and 32, and the
+/// crossover between them is not measured
 const WINOGRAD_TENSOR_BATCH: usize = 8;
 
 /// The convolution contract and immutable folded weights used to create a plan
