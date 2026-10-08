@@ -1,0 +1,1013 @@
+{
+  "schema": 1,
+  "purpose": "Harness control and mutation proof; not production acceptance",
+  "records": [
+    {
+      "target": "resnet",
+      "implementation": "Library",
+      "record_sha256": "0847495ce2c488670cf3966aaf6d3de9485fe4b4df42e91e37d3547f44ba174b",
+      "bytes": 65493008,
+      "lock_digest": "72a3bd67b63d7acc6afcb6ef0edd3e569e24801dc49fe36f30502e6530dc1a34",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36,
+        "observed_sm_clock_range_mhz": [
+          2227,
+          2287
+        ]
+      },
+      "status": "passed",
+      "production_acceptance": false,
+      "intended_gate": null,
+      "caught": null
+    },
+    {
+      "target": "resnet",
+      "implementation": "Precision",
+      "record_sha256": "0e04ebc81de0484f2294c583b30c016e165c061efcceadc78bb17c185be61fb9",
+      "bytes": 34412923,
+      "lock_digest": "72a3bd67b63d7acc6afcb6ef0edd3e569e24801dc49fe36f30502e6530dc1a34",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "layer",
+      "caught": true
+    },
+    {
+      "target": "resnet",
+      "implementation": "Shape",
+      "record_sha256": "c549daeb7a2deb44497c9ecd216e0582720817fd27877d2b54faa165e74efd8f",
+      "bytes": 39492485,
+      "lock_digest": "72a3bd67b63d7acc6afcb6ef0edd3e569e24801dc49fe36f30502e6530dc1a34",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "layer",
+      "caught": true
+    },
+    {
+      "target": "resnet",
+      "implementation": "Fallback",
+      "record_sha256": "67c305d71b5151ac4bb960679e6e0b8c04aa4286369a5181d575bd1e5b046808",
+      "bytes": 59423937,
+      "lock_digest": "72a3bd67b63d7acc6afcb6ef0edd3e569e24801dc49fe36f30502e6530dc1a34",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "profile",
+      "caught": true
+    },
+    {
+      "target": "resnet",
+      "implementation": "Tail",
+      "record_sha256": "ac08826e239859c9d016b296b9fef8d87a07ea1fa818abe41644fdbda8fa2d43",
+      "bytes": 44489910,
+      "lock_digest": "72a3bd67b63d7acc6afcb6ef0edd3e569e24801dc49fe36f30502e6530dc1a34",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "layer",
+      "caught": true
+    },
+    {
+      "target": "resnet",
+      "implementation": "Atomic",
+      "record_sha256": "86ee6857378050025ac05adb7642f2ba22fce6b03d9455c2a0614ec92a21b5b5",
+      "bytes": 34637855,
+      "lock_digest": "72a3bd67b63d7acc6afcb6ef0edd3e569e24801dc49fe36f30502e6530dc1a34",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "determinism:fixed_reduction_order",
+      "caught": true
+    },
+    {
+      "target": "resnet",
+      "implementation": "StageSlow",
+      "record_sha256": "a2ffc0ba79a63425787619892ab45ee2294fd096dd2268e6c90d54ce255a8b20",
+      "bytes": 66783747,
+      "lock_digest": "72a3bd67b63d7acc6afcb6ef0edd3e569e24801dc49fe36f30502e6530dc1a34",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36,
+        "observed_sm_clock_range_mhz": [
+          2235,
+          2287
+        ]
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "paired_stage",
+      "caught": true
+    },
+    {
+      "target": "resnet",
+      "implementation": "StageAccuracy",
+      "record_sha256": "05dc2b759c2c6b84dffef3bbc19f2877c7fde76f5a1b557f9522f7d38fcfae9e",
+      "bytes": 59418789,
+      "lock_digest": "72a3bd67b63d7acc6afcb6ef0edd3e569e24801dc49fe36f30502e6530dc1a34",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "stage_truth",
+      "caught": true
+    },
+    {
+      "target": "resnet",
+      "implementation": "Slow",
+      "record_sha256": "12f9a9cd915bf0dcb084ed7910702334f37636e20965245149b44730d9a2ea9f",
+      "bytes": 66181803,
+      "lock_digest": "72a3bd67b63d7acc6afcb6ef0edd3e569e24801dc49fe36f30502e6530dc1a34",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36,
+        "observed_sm_clock_range_mhz": [
+          2242,
+          2287
+        ]
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "speed",
+      "caught": true
+    },
+    {
+      "target": "resnet",
+      "implementation": "PhaseCheat",
+      "record_sha256": "6edb4ce422b2ad142c8ab27629f2a0c6eee115b3e42b1f6be0fb4425414ed02d",
+      "bytes": 61348058,
+      "lock_digest": "72a3bd67b63d7acc6afcb6ef0edd3e569e24801dc49fe36f30502e6530dc1a34",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36,
+        "observed_sm_clock_range_mhz": [
+          2272,
+          2287
+        ]
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "timing_output",
+      "caught": true
+    },
+    {
+      "target": "resnet",
+      "implementation": "Unscoped",
+      "record_sha256": "f4396ecc2a6438602de2a50cd9848cda02b647f3e5dcab30a374d18bd7b81503",
+      "bytes": 59425046,
+      "lock_digest": "72a3bd67b63d7acc6afcb6ef0edd3e569e24801dc49fe36f30502e6530dc1a34",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "profile",
+      "caught": true
+    },
+    {
+      "target": "resnet",
+      "implementation": "Unlisted",
+      "record_sha256": "66c0d53e6848b835603916091817d89ff407278dcdcfdf134ea4c4d1ef787f9b",
+      "bytes": 59459822,
+      "lock_digest": "72a3bd67b63d7acc6afcb6ef0edd3e569e24801dc49fe36f30502e6530dc1a34",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "profile",
+      "caught": true
+    },
+    {
+      "target": "resnet",
+      "implementation": "Lookup",
+      "record_sha256": "f81c25a15a8980f79a0accb6a70d3f5a6c4b629ae9ba9dcf6604ac659124dc84",
+      "bytes": 34441235,
+      "lock_digest": "72a3bd67b63d7acc6afcb6ef0edd3e569e24801dc49fe36f30502e6530dc1a34",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "secret",
+      "caught": true
+    },
+    {
+      "target": "resnet",
+      "implementation": "UninitShared",
+      "record_sha256": "562230904651ee2097d711242482e07543399871c665a53cbd8ad2361f5b4145",
+      "bytes": 59428556,
+      "lock_digest": "72a3bd67b63d7acc6afcb6ef0edd3e569e24801dc49fe36f30502e6530dc1a34",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "ptx:shared_initialization",
+      "caught": true
+    },
+    {
+      "target": "lstm",
+      "implementation": "Library",
+      "record_sha256": "919f51d4444265f681660271e277105fb9551124afbad9355a8433bcef450532",
+      "bytes": 256558854,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36,
+        "observed_sm_clock_range_mhz": [
+          2272,
+          2287
+        ]
+      },
+      "status": "passed",
+      "production_acceptance": false,
+      "intended_gate": null,
+      "caught": null
+    },
+    {
+      "target": "lstm",
+      "implementation": "Precision",
+      "record_sha256": "ebbbadeb75b516b57f9966c5d798c11f8c9333444c76d8f4eb1b0f7bc2415569",
+      "bytes": 144952011,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "layer",
+      "caught": true
+    },
+    {
+      "target": "lstm",
+      "implementation": "Shape",
+      "record_sha256": "2e59e9b811ed227e6c42c201c057971b1f84e3c234bcb407d59b16e167c01002",
+      "bytes": 169575407,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "layer",
+      "caught": true
+    },
+    {
+      "target": "lstm",
+      "implementation": "Fallback",
+      "record_sha256": "705badf93ff6752362ac7026621297b7875d908068f42e58d9f7deebc1de7a21",
+      "bytes": 256767094,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "profile",
+      "caught": true
+    },
+    {
+      "target": "lstm",
+      "implementation": "Tail",
+      "record_sha256": "dc729f408fc4de275fb19690d9431268ca59099468e4b56f3b743118fb73148c",
+      "bytes": 219939014,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "layer",
+      "caught": true
+    },
+    {
+      "target": "lstm",
+      "implementation": "Atomic",
+      "record_sha256": "ebefb2cd00e9b7b17345604c798cca1c76208759fbfe4d7c798d4d936108e2e0",
+      "bytes": 144695387,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "determinism:fixed_reduction_order",
+      "caught": true
+    },
+    {
+      "target": "lstm",
+      "implementation": "StageSlow",
+      "record_sha256": "cc7de264f8528c1fad38fcab92cbc17fe28f4d4c48914025a4354527ffd1b6f4",
+      "bytes": 256840092,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36,
+        "observed_sm_clock_range_mhz": [
+          2265,
+          2287
+        ]
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "paired_stage",
+      "caught": true
+    },
+    {
+      "target": "lstm",
+      "implementation": "StageAccuracy",
+      "record_sha256": "1648a42d06dbddeb1f5ed1d966fa8b50279ceaab3fa398783b31f0fea8123af9",
+      "bytes": 255867343,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "stage_truth",
+      "caught": true
+    },
+    {
+      "target": "lstm",
+      "implementation": "Slow",
+      "record_sha256": "8bfc23bc6c36175ffc2013c83a1f63a7a4e2271cdfbe6867fc3bf1862b1160df",
+      "bytes": 257089946,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36,
+        "observed_sm_clock_range_mhz": [
+          2272,
+          2287
+        ]
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "speed",
+      "caught": true
+    },
+    {
+      "target": "lstm",
+      "implementation": "PhaseCheat",
+      "record_sha256": "e98fc97937794b84e75f3b1c2f64c34017cac2e3338a5115bb0debe6113d1026",
+      "bytes": 256539399,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36,
+        "observed_sm_clock_range_mhz": [
+          2257,
+          2287
+        ]
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "timing_output",
+      "caught": true
+    },
+    {
+      "target": "lstm",
+      "implementation": "Unscoped",
+      "record_sha256": "dd283764533d7d060c3f9c28f175a7d891602e11b2c6e8717185d3a38a26883f",
+      "bytes": 255243873,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "profile",
+      "caught": true
+    },
+    {
+      "target": "lstm",
+      "implementation": "Unlisted",
+      "record_sha256": "65c5c13990a6af5e73df7c0fcb7e729bfae503d3042fb168b35de657f8367a0e",
+      "bytes": 256317518,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "profile",
+      "caught": true
+    },
+    {
+      "target": "lstm",
+      "implementation": "Lookup",
+      "record_sha256": "3982e004920ebdb9de72457309724cde699578521a99356087912907e619cc90",
+      "bytes": 144334411,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "secret",
+      "caught": true
+    },
+    {
+      "target": "lstm",
+      "implementation": "UninitShared",
+      "record_sha256": "9079673d7e28add58aeaccbec2b1c6bebf875b044ea7f24deffaca3a4b6afe6d",
+      "bytes": 256310026,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "ptx:shared_initialization",
+      "caught": true
+    },
+    {
+      "target": "sincnet",
+      "implementation": "Library",
+      "record_sha256": "4c527be958cad90fe8b0b2ae9b6013614f03624f703f5ad4f53d770499dc8393",
+      "bytes": 6658712,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36,
+        "observed_sm_clock_range_mhz": [
+          2265,
+          2287
+        ]
+      },
+      "status": "passed",
+      "production_acceptance": false,
+      "intended_gate": null,
+      "caught": null
+    },
+    {
+      "target": "sincnet",
+      "implementation": "Precision",
+      "record_sha256": "1c78851b5c0fe391a2f984139867d26a954be621e3bbf4799aa4023305d7a507",
+      "bytes": 2838501,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "layer",
+      "caught": true
+    },
+    {
+      "target": "sincnet",
+      "implementation": "Shape",
+      "record_sha256": "904c1709eadcac5334a5adf9fb5875e095ee361374b3ff61aa8a9eb2f0e0c0ef",
+      "bytes": 3190515,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "layer",
+      "caught": true
+    },
+    {
+      "target": "sincnet",
+      "implementation": "Fallback",
+      "record_sha256": "339909ec6011759c4757307ae1923560fed28fad7a50ab31c8f21d5344154586",
+      "bytes": 4580168,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "profile",
+      "caught": true
+    },
+    {
+      "target": "sincnet",
+      "implementation": "Tail",
+      "record_sha256": "fee523e554aebb19b2f235dbf7483f84f38e01b8007ef0bb3caa1cc93f80602a",
+      "bytes": 3551125,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "layer",
+      "caught": true
+    },
+    {
+      "target": "sincnet",
+      "implementation": "Atomic",
+      "record_sha256": "f16532fa8c60a84a4ac9b29ae6278064d995cfe421b4b7933d56d3acc8163674",
+      "bytes": 3020235,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "determinism:fixed_reduction_order",
+      "caught": true
+    },
+    {
+      "target": "sincnet",
+      "implementation": "StageSlow",
+      "record_sha256": "2a1a2e9699610dcaebf483daf2bf3078592d69ee2dba4dea1b268cb93960ba98",
+      "bytes": 6692724,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36,
+        "observed_sm_clock_range_mhz": [
+          2265,
+          2287
+        ]
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "paired_stage",
+      "caught": true
+    },
+    {
+      "target": "sincnet",
+      "implementation": "StageAccuracy",
+      "record_sha256": "322f3040d6d64c9172fba3d13d5ba6ddbc2bf96dac86ba3a2e35198c6603833a",
+      "bytes": 4577366,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "stage_truth",
+      "caught": true
+    },
+    {
+      "target": "sincnet",
+      "implementation": "Slow",
+      "record_sha256": "21f8c9fac4f738d7ae62ad3dbb1ad858ee2f40069d1717e0b8e1c0eddaf1b810",
+      "bytes": 5198187,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36,
+        "observed_sm_clock_range_mhz": [
+          2272,
+          2287
+        ]
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "speed",
+      "caught": true
+    },
+    {
+      "target": "sincnet",
+      "implementation": "PhaseCheat",
+      "record_sha256": "d0f7f81ba6ddcd611a565ba468ce6c643be3d531b1026a514469ffd672a41137",
+      "bytes": 4918033,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36,
+        "observed_sm_clock_range_mhz": [
+          2272,
+          2287
+        ]
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "timing_output",
+      "caught": true
+    },
+    {
+      "target": "sincnet",
+      "implementation": "Unscoped",
+      "record_sha256": "65fed97f3f4d821e1c5e17a2f5ffd3f881e39df3969bf5fabb8ec325b2959b4b",
+      "bytes": 4580434,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "profile",
+      "caught": true
+    },
+    {
+      "target": "sincnet",
+      "implementation": "Unlisted",
+      "record_sha256": "af043ba4b631ebe1cfdabe03a19a4eb0c16958966a2f11aa0cd5228372bfa7be",
+      "bytes": 4582178,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "profile",
+      "caught": true
+    },
+    {
+      "target": "sincnet",
+      "implementation": "Lookup",
+      "record_sha256": "c1c03ef1a6398b63178b20d1cca348e9e7b367c9a14e59b19d46da19d71f6b65",
+      "bytes": 2837805,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "secret",
+      "caught": true
+    },
+    {
+      "target": "sincnet",
+      "implementation": "UninitShared",
+      "record_sha256": "87da0dfbca52ceb2c164a1770d7932d002bab3bb98dccbe8e22505748ad57a0c",
+      "bytes": 4575698,
+      "lock_digest": "7dd3b903d2ed6a791118d8a3d6438397be9136a1c7d625a67824c4c7e84e1783",
+      "tier": "sm75",
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36
+      },
+      "status": "rejected",
+      "production_acceptance": false,
+      "intended_gate": "ptx:shared_initialization",
+      "caught": true
+    }
+  ],
+  "support": {
+    "archive_sha256": "0f648be464a30ddd1f31642bdb126f4110756d15b45888639acd05d87316b1d6",
+    "verified_proof_sha256": "a357694360a7ab38c4b80bb37d966fbd7609520153c12e878ae42e905c68fc37",
+    "files": 11668,
+    "command_logs": 501,
+    "source_bindings": 6216,
+    "resnet_sm75_processes": 97,
+    "probe_tiers": [
+      "sm75",
+      "sm80"
+    ],
+    "same_plan_captures": 7,
+    "partial_tile_passes": 1,
+    "partial_tile_ignored": 0
+  },
+  "phase2c1": {
+    "evidence": "evidence/phase2c1-results.json",
+    "sha256": "4ed374c4b9ee0e630cf3dd6e8f70a8a95e27e3aa3f8caa7ca2b9f3e88cfda151",
+    "purpose": "Phase 2c-1 infrastructure proof; no new production acceptance",
+    "full_library_controls": 3,
+    "standard_mutant_kinds_caught": 13,
+    "matched_pairs": 2,
+    "production_acceptance": false,
+    "full_39_required_at": "Final phase 2c seal after phase 2c-2",
+    "record_owned_production_artifact_loads": 2,
+    "grok_audit_followup": {
+      "file": "phase2c1-grok-fixes.json",
+      "sha256": "ce0afab2d720ade0460c452eea0132dad94d4a375c56f7f9b77cc777ef2d327a",
+      "purpose": "Grok audit fixes and strict infrastructure proof; no new production acceptance",
+      "full_library_controls": 2,
+      "default_jit_areas": 5,
+      "production_acceptance": false,
+      "evidence": "evidence/phase2c1-grok-fixes.json"
+    }
+  }
+}

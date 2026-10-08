@@ -1,7 +1,7 @@
 //! Isolated convolution qualification through the locked production dispatcher
 
-use super::{ConvLayer, ConvPlan, ConvPlanner, Convs, ResNetEmbedding, Residual};
-use crate::inference::cuda::candidate::{ConvCandidate, ConvOxide};
+use super::dispatch::Plan;
+use super::{ConvLayer, Convs, ResNetEmbedding, Residual};
 use crate::inference::cuda::implementation::Choice;
 use crate::inference::cuda::test_support::{self, Mutant};
 use crate::inference::cuda::{CudaError, CudaRuntime, SafetensorsFile};
@@ -44,7 +44,7 @@ pub(super) fn mutant_conv(
             Residual::None { scratch } => Residual::None { scratch },
             Residual::Add(value) => Residual::Add(value),
         };
-        convs.plan(layer).forward_bias_relu(
+        convs.plan(layer)?.library()?.forward_bias_relu(
             &mut convs.workspace.as_view_mut(),
             x,
             &weight,
@@ -91,14 +91,39 @@ pub(crate) struct HostInputs {
     pub(crate) residual: Option<Vec<f32>>,
 }
 
+/// Exact convolution geometry and weights with no CUDA owner
+pub(crate) struct HostReference {
+    spec: crate::inference::cuda::geometry::Conv2d,
+    weight: Vec<f32>,
+    bias: Vec<f32>,
+}
+
+impl HostReference {
+    /// Computes independent f64 truth using only host data
+    pub(crate) fn evaluate(
+        &self,
+        input: &HostInputs,
+        state: &mut u64,
+    ) -> crate::inference::cuda::test_support::qualify::reference::Sample {
+        use crate::inference::cuda::test_support::qualify::reference;
+        reference::conv(
+            &self.spec,
+            &input.input,
+            &self.weight,
+            &self.bias,
+            input.residual.as_deref(),
+            reference::indices(&self.spec.output_shape(), state),
+        )
+    }
+}
+
 /// One layer with two reference input sets, separate from the full-stage buffers
 pub(crate) struct Operator<'a> {
     model: &'a ResNetEmbedding,
     layer: &'a ConvLayer,
     batch: usize,
-    plans: Vec<ConvPlan>,
+    plans: Vec<(String, Plan)>,
     workspace: CudaSlice<u8>,
-    candidates: Vec<(String, ConvOxide)>,
     inputs: Vec<Inputs>,
     output: CudaSlice<f32>,
     adds_residual: bool,
@@ -167,7 +192,7 @@ impl<'a> Operator<'a> {
         let stream = runtime.stream();
         let (_, output_len) = Self::lens(model, batch, block, second);
         // only the precision mutant changes its input in place and needs a restore copy
-        let restores = layer.choice(batch, model.0.math) == Choice::Mutant(Mutant::Precision);
+        let restores = layer.override_choice() == Some(Choice::Mutant(Mutant::Precision));
         let mut inputs = Vec::new();
         for set in sets {
             inputs.push(Inputs {
@@ -184,29 +209,21 @@ impl<'a> Operator<'a> {
             });
         }
 
-        let planner = ConvPlanner::new(runtime)?;
-        let plans = model
-            .0
-            .trunk
-            .shapes()
-            .iter()
-            .map(|shape| planner.plan(shape.conv(batch, model.0.math)))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut plans = super::dispatch::plan_layers(runtime, &model.0.trunk, batch, model.0.math)?;
+        // an isolated operator owns only its plan and that plan's workspace
+        plans.retain(|(name, _)| name == layer.name());
         let workspace_bytes = plans
             .iter()
-            .map(ConvPlan::workspace_bytes)
+            .map(|(_, plan)| plan.workspace_bytes())
             .max()
-            .unwrap_or(1)
+            .unwrap_or(0)
             .max(1);
-        let candidates =
-            super::dispatch::plan_candidates(runtime, &model.0.trunk, batch, model.0.math)?;
         Ok(Self {
             model,
             layer,
             batch,
             plans,
             workspace: stream.alloc_zeros(workspace_bytes)?,
-            candidates,
             output: stream.alloc_zeros(output_len)?,
             inputs,
             adds_residual: second,
@@ -214,39 +231,57 @@ impl<'a> Operator<'a> {
         })
     }
 
-    /// Independent f64 truth from the same host inputs and uploaded folded weights
-    pub(crate) fn f64_reference(
-        &self,
-        runtime: &CudaRuntime,
-        input: &HostInputs,
-        state: &mut u64,
-    ) -> Result<super::super::test_support::qualify::reference::Sample, CudaError> {
-        use super::super::test_support::qualify::reference;
-        let spec = self.layer.conv(self.batch, self.model.0.math);
-        let weight = self.layer.weight().download(runtime.stream())?;
-        let bias = self.layer.bias().download(runtime.stream())?;
-        Ok(reference::conv(
-            &spec,
-            &input.input,
-            &weight,
-            &bias,
-            input.residual.as_deref(),
-            reference::indices(&spec.output_shape(), state),
-        ))
+    /// Copies the exact uploaded weights into a host-only f64 truth owner
+    pub(crate) fn f64_snapshot(&self, runtime: &CudaRuntime) -> Result<HostReference, CudaError> {
+        Ok(HostReference {
+            spec: self.layer.conv(self.batch, self.model.0.math),
+            weight: self.layer.weight().download(runtime.stream())?,
+            bias: self.layer.bias().download(runtime.stream())?,
+        })
     }
 
     pub(crate) fn name(&self) -> &str {
         self.layer.name()
     }
 
+    /// Select coverage before allocating buffers; paired tests keep only one layer live
+    pub(crate) fn declared_at(
+        model: &ResNetEmbedding,
+        runtime: &CudaRuntime,
+        batch: usize,
+        block: usize,
+        second: bool,
+    ) -> Result<bool, CudaError> {
+        use crate::inference::cuda::implementation::{Selected, plan_selection};
+
+        let block = &model.0.trunk.blocks[block];
+        let layer = if second { &block.conv2 } else { &block.conv1 };
+        let selected = plan_selection(
+            runtime,
+            layer.boundary(),
+            batch,
+            model.0.math,
+            layer.override_choice(),
+        )?;
+        Ok(!matches!(selected, Selected::Library))
+    }
+
     /// Whether the candidate runs this pair; undeclared pairs run the Library path
     pub(crate) fn declared(&self) -> bool {
-        match self.layer.choice(self.batch, self.model.0.math) {
+        match self
+            .plans
+            .iter()
+            .find(|(name, _)| name == self.layer.name())
+            .expect("planned layer")
+            .1
+            .choice()
+        {
             Choice::Library => false,
-            Choice::Oxide(_) => {
-                ConvOxide::COVERAGE.covers(self.name(), self.batch, self.model.0.math)
-            }
+            Choice::Oxide(_) => true,
             Choice::Mutant(_) => true,
+            Choice::StageTail | Choice::StageTailControl => {
+                unreachable!("a selection request is resolved before the plan")
+            }
         }
     }
 
@@ -266,8 +301,8 @@ impl<'a> Operator<'a> {
             plans: &self.plans,
             workspace: &mut self.workspace,
             chunks: self.batch,
+            qualification: None,
             math: self.model.0.math,
-            candidates: &self.candidates,
         };
         let set = &self.inputs[which];
         let r = set.residual.as_view();
@@ -339,6 +374,11 @@ impl EmbeddingBatch {
         self.download_output(runtime)
     }
 
+    /// Plant a stage-only accuracy defect in the actual device output
+    pub(crate) fn qualification_round_stage(&self, runtime: &CudaRuntime) -> Result<(), CudaError> {
+        test_support::round_input(runtime, self.output.data())
+    }
+
     /// Embeddings per forward pass, `chunks * 3`
     pub fn rows(&self) -> usize {
         self.chunks * SPEAKERS_PER_CHUNK
@@ -376,5 +416,89 @@ impl EmbeddingBatch {
             + self.pooled.len()
             + self.output.len();
         floats * size_of::<f32>()
+    }
+}
+
+/// Prepared functions for the unchanged Library head bias operation
+pub(crate) struct HeadBias(super::kernels::EmbeddingKernels);
+
+impl HeadBias {
+    /// Load Library functions before any enqueue or capture
+    pub(crate) fn new(runtime: &CudaRuntime) -> Result<Self, CudaError> {
+        Ok(Self(super::kernels::EmbeddingKernels::load(runtime)?))
+    }
+    /// Seed output rows without resolving or loading a module
+    pub(crate) fn run(
+        &self,
+        runtime: &CudaRuntime,
+        bias: &CudaSlice<f32>,
+        output: &mut CudaSlice<f32>,
+    ) -> Result<(), CudaError> {
+        self.0
+            .broadcast_rows(runtime, &bias.as_view(), &mut output.as_view_mut())
+    }
+}
+
+/// Install one prepared route using the actual embedding operation weights
+impl EmbeddingBatch {
+    pub(crate) fn install_boundary(
+        &mut self,
+        runtime: &CudaRuntime,
+        operation: test_support::candidate_seam::Operation,
+        choice: &str,
+        fixture: Vec<f32>,
+    ) -> Result<(), CudaError> {
+        use crate::inference::cuda::candidate::{DenseSite, DenseSpec};
+        use test_support::candidate_seam::Operation;
+        assert!(self.graph.is_none(), "install boundary before capture");
+        let invalid = || CudaError::Unsupported {
+            context: "embedding boundary installation",
+            reason: "operation does not match this model workspace".to_owned(),
+        };
+        if operation.tuple() != (self.chunks, self.model.math) {
+            return Err(invalid());
+        }
+        let (weight, bias) = match operation {
+            Operation::Dense(spec) if spec.site() == DenseSite::Embedding => {
+                if operation
+                    != Operation::Dense(
+                        DenseSpec::new(DenseSite::Embedding, self.chunks, self.model.math)
+                            .map_err(|_| invalid())?,
+                    )
+                {
+                    return Err(invalid());
+                }
+                (self.model.head_weight.data(), self.model.head_bias.data())
+            }
+            Operation::Spatial { boundary, .. } => {
+                let (layer, residual) = self
+                    .model
+                    .trunk
+                    .layers()
+                    .find(|(layer, _)| layer.boundary() == boundary)
+                    .ok_or_else(invalid)?;
+                let actual = Operation::Spatial {
+                    boundary,
+                    conv: layer.conv(self.chunks, self.model.math),
+                    epilogue: layer.epilogue(residual),
+                };
+                if operation != actual {
+                    return Err(invalid());
+                }
+                (layer.weight().data(), layer.bias().data())
+            }
+            _ => return Err(invalid()),
+        };
+        let owner = test_support::boundaries::Owner::prepare(
+            runtime,
+            operation,
+            choice,
+            weight,
+            bias,
+            || Ok(fixture),
+        )?;
+        self.qualification
+            .insert(operation.boundary().name(), owner);
+        Ok(())
     }
 }

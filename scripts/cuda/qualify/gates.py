@@ -2,8 +2,10 @@
 
 import math
 import re
+import random
 import statistics
 import struct
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -23,6 +25,30 @@ class ParityRejected(Rejected):
         super().__init__(message)
         self.failing = failing
         self.cases = cases
+
+
+class TruthRejected(Rejected):
+    """A stage exceeds its Library truth bound; retain every bound component."""
+
+    def __init__(self, message: str, evidence: dict):
+        super().__init__(message)
+        self.evidence = evidence
+
+
+class StageRejected(Rejected):
+    """A paired stage fails the ratio or time margin; retain its replay estimate."""
+
+    def __init__(self, message: str, evidence: dict):
+        super().__init__(message)
+        self.evidence = evidence
+
+
+class StageBlocked(Blocked):
+    """The operator gate cannot authorize a paired margin; retain the estimate."""
+
+    def __init__(self, message: str, evidence: dict):
+        super().__init__(message)
+        self.evidence = evidence
 
 
 @dataclass(frozen=True)
@@ -252,27 +278,203 @@ def speed(runs: Sequence[Timing], candidate: str, bound: float) -> dict:
     return {**evidence, "gate": "operator: strict, faster Library median"}
 
 
-def stage_speed(runs: Sequence[Timing], candidate: str, bound: float) -> dict:
-    """The stage regression guard for a stage that runs declared candidate layers.
+MIN_STAGE_BLOCKS = 256
+STAGE_BOOTSTRAP_BLOCK = 32
+STAGE_BOOTSTRAP_DRAWS = 4096
+# collection rounds operator strata to 16; bootstrap never splits a whole stratum
+OPERATOR_STRATUM_ALIGNMENT = 16
 
-    A stage saving can sit at the stage noise, so each A/B pair only has to stay
-    within `bound` of its Library process, and the mean of the two pair speedups must
-    still be at least 1, so one case cannot be offset by another. The operator gate is
-    the 0% test.
+
+def paired_operator_saving(row: dict) -> dict[str, float]:
+    """Sum per-layer ABBA mean savings measured beside the same stage replays.
+
+    ResNet uses equal, contiguous per-layer strata to bound live GPU memory.
+    A one-operator stage needs no stratification metadata.
     """
-    evidence = _speed_evidence(runs, candidate, bound)
-    medians = evidence["medians_ms"]
-    if medians[1] > medians[0] * (1 + bound) or medians[3] > medians[2] * (1 + bound):
-        raise Rejected(
-            f"speed: stage candidate slower than its Library process plus the {bound} stage bound"
-        )
-    if statistics.fmean(evidence["speedups"]) < 1.0:
-        raise Rejected("speed: stage candidate slower on average in this case")
+    blocks = row["operator_abba_ms"]
+    if "operator_layers" not in row and "operator_layer_by_block" not in row:
+        return {
+            "operator": statistics.fmean(
+                (b[0] + b[3] - b[1] - b[2]) / 2 for b in blocks
+            )
+        }
+    layers = row.get("operator_layers", [])
+    labels = row.get("operator_layer_by_block", [])
+    counts = Counter(labels)
+    if (
+        not layers
+        or len(layers) != len(set(layers))
+        or len(labels) != len(blocks)
+        or set(counts) != set(layers)
+        or len(set(counts.values())) != 1
+        or min(counts.values()) < OPERATOR_STRATUM_ALIGNMENT
+        or any(count % OPERATOR_STRATUM_ALIGNMENT for count in counts.values())
+    ):
+        raise Rejected("paired stage: incomplete operator strata")
+    expected_labels = [layer for layer in layers for _ in range(counts[layer])]
+    if labels != expected_labels:
+        raise Rejected("paired stage: non-contiguous operator strata")
     return {
-        **evidence,
-        "ratio": statistics.fmean(evidence["speedups"]),
-        "gate": "stage: regression guard within the stage bound",
+        layer: statistics.fmean(
+            (b[0] + b[3] - b[1] - b[2]) / 2
+            for b, label in zip(blocks, labels, strict=True)
+            if label == layer
+        )
+        for layer in layers
     }
+
+
+def stage_speed(row: dict, operator_passed: bool) -> dict:
+    """Decide stage non-regression from replay-level ABBA blocks in one process.
+
+    Resample contiguous blocks, not independent adjacent replays, to retain local
+    clock-drift correlation. ResNet resamples whole equal operator strata. The
+    margin is in time units: its ratio threshold is 1 / (1 + saving_fraction).
+    Both paths use the one-sided 95% lower confidence bound.
+    """
+    blocks = row["stage_abba_ms"]
+    operators = row["operator_abba_ms"]
+    if row.get("order") != "ABBA" or row.get("warmup", 0) < 5:
+        raise Rejected("paired stage: invalid replay order or warmup")
+    if len(blocks) < MIN_STAGE_BLOCKS or len(operators) != len(blocks):
+        raise Rejected("paired stage: insufficient paired replays")
+    for block in (*blocks, *operators):
+        if len(block) != 4:
+            raise Rejected("paired stage: incomplete ABBA block")
+        finite(block)
+        if min(block) <= 0:
+            raise Rejected("paired stage: non-positive timing")
+    layer_savings = paired_operator_saving(row)
+    block_length = (
+        len(blocks) // len(row["operator_layers"])
+        if "operator_layers" in row
+        else STAGE_BOOTSTRAP_BLOCK
+    )
+    if len(blocks) % block_length:
+        raise Rejected("paired stage: incomplete bootstrap block")
+    groups = []
+    for start in range(0, len(blocks), block_length):
+        group = blocks[start : start + block_length]
+        groups.append(
+            (sum(b[0] + b[3] for b in group), sum(b[1] + b[2] for b in group))
+        )
+    if len(groups) < 2:
+        raise Rejected("paired stage: insufficient independent bootstrap groups")
+    library = sum(g[0] for g in groups)
+    candidate = sum(g[1] for g in groups)
+    point = library / candidate
+    rng = random.Random(0xABBA_2B)
+    estimates = []
+    for _ in range(STAGE_BOOTSTRAP_DRAWS):
+        sample = rng.choices(groups, k=len(groups))
+        estimates.append(sum(g[0] for g in sample) / sum(g[1] for g in sample))
+    estimates.sort()
+    low = estimates[int(0.05 * len(estimates))]
+    high = estimates[int(0.95 * len(estimates))]
+    # measure the eligible operators beside each stage block in the same replay set
+    saving_ms = sum(layer_savings.values())
+    stage_ms = library / (2 * len(blocks))
+    saving_fraction = saving_ms / stage_ms
+    if saving_fraction <= -1:
+        raise Rejected("paired stage: non-positive time margin")
+    threshold = 1 / (1 + saving_fraction)
+    evidence = {
+        "ratio": point,
+        "one_sided95_lower": low,
+        "one_sided95_upper": high,
+        "ci95_diagnostic": [
+            estimates[int(0.025 * len(estimates))],
+            estimates[int(0.975 * len(estimates))],
+        ],
+        "non_inferiority_ratio_threshold": threshold,
+        "operator_saving_ms": saving_ms,
+        "operator_saving_by_layer_ms": layer_savings,
+        "stage_library_ms": stage_ms,
+        "operator_saving_fraction": saving_fraction,
+        "operator_gate_passed": operator_passed,
+        "pairs": 2 * len(blocks),
+        "abba_blocks": len(blocks),
+        "bootstrap_block_abba": block_length,
+        "bootstrap_groups": len(groups),
+        "bootstrap_design": "whole strata"
+        if "operator_layers" in row
+        else "contiguous blocks",
+        "bootstrap_draws": STAGE_BOOTSTRAP_DRAWS,
+        "gate": "stage: paired replay non-regression",
+    }
+    if low >= 1.0:
+        evidence["acceptance_path"] = "primary"
+        return evidence
+    evidence["acceptance_path"] = "margin"
+    if point < 1.0:
+        raise StageRejected(
+            "paired stage: stage regression exceeds zero slowdown", evidence
+        )
+    if not operator_passed:
+        raise StageBlocked(
+            "paired stage: operator gate does not authorize the time margin", evidence
+        )
+    if low >= threshold:
+        return evidence
+    raise StageRejected(
+        "paired stage: non-inferiority margin not established", evidence
+    )
+
+
+def tf32_truth(candidate: dict, library: dict, draws: Sequence[dict]) -> dict:
+    """Bound each same-truth error by the unperturbed Library and all its draws.
+
+    Candidates and controls use the same rule. The old upper-95th percentile
+    remains a diagnostic, not the acceptance limit.
+    """
+    if len(draws) < 8:
+        raise Rejected("TF32 truth: at least 8 independent perturbation draws required")
+    limits, components, upper95 = {}, {}, {}
+    failing = []
+    for key in ("relative_l2", "max_abs", "minimum_cosine"):
+        values = [float(draw[key]) for draw in draws]
+        value = float(candidate[key])
+        unperturbed = float(library[key])
+        finite([value, unperturbed, *values])
+        if key == "minimum_cosine":
+            if any(
+                not -1 <= x <= 1.000000000000001 for x in [value, unperturbed, *values]
+            ):
+                raise Rejected("TF32 truth: invalid cosine")
+            values = [max(0.0, 1.0 - x) for x in values]
+            value = max(0.0, 1.0 - value)
+            unperturbed = max(0.0, 1.0 - unperturbed)
+        elif min(value, unperturbed, *values) < 0:
+            raise Rejected("TF32 truth: negative error")
+        maximum_draw = max(values)
+        limit = max(unperturbed, maximum_draw)
+        diagnostic = sorted(values)[math.ceil(0.95 * len(values)) - 1]
+        limits[key] = limit
+        upper95[key] = diagnostic
+        components[key] = {
+            "candidate": value,
+            "unperturbed_library": unperturbed,
+            "draws": values,
+            "maximum_draw": maximum_draw,
+            "maximum": limit,
+            "upper95_diagnostic": diagnostic,
+        }
+        if value > limit:
+            failing.append(key)
+    evidence = {
+        "error_limits": limits,
+        "bound_components": components,
+        "draws": len(draws),
+        "rule": "max(unperturbed Library error, maximum perturbation draw error)",
+        "upper95_diagnostic": upper95,
+        "truth": "FP32 Library, same input",
+    }
+    if failing:
+        raise TruthRejected(
+            f"TF32 truth: candidate less accurate than Library TF32 ({', '.join(failing)})",
+            evidence,
+        )
+    return evidence
 
 
 def tf32_band(rows: Sequence[dict], embedding: bool) -> dict:
@@ -327,60 +529,6 @@ def tf32_band(rows: Sequence[dict], embedding: bool) -> dict:
         "seeds": seeds,
         "cases": len(rows),
     }
-
-
-def tf32_stage_case(
-    candidate: dict, library: dict, band: dict, embedding: bool
-) -> dict:
-    """One TF32 stage case may change from the Library stage only within the band."""
-    if embedding:
-        drop = library["minimum_cosine"] - candidate["minimum_cosine"]
-        finite([drop])
-        if drop > band["cosine"]:
-            raise Rejected(
-                f"stage band: cosine drop {drop:.3e} exceeds band {band['cosine']:.3e}"
-            )
-        return {"cosine_drop": drop}
-    changes = {
-        "relative_l2": candidate["relative_l2"] - library["relative_l2"],
-        "max_abs": candidate["max_abs"] - library["max_abs"],
-        "flips": candidate["argmax_flips"] - library["argmax_flips"],
-    }
-    finite(list(changes.values()))
-    for key, value in changes.items():
-        if value > band[key]:
-            raise Rejected(
-                f"stage band: {key} increase {value} exceeds band {band[key]}"
-            )
-    return changes
-
-
-def tf32_stage_aggregate(
-    candidates: Sequence[dict], libraries: Sequence[dict], band: dict, embedding: bool
-) -> dict:
-    """Across every TF32 stage case the candidate may not be worse on average."""
-    if not candidates or len(candidates) != len(libraries):
-        raise Rejected("stage band: missing aggregate cases")
-    if embedding:
-        means = [
-            statistics.fmean(row["mean_cosine"] for row in rows)
-            for rows in (candidates, libraries)
-        ]
-        if means[0] < means[1]:
-            raise Rejected("stage band: mean cosine below Library")
-        return {"mean_cosine": means}
-    errors = [
-        statistics.fmean(row["relative_l2"] for row in rows)
-        for rows in (candidates, libraries)
-    ]
-    flips = [
-        sum(row["argmax_flips"] for row in rows) for rows in (candidates, libraries)
-    ]
-    if errors[0] > errors[1]:
-        raise Rejected("stage band: mean logits error above Library")
-    if flips[0] > flips[1] + band["total_flips"]:
-        raise Rejected("stage band: total flips above Library plus the band")
-    return {"mean_relative_l2": errors, "total_flips": flips}
 
 
 TOOLS = ("memcheck", "racecheck", "initcheck")

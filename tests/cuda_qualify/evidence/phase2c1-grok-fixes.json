@@ -1,0 +1,850 @@
+{
+  "schema": 1,
+  "purpose": "Grok audit fixes and strict infrastructure proof; no new production acceptance",
+  "verified_central": "2026-10-06T23:43:27.305537-05:00",
+  "audited_commit": "c56cba44a26a17edd2e433f15d4075421734cce1",
+  "audited_lock": "f4668fe2b03c226f521d9fafad4ca2d739eea451f05cab2232ea1af0ce1d83fe",
+  "audit_output_sha256": "c5512207e3a9aa3b43304e6d82af0fe423b59307d232d6eedd0d4943565bcf40",
+  "source_end_commit": "4fc0a5fac4297599151b1d1c8bc1df7859161151",
+  "evidence_blobs_directory": "/Users/praveen/code/research/speakrs/no-cudnn/phase2c1/blobs",
+  "raw_records_directory": "/Users/praveen/Library/Caches/speakrs-cuda-qualify/records",
+  "production_acceptance": false,
+  "functional_proof": {
+    "passed": true,
+    "verified_central": "2026-10-06T20:39:48.543801-05:00",
+    "proof_sha256": "86a847f3c13d9c8fe9549d5da38eadbce3dcd8969aaf788f43b94879a06b9fb4",
+    "archive_sha256": "d0195e3f5434d33b394bb8e8f135de27dbc2305cd52a14c4485b446957bb2105",
+    "source_commit": "39102c3f7eb0166995f645009c9ae3a6e620bbea",
+    "compiled_lock": "a2f0556352df307462525fa341837fe7a0ab89bd1f02801bee7ae18e35add827",
+    "source_files_verified": 435,
+    "command_logs_verified": 3,
+    "production": [
+      {
+        "area": "sincnet",
+        "artifact": {
+          "kind": "PtxJit",
+          "sha256": "967bc6893f80da84d8d4d288f2cf1ca3336ca09c4386495cab722beb0ac87247"
+        },
+        "batch": 1,
+        "boundary": "sincnet.conv0.abs_pool",
+        "candidate": true,
+        "device": "12.0",
+        "embedded_ptx_sha256": "967bc6893f80da84d8d4d288f2cf1ca3336ca09c4386495cab722beb0ac87247",
+        "l2_bytes": 33554432,
+        "math": "fp32",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "record": "a4d1a2692b78a814cd2da16f084801c3641bfd11c6d095d610f3a8182ad6f675",
+        "sm_count": 36,
+        "tier": "sm75"
+      },
+      {
+        "area": "resnet",
+        "artifact": {
+          "kind": "PtxJit",
+          "sha256": "dd6449c0129f9a03bf691c0338611b50b651ab714d5803caedea87de3c72b6b7"
+        },
+        "batch": 1,
+        "boundary": "resnet.layer1.0.conv1",
+        "candidate": true,
+        "device": "12.0",
+        "embedded_ptx_sha256": "dd6449c0129f9a03bf691c0338611b50b651ab714d5803caedea87de3c72b6b7",
+        "l2_bytes": 33554432,
+        "math": "fp32",
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "record": "8f8fa3e3c158771e354aad83f4e42fca6fac998aa192b39a966067a4b0035758",
+        "sm_count": 36,
+        "tier": "sm75"
+      }
+    ],
+    "always_on": [
+      {
+        "area": "fbank",
+        "artifact": {
+          "kind": "PtxJit",
+          "sha256": "65beebc2586613a2f6fbb56f53c13086a4dc2b29258781763e20a9aa109ecde2"
+        },
+        "device": "12.0",
+        "embedded_ptx_sha256": "65beebc2586613a2f6fbb56f53c13086a4dc2b29258781763e20a9aa109ecde2",
+        "tier": "sm75"
+      },
+      {
+        "area": "embedding",
+        "artifact": {
+          "kind": "PtxJit",
+          "sha256": "3a4cb4f2cb28db4d1acfcab13576d4066c53da767e84d86cb952b099fe2034d4"
+        },
+        "device": "12.0",
+        "embedded_ptx_sha256": "3a4cb4f2cb28db4d1acfcab13576d4066c53da767e84d86cb952b099fe2034d4",
+        "tier": "sm75"
+      },
+      {
+        "area": "segmentation",
+        "artifact": {
+          "kind": "PtxJit",
+          "sha256": "9ebf472e97a997ecdd263a1474412c106eeca8762d448da6bbb7d6199166adb7"
+        },
+        "device": "12.0",
+        "embedded_ptx_sha256": "9ebf472e97a997ecdd263a1474412c106eeca8762d448da6bbb7d6199166adb7",
+        "tier": "sm75"
+      }
+    ],
+    "no_cubins_loaded": true,
+    "gpu_assertion": "default_production_loads_record_pinned_jit asserts exactly five recorded modules, both PtxJit",
+    "verification_receipt_sha256": "06e02017685c28242656f2262b350741f09d9262877cc9b9bf97acb8e029652f",
+    "gpu_task": "01a11403-ecf5-769a-aed7-e81716408dda",
+    "verification_task": "01a11403-ed0b-73aa-8318-9762c39f7312",
+    "binary_sha256": "b939fb96beb658088d34a9bf15087c16a14c2ac220fe18dc4e45ad60368bb1b2",
+    "commands": [
+      {
+        "argv": [
+          "rustc",
+          "--version"
+        ],
+        "exit": 0,
+        "start_central": "2026-10-06T20:39:25.292000-05:00",
+        "end_central": "2026-10-06T20:39:25.322509-05:00",
+        "log": "00.log",
+        "sha256": "8dc912acd5bfeafc70b01b1d2a2afb0844afa02f5dba2f1ae8d5c212d005afb6"
+      },
+      {
+        "argv": [
+          "cargo",
+          "test",
+          "--release",
+          "--lib",
+          "--features",
+          "cuda",
+          "--no-run",
+          "--message-format=json"
+        ],
+        "exit": 0,
+        "start_central": "2026-10-06T20:39:25.322772-05:00",
+        "end_central": "2026-10-06T20:39:34.946478-05:00",
+        "log": "01.log",
+        "sha256": "cf31cf01899aa17c9742f659fad5b3e5f78038dbce6191760555729343c525f6"
+      },
+      {
+        "argv": [
+          "flock",
+          "/workspace/gpu-bench.lock",
+          "/workspace/p2c1/target/release/deps/speakrs-dba8cd23747380d7",
+          "--exact",
+          "inference::cuda::implementation::tests::default_production_loads_record_pinned_jit",
+          "--ignored",
+          "--nocapture",
+          "--test-threads=1"
+        ],
+        "exit": 0,
+        "start_central": "2026-10-06T20:39:34.949251-05:00",
+        "end_central": "2026-10-06T20:39:35.393224-05:00",
+        "log": "02.log",
+        "sha256": "923f6068bf9478428ce0eef282adf2f401af83a197f08144a98a45b43c0157fa"
+      }
+    ],
+    "source_archive_sha256": "f674d5af80745c784b6d1359fc2d86e88f76e248c2c0765527ca7a01618f92fb",
+    "source_snapshot_sha256": "b5907fccbb41ca1cdc9c95746b43d95cce8f00bd128a1421831d71d8550530d3",
+    "carry_forward_to_control_source": {
+      "end_commit": "4fc0a5fac4297599151b1d1c8bc1df7859161151",
+      "changed_files": [
+        "scripts/cuda/qualify/LOCK",
+        "scripts/cuda/qualify/SCOPE.json",
+        "xtask/src/commands/cuda_kernels/ptx_lint.rs",
+        "xtask/tests/fixtures/ptx/shared-truncation-review.ptx"
+      ],
+      "exact_diff_sha256": "ddbe1d55b42c2cf846415d39163a149c05366eabf51b44186055e985653879f7",
+      "reason": "Only lint, scan fixture, external control archive pin and lock change; no runtime owner, PTX, cubin, manifest, draw or timing code changes"
+    }
+  },
+  "full_library_controls": [
+    {
+      "area": "sincnet",
+      "run_id": "audit-sincnet-Library-002",
+      "gpu_task": "01a11413-789a-7297-8a35-38d3cf9938aa",
+      "verification_task": "01a11413-78ae-76d9-a8d1-5a215ab3ddd8",
+      "source_commit": "4fc0a5fac4297599151b1d1c8bc1df7859161151",
+      "compiled_lock": "1b3359c9178886027ecd4adf3dc0e24e803d06086f6c7104891b7b274811abf9",
+      "control_archive_sha256": "1914adb9754dccdd09c32563c8b2609158f456b3c8d703f3bdee957b97b55b3f",
+      "record_sha256": "cd7c7f094aede58abdc8d54d7f76196d8c90b9e7ecbf343584aeaf9eb95ea579",
+      "record_bytes": 6742534,
+      "record_status": "passed",
+      "accepts_replacement": false,
+      "checks_passed": 214,
+      "failed_checks": [],
+      "phases_run": [
+        "numeric",
+        "timing",
+        "paired",
+        "profile",
+        "sanitize"
+      ],
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "l2_bytes": 33554432,
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36,
+        "observed_sm_clock_range_mhz": [
+          2242,
+          2287
+        ]
+      },
+      "started_central": "2026-10-06T20:56:25.187231-05:00",
+      "ended_central": "2026-10-06T21:07:58.547277-05:00",
+      "source_bindings": 159,
+      "complete_candidate_files": {
+        "ptx": {
+          "src/inference/cuda/ptx/sincnet.sm75.ptx": "967bc6893f80da84d8d4d288f2cf1ca3336ca09c4386495cab722beb0ac87247"
+        },
+        "manifests": {
+          "src/inference/cuda/ptx/sincnet.manifest": "09a4a44ef930dee6fee351fe35fe6451cc316bf08da0bdf843bbb9f785531496"
+        },
+        "host_sources": {
+          "src/inference/cuda/candidate.rs": "f3eebb5a137ae963d0d8258b13f99d4aa01786467eb9e4b73af6a3e5e11a5343",
+          "src/inference/cuda/candidate/sinc.rs": "96dac61ad53f015646b391a18febe024e5d2706c25075a9767caa8b5cd976d7e"
+        },
+        "kernel_sources": {
+          "crates/speakrs-cuda-kernels/src/sincnet.rs": "600f1c3688e073e13b65a36b0fbe4917dde498218efba8c61fca912e6f9d6920"
+        },
+        "cubins": {
+          "src/inference/cuda/ptx/sincnet.sm75.sm_120.cubin": "b9d7e0bba571328c769c6764bf07e6a7887d36aba98c83f4f42a7dbc73b7e947",
+          "src/inference/cuda/ptx/sincnet.sm75.sm_75.cubin": "e8ae0ee864b13ab409127cdeba5993dc925acb12bcd7c25bb456a64e24aa671b",
+          "src/inference/cuda/ptx/sincnet.sm75.sm_80.cubin": "9341405837d3ca854ae4834d1d6a661f9b8863f5e76522ca18968c3483c51f5d",
+          "src/inference/cuda/ptx/sincnet.sm75.sm_86.cubin": "01726e018372f13d4f983fbfccafcc537a93f756ce5fce9e4cb012660881b9e2",
+          "src/inference/cuda/ptx/sincnet.sm75.sm_89.cubin": "6a8c6eaa44300f5a2e62c9a5305ee8c3e10eb47d206c1da71f90f7ca5b8090e6",
+          "src/inference/cuda/ptx/sincnet.sm75.sm_90.cubin": "8713d039314df49b4961584a3e887bdb2d5b03a6ee625c3608f9807abb854528"
+        }
+      },
+      "command_logs_verified": 24,
+      "files_verified": 45,
+      "module_bindings_verified": 15,
+      "loaded_modules": [
+        {
+          "area": "qualify",
+          "artifact": {
+            "kind": "PtxJit",
+            "sha256": "d5961407ae3625d2744e32083a292a4deaaa68efba7f2eeeb9d7fd5c1232f382"
+          },
+          "embedded_ptx_sha256": "d5961407ae3625d2744e32083a292a4deaaa68efba7f2eeeb9d7fd5c1232f382",
+          "entries": [
+            "qualify_add",
+            "qualify_atomic",
+            "qualify_round",
+            "qualify_clear",
+            "qualify_pool",
+            "qualify_fault",
+            "qualify_oob"
+          ],
+          "sha256": "d5961407ae3625d2744e32083a292a4deaaa68efba7f2eeeb9d7fd5c1232f382",
+          "tier": "sm75",
+          "path": "tests/cuda_qualify/device/qualify.sm75.ptx"
+        },
+        {
+          "area": "controls",
+          "artifact": {
+            "kind": "PtxJit",
+            "sha256": "003020b6ea918342cf52263a1ca9c066b04bb8fdc197ec01b0eeac8fffa00c26"
+          },
+          "embedded_ptx_sha256": "003020b6ea918342cf52263a1ca9c066b04bb8fdc197ec01b0eeac8fffa00c26",
+          "entries": [
+            "qualify_poison",
+            "qualify_race",
+            "qualify_perturb"
+          ],
+          "sha256": "003020b6ea918342cf52263a1ca9c066b04bb8fdc197ec01b0eeac8fffa00c26",
+          "tier": "sm75",
+          "path": "tests/cuda_qualify/device/controls.sm75.ptx"
+        },
+        {
+          "area": "segmentation",
+          "artifact": {
+            "kind": "PtxJit",
+            "sha256": "9ebf472e97a997ecdd263a1474412c106eeca8762d448da6bbb7d6199166adb7"
+          },
+          "embedded_ptx_sha256": "9ebf472e97a997ecdd263a1474412c106eeca8762d448da6bbb7d6199166adb7",
+          "entries": [
+            "segmentation_bias_leaky",
+            "segmentation_bias_log_softmax",
+            "segmentation_pool_norm"
+          ],
+          "sha256": "9ebf472e97a997ecdd263a1474412c106eeca8762d448da6bbb7d6199166adb7",
+          "tier": "sm75",
+          "path": "src/inference/cuda/ptx/segmentation.sm75.ptx"
+        }
+      ],
+      "cpu_lock_evidence": [
+        {
+          "group": "library",
+          "mode": "fp32",
+          "gpu_sections": 6,
+          "owner": "child",
+          "path": "/workspace/gpu-bench.lock",
+          "f64_sections": 5,
+          "bound_draw_sections": 0,
+          "all_cpu_work_unlocked": true,
+          "draw_seeds": [],
+          "draw_lengths": []
+        },
+        {
+          "group": "library",
+          "mode": "tf32",
+          "gpu_sections": 134,
+          "owner": "child",
+          "path": "/workspace/gpu-bench.lock",
+          "f64_sections": 5,
+          "bound_draw_sections": 128,
+          "all_cpu_work_unlocked": true,
+          "draw_seeds": [
+            11,
+            23,
+            37,
+            41,
+            53,
+            67,
+            79,
+            97
+          ],
+          "draw_lengths": [
+            1278000,
+            8946000,
+            40896000,
+            42174000,
+            81792000
+          ]
+        },
+        {
+          "group": "candidate",
+          "mode": "fp32",
+          "gpu_sections": 6,
+          "owner": "child",
+          "path": "/workspace/gpu-bench.lock",
+          "f64_sections": 5,
+          "bound_draw_sections": 0,
+          "all_cpu_work_unlocked": true,
+          "draw_seeds": [],
+          "draw_lengths": []
+        },
+        {
+          "group": "candidate",
+          "mode": "tf32",
+          "gpu_sections": 6,
+          "owner": "child",
+          "path": "/workspace/gpu-bench.lock",
+          "f64_sections": 5,
+          "bound_draw_sections": 0,
+          "all_cpu_work_unlocked": true,
+          "draw_seeds": [],
+          "draw_lengths": []
+        }
+      ],
+      "verification_receipt_sha256": "ecd868ef6c1144133695ab16fdc2d9dd5d15abaff5b51e4266bd3906f9d09d8b",
+      "proof_sha256": "2e4a28d74138195761e54532e0219e00bf6084246cad9942585c8dedc7f03bf4",
+      "archive_sha256": "38734191eb7c4f62eeafeba9c79c4cd64c8d79a8386843ea78cadcb262dd9758",
+      "files_index_sha256": "a67e8e95d1109eccb90610b80905e38cb5331abda5ce78cfadf1da8b3a6233c5",
+      "fetch_commands_sha256": "7f0b8a180194f2a19552947b71c4ad73dae449fe14b0b4dc7e7c358a24da8391",
+      "source_snapshot_sha256": "d167942caff7c46d270c2fec0f2cf1b9bc2175cb0a8b795e9e72549e10f41f17"
+    },
+    {
+      "area": "resnet",
+      "run_id": "audit-resnet-Library-002",
+      "gpu_task": "01a11413-78ce-728c-be94-7a090e9ddf6f",
+      "verification_task": "01a11413-78de-7125-95aa-2d05780ce6b4",
+      "source_commit": "4fc0a5fac4297599151b1d1c8bc1df7859161151",
+      "compiled_lock": "1b3359c9178886027ecd4adf3dc0e24e803d06086f6c7104891b7b274811abf9",
+      "control_archive_sha256": "1914adb9754dccdd09c32563c8b2609158f456b3c8d703f3bdee957b97b55b3f",
+      "record_sha256": "31fb1f7bc1664b6593ff2b1b88cdaeb9590d9570c5fde9af94e8502b6a75f5de",
+      "record_bytes": 66105536,
+      "record_status": "passed",
+      "accepts_replacement": false,
+      "checks_passed": 1159,
+      "failed_checks": [],
+      "phases_run": [
+        "numeric",
+        "timing",
+        "paired",
+        "profile",
+        "sanitize"
+      ],
+      "device": {
+        "compute_capability": "12.0",
+        "cublas_version": 120804,
+        "cuda_version": 12080,
+        "cudnn_version": 90800,
+        "driver_api_version": 13020,
+        "driver_version": "595.84",
+        "l2_bytes": 33554432,
+        "name": "NVIDIA GeForce RTX 5060 Ti",
+        "sm_count": 36,
+        "observed_sm_clock_range_mhz": [
+          2130,
+          2287
+        ]
+      },
+      "started_central": "2026-10-06T21:08:20.522039-05:00",
+      "ended_central": "2026-10-06T23:39:14.898946-05:00",
+      "source_bindings": 159,
+      "complete_candidate_files": {
+        "ptx": {
+          "src/inference/cuda/ptx/resnet.sm75.ptx": "dd6449c0129f9a03bf691c0338611b50b651ab714d5803caedea87de3c72b6b7"
+        },
+        "manifests": {
+          "src/inference/cuda/ptx/resnet.manifest": "734d43a71f6958fce6cdac766723e4ffba6b32c584e2ebf5accfbdfafd019031"
+        },
+        "host_sources": {
+          "src/inference/cuda/candidate.rs": "f3eebb5a137ae963d0d8258b13f99d4aa01786467eb9e4b73af6a3e5e11a5343",
+          "src/inference/cuda/candidate/conv.rs": "0e9bc602a618dd1202df9e7cfc566461f6537c474bb2759e099c0c46165e8506"
+        },
+        "kernel_sources": {
+          "crates/speakrs-cuda-kernels/src/resnet.rs": "9f2b5fd4c5c88236aad9829c8ef48c1c7b1b55169a8d82228edbd622c8184122"
+        },
+        "cubins": {
+          "src/inference/cuda/ptx/resnet.sm75.sm_120.cubin": "0fde49e67ccfd4f3227d90575c5d5df50eac51d706fb1e963c3c838751463c14",
+          "src/inference/cuda/ptx/resnet.sm75.sm_75.cubin": "c50d3818e4417b437d7fe8e15fd6e14fbaf389e01444b258523abd456ab01a30",
+          "src/inference/cuda/ptx/resnet.sm75.sm_80.cubin": "09d62d9266b129f26ab45ea8270d565d8423227783727bd79f3d2a3a556094b0",
+          "src/inference/cuda/ptx/resnet.sm75.sm_86.cubin": "84528b6f59264ab4a36855afffa20be2373ec85a02f64598d70cb32c2d22cc22",
+          "src/inference/cuda/ptx/resnet.sm75.sm_89.cubin": "7fa7644f646e18bcc444276641218eec1876c0074e81a8499d96d9ae79c0cce7",
+          "src/inference/cuda/ptx/resnet.sm75.sm_90.cubin": "1794eb077340f993f5f880407bd70ce092c2dd2cfd93875ae1252140e47c18dd"
+        }
+      },
+      "command_logs_verified": 24,
+      "files_verified": 45,
+      "module_bindings_verified": 20,
+      "loaded_modules": [
+        {
+          "area": "qualify",
+          "artifact": {
+            "kind": "PtxJit",
+            "sha256": "d5961407ae3625d2744e32083a292a4deaaa68efba7f2eeeb9d7fd5c1232f382"
+          },
+          "embedded_ptx_sha256": "d5961407ae3625d2744e32083a292a4deaaa68efba7f2eeeb9d7fd5c1232f382",
+          "entries": [
+            "qualify_add",
+            "qualify_atomic",
+            "qualify_round",
+            "qualify_clear",
+            "qualify_pool",
+            "qualify_fault",
+            "qualify_oob"
+          ],
+          "sha256": "d5961407ae3625d2744e32083a292a4deaaa68efba7f2eeeb9d7fd5c1232f382",
+          "tier": "sm75",
+          "path": "tests/cuda_qualify/device/qualify.sm75.ptx"
+        },
+        {
+          "area": "controls",
+          "artifact": {
+            "kind": "PtxJit",
+            "sha256": "003020b6ea918342cf52263a1ca9c066b04bb8fdc197ec01b0eeac8fffa00c26"
+          },
+          "embedded_ptx_sha256": "003020b6ea918342cf52263a1ca9c066b04bb8fdc197ec01b0eeac8fffa00c26",
+          "entries": [
+            "qualify_poison",
+            "qualify_race",
+            "qualify_perturb"
+          ],
+          "sha256": "003020b6ea918342cf52263a1ca9c066b04bb8fdc197ec01b0eeac8fffa00c26",
+          "tier": "sm75",
+          "path": "tests/cuda_qualify/device/controls.sm75.ptx"
+        },
+        {
+          "area": "fbank",
+          "artifact": {
+            "kind": "PtxJit",
+            "sha256": "65beebc2586613a2f6fbb56f53c13086a4dc2b29258781763e20a9aa109ecde2"
+          },
+          "embedded_ptx_sha256": "65beebc2586613a2f6fbb56f53c13086a4dc2b29258781763e20a9aa109ecde2",
+          "entries": [
+            "fbank_frame_window",
+            "fbank_log_cmn",
+            "fbank_mel_sparse",
+            "fbank_power"
+          ],
+          "sha256": "65beebc2586613a2f6fbb56f53c13086a4dc2b29258781763e20a9aa109ecde2",
+          "tier": "sm75",
+          "path": "src/inference/cuda/ptx/fbank.sm75.ptx"
+        },
+        {
+          "area": "embedding",
+          "artifact": {
+            "kind": "PtxJit",
+            "sha256": "3a4cb4f2cb28db4d1acfcab13576d4066c53da767e84d86cb952b099fe2034d4"
+          },
+          "embedded_ptx_sha256": "3a4cb4f2cb28db4d1acfcab13576d4066c53da767e84d86cb952b099fe2034d4",
+          "entries": [
+            "embedding_bias",
+            "embedding_broadcast_rows",
+            "embedding_fbank_transpose",
+            "embedding_mask_pool"
+          ],
+          "sha256": "3a4cb4f2cb28db4d1acfcab13576d4066c53da767e84d86cb952b099fe2034d4",
+          "tier": "sm75",
+          "path": "src/inference/cuda/ptx/embedding.sm75.ptx"
+        }
+      ],
+      "cpu_lock_evidence": [
+        {
+          "group": "library",
+          "mode": "fp32",
+          "gpu_sections": 71,
+          "owner": "child",
+          "path": "/workspace/gpu-bench.lock",
+          "f64_sections": 70,
+          "bound_draw_sections": 0,
+          "all_cpu_work_unlocked": true,
+          "draw_seeds": [],
+          "draw_lengths": []
+        },
+        {
+          "group": "library",
+          "mode": "tf32",
+          "gpu_sections": 1863,
+          "owner": "child",
+          "path": "/workspace/gpu-bench.lock",
+          "f64_sections": 70,
+          "bound_draw_sections": 1792,
+          "all_cpu_work_unlocked": true,
+          "draw_seeds": [
+            11,
+            23,
+            37,
+            41,
+            53,
+            67,
+            79,
+            97
+          ],
+          "draw_lengths": [
+            1277440,
+            2554880,
+            8942080,
+            17884160,
+            40878080,
+            42155520,
+            81756160,
+            84311040,
+            163512320
+          ]
+        },
+        {
+          "group": "candidate",
+          "mode": "fp32",
+          "gpu_sections": 71,
+          "owner": "child",
+          "path": "/workspace/gpu-bench.lock",
+          "f64_sections": 70,
+          "bound_draw_sections": 0,
+          "all_cpu_work_unlocked": true,
+          "draw_seeds": [],
+          "draw_lengths": []
+        },
+        {
+          "group": "candidate",
+          "mode": "tf32",
+          "gpu_sections": 71,
+          "owner": "child",
+          "path": "/workspace/gpu-bench.lock",
+          "f64_sections": 70,
+          "bound_draw_sections": 0,
+          "all_cpu_work_unlocked": true,
+          "draw_seeds": [],
+          "draw_lengths": []
+        }
+      ],
+      "verification_receipt_sha256": "fb4df695469471f067724be74767dd39fe97185f12cf0cbbab9ad1a24641a58e",
+      "proof_sha256": "ad7a41f8622f064601adc3ac3fba3486ce3b4325e6fdf7cc48794eea0ac6c427",
+      "archive_sha256": "0b89cb0ca988ffe8fa9a7d68f5806a2768ece6dc11acdd1e32022badd6b7db4f",
+      "files_index_sha256": "f16251ba90539f21be86842846a7b82bec61222e1bc90e1822613908f572bc9b",
+      "fetch_commands_sha256": "b1ca01b9ec33a34ddf9f94ac98794a80cc2aee009c1835d62f7790faaeeea63f",
+      "source_snapshot_sha256": "cf634eda7f4cdb680eb6accf709000b31fd4bdb4f7079efab6c248dbfa375ea8"
+    }
+  ],
+  "mac_task": "01a11403-ecbb-70fb-b0e5-d5608e01286a",
+  "mac_outcomes_sha256": "cca22a62e75bdb477bf119231991da35b4833bacb5fb651ea7370ad062463e3e",
+  "mac_commands": [
+    {
+      "argv": [
+        "just",
+        "fmt"
+      ],
+      "exit": 0,
+      "start_central": "2026-10-06T20:39:23.994214-05:00",
+      "end_central": "2026-10-06T20:39:24.586875-05:00",
+      "log": "_scratch/no-cudnn/phase2/2c1/mac-grok-fixes/00.log"
+    },
+    {
+      "argv": [
+        "just",
+        "clippy"
+      ],
+      "exit": 0,
+      "start_central": "2026-10-06T20:39:24.587187-05:00",
+      "end_central": "2026-10-06T20:39:34.894523-05:00",
+      "log": "_scratch/no-cudnn/phase2/2c1/mac-grok-fixes/01.log"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "--workspace"
+      ],
+      "exit": 0,
+      "start_central": "2026-10-06T20:39:34.894951-05:00",
+      "end_central": "2026-10-06T20:40:01.707444-05:00",
+      "log": "_scratch/no-cudnn/phase2/2c1/mac-grok-fixes/02.log"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "speakrs",
+        "--lib",
+        "--no-default-features",
+        "--features",
+        "cuda",
+        "inference::cuda"
+      ],
+      "exit": 0,
+      "start_central": "2026-10-06T20:40:01.708286-05:00",
+      "end_central": "2026-10-06T20:40:18.266441-05:00",
+      "log": "_scratch/no-cudnn/phase2/2c1/mac-grok-fixes/03.log"
+    },
+    {
+      "argv": [
+        "uv",
+        "run",
+        "--group",
+        "dev",
+        "python",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests/cuda_qualify",
+        "-p",
+        "test_*.py"
+      ],
+      "exit": 0,
+      "start_central": "2026-10-06T20:40:18.267903-05:00",
+      "end_central": "2026-10-06T20:40:19.791941-05:00",
+      "log": "_scratch/no-cudnn/phase2/2c1/mac-grok-fixes/04.log"
+    },
+    {
+      "argv": [
+        "uv",
+        "run",
+        "--group",
+        "dev",
+        "ty",
+        "check",
+        "--python",
+        ".venv",
+        "scripts/cuda/qualify",
+        "tests/cuda_qualify"
+      ],
+      "exit": 0,
+      "start_central": "2026-10-06T20:40:19.792327-05:00",
+      "end_central": "2026-10-06T20:40:19.928648-05:00",
+      "log": "_scratch/no-cudnn/phase2/2c1/mac-grok-fixes/05.log"
+    },
+    {
+      "argv": [
+        "cargo",
+        "xtask",
+        "cuda-kernels",
+        "check"
+      ],
+      "exit": 0,
+      "start_central": "2026-10-06T20:40:19.928991-05:00",
+      "end_central": "2026-10-06T20:40:23.513592-05:00",
+      "log": "_scratch/no-cudnn/phase2/2c1/mac-grok-fixes/06.log"
+    },
+    {
+      "argv": [
+        "uv",
+        "run",
+        "--group",
+        "dev",
+        "python",
+        "scripts/cuda/qualify/qualify.py",
+        "--check-table"
+      ],
+      "exit": 0,
+      "start_central": "2026-10-06T20:40:23.513912-05:00",
+      "end_central": "2026-10-06T20:40:27.307409-05:00",
+      "log": "_scratch/no-cudnn/phase2/2c1/mac-grok-fixes/07.log"
+    },
+    {
+      "argv": [
+        "uv",
+        "run",
+        "--group",
+        "dev",
+        "python",
+        "scripts/cuda/qualify/qualify.py",
+        "--check-table",
+        "--records",
+        "/Users/praveen/.local/share/speakrs-cuda-qualify"
+      ],
+      "exit": 0,
+      "start_central": "2026-10-06T20:40:27.307803-05:00",
+      "end_central": "2026-10-06T20:40:28.320333-05:00",
+      "log": "_scratch/no-cudnn/phase2/2c1/mac-grok-fixes/08.log"
+    },
+    {
+      "argv": [
+        "uv",
+        "run",
+        "--group",
+        "dev",
+        "python",
+        "scripts/cuda/qualify/lock.py",
+        "--check",
+        "--expected",
+        "a2f0556352df307462525fa341837fe7a0ab89bd1f02801bee7ae18e35add827"
+      ],
+      "exit": 0,
+      "start_central": "2026-10-06T20:40:28.320756-05:00",
+      "end_central": "2026-10-06T20:40:28.403120-05:00",
+      "log": "_scratch/no-cudnn/phase2/2c1/mac-grok-fixes/09.log"
+    },
+    {
+      "argv": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "exit": 0,
+      "start_central": "2026-10-06T20:40:28.403576-05:00",
+      "end_central": "2026-10-06T20:40:28.416836-05:00",
+      "log": "_scratch/no-cudnn/phase2/2c1/mac-grok-fixes/10.log"
+    }
+  ],
+  "mac_log_sha256": {
+    "00.log": "f3fbdf46778d18f6747bbfd77017085dbc5ffd7567fa102543b4be0faa064937",
+    "01.log": "ffa8abc2435fdc56eb0e7586c66445e8b9c622249f36c89e50b22f0e7dcdcf15",
+    "02.log": "a797985c2e235d8ac621ab37eb5988236fba94873a308ba3c9ae78370effb1d3",
+    "03.log": "60fcf297b28450b194639cf66404d46f8ed223d3ed923c9b530eeb452666bee0",
+    "04.log": "3a00d9d5ec3a387c8a903d53b9430d1ef7fb4f0707411814a5d4aee3a74ce714",
+    "05.log": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+    "06.log": "13156e9eeb6e6e198271e33a0ce76b8c536ca8655e5c60a30ea290180aa375d5",
+    "07.log": "a25c627590322770ab30d7517176875fefa86bff53589a10a48ec8c492b432bb",
+    "08.log": "bb07e809ccd256f746a44bc6820103d1d83ba5387ed20ab056f9d81e9690b882",
+    "09.log": "629a1b1606f0d5c22a2c51db82706ebec0f86026fc23393438dc843ff2320060",
+    "10.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "python_tests_passed": 148,
+  "cuda_host_tests_passed": 70,
+  "cuda_host_tests_ignored": 14,
+  "review": {
+    "task": "01a11403-eccd-7680-a84a-2eb943bbb50b",
+    "report_sha256": "12691e48e2b56e5d8606d7dbc6a47f377fa002ff0ccb6fbe5f1dcfc887f30a5d",
+    "findings": [
+      "Dollar register names omitted",
+      "Wide arithmetic and vector result widths wrong",
+      "Subword narrowing omitted"
+    ],
+    "resolution_commit": "e6c1130",
+    "failing_fixture": "xtask/tests/fixtures/ptx/shared-truncation-review.ptx",
+    "exact_new_sites": 12,
+    "lint_tests_passed": 6,
+    "xtask_tests_passed": 155,
+    "safe_fixture_passed": true,
+    "all_shipped_ptx_passed": true
+  },
+  "finding_resolutions": [
+    {
+      "finding": "Always-on unqualified cubins",
+      "owner": "ProductionArtifactOwner::AlwaysOnPtxJit",
+      "host_test": "always_on_owners_request_embedded_ptx_jit_on_both_devices",
+      "functional_test": "default_production_loads_record_pinned_jit",
+      "qualification_only_exact_request": true,
+      "cc89_gpu_not_needed": "Owner policy is device independent; host tests cover both exact capability values"
+    },
+    {
+      "finding": "PTX taint false negatives",
+      "fixture": "xtask/tests/fixtures/ptx/shared-truncation-paths.ptx",
+      "review_fixture": "xtask/tests/fixtures/ptx/shared-truncation-review.ptx",
+      "test": "dollar_wide_vector_and_subword_paths_are_rejected",
+      "original_lstm_sites": 8,
+      "all_committed_ptx_passed": true
+    },
+    {
+      "finding": "Candidate cubins and manifests outside record identity",
+      "tests": [
+        "test_jit_record_binds_every_candidate_cubin_and_manifest",
+        "test_cubin_table_pin_is_checked_against_shipped_bytes"
+      ],
+      "modern_complete_candidate_identity": true,
+      "both_table_modes_check_shipped_cubin_pin": true
+    },
+    {
+      "finding": "TF32 draw sections not case bound",
+      "owner": "DrawCase",
+      "test": "test_numeric_truth_and_band_rows_require_unlocked_cpu_evidence",
+      "binding": [
+        "case",
+        "layer",
+        "seed",
+        "length"
+      ],
+      "live_controls": [
+        "sincnet",
+        "resnet"
+      ]
+    },
+    {
+      "finding": "Module load inside timed interval",
+      "owner": "TimedInterval and prepare_process_modules",
+      "test": "timed_module_loading_is_refused_before_driver_work",
+      "live_controls": [
+        "sincnet",
+        "resnet"
+      ],
+      "gates_bounds_samples_seeds_replays_changed": false
+    }
+  ],
+  "gate_decision_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "collection_diff_sha256": "a2506a7dbe2f949abdd2d386ae649969f4e3d42d7a81cfef37eb58c094737b17",
+  "collection_diff_archive_sha256": "94bbca2974d14e011e9db25c96bab7d5e6142f6729ddbabf082c0b5623d01669",
+  "setup_failure": {
+    "setup_error": true,
+    "control_verdict_exists": false,
+    "gpu_work_started": false,
+    "file_hashes_verified": 4,
+    "source_commit": "4fc0a5fac4297599151b1d1c8bc1df7859161151",
+    "source_lock": "1b3359c9178886027ecd4adf3dc0e24e803d06086f6c7104891b7b274811abf9",
+    "cause": "one extra directory level refused by unchanged qualification path guard",
+    "retained": {
+      "_scratch/no-cudnn/phase2/2c1/audit-sincnet-Library-001/archive.tar.gz": "df615c5cad5a8ff7bc3ac78ac1cbae3dd0ebb28aa960e84b0db0534c240c0399",
+      "_scratch/no-cudnn/phase2/2c1/audit-sincnet-Library-001/proof.json": "19c79c9e987331837e293f92df98600f1d664685b576c0060f4988e32cce4439",
+      "_scratch/no-cudnn/phase2/2c1/audit-sincnet-Library-001/files.json": "785ee0ad76a65b21a2a4ff9e09cdb28123367b568c66ec81ff5fce3d46c99ad2",
+      "_scratch/no-cudnn/phase2/2c1/audit-sincnet-Library-001/launcher.log": "b91eff66b281189f2629c1ae02caf48e05a298770d53a39c0f2ec7f4afcbd439",
+      "_scratch/no-cudnn/phase2/2c1/audit-controls-submission.json": "5c2fcf5385e41d89d2edc5e8d202cba5bd58a60ec851f5017a52a08eba2d10ed",
+      "_scratch/no-cudnn/phase2/2c1/gpu-audit-control.py": "b84136d63276b7ac2b7ff5afcc969ef704060ee16c977a1ceaad6a5ec30058c6",
+      "_scratch/no-cudnn/phase2/2c1/audit-sincnet-control-snapshot.json": "ee8db65e8cd8ce343119416466b9e455f0714fdccc74d247adb9deaf70dfbfc6"
+    }
+  },
+  "setup_failure_tasks": {
+    "gpu": "01a1140f-cd28-749b-bde0-693e72f7def9",
+    "fetch": "01a1140f-cd3b-762d-9363-2c6f68b7de36",
+    "resnet_not_started": [
+      "01a1140f-cd5d-776d-ac57-a1c34155b0c1",
+      "01a1140f-cd6d-7107-8b2d-52e0f0d435f3"
+    ]
+  },
+  "proof_tool_pins": {
+    "gpu-audit-control-retry.py": "ab02cba87c055230830892ab83f3c1bd42c3754db98832120dfc29486be9c6dc",
+    "verify-audit-control-retry.py": "2d07bb4c7abe63f984954b4e3eb3f0d9e3744834b4384513281169a9c7748852",
+    "fetch-audit-control-retry.py": "d63433c369a708183ff46394187fb8769dc8119344409fb125c2b67c34fc6d55",
+    "source-audit-controls-retry.tar.gz": "823c4983d44ec5a18467cf609b41d84ca3f7d61803f5bb87fc61ad7dfab107c1",
+    "audit-controls-retry-upload-commands.json": "fdfa980165eb9342982e34f754075a43fa070102b18a4a4a1b250773f01c5b17",
+    "audit-controls-retry-submission.json": "0124af60113f87b45dd24e0d3518b95cf1783101694c6cbe7032b79ae3468df9"
+  },
+  "carry_forward_rule": "Earlier controls and mutants keep actual old compiled locks; these new controls cover stricter draw evidence and module preparation. No new production acceptance. Full 39 standard mutants required at the final phase 2c seal after phase 2c-2",
+  "lstm_control_not_repeated_reason": "Draw generation and integer goldens are unchanged; concrete LSTM length and wrong-case/seed/layer/length negatives cover the stricter binding; fresh review found no extra live-path gap. New controls exercise SincNet and ResNet changed module preparation and live band paths",
+  "always_on_cubin_adoption": "Phase 5: end-to-end A/B startup, RTFx and bit-identical outputs"
+}

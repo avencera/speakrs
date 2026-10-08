@@ -1,5 +1,6 @@
 """Gate regression checks. These do not substitute for GPU mutation proof."""
 
+import copy
 import importlib
 import json
 import math
@@ -15,8 +16,10 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts/cuda/qualify"))
 trace = importlib.import_module("parse_trace")
 gates = importlib.import_module("gates")
+qualify = importlib.import_module("qualify")
 snapshot = importlib.import_module("lock")
 scan = importlib.import_module("scan")
+verdict = importlib.import_module("verdict")
 
 NONCE = "0123456789abcdef0123456789abcdef"
 
@@ -102,15 +105,194 @@ class Gates(unittest.TestCase):
         self.assertEqual(gates.spread_bound("fp32/first/b1/stage"), 0.003)
         self.assertEqual(gates.spread_bound("fp32/first/b1/lstm.stack"), 0.010)
 
-    def test_stage_guard_allows_noise_but_not_regression(self):
-        within = [("Library", 1.0), ("c", 1.002), ("Library", 1.001), ("c", 0.997)]
-        self.assertGreater(gates.stage_speed(self.runs(within), "c", 0.003)["ratio"], 0)
-        slower = [("Library", 1.0), ("c", 1.004), ("Library", 1.0), ("c", 1.0)]
-        with self.assertRaisesRegex(gates.Rejected, "stage candidate slower"):
-            gates.stage_speed(self.runs(slower), "c", 0.003)
-        offset = [("Library", 1.0), ("c", 1.002), ("Library", 1.0), ("c", 1.0)]
-        with self.assertRaisesRegex(gates.Rejected, "slower on average"):
-            gates.stage_speed(self.runs(offset), "c", 0.003)
+    def paired_row(self, candidate=0.999, saving=0.003):
+        return {
+            "order": "ABBA",
+            "warmup": 5,
+            "stage_abba_ms": [[1.0, candidate, candidate, 1.0] for _ in range(256)],
+            "operator_abba_ms": [
+                [0.01, 0.01 - saving, 0.01 - saving, 0.01] for _ in range(256)
+            ],
+        }
+
+    def test_stage_paired_guard_detects_regression_and_needs_pairs(self):
+        row = self.paired_row()
+        result = gates.stage_speed(row, False)
+        self.assertGreater(result["one_sided95_lower"], 1.0)
+        self.assertEqual(result["acceptance_path"], "primary")
+        with self.assertRaisesRegex(gates.Rejected, "stage regression"):
+            gates.stage_speed(self.paired_row(1.004), True)
+        row["stage_abba_ms"].pop()
+        with self.assertRaisesRegex(gates.Rejected, "insufficient"):
+            gates.stage_speed(row, True)
+
+    def test_tiny_operator_requires_resolving_its_saving_and_operator_gate(self):
+        row = self.paired_row(1.0, 0.003)
+        for i, block in enumerate(row["stage_abba_ms"]):
+            block[1] = block[2] = 0.999 + (0.004 if (i // 32) % 2 else -0.004)
+        result = gates.stage_speed(row, True)
+        self.assertEqual(result["acceptance_path"], "margin")
+        self.assertLess(result["one_sided95_lower"], 1)
+        self.assertGreaterEqual(
+            result["one_sided95_lower"], result["non_inferiority_ratio_threshold"]
+        )
+        with self.assertRaises(gates.Blocked):
+            gates.stage_speed(row, False)
+        row["operator_abba_ms"] = [[0.01, 0.00999, 0.00999, 0.01] for _ in range(256)]
+        with self.assertRaisesRegex(gates.StageRejected, "non-inferiority margin"):
+            gates.stage_speed(row, True)
+
+    def test_grok_asymmetric_tail_does_not_fit_the_time_margin(self):
+        # one 16-replay group at 2.5x Library time, the rest at 9ms: exact mean 10ms
+        row = self.paired_row()
+        row["stage_abba_ms"] = [[10, 25, 25, 10]] * 16 + [[10, 9, 9, 10]] * 240
+        row["operator_abba_ms"] = [[2, 0.5, 0.5, 2]] * 256
+        with self.assertRaisesRegex(
+            gates.StageRejected, "non-inferiority margin"
+        ) as caught:
+            gates.stage_speed(row, True)
+        evidence = caught.exception.evidence
+        self.assertEqual(evidence["ratio"], 1)
+        self.assertAlmostEqual(evidence["operator_saving_fraction"], 0.15)
+        self.assertAlmostEqual(evidence["ci95_diagnostic"][0], 5 / 6)
+        self.assertAlmostEqual(evidence["ci95_diagnostic"][1], 10 / 9)
+        self.assertLess(evidence["one_sided95_lower"], 1 / 1.15)
+        self.assertEqual(evidence["acceptance_path"], "margin")
+
+    def test_bootstrap_does_not_split_measured_operator_strata(self):
+        row = self.paired_row(1)
+        row["operator_layers"] = ["one", "two", "three", "four"]
+        row["operator_layer_by_block"] = [
+            layer for layer in row["operator_layers"] for _ in range(64)
+        ]
+        result = gates.stage_speed(row, True)
+        self.assertEqual(result["bootstrap_design"], "whole strata")
+        self.assertEqual(result["bootstrap_block_abba"], 64)
+        self.assertEqual(result["bootstrap_groups"], 4)
+
+    def test_recorded_replay_fixture_with_one_scaled_group_fails_margin(self):
+        # this fixture scales recorded data only; it is not a measured GPU mutant
+        fixture = json.loads(
+            (Path(__file__).parent / "stage_margin_fixture.json").read_text()
+        )
+        row = fixture["row"]
+        start = fixture["group_start"]
+        for block in row["stage_abba_ms"][start : start + fixture["group_blocks"]]:
+            block[1] *= fixture["candidate_group_scale"]
+            block[2] *= fixture["candidate_group_scale"]
+        with self.assertRaisesRegex(
+            gates.StageRejected, "non-inferiority margin"
+        ) as caught:
+            gates.stage_speed(row, True)
+        evidence = caught.exception.evidence
+        self.assertGreaterEqual(evidence["ratio"], 1)
+        self.assertGreater(evidence["operator_saving_fraction"], 0)
+        self.assertLess(
+            evidence["one_sided95_lower"], evidence["non_inferiority_ratio_threshold"]
+        )
+        self.assertEqual(evidence["bootstrap_block_abba"], fixture["group_blocks"])
+        self.assertEqual(evidence["acceptance_path"], "margin")
+
+    def test_stratified_saving_is_the_sum_not_the_mean_and_needs_each_layer(self):
+        row = self.paired_row(1.0)
+        row["operator_layers"] = ["one", "two"]
+        row["operator_layer_by_block"] = ["one"] * 128 + ["two"] * 128
+        row["operator_abba_ms"] = [[0.02, 0.01, 0.01, 0.02]] * 128 + [
+            [0.02, 0.019, 0.019, 0.02]
+        ] * 128
+        result = gates.stage_speed(row, True)
+        self.assertAlmostEqual(result["operator_saving_ms"], 0.011)
+        self.assertEqual(set(result["operator_saving_by_layer_ms"]), {"one", "two"})
+        row["operator_layer_by_block"][0] = "two"
+        with self.assertRaisesRegex(gates.Rejected, "operator strata"):
+            gates.stage_speed(row, True)
+
+    def test_tf32_truth_rejects_each_error_and_missing_draws(self):
+        library = {"minimum_cosine": 0.9999, "relative_l2": 0.001, "max_abs": 0.01}
+        gates.tf32_truth(library, library, [library] * 8)
+        better = {"minimum_cosine": 1.0, "relative_l2": 0.0, "max_abs": 0.0}
+        gates.tf32_truth(better, library, [library] * 8)
+        for key, value in [
+            ("minimum_cosine", 0.9998),
+            ("relative_l2", 0.0011),
+            ("max_abs", 0.011),
+        ]:
+            with (
+                self.subTest(key=key),
+                self.assertRaisesRegex(gates.Rejected, "less accurate"),
+            ):
+                gates.tf32_truth({**library, key: value}, library, [library] * 8)
+        with self.assertRaisesRegex(gates.Rejected, "8 independent"):
+            gates.tf32_truth(library, library, [library] * 7)
+
+    def test_tf32_candidate_equal_to_library_passes_when_draws_are_more_accurate(self):
+        library = {"minimum_cosine": 0.9998, "relative_l2": 0.002, "max_abs": 0.02}
+        draw = {"minimum_cosine": 0.9999, "relative_l2": 0.001, "max_abs": 0.01}
+        evidence = gates.tf32_truth(library, library, [draw] * 8)
+        for key in library:
+            component = evidence["bound_components"][key]
+            self.assertEqual(component["candidate"], component["unperturbed_library"])
+            self.assertEqual(component["maximum"], component["unperturbed_library"])
+            self.assertEqual(len(component["draws"]), 8)
+            self.assertLess(component["upper95_diagnostic"], component["maximum"])
+
+    def test_tf32_slightly_worse_than_maximum_draw_fails_and_retains_components(self):
+        library = {"minimum_cosine": 0.9999, "relative_l2": 0.001, "max_abs": 0.01}
+        draw = {**library, "relative_l2": 0.002}
+        candidate = {**draw, "relative_l2": 0.00200000001}
+        with self.assertRaises(gates.TruthRejected) as raised:
+            gates.tf32_truth(candidate, library, [library] * 7 + [draw])
+        evidence = raised.exception.evidence
+        self.assertEqual(evidence["error_limits"]["relative_l2"], 0.002)
+        self.assertEqual(
+            evidence["bound_components"]["relative_l2"]["draws"], [0.001] * 7 + [0.002]
+        )
+        result = {"checks": []}
+        qualify.check(
+            result,
+            "stage_truth:case",
+            lambda: gates.tf32_truth(candidate, library, [library] * 7 + [draw]),
+        )
+        self.assertFalse(result["checks"][0]["passed"])
+        self.assertEqual(result["checks"][0]["evidence"], evidence)
+
+    def test_stage_max_abs_only_failure_rejects_all_production_tuples(self):
+        library = {"minimum_cosine": 0.9999, "relative_l2": 0.001, "max_abs": 0.01}
+        draw = {**library, "max_abs": 0.02}
+        candidate = {**library, "max_abs": math.nextafter(0.02, math.inf)}
+        child: dict = {
+            "checks": [{"check": "all_other_checks", "passed": True}],
+            "coverage_declared": {"triples": [["boundary", 1, "tf32"]]},
+            "accepted_tuples": [["boundary", 1, "tf32"]],
+        }
+        qualify.check(
+            child,
+            "stage_truth:tf32/first/b1/stage",
+            lambda: gates.tf32_truth(candidate, library, [library] * 7 + [draw]),
+        )
+        failed: dict = child["checks"][-1]
+        self.assertFalse(failed["passed"])
+        evidence = failed["evidence"]
+        assert isinstance(evidence, dict)
+        limits: dict = evidence["error_limits"]
+        self.assertEqual(limits["max_abs"], 0.02)
+        qualify.finish_tier(child, [])
+        self.assertEqual(child["status"], "rejected")
+        self.assertEqual(
+            child["verdict_evaluation"]["hard_failures"],
+            ["stage_truth:tf32/first/b1/stage"],
+        )
+        # a forged passed label cannot turn the retained hard failure into coverage
+        record = {
+            "schema": 4,
+            "implementation": "Oxide",
+            "status": "passed",
+            "checks": [{"check": "static_scan", "passed": True}],
+            "tiers": {"sm75": {**child, "status": "passed"}},
+        }
+        decision = verdict.evaluate_record(record, "sm75")
+        self.assertFalse(decision["accepted"])
+        self.assertEqual(decision["accepted_tuples"], [])
 
     def test_speed_requires_fresh_processes_and_samples(self):
         runs = self.runs([("Library", 1), ("c", 0.99), ("Library", 1), ("c", 0.99)])
@@ -138,14 +320,6 @@ class Gates(unittest.TestCase):
     def test_tf32_band_is_the_largest_perturbed_drop(self):
         band = gates.tf32_band(self.band_rows([1e-7, 3e-7]), True)
         self.assertAlmostEqual(band["cosine"], 3e-7)
-        library = {"minimum_cosine": 0.9999, "mean_cosine": 0.99995}
-        gates.tf32_stage_case({"minimum_cosine": 0.9999 - 2e-7}, library, band, True)
-        with self.assertRaisesRegex(gates.Rejected, "exceeds band"):
-            gates.tf32_stage_case(
-                {"minimum_cosine": 0.9999 - 4e-7}, library, band, True
-            )
-        with self.assertRaisesRegex(gates.Rejected, "mean cosine"):
-            gates.tf32_stage_aggregate([{"mean_cosine": 0.9999}], [library], band, True)
         with self.assertRaisesRegex(gates.Rejected, "8 seeds"):
             rows = self.band_rows([1e-7])
             rows[0]["band"].pop()
@@ -163,23 +337,6 @@ class Gates(unittest.TestCase):
         band = gates.tf32_band(rows, False)
         self.assertEqual(band["flips"], 1)
         self.assertEqual(band["total_flips"], 1)
-        gates.tf32_stage_case(
-            {"relative_l2": 0.0105, "max_abs": 0.11, "argmax_flips": 3},
-            library,
-            band,
-            False,
-        )
-        with self.assertRaises(gates.Rejected):
-            gates.tf32_stage_case(
-                {"relative_l2": 0.0105, "max_abs": 0.11, "argmax_flips": 4},
-                library,
-                band,
-                False,
-            )
-        with self.assertRaisesRegex(gates.Rejected, "mean logits error"):
-            gates.tf32_stage_aggregate(
-                [{"relative_l2": 0.0105, "argmax_flips": 2}], [library], band, False
-            )
 
     def test_completed_sanitizer_required(self):
         gates.sanitizer("memcheck", 0, "========= ERROR SUMMARY: 0 errors")
@@ -312,6 +469,40 @@ class Scan(unittest.TestCase):
         self.assertEqual(result["findings"], [])
         self.assertIn("src/inference/cuda/candidate/lstm.rs", result["host_files"])
 
+    def test_candidate_plans_cannot_reload_modules(self):
+        relative = "src/inference/cuda/candidate/fixture.rs"
+        good = "fn plan(runtime: &CudaRuntime, kernels: &LoadedKernels) { kernels.function(ENTRY)?; }"
+        self.assertEqual(
+            scan.scan_text(relative, good, scan.HOST_RULES, resolve_calls=True), []
+        )
+        for load in (
+            "runtime.load_kernels(KernelModule::Lstm)",
+            "runtime.load_module(request)",
+            "load_artifact(request, bytes, loader)",
+            "let loader = runtime.load_kernels; loader(KernelModule::Lstm)",
+            "use driver::load_ptx as restore; restore(bytes)",
+            "cuModuleLoadData(&mut module, bytes)",
+        ):
+            code = good.replace("kernels.function(ENTRY)?", load)
+            with self.subTest(load=load):
+                findings = scan.scan_text(
+                    relative, code, scan.HOST_RULES, resolve_calls=True
+                )
+                self.assertTrue(
+                    any(
+                        "preloaded LoadedKernels" in finding.reason
+                        for finding in findings
+                    )
+                )
+        for name in ("conv", "lstm", "sinc"):
+            path = f"src/inference/cuda/candidate/{name}.rs"
+            self.assertEqual(
+                scan.scan_text(
+                    path, (ROOT / path).read_text(), scan.HOST_RULES, resolve_calls=True
+                ),
+                [],
+            )
+
     def test_each_rule_refuses_its_construct(self):
         refused = {
             'let p = std::env::var("X");': "environment",
@@ -350,7 +541,10 @@ class Scan(unittest.TestCase):
         allowed = [
             "use super::{Coverage, LstmPhases};\nuse super::layout::pack;",
             "use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, KernelModule};",
-            "use crate::inference::cuda::dnn::Conv2d;\nuse crate::inference::cuda::error::check_len;",
+            "use crate::inference::cuda::ComputeCapability as CC; let cc = CC::new(12, 0);",
+            "use crate::inference::cuda::device::DeviceAttributes as Device; fn sm(d: &Device) { d.multiprocessors(); }",
+            "use crate::inference::cuda::candidate::{ConfigPin, ConvPin, ConvKernel, FbankSpec}; let pin = ConfigPin::Conv(ConvPin::Kernel(ConvKernel::C64));",
+            "use crate::inference::cuda::geometry::Conv2d;\nuse crate::inference::cuda::error::check_len;",
             'let e = crate::inference::cuda::CudaError::Unsupported { context: "x", reason: r };',
             "use cudarc::driver::{CudaStream, LaunchConfig, PushKernelArg};",
             "use cudarc::driver::sys::CUfunction_attribute;",
@@ -364,6 +558,7 @@ class Scan(unittest.TestCase):
                     [],
                 )
         refused = [
+            "use crate::inference::cuda::implementation::TupleProof;",
             "crate::inference::cuda::test_support::phase();",
             "use crate::inference::cuda::SafetensorsFile;\nSafetensorsFile::open(path);",
             "let f = crate::inference::cuda::weights::SafetensorsFile::open(p);",
@@ -529,18 +724,15 @@ class Trace(unittest.TestCase):
             (125, 140, "call", "cudnn.conv"),
         ]
         launches = [
-            (5, "setup_kernel_outside_windows", 9, "kernel", None),
             (25, "resnet_conv", 7, "kernel", None),
             (55, "embedding_bias", 7, "kernel", None),
             (130, "sm80_xmma_fprop_cudnn", 7, "kernel", None),
         ]
         return launches, ranges
 
-    def attribute(
-        self, path, declared=frozenset({LAYER}), library=False, shapes=frozenset()
-    ):
+    def attribute(self, path, declared=frozenset({LAYER}), library=False):
         return trace.attribute(
-            path, (self.LAYER,), NONCE, self.ALLOW, declared, shapes, library
+            path, (self.LAYER,), NONCE, self.ALLOW, declared, library
         )
 
     def run_case(self, change):
@@ -550,6 +742,12 @@ class Trace(unittest.TestCase):
             path = Path(directory) / "trace.sqlite"
             self.build(path, launches, ranges)
             return self.attribute(path)
+
+    def receipt(self, result: dict, index: int) -> dict:
+        value = result["profile_traces"][index]["receipt"]
+        if not isinstance(value, dict):
+            self.fail("each produced trace must have a check receipt")
+        return value
 
     def test_good_candidate_trace_passes(self):
         result = self.run_case(lambda launches, ranges: None)
@@ -632,8 +830,269 @@ class Trace(unittest.TestCase):
         with self.assertRaisesRegex(trace.Rejected, "graph node"):
             self.run_case(change)
 
-    def lstm_trace(self, path, drop_phase=None, overlap=False, projection_phase=True):
-        """A candidate stack with all 16 phases; L0.forward projects through cuBLAS."""
+    def test_every_first_use_api_position_has_the_exact_profile_gate(self):
+        for position in (
+            "plan",
+            "warmup/0",
+            "eager",
+            "capture",
+            "first-replay",
+            "fresh",
+        ):
+            launches, ranges = self.good()
+            ranges.extend(
+                [
+                    (210, 300, "window", f"lifecycle/case/{position}"),
+                    (220, 280, "candidate", self.LAYER),
+                    (230, 240, "call", "cublas.m1.n1.k1"),
+                ]
+            )
+            # capture may record no eager kernel event; the real API scope still belongs to the candidate
+            if position != "capture":
+                launches.append((235, "cublas_single", 7, "kernel", None))
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "trace.sqlite"
+                self.build(path, launches, ranges)
+                with self.assertRaises(trace.Rejected) as rejected:
+                    self.attribute(path)
+                self.assertTrue(
+                    qualify.MUTANT_GATES["FirstUseFallbackCaptured"].matches(
+                        {
+                            "check": "profile",
+                            "reason": str(rejected.exception),
+                        }
+                    ),
+                    position,
+                )
+
+    def test_outside_window_work_is_not_silently_skipped(self):
+        for kernel in ("cublas_single", "unknown_setup_kernel"):
+            with self.subTest(kernel=kernel), self.assertRaises(trace.Rejected):
+                self.run_case(
+                    lambda launches, ranges: launches.append(
+                        (3, kernel, 7, "kernel", None)
+                    )
+                )
+        with self.assertRaisesRegex(
+            trace.Rejected, "outside a checked lifecycle window"
+        ):
+            self.run_case(
+                lambda launches, ranges: (
+                    ranges.append((210, 250, "candidate", self.LAYER)),
+                    launches.append((220, "resnet_conv", 7, "kernel", None)),
+                )
+            )
+
+    def test_side_stream_does_not_hide_unread_captured_first_use_fault(self):
+        with tempfile.TemporaryDirectory() as directory:
+            eager = Path(directory) / "profile-eager.sqlite"
+            short = Path(directory) / "profile.sqlite"
+            launches, ranges = self.good()
+            launches.append((28, "resnet_conv", 8, "kernel", None))
+            self.build(eager, launches, ranges)
+            ranges.extend(
+                [
+                    (210, 300, "window", "lifecycle/case/first-replay"),
+                    (220, 280, "candidate", self.LAYER),
+                    (230, 240, "call", "cublas.m1.n1.k1"),
+                ]
+            )
+            launches.append((235, "cublas_single", 7, "kernel", None))
+            self.build(short, launches, ranges)
+            result: dict = {
+                "profile_traces": [
+                    {
+                        "label": name,
+                        "path": str(path),
+                        "sha256": qualify.sha(path),
+                        "receipt": None,
+                    }
+                    for name, path in (("profile", short), ("profile-eager", eager))
+                ]
+            }
+            result["profile_traces"][0]["retained_for_eager"] = True
+            self.assertNotIn("short_profile", result)
+            with self.assertRaisesRegex(qualify.Rejected, "not checked"):
+                qualify.profile_trace_receipts(result)
+            with self.assertRaisesRegex(qualify.Rejected, "forbidden library kernels"):
+                qualify.check_profile_traces(
+                    result,
+                    (self.LAYER,),
+                    NONCE,
+                    self.ALLOW,
+                    frozenset({self.LAYER}),
+                    False,
+                )
+            self.assertFalse(self.receipt(result, 0)["passed"])
+            self.assertIs(result["short_profile"], result["profile_traces"][0])
+            self.assertTrue(self.receipt(result, 1)["passed"])
+            self.assertEqual(self.attribute(eager)["windows"], 2)
+
+    def test_fresh_input_exposes_a_content_keyed_library_fallback(self):
+        launches, ranges = self.good()
+        ranges.extend(
+            [
+                (210, 300, "window", "lifecycle/secret/fp32/b1/fresh"),
+                (220, 280, "candidate", self.LAYER),
+            ]
+        )
+        pinned = (1.0, 2.0)
+        fresh = (0.5, 3.0)
+        calls = []
+
+        def enqueue(values):
+            if values != pinned:
+                calls.append(values)
+                ranges.append((230, 240, "call", "cublas.content_miss"))
+                launches.append((235, "cublas_single", 7, "kernel", None))
+
+        enqueue(pinned)
+        self.assertEqual(calls, [])
+        enqueue(fresh)
+        self.assertEqual(calls, [fresh])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.sqlite"
+            self.build(path, launches, ranges)
+            with self.assertRaisesRegex(trace.Rejected, "forbidden library kernels"):
+                self.attribute(path)
+
+    def test_invalid_sqlite_has_a_failed_trace_receipt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad.sqlite"
+            path.write_bytes(b"not sqlite")
+            result: dict = {
+                "profile_traces": [
+                    {
+                        "label": "bad",
+                        "path": str(path),
+                        "sha256": qualify.sha(path),
+                        "receipt": None,
+                    }
+                ]
+            }
+            with self.assertRaisesRegex(qualify.Rejected, "invalid SQLite"):
+                qualify.check_profile_traces(
+                    result,
+                    (self.LAYER,),
+                    NONCE,
+                    self.ALLOW,
+                    frozenset({self.LAYER}),
+                    False,
+                )
+            self.assertFalse(self.receipt(result, 0)["passed"])
+
+    def test_fresh_coverage_requires_an_actual_correlated_kernel(self):
+        name = f"lifecycle/secret/fp32/{self.LAYER}/b1/fresh"
+        coverage = qualify.Coverage.product((self.LAYER,), (1,), ("fp32",))
+        self.assertEqual(
+            qualify.fresh_profile_windows("resnet", coverage, False), frozenset({name})
+        )
+        for present, launched in ((False, False), (True, False), (True, True)):
+            launches, ranges = self.good()
+            if present:
+                ranges.extend(
+                    [(210, 300, "window", name), (220, 280, "candidate", self.LAYER)]
+                )
+            if launched:
+                launches.append((235, "resnet_conv", 7, "kernel", None))
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "trace.sqlite"
+                self.build(path, launches, ranges)
+                result: dict = {
+                    "profile_traces": [
+                        {
+                            "label": "profile",
+                            "path": str(path),
+                            "sha256": qualify.sha(path),
+                            "receipt": None,
+                        }
+                    ]
+                }
+
+                def check():
+                    return qualify.check_profile_traces(
+                        result,
+                        (self.LAYER,),
+                        NONCE,
+                        self.ALLOW,
+                        frozenset({self.LAYER}),
+                        False,
+                        fresh_windows=frozenset({name}),
+                    )
+
+                if launched:
+                    self.assertEqual(check()["checked_traces"], ["profile"])
+                else:
+                    with self.assertRaisesRegex(
+                        qualify.Rejected, "missing fresh-input kernel coverage"
+                    ):
+                        check()
+
+    def test_a_receipt_cannot_accept_changed_or_removed_trace_bytes(self):
+        for removed in (False, True):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "trace.sqlite"
+                self.build(path, *self.good())
+                result: dict = {
+                    "profile_traces": [
+                        {
+                            "label": "profile",
+                            "path": str(path),
+                            "sha256": qualify.sha(path),
+                            "receipt": None,
+                        }
+                    ]
+                }
+                self.assertEqual(
+                    qualify.check_profile_traces(
+                        result,
+                        (self.LAYER,),
+                        NONCE,
+                        self.ALLOW,
+                        frozenset({self.LAYER}),
+                        False,
+                    )["checked_traces"],
+                    ["profile"],
+                )
+                if removed:
+                    path.unlink()
+                else:
+                    path.write_bytes(b"changed after validation")
+                with self.assertRaisesRegex(
+                    qualify.Rejected, "file is missing" if removed else "bytes changed"
+                ):
+                    qualify.profile_trace_receipts(result)
+
+    def test_lifecycle_enqueues_do_not_change_eager_multisets(self):
+        launches, ranges = self.good()
+        ranges.extend(
+            [
+                (210, 300, "window", "lifecycle/case/warmup/0"),
+                (220, 280, "candidate", self.LAYER),
+            ]
+        )
+        launches.append((235, "resnet_conv", 7, "kernel", None))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.sqlite"
+            self.build(path, launches, ranges)
+            self.assertEqual(self.attribute(path)["windows"], 3)
+            self.assertEqual(
+                dict(trace.window_kernels(path, NONCE, multiset=True)["case"]),
+                {"resnet_conv": 1},
+            )
+            self.assertNotIn(
+                "lifecycle/case/warmup/0", trace.window_kernels(path, NONCE)
+            )
+
+    def lstm_trace(
+        self,
+        path,
+        drop_phase=None,
+        overlap=False,
+        projection_phase=True,
+        library_projection=False,
+    ):
+        """A custom stack with an optional forbidden cuBLAS projection call."""
         layer = "lstm.stack"
         ranges = [(10, 1000, "window", "case"), (20, 900, "candidate", layer)]
         launches = []
@@ -643,7 +1102,7 @@ class Trace(unittest.TestCase):
             if name != drop_phase:
                 ranges.append((start, end, "phase", name))
             launches.append((start + 2, "resnet_conv", 7, "kernel", None))
-            if name == "input_proj.L0.forward":
+            if name == "input_proj.L0.forward" and library_projection:
                 inner = (start + 3, start + 30) if projection_phase else (905, 940)
                 ranges.append((*inner, "projection", "L0.forward"))
                 ranges.append(
@@ -658,20 +1117,21 @@ class Trace(unittest.TestCase):
         self.build(path, launches, ranges)
         return layer
 
-    def test_lstm_candidate_needs_its_phases_and_helper(self):
-        shapes = frozenset({(589, 512, 60)})
+    def test_lstm_candidate_requires_phases_and_zero_library_projections(self):
         stack = frozenset({"lstm.stack"})
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "good.sqlite"
             layer = self.lstm_trace(path)
-            trace.attribute(path, (layer,), NONCE, self.ALLOW, stack, shapes)
+            trace.attribute(path, (layer,), NONCE, self.ALLOW, stack)
+            path = Path(directory) / "library-projection.sqlite"
+            self.lstm_trace(path, library_projection=True)
             with self.assertRaisesRegex(trace.Rejected, "forbidden library kernels"):
-                trace.attribute(path, (layer,), NONCE, self.ALLOW, stack, frozenset())
+                trace.attribute(path, (layer,), NONCE, self.ALLOW, stack)
             cases = [
                 ({"drop_phase": "recurrence.L3.reverse"}, "lacks locked phase scopes"),
                 ({"overlap": True}, "overlapping LSTM phase scopes"),
                 (
-                    {"projection_phase": False},
+                    {"projection_phase": False, "library_projection": True},
                     "projection outside its input_proj phase",
                 ),
             ]
@@ -680,9 +1140,7 @@ class Trace(unittest.TestCase):
                     path = Path(directory) / f"{reason}.sqlite"
                     self.lstm_trace(path, **options)
                     with self.assertRaisesRegex(trace.Rejected, reason):
-                        trace.attribute(
-                            path, (layer,), NONCE, self.ALLOW, stack, shapes
-                        )
+                        trace.attribute(path, (layer,), NONCE, self.ALLOW, stack)
 
     def test_library_control_has_no_candidate_scopes(self):
         launches, ranges = self.good()
@@ -707,6 +1165,91 @@ class Trace(unittest.TestCase):
                 trace.Rejected, "declared boundary has no candidate"
             ):
                 self.attribute(path)
+
+
+class Tf32NegativeEvidence(unittest.TestCase):
+    def fixture(self):
+        truth = {"minimum_cosine": 0.9999, "relative_l2": 0.001, "max_abs": 0.01}
+        metrics = {
+            "minimum_cosine": 1.0,
+            "mean_cosine": 1.0,
+            "relative_l2": 0.0,
+            "max_abs": 0.0,
+            "sha256": "a" * 64,
+        }
+        row = {
+            "id": "tf32/first/b1/stage",
+            "first": dict(metrics),
+            "second": dict(metrics),
+            "bitwise_equal": True,
+            "truth": dict(truth),
+            "truth_sha256": "b" * 64,
+        }
+        band = {
+            "id": row["id"] + "/band",
+            "metrics": [dict(metrics) for _ in range(8)],
+            "truth_sha256": row["truth_sha256"],
+            "seeds": list(range(8)),
+            "truth_draws": [dict(truth) for _ in range(8)],
+        }
+        return row, copy.deepcopy(row), band
+
+    def evaluate(self, candidate, control, band, *, same_fp32=False):
+        result = {"target": "resnet", "implementation": "Oxide", "checks": []}
+        candidates, controls = [candidate], [control, band]
+        if same_fp32:
+            candidates.append({**candidate, "id": "fp32/first/b1/stage"})
+            controls.append({**control, "id": "fp32/first/b1/stage"})
+            self.assertEqual(
+                candidates[0]["first"]["sha256"], candidates[1]["first"]["sha256"]
+            )
+        coverage = qualify.Coverage.product(
+            ["resnet.layer1.0.conv1"], [1], ["fp32", "tf32"]
+        )
+        qualify.numeric(result, controls, candidates, coverage)
+        return next(
+            row
+            for row in result["checks"]
+            if row["check"] == "stage_truth:tf32/first/b1/stage"
+        )
+
+    def test_equal_fp32_and_tf32_outputs_do_not_prove_accuracy(self):
+        candidate, control, band = self.fixture()
+        candidate["truth"]["relative_l2"] = 0.002
+        check = self.evaluate(candidate, control, band, same_fp32=True)
+        self.assertFalse(check["passed"])
+        self.assertIn("less accurate", check["reason"])
+        self.assertEqual(
+            check["evidence"]["bound_components"]["relative_l2"]["candidate"], 0.002
+        )
+
+    def test_fixture_accuracy_cannot_replace_same_input_truth(self):
+        candidate, control, band = self.fixture()
+        self.assertEqual(candidate["first"]["minimum_cosine"], 1.0)
+        candidate.pop("truth")
+        check = self.evaluate(candidate, control, band)
+        self.assertFalse(check["passed"])
+        self.assertIn("missing same-input", check["reason"])
+
+    def test_invalid_truth_identity_metrics_and_draws_fail_closed(self):
+        for fault in ("hash", "nan", "negative", "cosine", "seeds", "draws"):
+            candidate, control, band = self.fixture()
+            if fault == "hash":
+                candidate["truth_sha256"] = "c" * 64
+            elif fault == "nan":
+                candidate["truth"]["max_abs"] = math.nan
+            elif fault == "negative":
+                candidate["truth"]["relative_l2"] = -0.1
+            elif fault == "cosine":
+                candidate["truth"]["minimum_cosine"] = 2.0
+            elif fault == "seeds":
+                band["seeds"] = [0] * 8
+            else:
+                band["truth_draws"].pop()
+            with self.subTest(fault=fault):
+                check = self.evaluate(candidate, control, band)
+                self.assertFalse(check["passed"])
+                self.assertTrue(check["reason"])
 
 
 if __name__ == "__main__":

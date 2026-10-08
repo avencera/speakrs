@@ -1,7 +1,7 @@
 """Static scan of candidate code and of the build inputs, before anything is built.
 
 Candidate host code lives in src/inference/cuda/candidate/ and candidate kernels in
-the resnet, lstm and sincnet areas of the kernel crate. Locked dispatch calls the
+the resnet, lstm, sincnet and fbankdft areas of the kernel crate. Locked dispatch calls the
 candidate, so candidate code must not observe or steer the measurement: no
 environment, files, network, processes, threads, clocks or capture state; no state
 that outlives a call; no harness, NVTX or library calls; no foreign code. Comments
@@ -17,7 +17,15 @@ from lock import LockError, inventory
 
 CANDIDATE_HOST = "src/inference/cuda/candidate"
 KERNEL_CRATE = "crates/speakrs-cuda-kernels/src"
-CANDIDATE_AREAS = ("resnet", "lstm", "sincnet")
+CANDIDATE_AREAS = (
+    "resnet",
+    "lstm",
+    "lstmproj",
+    "sincnet",
+    "fbankdft",
+    "segdense",
+    "wideconv",
+)
 # a static item declaration, not the `'static` lifetime
 STATIC_ITEM = r"(?<!')\bstatic\s+(?:mut\s+)?[A-Za-z_][A-Za-z0-9_]*\s*:"
 
@@ -26,6 +34,10 @@ FORBIDDEN_STD = ("env", "fs", "net", "process", "thread", "os", "io", "time")
 STD_ROOTS = ("std", "core", "alloc")
 # each rule is a pattern and the reason it is refused
 HOST_RULES: tuple[tuple[str, str], ...] = (
+    (
+        r"\b(?:load_kernels|load_artifact|load_ptx|load_cubin|load_library|load_function|load_module|cuModuleLoad[A-Za-z_]*|cuLibraryLoad[A-Za-z_]*)\b",
+        "candidate plans must use preloaded LoadedKernels",
+    ),
     (r"\boption_env\s*!", "environment read"),
     (r"\benv\s*!\s*\(\s*\"(?!CARGO_)", "env! outside compile-time Cargo constants"),
     (
@@ -234,13 +246,19 @@ CANDIDATE_MODULE = ("crate", "inference", "cuda", "candidate")
 # locked items a candidate may name outside its own tree; `Name::*` items allow
 # variants and associated items, the others only the name itself
 CRATE_ITEMS = {
+    ("crate", "inference", "cuda", "implementation", "BoundaryId"): True,
+    ("crate", "inference", "cuda", "implementation", "BroadEvidence"): True,
+    ("crate", "inference", "cuda", "implementation", "ArchitectureSpeed"): True,
+    ("crate", "inference", "cuda", "implementation", "SpeedScope"): True,
     ("crate", "inference", "cuda", "CudaError"): True,
     ("crate", "inference", "cuda", "CudaMath"): True,
     ("crate", "inference", "cuda", "KernelModule"): True,
     ("crate", "inference", "cuda", "PtxTier"): True,
+    ("crate", "inference", "cuda", "ComputeCapability"): True,
+    ("crate", "inference", "cuda", "device", "DeviceAttributes"): True,
     ("crate", "inference", "cuda", "CudaRuntime"): False,
     ("crate", "inference", "cuda", "LoadedKernels"): False,
-    ("crate", "inference", "cuda", "dnn", "Conv2d"): True,
+    ("crate", "inference", "cuda", "geometry", "Conv2d"): True,
     ("crate", "inference", "cuda", "error", "check_len"): False,
     ("crate", "inference", "cuda", "error", "element_count"): False,
     ("crate", "inference", "cuda", "error", "to_c_int"): False,

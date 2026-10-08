@@ -12,7 +12,8 @@ use super::{
     set_band, set_label, window,
 };
 use crate::inference::cuda::candidate::{
-    Batches, ConvCandidate, ConvOxide, Coverage, CoverageEntry, Maths, Projection,
+    Batches, ConvCandidate, ConvOxide, Coverage, CoverageEntry, FbankCandidate, FbankOxide, Maths,
+    Projection,
 };
 use crate::inference::cuda::embedding::test_support::{HostInputs, Operator};
 use crate::inference::cuda::weights::uniform;
@@ -25,8 +26,25 @@ use cudarc::driver::sys::{CUevent_flags, CUgraphInstantiate_flags, CUstreamCaptu
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+#[path = "environment.rs"]
+mod environment;
+
+#[path = "cpu.rs"]
+pub(crate) mod cpu;
+
+#[path = "fbank_probe.rs"]
+mod fbank_probe;
+#[path = "new_probe.rs"]
+mod new_probe;
+
+#[path = "lock.rs"]
+pub(crate) mod lock;
+#[path = "paired.rs"]
+mod paired;
 #[path = "reference.rs"]
 pub(crate) mod reference;
+#[path = "truth.rs"]
+mod truth;
 
 const CASES: [(&str, usize); 8] = [
     ("first", 1),
@@ -74,7 +92,12 @@ pub(crate) fn read_batch(
 }
 
 fn reference(target: &str, case: &str) -> Result<SafetensorsFile, CudaError> {
-    let model = if target == "resnet" {
+    if target == "fbankdft" {
+        return SafetensorsFile::open(
+            "/workspace/ref/wespeaker-fbank-b32/test_and_short_b32.safetensors",
+        );
+    }
+    let model = if target == "resnet" || new_probe::embedding(target) {
         "wespeaker-multimask-tail"
     } else {
         "segmentation-3.0"
@@ -145,6 +168,72 @@ fn metrics(actual: &[f32], expected: &[f32], width: usize) -> Value {
     json!({"relative_l2":(numerator/denominator).sqrt(),"max_abs":max_abs,"minimum_cosine":cosine,"mean_cosine":mean_cosine,"argmax_flips":flips,"sha256":sha(actual),"elements":actual.len()})
 }
 
+/// Full-stage diagnostics against unrounded independent f64 values
+fn metrics_f64(actual: &[f32], expected: &[f64], width: usize) -> Value {
+    assert!(!actual.is_empty());
+    assert_eq!(actual.len(), expected.len());
+    assert!(actual.iter().all(|x| x.is_finite()) && expected.iter().all(|x| x.is_finite()));
+    let mut numerator = 0.0f64;
+    let mut denominator = 0.0f64;
+    let mut max_abs = 0.0f64;
+    for (&a, &r) in actual.iter().zip(expected) {
+        let (x, y) = (f64::from(a), r);
+        numerator += (x - y).powi(2);
+        denominator += y.powi(2);
+        max_abs = max_abs.max((x - y).abs());
+    }
+    assert!(denominator > 0.0);
+    let mut cosine = 1.0f64;
+    let mut cosine_sum = 0.0f64;
+    let mut flips = 0;
+    let mut rows = 0;
+    if width > 1 {
+        for (a, r) in actual.chunks_exact(width).zip(expected.chunks_exact(width)) {
+            let dot = a
+                .iter()
+                .zip(r)
+                .map(|(&x, &y)| f64::from(x) * y)
+                .sum::<f64>();
+            let norm = a.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>().sqrt()
+                * r.iter().map(|&x| x.powi(2)).sum::<f64>().sqrt();
+            let row = if norm > 0.0 { dot / norm } else { -1.0 };
+            cosine = cosine.min(row);
+            cosine_sum += row;
+            rows += 1;
+            let argmax = |v: &[f32]| {
+                v.iter()
+                    .enumerate()
+                    .fold(0, |best, (i, x)| if *x > v[best] { i } else { best })
+            };
+            let expected_argmax = r
+                .iter()
+                .enumerate()
+                .fold(0, |best, (i, x)| if *x > r[best] { i } else { best });
+            flips += usize::from(argmax(a) != expected_argmax);
+        }
+    }
+    let mean_cosine = if rows > 0 {
+        cosine_sum / rows as f64
+    } else {
+        1.0
+    };
+    json!({"relative_l2":(numerator/denominator).sqrt(),"max_abs":max_abs,"minimum_cosine":cosine,"mean_cosine":mean_cosine,"argmax_flips":flips,"sha256":sha(actual),"elements":actual.len()})
+}
+
+#[test]
+fn stage_metrics_keep_f64_errors_and_actual_f32_output_hash() {
+    let actual = [1.0f32, 2.0];
+    let delta = 2.0f64.powi(-30);
+    let expected = [1.0 + delta, 2.0];
+    let measured = metrics_f64(&actual, &expected, 2);
+    assert_eq!(measured["max_abs"], delta);
+    assert_eq!(measured["sha256"], sha(&actual));
+    assert_eq!(measured["elements"], 2);
+    assert_eq!(measured["argmax_flips"], 0);
+    let l2 = delta / ((1.0 + delta).powi(2) + 4.0).sqrt();
+    assert_eq!(measured["relative_l2"], l2);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn record(
     rows: &mut Vec<Value>,
@@ -176,6 +265,7 @@ fn capture(
         .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)
         .map_err(CudaError::from)
         .and_then(|()| {
+            let _trace = super::CaptureTrace::start();
             let enqueued = enqueue();
             let graph = stream.end_capture(CUgraphInstantiate_flags(0));
             enqueued?;
@@ -186,6 +276,114 @@ fn capture(
         unsafe { context.enable_event_tracking() };
     }
     Ok(captured?.expect("a qualification operator enqueues at least one node"))
+}
+
+/// Prepared scratch for one real API call, independent of the normal stage enqueue
+struct FirstUseCall {
+    // a private handle keeps the hook from changing the stage handle's math mode
+    blas: cudarc::cublas::CudaBlas,
+    a: cudarc::driver::CudaSlice<f32>,
+    b: cudarc::driver::CudaSlice<f32>,
+    c: cudarc::driver::CudaSlice<f32>,
+}
+
+impl FirstUseCall {
+    fn prepare(runtime: &CudaRuntime, choice: &str) -> Result<Option<Self>, CudaError> {
+        if super::Mutant::parse(choice)
+            .and_then(super::profile_lifecycle::FirstUse::stage)
+            .is_none()
+        {
+            return Ok(None);
+        }
+        runtime.prepare_library(crate::inference::cuda::CudaLibrary::Cublas)?;
+        Ok(Some(Self {
+            blas: cudarc::cublas::CudaBlas::new(std::sync::Arc::clone(runtime.stream()))?,
+            a: runtime.stream().clone_htod(&[2.0])?,
+            b: runtime.stream().clone_htod(&[3.0])?,
+            c: runtime.stream().alloc_zeros(1)?,
+        }))
+    }
+
+    fn enqueue(&mut self) -> Result<(), CudaError> {
+        use cudarc::cublas::{Gemm, GemmConfig, sys::cublasOperation_t};
+        let config = GemmConfig {
+            transa: cublasOperation_t::CUBLAS_OP_N,
+            transb: cublasOperation_t::CUBLAS_OP_N,
+            m: 1,
+            n: 1,
+            k: 1,
+            lda: 1,
+            ldb: 1,
+            ldc: 1,
+            alpha: 1.0,
+            beta: 0.0,
+        };
+        let _call = super::call("cublas.m1.n1.k1");
+        // SAFETY: the three one-element buffers match the fixed GEMM shape and the
+        // prepared handle uses the same stream; the driver synchronizes before drop
+        unsafe { self.blas.gemm(config, &self.a, &self.b, &mut self.c) }?;
+        Ok(())
+    }
+}
+
+/// One complete profile lifecycle without timing bursts or repeated graph replays
+fn profile_case(
+    runtime: &CudaRuntime,
+    key: &str,
+    choice: &str,
+    layer: &str,
+    mut enqueue: impl FnMut() -> Result<(), CudaError>,
+) -> Result<(), CudaError> {
+    use super::profile_lifecycle::{FirstUse, Stage};
+    let mut fallback = FirstUseCall::prepare(runtime, choice)?;
+    let mut hook = FirstUse::new(choice);
+    let eager_only = std::env::var("SPEAKRS_QUALIFY_SHORT_TRACE").is_ok_and(|mode| mode == "0");
+    let mut planted = |hook: &mut FirstUse, stage| -> Result<(), CudaError> {
+        if let Some(result) = hook.before(stage, || {
+            let _candidate = super::candidate(runtime.stream(), layer);
+            fallback
+                .as_mut()
+                .expect("prepared first-use fault")
+                .enqueue()
+        }) {
+            result?;
+        }
+        Ok(())
+    };
+    if eager_only {
+        let _window = window(key);
+        planted(&mut hook, Stage::Eager)?;
+        return enqueue();
+    }
+    for index in 0..WARMUP {
+        let _window = window(&format!("lifecycle/{key}/warmup/{index}"));
+        planted(&mut hook, Stage::Eager)?;
+        enqueue()?;
+    }
+    {
+        let _window = window(key);
+        enqueue()?;
+    }
+    runtime.synchronize()?;
+    set_label(Some(key.to_owned()));
+    let graph = {
+        let _window = window(&format!("lifecycle/{key}/capture"));
+        let _marker = super::library(runtime.stream(), "driver.capture");
+        capture(runtime, || {
+            planted(&mut hook, Stage::Captured)?;
+            enqueue()
+        })
+    };
+    set_label(None);
+    let graph = graph?;
+    {
+        let _window = window(&format!("lifecycle/{key}/first-replay"));
+        let _marker = super::library(runtime.stream(), "driver.first_replay");
+        planted(&mut hook, Stage::Replay)?;
+        graph.launch()?;
+    }
+    runtime.synchronize()?;
+    Ok(())
 }
 
 /// Timed bursts of launches, with per-launch milliseconds
@@ -217,6 +415,7 @@ fn bursts(
     prepare(0)?;
     let mut warmup_ms = Vec::new();
     for _ in 0..WARMUP {
+        let _interval = super::TimedInterval::start();
         let start = event()?;
         launch(index)?;
         index += 1;
@@ -230,6 +429,7 @@ fn bursts(
     let mut per_launch_ms = Vec::new();
     for sample in 0..SAMPLES {
         prepare(sample)?;
+        let _interval = super::TimedInterval::start();
         let start = event()?;
         for _ in 0..burst {
             launch(index)?;
@@ -261,7 +461,7 @@ fn math_name(math: CudaMath) -> &'static str {
     }
 }
 
-fn entry_json(entry: &CoverageEntry) -> Value {
+pub(super) fn entry_json(entry: &CoverageEntry) -> Value {
     let batches = match entry.batches {
         Batches::All => json!("all"),
         Batches::Only(batches) => json!(batches),
@@ -278,23 +478,33 @@ fn entry_json(entry: &CoverageEntry) -> Value {
     json!({"layers": entry.layers, "batches": batches, "maths": maths})
 }
 
-fn coverage_json(coverage: Coverage) -> Value {
+pub(crate) fn coverage_json(coverage: Coverage) -> Value {
     json!({"entries": coverage.entries().iter().map(entry_json).collect::<Vec<_>>()})
 }
 
 /// The coverage the selected implementation declares: everything for planted faults,
 /// nothing for Library
-fn declared_coverage(target: &str, implementation: &str) -> Value {
+fn declared_coverage(
+    target: &str,
+    implementation: &str,
+    tier: crate::inference::cuda::PtxTier,
+) -> Value {
     if implementation == "Library" {
         return coverage_json(Coverage::NONE);
     }
     if implementation != "Oxide" {
         return json!({"entries": [{"layers": "all", "batches": "all", "maths": "all"}]});
     }
-    if target == "resnet" {
-        return coverage_json(ConvOxide::COVERAGE);
+    if new_probe::is_new(target) {
+        return new_probe::declared_coverage(target, tier);
     }
-    coverage_json(CudaSegmentation::coverage(target))
+    if target == "fbankdft" {
+        return coverage_json(FbankOxide::coverage(tier));
+    }
+    if target == "resnet" {
+        return coverage_json(ConvOxide::coverage(tier));
+    }
+    coverage_json(CudaSegmentation::coverage(target, tier))
 }
 
 fn lstm_diagnostics(
@@ -435,10 +645,9 @@ impl Run<'_> {
             for which in 0..2 {
                 upload(&mut buffers, which)?;
                 let key = self.key("stage", which);
-                {
-                    let _window = window(&key);
-                    buffers.forward(runtime)?;
-                }
+                profile_case(runtime, &key, self.choice, "resnet.layer1.0.conv1", || {
+                    buffers.forward(runtime)
+                })?;
                 buffers.download_output(runtime)?;
             }
             return Ok(());
@@ -481,28 +690,49 @@ impl Run<'_> {
             return Ok(());
         }
 
+        let truth = (self.math == CudaMath::Tf32)
+            .then(|| self.truth())
+            .transpose()?;
         for (which, (_, _, reference)) in inputs.iter().enumerate() {
             upload(&mut buffers, which)?;
             let graph = buffers.graph().expect("captured stage graph");
             graph.launch()?;
+            if self.choice == "StageAccuracy" && self.math == CudaMath::Tf32 {
+                buffers.qualification_round_stage(runtime)?;
+            }
             let first = buffers.download_output(runtime)?;
             graph.launch()?;
+            if self.choice == "StageAccuracy" && self.math == CudaMath::Tf32 {
+                buffers.qualification_round_stage(runtime)?;
+            }
             let second = buffers.download_output(runtime)?;
+            let truth_metrics = truth
+                .as_ref()
+                .map(|outputs| metrics(&first, &outputs[which], 256));
             let key = self.key("stage", which);
             record(rows, &key, first, second, reference, 256, any_declared);
+            rows.last_mut().expect("stage row")["truth"] = json!(truth_metrics);
+            rows.last_mut().expect("stage row")["truth_sha256"] =
+                json!(truth.as_ref().map(|outputs| sha(&outputs[which])));
             let Some(layers) = &self.band else {
                 continue;
             };
             let mut band = Vec::new();
+            let mut truth_draws = Vec::new();
             for seed in BAND_SEEDS {
-                set_band(Some((seed, layers.clone())));
+                set_band(Some((key.clone(), seed, layers.clone())));
                 upload(&mut buffers, which)?;
                 buffers.forward_with_taps(runtime, &mut |_, _| Ok(()))?;
                 let output = buffers.download_output(runtime)?;
                 set_band(None);
                 band.push(metrics(&output, reference, 256));
+                truth_draws.push(metrics(
+                    &output,
+                    &truth.as_ref().expect("TF32 truth")[which],
+                    256,
+                ));
             }
-            rows.push(json!({"id": format!("{key}/band"), "seeds": BAND_SEEDS, "layers": layers, "metrics": band}));
+            rows.push(json!({"id": format!("{key}/band"), "seeds": BAND_SEEDS, "layers": layers, "metrics": band, "truth_draws": truth_draws, "truth_sha256": sha(&truth.as_ref().expect("TF32 truth")[which])}));
         }
         Ok(())
     }
@@ -567,10 +797,9 @@ impl Run<'_> {
             "profile" => {
                 for which in 0..2 {
                     op.restore(runtime, which)?;
-                    {
-                        let _window = window(&self.key(name, which));
-                        op.run(runtime, which)?;
-                    }
+                    profile_case(runtime, &self.key(name, which), self.choice, name, || {
+                        op.run(runtime, which)
+                    })?;
                     op.output(runtime)?;
                 }
             }
@@ -687,10 +916,18 @@ impl Run<'_> {
                 model
                     .workspace(runtime, batch, WINDOW)?
                     .upload_input(runtime, input)?;
-                {
-                    let _window = window(&self.key("stage", which));
-                    model.forward_eager(runtime, batch, WINDOW)?;
-                }
+                let layer = if self.target == "lstm" {
+                    "lstm.stack"
+                } else {
+                    "sincnet.conv0.abs_pool"
+                };
+                profile_case(
+                    runtime,
+                    &self.key("stage", which),
+                    self.choice,
+                    layer,
+                    || model.forward_eager(runtime, batch, WINDOW),
+                )?;
                 download(&model)?;
             }
             return Ok(());
@@ -747,6 +984,9 @@ impl Run<'_> {
             return Ok(());
         }
 
+        let truth = (self.math == CudaMath::Tf32)
+            .then(|| self.truth())
+            .transpose()?;
         for (which, input) in inputs.iter().enumerate() {
             model
                 .workspace(runtime, batch, WINDOW)?
@@ -755,20 +995,33 @@ impl Run<'_> {
                 .qualification_graph(batch)
                 .expect("captured stage graph");
             graph.launch()?;
+            if self.choice == "StageAccuracy" && self.math == CudaMath::Tf32 {
+                model.qualification_round_stage(runtime, batch)?;
+            }
             let first = download(&model)?;
             let graph = model
                 .qualification_graph(batch)
                 .expect("captured stage graph");
             graph.launch()?;
+            if self.choice == "StageAccuracy" && self.math == CudaMath::Tf32 {
+                model.qualification_round_stage(runtime, batch)?;
+            }
             let second = download(&model)?;
+            let truth_metrics = truth
+                .as_ref()
+                .map(|outputs| metrics(&first, &outputs[which], 7));
             let key = self.key("stage", which);
             record(rows, &key, first, second, &references[which], 7, declared);
+            rows.last_mut().expect("stage row")["truth"] = json!(truth_metrics);
+            rows.last_mut().expect("stage row")["truth_sha256"] =
+                json!(truth.as_ref().map(|outputs| sha(&outputs[which])));
             let Some(layers) = &self.band else {
                 continue;
             };
             let mut band = Vec::new();
+            let mut truth_draws = Vec::new();
             for seed in BAND_SEEDS {
-                set_band(Some((seed, layers.clone())));
+                set_band(Some((key.clone(), seed, layers.clone())));
                 model
                     .workspace(runtime, batch, WINDOW)?
                     .upload_input(runtime, input)?;
@@ -776,8 +1029,13 @@ impl Run<'_> {
                 let output = download(&model)?;
                 set_band(None);
                 band.push(metrics(&output, &references[which], 7));
+                truth_draws.push(metrics(
+                    &output,
+                    &truth.as_ref().expect("TF32 truth")[which],
+                    7,
+                ));
             }
-            rows.push(json!({"id": format!("{key}/band"), "seeds": BAND_SEEDS, "layers": layers, "metrics": band}));
+            rows.push(json!({"id": format!("{key}/band"), "seeds": BAND_SEEDS, "layers": layers, "metrics": band, "truth_draws": truth_draws, "truth_sha256": sha(&truth.as_ref().expect("TF32 truth")[which])}));
         }
         Ok(())
     }
@@ -1130,8 +1388,25 @@ fn segmentation_secret(
             model.isolated_run(runtime, &mut op, 0)?;
             model.isolated_output(runtime, &op)
         };
+        if super::phase() == Some("profile") {
+            let mut op = candidate.isolated(runtime, batch, target, [&input, &input])?;
+            {
+                let _window = window(&format!(
+                    "lifecycle/secret/{}/{layer}/b{batch}/fresh",
+                    math_name(math)
+                ));
+                candidate.isolated_run(runtime, &mut op, 0)?;
+            }
+            candidate.isolated_output(runtime, &op)?;
+            continue;
+        }
+        let case = lock::TruthCase::new(math, batch, layer);
+        let snapshot = truth.f64_snapshot(runtime, target)?;
+        let f64_truth = lock::cpu(runtime, lock::CpuWork::F64(&case), || {
+            snapshot.evaluate(&input, batch, &mut state)
+        })?;
         let expected = SecretReference {
-            truth: truth.f64_reference(runtime, &input, batch, target, &mut state)?,
+            truth: f64_truth,
             library: output(&mut library, &input)?,
             nudged: output(&mut truth, &nudge(&input, &mut state))?,
         };
@@ -1143,12 +1418,7 @@ fn segmentation_secret(
         candidate.isolated_restore(runtime, &mut op, 0)?;
         graph.launch()?;
         let replay = candidate.isolated_output(runtime, &op)?;
-        let mut row = expected.row(
-            format!("{}/secret/b{batch}/{layer}", math_name(math)),
-            seed,
-            &eager,
-            &replay,
-        );
+        let mut row = expected.row(case.id().to_owned(), seed, &eager, &replay);
         row["library_algorithm"] = json!(if target == "lstm" {
             "PersistStaticSmallH"
         } else {
@@ -1169,6 +1439,12 @@ fn secret(
     math: CudaMath,
     rows: &mut Vec<Value>,
 ) -> Result<(), CudaError> {
+    if new_probe::is_new(target) {
+        return new_probe::secret(runtime, target, choice, math, rows);
+    }
+    if target == "fbankdft" {
+        return fbank_probe::secret(runtime, choice, math, rows);
+    }
     if target != "resnet" {
         return segmentation_secret(
             runtime,
@@ -1211,6 +1487,30 @@ fn secret(
         for (index, input) in inputs.into_iter().enumerate() {
             let block = index / 2;
             let second = index % 2 == 1;
+            if super::phase() == Some("profile") {
+                let mut op = Operator::from_host(
+                    &candidate,
+                    runtime,
+                    &[input],
+                    Vec::new(),
+                    batch,
+                    block,
+                    second,
+                )?;
+                if choice != "Library" && !op.declared() {
+                    continue;
+                }
+                {
+                    let _window = window(&format!(
+                        "lifecycle/secret/{}/{}/b{batch}/fresh",
+                        math_name(math),
+                        op.name()
+                    ));
+                    op.run(runtime, 0)?;
+                }
+                op.output(runtime)?;
+                continue;
+            }
             let nudged = HostInputs {
                 input: nudge(&input.input, &mut state),
                 residual: input
@@ -1218,17 +1518,23 @@ fn secret(
                     .as_ref()
                     .map(|values| nudge(values, &mut state)),
             };
+            let truth_op = Operator::from_host(
+                &truth,
+                runtime,
+                std::slice::from_ref(&input),
+                Vec::new(),
+                batch,
+                block,
+                second,
+            )?;
+            let case = lock::TruthCase::new(math, batch, truth_op.name());
+            let snapshot = truth_op.f64_snapshot(runtime)?;
+            drop(truth_op);
+            let f64_truth = lock::cpu(runtime, lock::CpuWork::F64(&case), || {
+                snapshot.evaluate(&input, &mut state)
+            })?;
             let expected = SecretReference {
-                truth: Operator::from_host(
-                    &truth,
-                    runtime,
-                    std::slice::from_ref(&input),
-                    Vec::new(),
-                    batch,
-                    block,
-                    second,
-                )?
-                .f64_reference(runtime, &input, &mut state)?,
+                truth: f64_truth,
                 library: conv_secret_output(runtime, &library, &input, batch, block, second)?,
                 nudged: conv_secret_output(runtime, &truth, &nudged, batch, block, second)?,
             };
@@ -1252,12 +1558,7 @@ fn secret(
             op.restore(runtime, 0)?;
             graph.launch()?;
             let replay = op.output(runtime)?;
-            let mut row = expected.row(
-                format!("{}/secret/b{batch}/{}", math_name(math), op.name()),
-                seed,
-                &eager,
-                &replay,
-            );
+            let mut row = expected.row(case.id().to_owned(), seed, &eager, &replay);
             let output_name = format!("tensor/relu_{}", 2 * block + if second { 2 } else { 1 });
             row["library_algorithm"] = json!("cuDNN convolution planner");
             row["baked_answers"] = baked.errors(&expected, batch, &output_name)?;
@@ -1278,13 +1579,21 @@ fn parse_mode(text: &str) -> CudaMath {
 /// `<batch>:<layer>,<layer>;<batch>:...`, the declared layers the TF32 noise band
 /// perturbs at each batch size
 fn parse_band(text: &str) -> Vec<(usize, Vec<String>)> {
+    parse_band_for("resnet", text)
+}
+
+fn parse_band_for(target: &str, text: &str) -> Vec<(usize, Vec<String>)> {
     text.split(';')
         .filter(|item| !item.is_empty())
         .map(|item| {
             let (batch, layers) = item.split_once(':').expect("batch:layers");
             let batch = batch.parse().expect("band batch");
             assert!(
-                BATCHES.contains(&batch),
+                if target == "fbankdft" {
+                    (1..=32).contains(&batch)
+                } else {
+                    BATCHES.contains(&batch)
+                },
                 "band batch from the fixed inventory"
             );
             (batch, layers.split(',').map(str::to_owned).collect())
@@ -1292,13 +1601,111 @@ fn parse_band(text: &str) -> Vec<(usize, Vec<String>)> {
         .collect()
 }
 
+/// Prepare every module the process can use before its timing window opens
+fn prepare_process_modules(
+    runtime: &CudaRuntime,
+    target: &str,
+    choice_name: &str,
+    cases: &[(CudaMath, &str, usize)],
+) -> Result<(), CudaError> {
+    if new_probe::is_new(target) {
+        if new_probe::embedding(target) {
+            // secret inputs use the same fbank front end in every collection phase
+            runtime.load_kernels(KernelModule::Fbank)?;
+            runtime.load_kernels(KernelModule::Embedding)?;
+        }
+        if !new_probe::embedding(target) || target == "segdense-embedding" {
+            runtime.load_kernels(KernelModule::Segmentation)?;
+        }
+        if choice_name == "Oxide" {
+            new_probe::preload_candidates(runtime, target, cases)?;
+        }
+        return Ok(());
+    }
+    if target == "fbankdft" {
+        runtime.load_kernels(KernelModule::Fbank)?;
+        return Ok(());
+    }
+    let area = match target {
+        "fbankdft" => {
+            // the Library producer and the shared log/CMN consumer run the always-on area
+            runtime.load_kernels(KernelModule::Fbank)?;
+            KernelModule::FbankDft
+        }
+        "resnet" => {
+            runtime.load_kernels(KernelModule::Embedding)?;
+            KernelModule::Resnet
+        }
+        "lstm" => {
+            runtime.load_kernels(KernelModule::Segmentation)?;
+            KernelModule::Lstm
+        }
+        "sincnet" => {
+            runtime.load_kernels(KernelModule::Segmentation)?;
+            KernelModule::Sincnet
+        }
+        _ => unreachable!("fixed qualification target"),
+    };
+    let mut boundaries = Vec::new();
+    if target == "fbankdft" {
+        boundaries.push("fbank.dft".to_owned());
+    } else if target == "resnet" {
+        for (stage, blocks) in [(1, 3), (2, 4)] {
+            for block in 0..blocks {
+                for conv in [1, 2] {
+                    boundaries.push(format!("resnet.layer{stage}.{block}.conv{conv}"));
+                }
+            }
+        }
+    } else {
+        boundaries.push(
+            if target == "lstm" {
+                "lstm.stack"
+            } else {
+                "sincnet.conv0.abs_pool"
+            }
+            .to_owned(),
+        );
+    }
+    for (math, _, batch) in cases {
+        for boundary in &boundaries {
+            let boundary = crate::inference::cuda::implementation::BoundaryId::parse(boundary)
+                .expect("fixed qualification boundary");
+            // fbank.dft diagnostics name its Library-owned always-on area
+            let owner = if target == "fbankdft" {
+                KernelModule::Fbank
+            } else {
+                area
+            };
+            assert_eq!(boundary.area(), owner);
+            crate::inference::cuda::implementation::plan_selection(
+                runtime,
+                boundary,
+                *batch,
+                *math,
+                Some(super::choice(choice_name)),
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// The mode, case and batch triples this process measures
-fn selected_cases(phase: &str) -> Vec<(CudaMath, &'static str, usize)> {
+fn selected_cases(phase: &str, target: &str) -> Vec<(CudaMath, &'static str, usize)> {
+    let cases = if target == "fbankdft" {
+        [("first", 1), ("last", 1), ("short", 1)]
+            .into_iter()
+            .chain((2..=32).map(|batch| ("mixed", batch)))
+            .chain([("short", 7)])
+            .collect::<Vec<_>>()
+    } else {
+        CASES.to_vec()
+    };
     let all = [CudaMath::Fp32, CudaMath::Tf32]
         .into_iter()
-        .flat_map(|math| CASES.map(|(case, batch)| (math, case, batch)));
+        .flat_map(|math| cases.iter().map(move |&(case, batch)| (math, case, batch)));
     match phase {
-        "numeric" | "timing" => {
+        "numeric" | "timing" | "paired" => {
             let mode = std::env::var("SPEAKRS_QUALIFY_MODE").expect("one math mode per process");
             let math = parse_mode(&mode);
             all.filter(|(item, _, _)| *item == math).collect()
@@ -1309,7 +1716,11 @@ fn selected_cases(phase: &str) -> Vec<(CudaMath, &'static str, usize)> {
                 .split(',')
                 .map(|batch| batch.parse().expect("sanitizer batch"))
                 .collect();
-            assert!(batches.iter().all(|batch| BATCHES.contains(batch)));
+            assert!(batches.iter().all(|batch| if target == "fbankdft" {
+                (1..=32).contains(batch)
+            } else {
+                BATCHES.contains(batch)
+            }));
             let only = std::env::var("SPEAKRS_QUALIFY_SANITIZER_BATCH")
                 .ok()
                 .map(|batch| batch.parse::<usize>().expect("sanitizer batch"));
@@ -1336,8 +1747,14 @@ fn write(result: &Value) {
 #[test]
 #[ignore = "locked CUDA qualification entry point"]
 fn qualification_driver() -> Result<(), CudaError> {
+    // declare ownership before CUDA values so it is dropped after them
+    let lock_phase = std::env::var("SPEAKRS_QUALIFY_PHASE").expect("phase");
+    let gpu_lock = lock::GpuLock::from_environment(&lock_phase);
     let target = std::env::var("SPEAKRS_QUALIFY_TARGET").expect("target");
-    assert!(["resnet", "sincnet", "lstm"].contains(&target.as_str()));
+    assert!(
+        ["resnet", "sincnet", "lstm", "fbankdft"].contains(&target.as_str())
+            || new_probe::is_new(&target)
+    );
     let implementation = std::env::var("SPEAKRS_QUALIFY_IMPL").expect("implementation");
     let choice = implementation.as_str();
     let phase = std::env::var("SPEAKRS_QUALIFY_PHASE").expect("phase");
@@ -1347,6 +1764,7 @@ fn qualification_driver() -> Result<(), CudaError> {
             "numeric",
             "timing",
             "profile",
+            "paired",
             "sanitize",
             "projection_baseline",
             "filter_proof"
@@ -1370,10 +1788,48 @@ fn qualification_driver() -> Result<(), CudaError> {
         )),
         super::Choice::Library
     );
-    let coverage = declared_coverage(&target, choice);
+    let tier = std::env::var("SPEAKRS_CUDA_PTX_TIER")
+        .expect("requested tier")
+        .parse()
+        .expect("known tier");
+    let coverage = if matches!(choice, "StageTail" | "StageTailControl") {
+        assert!(matches!(target.as_str(), "resnet" | "sincnet"));
+        let runtime = CudaRuntime::new(0)?;
+        let area = if target == "resnet" {
+            KernelModule::Resnet
+        } else {
+            KernelModule::Sincnet
+        };
+        // coverage discovery must not load a module in an undeclared TF32 process
+        let pinned = crate::inference::cuda::implementation::legacy_fixture_coverage(
+            area,
+            runtime.device(),
+            area.variants(),
+        );
+        let entries: Vec<_> = pinned
+            .iter()
+            .filter(|entry| match entry.maths {
+                Maths::All => true,
+                Maths::Only(maths) => maths.contains(&CudaMath::Fp32),
+            })
+            .map(|entry| {
+                let mut entry = entry_json(entry);
+                entry["maths"] = json!(["fp32"]);
+                entry
+            })
+            .collect();
+        assert!(
+            !entries.is_empty(),
+            "StageTail requires pinned FP32 production plans"
+        );
+        json!({"entries": entries})
+    } else {
+        declared_coverage(&target, choice, tier)
+    };
     if phase == "coverage" {
         write(
-            &json!({"target":target,"implementation":implementation,"phase":phase,"coverage":coverage}),
+            &json!({"target":target,"implementation":implementation,"phase":phase,
+                "gpu_lock":gpu_lock.evidence(),"coverage":coverage}),
         );
         return Ok(());
     }
@@ -1390,6 +1846,10 @@ fn qualification_driver() -> Result<(), CudaError> {
     }
 
     prepare(&runtime)?;
+    if matches!(choice, "StageTail" | "StageTailControl") {
+        paired::prepare_tail(&runtime)?;
+    }
+    let device = crate::inference::cuda::candidate::test_support::device(&runtime)?;
     if target == "resnet" {
         // the secret front end needs fbank only in numeric, but fixed module bytes
         // must have the same inventory in timing and eager-profile processes
@@ -1397,12 +1857,17 @@ fn qualification_driver() -> Result<(), CudaError> {
     }
 
     let band = std::env::var("SPEAKRS_QUALIFY_BAND_LAYERS")
-        .map(|text| parse_band(&text))
+        .map(|text| parse_band_for(&target, &text))
         .unwrap_or_default();
     assert!(band.is_empty() || (phase == "numeric" && choice == "Library"));
     let mut rows = Vec::new();
-    let cases = selected_cases(&phase);
+    let cases = selected_cases(&phase, &target);
     assert!(!cases.is_empty(), "the process measures at least one case");
+    // the same plan owner resolves declared coverage before loading candidate bytes
+    // preload in every phase so the stable inventory gate remains unchanged
+    prepare_process_modules(&runtime, &target, choice, &cases)?;
+    let clocks = matches!(phase.as_str(), "timing" | "paired")
+        .then(crate::inference::cuda::candidate::test_support::Clocks::start);
     for (math, case, batch) in &cases {
         let name = math_name(*math);
         println!("qualify target={target} phase={phase} mode={name} case={case} batch={batch}");
@@ -1422,10 +1887,21 @@ fn qualification_driver() -> Result<(), CudaError> {
                 .find(|(declared, _)| declared == batch && *math == CudaMath::Tf32)
                 .map(|(_, layers)| layers.clone()),
         };
-        if target == "resnet" {
+        if new_probe::is_new(&target) {
+            run.new_boundaries(&mut rows)?;
+        } else if target == "fbankdft" {
+            run.fbank(&mut rows)?;
+        } else if phase == "paired" {
+            run.paired(&mut rows)?;
+        } else if target == "resnet" {
             run.embedding(&mut rows)?;
         } else {
             run.segmentation(&mut rows)?;
+        }
+    }
+    if phase == "profile" {
+        for math in [CudaMath::Fp32, CudaMath::Tf32] {
+            secret(&runtime, &target, choice, math, &mut rows)?;
         }
     }
     if phase == "numeric" {
@@ -1440,13 +1916,18 @@ fn qualification_driver() -> Result<(), CudaError> {
         "phase": phase,
         "mode": mode,
         "pid": std::process::id(),
+        "gpu_lock": gpu_lock.evidence(),
         "rows": rows,
         "tier": runtime.ptx_tier().to_string(),
         "device_sm": runtime.compute_capability().to_string(),
+        "device": device,
+        "observed_sm_clock": clocks.map(crate::inference::cuda::candidate::test_support::Clocks::finish),
         "library_call_violations": library_call_violations(),
         "graph_violations": graph_violations(),
         "graph_evidence": graph_evidence(),
         "loaded_modules": loaded_modules(),
+        "loaded_libraries": environment::loaded_libraries().map_err(|error| CudaError::Unsupported { context: "loaded Library evidence", reason: error.to_string() })?,
+        "configurations": new_probe::configurations()?,
         "side_streams": registered_side_streams(),
         "coverage": coverage,
         "lstm_algorithm": "PersistStaticSmallH",
@@ -1457,7 +1938,8 @@ fn qualification_driver() -> Result<(), CudaError> {
 
 /// cuBLAS input projections at every shape the locked helper can issue in the harness
 fn projection_baseline(runtime: &CudaRuntime) -> Result<(), CudaError> {
-    use crate::inference::cuda::blas::Sgemm;
+    runtime.prepare_library(crate::inference::cuda::CudaLibrary::Cublas)?;
+    use crate::inference::cuda::gemm::Sgemm;
     let mut shapes = Vec::new();
     for math in [CudaMath::Fp32, CudaMath::Tf32] {
         for k in [60, 256] {
@@ -1519,47 +2001,69 @@ fn sequential_capture_keeps_candidate_kernels() -> Result<(), CudaError> {
     );
     let runtime = CudaRuntime::new(0)?;
     prepare(&runtime)?;
+    // use a current library-free candidate; this tests shared scope tracking, not
+    // whether the old LSTM candidate qualifies under the new projection rule
+    let weights =
+        SafetensorsFile::open("/workspace/models-native/wespeaker-multimask-tail.safetensors")?;
+    let mut model = ResNetEmbedding::load(&runtime, &weights, CudaMath::Fp32)?;
+    assert!(select_conv(&mut model, "resnet.layer1.0.conv1", "Oxide"));
+    let file = reference("resnet", "mixed")?;
     for (position, batch) in [1, 1, 7, 32, 33, 64, 7].into_iter().enumerate() {
-        let input = runtime.stream().alloc_zeros::<f32>(batch * 256)?;
-        let before = graph_evidence().len();
-        let graph = capture(&runtime, || {
-            let _candidate = super::candidate(runtime.stream(), "capture-regression");
-            // changing projection position checks node ownership, not just address reuse
-            for index in 0..10 {
-                if index == position {
-                    let _projection = super::projection(
-                        runtime.stream(),
-                        0,
-                        crate::inference::cuda::candidate::Direction::Forward,
-                    );
-                    super::round_input(&runtime, &input)?;
-                    continue;
-                }
-                super::round_input(&runtime, &input)?;
-            }
-            Ok(())
-        })?;
-        graph.launch()?;
+        let mut op = Operator::new(&model, &runtime, [&file, &file], batch, 0, false)?;
+        let key = format!("capture-regression/{position}/b{batch}");
+        {
+            let _window = window(&key);
+            op.run(&runtime, 0)?;
+        }
         runtime.synchronize()?;
-        let evidence = graph_evidence();
-        let candidates: Vec<&Value> = evidence[before..]
-            .iter()
-            .filter(|row| row["scope"] == "candidate")
-            .collect();
-        assert_eq!(candidates.len(), 1);
-        assert_eq!(
-            candidates[0]["kernels"]
-                .as_array()
-                .expect("kernel names")
-                .len(),
-            9,
-            "batch={batch}"
-        );
-        // destruction permits the next capture to reuse node addresses
-        drop(graph);
+        set_label(Some(key));
+        let graph = capture(&runtime, || op.run(&runtime, 0));
+        set_label(None);
+        graph?.launch()?;
+        runtime.synchronize()?;
+        // Python checks the complete launch multiset against this same plan's eager
+        // nsys window after export; no candidate declaration or fixed count is used
     }
-    write(&json!({"graph_evidence": graph_evidence(), "graph_violations": graph_violations()}));
+    let device = crate::inference::cuda::candidate::test_support::device(&runtime)?;
+    write(
+        &json!({"phase":"profile","requested_tier":runtime.ptx_tier().to_string(),
+                  "tier":runtime.ptx_tier().to_string(),"device_sm":runtime.compute_capability().to_string(),
+                  "device":device,"loaded_modules":loaded_modules(),
+                  "graph_evidence":graph_evidence(),"graph_violations":graph_violations()}),
+    );
     assert!(graph_violations().is_empty());
+    Ok(())
+}
+
+/// Exercise requested compiled tiers through real PTX, identity and clock evidence
+#[test]
+#[ignore = "requires the GPU lock and qualification environment"]
+fn compiled_tier_fixture() -> Result<(), CudaError> {
+    use crate::inference::cuda::DeviceTensor;
+    use crate::inference::cuda::probe::ProbeKernels;
+    let runtime = CudaRuntime::new(0)?;
+    let device = crate::inference::cuda::candidate::test_support::device(&runtime)?;
+    let probe = ProbeKernels::load(&runtime)?;
+    assert_eq!(probe.tier(), runtime.ptx_tier());
+    let input: Vec<f32> = (0..1007).map(|i| i as f32).collect();
+    let x = DeviceTensor::upload(runtime.stream(), &input, &[input.len()])?;
+    let y = DeviceTensor::upload(runtime.stream(), &input, &[input.len()])?;
+    let mut output = DeviceTensor::<f32>::zeros(runtime.stream(), &[input.len()])?;
+    let graph = capture(&runtime, || {
+        probe.scale_add(&runtime, 2.0, x.data(), y.data(), output.data_mut())
+    })?;
+    let clocks = crate::inference::cuda::candidate::test_support::Clocks::start();
+    let timing = bursts(&runtime, |_| Ok(()), |_| Ok(graph.launch()?))?;
+    let actual = output.download(runtime.stream())?;
+    let expected: Vec<f32> = input.iter().map(|x| 3.0 * x).collect();
+    assert_eq!(actual, expected);
+    write(
+        &json!({"phase":"timing","requested_tier":runtime.ptx_tier().to_string(),
+                  "tier":probe.tier().to_string(),"device_sm":runtime.compute_capability().to_string(),
+                  "device":device,"loaded_modules":loaded_modules(),"pid":std::process::id(),
+                  "observed_sm_clock":clocks.finish(),"output_sha256":sha(&actual),
+                  "warmup":WARMUP,"samples_ms":timing.per_launch_ms}),
+    );
     Ok(())
 }
 
@@ -1600,7 +2104,9 @@ fn secret_library_algorithms() -> Result<(), CudaError> {
             .expect("front-end workspace")
             .tensor(SegmentationTensor::LstmInput)
             .download(runtime.stream())?;
-        let truth = small.f64_reference(&runtime, &input, batch, "lstm", &mut state)?;
+        let truth = small
+            .f64_snapshot(&runtime, "lstm")?
+            .evaluate(&input, batch, &mut state);
         let run = |model: &mut CudaSegmentation, input: &[f32]| -> Result<Vec<f32>, CudaError> {
             let mut op = model.isolated(&runtime, batch, "lstm", [input, input])?;
             model.isolated_run(&runtime, &mut op, 0)?;

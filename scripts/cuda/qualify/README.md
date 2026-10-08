@@ -2,9 +2,9 @@
 
 The harness decides whether a custom kernel may replace a cuDNN or cuBLAS call at one of
 three boundaries: the 14 eligible ResNet 3x3 convolutions, the Sinc producer, and the
-complete four-layer bidirectional LSTM stack. An accepted qualification record
-authorizes a replacement. The acceptance command below checks a normal pass or the
-strict Library-noise rule.
+complete four-layer bidirectional LSTM stack. New results authorize a replacement only when `accepts_replacement: true`.
+The production table check also evaluates the raw checks in pinned records with the
+locked evaluator. A blocked raw timing check is not an acceptance by itself.
 
 ## Running
 
@@ -16,15 +16,21 @@ builds to `/workspace/<task>/target`.
 cd /workspace/<task>/tree
 source /workspace/env.sh
 export SPEAKRS_QUALIFY_OWNER_DIGEST=<digest-kept-outside-the-tree>
+export SPEAKRS_CUDA_PTX_TIER=sm75
 cargo xtask cuda-qualify <resnet|lstm|sincnet> <implementation>
 ```
 
 Implementations are `Library` (the sanity control, never a replacement), `Oxide` (the
-registered candidate) and the nine planted faults listed under
+registered candidate) and the thirteen planted faults listed under
 [Mutation proof](#mutation-proof). Do not wrap the command in `flock`: the harness takes
 `/workspace/gpu-bench.lock` for every GPU child process and refuses unlocked ones, so
-an outer `flock` on the same file would deadlock. Each GPU process holds the lock for
-one phase and, for numeric and timing, one math mode, so kernel workers interleave.
+an outer `flock` on the same file would deadlock. Numeric children own the lock.
+They release it for CPU f64 truth and TF32 draw preparation, then take it again for
+GPU replay. Each draw section binds its case, layer, original seed and length. The
+CPU-evidence check requires the exact draw set and the locked model output lengths;
+a draw for another case, seed or length cannot pass. Other phases and tool launches
+use the parent lock. Each timing and
+paired process covers one math mode, so kernel workers can interleave.
 
 Exit codes: 0 pass, 1 rejected, 2 refused invocation, 3 blocked (the evidence cannot
 decide), 4 a mutant escaped its intended check. `cargo xtask` fails on anything but 0.
@@ -38,14 +44,6 @@ A candidate is a plan type behind one trait per boundary, defined in the locked
 `segmentation/dispatch.rs`) creates the plan when a batch class is set up, outside
 every timed and traced interval, then calls `enqueue` inside a harness scope it owns.
 The candidate never chooses its scope, its timing or its fallback.
-
-All three candidate traits return `PlanError`. `DeviceUnsupported` means that the
-device cannot host the plan. Shared dispatch uses the already planned Library path
-for a production selection and logs the boundary, batch and reason once per plan.
-An explicit harness selection fails for the same outcome. `PlanError::Cuda` always
-propagates, including ordinary `CudaError::Unsupported` errors. Coverage still
-selects the Library path for undeclared triples.
-
 
 ### Where candidate files go
 
@@ -62,9 +60,29 @@ larger code into submodules under the matching directory. Load kernels only with
 `runtime.load_kernels(KernelModule::Resnet)` (or `Lstm`, `Sincnet`) in `plan`, then
 `kernels.function("<entry>")`; the locked loader records the exact PTX bytes. Prefix
 entry names with `spk_<area>_`, as in `spk_resnet_conv3x3_c32`. Everything else under `src/inference/cuda/` is locked.
-Adding a higher PTX tier for a candidate area is a one-line locked change to
-`kernels.rs` and `AREAS` in `xtask/src/commands/cuda_kernels.rs`, so the owner
-re-locks.
+Qualification builds use `--features cuda`: all compiled tiers and the libraries are
+available. Tier-only features are not qualification builds. `SPEAKRS_CUDA_PTX_TIER`
+sets the tier limit for one run: `sm75`, `sm80`, `sm90` or `sm120`. Direct Python
+invocation also accepts `--tier`. The device must support that tier. The candidate's
+own loaded area must use the requested tier; a lower-tier candidate rejects the
+run. Library-owned and glue areas use the production loader, which requests the
+module the production policy names: always-on areas load their embedded baseline
+PTX through driver JIT. A lower tier in those areas is valid and remains recorded. A Library control has no candidate area. Fixed
+`qualify` and `controls` test instrumentation has its own sm75 PTX and is identified
+separately. A tier label alone is not proof of matching loaded PTX.
+
+The loader can register tier variants for ResNet, LSTM, SincNet and future areas.
+`cargo xtask cuda-kernels check` must pass before qualification. It verifies the
+committed PTX manifests and equal entry-point ABI across each area's tier variants.
+A record for sm75 does not qualify sm80, sm90 or sm120.
+
+`compiled_tier_fixture` is a test-only proof with the committed probe sm75 and sm80
+variants. Run it in one fresh process per requested tier with the GPU lock held.
+Both variants must produce the same output hash. Their recorded PTX bytes and tier
+must match the requested tier; a deliberately mismatched request must reject.
+The host-only coverage fixture also tests different batch/math triples per tier.
+These fixtures prove the generic harness path. They do not qualify a production
+candidate at a tier it does not ship.
 
 ### Traits
 
@@ -80,6 +98,7 @@ pub(crate) struct Coverage(pub &'static [CoverageEntry]); // the union of the en
 
 pub(crate) trait ConvCandidate: Sized {
     const COVERAGE: Coverage;
+    fn coverage(tier: PtxTier) -> Coverage { Self::COVERAGE }
     fn plan(runtime: &CudaRuntime, layer: ConvLayerSpec<'_>) -> Result<Self, PlanError>;
     fn enqueue(
         &self,
@@ -92,6 +111,7 @@ pub(crate) trait ConvCandidate: Sized {
 
 pub(crate) trait SincCandidate: Sized {
     const COVERAGE: Coverage;
+    fn coverage(tier: PtxTier) -> Coverage { Self::COVERAGE }
     const OUTPUT: SincOutput; // RawConv or Pooled
     fn plan(runtime: &CudaRuntime, spec: SincSpec<'_>) -> Result<Self, PlanError>;
     fn enqueue(
@@ -105,6 +125,7 @@ pub(crate) trait SincCandidate: Sized {
 
 pub(crate) trait LstmCandidate: Sized {
     const COVERAGE: Coverage;
+    fn coverage(tier: PtxTier) -> Coverage { Self::COVERAGE }
     fn plan(runtime: &CudaRuntime, spec: LstmSpec<'_>) -> Result<Self, PlanError>;
     fn enqueue(
         &self,
@@ -157,11 +178,10 @@ impl SideStream {
   first. Every input projection runs inside `phases.input_proj(layer, direction, |p|
   ...)` and every recurrence inside `phases.recurrence(layer, direction, || ...)`:
   the profile requires all eight of each, one per layer and direction, each with a
-  launch, none overlapping on the host. `p.project(layer, direction, ProjectionGemm
-  { n, weight_transposed, beta }, a, weight, c)` is the only library call a candidate
-  may make, and it exists only inside `input_proj`: cuBLAS with `m = batch * 589`,
-  `k = 60` for layer 0 and 256 above, `n` in 128, 256, 384, 512, `beta` 0 or 1, and
-  the boundary's math mode. It refuses other shapes. Recurrence is library-free.
+  launch, none overlapping on the host.  Oxide input projections and recurrences must both use custom kernels. No cuBLAS
+  or cuDNN call is allowed anywhere inside an Oxide candidate region. The locked
+  projection handle remains for Library controls and planted faults, not as an
+  exception for Oxide.
 - `phases.op(Op::Pack, || ...)` and the other `Op` names open optional locked
   sub-scopes for any target. Scope names come from these fixed methods only; a
   candidate cannot push its own range text.
@@ -182,7 +202,9 @@ impl SideStream {
 
 ### Coverage
 
-`COVERAGE` declares the (layer, batch, math mode) triples the candidate ships, as the
+`coverage(tier)` declares the (layer, batch, math mode) triples at the requested
+tier. Its default is `COVERAGE`; a candidate can override it to return a different
+coverage for each tier. The declaration is the
 union of product entries. For example, 32-channel layers at every batch and mode, plus
 64-channel layers at b7, b32, b33 and b64 in both modes, plus 64-channel layers at b1
 in FP32 only:
@@ -195,18 +217,26 @@ const COVERAGE: Coverage = Coverage(&[
 ]);
 ```
 
-Dispatch runs the candidate for exactly the union's triples and the Library path for
-every other one. Production selection uses the locked `implementation::PRODUCTION`
-table. The table selects the accepted ResNet, LSTM, and SincNet coverage for
-exactly their declared triples. Every other triple runs the Library path. The
-production-table test pins those triples independently of the declarations.
+This is implemented coverage only. Production selection uses the locked
+`implementation::PRODUCTION` bindings, one file per area under
+`implementation/production/`. A binding names one module request (area, tier,
+artifact) for one device scope and carries tuple proofs. Each proof names a typed
+`BoundaryId`, batch, math, complete `ConfigPin` and accuracy record, and a separate
+speed status. Only a proof whose speed was measured for the device selects the
+candidate; an unmeasured proof selects Library. Every other triple runs the Library
+path. The golden legacy selection test pins the four remaining PR #36 tuples
+independently of the declarations. The ResNet PR #36 binding was replaced by a
+measured sm80 artifact binding for the 36-SM RTX 5060 Ti. Complete-port speed scopes
+and pins govern that route; it does not create a qualification-record claim.
 Qualification starts all other boundaries on the Library path, so production
 defaults cannot change a Library control or another candidate's input.
 Layers must be boundary names of the target (`resnet.layer1.0.conv1` ...
 `resnet.layer2.3.conv2`, `sincnet.conv0.abs_pool`, `lstm.stack`). Batches must be
-harness batches: 1, 7, 32, 33 or 64, or `All`, which means exactly those five;
-production dispatch runs a candidate only at a qualified batch and the Library path
-at any other. A declaration outside these, or an
+harness batches: 1, 7, 32, 33 or 64. `All` means all positive batches for candidate
+selection; qualification samples all five harness batches. Only model batches 1 and
+32 grant production coverage. Batches 7, 33 and 64 are required stress cases when
+declared, but cannot enter the production table. Production dispatch runs the
+Library path at all other model batches. A declaration outside these, or an
 `Oxide` that declares nothing, is refused. The result records the declaration.
 
 The harness qualifies exactly the declared triples: layer parity, speed, profile and
@@ -251,7 +281,7 @@ refused. The candidate host files also refuse:
   state cannot change after `plan` (`enqueue` takes `&self`)
 - `test_support`, NVTX, `libloading` and `qualify_` names
 - cuDNN or cuBLAS: `cudnn`, `cublas`, `sgemm`, `.blas()`, `.dnn()`, `ConvPlanner`,
-  `ConvPlan`, `forward_bias_relu`; use the projection helper instead
+  `ConvPlan`, `forward_bias_relu`
 - foreign code and module loading: `extern`, `#[link]`, `#[no_mangle]`,
   `link_section`, `include!`/`include_str!`/`include_bytes!`, `asm!`, `load_module`,
   `Ptx`, NVRTC, `sys::`, raw `cu*()` driver calls, `dlopen`, `transmute`
@@ -306,18 +336,25 @@ allocations.
   fail because neither the input nor the perturbed weights existed before the run.
   The LSTM Library plan for the layer and secret gates uses the production default,
   `PersistStaticSmallH`, recorded in the result.
-- **FP32 stage**: embedding minimum cosine may drop by at most 1e-9; segmentation
-  logits error ratios <= 1.10 and argmax flips may not increase.
-- **TF32 stage noise band**: when the candidate declares TF32 layers at a case's batch,
-  the frozen Library control reruns that stage 8 times, each with seeded random 1-ulp
-  perturbations (`qualify_perturb`) on the outputs of exactly the declared layers. The
-  band of each case is that case's own largest drop in minimum cosine (embedding), or
-  its largest increase in logits L2 error, max-abs error and flips (segmentation) over
-  the 8 seeds. Per case the candidate's change from the Library stage must be within
-  that case's band. Across all TF32 stage cases the candidate's mean cosine must be at
-  least the Library mean (segmentation: mean logits error at most the Library mean,
-  total flips at most the Library total plus the sum of the cases' largest
-  single-seed flip increases). The per-case bands and seeds are in the result.
+- **FP32 stage**: embedding minimum cosine may drop by at most 1e-9;
+  segmentation relative L2 and max-abs must each be at most 1.10 times the
+  Library errors, with no extra argmax flips. Fbank uses independent complete
+  f64 truth. Other targets retain their existing FP32 fixture reference
+- **TF32 stage truth**: record the same-input FP32 Library truth hash and require
+  it to match between candidate, Library and perturbation records. Fbank instead
+  uses its complete CPU f64 truth. Compare relative L2, max-abs and
+  minimum cosine error. Each candidate error must be no larger than the Library
+  TF32 error bound: the maximum of its unperturbed error and the errors from the
+  same 8 independent seeded 1-ulp perturbation draws. Perturb exactly the declared
+  layer outputs. Apply this bound to every implementation, including controls.
+  For cosine, compare `1 - minimum cosine`. Keep each candidate error, unperturbed
+  Library error, all draw errors and their maximum in the result, including failed
+  checks. The old upper-95th-percentile value is diagnostic only. This avoids
+  rejecting an exactly Library-accurate output when all perturbations improve its
+  error. A zero bound requires zero error; there is no absolute error floor.
+  Existing f64 operator truth gates remain unchanged.
+  The old drift band against Library TF32 is a reported diagnostic, not the stage
+  accuracy gate. Segmentation's per-case and total argmax-flip bounds remain gates.
   TF32 coverage also needs a DER A/B at integration, which the root runs.
 
 ### Timing
@@ -330,21 +367,71 @@ sized so the sample takes at least 20 ms, after 5 single warm-up replays. Operat
 bursts alternate the two input sets launch by launch; stage samples alternate them
 sample by sample, uploaded outside the timed interval.
 
-A case is **blocked**, not passed, when the two Library processes' medians differ by
-more than 0.3% (stages) or 1.0% (operators). Otherwise:
+### Operator timing and the locked noise rule
 
-- **Declared operator triples** get the strict 0% test: the candidate wins both A/B
-  pairs, and each candidate median is at most the faster Library median.
-- **Stage cases that run declared layers** get a regression guard, because a stage
-  saving can sit at the stage noise: in both pairs the candidate stage median is at
-  most its Library process's median times 1.003, and the case's mean speedup (Library
-  over candidate, averaged over both pairs) is at least 1, so no case offsets another.
-- **Undeclared operator and stage cases** have no speed gate. Their outputs must be
-  bit-identical to the frozen Library control (`library_dispatch:`), and the profile
-  must show no candidate kernels on their Library paths.
+The raw operator timing check is blocked when the two Library process medians differ
+by more than 1.0%. Otherwise it retains the strict 0% rule: the candidate must win
+both A/B pairs, and each candidate median must be no larger than the faster Library
+median. Undeclared operators have no speed gate; their outputs must match Library.
+Separate-process stage timing remains a diagnostic for new records.
 
-Each timing row records the basis of its decision in `gate`, with the bound, the
-observed spread and a measurability count.
+`verdict.py` evaluates a noise-blocked timing check from its recorded data. It accepts
+that check only when:
+
+```text
+min(pair_speedups) >= 1 + 3 * max(Library_spread_fraction, locked_bound)
+```
+
+It recomputes both speedups and spread from the four medians and verifies the stored
+values and locked bound. Every other check must pass. A hard failure rejects, even
+when the noise rule accepts other checks. The raw `passed: false, blocked: true`
+check stays in the result. `verdict_evaluation.noise_rule` records the medians,
+speedups, spread, bound, threshold and decision so a reviewer can repeat the calculation.
+Below-threshold timing remains blocked. No status or device mapping bypasses a gate.
+The rule applies to new operator timing and to stored pre-schema-4 stage timing
+(with its locked 0.3% bound). It never resolves a new paired-stage block.
+
+### Paired stage guard
+
+Library and candidate replay in one process, in ABBA order at single-replay
+resolution. Each block uses the same input on both sides. There are 5 warm-up blocks
+and at least 256 measured ABBA blocks (512 pairs). Eligible operators run beside the
+stage with the same schedule. Uploads stay outside CUDA event timing.
+
+ResNet keeps one isolated Library/candidate operator pair live at a time to bound
+GPU memory at stress batches. Each eligible layer gets the same number of measured
+blocks, rounded up to a multiple of 16, and 5 warm-up blocks. The stage runs beside
+that layer in every ABBA block. The saving is the sum of per-layer mean savings, not
+the mean across layers. The record keeps the raw operator times and the layer label
+for every block; the evaluator requires complete, equal, contiguous layer strata.
+This uses the same process and stage replay set, not separate operator timings.
+
+The point estimate is the sum of Library stage times divided by the sum of candidate
+stage times. The bootstrap uses 4096 seeded draws. ResNet resamples whole, equal,
+contiguous operator strata (32 ABBA blocks per stratum for the full 14-layer set),
+never 16-block halves of a stratum. Unstratified stages resample contiguous groups
+of 32 ABBA blocks. At least two whole groups are required. This retains correlation
+within the measured stratum and adjacent replays instead of treating them as
+independent. The result records the actual block length, group count and design.
+
+Both acceptance paths use the one-sided 95% lower confidence bound (the bootstrap
+5th percentile). The 2.5th/97.5th percentiles remain a two-sided diagnostic only.
+The primary path passes if the one-sided lower bound is at least 1.0. Otherwise
+the time-unit non-inferiority margin path passes only if all three conditions hold:
+
+- the point estimate is at least 1.0;
+- the one-sided 95% lower speedup bound is at least `1 / (1 + delta)`, where
+  `delta = sum(operator saving_ms) / Library stage_ms`, measured in this process
+  and replay set;
+- every eligible operator passed the locked operator timing rule, including its
+  noise-rule evaluation when applicable.
+
+A point estimate below 1.0 rejects. A failed non-inferiority margin rejects. A margin
+without a passed operator gate blocks. No CI half-width comparison grants acceptance.
+Saving measured in a separate process cannot resolve this gate. The result keeps all stage and operator
+ABBA observations, bootstrap settings, CI and measured saving. Each paired output
+hash must match the numeric phase for the same input. Library controls validate this
+measurement contract without requiring Library to be faster than itself.
 
 After its bursts, every timing process replays each case once on each input set and
 records both output hashes. Both must equal the numeric phase's outputs for the same
@@ -370,8 +457,8 @@ only to locked code. A range with another nonce is refused.
 - Kernels a candidate launches from `plan` (the `plan` scope) must be on the
   allow-list too.
 - In a candidate scope, a kernel's mangled and demangled names must both be entries
-  of the PTX bytes the process loaded. A library call is allowed only inside the
-  locked projection helper, as cuBLAS, at a shape the projection baseline covers.
+  of the PTX bytes the process loaded. Oxide candidates must make zero Library
+  calls, including calls inside the locked projection helper.
   Host-device copies are refused.
 - A Library path may not launch a candidate-area entry.
 - Every declared boundary must have a candidate scope with kernels.
@@ -379,17 +466,20 @@ only to locked code. A range with another nonce is refused.
 The numeric and timing processes also track library calls made while a candidate
 scope is open, and, during graph capture, enumerate the nodes each candidate scope
 adds to the captured graph, side-stream branches included, and resolve kernel names with `cuFuncGetName` /
-`cuKernelGetName`. Library kernels outside the projection helper, unlisted kernels,
+`cuKernelGetName`. Library kernels in any candidate scope, unlisted kernels,
 host copies and host or event nodes fail (`profile:captured_library_calls`,
 `profile:graph_nodes`). The driver labels every capture with its case, and
-`profile:graph_nodes` also fails unless each case's captured candidate-kernel set
-equals that case's eager-profile candidate-kernel set. Graph mode is set and verified
-by the locked driver. Projection-node permissions are reset when the driver capture
-ID changes, so node addresses reused after graph destruction cannot hide kernels.
-The ignored `sequential_capture_keeps_candidate_kernels` regression runs fresh
-captures at b1, b1, b7, b32, b33, b64 and b7 in one process with scope tracking on.
-Every capture must report exactly nine candidate kernels, excluding its one
-projection kernel. The ignored `secret_library_algorithms` proof measures Standard and
+`profile:graph_nodes` also fails unless each case's captured candidate-kernel multiset
+equals that case's eager-profile candidate-kernel multiset. Graph mode is set and verified
+by the locked driver. Only Library controls use projection-node permissions. These
+permissions reset when the driver capture ID changes, so node addresses reused after
+graph destruction cannot hide kernels.
+The ignored `sequential_capture_keeps_candidate_kernels` regression uses a real
+Oxide ResNet convolution plan and runs fresh captures at b1, b1, b7, b32, b33, b64 and b7 in one process with scope tracking on.
+For each capture, the same plan first records an eager launch trace on the same
+input. The harness derives the expected kernel multiset from that trace and requires
+capture == eager, including duplicate launches. There is no fixed kernel count and
+no candidate-declared count. The ignored `secret_library_algorithms` proof measures Standard and
 PersistStaticSmallH separately against f64 on the same secret input. Both must have
 FP32 rounding-scale error (below 1e-4 relative L2), and a one-element, one-ULP nudge
 must change the SmallH error by at most 10%. The SmallH/Standard error ratio is
@@ -398,18 +488,124 @@ algorithm's gate. The capture and soundness tests need the qualification environ
 and GPU lock. The ignored `f64_reference_matches_fixture_rounding` and
 `conv_f64_matches_fixture_rounding` tests use fixture intermediates and run on CPU.
 
-### Loaded PTX
+### Loaded artifacts and embedded PTX
 
-The allow-list is built from the exact bytes the locked loader handed to the driver.
-Each loaded module must match a committed file under `src/inference/cuda/ptx/` or
-`tests/cuda_qualify/device/` byte for byte and by area name, and its parsed entries
-must match. Any PTX in a subdirectory of `ptx/` is refused. The result records the
-module hashes and the areas loaded by each numeric, timing and profile process.
-Non-candidate modules must have identical bytes in every process. Each candidate
-area must have identical bytes in every process that loads it. A process that runs
-at least one declared triple must load its candidate area. A process that runs no
-declared triple must load no candidate area. Thus FP32-only coverage loads candidate
-PTX in FP32 processes, but not in TF32 processes.
+`cargo xtask cuda-kernels build-cubins` builds each committed PTX tier for each
+exact architecture in 75, 80, 86, 89, 90 and 120 at or above that tier. The manifest
+pins the cubin hash, its source PTX hash, and the ptxas version and flags.
+`cargo xtask cuda-kernels check` checks these pins and the feature embed masks.
+`check --rebuild` checks committed PTX pins and byte-identical cubin rebuilds
+with the pinned CUDA 13.0.88 ptxas. It does not regenerate PTX. A CPU test checks each host plan's possible kernel names
+against every PTX tier that it can use. The PTX lint rejects generic shared
+addresses from generic `cvta.shared.u64` or `cvta.shared.u32`. Function-wide
+fixed-point taint follows every value instruction, including arithmetic, shifts,
+selection, bitwise operations, calls and vector moves. A tainted narrowing
+conversion or move fails. `cvta.to.shared` converts to a valid shared offset;
+register taint does not cross function boundaries. Dollar-prefixed registers,
+wide arithmetic, vector load elements and narrowing below 32 bits are checked.
+Unknown result widths cannot suppress a tainted narrowing sink.
+
+A production binding resolves a complete module request before any load: the
+area, the tier whose bytes are loaded and the exact artifact. Adding another
+embedded tier never moves a binding. A forced tier limit below the binding's tier
+leaves its tuples on Library. A `PtxJit` pin loads the pinned embedded PTX of the
+binding's tier; a `Cubin { arch, sha256 }` pin loads only that exact architecture
+and hash. A missing or driver-rejected requested
+artifact is a typed refusal, not a request to try the other format. Production
+uses the existing Library fallback where allowed; driver-only mode returns the
+typed refusal. Uncovered production tuples load no candidate module.
+
+The always-on fbank, embedding and segmentation areas have a typed
+`AlwaysOnPtxJit` owner next to the production table. It requests driver JIT of the
+actual embedded PTX on every device, as PR #36 did. No production path can request
+`EmbeddedExact`: that variant exists only in the CUDA qualification test build.
+Always-on cubin adoption is a phase 5 item. It requires end-to-end A/B evidence for
+startup, RTFx and bit-identical outputs before its production owner can change.
+
+An explicit qualification triple requests the exact embedded artifact it declares
+before loading: the device's exact cubin when embedded, otherwise PTX JIT. A
+rejected cubin does not silently become a JIT measurement. The typed successful
+artifact is `Cubin { arch, sha256 }` or `PtxJit { sha256 }`.
+`SPEAKRS_CUDA_FORCE_PTX_JIT=1` is a diagnostic override only. Actual loaded bytes
+still form the selection key, so this override cannot authorize a cubin pin.
+The legacy StageTail fixture retains its explicit JIT policy. Current PR #36
+production pins request JIT without any environment override, including cc 12.0.
+
+The runtime caches one module per area, so a compile-time validator rejects two
+different module requests for one area on overlapping device scopes. One binding
+may carry proofs from several records, but each tuple has one proof per device.
+Both `--check-table` modes still reject a second exported owner for one area, tier
+and capability. Cached modules cannot be replaced by a request for a different
+module. Speed evidence has a typed scope: a point (capability, SM count and device
+name) for new records, or capability-wide for the two retained PR #36 records only.
+The validator rejects a device-dependent selection rule pinned on point evidence, and
+both table modes reject an exported scope that differs from the record's own
+device evidence, so legacy approval is never relabelled as point evidence.
+The selection key includes the tier, exact device capability and loaded artifact.
+A cubin-qualified table entry cannot match JIT, another cubin architecture, or
+other bytes. A mismatch uses Library where allowed, or the typed driver-only
+error. The legacy PR #36 entries remain explicit sm75, cc 12.0, PTX-JIT entries.
+They do not authorize the new cubins.
+
+Selection intent and coverage come before artifact loading. Library controls,
+Library-backed faults, and uncovered tuples do not load a candidate module for
+selection or diagnostics. Library diagnostics use only the production module's
+tier, or the baseline tier when the area loads no module on the device, and the
+device context. A covered Oxide request loads its artifact before it can receive
+a qualification token. The exact candidate-area loading check remains required.
+
+Candidate sources, PTX, cubins and build manifests stay outside the harness lock
+so a new candidate can be measured by the same locked harness. A qualification
+record's `code_sha256` binds the complete candidate-area file sets, including
+unselected PTX tiers, cubin architectures and manifests. The loaded-artifact
+record separately binds the actual binary bytes, source PTX and build metadata.
+Both table checks reject file-set drift and a cubin production pin that differs
+from the shipped file. Legacy PR #36 records retain their explicit JIT mapping;
+they do not gain invented cubin evidence.
+
+Every process prepares its required modules through the same plan owner before
+timing clocks start. Library and uncovered choices still load no candidate module.
+A test-only interval guard covers the clock window and each event interval, and
+refuses driver module loading inside either one. This applies to runtime modules
+and harness PTX, including the unlisted mutant module.
+
+The allow-list uses the actual PTX text embedded in the running binary, not a
+source-tree hash assigned after the run. Each module records
+`embedded_ptx_sha256`. An accepting verdict requires it to match the pinned PTX
+file, the module hash, and the cubin's source PTX hash where applicable. A stale
+binary cannot accept. Parsed entries must also match the PTX. PTX in a
+subdirectory of `ptx/` is refused. Cubin records include exact architecture, actual
+binary hash, source PTX hash, and embedded ptxas version and flags.
+
+Schema-5 records include the device name, exact capability, positive SM count and
+L2 size, driver release and API version, cuDNN and cuBLAS versions, and
+`cuda_version` from `cublasGetCudartVersion`. Device name, SM count and L2 are
+physical-device evidence, not extra selection-key fields. All processes must
+report consistent device and artifact data. Timing and paired replay use a joined
+SM clock sampler. The sampler and its child processes stop before unlock.
+
+### CPU work and GPU ownership
+
+GPU preparation produces the exact FP32 front-end inputs and copies the operator
+weights under the lock. The CPU then computes operator f64 truth without the
+lock. Each TF32 draw uses the same seed, layer-name hash, per-index integer hash
+and one-ULP rule as before. The CPU prepares the draw choices without the lock;
+the GPU applies them after the lock is taken again. Gates, thresholds, samples
+and seeds are unchanged. A context-wide synchronization precedes each CPU section.
+A guard takes the lock again before normal return or panic unwind, so CUDA object
+drops remain locked. Records state lock ownership and each unlocked CPU section.
+Each TF32 draw section binds its case, layer, original seed and output length.
+The CPU-evidence check requires the exact draw set for each emitted band row;
+a section from another case, seed or length cannot satisfy that row.
+
+### Override types
+
+The plan types can request Library or one configuration from an enumerated set
+per area. Each custom configuration has its own pinned accuracy and deterministic
+execution evidence for an exact boundary, batch, math mode and target artifact.
+A private token prevents reuse for another configuration or tuple. These overrides
+are marked **unqualified for speed** in logs and diagnostics. This phase provides
+types and tests only; it adds no CLI or file format.
 
 ### Sanitizer
 
@@ -425,11 +621,12 @@ declares every batch), both math modes. Each tool must complete with zero findin
 within 20 minutes after lock acquisition. A ResNet timeout is split into one process
 per declared convolution and batch; LSTM and Sinc timeouts block.
 
-LSTM candidates may call cuBLAS projections, which the include filter does not
-instrument. The locked projection baseline runs all three tools, unfiltered, on every
+Oxide LSTM candidates must use custom input projections and make zero Library projection
+calls. The previous K2 record remains pinned in production, but K2 cannot pass this new profile rule. The locked projection baseline runs all three tools, unfiltered, on every
 shape the helper can issue at a harness batch (m = 589 x 1, 7, 32, 33, 64; n = 128 to
 512; k = 60 and 256; both modes) and is retained under `tests/cuda_qualify/baselines/`.
-The profile rule allows only those shapes.
+These shapes constrain the Library baseline only. They do not permit any Library
+call in an Oxide candidate region.
 
 Shared-memory initialization is outside all three tools: initcheck covers global
 memory only and racecheck covers hazards. Two checks cover it instead:
@@ -452,6 +649,36 @@ not run the sanitizer tools.
 
 ## Mutation proof
 
+### Phase 2c infrastructure proof and final seal
+
+Phase 2c-1 requires three full Library controls (one per area), one live mutant
+per each of the 13 standard mutant kinds on the area with the most changed
+collection or injection path, and matched ResNet and SincNet StageTail pairs.
+Record each actual device and compiled lock. The exact unchanged gate-decision
+code and every changed collection/injection path are bound in
+`tests/cuda_qualify/PHASE2C1_CARRY_FORWARD.md` and its evidence files. This reduced
+infrastructure proof grants no new production acceptance. If any mutant fails to
+reach its intended gate, stop; do not change its gate, bounds, samples or seeds.
+
+Run all 39 standard mutants at the final phase 2c seal, after phase 2c-2. That
+full area matrix is required even when this infrastructure subset passes. Keep
+each completed run and its verification receipt, copy it off the GPU box at once,
+and skip only verified matching completed runs after a restart. Matched controls
+and faults must run on the same device in the same quiet window. Legacy StageTail
+production fixtures remain cc 12.0 PTX-JIT only.
+
+The phase 2c-1 results are pinned in
+`tests/cuda_qualify/evidence/phase2c1-results.json`, linked by `PROOF.json` and
+`AUDIT_PROOF.json`. They preserve the measured locks and full raw evidence; the
+final owner lock does not relabel a measured binary. Fixture coverage discovery
+reads embedded PTX identity without loading an unused module. The plan owner
+still requires actual loaded-artifact identity before it makes a production token.
+The SincNet matched control passes every check. The ResNet matched proof has a
+shared control/fault stable-module failure in its earlier records; its matched
+criterion passed, but those records grant no production acceptance. The exact
+carry-forward document states this limit and the unchanged paths.
+
+
 A mutant is caught only by its exact tier-stripped check name and reason:
 
 | Mutant | Planted defect | Caught by |
@@ -462,6 +689,9 @@ A mutant is caught only by its exact tier-stripped check name and reason:
 | `Fallback` | library work in the candidate scope | `profile` with `forbidden library kernels` |
 | `Atomic` | floating-point atomic accumulation | `determinism:fixed_reduction_order` with `floating-point atomic in launched custom entry` |
 | `Slow` | the library operation three times | `speed:` with `candidate slower than the faster Library process` |
+| `StageSlow` | replays the candidate stage twice, without adding isolated operator work | `paired_stage:` with `stage regression exceeds zero slowdown` |
+| `StageTail` | adds an intermittent captured GPU spin after a real pinned FP32 candidate stage, with unchanged operators | `paired_stage:` with `non-inferiority margin not established` |
+| `StageAccuracy` | rounds the real TF32 stage output to BF16, without changing isolated operators | `stage_truth:` with `candidate less accurate than Library TF32` |
 | `PhaseCheat` | skips its work in the timing phase | `timing_output:` with `final output differs` |
 | `Unscoped` | launches after its scope closes | `profile` with `outside a candidate or library range` |
 | `Unlisted` | launches a kernel from unrecorded PTX | `profile` with `not on the loaded PTX allow-list` |
@@ -471,7 +701,7 @@ A mutant is caught only by its exact tier-stripped check name and reason:
 An escaped mutant is written as `escaped` and exits 4. A mutant runs only the phases
 its gate reads (always numeric, which includes the secret-input and PTX checks;
 profile for `Fallback`, `Atomic`, `Unscoped` and `Unlisted`; timing for `Slow` and
-`PhaseCheat`), and no sanitizer tools. Library
+`PhaseCheat`; paired replay for `StageSlow` and `StageTail`), and no sanitizer tools. Library
 controls run every phase plus the three positive sanitizer controls; candidates run
 every phase, the positive controls and the candidate sanitizer. The static scan has its own
 proof: `tests/cuda_qualify/scan_fixtures/phase_cheat.rs` reads `SPEAKRS_QUALIFY_PHASE`,
@@ -479,6 +709,167 @@ and `unscanned_call.rs` hands its work to code outside the candidate tree; both 
 refused, in the unit tests and live, copied over the LSTM candidate in a scratch tree.
 A new module elsewhere under `src/` fails the lock before Python starts. `PhaseCheat`
 is the phase cheat with the scan bypassed.
+
+`StageTail` differs from the Library-backed fault seam. It uses only the FP32
+tuples selected by the pinned production table on the actual tier and device.
+Other tuples, including stress batches and TF32, retain Library identity. The
+operators run the real accepted candidate, in both separate-process timing and
+paired replay. A failed margin requires the existing operator gate to have passed;
+neither planted timings nor a forced operator pass can authorize that branch.
+
+The fault applies only to `fp32/first/b1` on ResNet and `fp32/mixed/b32` on SincNet.
+The first 16 collected ABBA blocks use a second captured stage graph; every other
+block uses the normal candidate graph. The delayed graph runs the same real stage
+on the same buffers, then one thread spins on the [PTX device timer](https://docs.nvidia.com/cuda/parallel-thread-execution/#special-registers-globaltimer-globaltimer-lo-globaltimer-hi).
+CUDA events measure this GPU work. There is no host sleep or alteration of timing
+data. The extra duration is 1.7 times the median of five in-process Library stage
+replays for ResNet, and 1.4 times for SincNet. These fixed fault sizes keep the point
+at least 1 while testing the lower tail; they do not change a gate threshold.
+The record holds the calibration replays, requested duration, measured spin time,
+group size/count, and delayed output hashes on both inputs. Both normal and delayed
+hashes must match numeric evidence. ResNet still bootstraps whole operator strata;
+SincNet still uses whole 32-block bootstrap groups, not the shorter fault group.
+
+Hardware proof covers ResNet and SincNet. LSTM StageTail is refused until phase
+2c-2 integrates the Library-free LSTM candidate: the current pinned implementation
+uses cuBLAS projections inside Oxide. This deferral does not exempt those calls
+from the zero-library rule. Shared gate logic also has the exact asymmetric-tail
+regression case and a clearly labelled, altered recorded-data fixture.
+
+## Production table and record cache
+
+Run `python3 scripts/cuda/qualify/qualify.py --check-table`. This host-only check runs
+the locked Rust table-export test with the `cuda` feature. It uses evaluated table
+values, not a parser for Rust source expressions. `--table <json>` checks a scratch
+copy for negative proof. It does not run a GPU or change production selection.
+
+Pinned JSON or gzip JSON records live outside the tree, under
+`$SPEAKRS_QUALIFY_CACHE/records/<sha256>`. The default Mac cache is
+`~/Library/Caches/speakrs-cuda-qualify`. Import exact raw bytes with:
+
+```sh
+python3 scripts/cuda/qualify/assets.py --record-sha256 <sha256> --import-file <file>
+python3 scripts/cuda/qualify/qualify.py --check-table
+```
+
+The default check uses the small owner-locked `ACCEPTANCE.json` summary and needs
+no raw records. Each entry must be a subset of its summarized accepted tuples,
+with matching tier, device capability, area and DER hash. Current area source,
+manifest, PTX and full tested coverage hashes must equal the summary. Missing
+summaries, extra production tuples, changed files or declarations fail closed.
+The pinned tier must also be one that production can load on that device: some
+tier feature supported by the device must embed that tier at or below its own
+limit. A binding names its tier, so a higher embedded variant does not displace
+it. A forced qualification tier that no
+production build can select on the pinned device cannot authorize an entry.
+The summary contains the original record hash, harness lock digest, accepted tuples
+and complete noise-rule inputs, threshold and result. CI runs this offline mode
+and the Python suite. It does not download or publish raw evidence.
+
+For a full local evidence check, use the outside-tree cache root:
+
+```sh
+python3 scripts/cuda/qualify/qualify.py --check-table --records "$SPEAKRS_QUALIFY_CACHE"
+```
+
+This reads `<cache>/records/<sha256>`, verifies exact raw file hashes and re-runs
+the locked evaluator. It re-derives the complete canonical summary; its bytes must
+match the committed summary exactly. The full mode also checks all offline drift
+rules. The DER evidence hash must resolve to a whole-plan receipt in this mode.
+No raw record or generated verdict can silently change the shipped summary.
+
+The table and its derived summary replace `QUALIFIED.json` and `qualified.py`.
+There is one locked noise evaluator. It agrees with the old evaluator on all three
+pinned records, including 20 ResNet and three LSTM noise-blocked cases. Full record
+checks validate phase completion, exact aggregate checks, and required numeric,
+secret, speed, stage and paired evidence for each declared case. Stress batches
+must pass but never grant model-boundary production coverage. Filterbank batches
+B1 through B32 are all production-domain batches; B33 and B64 are not filterbank
+collection cases. `domains.BatchDomain` keeps these domains separate.
+
+New records retain source-file hashes. The three older records retain a driver
+binary hash, not source hashes. Their fixed source, manifest and PTX bindings were
+copied from PR #36's acceptance manifest into the explicit locked legacy mapping.
+Both the original shared candidate-interface hash and its amended hash are reported.
+The original amendment covers `PlanError`, per-tier coverage and production/stress
+batches. Separate fixed old/new pins cover host kernel enumeration, cubin manifest
+metadata and the typed selection domain (config pins, special-value contracts and
+typed plan refusals). Amendments apply in order, so a later pin may amend an earlier
+one, and every applied pin is reported. Each pin states the reason. No amendment
+changes candidate arithmetic or claims new GPU evidence. It is not GPU evidence for a changed operator. Added,
+removed or changed bound files reject. The summary retains this source evidence gap.
+
+Owners generate summaries with `records.write_summaries` from the evaluated Rust
+table and exact raw cache. This is an explicit owner action, followed by full
+comparison, drift tests and a new lock. Qualification proof uses the full record
+mode before the GPU matrix. Summary generation does not run a GPU or approve a
+new candidate. No writable acceptance manifest or second noise-rule copy remains.
+
+### Whole-plan DER receipts
+
+New integrated DER evidence uses a closed schema: `{"schema": 1, "plans": [...]}`.
+There is one plan for each selected math mode, in sorted mode order. Each plan
+binds the following fields:
+
+- `device_scope`: the exact speed-proof point or explicit legacy capability scope
+- `math`, `models`: math mode and both model content hashes from the Rust export
+- `inputs`: input-manifest and reference hashes, plus a positive input file count
+- `pipeline_config_sha256`: the complete integrated pipeline configuration hash
+- `library_artifacts`: tiers and actual-byte keys of the always-on fbank, embedding
+  and segmentation modules
+- `routes`: one route for every exported boundary and its production batches,
+  including Library routes. Candidate routes include area, tier, artifact key and
+  the exact tested `ConfigPin`
+- `baseline`: all-Library routes, frozen control archive hash and DER metrics
+- `candidate`: candidate DER metrics
+- `verdict`: the passing decision, policy hash and canonical baseline/candidate
+  hashes
+
+Both metric records include finite nonnegative DER, an output hash and an identity
+hash and an execution hash. The identity hash covers device, math, model, input, pipeline configuration
+and always-on artifacts. The baseline and candidate must use the same snapshot identity. Each scorer
+metric also binds its own complete route list through `execution_sha256`. The
+baseline execution hash includes its frozen control archive. The verdict binds
+these metric objects, so it cannot be reused after a route, pin or artifact change.
+This schema binds an existing integrated verdict; it adds no DER threshold.
+The policy hash identifies the rule used by the integrated scorer.
+
+Every entry on the same device scope must use the same integrated receipt and
+complete plan domain. A per-area receipt cannot authorize a combined execution
+plan. Raw checks validate the immutable evidence. Offline checks repeat the plan
+binding against the owner-locked receipt, including after a lock refresh.
+
+Only the exact archived PR #36 integrated hash in `der.LEGACY_HASH` can use
+`LEGACY_DER.json`. This mapping fixes the original record/configuration pins,
+model hashes, domain, always-on artifact hashes, scope and A/B verdict. Removed
+tuple permissions stay removed. The old integrated summary has no direct model
+or audio content hashes and no per-process environment query. The model hashes
+come from the archived qualification inputs; the remaining mapping is an explicit
+migration, not a new measurement. `LegacyWholePlan.evidence_gap` retains this gap.
+No other nonempty JSON object is accepted.
+
+### Explicit legacy hardware mapping
+
+Only these two PR #36 records use the legacy hardware mapping in `records.LEGACY`:
+
+| Area | Record SHA-256 | Hardware source report |
+| --- | --- | --- |
+| LSTM (K2) | `3badc1aec939b0e8f7312786d695bec6445de1dacb1f85e44124bf3ac20356f8` | `qualification/k2/REPORT-final-lock.md` |
+| SincNet (K3) | `a4d1a2692b78a814cd2da16f084801c3641bfd11c6d095d610f3a8182ad6f675` | `qualification/k3/REPORT-K3-requalify.md` |
+
+The archived ResNet K1 record is
+`8f8fa3e3c158771e354aad83f4e42fca6fac998aa192b39a966067a4b0035758`, from
+`qualification/k1/REPORT-K1-requalify.md`. It no longer grants a production binding.
+
+The reports are in the `speakrs-native-cuda-records-2026-10-04` research archive.
+They state sm75 PTX on an RTX 5070 Ti, capability 12.0. This is not Turing hardware
+qualification. The mapping supplies only the missing tier/device identity and names
+older binary-only code provenance explicitly. The derived summary also records the
+legacy device name from those reports. It does not bypass a blocked status.
+K2 keeps its raw blocked outcome; the same general noise evaluator used for new
+operator timing must accept its recorded speedups. The PR #36 noise decision
+is documented in `decision-log.tsv`, at 1:54:43 PM CDT on October 3, 2026, and the K1
+and K2 decisions at 4:47:33 AM and 5:08:33 AM CDT on October 4, 2026.
 
 ## Lock
 
@@ -539,62 +930,461 @@ original control archive when reusing its existing projection baseline.
 
 The runtime defaults are segmentation FP32, embedding TF32,
 `CudaLstmAlgorithm::PersistStaticSmallH`, and enabled CUDA graphs. The frozen control
-archive retains the exact source used for the original qualification; it is not
-rewritten during integration.
+archive retains the exact Library source for the current lock. Renew it when the
+locked Rust harness changes, before collecting a new baseline.
 
-## Production qualification manifest
+## Phase 2a ownership and production policy
 
-CI runs `python3 scripts/cuda/qualify/qualified.py check` on every push. This CPU-only
-check binds each `implementation::PRODUCTION` candidate area to `QUALIFIED.json`.
-It checks every shipped PTX tier, its area `.manifest`, all candidate host and
-kernel area source modules, the shared `candidate.rs` execution helpers, and the
-exact coverage declared in the code. Added or removed files and missing production entries fail. Unfamiliar coverage syntax fails
-closed and needs a checker update.
+Qualification builds use `cuda` (which enables `_cuda-libraries`), never a target-only feature. Library controls construct
+Library plans; candidates construct Oxide plans from a test-only qualification token.
+Production selection uses the boundary, batch, math, actual area PTX tier, and exact
+device capability. Production model batches are 1 and 32; 7, 33 and 64 remain stress
+cases. The production table pins accepted record and integrated DER hashes. Each result records its tier/device, and the host-only record check validates the
+production entries.
 
-A kernel change needs a new qualification record, then acceptance, then a manifest
-commit:
+## Candidate plan refusals
+
+Candidate traits return `Result<Self, PlanError>`. A validated production token
+may receive `DeviceUnsupported` when a device cannot host a candidate. With the
+Library policy allowed, dispatch then builds only the Library plan for that boundary
+and loads its library at that point. It does not build a dormant second plan. With
+the driver-only policy, the refusal returns `CandidateDeviceUnsupported`, with the
+area, boundary, batch, math, actual tier, device capability and reason. Explicit and
+qualification selections return that error and never fall back. Real CUDA or model
+errors always propagate. A successful candidate remains the only plan owner.
+
+### Harness proof records
+
+`tests/cuda_qualify/PROOF.json` pins the raw hashes for the Library controls and
+mutation proof. The owner lock covers this small receipt. It does not grant
+production coverage: Library controls and mutants cannot authorize a replacement.
+The receipt preserves each record's original harness digest, tier and device.
+A later owner lock can retain proof only with an explicit, reviewed comparison
+of the changed files; it cannot silently relabel the original record.
+
+Raw proof records remain outside git, named by their exact SHA-256. The phase 2b
+Mac proof uses `~/.local/share/speakrs-cuda-qualify/records/<sha256>`. To read an
+imported production record from that cache, pass its root with `--records`:
 
 ```sh
-cargo xtask cuda-qualify <resnet|lstm|sincnet> Oxide
-python3 scripts/cuda/qualify/qualified.py accept /archive/qualify-<area>-Oxide-<run>.json
-python3 scripts/cuda/qualify/qualified.py check
-python3 scripts/cuda/qualify/lock.py
-git add scripts/cuda/qualify/QUALIFIED.json scripts/cuda/qualify/LOCK
+python3 scripts/cuda/qualify/qualify.py --check-table --records "$HOME/.local/share/speakrs-cuda-qualify"
 ```
 
-The accept command also reads `.json.gz` archives. It verifies that the record's
-loaded candidate PTX hashes match every shipped tier and that recorded coverage
-matches the code. It stores the record filename and SHA-256 of its exact file bytes,
-the original qualification lock digest, source hashes, coverage and verdict basis.
-The original lock digest is historical evidence; it does not claim that the current
-harness has the same digest. A manifest update changes the current lock, so re-lock
-after acceptance. Do not rewrite the frozen Library control or the old records.
+The full tool logs and archive hash are retained with the proof report. Raw file
+hashes identify the original JSON bytes, not a reserialized copy.
 
-Each tier must first contain complete phase evidence and a completed harness verdict.
-Acceptance then requires `accepts_replacement: true` with no failed checks, or this
-rule: all non-passing checks must be speed checks blocked only by Library process spread,
-with no hard failures. For each blocked case, the smaller of the two Library over
-candidate speedups must be at least `1 + 3 * max(Library spread, spread bound)`.
-The command recomputes the spread and both speedups from the four recorded medians.
-The manifest retains the table of blocked cases and their margins. The qualification
-measurement gates remain unchanged; this command records the acceptance decision.
+### Audit decisions for phase 2b
 
-### Retained qualification records
+The TF32 truth ceilings are componentwise: cosine, max-abs and relative L2 may take
+their maxima from different perturbation draws. This is an accepted residual of
+the root-decided max(unperturbed Library, eight draws) rule. The Grok audit measured
+a lift of at most 6.7% in cosine error and about 1.9% in SincNet max-abs. These lifts
+are not a new tolerance or a change to the gate.
 
-The initial entries use these outside-repository archives under
-`~/code/research/cuda-kernel-opportunities/speakrs-native-cuda-records-2026-10-04/qualification/`:
+The owner lock includes `.github/workflows/ci.yml`. Offline CI validates the locked
+acceptance summaries and current shipped bindings; it does not open raw records.
+Full raw-record re-derivation (`qualify.py --check-table --records <cache>`) runs on
+the GPU box at every re-lock. No record publication or download URL is required.
 
-| Area | Archive | Verdict basis | Original lock prefix |
-| --- | --- | --- | --- |
-| resnet | `k1/qualify-resnet-Oxide-20261004T064208.284837Z.json.gz` | Library-noise rule, 20 blocked cases | `368389d2` |
-| lstm | `k2/qualify-lstm-Oxide-20261004T095844.546766Z.json.gz` | Library-noise rule, 3 blocked cases | `4bb7818f` |
-| sincnet | `k3/qualify-sincnet-Oxide-20261004T093054.587886Z.json.gz` | `accepts_replacement` | `368389d2` |
+Production loadability follows the locked `AreaPtx` feature embed masks and each
+tier feature. A PTX file on disk with no matching embed mask cannot make a table
+entry loadable. The cubin/JIT artifact must also match the qualified entry.
+The current production areas ship only sm75, so their current table proof is not
+a claim that an unembedded future variant is production-loadable.
 
-**Source evidence gap:** schema-3 records contain loaded PTX hashes and coverage, but
-not host-source, kernel-source, or PTX build-manifest hashes. The initial manifest
-captures these hashes at acceptance, including the device-capacity fallback change.
-These hashes prevent later unrecorded changes; they do not prove that the old run
-used the same source or build-manifest bytes. Keep this gap visible in each entry. Do not treat a source-only acceptance of
-an old record as a new qualification. Future host changes need a new run under the
-updated harness, as do kernel and PTX changes. The archived PTX hashes match the
-initial shipped files exactly.
+### StageTail matched-candidate control
+
+`StageTailControl` is a test-only, non-accepting control. It selects exactly the
+same pinned FP32 production plans and coverage as `StageTail`, runs the same
+numeric, operator timing and paired stage phases, and loads the same recorded
+spin module. It does not capture or enqueue a delay. Neither choice grants
+production acceptance. In the same quiet device window, the proof requires the
+mutant to fail its intended paired-stage margin check and that same check to pass
+in the control. After the unchanged locked noise evaluator is applied to both
+records, the mutant must have no new failure except that margin. It must also
+have no new non-timing failure that the control passes. Raw blocked checks can
+change in both directions between runs of the same binary; the proof records
+these flips, both raw and evaluated failure sets, and every Library spread.
+The comparison changes no qualification gate, noise bound or record verdict.
+
+The locked `tests/cuda_qualify/AUDIT_PROOF.json` pins the two matched pairs and
+the offline replay of all 42 prior control and mutant verdicts. All 39 prior
+intended-gate catches are unchanged. ResNet and SincNet StageTail both reach the
+margin path with a point estimate above 1, positive measured operator saving,
+and a passed operator gate, then fail its one-sided lower-bound requirement.
+The same paired check passes in each no-fault control. Both pairs have no new
+non-timing failure. ResNet has raw operator noise flips; the receipt retains
+the raw sets, all noise evaluations, and a hash for every timing spread row.
+The receipt grants no production coverage.
+
+The ResNet pair keeps its original compiled lock. Its later direct-selector
+correction is used by the isolated SincNet test only: ResNet's unchanged
+`plan_selection` returns the pinned token before that branch. The receipt pins
+the exact source diff and both source snapshots. SincNet uses the corrected
+snapshot. Final receipt and documentation changes do not relabel either
+compiled digest or alter measured evidence. Large archives and raw records
+remain outside git in the SHA-addressed qualification cache.
+
+The production artifact follow-up is pinned in
+`tests/cuda_qualify/evidence/phase2c1-production-artifacts.json`. A short shared-lock
+proof of the default CUDA build on cc 12.0 selects a SincNet tuple and a ResNet
+tuple with their PR #36 PTX-JIT artifacts, without a force-JIT environment override.
+No cubins are loaded for those areas. Host tests check all 52 current production
+tuples and exact cubin requests. A requested-artifact refusal does not try another
+format; production uses Library where allowed, and driver-only mode keeps the
+typed error. No new speed or accuracy qualification is claimed.
+
+
+The Grok audit-fix proof is pinned in
+`tests/cuda_qualify/evidence/phase2c1-grok-fixes.json`, linked from both proof
+indexes. A default-build shared-lock proof records all three always-on areas
+and both tested production areas as PTX JIT, with their embedded hashes and no
+cubin. New full SincNet and ResNet Library controls passed every check with the
+case-bound draws and pre-timing module preparation. Each raw record keeps its
+measured source, control archive, device and compiled lock. The final lock binds
+the receipts, not a new GPU measurement. The earlier LSTM projection baseline
+retains its old archive identity and cannot qualify a later control archive.
+Full 39-mutant proof remains required at the final phase 2c seal after phase 2c-2.
+
+### Filterbank DFT producer target
+
+`cuda-qualify fbankdft Library` measures `fbank.dft`. The producer accepts waveform
+`[B,160000]` and writes energies `[B,998,80]` before the unchanged log/CMN consumer.
+Its batch domain is 1 through 32 in each math mode. Cases are first, last and short
+at B1, mixed at every B2 through B32, and short at B7. Existing targets retain their
+cases, including the B33 and B64 stress cases.
+
+The Library producer implements `FbankCandidate` with the always-on `Fbank` module.
+The candidate is `candidate/fbank.rs`; its kernel `fbankdft_fft_mel_accurate` is the
+`fbankdft` kernel-crate area, shipped as sm75 PTX with exact-architecture cubins.
+`FbankDft` is a record-owned module area after the three model areas in route
+precedence; it does not replace the always-on `Fbank` module, whose PTX and pinned
+JIT stay byte-identical. The `Oxide` choice selects through `plan_selection`, loads
+the explicit qualification module and builds the plan from `FbankPin::FftMelAccurate`
+in `Qualified::fbank`, as production will from an accepted record. The pin runs the
+same FP32 kernel in both math modes. No production entry exists. Library and fault
+runs load no candidate artifact.
+
+Both input sets use the hash-pinned B32 WeSpeaker fbank snapshot. First, last and
+short select rows 0, 17 and 18. Mixed selects its first B rows. The alternate set is
+first for a short case and short for every other case. Audio, energies and features
+select the same rows. The driver checks that the two audio hashes differ. The
+energy reference is the unique matrix-multiply output with shape `[32,998,80]`.
+The pinned snapshot calls it `tensor/matmul`; operation matching accepts lowercase
+PyTorch and capitalized ONNX names. An absent or ambiguous match is an error.
+The stage reference in FP32 and TF32 is independent CPU f64 truth for every
+`[B,998,80]` output. It uses the same waveform bytes as the candidate and Library.
+The definition is `fbank-stage-f64-direct-v1`: scale by 32768; remove the ordered
+400-sample frame mean; apply exact f64 pre-emphasis 0.97 and symmetric Hamming;
+compute direct 512-point DFT sums; accumulate built-in mel coefficients converted
+from f32 to f64; floor energies at `f64::from(f32::EPSILON)` and take the log;
+then subtract each row/mel ordered mean over 998 frames. Each frame computes 257
+powers once, then 80 ordered mel sums. No FFT or GPU output defines this truth.
+The exact Hamming coefficients are not replaced with model f32 coefficients.
+The emitted constants identity records their rounding difference.
+
+Both first and repeated stage errors, cosine and argmax diagnostics use these
+unrounded f64 values. Output SHA-256 still hashes actual candidate FP32 bytes.
+`tensor/fbank` comparisons remain under `fixture_diagnostic`, with
+`acceptance_bound: false`. They are not used by stage acceptance.
+
+FP32 uses the unchanged `segmentation_parity` rule: relative L2 and max-abs at
+most 1.10 times the Library errors, with no extra argmax flips. TF32 uses the
+unchanged maximum of unperturbed Library error and eight perturbation errors,
+all against this same f64 truth. The seeds remain 11, 23, 37, 41, 53, 67, 79, 97.
+The existing TF32 argmax rules remain unchanged.
+
+`lock::StageTruthCase` and `CpuWork::StageTruth` bind the unlocked `stage_f64`
+CPU section to the emitted `stage_truth` identity. It includes exact case and
+fixture row selection, waveform hash, actual input/output shapes and lengths,
+unrounded f64 truth hash, definition and constants hashes. Complete deterministic
+evaluation has no sampling seed. Python rejects missing, incomplete or mismatched
+bindings, wrong ownership and unequal candidate/Library/draw truth identities.
+Verify mode requires a complete serial/parallel byte proof for each stage case.
+
+The private CPU reference owns an exact-byte waveform row cache under one fixed
+constants owner. Candidates cannot access this cache. First-time rows are
+computed in both policies in verify mode; later cases assemble full outputs
+from the same immutable rows and get their own complete proof and binding.
+Input keys and truth arrays stay in memory. Direct DFT CPU cost can be high;
+cache reuse does not reduce the scored output set or alter a reduction.
+
+Other targets retain their existing full-stage references: FP32 fixtures and
+same-input FP32 Library output for TF32. Their independent operator f64 checks
+are not complete stage references. The all-stage f64 extension is not enabled.
+Historical records remain unchanged. New fbank stage proof must use the corrected
+reference; old ORT-based stage proof does not cover this path.
+
+The secret check transforms audio in memory and computes 4096 stratified f64
+energy samples. It uses direct DFT sums, exact f64 Hamming and pre-emphasis, and
+the fixed built-in mel coefficients converted to f64. No Library output defines
+the truth. The numeric, timing, paired, profile and sanitizer checks use the
+existing gate functions and constants. The full Library stage uses the original
+producer and consumer with no extra device copy.
+
+| Fault | Filterbank path | Reason or affected evidence |
+| --- | --- | --- |
+| Precision | Applies | Rounds waveform inputs before the producer |
+| Shape | Applies | Omits outputs outside B32 |
+| Fallback | Applies | Real cuBLAS DFT call in a candidate scope |
+| Tail | Applies | Omits the partial output tile |
+| Atomic | Applies | Launched FP32 atomic reduction |
+| StageSlow | Applies | Extra full stage replay in paired timing |
+| StageAccuracy | Applies | TF32 log/CMN output rounding |
+| Slow | Applies | Three producer runs per invocation |
+| PhaseCheat | Applies | Skips the producer in the timing process |
+| Unscoped | Applies | Extra launch after the candidate scope |
+| Unlisted | Applies | Launch from an unrecorded module |
+| Lookup | Applies | Reuses the first waveform instead of fresh audio |
+| UninitShared | Applies | Launched entry with an unstored shared load |
+| StageTail and StageTailControl | Not applicable yet | Require an accepted production plan; no such fbank plan exists |
+| WrongLayout | Not applicable | No padded segment or padded writer exists at this boundary |
+
+The first-use faults have three names: `FirstUseFallbackEager`,
+`FirstUseFallbackCaptured`, and `FirstUseFallbackReplay`. Each makes one real
+cuBLAS call in a candidate scope at its selected position. `FirstUseFallback`
+is an alias for replay. Each variant must fail `profile` with `forbidden library
+kernels`. Failure at `profile:captured_library_calls` alone does not count.
+
+### Short profile lifecycle
+
+The nsys process includes plan construction, five warm-ups, one eager window,
+capture and graph instantiation, and one graph replay per input set and boundary
+or stage. Each warm-up, capture, and replay has a separate `lifecycle/` window.
+The parser checks plan kernels outside windows. It rejects an unowned kernel
+outside windows and candidate execution without a lifecycle window.
+
+Capture keeps its real candidate and API NVTX scopes. A call scope inside a
+candidate scope fails the profile gate even when capture produces no eager
+kernel event. Captured nodes remain separate evidence. A graph node cannot count
+as a correlated eager launch. The parser still rejects graph-node events without
+direct per-layer launch ownership; it does not hide graph attribution errors.
+
+Every profile process also makes a fresh-input enqueue for each covered boundary
+and math mode. It uses the existing in-memory audio transformation and secret seed
+owner. Fresh weights, inputs, and output samples are not written to disk. Numeric
+sampling and numeric rules do not change. Fresh windows have the `lifecycle/`
+prefix and do not change the one-invocation eager kernel multiset. The receipt
+requires a correlated kernel in every expected fresh boundary/batch/math window.
+
+A process with side streams also produces an eager-only trace. The harness checks
+both traces. `short_profile` keeps the captured lifecycle trace. `profile_traces`
+lists every produced SQLite file, its hash, and its check receipt. An unread trace,
+a failed receipt, or changed trace bytes fail `profile:trace_receipts`.
+
+| Existing profile check | Coverage |
+| --- | --- |
+| `profile` | All lifecycle traces, API scopes, plan kernels, warm-ups, eager calls, capture, replay, and fresh-input enqueues |
+| `profile`: stream rules | Correlated launches in both traces; side-stream ownership still uses the eager trace |
+| `profile:captured_library_calls` | Separate host call counter for all captures and typed first-use hooks |
+| `profile:graph_nodes` | Captured node restrictions and the unchanged eager set/multiset comparisons |
+| `profile:sequential_capture` | The separate seven-case trace and its multiset check; that trace also gets a profile receipt |
+| `determinism:fixed_reduction_order` | All custom entries in the retained profile trace |
+| `ptx:loaded_bytes/stable` | Module inventories from both the lifecycle and eager-only profile processes |
+
+No threshold, bound, sample count, seed policy, numeric rule, timing rule, or noise
+rule changes. Host checks do not replace the box pilot.
+
+### Ordered parallel CPU evidence
+
+CPU truth uses independent output samples, LSTM rows or complete fbank frames as work units. Each sum,
+DFT bin, gate sum and recurrence keeps its original reduction order. Sampling
+indices and RNG state are prepared serially. Worker chunks join in index order.
+TF32 draws use the same independent per-index integer hash as the frozen PTX.
+This work remains inside the existing unlocked `lock::cpu` section.
+
+`qualify.py ... --cpu-mode serial|parallel|verify` selects the policy. Parallel is
+the default. Verify computes both policies in one process on one immutable
+in-memory snapshot. It compares evidence bytes, including sample indices, f64
+bit patterns, and draw bytes. It records a hash and the exact CPU section binding
+in `gpu_lock.cpu_byte_identity`. It adds no duplicate ownership section and writes
+no input snapshot to disk. The live proof must run on the GPU box before G0 ends.
+
+Each command records elapsed wall seconds. `phase_wall_seconds` separates build,
+CPU truth, CPU draws, numeric, timing, paired, profile and sanitizer work. CPU
+truth and draws are subsets of numeric wall time, not extra elapsed time. CPU
+work excludes GPU lock wait; command wall time includes it. A retained eager
+trace is included in profile time. No timing gate uses these wall-time fields.
+
+### Comparison environment receipts
+
+Both table modes require one driver/cuDNN/cuBLAS file fingerprint for all entries
+on one device. New acceptance receipts also bind the queried driver, CUDA,
+cuDNN and cuBLAS versions. Every retained numeric, timing and paired process must
+match the record's device and versions, including the frozen Library controls.
+The locked-summary mode checks the derived receipt; raw-record mode derives it
+again from the immutable record.
+
+The two retained PR #36 record hashes use an explicit legacy receipt. Those records
+have installed Library file hashes but no per-process version query. Their receipt
+retains those file hashes and this evidence gap. It does not invent version fields
+or extend the mapping to other records.
+
+TF32 negative tests cover equal FP32/TF32 outputs with worse candidate accuracy,
+a max-absolute-error-only failure, fixture-only accuracy, invalid truth identity,
+invalid metrics or draws, and stale comparison environments. The truth rule remains
+`max(unperturbed Library error, maximum draw error)` for each metric.
+
+### Tuple configuration receipts
+
+Each production export names both its accuracy record and its speed record. If the
+hashes differ, both immutable records must qualify the tuple, artifact, device,
+source and configuration. The table never takes accuracy from a Library control
+or an unresolved record. Repeated records for one module binding are allowed;
+overlapping scopes with different tiers or artifacts are rejected.
+
+New numeric processes record the complete configuration pin supplied by locked
+code to each successful plan. Both table modes require each selected tuple to
+match its record's pin. The two retained PR #36 hashes use a separate fixed mapping:
+LSTM `LegacyCooperative` and Sinc `ConvAbsPool`. That mapping is not read from the
+live production table.
+
+### Loaded comparison Library bytes
+
+Modern comparison processes retain `loaded_libraries`: the exact file paths and
+SHA-256 hashes that provide cudarc's driver, cuDNN and cuBLAS API symbols. The
+locked driver finds each symbol in `/proc/self/maps` and hashes that provider,
+including providers selected by `LD_LIBRARY_PATH`. It does not infer these bytes
+from an installation directory or API version. All numeric controls/candidates,
+timing and paired processes must agree. Device-wide table checks compare the
+same fingerprints. `sanitizer_fingerprint` stays separate for the tool policy.
+Only exact PR #36 records use the explicit installed-file legacy receipt; its
+missing process-loaded evidence remains a historical gap.
+
+Each first-use variant prepares its own cuBLAS handle and one-element operands
+before work starts, outside capture and timing. The handle does not change the
+stage handle's math mode. The typed hook checks exactly one API call. Eager
+warm-ups cannot consume a captured-enqueue or replay hook.
+
+The profile command pins `--cuda-graph-trace=graph`. Replay is recorded as a whole
+CUDA graph; eager kernel attribution remains unchanged. Capture's locked node
+inventory supplies the per-node graph checks. This is the documented default
+on supported drivers, now explicit to avoid a tool-default change. The box pilot
+must confirm that the installed tool accepts it. See the
+[NVIDIA Nsight Systems graph trace guide](https://docs.nvidia.com/nsight-systems/UserGuide/index.html#cuda-graph-trace).
+
+### Segdense and Wideconv collection paths
+
+Each Segdense operation has its own collection path. Use
+`cuda-qualify segdense Library --collection NAME`, or the exact target below.
+`cuda-qualify wideconv Library` collects all 22 Wideconv boundaries. These
+record-owned areas have no candidate kernels or production entries yet. Oxide
+fails closed until the kernel ports provide a candidate and declared coverage.
+
+| Target | Boundary set | Stage |
+| --- | --- | --- |
+| `segdense-conv1` | `sincnet.conv1`, raw five-tap convolution | Segmentation |
+| `segdense-conv2` | `sincnet.conv2`, raw five-tap convolution | Segmentation |
+| `segdense-linear0` | `linear0`, GEMM with bias and leaky ReLU | Segmentation |
+| `segdense-linear1` | `linear1`, GEMM with bias and leaky ReLU | Segmentation |
+| `segdense-classifier` | `linear2`, GEMM with bias and log-softmax | Segmentation |
+| `segdense-embedding` | `resnet.seg_1`, broadcast bias and GEMM | Embedding |
+| `wideconv` | Stem, both convolutions in stages 3 and 4, and the three downsample shortcuts | Embedding |
+
+Each path keeps the model batch domain and both math modes. Numeric, secret,
+timing, paired, profile and sanitizer collection use the same path inventory.
+The full stage uses the original Library operation and its unchanged consumers.
+Wideconv shortcuts use bias without ReLU. The second block convolution includes
+the real residual. Wideconv has route precedence over the existing ResNet area
+when both areas have an explicit request for the same boundary.
+
+| Mutant | conv1 | conv2 | linear0 | linear1 | classifier | embedding | wideconv |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Precision | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| Shape | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| Fallback | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| FirstUseFallback | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| FirstUseFallbackEager | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| FirstUseFallbackCaptured | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| FirstUseFallbackReplay | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| Tail | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| Atomic | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| StageSlow | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| StageAccuracy | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| Slow | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| PhaseCheat | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| Unscoped | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| Unlisted | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| Lookup | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| UninitShared | Applies | Applies | Applies | Applies | Applies | Applies | Applies |
+| StageTail | No plan | No plan | No plan | No plan | No plan | No plan | No plan |
+| StageTailControl | No plan | No plan | No plan | No plan | No plan | No plan | No plan |
+| WrongLayout | No layout | No layout | No layout | No layout | No layout | No layout | No layout |
+
+`No plan` means the fault needs an accepted production plan. None exists for
+these areas. `No layout` means the padded-layout boundary is outside this task.
+These cells are refused before GPU work. Lookup caches only the pinned mixed
+fixture output with the original model weights. It does not cache or compute a
+fresh secret input. All three first-use variants use the typed lifecycle hook.
+The old FirstUseFallback name remains a replay alias.
+No gate, bound, seed, sample count or noise rule changes.
+
+
+### Profile audit source checks
+
+The locked host scan refuses `load_kernels` and module, artifact, function, PTX,
+cubin, or driver-library loading in the candidate tree. Candidate plans use the
+`LoadedKernels` given by the locked owner. The candidate directory stays outside
+the source lock. The scan rules and regression tests stay inside it.
+
+Modern DER receipts must match the typed owner's `der_inventory`: input manifest,
+reference inventory, file count, pipeline configuration, and baseline control
+archive. A valid hash string and recomputed receipt hashes are not sufficient.
+The current owner exports `Missing` for all four DER source inventories. No
+integrated DER source pin is present. Modern receipts fail with the missing source
+names until real locked sources are added. Qualification tensor assets and the
+qualification control archive do not replace integrated DER sources. The exact
+legacy DER mapping and its stated evidence gaps do not change.
+
+Dense secret sampling keeps the existing stratified sampler. Dense output shape
+is `[B*rows, columns]`: each matrix row is a sampler row. At B64, the 589-row
+segmentation sites cover at least 37,696 rows. The 4096 sample rule is a minimum,
+not a cap. The embedding head has three rows per item. No dense sample count,
+seed, index order or reduction order is reduced to limit CPU work.
+
+Wideconv uses equal, contiguous operator strata in paired timing, with one live
+operator pair. Each isolated operator is released before the full stage is
+allocated. Stage input uploads precede each paired observation on both sides.
+Stage timing alternates input sets by sample; isolated operators alternate their
+independently owned input sets by replay. Uploads remain outside event timing.
+
+### H0b-2 prepared later-candidate seam
+
+`test_support::candidate_seam` is test-only. No Segdense or Wideconv port is
+registered by default. Real Oxide remains unavailable. The CPU fixtures do not
+supply production identities, coverage or artifacts.
+
+A port implements `DenseCandidate`, `SegConvCandidate` or `ConvCandidate`. Its pin
+implements `PinEvidence`: the evidence must include the complete entry, tile,
+splits, packing and layout. Dense and temporal plans receive the owner's
+`LoadedKernels`. Their enqueue methods accept views. Conv keeps its existing API.
+No candidate plan may resolve or load a module.
+
+Register the implementation once per process with `register_dense`,
+`register_temporal` or `register_spatial`, using the exact selected
+`ModuleRequest`. A context-aware port can use `register_factory<F>` and the typed
+`Factory`/`Executor` protocol when its complete pin needs device facts. Factory
+resources include the actual operation weights and bias, runtime and already
+loaded module. No new locked plan enum variant is needed.
+
+Both isolated Operator creation and Stage installation call `Owner::prepare`.
+The selected `Prepared<Executor, Pin>` keeps the fixed operation, full typed pin
+and loaded module identity. It checks family, module identity and implemented
+coverage at the loaded tier before plan construction. Each call checks the exact
+operation, buffer lengths and residual/epilogue match before any candidate work.
+Candidate owners do not call the Library producer. Full-stage hooks pass the
+actual weight, bias and residual views. Enqueue adds no staging allocation or
+output copy. The no-owner Library path keeps the original operations.
+
+The common probe connects `new_probe::declared_coverage`,
+`new_probe::preload_candidates` before Clocks starts, and
+`new_probe::configurations`. The prepared receipt query is
+`candidate_seam::planned`. A port still needs its registration call, real
+artifact and pin sources before it can run. Existing production selection is
+unchanged.
+
+Dense sampling keeps `[B * rows, columns]` and the existing stratified sampler.
+4096 is a minimum, limited only by total output length, not a cap. For CPU test
+seed 73, B64 Linear0 and Linear1 each select 37,824 values; the classifier selects
+37,701. These samples cover every row and column. Qualification seeds and f64
+reduction order are unchanged.

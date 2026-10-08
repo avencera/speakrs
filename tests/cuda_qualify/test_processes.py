@@ -43,6 +43,21 @@ class Processes(unittest.TestCase):
             qualify.collect("resnet", implementation, Path(directory), result)
         return result
 
+    def test_matched_pinned_control_can_never_accept_a_replacement(self):
+        def passed(target, implementation, directory, child, tier):
+            child.update(
+                status="passed", checks=[{"check": "speed:fixed", "passed": True}]
+            )
+
+        result = self.collect("StageTailControl", passed)
+        self.assertEqual(result["status"], "passed")
+        self.assertFalse(result["accepts_replacement"])
+        self.assertNotIn("mutant_gate", result)
+        self.assertEqual(
+            qualify.CONTROL_PHASES["StageTailControl"],
+            qualify.MUTANT_PHASES["StageTail"],
+        )
+
     def test_incomplete_tier_can_never_accept_a_replacement(self):
         def incomplete(target, implementation, directory, child, tier):
             child.update(status="blocked", reason="required sanitizer not run")
@@ -110,6 +125,74 @@ class Processes(unittest.TestCase):
                 with self.assertRaisesRegex(qualify.Rejected, "shared GPU lock"):
                     qualify.command(argv, {}, Path("unused.log"), [])
             run.assert_not_called()
+
+    def test_cpu_lock_evidence_must_be_unlocked_and_complete(self):
+        def process(owner="child", sections=None, count=2):
+            return {
+                "rows": [{"id": "secret", "secret": True}] if owner == "child" else [],
+                "gpu_lock": {
+                    "path": qualify.GPU_LOCK,
+                    "owner": owner,
+                    "cpu_sections": sections
+                    if sections is not None
+                    else [{"work": "f64", "locked": False, "case": "secret"}],
+                    "gpu_sections": count,
+                },
+            }
+
+        qualify.validate_gpu_ownership(process(), "numeric")
+        qualify.validate_gpu_ownership(process("parent", [], 1), "profile")
+        for evidence in (
+            {},
+            process("parent"),
+            process(sections=[{"work": "f64", "locked": True, "case": "secret"}]),
+            process(sections=[{"work": "unknown", "locked": False}]),
+            process(count=1),
+            process(sections=[], count=True),
+        ):
+            with self.assertRaises(qualify.Rejected):
+                qualify.validate_gpu_ownership(evidence, "numeric")
+        with self.assertRaises(qualify.Rejected):
+            qualify.validate_gpu_ownership(process("parent"), "sanitize")
+
+    def test_child_lock_claim_cannot_unlock_other_gpu_commands(self):
+        binary = str(qualify.BOX / "target/release/driver")
+        env = {
+            "SPEAKRS_QUALIFY_PHASE": "numeric",
+            "SPEAKRS_QUALIFY_LOCK_OWNER": "child",
+        }
+        with patch.object(qualify.subprocess, "run") as run:
+            for argv in (
+                [binary, "--exact", "other_test", "--ignored", "--nocapture"],
+                ["nsys", "profile", binary],
+                ["compute-sanitizer", binary],
+                [binary, "--exact", qualify.PROFILE_TEST, "--ignored"],
+            ):
+                with self.assertRaisesRegex(qualify.Rejected, "shared GPU lock"):
+                    qualify.command(argv, env, Path("unused.log"), [])
+            run.assert_not_called()
+
+    def test_gpu_tool_owner_overrides_child_mode_without_nested_lock(self):
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(
+                qualify.subprocess, "run", return_value=SimpleNamespace(returncode=0)
+            ) as run,
+        ):
+            steps = []
+            qualify.gpu_command(
+                ["nsys", "profile", "driver"],
+                {"SPEAKRS_QUALIFY_LOCK_OWNER": "child"},
+                Path(directory) / "tool.log",
+                steps,
+            )
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[:2], ["flock", qualify.GPU_LOCK])
+            self.assertEqual(argv.count("flock"), 1)
+            self.assertEqual(
+                run.call_args.kwargs["env"]["SPEAKRS_QUALIFY_LOCK_OWNER"], "parent"
+            )
+            self.assertEqual(steps[0]["gpu_lock_owner"], "parent")
 
     def test_every_positive_control_needs_its_live_fault(self):
         faults = {
@@ -320,6 +403,8 @@ class Processes(unittest.TestCase):
             "profile": "profile",
             "determinism:fixed_reduction_order": "profile",
             "speed": "timing",
+            "paired_stage": "paired",
+            "stage_truth": "numeric",
             "timing_output": "timing",
             "secret": "numeric",
             "ptx:shared_initialization": "numeric",
@@ -374,11 +459,115 @@ class Processes(unittest.TestCase):
         self.assertEqual(qualify.EXIT_CODES[result["status"]], 4)
         self.assertFalse(result["accepts_replacement"])
 
-    def test_every_driver_process_holds_the_lock(self):
+    def test_partial_resnet_coverage_binds_70_preparations_to_63_secret_rows(self):
+        cases = [
+            f"tf32/secret/b{batch}/resnet.layer{stage}.{block}.conv{conv}"
+            for batch in qualify.BATCHES
+            for stage, blocks in [(1, 3), (2, 4)]
+            for block in range(blocks)
+            for conv in (1, 2)
+        ]
+        omitted = {
+            f"tf32/secret/b1/resnet.layer2.{block}.conv{conv}"
+            for block in range(4)
+            for conv in (1, 2)
+        } - {"tf32/secret/b1/resnet.layer2.0.conv1"}
+        sections = [{"work": "f64", "locked": False, "case": case} for case in cases]
+        rows = [{"id": case, "secret": True} for case in cases if case not in omitted]
+        self.assertEqual((len(sections), len(rows)), (70, 63))
+        process = {
+            "rows": rows,
+            "gpu_lock": {
+                "path": qualify.GPU_LOCK,
+                "owner": "child",
+                "cpu_sections": sections,
+                "gpu_sections": 71,
+            },
+        }
+        qualify.validate_gpu_ownership(process, "numeric")
+        sections[0] = {"work": "f64", "locked": False, "case": "wrong case"}
+        with self.assertRaisesRegex(qualify.Rejected, "missing unlocked f64"):
+            qualify.validate_gpu_ownership(process, "numeric")
+        sections[0] = sections[1]
+        with self.assertRaisesRegex(qualify.Rejected, "duplicate prepared"):
+            qualify.validate_gpu_ownership(process, "numeric")
+
+    def test_numeric_truth_and_band_rows_require_unlocked_cpu_evidence(self):
+        process = {
+            "rows": [
+                {"id": "secret", "secret": True},
+                {
+                    "id": "tf32/first/b1/stage/band",
+                    "layers": ["lstm.stack"],
+                    "seeds": [11, 23, 37, 41, 53, 67, 79, 97],
+                },
+            ],
+            "gpu_lock": {
+                "path": qualify.GPU_LOCK,
+                "owner": "child",
+                "cpu_sections": [],
+                "gpu_sections": 1,
+            },
+        }
+        with self.assertRaisesRegex(qualify.Rejected, "f64 truth"):
+            qualify.validate_gpu_ownership(process, "numeric")
+        sections: list[dict] = [{"work": "f64", "locked": False, "case": "secret"}]
+        process["gpu_lock"].update(cpu_sections=sections, gpu_sections=2)
+        with self.assertRaisesRegex(qualify.Rejected, "TF32 draw"):
+            qualify.validate_gpu_ownership(process, "numeric")
+        sections.extend(
+            {
+                "work": "tf32_draws",
+                "locked": False,
+                "case": "tf32/first/b1/stage",
+                "layer": "lstm.stack",
+                "seed": seed,
+                "length": 589 * 256,
+            }
+            for seed in [11, 23, 37, 41, 53, 67, 79, 97]
+        )
+        process["gpu_lock"]["gpu_sections"] = 10
+        qualify.validate_gpu_ownership(process, "numeric")
+        for field, value in (
+            ("case", "tf32/last/b1/stage"),
+            ("seed", 23),
+            ("length", 1),
+            ("layer", "sincnet.conv0.abs_pool"),
+        ):
+            original = sections[1][field]
+            sections[1][field] = value
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(qualify.Rejected, "TF32 draw"),
+            ):
+                qualify.validate_gpu_ownership(process, "numeric")
+            sections[1][field] = original
+        sections.append(sections[1].copy())
+        process["gpu_lock"]["gpu_sections"] += 1
+        with self.assertRaisesRegex(qualify.Rejected, "TF32 draw"):
+            qualify.validate_gpu_ownership(process, "numeric")
+        self.assertEqual(
+            qualify.draw_length(
+                "tf32/mixed/b32/stage/switched", "resnet.layer2.0.conv1"
+            ),
+            32 * 64 * 40 * 499,
+        )
+        self.assertEqual(
+            qualify.draw_length("tf32/first/b1/stage", "sincnet.conv0.abs_pool"),
+            80 * 15975,
+        )
+
+    def test_driver_uses_child_lock_only_for_numeric(self):
         mode = "fp32"
 
         def run(argv, **kwargs):
-            self.assertEqual(argv[:2], ["flock", qualify.GPU_LOCK])
+            env = kwargs["env"]
+            if env["SPEAKRS_QUALIFY_PHASE"] == "numeric":
+                self.assertNotEqual(argv[0], "flock")
+                self.assertEqual(env["SPEAKRS_QUALIFY_LOCK_OWNER"], "child")
+            else:
+                self.assertEqual(argv[:2], ["flock", qualify.GPU_LOCK])
+                self.assertEqual(env["SPEAKRS_QUALIFY_LOCK_OWNER"], "parent")
             kwargs["stdout"].write(b"test result: ok. 1 passed; 0 failed\n")
             env = kwargs["env"]
             phase = env["SPEAKRS_QUALIFY_PHASE"]
@@ -387,10 +576,40 @@ class Processes(unittest.TestCase):
                     {
                         "implementation": env["SPEAKRS_QUALIFY_IMPL"],
                         "phase": phase,
+                        "gpu_lock": {
+                            "path": qualify.GPU_LOCK,
+                            "owner": env["SPEAKRS_QUALIFY_LOCK_OWNER"],
+                            "cpu_sections": [],
+                            "gpu_sections": 1,
+                        },
                         "target": env["SPEAKRS_QUALIFY_TARGET"],
                         "mode": env.get("SPEAKRS_QUALIFY_MODE"),
                         "pid": 1,
                         "tier": "sm75",
+                        "device_sm": "12.0",
+                        "device": {
+                            "name": "test",
+                            "compute_capability": "12.0",
+                            "sm_count": 36,
+                            "l2_bytes": 33554432,
+                            "driver_api_version": 12080,
+                            "driver_version": "570.0",
+                            "cuda_version": 12080,
+                            "cudnn_version": 90000,
+                            "cublas_version": 120800,
+                        },
+                        "loaded_modules": [
+                            {
+                                "area": "segmentation",
+                                "tier": "sm75",
+                                "artifact": {"kind": "PtxJit", "sha256": "a" * 64},
+                            }
+                        ],
+                        "observed_sm_clock": {
+                            "samples": 2,
+                            "min_mhz": 2400,
+                            "max_mhz": 2600,
+                        },
                         "coverage": {"layers": [], "batches": [], "maths": []},
                         "rows": [
                             {"id": key, "cuda_graph": True}
@@ -421,6 +640,10 @@ class Processes(unittest.TestCase):
                 self.assertEqual(data["phase"], phase)
             self.assertEqual(len(steps), 5)
             self.assertTrue(all(item["gpu_lock"] == qualify.GPU_LOCK for item in steps))
+            self.assertEqual(
+                [item["gpu_lock_owner"] for item in steps],
+                ["parent", "child", "parent", "parent", "parent"],
+            )
 
     def test_case_inventory_cannot_be_reduced(self):
         self.assertEqual(len(qualify.case_ids()), 16)
@@ -507,6 +730,8 @@ class Processes(unittest.TestCase):
                 "area": "lstm",
                 "tier": "sm75",
                 "sha256": qualify.sha(path),
+                "embedded_ptx_sha256": qualify.sha(path),
+                "artifact": {"kind": "PtxJit", "sha256": qualify.sha(path)},
                 "entries": ["lstm_step"],
             }
             allow, _ = qualify.verify_modules([module], root)
@@ -550,33 +775,24 @@ class Processes(unittest.TestCase):
         gated = {item["check"]: item for item in result["checks"]}
         self.assertEqual(
             sorted(gated),
-            ["speed:fp32/mixed/b32/lstm.stack", "speed:fp32/mixed/b32/stage"],
+            ["speed:fp32/mixed/b32/lstm.stack"],
         )
         self.assertTrue(all(item.get("blocked") for item in gated.values()))
         self.assertEqual(result["measurability"]["stage"]["measurable"], 0)
         gates = {row["id"]: row["gate"] for row in result["timing"]}
         self.assertTrue(gates["fp32/first/b1/stage"].startswith("undeclared stage"))
-        self.assertTrue(gates["fp32/mixed/b32/stage"].startswith("stage: regression"))
+        self.assertTrue(gates["fp32/mixed/b32/stage"].startswith("stage: paired"))
 
-    def test_stage_within_its_bound_passes_while_the_operator_must_win(self):
+    def test_stage_guard_cannot_use_separate_process_timing(self):
         coverage = qualify.Coverage.product({"lstm.stack"}, {32}, {"fp32"})
-        result: dict = {"target": "lstm", "checks": []}
-        # the candidate is 0.1% slower: inside the stage bound, but slower on average
+        result = {"target": "lstm", "checks": []}
         qualify.timing(
             result, self.timing_runs([1.0, 1.001, 1.0, 1.001]), "Oxide", coverage
         )
-        gated = {item["check"]: item for item in result["checks"]}
-        self.assertIn(
-            "slower on average", gated["speed:fp32/mixed/b32/stage"]["reason"]
+        self.assertFalse(
+            any(item["check"].endswith("/stage") for item in result["checks"])
         )
-        self.assertFalse(gated["speed:fp32/mixed/b32/lstm.stack"]["passed"])
-        result = {"target": "lstm", "checks": []}
-        # inside the bound and faster on average: the stage passes
-        qualify.timing(
-            result, self.timing_runs([1.0, 1.002, 1.0, 0.997]), "Oxide", coverage
-        )
-        gated = {item["check"]: item for item in result["checks"]}
-        self.assertTrue(gated["speed:fp32/mixed/b32/stage"]["passed"])
+        self.assertFalse(result["checks"][0]["passed"])
 
     def test_library_control_reports_measurability(self):
         coverage = qualify.Coverage(frozenset())
@@ -707,6 +923,82 @@ class Processes(unittest.TestCase):
     def test_declared_process_must_load_its_area(self):
         with self.assertRaisesRegex(qualify.Rejected, "did not load candidate area"):
             self.stable(self.module_process("fp32", False))
+
+    def test_stage_tail_keeps_real_candidate_module_requirements(self):
+        for implementation in ("StageTail", "StageTailControl"):
+            coverage = qualify.Coverage.product(
+                {"sincnet.conv0.abs_pool"}, {32}, {"fp32"}
+            )
+            with self.assertRaisesRegex(
+                qualify.Rejected, "did not load candidate area"
+            ):
+                qualify.stable_modules(
+                    [self.module_process("fp32", False)],
+                    coverage,
+                    "sincnet",
+                    implementation,
+                )
+            evidence = qualify.stable_modules(
+                [self.module_process("fp32"), self.module_process("tf32", False)],
+                coverage,
+                "sincnet",
+                implementation,
+            )
+            self.assertEqual(
+                evidence["processes"][0]["loaded_candidate_areas"], ["sincnet"]
+            )
+            self.assertEqual(evidence["processes"][1]["loaded_candidate_areas"], [])
+
+    def test_delayed_stage_graph_must_match_both_numeric_inputs(self):
+        key = "fp32/mixed/b32/stage"
+        op = "fp32/mixed/b32/sincnet.conv0.abs_pool"
+        coverage = qualify.Coverage.product({"sincnet.conv0.abs_pool"}, {32}, {"fp32"})
+        numeric = {
+            "rows": [
+                {"id": key, "first": {"sha256": "stage-first"}},
+                {"id": key + "/switched", "first": {"sha256": "stage-second"}},
+                {"id": op, "first": {"sha256": "op-first"}},
+                {"id": op + "/switched", "first": {"sha256": "op-second"}},
+            ]
+        }
+        row: dict = {
+            "id": key,
+            "order": "ABBA",
+            "warmup": 5,
+            "stage_abba_ms": [[1, 0.99, 0.99, 1]] * 256,
+            "operator_abba_ms": [[0.1, 0.08, 0.08, 0.1]] * 256,
+            "output_sha256": [["stage-first", "stage-second"]] * 2,
+            "operator_outputs": [
+                {"id": op, "output_sha256": [["op-first", "op-second"]] * 2}
+            ],
+        }
+        for hashes in [None, ["stage-first", "wrong"], ["stage-first", "stage-second"]]:
+            with self.subTest(hashes=hashes):
+                row["stage_tail"] = {"delayed_output_sha256": hashes}
+                result: dict = {
+                    "target": "sincnet",
+                    "checks": [{"check": "speed:" + op, "passed": True}],
+                }
+                qualify.paired_checks(
+                    result,
+                    {"mode": "fp32", "rows": [row]},
+                    coverage,
+                    numeric,
+                    numeric,
+                    "StageTail",
+                )
+                output = next(
+                    check
+                    for check in result["checks"]
+                    if check["check"] == "paired_output:" + key
+                )
+                self.assertEqual(
+                    output["passed"], hashes == ["stage-first", "stage-second"]
+                )
+                if not output["passed"]:
+                    reason = output["reason"]
+                    assert isinstance(reason, str)
+                    self.assertIn("delayed output differs", reason)
 
     def test_undeclared_process_must_load_no_candidate_area(self):
         with self.assertRaisesRegex(qualify.Rejected, "no declared triple"):

@@ -4,8 +4,8 @@
 // qualify_poison fills the dynamic shared allocation with a NaN pattern before
 // candidate launches in the numeric phase. qualify_race is the racecheck positive
 // control: two warps store to one shared word with no barrier. qualify_perturb moves
-// a seeded random choice of elements by one unit in the last place, for the TF32
-// stage noise band
+// the exact host-prepared seeded choices by one unit in the last place, for the
+// TF32 stage noise band
 //
 
 .version 6.3
@@ -60,16 +60,16 @@ $L__poison_done:
 .visible .entry qualify_perturb(
 	.param .u64 qualify_perturb_param_0,
 	.param .u64 qualify_perturb_param_1,
-	.param .u32 qualify_perturb_param_2
+	.param .u64 qualify_perturb_param_2
 )
 {
 	.reg .pred 	%p<5>;
 	.reg .b32 	%r<13>;
-	.reg .b64 	%rd<8>;
+	.reg .b64 	%rd<11>;
 
 	ld.param.u64 	%rd1, [qualify_perturb_param_0];
 	ld.param.u64 	%rd2, [qualify_perturb_param_1];
-	ld.param.u32 	%r1, [qualify_perturb_param_2];
+	ld.param.u64 	%rd8, [qualify_perturb_param_2];
 	mov.u32 	%r2, %ctaid.x;
 	mov.u32 	%r3, %ntid.x;
 	mov.u32 	%r4, %tid.x;
@@ -78,18 +78,9 @@ $L__poison_done:
 	add.s64 	%rd5, %rd3, %rd4;
 	setp.ge.u64 	%p1, %rd5, %rd2;
 	@%p1 bra 	$L__perturb_done;
-	cvt.u32.u64 	%r5, %rd5;
-	mul.lo.s32 	%r6, %r5, -1640531535;
-	xor.b32 	%r6, %r6, %r1;
-	shr.u32 	%r7, %r6, 16;
-	xor.b32 	%r6, %r6, %r7;
-	mul.lo.s32 	%r6, %r6, -2048144789;
-	shr.u32 	%r7, %r6, 13;
-	xor.b32 	%r6, %r6, %r7;
-	mul.lo.s32 	%r6, %r6, -1028477387;
-	shr.u32 	%r7, %r6, 16;
-	xor.b32 	%r6, %r6, %r7;
-	rem.u32 	%r8, %r6, 3;
+	cvta.to.global.u64 	%rd9, %rd8;
+	add.s64 	%rd10, %rd9, %rd5;
+	ld.global.u8 	%r8, [%rd10];
 	cvta.to.global.u64 	%rd6, %rd1;
 	shl.b64 	%rd7, %rd5, 2;
 	add.s64 	%rd6, %rd6, %rd7;

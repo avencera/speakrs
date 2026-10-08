@@ -10,8 +10,8 @@ input-projection helper), `fixed` (a locked launch of a Library-owned kernel) an
 
 Inside a window every kernel, copy and memset must be launched inside one of those
 scopes, on the qualification stream. Inside a candidate scope a kernel must be an
-entry of the PTX bytes the process loaded, unless it is a cuBLAS kernel of the
-projection helper at a baseline shape. Library paths may not launch candidate kernels.
+entry of the PTX bytes the process loaded. Candidates may make no Library calls,
+including input projections. Library paths may not launch candidate kernels.
 """
 
 import re
@@ -43,6 +43,7 @@ LSTM_PHASES = tuple(
 )
 # CUPTI copy kinds that stay on the device: device to device, peer to peer
 DEVICE_COPIES = {8, 10}
+LIBRARY_KERNEL = re.compile(r"cublas|cudnn|cufft|xmma|(?:^|_)s?gemm", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -112,7 +113,6 @@ def attribute(
     nonce: str,
     allow: AllowList,
     declared: frozenset[str] = frozenset(),
-    projection_shapes: frozenset[tuple[int, int, int]] = frozenset(),
     library_control: bool = False,
 ) -> dict:
     """Apply the window, scope, allow-list and stream rules to an eager trace.
@@ -126,19 +126,21 @@ def attribute(
         raise Rejected("profile: invalid nonce")
     if not path.is_file():
         raise Rejected("profile: missing SQLite export")
-    with closing(
-        sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True)
-    ) as connection:
-        connection.row_factory = sqlite3.Row
-        return _attribute(
-            connection,
-            required,
-            nonce,
-            allow,
-            declared,
-            projection_shapes,
-            library_control,
-        )
+    try:
+        with closing(
+            sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True)
+        ) as connection:
+            connection.row_factory = sqlite3.Row
+            return _attribute(
+                connection,
+                required,
+                nonce,
+                allow,
+                declared,
+                library_control,
+            )
+    except (sqlite3.Error, IndexError, KeyError) as error:
+        raise Rejected(f"profile: invalid SQLite trace: {error}") from error
 
 
 def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
@@ -210,13 +212,31 @@ def _events(connection, tables: set[str], names: dict):
             yield row, kind, set(), copy_kind
 
 
+def _forbidden_calls(ranges: list[Range]) -> list[str]:
+    """Capture records API calls, not eager launches; retain their real ownership."""
+    candidates = [scope for scope in ranges if scope.kind == "candidate"]
+    plans = [scope for scope in ranges if scope.kind == "plan"]
+    libraries = [scope for scope in ranges if scope.kind == "library"]
+    return [
+        call.name
+        for call in ranges
+        if call.kind == "call"
+        and (
+            any(_inside(call, candidate) for candidate in candidates)
+            or (
+                any(_inside(call, plan) for plan in plans)
+                and not any(_inside(call, library) for library in libraries)
+            )
+        )
+    ]
+
+
 def _attribute(
     connection: sqlite3.Connection,
     required: tuple[str, ...],
     nonce: str,
     allow: AllowList,
     declared: frozenset[str],
-    projection_shapes: frozenset[tuple[int, int, int]],
     library_control: bool,
 ) -> dict:
     tables = {
@@ -229,6 +249,11 @@ def _attribute(
         raise Rejected("profile: missing NVTX or kernel tables")
     names = dict(connection.execute("SELECT id, value FROM StringIds"))
     ranges = _ranges(connection, names, nonce)
+    forbidden = _forbidden_calls(ranges)
+    if forbidden:
+        raise Rejected(
+            f"profile: forbidden library kernels in a candidate scope: real API calls {forbidden[:8]}"
+        )
     # a stage also runs the other boundaries of its model on their Library paths
     for range_ in ranges:
         if range_.kind == "candidate" and range_.name not in required:
@@ -252,6 +277,7 @@ def _attribute(
     stream_events: Counter = Counter()
     stream_candidate_events: Counter = Counter()
     phase_events: Counter = Counter()
+    window_events: Counter = Counter({ranges[index].name: 0 for index in windows})
     for row, kind, event_names, copy_kind in _events(connection, tables, names):
         linked = launches.get((row["globalPid"], row["correlationId"]), [])
         if not linked:
@@ -268,6 +294,8 @@ def _attribute(
         if any(ranges[index].kind in ("candidate", "plan") for index in owners):
             stream_candidate_events[row["streamId"]] += 1
         for index in owners:
+            if ranges[index].kind == "window" and kind == "kernel":
+                window_events[ranges[index].name] += 1
             if ranges[index].kind == "phase" and kind == "kernel":
                 phase_events[index] += 1
         in_plan = any(ranges[index].kind == "plan" for index in owners)
@@ -283,7 +311,24 @@ def _attribute(
                 for launch in linked
             ):
                 violations["cross-thread work during a window"].append(kind)
-            continue
+            if not owners:
+                if kind == "kernel":
+                    reason = (
+                        "forbidden library kernels outside checked scopes"
+                        if any(LIBRARY_KERNEL.search(name) for name in event_names)
+                        else "work outside a candidate or library range"
+                    )
+                    violations[reason].append(label)
+                # host setup transfers are not candidate execution
+                continue
+            if in_plan:
+                continue
+            if any(ranges[index].kind == "candidate" for index in owners):
+                violations[
+                    "candidate execution outside a checked lifecycle window"
+                ].append(label)
+            # locked Library front ends can run outside candidate windows; their
+            # call/fixed ownership still has to pass the rules below
 
         held = [ranges[index] for index in owners if ranges[index].kind != "window"]
         if not held:
@@ -307,16 +352,15 @@ def _attribute(
         elif not calls:
             streams[stream] += 1
         if candidate and calls:
-            projection = "projection" in kinds and all(
-                _projection_call(scope.name, projection_shapes) for scope in calls
-            )
-            if not projection:
-                violations["forbidden library kernels in a candidate scope"].append(
-                    label
-                )
+            violations["forbidden library kernels in a candidate scope"].append(label)
             continue
         if candidate and kind == "kernel" and not event_names <= allow.entries:
-            violations["kernel is not on the loaded PTX allow-list"].append(label)
+            reason = (
+                "forbidden library kernels in a candidate scope"
+                if any(LIBRARY_KERNEL.search(name) for name in event_names)
+                else "kernel is not on the loaded PTX allow-list"
+            )
+            violations[reason].append(label)
             continue
         if candidate and kind == "copy" and copy_kind not in DEVICE_COPIES:
             violations["host transfer inside a candidate scope"].append(label)
@@ -401,12 +445,13 @@ def _attribute(
             for (kind, name), evidence in sorted(scopes.items())
         ],
         "windows": len(windows),
+        "window_kernel_events": dict(sorted(window_events.items())),
         "attribution": "CPU launch correlation and same-thread nonce-scoped NVTX containment",
         "eager": True,
     }
 
 
-def window_kernels(path: Path, nonce: str) -> dict[str, set[str]]:
+def window_kernels(path: Path, nonce: str, *, multiset: bool = False) -> dict:
     """The candidate kernels each driver window launched, by window name.
 
     A kernel counts when a candidate scope and the window enclose its launch and no
@@ -428,7 +473,8 @@ def window_kernels(path: Path, nonce: str) -> dict[str, set[str]]:
         index = ContainmentIndex(ranges)
         launches = _launches(connection, tables)
         columns = _columns(connection, "CUPTI_ACTIVITY_KIND_KERNEL")
-        found: dict[str, set[str]] = defaultdict(set)
+        counts = defaultdict(Counter)
+        found = defaultdict(set)
         for row in connection.execute("SELECT * FROM CUPTI_ACTIVITY_KIND_KERNEL"):
             owners = set()
             for launch in launches.get((row["globalPid"], row["correlationId"]), []):
@@ -442,9 +488,20 @@ def window_kernels(path: Path, nonce: str) -> dict[str, set[str]]:
                 names.get(row["mangledName"]) if "mangledName" in columns else None
             ) or names.get(row["demangledName"])
             for owner in owners:
-                if ranges[owner].kind == "window" and name:
-                    found[ranges[owner].name].add(name)
-        return dict(found)
+                if (
+                    ranges[owner].kind == "window"
+                    and name
+                    and not ranges[owner].name.startswith("lifecycle/")
+                ):
+                    if row["graphNodeId"] not in (None, 0):
+                        raise Rejected(
+                            "profile: graph node cannot count as an eager launch"
+                        )
+                    if multiset:
+                        counts[ranges[owner].name][name] += 1
+                    else:
+                        found[ranges[owner].name].add(name)
+        return dict(counts) if multiset else dict(found)
 
 
 def _inside(inner: Range, outer: Range) -> bool:
@@ -500,9 +557,3 @@ def _phase_rules(
         for index, phase in inner:
             if not phase_events[index]:
                 violations["LSTM phase scope without a launch"].append(phase.name)
-
-
-def _projection_call(name: str, shapes: frozenset[tuple[int, int, int]]) -> bool:
-    """A projection call must be cuBLAS at a shape the unfiltered baseline covers."""
-    match = re.fullmatch(r"cublas\.m(\d+)\.n(\d+)\.k(\d+)", name)
-    return match is not None and (int(match[1]), int(match[2]), int(match[3])) in shapes

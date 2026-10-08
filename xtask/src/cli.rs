@@ -64,11 +64,14 @@ enum Command {
     },
     /// Qualify one CUDA layer target against the locked harness
     CudaQualify {
-        /// Target: resnet, lstm or sincnet
-        #[arg(value_parser = ["resnet", "lstm", "sincnet"])]
+        /// CUDA collection target
+        #[arg(value_parser = ["resnet", "lstm", "sincnet", "fbankdft", "wideconv", "segdense", "segdense-conv1", "segdense-conv2", "segdense-linear0", "segdense-linear1", "segdense-classifier", "segdense-embedding"])]
         target: String,
         /// Internal implementation name; Library is the control
         implementation: String,
+        /// Explicit collection for the segdense umbrella target
+        #[arg(long, value_parser = ["conv1", "conv2", "linear0", "linear1", "classifier", "embedding"])]
+        collection: Option<String>,
     },
     /// Run speaker diarization on WAV files
     Diarize {
@@ -142,7 +145,8 @@ impl Command {
             Self::CudaQualify {
                 target,
                 implementation,
-            } => commands::cuda_qualify::run(&target, &implementation),
+                collection,
+            } => commands::cuda_qualify::run(&target, &implementation, collection.as_deref()),
             Self::Diarize {
                 mode,
                 models_dir,

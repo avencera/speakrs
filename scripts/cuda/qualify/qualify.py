@@ -12,7 +12,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from collections import defaultdict
+import time
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,6 +41,9 @@ from gates import (
     Blocked,
     Error,
     ParityRejected,
+    TruthRejected,
+    StageRejected,
+    StageBlocked,
     Rejected,
     Timing,
     embedding_parity,
@@ -52,11 +56,14 @@ from gates import (
     spread_bound,
     stage_speed,
     tf32_band,
-    tf32_stage_aggregate,
-    tf32_stage_case,
+    tf32_truth,
 )
-from lock import ROOT, LockError, verify
+import artifacts
+from lock import ROOT, LockError, inventory, verify
 from assets import resolve
+from records import check_table, shipped_files
+from verdict import evaluate_checks, noise_timing
+from domains import COLLECTION_REGISTRY, MODEL, collection
 from parse_trace import AllowList, attribute, window_kernels
 from ptx import shared_initialization
 from scan import cargo_home, scan
@@ -66,29 +73,19 @@ WORKSPACE = Path("/workspace")
 BOX = ROOT.parent
 GPU_LOCK = "/workspace/gpu-bench.lock"
 PROFILE_TEST = "inference::cuda::test_support::qualify::qualification_driver"
-CASES = (
-    ("first", 1),
-    ("last", 1),
-    ("short", 1),
-    ("mixed", 7),
-    ("mixed", 32),
-    ("mixed", 33),
-    ("mixed", 64),
-    ("short", 7),
-)
+CASES = MODEL.cases
 MODES = ("fp32", "tf32")
-BATCHES = (1, 7, 32, 33, 64)
+BATCHES = MODEL.tested
 FRAMES = 589
 PROJECTION_COLUMNS = (128, 256, 384, 512)
-# every shape the locked projection helper can issue at a harness batch size
-PROJECTION_SHAPES = frozenset(
-    (batch * FRAMES, n, k)
-    for batch in BATCHES
-    for n in PROJECTION_COLUMNS
-    for k in (60, 256)
-)
 # the candidate PTX area of each target
-AREAS = {"resnet": "resnet", "lstm": "lstm", "sincnet": "sincnet"}
+AREAS = {
+    "resnet": "resnet",
+    "lstm": "lstm",
+    "sincnet": "sincnet",
+    "fbankdft": "fbankdft",
+    **COLLECTION_REGISTRY["AREAS"],
+}
 
 
 @dataclass(frozen=True)
@@ -132,11 +129,20 @@ MUTANT_GATES = {
     "Precision": Gate("layer", "layer parity"),
     "Shape": Gate("layer", "layer parity", "non_b32"),
     "Fallback": Gate("profile", "forbidden library kernels"),
+    "FirstUseFallback": Gate("profile", "forbidden library kernels"),
+    "FirstUseFallbackEager": Gate("profile", "forbidden library kernels"),
+    "FirstUseFallbackCaptured": Gate("profile", "forbidden library kernels"),
+    "FirstUseFallbackReplay": Gate("profile", "forbidden library kernels"),
     "Tail": Gate("layer", "layer parity", "partial"),
     "Atomic": Gate(
         "determinism:fixed_reduction_order",
         "floating-point atomic in launched custom entry",
     ),
+    "StageSlow": Gate("paired_stage", "paired stage: stage regression"),
+    "StageTail": Gate(
+        "paired_stage", "paired stage: non-inferiority margin not established"
+    ),
+    "StageAccuracy": Gate("stage_truth", "candidate less accurate than Library TF32"),
     "Slow": Gate("speed", "candidate slower than the faster Library process"),
     "PhaseCheat": Gate("timing_output", "final output differs"),
     "Unscoped": Gate("profile", "outside a candidate or library range"),
@@ -145,14 +151,21 @@ MUTANT_GATES = {
     "UninitShared": Gate("ptx:shared_initialization", "shared load"),
 }
 MUTANTS = tuple(MUTANT_GATES)
-PHASES = ("numeric", "timing", "profile", "sanitize")
+PHASES = ("numeric", "timing", "paired", "profile", "sanitize")
 # a mutant proves only its intended check, so it runs the phases that check needs;
 # Library controls and candidates run every phase
 MUTANT_PHASES = {
+    "StageSlow": ("numeric", "timing", "paired"),
+    "StageTail": ("numeric", "timing", "paired"),
+    "StageAccuracy": ("numeric",),
     "Precision": ("numeric",),
     "Shape": ("numeric",),
     "Tail": ("numeric",),
     "Fallback": ("numeric", "profile"),
+    "FirstUseFallback": ("numeric", "profile"),
+    "FirstUseFallbackEager": ("numeric", "profile"),
+    "FirstUseFallbackCaptured": ("numeric", "profile"),
+    "FirstUseFallbackReplay": ("numeric", "profile"),
     "Atomic": ("numeric", "profile"),
     "Unscoped": ("numeric", "profile"),
     "Unlisted": ("numeric", "profile"),
@@ -161,6 +174,8 @@ MUTANT_PHASES = {
     "Lookup": ("numeric",),
     "UninitShared": ("numeric",),
 }
+# the unmutated pinned control runs the same protocol but grants no acceptance
+CONTROL_PHASES = {"StageTailControl": MUTANT_PHASES["StageTail"]}
 EXIT_CODES = {"passed": 0, "rejected": 1, "blocked": 3, "escaped": 4}
 
 
@@ -177,12 +192,53 @@ def layers(target: str) -> tuple[str, ...]:
         return ("lstm.stack",)
     if target == "sincnet":
         return ("sincnet.conv0.abs_pool",)
+    if target == "fbankdft":
+        return ("fbank.dft",)
+    if target in COLLECTION_REGISTRY["LAYERS"]:
+        return COLLECTION_REGISTRY["LAYERS"][target]
     raise Rejected("unknown target")
 
 
-def case_ids() -> list[str]:
+def resolve_target(target: str, selected: str | None) -> str:
+    """Require an explicit collection for the segmentation umbrella target"""
+    if target == "segdense":
+        if selected not in COLLECTION_REGISTRY["SEGDENSE"]:
+            raise Rejected("segdense requires --collection")
+        return f"segdense-{selected}"
+    if selected is not None:
+        raise Rejected("--collection requires target segdense")
+    if target not in AREAS:
+        raise Rejected("unknown target")
+    return target
+
+
+def preflight(target: str, implementation: str) -> None:
+    """Refuse faults that require a production plan before any collection starts"""
+    if implementation in ("StageTail", "StageTailControl") and (
+        target == "fbankdft" or target in COLLECTION_REGISTRY["LAYERS"]
+    ):
+        raise Rejected(
+            f"{target}: StageTail requires an accepted production plan; none exists before the port"
+        )
+
+
+def target_batches(target: str) -> tuple[int, ...]:
+    """Use the batch domain owned by the selected boundary."""
+    return collection(target).tested
+
+
+def target_cases(target: str) -> tuple[tuple[str, int], ...]:
+    """Retain the existing cases and select only valid filterbank batch plans."""
+    return collection(target).cases
+
+
+def case_ids(target: str = "resnet") -> list[str]:
     """Every math mode and case, in a fixed order."""
-    return [f"{mode}/{case}/b{batch}" for mode in MODES for case, batch in CASES]
+    return [
+        f"{mode}/{case}/b{batch}"
+        for mode in MODES
+        for case, batch in target_cases(target)
+    ]
 
 
 def sha(path: Path) -> str:
@@ -200,8 +256,16 @@ def command(argv: list[str], env: dict[str, str], path: Path, steps: list[dict])
         or executable.name == "compute-sanitizer"
         or (executable.name == "nsys" and "profile" in argv[1:])
     )
-    if touches_gpu and not locked:
+    child_owned = (
+        not locked
+        and executable.is_relative_to(BOX / "target")
+        and argv[1:] == ["--exact", PROFILE_TEST, "--ignored", "--nocapture"]
+        and env.get("SPEAKRS_QUALIFY_PHASE") == "numeric"
+        and env.get("SPEAKRS_QUALIFY_LOCK_OWNER") == "child"
+    )
+    if touches_gpu and not (locked or child_owned):
         raise Rejected("GPU process refused: the shared GPU lock is required")
+    start = time.monotonic()
     with path.open("wb") as log:
         process = subprocess.run(
             argv, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT, check=False
@@ -209,10 +273,13 @@ def command(argv: list[str], env: dict[str, str], path: Path, steps: list[dict])
     steps.append(
         {
             "argv": argv,
+            "phase": env.get("SPEAKRS_QUALIFY_PHASE", "build"),
+            "wall_seconds": time.monotonic() - start,
             "returncode": process.returncode,
             "log": str(path),
             "sha256": sha(path),
-            "gpu_lock": GPU_LOCK if locked else None,
+            "gpu_lock": GPU_LOCK if locked or child_owned else None,
+            "gpu_lock_owner": "child" if child_owned else "parent" if locked else None,
         }
     )
     return process.returncode
@@ -222,7 +289,8 @@ def gpu_command(
     argv: list[str], env: dict[str, str], path: Path, steps: list[dict]
 ) -> int:
     """Hold the shared lock for the complete GPU process and its children."""
-    return command(["flock", GPU_LOCK, *argv], env, path, steps)
+    child = dict(env, SPEAKRS_QUALIFY_LOCK_OWNER="parent")
+    return command(["flock", GPU_LOCK, *argv], child, path, steps)
 
 
 def clean_environment() -> dict[str, str]:
@@ -249,6 +317,7 @@ def clean_environment() -> dict[str, str]:
             "CARGO_ENCODED_RUSTFLAGS",
             "CARGO_INCREMENTAL",
             "SPEAKRS_QUALIFY_NVTX",
+            "SPEAKRS_CUDA_FORCE_PTX_JIT",
         )
     } | {"CARGO_PROFILE_DEV_DEBUG": "0", "CARGO_PROFILE_TEST_DEBUG": "0"}
 
@@ -261,7 +330,6 @@ def build(
 ) -> Path:
     """Build only this task's release test binary, outside the GPU lock."""
     log = directory / ("build.jsonl" if manifest is None else "control-build.jsonl")
-    tier = env.get("SPEAKRS_CUDA_PTX_TIER", "sm75")
     args = [
         "cargo",
         "test",
@@ -270,7 +338,7 @@ def build(
         "speakrs",
         "--no-default-features",
         "--features",
-        "cuda" if tier == "sm75" else f"cuda,cuda-{tier}",
+        "cuda",
         "--lib",
         "--no-run",
         "--message-format=json",
@@ -313,7 +381,6 @@ def toolchain(env: dict[str, str]) -> str:
 
 def build_library(env: dict[str, str], directory: Path, steps: list[dict]) -> None:
     """Build the non-test library from the same tree, so test-only code cannot pass."""
-    tier = env.get("SPEAKRS_CUDA_PTX_TIER", "sm75")
     args = [
         "cargo",
         "build",
@@ -322,7 +389,7 @@ def build_library(env: dict[str, str], directory: Path, steps: list[dict]) -> No
         "speakrs",
         "--no-default-features",
         "--features",
-        "cuda" if tier == "sm75" else f"cuda,cuda-{tier}",
+        "cuda",
         "--lib",
     ]
     if command(args, env, directory / "build-library.log", steps):
@@ -341,7 +408,11 @@ def verify_inputs(target: str) -> dict[str, str]:
     manifest = json.loads((ROOT / "tests/cuda_qualify/ASSETS.json").read_text())
     if manifest.get("schema") != 1:
         raise Rejected("unsupported input manifest")
-    model = "wespeaker-multimask-tail" if target == "resnet" else "segmentation-3.0"
+    model = (
+        "wespeaker-multimask-tail"
+        if target in COLLECTION_REGISTRY["EMBEDDING_TARGETS"]
+        else "segmentation-3.0"
+    )
     required = {str(Path("/workspace/models-native") / f"{model}.safetensors")}
     for suffix, case in (
         ("", "test_first_b1"),
@@ -352,10 +423,12 @@ def verify_inputs(target: str) -> dict[str, str]:
         required.add(
             str(Path("/workspace/ref") / f"{model}{suffix}" / f"{case}.safetensors")
         )
-    if target == "resnet":
+    if target in COLLECTION_REGISTRY["EMBEDDING_TARGETS"]:
         required.add(
             "/workspace/ref/wespeaker-fbank-b32/test_and_short_b32.safetensors"
         )
+    if target == "fbankdft":
+        required = {"/workspace/ref/wespeaker-fbank-b32/test_and_short_b32.safetensors"}
     files = manifest["files"]
     if not required <= files.keys():
         raise Rejected("input manifest omits a required asset")
@@ -413,15 +486,19 @@ def parse_coverage(raw: dict, target: str) -> Coverage:
     triples: set[tuple[str, int, str]] = set()
     for entry in raw["entries"]:
         names = inventory if entry["layers"] == "all" else tuple(entry["layers"])
-        batches = BATCHES if entry["batches"] == "all" else tuple(entry["batches"])
+        batches = (
+            target_batches(target)
+            if entry["batches"] == "all"
+            else tuple(entry["batches"])
+        )
         modes = MODES if entry["maths"] == "all" else tuple(entry["maths"])
         if not set(names) <= set(inventory):
             raise Rejected(
                 f"coverage names unknown layers: {sorted(set(names) - set(inventory))}"
             )
-        if not set(batches) <= set(BATCHES):
+        if not set(batches) <= set(target_batches(target)):
             raise Rejected(
-                f"coverage names batches the harness cannot test: {sorted(set(batches) - set(BATCHES))}"
+                f"coverage names batches the harness cannot test: {sorted(set(batches) - set(target_batches(target)))}"
             )
         if not set(modes) <= set(MODES):
             raise Rejected("coverage names an unknown math mode")
@@ -440,12 +517,299 @@ def expected_ids(target: str, phase: str, mode: str) -> set[str]:
     """The rows one per-mode process must produce, without trusting device output."""
     base = {
         f"{mode}/{case}/b{batch}/{layer}"
-        for case, batch in CASES
+        for case, batch in target_cases(target)
         for layer in (*layers(target), "stage")
     }
     if phase == "numeric":
         return base | {f"{key}/switched" for key in base}
     return base
+
+
+def draw_length(case: str, layer: str) -> int:
+    """Bind draw lengths to the locked model geometry, not a reported CPU section."""
+    match = re.fullmatch(
+        r"tf32/(first|last|short|mixed)/b([1-9][0-9]*)/stage(/switched)?", case
+    )
+    if match is None:
+        raise Rejected("GPU lock: invalid TF32 draw case")
+    batch = int(match[2])
+    if layer == "fbank.dft":
+        if batch not in target_batches("fbankdft"):
+            raise Rejected("GPU lock: invalid TF32 draw batch")
+        return batch * 998 * 80
+    if batch not in BATCHES:
+        raise Rejected("GPU lock: invalid TF32 draw batch")
+    if layer in COLLECTION_REGISTRY["DRAW_ELEMENTS"]:
+        return batch * COLLECTION_REGISTRY["DRAW_ELEMENTS"][layer]
+    if layer == "lstm.stack":
+        return batch * FRAMES * 256
+    if layer == "sincnet.conv0.abs_pool":
+        return batch * 80 * ((160_000 - 251) // 10 + 1)
+    conv = re.fullmatch(r"resnet.layer([12])\.([0-6])\.conv([12])", layer)
+    if conv is None or int(conv[2]) >= (3 if conv[1] == "1" else 4):
+        raise Rejected("GPU lock: invalid TF32 draw layer")
+    return batch * (32 * 80 * 998 if conv[1] == "1" else 64 * 40 * 499)
+
+
+FBANK_STAGE_DEFINITION = "fbank-stage-f64-direct-v1"
+FBANK_STAGE_FIELDS = {
+    "case",
+    "evaluation",
+    "dtype",
+    "definition",
+    "constants",
+    "input_shape",
+    "shape",
+    "input_length",
+    "length",
+    "input_sha256",
+    "truth_sha256",
+    "fixture_rows",
+}
+
+
+def fbank_stage_binding(binding: dict, key: str) -> None:
+    """Require complete deterministic f64 truth for the exact locked input geometry."""
+    match = re.fullmatch(
+        r"(fp32|tf32)/(first|last|short|mixed)/b([1-9][0-9]*)/stage(/switched)?", key
+    )
+    if (
+        match is None
+        or not isinstance(binding, dict)
+        or set(binding) != FBANK_STAGE_FIELDS
+    ):
+        raise Rejected("fbank stage truth: missing or invalid f64 binding")
+    batch = int(match[3])
+    if (match[2], batch) not in target_cases("fbankdft"):
+        raise Rejected("fbank stage truth: invalid case")
+    source = match[2]
+    if match[4]:
+        source = "first" if source == "short" else "short"
+    fixture_rows = (
+        list(range(batch))
+        if source == "mixed"
+        else [{"first": 0, "last": 17, "short": 18}[source]] * batch
+    )
+    if (
+        binding.get("case") != key
+        or binding.get("evaluation") != "complete-deterministic"
+        or binding.get("dtype") != "f64"
+        or binding.get("definition") != FBANK_STAGE_DEFINITION
+        or binding.get("input_shape") != [batch, 160_000]
+        or binding.get("shape") != [batch, 998, 80]
+        or type(binding.get("input_length")) is not int
+        or binding["input_length"] != batch * 160_000
+        or type(binding.get("length")) is not int
+        or binding["length"] != batch * 998 * 80
+        or binding.get("fixture_rows") != fixture_rows
+    ):
+        raise Rejected(
+            "fbank stage truth: mismatched complete f64 geometry or definition"
+        )
+    for field in ("input_shape", "shape", "fixture_rows"):
+        if not isinstance(binding[field], list) or any(
+            type(value) is not int for value in binding[field]
+        ):
+            raise Rejected("fbank stage truth: invalid typed geometry")
+    constants = binding.get("constants")
+    if not isinstance(constants, dict) or set(constants) != {
+        "sha256",
+        "mel_sha256",
+        "window",
+        "mel",
+        "scale",
+        "preemphasis",
+        "energy_floor",
+        "window_f32_max_abs",
+    }:
+        raise Rejected("fbank stage truth: missing independent constants")
+    if (
+        constants["window"] != "exact-f64-Hamming"
+        or constants["mel"] != "built-in-f32-converted-to-f64"
+        or constants["scale"] != 32768.0
+        or constants["preemphasis"] != 0.97
+        or constants["energy_floor"] != 2.0**-23
+    ):
+        raise Rejected("fbank stage truth: wrong independent constants")
+    difference = constants["window_f32_max_abs"]
+    if type(difference) not in (int, float) or difference < 0:
+        raise Rejected("fbank stage truth: invalid Hamming diagnostic")
+    finite([difference])
+    for digest in (
+        binding["input_sha256"],
+        binding["truth_sha256"],
+        constants["sha256"],
+        constants["mel_sha256"],
+    ):
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise Rejected("fbank stage truth: missing f64 or input hash")
+
+
+def fbank_stage_row(row: dict, key: str) -> dict:
+    """Bind every scored output and draw to the same complete unrounded reference."""
+    binding = row.get("stage_truth")
+    if not isinstance(binding, dict):
+        raise Rejected("fbank stage truth: missing f64 binding")
+    fbank_stage_binding(binding, key)
+    if row.get("truth_sha256") != binding["truth_sha256"]:
+        raise Rejected("fbank stage truth: mismatched f64 identity")
+    if row.get("id") == key + "/band":
+        if row.get("seeds") != [11, 23, 37, 41, 53, 67, 79, 97]:
+            raise Rejected("fbank stage truth: fixed perturbation seeds required")
+        metrics = row.get("metrics", [])
+        if len(metrics) != 8 or metrics != row.get("truth_draws"):
+            raise Rejected("fbank stage truth: missing same-f64 draws")
+    else:
+        if row.get("id") != key or row.get("truth") != row.get("first"):
+            raise Rejected("fbank stage truth: missing same-f64 stage metrics")
+        metrics = [row.get("first"), row.get("second")]
+    for measured in metrics:
+        if not isinstance(measured, dict) or (
+            type(measured.get("elements")) is not int
+            or measured["elements"] != binding["length"]
+        ):
+            raise Rejected("fbank stage truth: incomplete output metrics")
+    return binding
+
+
+def fbank_stage_identity(key: str, *rows: dict) -> None:
+    """Candidate, Library and draws must identify the same input and f64 reference."""
+    bindings = [fbank_stage_row(row, key) for row in rows]
+    if not bindings or any(binding != bindings[0] for binding in bindings[1:]):
+        raise Rejected("fbank stage truth: f64 identity differs between processes")
+
+
+def fbank_stage_cpu_evidence(
+    process: dict, evidence: dict, sections: list[dict]
+) -> None:
+    """Require one unlocked CPU owner and complete byte proof for each stage output."""
+    rows = process.get("rows", [])
+    stage_sections = {
+        section["case"]: section
+        for section in sections
+        if section["work"] == "stage_f64"
+    }
+    if len(stage_sections) != sum(
+        section["work"] == "stage_f64" for section in sections
+    ):
+        raise Rejected("GPU lock: duplicate prepared f64 stage case")
+    stage_rows = [
+        row
+        for row in rows
+        if re.fullmatch(
+            r"(?:fp32|tf32)/(?:first|last|short|mixed)/b[1-9][0-9]*/stage(?:/switched)?",
+            row.get("id", ""),
+        )
+    ]
+    stage_keys = {row["id"] for row in stage_rows}
+    if len(stage_keys) != len(stage_rows):
+        raise Rejected("GPU lock: duplicate emitted f64 stage case")
+    if set(stage_sections) != stage_keys:
+        raise Rejected("GPU lock: missing or mismatched unlocked f64 stage truth")
+    for row in rows:
+        if row.get("id") not in stage_keys and not row.get("id", "").endswith("/band"):
+            continue
+        key = row["id"].removesuffix("/band")
+        binding = fbank_stage_row(row, key)
+        section = stage_sections.get(key)
+        if section != {"work": "stage_f64", "locked": False, **binding}:
+            raise Rejected("GPU lock: f64 stage row differs from CPU owner binding")
+    if evidence.get("cpu_mode") not in ("serial", "parallel", "verify"):
+        raise Rejected("GPU lock: missing f64 stage CPU policy")
+    if evidence.get("cpu_mode") == "verify":
+        proofs = evidence.get("cpu_byte_identity", [])
+        for section in stage_sections.values():
+            matching = [proof for proof in proofs if proof.get("binding") == section]
+            if len(matching) != 1 or (
+                matching[0].get("serial_parallel_equal") is not True
+                or matching[0].get("bytes") != 8 + section["length"] * 8
+                or re.fullmatch(r"[0-9a-f]{64}", str(matching[0].get("sha256"))) is None
+            ):
+                raise Rejected("GPU lock: missing complete f64 stage byte proof")
+
+
+def validate_gpu_ownership(process: dict, phase: str) -> None:
+    """Require completed evidence from the selected GPU lock owner."""
+    evidence = process.get("gpu_lock")
+    owner = "child" if phase == "numeric" else "parent"
+    if not isinstance(evidence, dict) or (
+        evidence.get("path") != GPU_LOCK or evidence.get("owner") != owner
+    ):
+        raise Rejected("GPU lock: missing or inconsistent ownership evidence")
+    sections = evidence.get("cpu_sections")
+    if not isinstance(sections, list):
+        raise Rejected("GPU lock: missing CPU ownership evidence")
+    if owner == "parent" and sections:
+        raise Rejected("GPU lock: parent-owned process ran CPU qualification work")
+    for section in sections:
+        if (
+            not isinstance(section, dict)
+            or section.get("work") not in ("f64", "tf32_draws", "stage_f64")
+            or section.get("locked") is not False
+        ):
+            raise Rejected("GPU lock: CPU qualification work held the shared lock")
+        if section["work"] == "stage_f64":
+            if process.get("target") != "fbankdft":
+                raise Rejected("GPU lock: f64 stage work requires the fbank owner")
+            binding = {
+                key: value
+                for key, value in section.items()
+                if key not in ("work", "locked")
+            }
+            fbank_stage_binding(binding, section.get("case", ""))
+            continue
+        fields = (
+            {"work", "locked", "case"}
+            if section["work"] == "f64"
+            else {"work", "locked", "case", "layer", "seed", "length"}
+        )
+        if set(section) != fields or (
+            section["work"] == "f64"
+            and (not isinstance(section["case"], str) or not section["case"])
+        ):
+            raise Rejected("GPU lock: missing or invalid CPU case evidence")
+    count = evidence.get("gpu_sections")
+    if type(count) is not int or count != len(sections) + 1:
+        raise Rejected("GPU lock: incomplete GPU ownership evidence")
+    if owner == "child":
+        rows = process.get("rows", [])
+        prepared = [section["case"] for section in sections if section["work"] == "f64"]
+        if len(set(prepared)) != len(prepared):
+            raise Rejected("GPU lock: duplicate prepared f64 case")
+        emitted = [row.get("id") for row in rows if row.get("secret") is True]
+        if any(not isinstance(case, str) or not case for case in emitted) or not set(
+            emitted
+        ) <= set(prepared):
+            raise Rejected("GPU lock: missing unlocked f64 truth work")
+        if process.get("target") == "fbankdft":
+            fbank_stage_cpu_evidence(process, evidence, sections)
+        expected = Counter()
+        for row in rows:
+            if not row.get("id", "").endswith("/band") or not row.get("layers"):
+                continue
+            if row.get("seeds") != [11, 23, 37, 41, 53, 67, 79, 97]:
+                raise Rejected("GPU lock: invalid TF32 draw seeds")
+            case = row["id"].removesuffix("/band")
+            for layer in row["layers"]:
+                length = draw_length(case, layer)
+                for seed in row["seeds"]:
+                    expected[(case, layer, seed, length)] += 1
+        actual = Counter()
+        for section in sections:
+            if section["work"] != "tf32_draws":
+                continue
+            if (
+                not isinstance(section["case"], str)
+                or not isinstance(section["layer"], str)
+                or type(section["seed"]) is not int
+                or type(section["length"]) is not int
+            ):
+                raise Rejected("GPU lock: invalid TF32 draw binding")
+            actual[
+                (section["case"], section["layer"], section["seed"], section["length"])
+            ] += 1
+        if actual != expected:
+            raise Rejected("GPU lock: missing or mismatched unlocked TF32 draw work")
 
 
 def driver(
@@ -458,7 +822,7 @@ def driver(
     label: str,
     extra: dict | None = None,
 ) -> dict:
-    """Run one fresh test process under the lock and require its evidence file."""
+    """Run a fresh driver with explicit GPU ownership and require its evidence."""
     output = directory / f"{label}.json"
     child = dict(
         env,
@@ -468,16 +832,28 @@ def driver(
         **(extra or {}),
     )
     log = directory / f"{label}.log"
-    if gpu_command(
-        [str(binary), "--exact", PROFILE_TEST, "--ignored", "--nocapture"],
-        child,
-        log,
-        steps,
-    ):
+    argv = [str(binary), "--exact", PROFILE_TEST, "--ignored", "--nocapture"]
+    if phase == "numeric":
+        child["SPEAKRS_QUALIFY_LOCK_OWNER"] = "child"
+        code = command(argv, child, log, steps)
+    else:
+        code = gpu_command(argv, child, log, steps)
+    if code:
         raise Rejected(f"driver failed: {label}")
     if "1 passed; 0 failed" not in log.read_text() or not output.is_file():
         raise Rejected(f"driver missing completed GPU evidence: {label}")
     data = json.loads(output.read_text())
+    validate_gpu_ownership(data, phase)
+    if phase == "numeric" and data.get("target") == "fbankdft":
+        if data["gpu_lock"].get("cpu_mode") != child.get(
+            "SPEAKRS_QUALIFY_CPU_MODE", "parallel"
+        ):
+            raise Rejected("GPU lock: f64 stage CPU policy differs from requested mode")
+    if phase == "numeric":
+        steps[-1]["cpu_work_wall_seconds"] = data["gpu_lock"].get(
+            "cpu_wall_seconds", {}
+        )
+        steps[-1]["cpu_byte_identity"] = data["gpu_lock"].get("cpu_byte_identity", [])
     if (
         data["implementation"] != implementation
         or data["phase"] != phase
@@ -487,6 +863,8 @@ def driver(
     if phase == "coverage":
         return data
     mode = child.get("SPEAKRS_QUALIFY_MODE")
+    if phase == "paired" and (mode not in MODES or data.get("mode") != mode):
+        raise Rejected("driver math mode mismatch")
     if phase in ("numeric", "timing"):
         if mode not in MODES or data.get("mode") != mode:
             raise Rejected("driver math mode mismatch")
@@ -503,8 +881,67 @@ def driver(
             raise Rejected("graph replay timing is required")
     if data.get("tier") != env.get("SPEAKRS_CUDA_PTX_TIER"):
         raise Rejected("driver PTX tier mismatch")
+    validate_target(
+        data,
+        env["SPEAKRS_CUDA_PTX_TIER"],
+        candidate_area=AREAS[env["SPEAKRS_QUALIFY_TARGET"]]
+        if implementation != "Library"
+        else None,
+    )
     data["evidence_sha256"] = sha(output)
     return data
+
+
+def validate_target(process: dict, tier: str, *, candidate_area: str | None) -> dict:
+    """Require the selected candidate tier and retain every area's loaded tier.
+
+    The trusted caller identifies the candidate area. Library and glue areas use
+    the production loader's tier limit, not a forced variant at that limit.
+    """
+    device = artifacts.device(process.get("device"))
+    required = (
+        "name",
+        "compute_capability",
+        "sm_count",
+        "l2_bytes",
+        "driver_api_version",
+        "driver_version",
+        "cuda_version",
+        "cudnn_version",
+        "cublas_version",
+    )
+    if any(not device.get(key) for key in required):
+        raise Rejected("target: missing device or library version evidence")
+    if device["compute_capability"] != process.get("device_sm"):
+        raise Rejected("target: inconsistent compute capability")
+    minimum = {"sm75": (7, 5), "sm80": (8, 0), "sm90": (9, 0), "sm120": (12, 0)}[tier]
+    capability = artifacts.capability(device["compute_capability"])
+    if capability < minimum:
+        raise Rejected("target: device cannot execute requested tier")
+    modules = process.get("loaded_modules", [])
+    if not modules:
+        raise Rejected("target: missing loaded area evidence")
+    for module in modules:
+        pin = module.get("artifact", {})
+        if not isinstance(pin, dict):
+            raise Rejected("artifact: missing loaded artifact")
+        artifacts.key(
+            {name: pin[name] for name in ("kind", "arch", "sha256") if name in pin},
+            device_capability=device["compute_capability"],
+        )
+        if module["area"] == candidate_area and module["tier"] != tier:
+            raise Rejected(
+                f"target: loaded tier differs from requested tier: {module['area']} {module['tier']} != {tier}"
+            )
+    if process.get("phase") in ("timing", "paired"):
+        clocks = process.get("observed_sm_clock", {})
+        if (
+            not clocks
+            or clocks.get("samples", 0) < 1
+            or not 0 < clocks.get("min_mhz", 0) <= clocks.get("max_mhz", 0)
+        ):
+            raise Rejected("target: missing observed SM clocks during timing")
+    return {"device": device, "loaded_tiers": {m["area"]: m["tier"] for m in modules}}
 
 
 def fail(error: Rejected):
@@ -517,6 +954,16 @@ def check(result: dict, name: str, operation) -> None:
     try:
         evidence = operation()
         result["checks"].append({"check": name, "passed": True, "evidence": evidence})
+    except StageBlocked as error:
+        result["checks"].append(
+            {
+                "check": name,
+                "passed": False,
+                "blocked": True,
+                "reason": str(error),
+                "evidence": error.evidence,
+            }
+        )
     except Blocked as error:
         result["checks"].append(
             {"check": name, "passed": False, "blocked": True, "reason": str(error)}
@@ -529,6 +976,15 @@ def check(result: dict, name: str, operation) -> None:
                 "reason": str(error),
                 "failing_cases": error.failing,
                 "cases": error.cases,
+            }
+        )
+    except (TruthRejected, StageRejected) as error:
+        result["checks"].append(
+            {
+                "check": name,
+                "passed": False,
+                "reason": str(error),
+                "evidence": error.evidence,
             }
         )
     except Rejected as error:
@@ -572,6 +1028,7 @@ def verify_modules(modules: list[dict], root: Path = ROOT) -> tuple[AllowList, d
         names = ENTRY.findall(path.read_text())
         if names != module["entries"]:
             raise Rejected(f"loaded entries differ from {path.name}")
+        artifacts.module(module, root)
         harness = path.parent.name == "device"
         if not harness and not path.name.startswith(
             f"{module['area']}.{module['tier']}."
@@ -897,23 +1354,25 @@ def missing_projection_markers(text: str) -> list[str]:
 def stage_check(result: dict, key: str, row: dict, control: dict) -> None:
     """The strict stage rule: FP32 always, TF32 when no candidate layer runs in TF32."""
     a, b = row["first"], control["first"]
-    if result["target"] == "resnet":
+    if result["target"] in COLLECTION_REGISTRY["EMBEDDING_TARGETS"]:
         check(
             result,
             f"stage:{key}",
             lambda: embedding_parity(a["minimum_cosine"], b["minimum_cosine"]),
         )
         return
-    check(
-        result,
-        f"stage:{key}",
-        lambda: segmentation_parity(
+
+    def parity():
+        if result["target"] == "fbankdft":
+            fbank_stage_identity(key, row, control)
+        segmentation_parity(
             Error(a["relative_l2"], a["max_abs"]),
             Error(b["relative_l2"], b["max_abs"]),
             a["argmax_flips"],
             b["argmax_flips"],
-        ),
-    )
+        )
+
+    check(result, f"stage:{key}", parity)
 
 
 def numeric(
@@ -928,7 +1387,7 @@ def numeric(
     }
     grouped = defaultdict(list)
     band_rows = []
-    embedding = result["target"] == "resnet"
+    embedding = result["target"] in COLLECTION_REGISTRY["EMBEDDING_TARGETS"]
     secrets = [row for row in candidate if row.get("secret")]
     for row in candidate:
         if row.get("secret"):
@@ -946,6 +1405,14 @@ def numeric(
 
         check(result, f"determinism:{key}", repeat)
         if boundary == "stage":
+            if result["target"] == "fbankdft":
+                check(
+                    result,
+                    f"stage_reference:{key}",
+                    lambda row=row, control=control, key=key: fbank_stage_identity(
+                        key, row, control
+                    ),
+                )
             if not coverage.layers_at(batch, mode):
 
                 def stage_identity(row=row, control=control):
@@ -955,7 +1422,9 @@ def numeric(
                         )
 
                 check(result, f"library_dispatch:{key}", stage_identity)
-            elif mode == "tf32" and key in bands:
+                if mode == "tf32" and result.get("implementation") == "Library":
+                    band_rows.append((key, row, control))
+            elif mode == "tf32":
                 band_rows.append((key, row, control))
             else:
                 stage_check(result, key, row, control)
@@ -990,60 +1459,97 @@ def numeric(
         check(result, f"layer:{mode}/{layer}", lambda cases=cases: layer_parity(cases))
 
     secret_coverage = (
-        Coverage.product(layers(result["target"]), BATCHES, MODES)
+        Coverage.product(
+            layers(result["target"]), target_batches(result["target"]), MODES
+        )
         if result.get("implementation") == "Library"
         else coverage
     )
     secret_checks(result, secrets, secret_coverage)
     if not band_rows:
         return
-    seeds = next(row["seeds"] for row in library if row["id"].endswith("/band"))
-    layers_used = sorted(
-        {
-            layer
-            for row in library
-            if row["id"].endswith("/band")
-            for layer in row["layers"]
-        }
-    )
     bands_by_case = {}
     for key, row, control in band_rows:
-        # each case's band is that case's own seed maximum
-        try:
-            band = tf32_band(
+        band_row = baseline.get(f"{key}/band")
+
+        def truth_gate(row=row, control=control, band_row=band_row):
+            if result["target"] == "fbankdft":
+                if band_row is None:
+                    raise Rejected("TF32 truth: missing complete CPU f64 stage draws")
+                fbank_stage_identity(row["id"], row, control, band_row)
+            if (
+                band_row is None
+                or row.get("truth") is None
+                or control.get("truth") is None
+            ):
+                raise Rejected(
+                    "TF32 truth: missing same-input FP32 truth or perturbation draws"
+                )
+            truth_hash = row.get("truth_sha256")
+            if (
+                not truth_hash
+                or truth_hash != control.get("truth_sha256")
+                or truth_hash != band_row.get("truth_sha256")
+            ):
+                raise Rejected(
+                    "TF32 truth: FP32 Library truth differs between processes"
+                )
+            seeds = band_row.get("seeds", [])
+            if len(seeds) < 8 or len(set(seeds)) != len(seeds):
+                raise Rejected("TF32 truth: independent perturbation seeds required")
+            if len(band_row.get("truth_draws", [])) != len(seeds):
+                raise Rejected("TF32 truth: missing perturbation draw")
+            if result["target"] != "fbankdft":
+                return tf32_truth(
+                    row["truth"], control["truth"], band_row["truth_draws"]
+                )
+            try:
+                evidence = tf32_truth(
+                    row["truth"], control["truth"], band_row["truth_draws"]
+                )
+            except TruthRejected as error:
+                error.evidence["truth"] = (
+                    "independent CPU f64, complete stage, same input"
+                )
+                error.evidence["stage_truth"] = row["stage_truth"]
+                raise
+            evidence["truth"] = "independent CPU f64, complete stage, same input"
+            evidence["stage_truth"] = row["stage_truth"]
+            return evidence
+
+        check(result, f"stage_truth:{key}", truth_gate)
+        if key in bands:
+            bands_by_case[key] = tf32_band(
                 [{"metrics": control["first"], "band": bands[key]}], embedding
             )
-        except Rejected as error:
-            check(result, f"stage:{key}", lambda error=error: fail(error))
-            continue
-        bands_by_case[key] = band
-        check(
-            result,
-            f"stage:{key}",
-            lambda row=row, control=control, band=band: tf32_stage_case(
-                row["first"], control["first"], band, embedding
-            ),
-        )
+            if not embedding:
+
+                def stage_flips(row=row, control=control, band=bands_by_case[key]):
+                    if (
+                        row["first"]["argmax_flips"]
+                        > control["first"]["argmax_flips"] + band["flips"]
+                    ):
+                        raise Rejected(
+                            "stage: argmax flips above Library plus measured band"
+                        )
+
+                check(result, f"stage:{key}/argmax", stage_flips)
     result["tf32_band"] = {
+        "error_drift_diagnostic_only": True,
         "per_case": bands_by_case,
-        "seed_values": seeds,
-        "layers": layers_used,
     }
-    total = {
-        "total_flips": sum(
-            band.get("total_flips", 0) for band in bands_by_case.values()
-        )
-    }
-    check(
-        result,
-        "stage:tf32/aggregate",
-        lambda: tf32_stage_aggregate(
-            [row["first"] for _, row, _ in band_rows],
-            [control["first"] for _, _, control in band_rows],
-            total,
-            embedding,
-        ),
-    )
+    if not embedding:
+
+        def total_flips():
+            candidate = sum(row["first"]["argmax_flips"] for _, row, _ in band_rows)
+            library = sum(
+                control["first"]["argmax_flips"] for _, _, control in band_rows
+            )
+            band = sum(value.get("total_flips", 0) for value in bands_by_case.values())
+            if candidate > library + band:
+                raise Rejected("stage: total flips above Library plus measured band")
+
+        check(result, "stage:tf32/aggregate_argmax", total_flips)
 
 
 def secret_checks(result: dict, secrets: list[dict], coverage: Coverage) -> None:
@@ -1167,14 +1673,7 @@ def timing(
                     "undeclared stage: bitwise Library identity, no candidate kernels"
                 )
                 continue
-            detail["gate"] = "stage: regression guard within the stage bound"
-            check(
-                result,
-                f"speed:{key}",
-                lambda samples=samples, bound=bound: stage_speed(
-                    samples, implementation, bound
-                ),
-            )
+            detail["gate"] = "stage: paired replay guard in same-process phase"
     result["measurability"] = {
         kind: {"measurable": count, "cases": total}
         for kind, (count, total) in measurable.items()
@@ -1182,6 +1681,121 @@ def timing(
     result["noise_floor_fraction"] = max(
         row["library_process_spread_fraction"] for row in result["timing"]
     )
+
+
+def paired_checks(
+    result: dict,
+    process: dict,
+    coverage: Coverage,
+    library: dict,
+    candidate: dict,
+    implementation: str,
+) -> None:
+    """Require exact paired case coverage, numeric outputs and same-process saving."""
+    mode = process["mode"]
+    expected = {
+        f"{mode}/{case}/b{batch}/stage"
+        for case, batch in target_cases(result["target"])
+        if coverage.layers_at(batch, mode) or implementation == "Library"
+    }
+    rows = {row["id"]: row for row in process["rows"]}
+    if set(rows) != expected or len(rows) != len(process["rows"]):
+        raise Rejected("paired stage: missing or duplicate case coverage")
+    numeric = [{row["id"]: row for row in p["rows"]} for p in (library, candidate)]
+    for key, row in rows.items():
+
+        def outputs(row=row, key=key):
+            for side in (0, 1):
+                expected_hashes = [
+                    numeric[side][key]["first"]["sha256"],
+                    numeric[side][f"{key}/switched"]["first"]["sha256"],
+                ]
+                if row["output_sha256"][side] != expected_hashes:
+                    raise Rejected(
+                        "paired stage: final output differs from numeric evidence"
+                    )
+                if (
+                    side == 1
+                    and "stage_tail" in row
+                    and row["stage_tail"].get("delayed_output_sha256")
+                    != expected_hashes
+                ):
+                    raise Rejected(
+                        "paired stage: delayed output differs from numeric evidence"
+                    )
+                for op in row["operator_outputs"]:
+                    operator_key = (
+                        op.get("id") or key.removesuffix("stage") + op["layer"]
+                    )
+                    hashes = [
+                        numeric[side][operator_key]["first"]["sha256"],
+                        numeric[side][f"{operator_key}/switched"]["first"]["sha256"],
+                    ]
+                    if op["output_sha256"][side] != hashes:
+                        raise Rejected(
+                            "paired stage: operator output differs from numeric evidence"
+                        )
+
+        _, _, batch, _, _ = split_key(key)
+        expected_layers = (
+            set(layers(result["target"]))
+            if implementation == "Library"
+            else set(coverage.layers_at(batch, mode))
+        )
+        observed_layers = [
+            op.get("layer") or split_key(op["id"])[3] for op in row["operator_outputs"]
+        ]
+        if (
+            len(observed_layers) != len(set(observed_layers))
+            or set(observed_layers) != expected_layers
+        ):
+            raise Rejected("paired stage: missing or duplicate operator coverage")
+        if "operator_layers" in row and set(row["operator_layers"]) != expected_layers:
+            raise Rejected(
+                "paired stage: measured operator strata differ from coverage"
+            )
+        check(result, f"paired_output:{key}", outputs)
+        operator_keys = {
+            f"speed:{key.removesuffix('stage')}{layer}"
+            for layer in coverage.layers_at(batch, mode)
+        }
+        passed = {item["check"] for item in result["checks"] if item["passed"]}
+        details = {detail["id"]: detail for detail in result.get("timing", [])}
+        for item in result["checks"]:
+            if item["check"] not in operator_keys or not item.get("blocked"):
+                continue
+            try:
+                evaluation = noise_timing(
+                    item,
+                    details[item["check"].removeprefix("speed:")],
+                    allow_stage=False,
+                )
+                if evaluation["accepted"]:
+                    passed.add(item["check"])
+            except (Rejected, KeyError, ValueError):
+                pass
+        operator_passed = bool(operator_keys) and operator_keys <= passed
+        if implementation == "Library":
+            # a sanity control validates the estimator but never claims a speed improvement
+            check(result, f"paired_control:{key}", lambda row=row: paired_control(row))
+        else:
+            check(
+                result,
+                f"paired_stage:{key}",
+                lambda row=row, ok=operator_passed: stage_speed(row, ok),
+            )
+
+
+def paired_control(row: dict) -> dict:
+    """Check the full paired estimator contract without imposing a win on Library."""
+    try:
+        return stage_speed(row, True)
+    except (StageBlocked, StageRejected) as error:
+        return {
+            **error.evidence,
+            "control": True,
+            "comparison": "Library vs Library",
+        }
 
 
 def timing_outputs(
@@ -1286,8 +1900,13 @@ def profile(
     steps: list,
     implementation: str,
     target: str,
+    *,
+    test: str = PROFILE_TEST,
+    label: str = "profile",
+    eager_only: bool = False,
 ) -> Path:
-    """Run the eager nsys trace with the locked NVTX shim and export it."""
+    """Trace plan, warm-up, eager, capture and one replay with the locked shim."""
+    result["profile_trace_mode"] = "graph"
     shim = directory / "nvtx.so"
     if command(
         [
@@ -1306,13 +1925,14 @@ def profile(
         steps,
     ):
         raise Rejected("NVTX shim build failed")
-    prefix = directory / "profile"
+    prefix = directory / label
     profile_env = dict(
         env,
         SPEAKRS_QUALIFY_NVTX=str(shim),
         SPEAKRS_QUALIFY_IMPL=implementation,
         SPEAKRS_QUALIFY_PHASE="profile",
-        SPEAKRS_QUALIFY_OUTPUT=str(directory / "profile-driver.json"),
+        SPEAKRS_QUALIFY_SHORT_TRACE="0" if eager_only else "1",
+        SPEAKRS_QUALIFY_OUTPUT=str(directory / f"{label}-driver.json"),
     )
     if gpu_command(
         [
@@ -1321,17 +1941,18 @@ def profile(
             "--sample=none",
             "--cpuctxsw=none",
             "--trace=cuda,nvtx,cublas,cudnn",
+            "--cuda-graph-trace=graph",
             "--force-overwrite=true",
             "-o",
             str(prefix),
             str(binary),
             "--exact",
-            PROFILE_TEST,
+            test,
             "--ignored",
             "--nocapture",
         ],
         profile_env,
-        directory / "profile.log",
+        directory / f"{label}.log",
         steps,
     ):
         raise Rejected("blocked: nsys stage trace did not complete")
@@ -1347,16 +1968,149 @@ def profile(
             str(exported),
             str(prefix.with_suffix(".nsys-rep")),
         ],
-        env,
-        directory / "export.log",
+        dict(env, SPEAKRS_QUALIFY_PHASE="profile"),
+        directory / f"{label}-export.log",
         steps,
     ):
         raise Rejected("blocked: nsys SQLite export failed")
-    result["profile"] = {"path": str(exported), "sha256": sha(exported)}
+    if test == PROFILE_TEST:
+        process = json.loads((directory / f"{label}-driver.json").read_text())
+        validate_target(
+            process,
+            env["SPEAKRS_CUDA_PTX_TIER"],
+            candidate_area=AREAS[env["SPEAKRS_QUALIFY_TARGET"]]
+            if implementation != "Library"
+            else None,
+        )
+    result[label] = {"path": str(exported), "sha256": sha(exported)}
+    result.setdefault("profile_traces", []).append(
+        {
+            "label": label,
+            **result[label],
+            "eager_only": eager_only,
+            "receipt": None,
+        }
+    )
+    if test == PROFILE_TEST and not eager_only and process.get("side_streams"):
+        # replay correlations cannot recover per-node side-stream ownership
+        # retain the original eager trace for the unchanged attribution check
+        result["profile_traces"][-1]["retained_for_eager"] = True
+        retained = profile(
+            result,
+            binary,
+            env,
+            directory,
+            steps,
+            implementation,
+            target,
+            test=test,
+            label=f"{label}-eager",
+            eager_only=True,
+        )
+        result[label] = {"path": str(retained), "sha256": sha(retained)}
+        result["profile_retained_checks"] = [
+            "profile: stream attribution",
+            "profile:graph_nodes: eager launch multisets",
+        ]
+        return retained
     return exported
 
 
-CANDIDATE_AREAS = frozenset({"resnet", "lstm", "sincnet"})
+def fresh_profile_windows(
+    target: str, coverage: Coverage, library_control: bool
+) -> frozenset[str]:
+    """Require fresh launches for the same typed boundary, batch and math domain."""
+    selected = (
+        Coverage.product(layers(target), target_batches(target), MODES)
+        if library_control
+        else coverage
+    )
+    return frozenset(
+        f"lifecycle/secret/{mode}/{layer}/b{batch}/fresh"
+        for layer, batch, mode in selected.triples
+    )
+
+
+def check_profile_traces(
+    result: dict,
+    required: tuple[str, ...],
+    nonce: str,
+    allow: AllowList,
+    declared: frozenset[str],
+    library_control: bool,
+    *,
+    fresh_windows: frozenset[str] = frozenset(),
+) -> dict:
+    """Read each produced trace and bind an explicit check receipt to its bytes."""
+    traces = result.get("profile_traces", [])
+    if not traces:
+        raise Rejected("profile: no produced trace inventory")
+    failures = []
+    for item in traces:
+        if item.get("receipt") is not None:
+            continue
+        path = Path(item["path"])
+        try:
+            if sha(path) != item["sha256"]:
+                raise Rejected("profile: produced trace bytes changed")
+            evidence = attribute(
+                path, required, nonce, allow, declared, library_control
+            )
+            missing_fresh = sorted(
+                name
+                for name in fresh_windows
+                if not evidence["window_kernel_events"].get(name)
+            )
+            if missing_fresh:
+                raise Rejected(
+                    f"profile: missing fresh-input kernel coverage: {missing_fresh[:8]}"
+                )
+            item["receipt"] = {
+                "passed": True,
+                "sha256": item["sha256"],
+                "evidence": evidence,
+            }
+        except (Rejected, OSError) as error:
+            item["receipt"] = {
+                "passed": False,
+                "sha256": item["sha256"],
+                "reason": str(error),
+            }
+        if item.get("retained_for_eager"):
+            # the alias is published only after this lifecycle file has been read
+            result["short_profile"] = item
+        if not item["receipt"]["passed"]:
+            failures.append(f"{item['label']}: {item['receipt']['reason']}")
+    if failures:
+        raise Rejected("profile: " + "; ".join(failures))
+    return profile_trace_receipts(result)
+
+
+def profile_trace_receipts(result: dict) -> dict:
+    """Reject unread traces and receipts that do not match the produced inventory."""
+    traces = result.get("profile_traces", [])
+    if not traces:
+        raise Rejected("profile: no produced trace inventory")
+    if len({item["path"] for item in traces}) != len(traces):
+        raise Rejected("profile: duplicate produced trace path")
+    for item in traces:
+        try:
+            current = sha(Path(item["path"]))
+        except OSError as error:
+            raise Rejected(
+                f"profile: checked trace file is missing: {item['label']}"
+            ) from error
+        if current != item["sha256"]:
+            raise Rejected(f"profile: checked trace bytes changed: {item['label']}")
+        receipt = item.get("receipt")
+        if not isinstance(receipt, dict) or receipt.get("sha256") != item["sha256"]:
+            raise Rejected(f"profile: produced trace was not checked: {item['label']}")
+        if receipt.get("passed") is not True:
+            raise Rejected(f"profile: {item['label']}: {receipt.get('reason')}")
+    return {"checked_traces": [item["label"] for item in traces]}
+
+
+CANDIDATE_AREAS = frozenset(AREAS.values())
 
 
 def stable_modules(
@@ -1388,8 +2142,10 @@ def stable_modules(
             candidate[area] = modules[area]
         # profile covers all cases; numeric and timing cover their recorded triples
         ran = (
-            coverage.triples
-            if process["phase"] == "profile"
+            frozenset(
+                t for t in coverage.triples if process.get("mode") in (None, t[2])
+            )
+            if process["phase"] in ("profile", "paired")
             else frozenset(
                 (layer, batch, mode)
                 for row in process["rows"]
@@ -1397,7 +2153,11 @@ def stable_modules(
                 if (layer, batch, mode) in coverage.triples
             )
         )
-        required = {target} if implementation == "Oxide" and ran else set()
+        required = (
+            {AREAS[target]}
+            if implementation in ("Oxide", "StageTail", "StageTailControl") and ran
+            else set()
+        )
         if required - loaded:
             raise Rejected(
                 f"process runs declared triples but did not load candidate area {target}"
@@ -1432,13 +2192,42 @@ def graph_kernels(processes: list[dict]) -> dict[str, set[str]]:
     return dict(found)
 
 
+def capture_multisets(
+    trace: Path, processes: list[dict], nonce: str, *, required: int | None = None
+) -> dict:
+    """Compare each captured plan's multiset with correlated eager launches, not declarations."""
+    eager = window_kernels(trace, nonce, multiset=True)
+    compared = 0
+    evidence = []
+    for process in processes:
+        found: dict[str, Counter] = defaultdict(Counter)
+        for capture in process.get("graph_evidence", []):
+            if capture.get("case") is not None:
+                found[capture["case"]]
+                if capture["scope"] == "candidate":
+                    found[capture["case"]].update(capture["kernels"])
+        for case, kernels in found.items():
+            expected = eager.get(case, Counter())
+            if kernels != expected:
+                raise Rejected(
+                    f"profile: capture != eager launch multiset for {case}: {dict(kernels)} != {dict(expected)}"
+                )
+            compared += 1
+            evidence.append({"case": case, "kernel_multiset": dict(expected)})
+    if required is not None and (
+        compared != required or len(eager) != required or not all(eager.values())
+    ):
+        raise Rejected("profile: incomplete same-plan sequential capture evidence")
+    return {"compared": compared, "eager": evidence}
+
+
 def band_layers(coverage: Coverage, implementation: str) -> str:
     """`<batch>:<layers>;...` for every batch with declared TF32 layers."""
     if implementation == "Library":
         return ""
     return ";".join(
         f"{batch}:{','.join(coverage.layers_at(batch, 'tf32'))}"
-        for batch in BATCHES
+        for batch in sorted(coverage.batches)
         if coverage.layers_at(batch, "tf32")
     )
 
@@ -1456,6 +2245,42 @@ def collect_tier(
         SPEAKRS_QUALIFY_TARGET=target,
         SPEAKRS_QUALIFY_NONCE=nonce,
     )
+    preflight(target, implementation)
+    # the paired fault fixture uses the archived JIT-qualified production plans
+    if implementation in ("StageTail", "StageTailControl"):
+        env["SPEAKRS_CUDA_FORCE_PTX_JIT"] = "1"
+        result["artifact_policy"] = "LegacyPtxJitFixture"
+    else:
+        result["artifact_policy"] = "ExactCubinPreferred"
+    result["requested_tier"] = tier
+    result["code_sha256"] = {
+        name: sha(ROOT / name)
+        for name in inventory()
+        if name.endswith((".rs", ".manifest")) and (ROOT / name).is_file()
+    }
+    result["code_sha256"].update(
+        {
+            str(path.relative_to(ROOT)): sha(path)
+            for path in (ROOT / "src/inference/cuda/candidate").rglob("*.rs")
+        }
+    )
+    result["code_sha256"].update(
+        {
+            str(path.relative_to(ROOT)): sha(path)
+            for base in (
+                ROOT / "crates/speakrs-cuda-kernels/src",
+                ROOT / "src/inference/cuda/ptx",
+            )
+            for path in base.rglob("*")
+            if path.is_file() and path.suffix in (".rs", ".ptx", ".manifest")
+        }
+    )
+    # candidate artifacts sit outside the harness lock and must be pinned in full,
+    # including unselected tiers and architectures, not just the loaded module
+    candidate_manifest = ROOT / "src/inference/cuda/ptx" / f"{AREAS[target]}.manifest"
+    if candidate_manifest.is_file() or implementation == "Oxide":
+        for hashes in shipped_files(ROOT, AREAS[target]).values():
+            result["code_sha256"].update(hashes)
     result["verified_inputs"] = verify_inputs(target)
     steps = result["commands"]
     binary = build(env, directory, steps)
@@ -1491,7 +2316,12 @@ def collect_tier(
 
     numeric_library, numeric_candidate = {}, {}
     candidate_processes = []
-    band = band_layers(coverage, implementation)
+    band_coverage = (
+        Coverage.product(layers(target), target_batches(target), MODES)
+        if implementation == "Library"
+        else coverage
+    )
+    band = band_layers(band_coverage, "Oxide")
     for mode in MODES:
         extra = {"SPEAKRS_QUALIFY_MODE": mode}
         library = driver(
@@ -1514,7 +2344,10 @@ def collect_tier(
             f"numeric-{mode}-candidate",
             extra,
         )
+        if library["device"] != candidate["device"]:
+            raise Rejected("target: Library and candidate device identity differs")
         result.setdefault("device_sm", library["device_sm"])
+        result.setdefault("device", library["device"])
         numeric_library[mode] = library
         numeric_candidate[mode] = candidate
         candidate_processes.append(candidate)
@@ -1560,7 +2393,9 @@ def collect_tier(
             return {"modules": len(result["loaded_ptx"]["modules"])}
 
         check(result, "ptx:shared_initialization", shared_loads)
-    phases = MUTANT_PHASES.get(implementation, PHASES)
+    phases = CONTROL_PHASES.get(
+        implementation, MUTANT_PHASES.get(implementation, PHASES)
+    )
     result["phases_run"] = list(phases)
     if "timing" in phases:
         timing_cases = {}
@@ -1604,6 +2439,30 @@ def collect_tier(
             for run in runs
         ]
 
+    if "paired" in phases:
+        result["paired_processes"] = []
+        for mode in MODES:
+            paired = driver(
+                binary,
+                env,
+                directory,
+                steps,
+                implementation,
+                "paired",
+                f"paired-{mode}",
+                {"SPEAKRS_QUALIFY_MODE": mode},
+            )
+            candidate_processes.append(paired)
+            result["paired_processes"].append(paired)
+            paired_checks(
+                result,
+                paired,
+                coverage,
+                numeric_library[mode],
+                numeric_candidate[mode],
+                implementation,
+            )
+
     def captured_calls():
         violations = [
             v for p in candidate_processes for v in p["library_call_violations"]
@@ -1625,8 +2484,6 @@ def collect_tier(
             )
         }
 
-    check(result, "profile:captured_library_calls", captured_calls)
-    graphs = graph_kernels(candidate_processes)
     if "profile" not in phases:
         check(result, "profile:graph_nodes", graph_nodes)
 
@@ -1634,8 +2491,9 @@ def collect_tier(
         exported = profile(
             result, binary, env, directory, steps, implementation, target
         )
-        candidate_processes.append(
-            json.loads((directory / "profile-driver.json").read_text())
+        candidate_processes.extend(
+            json.loads((directory / f"{item['label']}-driver.json").read_text())
+            for item in result["profile_traces"]
         )
         if allow is not None:
             check(
@@ -1644,24 +2502,18 @@ def collect_tier(
                 lambda: fixed_reduction_order(exported, result["loaded_ptx"]),
             )
             declared = frozenset(layer for layer in coverage.layers)
-            baseline_shapes = (
-                PROJECTION_SHAPES
-                if target == "lstm"
-                and (
-                    ROOT / "tests/cuda_qualify/baselines" / f"lstm-{tier}.json"
-                ).exists()
-                else frozenset()
-            )
 
             def trace(library_control: bool) -> dict:
-                return attribute(
-                    exported,
+                return check_profile_traces(
+                    result,
                     layers(target),
                     nonce,
                     allow,
                     declared,
-                    baseline_shapes,
                     library_control,
+                    fresh_windows=fresh_profile_windows(
+                        target, coverage, library_control
+                    ),
                 )
 
             if implementation == "Library":
@@ -1677,7 +2529,25 @@ def collect_tier(
             else:
                 check(result, "profile", lambda: trace(False))
 
+        else:
+            check(
+                result,
+                "profile",
+                lambda: check_profile_traces(
+                    result,
+                    layers(target),
+                    nonce,
+                    AllowList(frozenset(), frozenset()),
+                    frozenset(coverage.layers),
+                    implementation == "Library",
+                    fresh_windows=fresh_profile_windows(
+                        target, coverage, implementation == "Library"
+                    ),
+                ),
+            )
+
         def graph_matches_profile():
+            graphs = graph_kernels(candidate_processes)
             evidence = graph_nodes()
             eager = window_kernels(exported, nonce)
             differences = {
@@ -1692,9 +2562,50 @@ def collect_tier(
                 raise Rejected(
                     f"profile: captured kernels differ from the eager profile: {dict(list(differences.items())[:4])}"
                 )
-            return {**evidence, "compared_cases": len(graphs)}
+            multisets = capture_multisets(exported, candidate_processes, nonce)
+            return {**evidence, "compared_cases": len(graphs), "multisets": multisets}
 
         check(result, "profile:graph_nodes", graph_matches_profile)
+
+    check(result, "profile:captured_library_calls", captured_calls)
+
+    if "profile" in phases and implementation == "Oxide":
+        regression = profile(
+            result,
+            binary,
+            env,
+            directory,
+            steps,
+            implementation,
+            target,
+            test="inference::cuda::test_support::qualify::sequential_capture_keeps_candidate_kernels",
+            label="capture-regression",
+        )
+        regression_process = json.loads(
+            (directory / "capture-regression-driver.json").read_text()
+        )
+        check(
+            result,
+            "profile",
+            lambda: check_profile_traces(
+                result,
+                ("resnet.layer1.0.conv1",),
+                nonce,
+                allow if allow is not None else AllowList(frozenset(), frozenset()),
+                frozenset({"resnet.layer1.0.conv1"}),
+                False,
+            ),
+        )
+        check(
+            result,
+            "profile:sequential_capture",
+            lambda: capture_multisets(
+                regression, [regression_process], nonce, required=7
+            ),
+        )
+
+    if "profile" in phases:
+        check(result, "profile:trace_receipts", lambda: profile_trace_receipts(result))
 
     check(
         result,
@@ -1726,7 +2637,7 @@ def collect_tier(
     blocked_tools = []
     include = sorted(allow.entries) if allow is not None else []
     # positive controls prove the include filter for Library controls and candidates
-    if implementation not in MUTANTS and include:
+    if implementation not in (*MUTANTS, *CONTROL_PHASES) and include:
         for control_name in CONTROLS:
             check(
                 result,
@@ -1735,7 +2646,7 @@ def collect_tier(
                     binary, env, directory, steps, control_name, include
                 ),
             )
-    if target == "lstm" and implementation not in MUTANTS:
+    if target == "lstm" and implementation not in (*MUTANTS, *CONTROL_PHASES):
         for tool in TOOLS:
             record = library_tool_record(baseline, tool)
             if record is not None:
@@ -1792,7 +2703,7 @@ def collect_tier(
                     else f"ProjectionBaseline/{tool}"
                 )
     # mutants prove their intended gate; sanitizer completion adds no harness evidence
-    if implementation not in ("Library", *MUTANTS) and include:
+    if implementation not in ("Library", *MUTANTS, *CONTROL_PHASES) and include:
         for tool in TOOLS:
             child = dict(
                 env,
@@ -1815,35 +2726,97 @@ def collect_tier(
             if record["returncode"] in (124, 137) or "1 passed; 0 failed" not in text:
                 blocked_tools.append(f"{implementation}/{tool}: incomplete bounded run")
     finish_tier(result, blocked_tools)
+    clocks = [
+        p["observed_sm_clock"]
+        for p in candidate_processes
+        if p.get("observed_sm_clock")
+    ]
+    if clocks:
+        result["device"]["observed_sm_clock_range_mhz"] = [
+            min(p["min_mhz"] for p in clocks),
+            max(p["max_mhz"] for p in clocks),
+        ]
+    result["loaded_tiers"] = {
+        m["area"]: m["tier"] for m in result.get("loaded_ptx", {}).get("modules", [])
+    }
+    result["accepted_tuples"] = (
+        [
+            list(t)
+            for t in sorted(coverage.triples)
+            if t[1] in collection(target).production
+        ]
+        if result["status"] == "passed" and implementation == "Oxide"
+        else []
+    )
+    result["phase_wall_seconds"] = phase_wall_times(steps)
     result["coverage"] = {
         "math": list(MODES),
-        "cases": CASES,
+        "cases": target_cases(target),
         "tier": tier,
         "real_turing_hardware": "untested",
     }
 
 
+def phase_wall_times(steps: list[dict]) -> dict:
+    """Sum command wall times and expose unlocked CPU subsets without double counting."""
+    totals = dict.fromkeys(
+        (
+            "build",
+            "cpu_truth",
+            "cpu_draws",
+            "numeric",
+            "timing",
+            "paired",
+            "profile",
+            "sanitizer",
+        ),
+        0.0,
+    )
+    for step in steps:
+        phase = step.get("phase", "build")
+        phase = (
+            "sanitizer"
+            if phase in ("sanitize", "filter_proof", "projection_baseline")
+            else phase
+        )
+        if phase in totals:
+            totals[phase] += step.get("wall_seconds", 0.0)
+        cpu = step.get("cpu_work_wall_seconds", {})
+        totals["cpu_truth"] += cpu.get("f64", 0.0)
+        totals["cpu_draws"] += cpu.get("tf32_draws", 0.0)
+    return {
+        "seconds": totals,
+        "numeric_includes_cpu_work": True,
+        "cpu_work_excludes_lock_wait": True,
+    }
+
+
 def finish_tier(result: dict, blocked_tools: list[str]) -> None:
     """Hard failures reject; incomplete or unmeasurable evidence blocks; else pass."""
-    failed = [item for item in result["checks"] if not item["passed"]]
-    hard = [item for item in failed if not item.get("blocked")]
-    blocked = [item for item in failed if item.get("blocked")]
-    if blocked_tools:
-        result["status"] = "blocked"
-        result["reason"] = (
-            f"Compute Sanitizer drivers did not complete: {blocked_tools}"
+    evaluation = evaluate_checks(
+        result["checks"], result.get("timing", []), allow_stage=False
+    )
+    result["verdict_evaluation"] = evaluation
+    if evaluation["hard_failures"]:
+        result.update(
+            status="rejected",
+            reason=f"{len(evaluation['hard_failures'])} failed checks",
         )
-    elif hard:
-        result["status"] = "rejected"
-        result["reason"] = f"{len(hard)} failed checks"
-    elif blocked:
-        result["status"] = "blocked"
-        result["reason"] = (
-            f"{len(blocked)} checks cannot be decided: {[item['check'] for item in blocked[:6]]}"
+    elif blocked_tools:
+        result.update(
+            status="blocked",
+            reason=f"Compute Sanitizer drivers did not complete: {blocked_tools}",
+        )
+    elif not evaluation["accepted"]:
+        result.update(
+            status="blocked",
+            reason=f"{len(evaluation['unresolved'])} checks cannot be decided",
         )
     else:
-        result["status"] = "passed"
-        result["reason"] = "all required checks passed"
+        result.update(
+            status="passed",
+            reason="all required checks passed under locked verdict evaluation",
+        )
 
 
 def shipped_tiers(target: str, root: Path = ROOT) -> tuple[str, ...]:
@@ -1865,7 +2838,7 @@ def shipped_tiers(target: str, root: Path = ROOT) -> tuple[str, ...]:
 
 
 def collect(target: str, implementation: str, directory: Path, result: dict) -> None:
-    """A pass requires the scan and every shipped candidate tier to pass every check."""
+    """A pass requires the scan and the requested compiled tier to pass every check."""
     findings = scan(ROOT, cargo_home())
     result["static_scan"] = findings
     if findings["findings"]:
@@ -1885,7 +2858,9 @@ def collect(target: str, implementation: str, directory: Path, result: dict) -> 
         {"check": "static_scan", "passed": True, "evidence": findings}
     )
     result["tiers"] = {}
-    for tier in shipped_tiers(target):
+    for tier in (
+        result.get("requested_tier", os.environ.get("SPEAKRS_CUDA_PTX_TIER", "sm75")),
+    ):
         output = directory / tier
         output.mkdir()
         child = {
@@ -1894,6 +2869,7 @@ def collect(target: str, implementation: str, directory: Path, result: dict) -> 
             "checks": [],
             "commands": result["commands"],
             "status": "blocked",
+            "requested_tier": tier,
         }
         result["tiers"][tier] = child
         try:
@@ -1905,6 +2881,9 @@ def collect(target: str, implementation: str, directory: Path, result: dict) -> 
             result["checks"].extend(
                 {**item, "check": f"{tier}/{item['check']}"} for item in child["checks"]
             )
+    result["phase_wall_seconds"] = phase_wall_times(result["commands"])
+    for child in result["tiers"].values():
+        child["phase_wall_seconds"] = result["phase_wall_seconds"]
     failed = [item for item in result["checks"] if not item["passed"]]
     hard = [item for item in failed if not item.get("blocked")]
     blocked = [
@@ -1929,7 +2908,7 @@ def collect(target: str, implementation: str, directory: Path, result: dict) -> 
                 reason=f"mutant escaped its intended check {gate['intended_check']} ({gate['intended_reason']})",
             )
     result["accepts_replacement"] = (
-        implementation not in ("Library", *MUTANTS) and result["status"] == "passed"
+        implementation == "Oxide" and result["status"] == "passed"
     )
     result["noise_floor_fraction"] = max(
         (child.get("noise_floor_fraction", 0.0) for child in result["tiers"].values()),
@@ -1982,9 +2961,80 @@ def summary(result: dict) -> str:
 def main() -> int:
     """Refuse changed harnesses before GPU work and again before writing results."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("target", choices=("resnet", "lstm", "sincnet"))
-    parser.add_argument("implementation")
+    parser.add_argument("target", nargs="?", choices=(*AREAS, "segdense"))
+    parser.add_argument("implementation", nargs="?")
+    parser.add_argument("--collection", choices=tuple(COLLECTION_REGISTRY["SEGDENSE"]))
+    parser.add_argument("--tier", choices=("sm75", "sm80", "sm90", "sm120"))
+    parser.add_argument("--check-table", action="store_true")
+    parser.add_argument(
+        "--cpu-mode",
+        choices=("serial", "parallel", "verify"),
+        default="parallel",
+        help="CPU evidence policy; verify compares both modes on one in-memory snapshot",
+    )
+    parser.add_argument(
+        "--records",
+        type=Path,
+        help="re-derive summaries from this outside-tree cache's records/<sha256>",
+    )
+    parser.add_argument(
+        "--table", type=Path, help="check a scratch copy of the evaluated table"
+    )
     args = parser.parse_args()
+    if args.check_table:
+        try:
+            with tempfile.TemporaryDirectory(
+                prefix="speakrs-production-table-"
+            ) as output:
+                path = args.table or Path(output) / "table.json"
+                if args.table is None:
+                    env = dict(
+                        clean_environment(), SPEAKRS_QUALIFY_TABLE_OUTPUT=str(path)
+                    )
+                    run = subprocess.run(
+                        [
+                            "cargo",
+                            "test",
+                            "-p",
+                            "speakrs",
+                            "--no-default-features",
+                            "--features",
+                            "cuda",
+                            "--lib",
+                            "--",
+                            "--exact",
+                            "inference::cuda::implementation::tests::export_production_table",
+                        ],
+                        cwd=ROOT,
+                        env=env,
+                        check=False,
+                    )
+                    if run.returncode or not path.is_file():
+                        raise Rejected("table: Rust export failed")
+                print(
+                    json.dumps(
+                        check_table(
+                            json.loads(path.read_text()),
+                            records=args.records / "records" if args.records else None,
+                        ),
+                        indent=2,
+                    )
+                )
+            return 0
+        except (Rejected, LockError, OSError, KeyError, ValueError) as error:
+            print(f"table rejected: {error}", file=sys.stderr)
+            return 1
+    if args.target is None or args.implementation is None or args.table or args.records:
+        parser.error("target and implementation required, or --check-table")
+    try:
+        args.target = resolve_target(args.target, args.collection)
+        preflight(args.target, args.implementation)
+    except Rejected as error:
+        parser.error(str(error))
+    os.environ["SPEAKRS_QUALIFY_CPU_MODE"] = args.cpu_mode
+    tier = args.tier or os.environ.get("SPEAKRS_CUDA_PTX_TIER", "sm75")
+    if tier not in ("sm75", "sm80", "sm90", "sm120"):
+        parser.error("unknown requested PTX tier")
     expected = os.environ.get("SPEAKRS_QUALIFY_OWNER_DIGEST")
     if not expected:
         print(
@@ -2008,8 +3058,17 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    if args.implementation not in ("Library", "Oxide", *MUTANTS):
+    if args.implementation not in ("Library", "Oxide", *MUTANTS, *CONTROL_PHASES):
         print("qualification refused: unknown implementation name", file=sys.stderr)
+        return 2
+    if (
+        args.implementation in ("StageTail", "StageTailControl")
+        and args.target == "lstm"
+    ):
+        print(
+            "qualification refused: LSTM StageTail awaits the Library-free candidate (phase 2c-2)",
+            file=sys.stderr,
+        )
         return 2
     now = datetime.now(UTC)
     stamp = now.strftime("%Y%m%dT%H%M%S.%fZ")
@@ -2017,7 +3076,8 @@ def main() -> int:
     directory = BOX / "results" / prefix
     directory.mkdir(parents=True, exist_ok=False)
     result = {
-        "schema": 3,
+        "schema": 5,
+        "requested_tier": tier,
         "target": args.target,
         "implementation": args.implementation,
         "lock_digest": digest,
