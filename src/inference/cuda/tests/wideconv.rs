@@ -30,7 +30,7 @@ use serde_json::json;
 
 use super::super::candidate::{
     ConfigPin, ConvCandidate, ConvInputs, ConvKernel, ConvLayerSpec, ConvOxide, ConvPin,
-    DriverCandidate, Epilogue, Phases, PlanError, WideconvAlgorithm, WideconvConfig,
+    DriverCandidate, Epilogue, Fp16Policy, Phases, PlanError, WideconvAlgorithm, WideconvConfig,
     WideconvDevice, WideconvOxide, WideconvPartition, WideconvProducts, WideconvSplitCells,
     WideconvTensorKernel,
 };
@@ -412,7 +412,8 @@ impl Candidate {
         };
         let kernels = tier(KernelModule::Wideconv)?;
         // device-aware coverage, so Turing plans its 64-channel layers here as routing does
-        let coverage = WideconvOxide::driver_coverage(kernels.tier(), runtime.device());
+        let coverage =
+            WideconvOxide::driver_coverage(kernels.tier(), runtime.device(), Fp16Policy::Allowed);
         if coverage.covers(spec.name, spec.conv.batch, spec.conv.math) {
             let forced = std::env::var("TRUNK_CONFIG")
                 .ok()
@@ -428,7 +429,7 @@ impl Candidate {
                         sms: 108,
                         tier: kernels.tier(),
                     };
-                    let config = WideconvConfig::select(device, spec.conv)?;
+                    let config = WideconvConfig::select(device, spec.conv, Fp16Policy::Allowed)?;
                     WideconvOxide::with_config(runtime, &kernels, spec, config)?
                 }
                 _ => {
@@ -491,6 +492,7 @@ impl Candidate {
                     conv.math,
                     runtime.device(),
                     tier,
+                    Fp16Policy::Allowed,
                 )? {
                     ConfigPin::Conv(pin) => Ok(pin),
                     other => Err(PlanError::DeviceUnsupported {
@@ -501,15 +503,17 @@ impl Candidate {
         }
     }
 
+    /// Enqueues the plan; FP16 tiles set `range` nonzero when an activation saturates
     fn enqueue(
         &self,
         inputs: ConvInputs<'_, '_>,
         y: &mut cudarc::driver::CudaViewMut<'_, f32>,
+        range: &mut cudarc::driver::CudaViewMut<'_, f32>,
         stream: &CudaStream,
     ) -> Result<(), CudaError> {
         match self {
             Self::Resnet(plan, _) => plan.enqueue(inputs, y, &Phases::new(), stream),
-            Self::Wide(plan) => plan.enqueue(inputs, y, &Phases::new(), stream),
+            Self::Wide(plan) => plan.enqueue_checked(inputs, y, range, &Phases::new(), stream),
         }
     }
 
@@ -686,8 +690,11 @@ fn driver_trunk_layers_match_library() -> Result<(), CudaError> {
                 enqueue_library()?;
                 let lib_graph = capture(stream, &mut enqueue_library)?;
                 let lib_values = stream.clone_dtoh(&lib_out)?;
+                // cuMemcpyDtoHAsync into pageable memory has no completion guarantee
+                stream.synchronize()?;
 
                 let mut out = stream.alloc_zeros::<f32>(output_len)?;
+                let mut range = stream.alloc_zeros::<f32>(1)?;
                 let residual = rd.as_ref().map(|value| value.as_view());
                 let mut enqueue = || {
                     candidate.enqueue(
@@ -698,15 +705,25 @@ fn driver_trunk_layers_match_library() -> Result<(), CudaError> {
                             bias: &bd.as_view(),
                         },
                         &mut out.as_view_mut(),
+                        &mut range.as_view_mut(),
                         stream,
                     )
                 };
                 enqueue()?;
                 let graph = capture(stream, &mut enqueue)?;
                 let eager = stream.clone_dtoh(&out)?;
+                // cuMemcpyDtoHAsync into pageable memory has no completion guarantee
+                stream.synchronize()?;
                 graph.launch()?;
                 let replay = stream.clone_dtoh(&out)?;
+                // cuMemcpyDtoHAsync into pageable memory has no completion guarantee
+                stream.synchronize()?;
                 let bitwise = bits(&eager) == bits(&replay);
+                // the reference activations stay inside the FP16 operand range
+                let range_words = stream.clone_dtoh(&range)?;
+                // cuMemcpyDtoHAsync into pageable memory has no completion guarantee
+                stream.synchronize()?;
+                let saturated = range_words[0].to_bits() != 0;
 
                 let truth = truth(conv, &xh, &wh, &bh, rh.as_deref());
                 let lib_error = error(&lib_values, &truth);
@@ -721,7 +738,7 @@ fn driver_trunk_layers_match_library() -> Result<(), CudaError> {
                 } else {
                     1e-6
                 };
-                let pass = bitwise && kernel_error.1 <= 10.0 * lib_error.1 + floor;
+                let pass = bitwise && !saturated && kernel_error.1 <= 10.0 * lib_error.1 + floor;
                 let (library_ms, kernel_ms) = if timing && [1, 32].contains(&batch) {
                     (
                         Some(timed(&lib_graph, stream)?),
@@ -736,7 +753,8 @@ fn driver_trunk_layers_match_library() -> Result<(), CudaError> {
                         "layer": layer.name, "batch": batch, "math": format!("{math:?}"),
                         "tier": runtime.ptx_tier().to_string(), "plan": candidate.describe(),
                         "kernel_error": kernel_error, "library_error": lib_error,
-                        "versus_library": versus_library, "bitwise": bitwise, "pass": pass,
+                        "versus_library": versus_library, "bitwise": bitwise, "saturated": saturated,
+                        "pass": pass,
                         "library_ms": library_ms, "kernel_ms": kernel_ms,
                     })
                 );

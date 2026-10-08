@@ -15,7 +15,7 @@ impl EmbeddingBatch {
         runtime: &CudaRuntime,
         tap: &mut EmbeddingTapFn<'_>,
     ) -> Result<(), CudaError> {
-        self.run(runtime, tap)
+        self.run(runtime, super::PlanSet::Selected, tap)
     }
 
     /// Copies host fbank and masks into the batch, runs the forward pass and

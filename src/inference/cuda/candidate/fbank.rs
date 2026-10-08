@@ -313,6 +313,7 @@ impl super::DriverCandidate for Oxide {
     fn driver_coverage(
         tier: PtxTier,
         _device: &crate::inference::cuda::device::DeviceAttributes,
+        _fp16: super::Fp16Policy,
     ) -> Coverage {
         Self::coverage(tier)
     }
@@ -370,6 +371,7 @@ impl super::DriverCandidate for Oxide {
         math: CudaMath,
         _device: &crate::inference::cuda::device::DeviceAttributes,
         _tier: PtxTier,
+        _fp16: super::Fp16Policy,
     ) -> Result<super::ConfigPin, PlanError> {
         Self::implemented_pin(FbankSpec::new(batch, math)?).map(super::ConfigPin::Fbank)
     }

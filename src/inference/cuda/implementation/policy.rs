@@ -1,7 +1,7 @@
 //! Measured whole-plan recipes and device-class defaults are distinct speed claims
 
 use super::{BoundaryId, SpeedScope};
-use crate::inference::cuda::candidate::{ConfigPin, ConvKernel, ConvPin, WideconvPin};
+use crate::inference::cuda::candidate::{ConfigPin, Fp16Policy, WideconvPin};
 use crate::inference::cuda::device::DeviceAttributes;
 use crate::inference::cuda::{ComputeCapability, CudaMath, KernelModule, PtxTier};
 
@@ -91,13 +91,13 @@ impl Recipe {
                 "hybrid-profile cea1cbe: FP32 b1/b32 fused SincNet; 30-file driver 319.73x versus hybrid 313.91x; identical RTTMs"
             }
             Self::Rtx4060Ti => {
-                "fc55d67 boundary measurements: fixed driver pins at embedding b1/b4/b8/b16/b32, scalar C32 conv2 at 14 exact tuples; FP32 segmentation and TF32 embedding"
+                "FP16 stride-1 C32/C64 at every batch and C128/C256 from batch 8; 30-file median 52.30 to 48.35 s with identical RTTMs; FP32 segmentation and TF32 embedding"
             }
             Self::Rtx5060Ti => {
                 "fc55d67 boundary measurements: fixed driver pins at embedding b1/b4/b8/b16/b32, staged one-product C128/C256 and 8-window LSTM tiles; FP32 segmentation and TF32 embedding"
             }
             Self::TeslaT4 => {
-                "fc55d67 T4 boundary measurements: 173 driver-pin choices and 55 Library choices across embedding b1/b4/b8/b16/b32; FP32 segmentation and TF32 embedding"
+                "FP16 stride-1 trunk at every batch; 216-file dev DER 7.0125 to 7.0118; 10-file driver 154.5x versus FP32 driver 92.2x; FP32 segmentation and TF32 embedding"
             }
             Self::A100Pcie => {
                 "hybrid-profile cea1cbe: complete FP32 segmentation/TF32 embedding driver recipe; 10-file driver 648.06x versus hybrid 547.35x; identical RTTMs; short-file Library startup wins; not a per-layer speed claim"
@@ -117,14 +117,27 @@ impl Recipe {
         }
     }
 
-    /// Choose execution from the measured boundary, batch and arithmetic mode
-    pub(crate) fn choice(self, boundary: BoundaryId, batch: usize, math: CudaMath) -> RecipeChoice {
+    /// Choose execution from the measured boundary, batch and arithmetic mode; an
+    /// excluded FP16 pin leaves the recipe's choice without it
+    pub(crate) fn choice(
+        self,
+        boundary: BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        fp16: Fp16Policy,
+    ) -> RecipeChoice {
+        if let Some(pin) = self
+            .fp16_pin(boundary, batch, math)
+            .filter(|_| fp16.allows())
+        {
+            return RecipeChoice::FixedPin(pin);
+        }
+
         if self == Self::TeslaT4 {
             let library = match math {
                 CudaMath::Tf32 => matches!(
                     (boundary.name(), batch),
                     ("resnet.conv1", 16 | 32)
-                        | ("resnet.layer1.0.conv1" | "resnet.layer1.0.conv2", 1)
                         | (
                             "resnet.layer2.0.conv1"
                                 | "resnet.layer3.0.conv1"
@@ -133,25 +146,6 @@ impl Recipe {
                         )
                         | ("resnet.layer3.0.shortcut.0", 1)
                         | ("resnet.layer4.0.shortcut.0", 4)
-                        | (
-                            "resnet.layer3.0.conv2"
-                                | "resnet.layer3.1.conv1"
-                                | "resnet.layer3.1.conv2"
-                                | "resnet.layer3.2.conv1"
-                                | "resnet.layer3.2.conv2"
-                                | "resnet.layer3.3.conv1"
-                                | "resnet.layer3.3.conv2"
-                                | "resnet.layer3.4.conv1"
-                                | "resnet.layer3.4.conv2"
-                                | "resnet.layer3.5.conv1"
-                                | "resnet.layer3.5.conv2"
-                                | "resnet.layer4.0.conv2"
-                                | "resnet.layer4.1.conv1"
-                                | "resnet.layer4.1.conv2"
-                                | "resnet.layer4.2.conv1"
-                                | "resnet.layer4.2.conv2",
-                            16 | 32
-                        )
                 ),
                 CudaMath::Fp32 => matches!((boundary.name(), batch), ("linear0" | "linear1", 1)),
             };
@@ -160,7 +154,7 @@ impl Recipe {
             }
         }
 
-        self.fixed_pin(boundary, batch, math)
+        self.fixed_pin(boundary, batch, math, fp16)
             .map_or(RecipeChoice::DriverPin, RecipeChoice::FixedPin)
     }
 
@@ -170,17 +164,15 @@ impl Recipe {
         boundary: BoundaryId,
         batch: usize,
         math: CudaMath,
+        fp16: Fp16Policy,
     ) -> Option<ConfigPin> {
-        if self == Self::Rtx4060Ti && math == CudaMath::Tf32 {
-            let scalar = match boundary.name() {
-                "resnet.layer1.0.conv2" | "resnet.layer1.1.conv2" => {
-                    matches!(batch, 1 | 4 | 8 | 16 | 32)
-                }
-                "resnet.layer1.2.conv2" => matches!(batch, 4 | 8 | 16 | 32),
-                _ => false,
-            };
-            return scalar.then_some(ConfigPin::Conv(ConvPin::Kernel(ConvKernel::C32)));
+        if let Some(pin) = self
+            .fp16_pin(boundary, batch, math)
+            .filter(|_| fp16.allows())
+        {
+            return Some(pin);
         }
+
         if !matches!(self, Self::A100Pcie | Self::A100Sxm4)
             || !matches!(batch, 1 | 32)
             || math != CudaMath::Tf32
@@ -188,6 +180,38 @@ impl Recipe {
             return None;
         }
         WideconvPin::measured_a100(boundary.name(), batch).map(ConfigPin::Wideconv)
+    }
+
+    /// Exact measured FP16 points, also used by builds without CUDA libraries
+    pub(crate) fn fp16_device(device: &DeviceAttributes, tier: PtxTier) -> Option<Self> {
+        [Self::TeslaT4, Self::Rtx4060Ti].into_iter().find(|recipe| {
+            recipe.scope().contains(device) && (*recipe == Self::TeslaT4 || tier >= PtxTier::Sm80)
+        })
+    }
+
+    /// FP16 changes only same-channel stride-1 trunk layers in TF32 mode
+    pub(crate) fn fp16_pin(
+        self,
+        boundary: BoundaryId,
+        batch: usize,
+        math: CudaMath,
+    ) -> Option<ConfigPin> {
+        let pin = match self {
+            Self::TeslaT4 => WideconvPin::measured_t4_fp16(boundary.name(), batch, math),
+            Self::Rtx4060Ti => {
+                // C128/C256 lose at small batches; the measured crossover starts at eight
+                if (boundary.name().starts_with("resnet.layer3.")
+                    || boundary.name().starts_with("resnet.layer4."))
+                    && batch < 8
+                {
+                    return None;
+                }
+
+                WideconvPin::fp16_wide(boundary.name(), batch, math)
+            }
+            _ => None,
+        }?;
+        Some(ConfigPin::Wideconv(pin))
     }
 
     pub(crate) fn select(
@@ -238,16 +262,28 @@ impl Recipe {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeviceDefault {
     AmpereTf32EarlyTrunk,
+    TuringFp16Trunk,
 }
 
 impl DeviceDefault {
     pub(crate) fn select(
         area: KernelModule,
+        boundary: BoundaryId,
         batch: usize,
         math: CudaMath,
         device: &DeviceAttributes,
         tier: PtxTier,
+        fp16: Fp16Policy,
     ) -> Option<Self> {
+        if area == KernelModule::Wideconv
+            && fp16.allows()
+            && math == CudaMath::Tf32
+            && device.capability() == ComputeCapability::new(7, 5)
+            && WideconvPin::fp16_wide(boundary.name(), batch, math).is_some()
+        {
+            return Some(Self::TuringFp16Trunk);
+        }
+
         (area == KernelModule::Resnet
             && matches!(batch, 1 | 32)
             && math == CudaMath::Tf32
@@ -257,7 +293,14 @@ impl DeviceDefault {
     }
 
     pub(crate) const fn summary(self) -> &'static str {
-        "TF32 early C32/C64 trunk group: A100, RTX 4060 Ti 2.18x/1.90x and RTX 5060 Ti 1.58x/2.03x versus cuDNN b1/b32; Ampere+ class default; not a universal per-layer claim"
+        match self {
+            Self::TuringFp16Trunk => {
+                "cc 7.5 TF32-mode FP16 trunk default: T4 trunk 1.95x faster; 216-file dev DER 7.0125 to 7.0118; no TF32 hardware"
+            }
+            Self::AmpereTf32EarlyTrunk => {
+                "TF32 early C32/C64 trunk group: A100, RTX 4060 Ti 2.18x/1.90x and RTX 5060 Ti 1.58x/2.03x versus cuDNN b1/b32; Ampere+ class default; not a universal per-layer claim"
+            }
+        }
     }
 }
 

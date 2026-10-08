@@ -278,7 +278,7 @@ fn winograd_launch_mirrors_device_tiles() {
 
 #[test]
 fn selection_follows_device_attributes() {
-    use super::super::wideconv::{Config, Device};
+    use super::super::wideconv::{Config, Device, Fp16Policy};
     use crate::inference::cuda::{ComputeCapability, PtxTier};
 
     let device = |major, minor, sms, tier| Device {
@@ -305,7 +305,8 @@ fn selection_follows_device_attributes() {
     };
     let c128 = |batch, math| same(batch, 128, [20, 250], math);
     let c256 = |batch, math| same(batch, 256, [10, 125], math);
-    let pick = |device, conv| Config::select(device, conv).expect("known contract");
+    let pick =
+        |device, conv| Config::select(device, conv, Fp16Policy::Allowed).expect("known contract");
     let wino = |products, partition, split_cells| Config {
         algorithm: Algorithm::Winograd(products),
         partition,
@@ -356,8 +357,10 @@ fn selection_follows_device_attributes() {
         (blackwell, c128(32, f), wino(Fp32Sweep2, Whole, All)),
         (ada, c128(1, t), wino(Tf32x1Staged, Two, From(34))),
         (ada, c256(1, t), wino(Tf32x1Staged, Four, From(8))),
+        // the class rule stays TF32; only the exact 4060 Ti recipe selects FP16
         (ada, c128(32, t), wino(Tf32x1Staged, Whole, All)),
         (ada, c256(32, t), wino(Tf32x1Staged, Whole, All)),
+        (ada_sm75, c256(32, t), wino(Fp32, Whole, All)),
         (blackwell, c128(1, t), wino(Tf32x1Staged, Four, From(36))),
         (blackwell, c256(1, t), wino(Tf32x1Staged, Eight, From(9))),
         (blackwell, c256(32, t), wino(Tf32x1Staged, Whole, All)),
@@ -403,6 +406,13 @@ fn selection_follows_device_attributes() {
         (a100_sm75, c64s2(32, f), spatial),
     ] {
         assert_eq!(pick(device, conv), expected, "{device:?} {conv:?}");
+    }
+    for batch in [1, 7] {
+        let algorithm = pick(ada, c256(batch, t)).algorithm;
+        assert!(
+            !matches!(algorithm, Algorithm::Fp16(_)),
+            "b{batch} {algorithm:?}"
+        );
     }
     // the stem's 39 wide CTAs per item fill eight waves from batch 7 on 34 SMs and
     // from batch 23 on 108
@@ -477,4 +487,31 @@ fn rejects_empty_and_partitioned_stems() {
         )
         .is_err()
     );
+}
+
+/// FP16 tiles scale weights by 2^10, so a weight just above 65504 / 1024 would
+/// saturate; NaN and infinity must exclude the layer too
+#[test]
+fn fp16_weight_guard_excludes_any_weight_that_would_saturate() {
+    use super::super::wideconv::{FP16_OPERAND_LIMIT, Fp16Policy};
+
+    assert_eq!(FP16_OPERAND_LIMIT, 63.968_75);
+    let shipped = [0.0, -1.7, 1.7, f32::MIN_POSITIVE];
+    assert_eq!(Fp16Policy::of_weights(&shipped), Fp16Policy::Allowed);
+    let edge = [FP16_OPERAND_LIMIT, -FP16_OPERAND_LIMIT];
+    assert_eq!(Fp16Policy::of_weights(&edge), Fp16Policy::Allowed);
+    for weight in [
+        FP16_OPERAND_LIMIT.next_up(),
+        -128.0,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NAN,
+    ] {
+        let weights = [0.5, weight, -0.5];
+        assert_eq!(
+            Fp16Policy::of_weights(&weights),
+            Fp16Policy::Excluded,
+            "{weight}"
+        );
+    }
 }

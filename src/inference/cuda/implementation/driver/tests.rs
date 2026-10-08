@@ -2,7 +2,8 @@
 
 use super::{Area, select_from};
 use crate::inference::cuda::candidate::{
-    Batches, ConfigPin, Coverage, CoverageEntry, DriverCandidate, Maths, PlanError, SincPin,
+    Batches, ConfigPin, Coverage, CoverageEntry, DriverCandidate, Fp16Policy, Maths, PlanError,
+    SincPin,
 };
 use crate::inference::cuda::device::{DeviceAttributes, test_support::Builder};
 use crate::inference::cuda::implementation::{
@@ -19,6 +20,7 @@ struct Fixture {
     limit: PtxTier,
     recipe_mode: super::super::policy::RecipeMode,
     tuned: Option<crate::inference::cuda::tuning::ApprovedChoice>,
+    fp16: Fp16Policy,
 }
 
 impl Fixture {
@@ -35,6 +37,7 @@ impl Fixture {
             limit: PtxTier::Sm120,
             recipe_mode: super::super::policy::RecipeMode::Disabled,
             tuned: None,
+            fp16: Fp16Policy::Allowed,
         }
     }
 }
@@ -54,6 +57,10 @@ impl Modules for &mut Fixture {
     }
     fn recipe_mode(&self) -> super::super::policy::RecipeMode {
         self.recipe_mode
+    }
+
+    fn fp16(&self) -> Fp16Policy {
+        self.fp16
     }
 
     fn device(&self) -> &DeviceAttributes {
@@ -82,7 +89,7 @@ impl Modules for &mut Fixture {
 struct Stub;
 impl DriverCandidate for Stub {
     const AREA: KernelModule = KernelModule::Sincnet;
-    fn driver_coverage(_tier: PtxTier, _device: &DeviceAttributes) -> Coverage {
+    fn driver_coverage(_tier: PtxTier, _device: &DeviceAttributes, _fp16: Fp16Policy) -> Coverage {
         Coverage(&[CoverageEntry {
             layers: &["sincnet.conv0.abs_pool"],
             batches: Batches::Only(&[1]),
@@ -95,6 +102,7 @@ impl DriverCandidate for Stub {
         _math: CudaMath,
         _device: &DeviceAttributes,
         _tier: PtxTier,
+        _fp16: Fp16Policy,
     ) -> Result<ConfigPin, PlanError> {
         Ok(ConfigPin::Sinc(SincPin::ConvAbsPool))
     }
@@ -174,8 +182,17 @@ fn driver_configuration_is_fixed_from_cached_device_attributes() {
     let large_device = Builder::new(ComputeCapability::new(12, 0))
         .multiprocessors(1000)
         .build();
-    let pin =
-        |device| ConvOxide::driver_pin(boundary, 1, CudaMath::Fp32, device, PtxTier::Sm75).unwrap();
+    let pin = |device| {
+        ConvOxide::driver_pin(
+            boundary,
+            1,
+            CudaMath::Fp32,
+            device,
+            PtxTier::Sm75,
+            Fp16Policy::Allowed,
+        )
+        .unwrap()
+    };
     assert_eq!(
         pin(&small_device),
         ConfigPin::Conv(ConvPin::Kernel(ConvKernel::C32Stride2))
@@ -190,8 +207,8 @@ fn driver_configuration_is_fixed_from_cached_device_attributes() {
 struct BroadStub;
 impl DriverCandidate for BroadStub {
     const AREA: KernelModule = KernelModule::Sincnet;
-    fn driver_coverage(tier: PtxTier, device: &DeviceAttributes) -> Coverage {
-        Stub::driver_coverage(tier, device)
+    fn driver_coverage(tier: PtxTier, device: &DeviceAttributes, fp16: Fp16Policy) -> Coverage {
+        Stub::driver_coverage(tier, device, fp16)
     }
     fn broad_evidence() -> Option<&'static crate::inference::cuda::implementation::BroadEvidence> {
         use crate::inference::cuda::implementation::{ArchitectureSpeed, BroadEvidence};
@@ -217,8 +234,9 @@ impl DriverCandidate for BroadStub {
         math: CudaMath,
         device: &DeviceAttributes,
         tier: PtxTier,
+        fp16: Fp16Policy,
     ) -> Result<ConfigPin, PlanError> {
-        Stub::driver_pin(boundary, batch, math, device, tier)
+        Stub::driver_pin(boundary, batch, math, device, tier, fp16)
     }
 }
 
@@ -251,8 +269,8 @@ struct RefusingBroad;
 #[cfg(feature = "_cuda-libraries")]
 impl DriverCandidate for RefusingBroad {
     const AREA: KernelModule = KernelModule::Sincnet;
-    fn driver_coverage(tier: PtxTier, device: &DeviceAttributes) -> Coverage {
-        Stub::driver_coverage(tier, device)
+    fn driver_coverage(tier: PtxTier, device: &DeviceAttributes, fp16: Fp16Policy) -> Coverage {
+        Stub::driver_coverage(tier, device, fp16)
     }
     fn broad_evidence() -> Option<&'static crate::inference::cuda::implementation::BroadEvidence> {
         BroadStub::broad_evidence()
@@ -263,6 +281,7 @@ impl DriverCandidate for RefusingBroad {
         _math: CudaMath,
         _device: &DeviceAttributes,
         _tier: PtxTier,
+        _fp16: Fp16Policy,
     ) -> Result<ConfigPin, PlanError> {
         Err(PlanError::DeviceUnsupported {
             reason: "stub resource refusal".to_owned(),
@@ -595,7 +614,15 @@ fn tensor_core_trunk_kernels_are_selected_only_for_tf32_on_ampere_and_newer() {
         .multiprocessors(34)
         .build();
     let pin = |name, batch, math, device: &_, tier| {
-        ConvOxide::driver_pin(BoundaryId::named(name), batch, math, device, tier).unwrap()
+        ConvOxide::driver_pin(
+            BoundaryId::named(name),
+            batch,
+            math,
+            device,
+            tier,
+            Fp16Policy::Allowed,
+        )
+        .unwrap()
     };
     let kernel = |kernel| ConfigPin::Conv(ConvPin::Kernel(kernel));
     for (device, batch) in [(&a100, 1), (&a100, 32), (&ada, 1), (&ada, 32)] {
@@ -680,69 +707,107 @@ fn tensor_core_trunk_kernels_are_selected_only_for_tf32_on_ampere_and_newer() {
 }
 
 #[test]
-fn only_turing_routes_the_64_channel_layers_to_ffma_winograd() {
-    use crate::inference::cuda::candidate::{WideconvAlgorithm, WideconvPin, WideconvProducts};
+fn fp16_routes_send_the_early_trunk_layers_to_wideconv() {
+    use crate::inference::cuda::candidate::{
+        WideconvAlgorithm, WideconvFp16Tiles, WideconvPin, WideconvProducts,
+    };
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Route {
+        Turing,
+        Ada,
+        None,
+    }
+
     let devices = [
         (
             ComputeCapability::new(7, 5),
             40,
             PtxTier::Sm75,
-            KernelModule::Wideconv,
+            Route::Turing,
         ),
         // an sm75-tier build on a newer part keeps the direct kernel
-        (
-            ComputeCapability::new(8, 6),
-            84,
-            PtxTier::Sm75,
-            KernelModule::Resnet,
-        ),
-        (
-            ComputeCapability::new(8, 9),
-            34,
-            PtxTier::Sm120,
-            KernelModule::Resnet,
-        ),
+        (ComputeCapability::new(8, 6), 84, PtxTier::Sm75, Route::None),
+        (ComputeCapability::new(8, 6), 84, PtxTier::Sm80, Route::None),
+        // Ada's route was measured with the sm80 tier only
+        (ComputeCapability::new(8, 9), 34, PtxTier::Sm75, Route::None),
+        (ComputeCapability::new(8, 9), 34, PtxTier::Sm80, Route::Ada),
+        (ComputeCapability::new(8, 9), 46, PtxTier::Sm80, Route::None),
         (
             ComputeCapability::new(12, 0),
             36,
             PtxTier::Sm120,
-            KernelModule::Resnet,
+            Route::None,
         ),
     ];
     // a build without the device's tier, such as `cuda-rtx50` on Turing, has no such route
     let devices = devices
         .into_iter()
         .filter(|(_, _, limit, _)| limit.is_compiled_in());
-    for (capability, sms, limit, area) in devices {
+    let wide = Some(WideconvAlgorithm::Fp16(WideconvFp16Tiles::Wide));
+    let narrow = Some(WideconvAlgorithm::Fp16(WideconvFp16Tiles::Narrow));
+    let winograd = Some(WideconvAlgorithm::Winograd(WideconvProducts::Fp32));
+    // per layer, batch and math: the Turing and Ada wideconv algorithms; `None` keeps the
+    // direct ResNet kernel for the 32- and 64-channel layers and any non-FP16 wideconv
+    // kernel for the wider ones. FP32 mode never takes FP16 tiles
+    let cases = [
+        ("resnet.layer1.0.conv1", 1, CudaMath::Tf32, wide, wide),
+        ("resnet.layer1.2.conv2", 32, CudaMath::Tf32, wide, wide),
+        ("resnet.layer1.0.conv1", 32, CudaMath::Fp32, None, None),
+        ("resnet.layer2.0.conv2", 32, CudaMath::Tf32, wide, wide),
+        ("resnet.layer2.3.conv2", 1, CudaMath::Fp32, winograd, None),
+        ("resnet.layer3.1.conv1", 1, CudaMath::Tf32, narrow, None),
+        ("resnet.layer3.1.conv1", 32, CudaMath::Tf32, wide, wide),
+        ("resnet.layer4.2.conv2", 1, CudaMath::Tf32, narrow, None),
+        ("resnet.layer4.2.conv2", 7, CudaMath::Tf32, wide, None),
+        ("resnet.layer4.2.conv2", 8, CudaMath::Tf32, wide, wide),
+        ("resnet.layer4.2.conv2", 32, CudaMath::Fp32, None, None),
+    ];
+    for (capability, sms, limit, route) in devices {
         let mut fixture = Fixture::new();
         fixture.device = Builder::new(capability)
             .multiprocessors(sms)
             .shared_optin_bytes(64 << 10)
+            .name(if route == Route::Ada {
+                "NVIDIA GeForce RTX 4060 Ti"
+            } else {
+                "unmeasured GPU"
+            })
             .build();
         fixture.limit = limit;
-        for name in ["resnet.layer2.0.conv2", "resnet.layer2.3.conv2"] {
-            for (batch, math) in [(1, CudaMath::Fp32), (32, CudaMath::Tf32)] {
-                let Selected::Oxide(token) = PlanRequest::DriverOnly
-                    .resolve(BoundaryId::named(name), batch, math, &mut fixture)
-                    .unwrap()
-                else {
-                    panic!("{capability:?} {name}: no driver route")
-                };
-                assert_eq!(token.area(), area, "{capability:?} {name} b{batch}");
-                if area != KernelModule::Wideconv {
-                    continue;
-                }
-                let PlanPin::Pinned(ConfigPin::Wideconv(WideconvPin::Configured(config))) =
-                    token.pin
-                else {
-                    panic!("{name}: unexpected pin {:?}", token.pin)
-                };
-                assert_eq!(
-                    config.algorithm,
-                    WideconvAlgorithm::Winograd(WideconvProducts::Fp32)
-                );
+        for (name, batch, math, turing, ada) in cases {
+            let Selected::Oxide(token) = PlanRequest::DriverOnly
+                .resolve(BoundaryId::named(name), batch, math, &mut fixture)
+                .unwrap()
+            else {
+                panic!("{capability:?} {name}: no driver route")
+            };
+            let context = format!("{capability:?} {limit:?} {name} b{batch} {math:?}");
+            let expected = match route {
+                Route::Turing => turing,
+                Route::Ada => ada,
+                Route::None => None,
+            };
+            let early = name.starts_with("resnet.layer1.") || name.starts_with("resnet.layer2.");
+            if expected.is_none() && early {
+                assert_eq!(token.area(), KernelModule::Resnet, "{context}");
+                continue;
+            }
+
+            let PlanPin::Pinned(ConfigPin::Wideconv(WideconvPin::Configured(config))) = token.pin
+            else {
+                panic!("{context}: unexpected pin {:?}", token.pin)
+            };
+            match expected {
+                Some(algorithm) => assert_eq!(config.algorithm, algorithm, "{context}"),
+                None => assert!(
+                    !matches!(config.algorithm, WideconvAlgorithm::Fp16(_)),
+                    "{context}: {:?}",
+                    config.algorithm
+                ),
             }
         }
+
         // the stride-2 entry of the stage keeps its ResNet kernel everywhere
         let Selected::Oxide(token) = PlanRequest::DriverOnly
             .resolve(
@@ -831,7 +896,7 @@ fn measured_a100_recipe_retains_pins_for_every_pipeline_boundary() {
                 else {
                     panic!("driver boundary")
                 };
-                let retained = recipe.fixed_pin(boundary, batch, math);
+                let retained = recipe.fixed_pin(boundary, batch, math, Fp16Policy::Allowed);
                 let expected = retained
                     .map(super::super::PlanPin::Pinned)
                     .unwrap_or(driver.pin);
@@ -1028,10 +1093,10 @@ fn tuner_plan_refusal_after_loading_cannot_be_a_library_timing() {
 
 #[test]
 #[cfg(feature = "_cuda-libraries")]
-fn measured_rtx_recipes_route_intermediate_batches_and_ada_scalar_choice() {
+fn measured_rtx_recipes_use_fp16_only_at_the_4060_ti_point() {
     use super::super::policy::RecipeMode;
     use crate::inference::cuda::candidate::{
-        ConvKernel, ConvPin, WideconvAlgorithm, WideconvPin, WideconvProducts,
+        ConvKernel, ConvPin, WideconvAlgorithm, WideconvFp16Tiles, WideconvPin, WideconvProducts,
     };
     for (cc, sms, name) in [
         (
@@ -1066,7 +1131,11 @@ fn measured_rtx_recipes_route_intermediate_batches_and_ada_scalar_choice() {
             };
             assert_eq!(
                 config.algorithm,
-                WideconvAlgorithm::Winograd(WideconvProducts::Tf32x1Staged)
+                if cc == ComputeCapability::new(8, 9) && batch >= 8 {
+                    WideconvAlgorithm::Fp16(WideconvFp16Tiles::Wide)
+                } else {
+                    WideconvAlgorithm::Winograd(WideconvProducts::Tf32x1Staged)
+                }
             );
             let Selected::Oxide(c32) = PlanRequest::Hybrid
                 .resolve(
@@ -1079,15 +1148,21 @@ fn measured_rtx_recipes_route_intermediate_batches_and_ada_scalar_choice() {
             else {
                 panic!("measured C32 trunk")
             };
-            let expected = if cc == ComputeCapability::new(8, 9) {
-                ConvKernel::C32
+            if cc == ComputeCapability::new(8, 9) {
+                let PlanPin::Pinned(ConfigPin::Wideconv(WideconvPin::Configured(config))) = c32.pin
+                else {
+                    panic!("FP16 early trunk")
+                };
+                assert_eq!(
+                    config.algorithm,
+                    WideconvAlgorithm::Fp16(WideconvFp16Tiles::Wide)
+                );
             } else {
-                ConvKernel::C32Tensor
-            };
-            assert_eq!(
-                c32.pin,
-                PlanPin::Pinned(ConfigPin::Conv(ConvPin::Kernel(expected)))
-            );
+                assert_eq!(
+                    c32.pin,
+                    PlanPin::Pinned(ConfigPin::Conv(ConvPin::Kernel(ConvKernel::C32Tensor)))
+                );
+            }
         }
     }
 }
@@ -1135,7 +1210,7 @@ fn measured_t4_recipe_routes_mixed_choices_without_changing_driver_only() {
             }
         }
     }
-    assert_eq!(counts, (173, 55));
+    assert_eq!(counts, (207, 21));
 
     // an exact user tune choice still has priority over a recipe's Library choice
     let boundary = BoundaryId::named("resnet.conv1");
@@ -1153,4 +1228,181 @@ fn measured_t4_recipe_routes_mixed_choices_without_changing_driver_only() {
         panic!("tune file overrides Library recipe")
     };
     assert_eq!(tuned.source(), super::super::policy::Source::TuneFile);
+}
+
+/// The pin and area a request selects, or `None` for Library
+#[cfg(feature = "_cuda-libraries")]
+fn route(
+    request: PlanRequest,
+    fixture: &mut Fixture,
+    name: &str,
+    batch: usize,
+) -> Option<(KernelModule, PlanPin)> {
+    match request
+        .resolve(BoundaryId::named(name), batch, CudaMath::Tf32, fixture)
+        .unwrap()
+    {
+        Selected::Oxide(token) => Some((token.area(), token.pin)),
+        Selected::Library => None,
+    }
+}
+
+#[cfg(feature = "_cuda-libraries")]
+fn is_fp16(route: Option<(KernelModule, PlanPin)>) -> bool {
+    matches!(route, Some((_, PlanPin::Pinned(pin))) if pin.is_fp16())
+}
+
+#[test]
+#[cfg(feature = "_cuda-libraries")]
+fn excluded_fp16_takes_each_source_choice_without_fp16_tiles() {
+    use super::super::policy::RecipeMode;
+    use crate::inference::cuda::candidate::{WideconvAlgorithm, WideconvPin, WideconvProducts};
+
+    let algorithm = |route: Option<(KernelModule, PlanPin)>| match route {
+        Some((_, PlanPin::Pinned(ConfigPin::Wideconv(WideconvPin::Configured(config))))) => {
+            Some(config.algorithm)
+        }
+        _ => None,
+    };
+    let ffma = Some(WideconvAlgorithm::Winograd(WideconvProducts::Fp32));
+    // per layer and batch: the Turing and 4060 Ti choices without FP16 tiles, where
+    // `None` is the direct ResNet kernel
+    let cases = [
+        ("resnet.layer1.0.conv1", 1, None, None),
+        ("resnet.layer2.1.conv2", 32, ffma, None),
+        (
+            "resnet.layer3.1.conv1",
+            32,
+            ffma,
+            Some(WideconvAlgorithm::Winograd(WideconvProducts::Tf32x1Staged)),
+        ),
+    ];
+    let devices = [
+        (ComputeCapability::new(7, 5), 40, "Tesla T4", PtxTier::Sm75),
+        (
+            ComputeCapability::new(8, 9),
+            34,
+            "NVIDIA GeForce RTX 4060 Ti",
+            PtxTier::Sm80,
+        ),
+    ];
+    for (capability, sms, name, limit) in devices {
+        if !limit.is_compiled_in() {
+            continue;
+        }
+        let mut fixture = Fixture::new();
+        fixture.device = Builder::new(capability)
+            .multiprocessors(sms)
+            .shared_optin_bytes(64 << 10)
+            .name(name)
+            .build();
+        fixture.limit = limit;
+        fixture.recipe_mode = RecipeMode::Fp32SegmentationTf32Embedding;
+        let turing = capability == ComputeCapability::new(7, 5);
+        for request in [PlanRequest::Hybrid, PlanRequest::DriverOnly] {
+            for (layer, batch, turing_choice, ada_choice) in cases {
+                let context = format!("{name} {request:?} {layer} b{batch}");
+                fixture.fp16 = Fp16Policy::Allowed;
+                let allowed = route(request, &mut fixture, layer, batch);
+                assert!(is_fp16(allowed), "{context}: the recipe picks FP16 tiles");
+
+                fixture.fp16 = Fp16Policy::Excluded;
+                let excluded = route(request, &mut fixture, layer, batch);
+                let expected = if turing { turing_choice } else { ada_choice };
+                match expected {
+                    Some(choice) => assert_eq!(algorithm(excluded), Some(choice), "{context}"),
+                    None => assert_eq!(
+                        excluded.map(|(area, _)| area),
+                        Some(KernelModule::Resnet),
+                        "{context}"
+                    ),
+                }
+            }
+        }
+
+        // no tuple of any boundary keeps an FP16 pin once excluded, in either build
+        fixture.fp16 = Fp16Policy::Excluded;
+        for boundary in BoundaryId::all().filter(|id| id.name() != "lstm.stack.input_proj") {
+            for batch in boundary.batches().iter() {
+                for request in [PlanRequest::Hybrid, PlanRequest::DriverOnly] {
+                    let selected = route(request, &mut fixture, boundary.name(), batch);
+                    assert!(!is_fp16(selected), "{name} {request:?} {boundary} b{batch}");
+                }
+            }
+        }
+
+        // an FP16 tune choice gives way to the selection made without it
+        let boundary = BoundaryId::named("resnet.layer2.1.conv2");
+        let tuned = crate::inference::cuda::tuning::tests::approved_choice(
+            &fixture.device,
+            boundary,
+            32,
+            CudaMath::Tf32,
+            fixture.limit,
+        );
+        assert!(tuned.is_fp16(), "{name}: the approved default is FP16");
+        fixture.tuned = Some(tuned);
+        fixture.fp16 = Fp16Policy::Allowed;
+        let Selected::Oxide(token) = PlanRequest::Hybrid
+            .resolve(boundary, 32, CudaMath::Tf32, &mut fixture)
+            .unwrap()
+        else {
+            panic!("{name}: tune choice")
+        };
+        assert_eq!(token.source(), super::super::policy::Source::TuneFile);
+        fixture.fp16 = Fp16Policy::Excluded;
+        let Selected::Oxide(token) = PlanRequest::Hybrid
+            .resolve(boundary, 32, CudaMath::Tf32, &mut fixture)
+            .unwrap()
+        else {
+            panic!("{name}: an excluded tune choice keeps the recipe's kernel")
+        };
+        assert!(!is_fp16(Some((token.area(), token.pin))), "{name}");
+        assert_eq!(
+            token.source(),
+            super::super::policy::Source::Recipe,
+            "{name}"
+        );
+        fixture.benchmarking = true;
+        let refusal = PlanRequest::Hybrid
+            .resolve(boundary, 32, CudaMath::Tf32, &mut fixture)
+            .unwrap_err();
+        assert!(
+            refusal
+                .to_string()
+                .contains("FP16 tuning candidate is excluded by the layer weights"),
+            "{name}: {refusal}"
+        );
+    }
+}
+
+#[test]
+#[cfg(all(feature = "_cuda-libraries", feature = "cuda-sm75"))]
+fn excluded_fp16_drops_the_turing_class_default() {
+    let mut fixture = Fixture::new();
+    fixture.device = Builder::new(ComputeCapability::new(7, 5))
+        .multiprocessors(40)
+        .shared_optin_bytes(64 << 10)
+        .name("unmeasured Turing GPU")
+        .build();
+    fixture.limit = PtxTier::Sm75;
+    let boundary = BoundaryId::named("resnet.layer2.1.conv2");
+    let Selected::Oxide(token) = PlanRequest::Hybrid
+        .resolve(boundary, 32, CudaMath::Tf32, &mut fixture)
+        .unwrap()
+    else {
+        panic!("the cc 7.5 class default routes FP16 tiles")
+    };
+    assert!(matches!(
+        token.evidence,
+        TokenEvidence::DeviceDefault(super::super::policy::DeviceDefault::TuringFp16Trunk)
+    ));
+    assert!(is_fp16(Some((token.area(), token.pin))));
+
+    // without FP16 tiles no class default covers the layer, so hybrid keeps Library
+    fixture.fp16 = Fp16Policy::Excluded;
+    let excluded = PlanRequest::Hybrid
+        .resolve(boundary, 32, CudaMath::Tf32, &mut fixture)
+        .unwrap();
+    assert!(matches!(excluded, Selected::Library), "{excluded:?}");
 }

@@ -750,7 +750,11 @@ fn to_u32(context: &'static str, value: usize) -> Result<u32, CudaError> {
 
 impl super::DriverCandidate for Oxide {
     const AREA: KernelModule = KernelModule::LstmProj;
-    fn driver_coverage(tier: PtxTier, _device: &DeviceAttributes) -> Coverage {
+    fn driver_coverage(
+        tier: PtxTier,
+        _device: &DeviceAttributes,
+        _fp16: super::Fp16Policy,
+    ) -> Coverage {
         Self::coverage(tier)
     }
     fn speed_scope(
@@ -776,6 +780,7 @@ impl super::DriverCandidate for Oxide {
         math: CudaMath,
         device: &DeviceAttributes,
         tier: PtxTier,
+        _fp16: super::Fp16Policy,
     ) -> Result<super::ConfigPin, PlanError> {
         Ok(super::ConfigPin::Lstm(LstmPin::Projected(projection_rule(
             ProjectionTarget {

@@ -531,6 +531,7 @@ impl super::DriverCandidate for Oxide {
     fn driver_coverage(
         _tier: super::PtxTier,
         _device: &super::super::device::DeviceAttributes,
+        _fp16: super::Fp16Policy,
     ) -> Coverage {
         IMPLEMENTED
     }
@@ -569,7 +570,15 @@ impl super::DriverCandidate for Oxide {
             return Ok(None);
         }
 
-        Self::driver_pin(boundary, batch, CudaMath::Fp32, device, tier).map(Some)
+        Self::driver_pin(
+            boundary,
+            batch,
+            CudaMath::Fp32,
+            device,
+            tier,
+            super::Fp16Policy::Allowed,
+        )
+        .map(Some)
     }
 
     fn driver_pin(
@@ -578,6 +587,7 @@ impl super::DriverCandidate for Oxide {
         math: CudaMath,
         device: &super::super::device::DeviceAttributes,
         tier: super::PtxTier,
+        _fp16: super::Fp16Policy,
     ) -> Result<super::ConfigPin, PlanError> {
         let name = boundary.name();
         let shape = if name == "resnet.layer2.0.conv1" {

@@ -175,9 +175,11 @@ pub(crate) use sinc::Oxide as SincOxide;
 // the GPU development checks force selections made for other devices
 #[cfg(all(test, feature = "_cuda-libraries"))]
 pub(crate) use lstmproj::RecurrencePlan;
+#[cfg(test)]
+pub(crate) use wideconv::Fp16Tiles as WideconvFp16Tiles;
 pub(crate) use wideconv::{
-    Algorithm as WideconvAlgorithm, TensorKernel as WideconvTensorKernel,
-    WinogradProducts as WideconvProducts,
+    Algorithm as WideconvAlgorithm, FP16_OPERAND_LIMIT, Fp16Policy,
+    TensorKernel as WideconvTensorKernel, WinogradProducts as WideconvProducts,
 };
 #[cfg(all(test, feature = "_cuda-libraries"))]
 pub(crate) use wideconv::{
@@ -267,6 +269,17 @@ impl ConfigPin {
             Self::Conv(ConvPin::LegacyWaves(_))
                 | Self::Wideconv(WideconvPin::DeviceRule)
                 | Self::Lstm(LstmPin::LegacyCooperative)
+        )
+    }
+
+    /// Whether the pin runs FP16 tiles, which [`Fp16Policy::Excluded`] removes
+    pub(crate) const fn is_fp16(self) -> bool {
+        matches!(
+            self,
+            Self::Wideconv(WideconvPin::Configured(wideconv::Config {
+                algorithm: WideconvAlgorithm::Fp16(_),
+                ..
+            }))
         )
     }
 }
@@ -1514,8 +1527,9 @@ fn validate_fixed_batch(
 pub(crate) trait DriverCandidate {
     /// The kernel module that owns this candidate
     const AREA: KernelModule;
-    /// Only tuples whose complete operation needs no numerical library on `device`
-    fn driver_coverage(tier: PtxTier, device: &DeviceAttributes) -> Coverage;
+    /// Only tuples whose complete operation needs no numerical library on `device`;
+    /// `fp16` drops tuples that only FP16 tiles implement
+    fn driver_coverage(tier: PtxTier, device: &DeviceAttributes, fp16: Fp16Policy) -> Coverage;
     /// Structural speed evidence, if this complete port is accepted on all devices
     fn broad_evidence() -> Option<&'static super::implementation::BroadEvidence> {
         None
@@ -1549,12 +1563,14 @@ pub(crate) trait DriverCandidate {
         Ok(None)
     }
 
-    /// One complete pin, selected from cached device facts without GPU allocation
+    /// One complete pin, selected from cached device facts without GPU allocation;
+    /// `fp16` excludes FP16 tiles from the choice
     fn driver_pin(
         boundary: super::implementation::BoundaryId,
         batch: usize,
         math: CudaMath,
         device: &super::device::DeviceAttributes,
         tier: PtxTier,
+        fp16: Fp16Policy,
     ) -> Result<ConfigPin, PlanError>;
 }

@@ -200,6 +200,11 @@ impl ApprovedConfig {
 }
 
 impl ApprovedChoice {
+    /// Whether the choice runs FP16 tiles
+    pub(crate) fn is_fp16(&self) -> bool {
+        matches!(self, Self::Kernel(config) if config.pin.is_fp16())
+    }
+
     pub(crate) fn label(&self) -> String {
         match self {
             Self::Library => "Library".into(),
