@@ -214,17 +214,7 @@ fn catalogue_filters_the_pipeline_points_and_batch_classes() {
             let batches = boundary.batches().iter();
             for batch in batches {
                 let tuple = Tuple::new(boundary, batch, math).unwrap();
-                // these implemented defaults lack portable algorithm evidence;
-                // measured recipes remain outside the tuner's approval owner
-                let t4_wide_winograd = cc.major == 7
-                    && (boundary.name().starts_with("resnet.layer3.")
-                        || boundary.name().starts_with("resnet.layer4."))
-                    && !boundary.name().ends_with("shortcut.0")
-                    && !matches!(
-                        boundary.name(),
-                        "resnet.layer3.0.conv1" | "resnet.layer4.0.conv1"
-                    );
-                let expects_kernel = !t4_wide_winograd;
+                let expects_kernel = true;
                 assert_eq!(
                     catalogue
                         .choices(tuple)
@@ -421,4 +411,24 @@ fn winograd_approval_is_limited_to_the_reviewed_algorithms_and_mode() {
         )
         .is_none()
     );
+}
+
+#[test]
+fn fp16_accuracy_approval_is_tf32_only_for_both_tile_sizes() {
+    use super::accuracy::{Approval, Policy};
+    use crate::inference::cuda::candidate::{ConfigPin, WideconvFp16Tiles, WideconvPin};
+    let boundary = BoundaryId::named("resnet.layer3.1.conv1");
+    let pin = WideconvPin::fp16_wide(boundary.name(), 32, CudaMath::Tf32).unwrap();
+    let WideconvPin::Configured(mut config) = pin else {
+        panic!("FP16 pin")
+    };
+    for tiles in [WideconvFp16Tiles::Wide, WideconvFp16Tiles::Narrow] {
+        config.algorithm = crate::inference::cuda::candidate::WideconvAlgorithm::Fp16(tiles);
+        let pin = ConfigPin::Wideconv(WideconvPin::Configured(config));
+        assert_eq!(
+            Policy::approve(boundary, CudaMath::Tf32, pin),
+            Some(Approval::Fp16Trunk)
+        );
+        assert_eq!(Policy::approve(boundary, CudaMath::Fp32, pin), None);
+    }
 }
