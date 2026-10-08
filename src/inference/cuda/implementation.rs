@@ -68,8 +68,8 @@ pub(crate) use evidence::{
 #[cfg(all(test, feature = "_cuda-libraries"))]
 use super::candidate::{Batches, Coverage, CoverageEntry, Maths};
 use super::candidate::{
-    ConfigPin, ConvCandidate, ConvLayerSpec, ConvOxide, LstmCandidate, LstmOxide, LstmSpec,
-    PlanError, SincCandidate, SincOxide, SincSpec,
+    ConfigPin, ConvCandidate, ConvLayerSpec, ConvOxide, FbankCandidate, FbankOxide, FbankSpec,
+    LstmCandidate, LstmOxide, LstmSpec, PlanError, SincCandidate, SincOxide, SincSpec,
 };
 use super::device::DeviceAttributes;
 use super::error::GeometryError;
@@ -573,6 +573,39 @@ impl Qualified {
         });
         self.finish(area, super::driver_only(), plan)
     }
+
+    /// Build exactly the accepted filterbank energy producer
+    // only qualification plans it until an accepted record wires the `fbank.rs` call site
+    #[cfg_attr(
+        not(all(test, feature = "cuda", not(feature = "cuda-driver-only"))),
+        allow(dead_code)
+    )]
+    pub(crate) fn fbank(
+        self,
+        runtime: &CudaRuntime,
+        spec: FbankSpec,
+    ) -> Result<Option<FbankOxide>, CudaError> {
+        let area = KernelModule::FbankDft;
+        let kernels = self.check(runtime, area, "fbank.dft", spec.batch(), spec.math())?;
+        let pin = match self.pin {
+            PlanPin::Pinned(ConfigPin::Fbank(pin)) => Ok(pin),
+            PlanPin::Pinned(other) => return Err(self.foreign_pin(other)),
+            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            PlanPin::Implemented => FbankOxide::implemented_pin(spec),
+        };
+        let plan = pin.and_then(|pin| {
+            let plan = FbankOxide::plan(runtime, &kernels, spec, pin)?;
+            #[cfg(all(test, feature = "cuda", not(feature = "cuda-driver-only")))]
+            super::test_support::configuration::record(
+                self.boundary.name(),
+                self.batch,
+                self.math,
+                ConfigPin::Fbank(pin),
+            );
+            Ok(plan)
+        });
+        self.finish(area, super::driver_only(), plan)
+    }
 }
 
 /// Invalid selection requests cannot create an Oxide token
@@ -788,6 +821,7 @@ fn candidate_coverage(area: KernelModule, tier: PtxTier) -> Coverage {
         KernelModule::Resnet => ConvOxide::coverage(tier),
         KernelModule::Lstm => LstmOxide::coverage(tier),
         KernelModule::Sincnet => SincOxide::coverage(tier),
+        KernelModule::FbankDft => FbankOxide::coverage(tier),
         _ => Coverage::NONE,
     }
 }

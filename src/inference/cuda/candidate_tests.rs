@@ -169,3 +169,173 @@ fn schedules_cover_every_tile_without_exceeding_residency() {
         }
     }
 }
+
+/// Every complete fbank pin, listed through an exhaustive match so a new variant must
+/// join the planning tests
+fn fbank_pins() -> [super::FbankPin; 1] {
+    let pins = [super::FbankPin::FftMelAccurate];
+    for pin in pins {
+        match pin {
+            super::FbankPin::FftMelAccurate => {}
+        }
+    }
+    pins
+}
+
+#[test]
+fn fbank_plan_shape_comes_from_every_pin_at_every_batch() {
+    use super::fbank::Launch;
+    use super::{FbankCandidate, FbankOxide, FbankSpec};
+    use crate::inference::cuda::implementation::BoundaryId;
+    use crate::inference::cuda::{CudaMath, PtxTier};
+
+    let boundary = BoundaryId::named("fbank.dft");
+    for math in [CudaMath::Fp32, CudaMath::Tf32] {
+        for batch in 0..=64 {
+            // implemented coverage is exactly the boundary's own batch domain
+            assert_eq!(
+                FbankOxide::coverage(PtxTier::Sm75).covers("fbank.dft", batch, math),
+                boundary.batches().contains(batch),
+                "b{batch} {math:?}"
+            );
+            let Ok(spec) = FbankSpec::new(batch, math) else {
+                assert!(!(1..=32).contains(&batch));
+                continue;
+            };
+            assert_eq!(
+                FbankOxide::implemented_pin(spec).expect("implemented pin"),
+                super::FbankPin::FftMelAccurate
+            );
+            for pin in fbank_pins() {
+                let launch = Launch::new(spec, pin).expect("pinned shape");
+                let config = launch.config();
+                assert_eq!(config.grid_dim, (125, batch as u32, 1));
+                assert_eq!(config.block_dim, (256, 1, 1));
+                assert_eq!(config.shared_mem_bytes, 0);
+                // eight frames per block cover all 998 frames of a row exactly once
+                let blocks = config.grid_dim.0 as usize;
+                assert!(blocks * 8 >= 998 && (blocks - 1) * 8 < 998);
+                assert_eq!(launch.waveform_len(), batch * 160_000);
+                assert_eq!(launch.energies_len(), batch * 998 * 80);
+                launch
+                    .check(batch * 160_000, batch * 998 * 80)
+                    .expect("exact buffers");
+            }
+        }
+    }
+}
+
+#[test]
+fn fbank_launch_refuses_buffers_of_another_shape() {
+    use super::fbank::Launch;
+    use super::{FbankPin, FbankSpec, GeometryError, PlanError};
+    use crate::inference::cuda::{CudaError, CudaMath};
+
+    for batch in [0, 33, 64] {
+        assert!(matches!(
+            FbankSpec::new(batch, CudaMath::Fp32),
+            Err(PlanError::Geometry(GeometryError::Invalid { .. }))
+        ));
+    }
+    let launch = Launch::new(
+        FbankSpec::new(7, CudaMath::Tf32).expect("batch"),
+        FbankPin::FftMelAccurate,
+    )
+    .expect("pinned shape");
+    let waveform = 7 * 160_000;
+    let energies = 7 * 998 * 80;
+    for (actual_waveform, actual_energies, expected, actual) in [
+        (waveform - 1, energies, waveform, waveform - 1),
+        (6 * 160_000, energies, waveform, 6 * 160_000),
+        (waveform, energies + 80, energies, energies + 80),
+        (waveform, 8 * 998 * 80, energies, 8 * 998 * 80),
+    ] {
+        let error = launch
+            .check(actual_waveform, actual_energies)
+            .expect_err("wrong buffer length");
+        assert!(
+            matches!(
+                error,
+                CudaError::BufferLength { expected: e, actual: a, .. } if e == expected && a == actual
+            ),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn fbank_tables_satisfy_the_staged_kernel_layout() {
+    use super::fbank::Tables;
+    use super::{FbankConstants, GeometryError, PlanError};
+
+    let constants = FbankConstants::new();
+    let tables = Tables::new(&constants).expect("the Library constants fit the kernel");
+    assert_eq!(tables.window, constants.window());
+    assert_eq!(tables.twiddle.len(), 1024);
+    // the kernel indexes these without bounds checks: 16 staged weights per filter and
+    // power rows that hold only bins 1..=255
+    assert_eq!(tables.weights.len(), 80 * 16);
+    for (filter, (&first, &count)) in tables.first.iter().zip(&tables.count).enumerate() {
+        assert!(
+            (1..=16).contains(&count) && first >= 1 && first + count - 1 <= 255,
+            "filter {filter}: {count} bins from {first}"
+        );
+        let row = &tables.weights[filter * 16..(filter + 1) * 16];
+        assert!(row[count as usize..].iter().all(|&weight| weight == 0.0));
+    }
+
+    let mel = constants.mel_table();
+    let window = constants.window().to_vec();
+    let refused = |window: Vec<f32>, first: Vec<u32>, count: Vec<u32>, width, weights| {
+        matches!(
+            Tables::checked(window, first, count, width, weights),
+            Err(PlanError::Geometry(GeometryError::Invalid { .. }))
+        )
+    };
+    let with = |filter: usize, first: u32, count: u32| {
+        let mut starts = mel.first.clone();
+        let mut counts = mel.count.clone();
+        starts[filter] = first;
+        counts[filter] = count;
+        (starts, counts)
+    };
+
+    assert!(refused(
+        window[..399].to_vec(),
+        mel.first.clone(),
+        mel.count.clone(),
+        16,
+        mel.weights.clone()
+    ));
+    assert!(refused(
+        window.clone(),
+        mel.first.clone(),
+        mel.count.clone(),
+        15,
+        mel.weights[..80 * 15].to_vec()
+    ));
+    assert!(refused(
+        window.clone(),
+        mel.first[..79].to_vec(),
+        mel.count.clone(),
+        16,
+        mel.weights.clone()
+    ));
+    for (filter, first, count) in [
+        // DC and Nyquist are never written to staged power
+        (0, 0, 4),
+        (79, 250, 7),
+        // more bins than the staged stride, and an empty run
+        (40, 100, 17),
+        (40, 100, 0),
+        (0, 0, 0),
+    ] {
+        let (starts, counts) = with(filter, first, count);
+        assert!(
+            refused(window.clone(), starts, counts, 16, mel.weights.clone()),
+            "filter {filter}: {count} bins from {first}"
+        );
+    }
+    let (starts, counts) = with(79, 240, 16);
+    assert!(Tables::checked(window, starts, counts, 16, mel.weights.clone()).is_ok());
+}
