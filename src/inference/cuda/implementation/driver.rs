@@ -120,6 +120,7 @@ pub(super) fn select_from(
                 modules.device(),
                 modules.recipe_mode(),
             )
+            .filter(|recipe| recipe.allows_tier_limit(modules.tier_limit()))
         })
         .flatten();
     let recipe_choice = recipe.map(|recipe| recipe.choice(boundary, batch, math));

@@ -398,4 +398,8 @@ fn t4_recipe_requires_its_exact_point_precision_and_batch_classes() {
         Recipe::select(boundary, 32, CudaMath::Tf32, &device, RecipeMode::Disabled),
         None
     );
+    assert_eq!(
+        Recipe::TeslaT4.allows_tier_limit(PtxTier::Sm75),
+        cfg!(feature = "cuda-sm75")
+    );
 }

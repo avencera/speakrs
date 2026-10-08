@@ -947,3 +947,31 @@ fn measured_t4_recipe_routes_mixed_choices_without_changing_driver_only() {
     }
     assert_eq!(counts, (173, 55));
 }
+
+#[test]
+#[cfg(feature = "_cuda-libraries")]
+fn a100_lower_tier_cannot_claim_the_measured_whole_plan() {
+    use super::super::policy::RecipeMode;
+    for name in ["NVIDIA A100-PCIE-40GB", "NVIDIA A100-SXM4-40GB"] {
+        let mut fixture = Fixture::new();
+        fixture.device = Builder::new(ComputeCapability::new(8, 0))
+            .multiprocessors(108)
+            .name(name)
+            .build();
+        fixture.recipe_mode = RecipeMode::Fp32SegmentationTf32Embedding;
+        fixture.limit = PtxTier::Sm75;
+        for (name, math) in [
+            ("resnet.layer1.0.conv1", CudaMath::Tf32),
+            ("sincnet.conv0.abs_pool", CudaMath::Fp32),
+            ("lstm.stack", CudaMath::Fp32),
+        ] {
+            let boundary = BoundaryId::named(name);
+            assert!(matches!(
+                PlanRequest::Hybrid
+                    .resolve(boundary, 32, math, &mut fixture)
+                    .unwrap(),
+                Selected::Library
+            ));
+        }
+    }
+}

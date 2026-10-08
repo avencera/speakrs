@@ -108,6 +108,15 @@ impl Recipe {
         }
     }
 
+    /// Recipes require the compiled tier used by their measured configurations
+    pub(crate) fn allows_tier_limit(self, tier: PtxTier) -> bool {
+        match self {
+            Self::Rtx4060TiSinc => true,
+            Self::TeslaT4 => cfg!(feature = "cuda-sm75"),
+            _ => tier >= PtxTier::Sm80 && cfg!(feature = "cuda-sm80"),
+        }
+    }
+
     /// Choose execution from the measured boundary, batch and arithmetic mode
     pub(crate) fn choice(self, boundary: BoundaryId, batch: usize, math: CudaMath) -> RecipeChoice {
         if self == Self::TeslaT4 {
