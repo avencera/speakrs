@@ -11,6 +11,10 @@ clippy:
     cargo clippy --all --all-targets --workspace --features "{{backend_features}} cuda load-dynamic _metrics" -- -D warnings
     # the CUDA-only build has no ONNX Runtime either
     cargo clippy -p speakrs --all-targets --no-default-features --features "online cuda" -- -D warnings
+    for features in cuda-sm75 cuda-sm80 cuda-sm90 cuda-sm120 cuda-rtx20 cuda-rtx30 cuda-rtx40 cuda-a100 cuda-rtx50; do
+        cargo clippy -p speakrs --all-targets --no-default-features --features "$features" -- -D warnings
+    done
+    cargo clippy -p speakrs --all-targets --features "cpu load-dynamic" -- -D warnings
     if [[ "$(uname)" == "Darwin" ]]; then
         # the CoreML-only build has no ONNX Runtime, so check it for dead code separately
         cargo clippy -p speakrs --all-targets --no-default-features --features "online coreml" -- -D warnings
@@ -25,6 +29,9 @@ lint: clippy python-lint
 
 test *args:
     cargo test --workspace {{args}}
+    cargo test -p speakrs --features "cpu load-dynamic" {{args}}
+    cargo test -p speakrs --no-default-features --features "online cuda" {{args}}
+    cargo test -p speakrs --no-default-features --features "online cuda-rtx50" {{args}}
 
 test-gpuq-workload:
     tests/gpuq-workload.sh
