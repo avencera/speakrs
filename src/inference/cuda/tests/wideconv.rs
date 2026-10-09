@@ -215,7 +215,7 @@ fn weights_path(root: &Path) -> std::path::PathBuf {
 /// Whether `TRUNK_B1_ONLY` asks every batch to cycle the batch-1 reference item, for
 /// boxes without the multi-gigabyte batch-32 reference; shapes and timing are unchanged
 fn b1_only() -> bool {
-    std::env::var_os("TRUNK_B1_ONLY").is_some()
+    std::env::var("TRUNK_B1_ONLY").as_deref() == Ok("1")
 }
 
 fn selected<T: ToString>(key: &str, value: T) -> bool {

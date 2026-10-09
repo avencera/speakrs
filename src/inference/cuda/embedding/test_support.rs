@@ -19,7 +19,14 @@ impl EmbeddingBatch {
         runtime: &CudaRuntime,
         tap: &mut EmbeddingTapFn<'_>,
     ) -> Result<(), CudaError> {
-        self.run(runtime, super::PlanSet::Selected, tap)
+        let activations = self.activations.clone();
+        let mut storage = activations.lock()?;
+        self.run_with_activations(
+            runtime,
+            super::PlanSet::Selected,
+            tap,
+            storage.buffers_mut(),
+        )
     }
 
     /// Copies host fbank and masks into the batch, runs the forward pass and
@@ -87,7 +94,8 @@ impl ResNetEmbedding {
 
 impl SharedEmbeddingActivations {
     pub(crate) fn retained_bytes(&self) -> usize {
-        let buffers = self.lock().unwrap();
+        let storage = self.lock().unwrap();
+        let buffers = storage.buffers();
         (buffers.trunk.iter().map(CudaSlice::len).sum::<usize>()
             + buffers.hidden.len()
             + buffers.shortcut.len())

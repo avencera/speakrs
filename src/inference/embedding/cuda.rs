@@ -400,20 +400,23 @@ impl Batches {
         runtime: &CudaRuntime,
         class: EmbeddingBatchClass,
     ) -> Result<&mut EmbeddingBatch, CudaError> {
+        let activations = match &self.activations {
+            Some(activations) => {
+                self.model
+                    .grow_activations(runtime, activations, class.chunks())?;
+                activations.clone()
+            }
+            None => {
+                let activations = self.model.activations(runtime, class.chunks())?;
+                self.activations = Some(activations.clone());
+                activations
+            }
+        };
         let slot = &mut self.plans[class.slot()];
         if let Some(batch) = slot {
             return Ok(batch);
         }
 
-        // allocate once at maximum capacity: captured graphs must never see moved pointers
-        let activations = match &self.activations {
-            Some(activations) => activations.clone(),
-            None => {
-                let activations = self.model.activations(runtime, MULTI_MASK_BATCH_SIZE)?;
-                self.activations = Some(activations.clone());
-                activations
-            }
-        };
         let mut batch = self
             .model
             .batch_with_activations(runtime, class.chunks(), activations)?;
