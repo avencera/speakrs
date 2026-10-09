@@ -37,6 +37,7 @@ use super::super::candidate::{
 use super::super::dnn::ConvPlanner;
 use super::super::geometry::{Conv2d, Residual};
 use super::super::implementation::Choice;
+use super::super::kernels::ModuleRequest;
 use super::super::{
     ComputeCapability, CudaError, CudaMath, CudaRuntime, KernelModule, PtxTier, ResNetEmbedding,
     SafetensorsFile,
@@ -398,6 +399,50 @@ fn forced_config(text: &str) -> WideconvConfig {
     }
 }
 
+#[test]
+fn trunk_resnet_override_obeys_forced_ptx_jit() -> Result<(), CudaError> {
+    use super::super::kernels::{ArtifactHash, LoadedArtifact};
+
+    let area = KernelModule::Resnet;
+    let device = ComputeCapability::new(8, 9);
+    let tier = if area.variants().embedded(PtxTier::Sm80).is_some() {
+        PtxTier::Sm80
+    } else {
+        PtxTier::Sm75
+    };
+    let embedded = area.variants().embedded(tier).expect("ResNet PTX");
+    let cubin = embedded.cubin(device).expect("RTX 4090 cubin");
+    for override_name in ["tensor", "sm80"] {
+        for force_jit in [false, true] {
+            let request = Candidate::resnet_override_request(
+                Some(override_name),
+                PtxTier::Sm80,
+                device,
+                |request| request.diagnostic_request(force_jit),
+            )?
+            .expect("trunk override selects an artifact");
+            let artifact = if force_jit {
+                LoadedArtifact::PtxJit {
+                    sha256: ArtifactHash::of(embedded.text.as_bytes()),
+                }
+            } else {
+                LoadedArtifact::Cubin {
+                    arch: device,
+                    sha256: ArtifactHash::of(cubin.bytes),
+                }
+            };
+            assert_eq!(request.area(), area);
+            assert_eq!(request.tier(), tier);
+            assert_eq!(
+                request.artifact(),
+                artifact,
+                "{override_name} JIT={force_jit}"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// The candidate that owns a trunk layer
 enum Candidate {
     Resnet(ConvOxide, ConvPin),
@@ -438,23 +483,13 @@ impl Candidate {
             };
             return Ok(Self::Wide(plan));
         }
-        let kernels = if matches!(
-            std::env::var("TRUNK_RESNET").as_deref(),
-            Ok("tensor" | "sm80")
-        ) {
-            // load the newest runnable tier directly so the comparison does not depend
-            // on a production binding
-            let area = KernelModule::Resnet;
-            let device = runtime.device().capability();
-            let request = area
-                .variants()
-                .driver_request(area, runtime.ptx_tier(), device)
-                .ok_or(CudaError::AreaTierNotCompiledIn {
-                    area: area.name(),
-                    tier: runtime.ptx_tier(),
-                    device,
-                    feature: runtime.ptx_tier().feature(),
-                })?;
+        let resnet_override = std::env::var("TRUNK_RESNET").ok();
+        let kernels = if let Some(request) = Self::resnet_override_request(
+            resnet_override.as_deref(),
+            runtime.ptx_tier(),
+            runtime.device().capability(),
+            |request| runtime.effective_request(request),
+        )? {
             runtime.load_module(request)?
         } else {
             tier(KernelModule::Resnet)?
@@ -464,6 +499,30 @@ impl Candidate {
             ConvOxide::plan(runtime, &kernels, spec, pin)?,
             pin,
         ))
+    }
+
+    fn resnet_override_request(
+        override_name: Option<&str>,
+        tier: PtxTier,
+        device: ComputeCapability,
+        effective_request: impl FnOnce(ModuleRequest) -> Result<ModuleRequest, CudaError>,
+    ) -> Result<Option<ModuleRequest>, CudaError> {
+        if !matches!(override_name, Some("tensor" | "sm80")) {
+            return Ok(None);
+        }
+
+        // select the newest runnable tier independently of production bindings,
+        // but retain the runtime's artifact policy for the diagnostic load
+        let area = KernelModule::Resnet;
+        let request = area.variants().driver_request(area, tier, device).ok_or(
+            CudaError::AreaTierNotCompiledIn {
+                area: area.name(),
+                tier,
+                device,
+                feature: tier.feature(),
+            },
+        )?;
+        effective_request(request).map(Some)
     }
 
     /// The driver-only pin on this device, or the one `TRUNK_RESNET` forces: `legacy`

@@ -14,6 +14,8 @@ clippy:
     for features in cuda-sm75 cuda-sm80 cuda-sm90 cuda-sm120 cuda-rtx20 cuda-rtx30 cuda-rtx40 cuda-a100 cuda-rtx50; do
         cargo clippy -p speakrs --all-targets --no-default-features --features "$features" -- -D warnings
     done
+    # the benchmark binary must compile its runners without the numerical libraries
+    cargo clippy -p xtask --all-targets --no-default-features --features cuda-rtx50 -- -D warnings
     cargo clippy -p speakrs --all-targets --features "cpu load-dynamic" -- -D warnings
     if [[ "$(uname)" == "Darwin" ]]; then
         # the CoreML-only build has no ONNX Runtime, so check it for dead code separately

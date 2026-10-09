@@ -1,17 +1,17 @@
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda")]
 use std::collections::HashMap;
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda")]
 use std::fs;
 use std::path::{Path, PathBuf};
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda")]
 use std::time::Duration;
 
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda")]
 use color_eyre::eyre::ensure;
 use color_eyre::eyre::{Result, bail};
 
 use super::super::BenchmarkMetadata;
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda")]
 use super::super::{
     BatchCommandRunner, DerAccumulation, DerImplResult, DerResultsWriter, ImplType, format_eta,
     now_stamp,
@@ -19,13 +19,13 @@ use super::super::{
 use super::gpu::resolve_gpu_impls;
 use super::preflight::preflight;
 use super::{BenchmarkJobConfig, BenchmarkJobResult, GpuBenchmarkSuiteConfig, ProgressUpdate};
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda")]
 use crate::catalog::ImplementationId;
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda")]
 use crate::commands::benchmark::run_store::DatasetIdentity;
 use crate::commands::benchmark::run_store::{BenchmarkRun, RunIdentity};
 use crate::commands::benchmark::runner::BatchRunOutput;
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda")]
 use crate::path::file_stem_string;
 
 pub fn run_gpu_benchmark_suite(config: &GpuBenchmarkSuiteConfig) -> Result<()> {
@@ -89,7 +89,7 @@ pub fn run_gpu_benchmark_suite(config: &GpuBenchmarkSuiteConfig) -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda")]
 pub fn run_benchmark_job(
     config: &BenchmarkJobConfig,
     progress_cb: Option<&(dyn Fn(&ProgressUpdate) + Send + Sync)>,
@@ -267,16 +267,16 @@ pub fn run_benchmark_job(
     })
 }
 
-#[cfg(not(feature = "cuda"))]
+#[cfg(not(feature = "_cuda"))]
 pub fn run_benchmark_job(
     _config: &BenchmarkJobConfig,
     _progress_cb: Option<&(dyn Fn(&ProgressUpdate) + Send + Sync)>,
     _run_identity: Option<&RunIdentity>,
 ) -> Result<BenchmarkJobResult> {
-    bail!("xtask benchmark jobs require the `cuda` feature")
+    bail!("xtask benchmark jobs require a CUDA backend feature")
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda")]
 pub fn run_speakrs_gpu(
     models_dir: &Path,
     files: &[(PathBuf, PathBuf)],
@@ -367,12 +367,12 @@ pub fn run_speakrs_gpu(
     })
 }
 
-#[cfg(not(feature = "cuda"))]
+#[cfg(not(feature = "_cuda"))]
 pub fn run_speakrs_gpu(
     _models_dir: &Path,
     _files: &[(PathBuf, PathBuf)],
     _mode: &str,
     _progress_cb: Option<&(dyn Fn(&ProgressUpdate) + Send + Sync)>,
 ) -> Result<BatchRunOutput> {
-    bail!("xtask GPU benchmark path requires the `cuda` feature")
+    bail!("xtask GPU benchmark path requires a CUDA backend feature")
 }
