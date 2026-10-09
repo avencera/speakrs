@@ -163,6 +163,10 @@ const C32_LAYERS: [&str; 6] = [
 /// TF32 mode on Turing; elsewhere, and in FP32 mode, the direct ResNet kernel keeps it
 const C32_STRIDE2_LAYERS: [&str; 1] = ["resnet.layer2.0.conv1"];
 
+/// Embedding batch classes at which the A100 recipes run the 64-channel same-channel
+/// layers on FP16 tiles; the TF32 early trunk is faster at batches 1, 4 and 8
+const A100_FP16_C64_BATCHES: [usize; 2] = [16, 32];
+
 /// The capability whose FP32 mode runs `C64_LAYERS` here, in FFMA Winograd
 const TURING: ComputeCapability = ComputeCapability::new(7, 5);
 
@@ -563,22 +567,31 @@ impl Pin {
         matches!(config.algorithm, Algorithm::Fp16(_)).then_some(Self::Configured(config))
     }
 
-    /// FP16 tiles on the 128- and 256-channel 3x3 boundaries, stride 2 included, from
-    /// batch 4 in TF32 mode: the A100 SXM4 and PCIe points where they beat cuDNN
+    /// FP16 tiles in TF32 mode at the A100 SXM4 and PCIe points where they beat the TF32
+    /// rule: the 128- and 256-channel 3x3 boundaries, stride 2 included, from batch 4,
+    /// the same-channel 32-channel layers at every batch, and the same-channel
+    /// 64-channel layers from batch 16
     ///
-    /// The same-channel layers take narrow tiles below batch 32, about 10% faster than
-    /// wide ones there; the stride-2 layers keep wide tiles at every batch. At batch 1 the
-    /// TF32 kernels already beat cuDNN and the FP16 tiles do not, and the 32- and
-    /// 64-channel layers run in the TF32 early trunk. The 128->256 stride-2 layer starts
-    /// at batch 8: at batch 4 the tune times the FP16 route at 0.059 ms against 0.057 ms
-    /// for both cuDNN and the TF32 rule
+    /// The 128- and 256-channel same-channel layers take narrow tiles below batch 32,
+    /// about 10% faster than wide ones there; the stride-2 layers keep wide tiles at
+    /// every batch. At batch 1 the TF32 kernels already beat cuDNN and the FP16 tiles do
+    /// not. The 128->256 stride-2 layer starts at batch 8: at batch 4 the tune times the
+    /// FP16 route at 0.059 ms against 0.057 ms for both cuDNN and the TF32 rule
+    ///
+    /// Against the TF32 early trunk on an A100-SXM4 (a100-driver-speed tune at f34f1ea),
+    /// wide tiles ran the 32-channel layers 10-22% faster at every batch, and the
+    /// 64-channel layers 1-7% faster at batches 16 and 32 but 2-12% slower below. The
+    /// 32->64 stride-2 layer tied at every batch, so it stays in the early trunk
     pub(crate) fn measured_a100_fp16(name: &str, batch: usize, math: CudaMath) -> Option<Self> {
-        if batch < 4 || math != CudaMath::Tf32 {
+        if math != CudaMath::Tf32 {
             return None;
         }
 
         let shape = Shape::of(model_conv(name, batch, math).ok()?).ok()?;
         let tiles = match shape {
+            Shape::C32 => Fp16Tiles::Wide,
+            Shape::C64 if A100_FP16_C64_BATCHES.contains(&batch) => Fp16Tiles::Wide,
+            _ if batch < 4 => return None,
             Shape::C128Stride2 if batch < 8 => return None,
             Shape::C128 | Shape::C256 if batch < 32 => Fp16Tiles::Narrow,
             Shape::C128 | Shape::C256 | Shape::C64Stride2 | Shape::C128Stride2 => Fp16Tiles::Wide,
@@ -2269,6 +2282,18 @@ const RTX4060TI_FP16_COVERAGE: [CoverageEntry; 3] = [
     },
 ];
 
+/// The A100 FP16 recipes add the same-channel 32-channel layers at every batch and the
+/// 64-channel ones where FP16 tiles beat the TF32 early trunk
+const A100_FP16_COVERAGE: [CoverageEntry; 3] = [
+    RTX4060TI_FP16_COVERAGE[0],
+    CoverageEntry {
+        layers: &C64_LAYERS,
+        batches: Batches::Only(&A100_FP16_C64_BATCHES),
+        maths: Maths::Only(&[CudaMath::Tf32]),
+    },
+    RTX4060TI_FP16_COVERAGE[2],
+];
+
 /// The 4090 FP16 recipe also runs the 32->64 stride-2 layer on FP16 tiles
 const RTX4090_FP16_COVERAGE: [CoverageEntry; 4] = [
     RTX4060TI_FP16_COVERAGE[0],
@@ -2307,6 +2332,7 @@ impl super::DriverCandidate for Oxide {
         match Recipe::fp16_device(device, tier).filter(|_| fp16.allows()) {
             Some(Recipe::Rtx4060Ti) => Coverage(&RTX4060TI_FP16_COVERAGE),
             Some(Recipe::Rtx4090) => Coverage(&RTX4090_FP16_COVERAGE),
+            Some(Recipe::A100Pcie | Recipe::A100Sxm4) => Coverage(&A100_FP16_COVERAGE),
             _ => Self::coverage_on(tier, device.capability(), fp16),
         }
     }
