@@ -154,7 +154,7 @@ impl CudaRuntime {
     ) -> Option<ApprovedChoice> {
         self.tuning
             .as_ref()
-            .and_then(|tuning| tuning.choice(boundary, batch, math))
+            .and_then(|tuning| tuning.plan_choice(boundary, batch, math))
     }
 
     pub(crate) fn is_tuning(&self) -> bool {

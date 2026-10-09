@@ -364,6 +364,22 @@ impl TuneControl {
         }
     }
 
+    pub(crate) fn plan_choice(
+        &self,
+        boundary: BoundaryId,
+        batch: usize,
+        math: CudaMath,
+    ) -> Option<ApprovedChoice> {
+        self.choice(boundary, batch, math).or_else(|| {
+            let TuneSelection::Bench { catalogue, .. } = &self.selection else {
+                return None;
+            };
+            let tuple = Tuple::new(boundary, batch, math).ok()?;
+            // untimed boundaries need an approved plan to complete the model pass
+            catalogue.choices(tuple).first().cloned()
+        })
+    }
+
     pub(crate) fn is_benchmark(&self) -> bool {
         matches!(self.selection, TuneSelection::Bench { .. })
     }

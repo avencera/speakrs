@@ -469,6 +469,20 @@ fn benchmark_visits_every_exact_approved_choice() {
                 "{name} {tuple:?}"
             );
         }
+        for (tuple, approved) in catalogue.0.iter().take(1) {
+            let control =
+                TuneControl::benchmark(BenchKind::CatalogueSlot(approved.len()), &device, tier)
+                    .unwrap();
+            assert!(
+                control
+                    .choice(tuple.boundary, tuple.batch, tuple.math.into())
+                    .is_none()
+            );
+            assert_eq!(
+                control.plan_choice(tuple.boundary, tuple.batch, tuple.math.into()),
+                approved.first().cloned()
+            );
+        }
         if cc.major == 7 {
             let tuple = Tuple::new(
                 BoundaryId::named("resnet.layer2.1.conv1"),
