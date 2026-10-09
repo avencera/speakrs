@@ -286,6 +286,44 @@ fallbacks.
 boundary, even when a tune file exists. The model-load log gives the source for
 each boundary: tune file, recipe, default, or library.
 
+### Tested NVIDIA GPUs
+
+These end-to-end results use a 10-file VoxConverse subset (about 1.9 hours of
+audio), FP32 segmentation and TF32 embedding. RTFx is audio duration divided by
+wall time, so higher is faster. Each figure is the median of three alternating
+rounds. The T4 and RTX 4090 were measured on the final code, and the A100, L4
+and A10 on an earlier revision of it. The RTX 4090 runs requested 16 CPU cores
+on Beam; the other rows used a two-core CPU limit on Modal. These are measured
+results, not guarantees for other hosts.
+
+| GPU | `cuda` RTFx | Driver-only RTFx |
+|---|---:|---:|
+| T4 | 197× | 198× |
+| A100 40 GB | 752× | 733× |
+| L4 | 285× | 286× |
+| A10 | 404× | 405× |
+| RTX 4090 | 965× | 1002× |
+
+The RTX 4060 Ti and RTX 5060 Ti also have measured kernel recipes. On the same
+subset, driver-only builds were 1.6× faster than cuDNN and cuBLAS on the RTX 4090
+and L4, 2.0× on the A10, and 1.4× on the H100 PCIe. The H100 has no tuned
+recipe: it is faster than the libraries end to end, but some individual layers
+are slower.
+
+Other Turing or newer GPUs use device-class defaults. `speakrs cuda tune`
+measures and saves the fastest kernels for the current device; add
+`--include-library` to also compare with cuDNN and cuBLAS.
+
+The libraries still win the layers below, each by 2–8 µs. This doesn't change
+end-to-end speed.
+
+| GPU | Layer | Batch | speakrs | cuDNN/cuBLAS |
+|---|---|---:|---:|---:|
+| T4 | `layer4.0.shortcut` | 4 | 149 µs | 141 µs |
+| T4 | `linear0` / `linear1` (FP32) | 1 | 18 / 13 µs | 15 / 11 µs |
+| A100 | `layer4.0.conv1` | 4 | 59 µs | 57 µs |
+| L4, A10, RTX 4090 | `seg_1` | 32 | 31 / 42 / 15 µs | 28 / 37 / 13 µs |
+
 ### CUDA tuning
 
 Build the opt-in command on Linux:
