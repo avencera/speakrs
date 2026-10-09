@@ -96,6 +96,11 @@ kernel_entries! {
     H16_C256_NARROW => "spk_wideconv_h16_c256_narrow",
     H16_C32 => "spk_wideconv_h16_c32",
     H16_C64 => "spk_wideconv_h16_c64",
+    H16_C32S2 => "spk_wideconv_h16_c32s2",
+    H16_C64S2 => "spk_wideconv_h16_c64s2",
+    H16_C64S2_NARROW => "spk_wideconv_h16_c64s2_narrow",
+    H16_C128S2 => "spk_wideconv_h16_c128s2",
+    H16_C128S2_NARROW => "spk_wideconv_h16_c128s2_narrow",
     PACK_H16 => "spk_wideconv_pack_h16",
 }
 
@@ -153,6 +158,10 @@ const C32_LAYERS: [&str; 6] = [
     "resnet.layer1.2.conv1",
     "resnet.layer1.2.conv2",
 ];
+
+/// The 32 -> 64 stride-2 trunk convolution, which wideconv runs only with FP16 tiles in
+/// TF32 mode on Turing; elsewhere, and in FP32 mode, the direct ResNet kernel keeps it
+const C32_STRIDE2_LAYERS: [&str; 1] = ["resnet.layer2.0.conv1"];
 
 /// The capability whose FP32 mode runs `C64_LAYERS` here, in FFMA Winograd
 const TURING: ComputeCapability = ComputeCapability::new(7, 5);
@@ -386,6 +395,9 @@ const WIDE_STEM_PIXELS: u32 = 8;
 const WIDE_STEM_WAVES: u32 = 8;
 /// Output columns per direct FP16 CTA, as `8 * n_tiles` in the device crate
 const FP16_COLUMNS: u32 = 64;
+/// Stage pixels per input row of a stride-2 FP16 CTA: `FP16_COLUMNS + 1` even padded
+/// columns, then the odd ones from pixel 68, rounded up to whole 128-byte rows
+const FP16_S2_ROW_PIXELS: u32 = 136;
 /// Waves of wide FP16 CTAs below which the 128- and 256-channel shapes use narrow ones
 const FP16_WIDE_WAVES: u32 = 2;
 
@@ -452,10 +464,77 @@ pub(crate) enum Pin {
 }
 
 impl Pin {
-    /// Wide FP16 tiles for a compiled same-channel stride-1 boundary in TF32 mode
+    /// Exact T4 stem pins from the Library-inclusive PR 41 tune
+    pub(crate) fn measured_t4_stem(name: &str, batch: usize, math: CudaMath) -> Option<Self> {
+        // final41/evidence/tune-library/t4/head/tune.txt, Tesla T4, TF32 math:
+        // b16 default/fp32/Library 1.404/0.890/0.937 ms; b32 2.807/1.767/1.877 ms
+        // the approved FP32 spatial kernel is more exact and beats both alternatives
+        if math == CudaMath::Tf32 && name == "resnet.conv1" && matches!(batch, 16 | 32) {
+            return Some(Self::Configured(Config {
+                algorithm: Algorithm::Spatial,
+                partition: Partition::Whole,
+                split_cells: SplitCells::All,
+            }));
+        }
+
+        None
+    }
+
+    /// Exact T4 FP32 fallback pins measured by ambitious/fp16 and PR 40 range-guard
+    /// checks, independent of the current device selection rule
+    pub(crate) fn measured_t4_fallback(name: &str, batch: usize, math: CudaMath) -> Option<Self> {
+        if math != CudaMath::Tf32 || !matches!(batch, 1 | 4 | 8 | 16 | 32) {
+            return None;
+        }
+
+        let partition = match name {
+            "resnet.layer3.0.conv2"
+            | "resnet.layer3.1.conv1"
+            | "resnet.layer3.1.conv2"
+            | "resnet.layer3.2.conv1"
+            | "resnet.layer3.2.conv2"
+            | "resnet.layer3.3.conv1"
+            | "resnet.layer3.3.conv2"
+            | "resnet.layer3.4.conv1"
+            | "resnet.layer3.4.conv2"
+            | "resnet.layer3.5.conv1"
+            | "resnet.layer3.5.conv2" => Partition::Whole,
+            "resnet.layer4.0.conv2"
+            | "resnet.layer4.1.conv1"
+            | "resnet.layer4.1.conv2"
+            | "resnet.layer4.2.conv1"
+            | "resnet.layer4.2.conv2" => {
+                if batch == 1 {
+                    Partition::Four
+                } else {
+                    Partition::Whole
+                }
+            }
+            _ => return None,
+        };
+
+        Some(Self::Configured(Config {
+            algorithm: Algorithm::Winograd(WinogradProducts::Fp32),
+            partition,
+            split_cells: SplitCells::All,
+        }))
+    }
+
+    /// Wide FP16 tiles for a compiled same-channel stride-1 boundary in TF32 mode, the
+    /// FP16 shapes measured outside Turing
     pub(crate) fn fp16_wide(name: &str, batch: usize, math: CudaMath) -> Option<Self> {
         let conv = model_conv(name, batch, math).ok()?;
         let shape = Shape::of(conv).ok()?;
+        if !shape.fp16_same_channel() {
+            return None;
+        }
+
+        Self::tuning_fp16_wide(name, batch, math)
+    }
+
+    /// Discover all compiled FP16 shapes without widening recipe coverage
+    fn tuning_fp16_wide(name: &str, batch: usize, math: CudaMath) -> Option<Self> {
+        let shape = Shape::of(model_conv(name, batch, math).ok()?).ok()?;
         if math != CudaMath::Tf32 || shape.fp16_entry(Fp16Tiles::Wide).is_none() {
             return None;
         }
@@ -467,11 +546,11 @@ impl Pin {
         }))
     }
 
-    /// The T4 recipe uses the same tile rule as the cc 7.5 default, at its 40 SM point
+    /// The T4 recipe uses the same tile rule as the cc 7.5 default, at its 40 SM point:
+    /// FP16 tiles on every 3x3 boundary but the stem in TF32 mode
     pub(crate) fn measured_t4_fp16(name: &str, batch: usize, math: CudaMath) -> Option<Self> {
-        Self::fp16_wide(name, batch, math)?;
         let conv = model_conv(name, batch, math).ok()?;
-        Config::select(
+        let config = Config::select(
             Device {
                 capability: TURING,
                 sms: 40,
@@ -480,34 +559,65 @@ impl Pin {
             conv,
             Fp16Policy::Allowed,
         )
-        .ok()
-        .map(Self::Configured)
+        .ok()?;
+        matches!(config.algorithm, Algorithm::Fp16(_)).then_some(Self::Configured(config))
     }
 
-    /// The retained A100 TF32 recipe pins at the measured batch classes
-    pub(crate) fn measured_a100(name: &str, batch: usize) -> Option<Self> {
-        if !matches!(batch, 1 | 32) || !LAYERS.contains(&name) {
+    /// FP16 tiles on the 128- and 256-channel 3x3 boundaries, stride 2 included, from
+    /// batch 4 in TF32 mode: the A100 SXM4 and PCIe points where they beat cuDNN
+    ///
+    /// The same-channel layers take narrow tiles below batch 32, about 10% faster than
+    /// wide ones there; the stride-2 layers keep wide tiles at every batch. At batch 1 the
+    /// TF32 kernels already beat cuDNN and the FP16 tiles do not, and the 32- and
+    /// 64-channel layers run in the TF32 early trunk. The 128->256 stride-2 layer starts
+    /// at batch 8: at batch 4 the tune times the FP16 route at 0.059 ms against 0.057 ms
+    /// for both cuDNN and the TF32 rule
+    pub(crate) fn measured_a100_fp16(name: &str, batch: usize, math: CudaMath) -> Option<Self> {
+        if batch < 4 || math != CudaMath::Tf32 {
             return None;
         }
-        let (algorithm, partition) = match name {
-            "resnet.layer3.0.conv1" | "resnet.layer4.0.conv1" => return None,
-            _ if name.ends_with("shortcut.0") => return None,
-            _ if name.starts_with("resnet.layer3.") => (
-                Algorithm::Winograd(WinogradProducts::Tf32x1),
-                Partition::Whole,
-            ),
-            _ if name.starts_with("resnet.layer4.") && batch == 1 => (
-                Algorithm::Winograd(WinogradProducts::Tf32x3),
-                Partition::Two,
-            ),
-            _ if name.starts_with("resnet.layer4.") => {
-                (Algorithm::TensorCore(TensorKernel::Tf32), Partition::Whole)
-            }
+
+        let shape = Shape::of(model_conv(name, batch, math).ok()?).ok()?;
+        let tiles = match shape {
+            Shape::C128Stride2 if batch < 8 => return None,
+            Shape::C128 | Shape::C256 if batch < 32 => Fp16Tiles::Narrow,
+            Shape::C128 | Shape::C256 | Shape::C64Stride2 | Shape::C128Stride2 => Fp16Tiles::Wide,
             _ => return None,
         };
+        shape.fp16_entry(tiles)?;
         Some(Self::Configured(Config {
-            algorithm,
-            partition,
+            algorithm: Algorithm::Fp16(tiles),
+            partition: Partition::Whole,
+            split_cells: SplitCells::All,
+        }))
+    }
+
+    /// FP16 tiles on every 3x3 trunk boundary but the stem in TF32 mode, at the RTX 4090
+    /// points where they beat both the TF32 rule and cuDNN
+    ///
+    /// The 32- and 64-channel layers, stride 2 included, take wide tiles at every batch,
+    /// and the 64->128 stride-2 layer from batch 4. The 128-channel layers take narrow
+    /// tiles from batch 4 and the 256-channel ones from batch 8: at batch 4 the TF32
+    /// rule runs them at 0.059 ms against 0.073 ms for narrow tiles. The 128->256
+    /// stride-2 layer takes narrow tiles from batch 4 and wide ones at batch 32. At
+    /// batch 1 the TF32 kernels win every layer of 64 or more input channels
+    pub(crate) fn measured_rtx4090_fp16(name: &str, batch: usize, math: CudaMath) -> Option<Self> {
+        if math != CudaMath::Tf32 {
+            return None;
+        }
+
+        let shape = Shape::of(model_conv(name, batch, math).ok()?).ok()?;
+        let tiles = match (shape, batch) {
+            (Shape::C32 | Shape::C32Stride2 | Shape::C64, _) => Fp16Tiles::Wide,
+            (_, 1) | (Shape::C256, 4) => return None,
+            (Shape::C64Stride2, _) | (Shape::C128Stride2, 32) => Fp16Tiles::Wide,
+            (Shape::C128 | Shape::C256 | Shape::C128Stride2, _) => Fp16Tiles::Narrow,
+            _ => return None,
+        };
+        shape.fp16_entry(tiles)?;
+        Some(Self::Configured(Config {
+            algorithm: Algorithm::Fp16(tiles),
+            partition: Partition::Whole,
             split_cells: SplitCells::All,
         }))
     }
@@ -587,7 +697,7 @@ impl Config {
                 split_cells: SplitCells::All,
             },
             Shape::C64Stride2 | Shape::C128Stride2 => whole(Algorithm::Spatial),
-            Shape::C32 => {
+            Shape::C32 | Shape::C32Stride2 => {
                 return Err(unsupported(
                     "32-channel layers run here only with FP16 tiles in TF32 mode",
                 ));
@@ -623,26 +733,24 @@ impl Config {
         })
     }
 
-    /// Turing has no TF32 hardware; its TF32 mode uses FP16 tensor cores instead
+    /// Turing has no TF32 hardware; its TF32 mode uses FP16 tensor cores instead, on
+    /// every 3x3 shape but the stem
     fn fp16(device: Device, shape: Shape, conv: Conv2d) -> Option<Fp16Tiles> {
-        if conv.math != CudaMath::Tf32
-            || device.capability != TURING
-            || !matches!(shape, Shape::C32 | Shape::C64 | Shape::C128 | Shape::C256)
-        {
+        if conv.math != CudaMath::Tf32 || device.capability != TURING {
             return None;
         }
 
         Self::fp16_turing_tiles(device, shape, conv)
     }
 
-    /// Turing's FP16 tiles: the 128- and 256-channel shapes take narrow tiles when wide
-    /// ones would give fewer than `FP16_WIDE_WAVES` CTAs per SM
+    /// Turing's FP16 tiles: shapes with narrow tiles take them when wide ones would give
+    /// fewer than `FP16_WIDE_WAVES` CTAs per SM
     fn fp16_turing_tiles(device: Device, shape: Shape, conv: Conv2d) -> Option<Fp16Tiles> {
         let [oh, ow] = conv.output().map(|size| size as u32);
         let (grid, _) = shape.fp16_launch(Fp16Tiles::Wide, conv.batch as u32, oh, ow)?;
         let ctas = grid.0 * grid.1 * grid.2;
         let narrow =
-            matches!(shape, Shape::C128 | Shape::C256) && ctas < FP16_WIDE_WAVES * device.sms;
+            shape.fp16_entry(Fp16Tiles::Narrow).is_some() && ctas < FP16_WIDE_WAVES * device.sms;
         Some(if narrow {
             Fp16Tiles::Narrow
         } else {
@@ -715,11 +823,8 @@ impl Config {
                 {
                     WinogradProducts::Tf32x1Staged
                 }
-                // two products keep TF32-mode error at that of a direct TF32
-                // convolution on the 128-channel layers only
-                (true, Shape::C128) => WinogradProducts::Tf32x2,
-                (true, _) if conv.batch < WINOGRAD_TENSOR_BATCH => WinogradProducts::Tf32x3,
-                (true, _) => return None,
+                // unmeasured tensor-rich parts use the approved staged product
+                (true, _) => WinogradProducts::Tf32x1Staged,
             });
         }
         // on parts with TF32 at the FP32 rate one staged product still beats both FFMA
@@ -836,11 +941,6 @@ impl Config {
     }
 }
 
-/// Batch from which the direct tensor-core kernel replaces Winograd in TF32 mode on the
-/// 256-channel layers of TF32-rich parts other than the A100; production runs batches 1
-/// and 32, and the crossover between them is not measured
-const WINOGRAD_TENSOR_BATCH: usize = 8;
-
 /// The convolution contract and immutable folded weights used to create a plan
 struct Spec<'a, 'b> {
     conv: Conv2d,
@@ -871,6 +971,7 @@ enum Shape {
     C64,
     C128,
     C256,
+    C32Stride2,
     C64Stride2,
     C128Stride2,
     Shortcut,
@@ -900,6 +1001,7 @@ impl Shape {
             (64, 64, [1, 1]) => Ok(Self::C64),
             (128, 128, [1, 1]) => Ok(Self::C128),
             (256, 256, [1, 1]) => Ok(Self::C256),
+            (32, 64, [2, 2]) => Ok(Self::C32Stride2),
             (64, 128, [2, 2]) => Ok(Self::C64Stride2),
             (128, 256, [2, 2]) => Ok(Self::C128Stride2),
             _ => Err(unsupported("no kernel for this channel or stride contract")),
@@ -911,7 +1013,7 @@ impl Shape {
     fn entry(self, in_channels: u32, batch: u32) -> Option<&'static str> {
         Some(match self {
             Self::Stem => entries::STEM,
-            Self::C32 | Self::C64 => return None,
+            Self::C32 | Self::C64 | Self::C32Stride2 => return None,
             Self::C128 => entries::C128,
             Self::C256 => entries::C256,
             Self::C64Stride2 => entries::C64S2,
@@ -924,7 +1026,7 @@ impl Shape {
     fn compiled_input(self, in_channels: usize) -> Option<[usize; 2]> {
         match (self, in_channels) {
             (Self::C128 | Self::C128Stride2, _) | (Self::Shortcut, 128) => Some([20, 250]),
-            (Self::C32, _) => Some([80, 998]),
+            (Self::C32 | Self::C32Stride2, _) => Some([80, 998]),
             (Self::C64, _) => Some([40, 499]),
             (Self::C256, _) => Some([10, 125]),
             (Self::C64Stride2, _) | (Self::Shortcut, 64) => Some([40, 499]),
@@ -962,11 +1064,12 @@ impl Shape {
             Self::C64Stride2 => Some(entries::TC_C64S2),
             Self::C128Stride2 if batch < TC_WIDE_BATCH => Some(entries::TC_C128S2_NARROW),
             Self::C128Stride2 => Some(entries::TC_C128S2),
-            Self::Stem | Self::C32 | Self::C64 | Self::Shortcut => None,
+            Self::Stem | Self::C32 | Self::C64 | Self::C32Stride2 | Self::Shortcut => None,
         }
     }
 
-    /// Direct FP16 entry for the same-channel stride-1 shapes
+    /// Direct FP16 entry for the 3x3 shapes other than the stem; the 32 -> 64 stride-2
+    /// layer has enough CTAs with whole-channel tiles at every batch
     fn fp16_entry(self, tiles: Fp16Tiles) -> Option<&'static str> {
         match (self, tiles) {
             (Self::C32, Fp16Tiles::Wide) => Some(entries::H16_C32),
@@ -975,13 +1078,25 @@ impl Shape {
             (Self::C128, Fp16Tiles::Narrow) => Some(entries::H16_C128_NARROW),
             (Self::C256, Fp16Tiles::Wide) => Some(entries::H16_C256),
             (Self::C256, Fp16Tiles::Narrow) => Some(entries::H16_C256_NARROW),
+            (Self::C32Stride2, Fp16Tiles::Wide) => Some(entries::H16_C32S2),
+            (Self::C64Stride2, Fp16Tiles::Wide) => Some(entries::H16_C64S2),
+            (Self::C64Stride2, Fp16Tiles::Narrow) => Some(entries::H16_C64S2_NARROW),
+            (Self::C128Stride2, Fp16Tiles::Wide) => Some(entries::H16_C128S2),
+            (Self::C128Stride2, Fp16Tiles::Narrow) => Some(entries::H16_C128S2_NARROW),
             _ => None,
         }
     }
 
+    /// Whether this shape's FP16 tiles keep the channel count at stride 1, the FP16 shapes
+    /// measured on the 4060 Ti
+    fn fp16_same_channel(self) -> bool {
+        matches!(self, Self::C32 | Self::C64 | Self::C128 | Self::C256)
+    }
+
     /// Direct FP16 grid and dynamic shared bytes, mirroring the device instances: output
     /// rows and channels per CTA, `FP16_COLUMNS` columns, and two stages of the CTA's
-    /// input rows and columns with their halo at 16 bytes per pixel
+    /// input rows and columns with their halo at 16 bytes per pixel. A stride-2 stage
+    /// row holds its even and odd columns in two planes of `FP16_S2_ROW_PIXELS` pixels
     fn fp16_launch(
         self,
         tiles: Fp16Tiles,
@@ -996,6 +1111,11 @@ impl Shape {
             (Self::C128, Fp16Tiles::Narrow) => (2, 64, 128),
             (Self::C256, Fp16Tiles::Wide) => (2, 128, 256),
             (Self::C256, Fp16Tiles::Narrow) => (2, 64, 256),
+            (Self::C32Stride2, Fp16Tiles::Wide) => (2, 64, 64),
+            (Self::C64Stride2, Fp16Tiles::Wide) => (2, 128, 128),
+            (Self::C64Stride2, Fp16Tiles::Narrow) => (2, 64, 128),
+            (Self::C128Stride2, Fp16Tiles::Wide) => (2, 128, 256),
+            (Self::C128Stride2, Fp16Tiles::Narrow) => (2, 64, 256),
             _ => return None,
         };
         let grid = (
@@ -1003,7 +1123,12 @@ impl Shape {
             oh.div_ceil(rows),
             batch * (channels / cta_channels),
         );
-        Some((grid, 2 * (rows + 2) * (FP16_COLUMNS + 2) * 16))
+        let stage = if self.fp16_same_channel() {
+            (rows + 2) * (FP16_COLUMNS + 2)
+        } else {
+            (2 * rows + 1) * FP16_S2_ROW_PIXELS
+        };
+        Some((grid, 2 * stage * 16))
     }
 
     /// Fused Winograd entry for the same-channel stride-1 shapes
@@ -1150,7 +1275,9 @@ impl Layout {
         {
             return Err(unsupported("no spatial tiles for this shape"));
         }
-        if algorithm == Algorithm::ImplicitGemm && matches!(shape, Shape::C32 | Shape::C64) {
+        if algorithm == Algorithm::ImplicitGemm
+            && matches!(shape, Shape::C32 | Shape::C64 | Shape::C32Stride2)
+        {
             return Err(unsupported(
                 "the 32- and 64-channel shapes have only FP16 and Winograd tiles",
             ));
@@ -1158,7 +1285,7 @@ impl Layout {
         if let Algorithm::Fp16(tiles) = algorithm {
             if shape.fp16_entry(tiles).is_none() {
                 return Err(unsupported(
-                    "FP16 tiles cover only the same-channel stride-1 shapes, narrow ones only the 128- and 256-channel shapes",
+                    "FP16 tiles cover the 3x3 shapes but the stem, narrow ones only those of 128 or more output channels",
                 ));
             }
             if conv.math != CudaMath::Tf32 {
@@ -1997,7 +2124,7 @@ impl Oxide {
         capability: ComputeCapability,
         fp16: Fp16Policy,
     ) -> Coverage {
-        // only FP16 tiles cover the 32-channel layers
+        // only FP16 tiles cover the 32-channel input layers
         const TURING_FP32_OPERANDS: Coverage = Coverage(&[
             CoverageEntry {
                 layers: &LAYERS,
@@ -2023,6 +2150,11 @@ impl Oxide {
             },
             CoverageEntry {
                 layers: &C32_LAYERS,
+                batches: Batches::All,
+                maths: Maths::Only(&[CudaMath::Tf32]),
+            },
+            CoverageEntry {
+                layers: &C32_STRIDE2_LAYERS,
                 batches: Batches::All,
                 maths: Maths::Only(&[CudaMath::Tf32]),
             },
@@ -2118,6 +2250,37 @@ pub(super) fn trunk_speed_scope(
     measured.then_some(super::super::implementation::SpeedScope::MeasuredCapability { capability })
 }
 
+/// The 4060 Ti FP16 recipe adds the same-channel 32- and 64-channel layers in TF32 mode
+const RTX4060TI_FP16_COVERAGE: [CoverageEntry; 3] = [
+    CoverageEntry {
+        layers: &LAYERS,
+        batches: Batches::All,
+        maths: Maths::All,
+    },
+    CoverageEntry {
+        layers: &C64_LAYERS,
+        batches: Batches::All,
+        maths: Maths::Only(&[CudaMath::Tf32]),
+    },
+    CoverageEntry {
+        layers: &C32_LAYERS,
+        batches: Batches::All,
+        maths: Maths::Only(&[CudaMath::Tf32]),
+    },
+];
+
+/// The 4090 FP16 recipe also runs the 32->64 stride-2 layer on FP16 tiles
+const RTX4090_FP16_COVERAGE: [CoverageEntry; 4] = [
+    RTX4060TI_FP16_COVERAGE[0],
+    RTX4060TI_FP16_COVERAGE[1],
+    RTX4060TI_FP16_COVERAGE[2],
+    CoverageEntry {
+        layers: &C32_STRIDE2_LAYERS,
+        batches: Batches::All,
+        maths: Maths::Only(&[CudaMath::Tf32]),
+    },
+];
+
 impl super::DriverCandidate for Oxide {
     const AREA: super::KernelModule = super::KernelModule::Wideconv;
 
@@ -2141,27 +2304,11 @@ impl super::DriverCandidate for Oxide {
 
     fn driver_coverage(tier: PtxTier, device: &DeviceAttributes, fp16: Fp16Policy) -> Coverage {
         use crate::inference::cuda::implementation::policy::Recipe;
-        if fp16.allows() && Recipe::fp16_device(device, tier) == Some(Recipe::Rtx4060Ti) {
-            return Coverage(&[
-                CoverageEntry {
-                    layers: &LAYERS,
-                    batches: Batches::All,
-                    maths: Maths::All,
-                },
-                CoverageEntry {
-                    layers: &C64_LAYERS,
-                    batches: Batches::All,
-                    maths: Maths::Only(&[CudaMath::Tf32]),
-                },
-                CoverageEntry {
-                    layers: &C32_LAYERS,
-                    batches: Batches::All,
-                    maths: Maths::Only(&[CudaMath::Tf32]),
-                },
-            ]);
+        match Recipe::fp16_device(device, tier).filter(|_| fp16.allows()) {
+            Some(Recipe::Rtx4060Ti) => Coverage(&RTX4060TI_FP16_COVERAGE),
+            Some(Recipe::Rtx4090) => Coverage(&RTX4090_FP16_COVERAGE),
+            _ => Self::coverage_on(tier, device.capability(), fp16),
         }
-
-        Self::coverage_on(tier, device.capability(), fp16)
     }
 
     fn speed_scope(
@@ -2189,7 +2336,7 @@ impl super::DriverCandidate for Oxide {
         if device.capability() < TURING {
             return Ok(None);
         }
-        let Some(wide) = Pin::fp16_wide(boundary.name(), batch, math) else {
+        let Some(wide) = Pin::tuning_fp16_wide(boundary.name(), batch, math) else {
             return Ok(None);
         };
         // retain the startup tile size where measured, without limiting discovery
@@ -2200,6 +2347,26 @@ impl super::DriverCandidate for Oxide {
             return Ok(Some(startup));
         }
         Ok(Some(super::ConfigPin::Wideconv(wide)))
+    }
+
+    fn tuning_fp32_pin(
+        boundary: super::super::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        _device: &DeviceAttributes,
+        _tier: PtxTier,
+    ) -> Result<Option<super::ConfigPin>, PlanError> {
+        let conv = model_conv(boundary.name(), batch, math)?;
+        let config = Config {
+            algorithm: Algorithm::Spatial,
+            partition: Partition::Whole,
+            split_cells: SplitCells::All,
+        };
+        if Layout::new(conv, config.partition, config.split_cells, config.algorithm).is_err() {
+            return Ok(None);
+        }
+
+        Ok(Some(super::ConfigPin::Wideconv(Pin::Configured(config))))
     }
 
     fn driver_pin(
@@ -2227,7 +2394,11 @@ impl super::DriverCandidate for Oxide {
 /// Geometry compiled into the model's 22 wide convolution boundaries and the 32- and
 /// 64-channel ones of the FP16 routes
 fn model_conv(name: &str, batch: usize, math: CudaMath) -> Result<Conv2d, PlanError> {
-    if !LAYERS.contains(&name) && !C64_LAYERS.contains(&name) && !C32_LAYERS.contains(&name) {
+    if !LAYERS.contains(&name)
+        && !C64_LAYERS.contains(&name)
+        && !C32_LAYERS.contains(&name)
+        && !C32_STRIDE2_LAYERS.contains(&name)
+    {
         return Err(PlanError::Geometry(GeometryError::Unimplemented {
             context: "wideconv boundary",
             reason: name.into(),
@@ -2240,6 +2411,7 @@ fn model_conv(name: &str, batch: usize, math: CudaMath) -> Result<Conv2d, PlanEr
         "resnet.layer4.0.shortcut.0" => (128, 256, [20, 250], 1, 2),
         "resnet.layer3.0.conv1" => (64, 128, [40, 499], 3, 2),
         "resnet.layer4.0.conv1" => (128, 256, [20, 250], 3, 2),
+        _ if C32_STRIDE2_LAYERS.contains(&name) => (32, 64, [80, 998], 3, 2),
         _ if C32_LAYERS.contains(&name) => (32, 32, [80, 998], 3, 1),
         _ if C64_LAYERS.contains(&name) => (64, 64, [40, 499], 3, 1),
         _ if name.starts_with("resnet.layer3.") => (128, 128, [20, 250], 3, 1),

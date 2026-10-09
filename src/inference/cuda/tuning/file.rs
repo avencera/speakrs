@@ -11,7 +11,7 @@ use super::{ApprovedChoice, Catalogue, LibraryVersions, Tuple};
 use crate::inference::cuda::CudaMath;
 use crate::inference::cuda::device::DeviceAttributes;
 
-const FORMAT_VERSION: u32 = 3;
+const FORMAT_VERSION: u32 = 4;
 const MAX_FILE_BYTES: u64 = 4 << 20;
 
 /// Every identity component must match before any row is used
@@ -99,6 +99,16 @@ impl TuneFile {
         }
         if self.key != *expected {
             return Err(FileError::KeyMismatch);
+        }
+        if !self.key.libraries.includes_library()
+            && self
+                .entries
+                .iter()
+                .any(|entry| entry.choice == ChoiceKey::Library)
+        {
+            return Err(FileError::Invalid(
+                "kernel-only tuning cannot contain Library choices".into(),
+            ));
         }
         let mut entries = BTreeMap::new();
         for entry in self.entries {

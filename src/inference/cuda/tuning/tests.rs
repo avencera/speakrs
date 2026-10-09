@@ -159,10 +159,15 @@ fn catalogue_exposes_only_current_pins_and_approved_scalar_trunk_alternatives() 
             _ => None,
         })
         .collect();
-    assert_eq!(kernels.len(), 2);
-    assert_eq!(kernels[0].family, "default");
-    assert_eq!(kernels[1].family, "fp32");
-    assert_ne!(kernels[0].pin(), kernels[1].pin());
+    assert_eq!(kernels.len(), 3);
+    let named = |family| {
+        kernels
+            .iter()
+            .find(|config| config.family == family)
+            .unwrap()
+    };
+    assert!(named("fp16").pin().is_fp16());
+    assert_ne!(named("default").pin(), named("fp32").pin());
     assert!(kernels.iter().all(|config| config.matches(
         tuple.boundary,
         tuple.batch,
@@ -246,7 +251,7 @@ fn catalogue_filters_the_pipeline_points_and_batch_classes() {
     }
 }
 
-/// An H100 rule implements two-product Winograd without portable accuracy approval
+/// An implemented two-product configuration without portable accuracy approval
 #[cfg(feature = "cuda-sm80")]
 pub(crate) fn unapproved_configuration() -> (
     DeviceAttributes,
@@ -268,14 +273,15 @@ pub(crate) fn unapproved_configuration() -> (
         crate::inference::cuda::implementation::tuning_configurations(&device, PtxTier::Sm80)
             .unwrap()
             .into_iter()
-            .find(|(id, batch, math, _, pin, _)| {
-                *id == boundary
-                    && *batch == 32
-                    && *math == CudaMath::Tf32
-                    && matches!(pin, ConfigPin::Wideconv(WideconvPin::Configured(config))
-                if config.algorithm == WideconvAlgorithm::Winograd(WideconvProducts::Tf32x2))
+            .find(|(id, batch, math, _, _, _)| {
+                *id == boundary && *batch == 32 && *math == CudaMath::Tf32
             })
-            .expect("the implemented H100 default uses two products");
+            .expect("the H100 default is implemented");
+    let ConfigPin::Wideconv(WideconvPin::Configured(mut config)) = pin else {
+        panic!("configured wideconv pin")
+    };
+    config.algorithm = WideconvAlgorithm::Winograd(WideconvProducts::Tf32x2);
+    let pin = ConfigPin::Wideconv(WideconvPin::Configured(config));
     (device, tuple, module, pin)
 }
 
@@ -477,10 +483,10 @@ fn benchmark_visits_every_exact_approved_choice() {
         }
         let device = Builder::new(cc).multiprocessors(sms).name(name).build();
         let catalogue = Catalogue::new(&device, tier).unwrap();
-        let passes: Vec<_> = catalogue.benchmark_kinds().collect();
+        let passes: Vec<_> = catalogue.benchmark_kinds(true).collect();
         let controls: Vec<_> = passes
             .iter()
-            .map(|kind| TuneControl::benchmark(*kind, &device, tier).unwrap())
+            .map(|kind| TuneControl::benchmark(*kind, true, &device, tier).unwrap())
             .collect();
         for (tuple, approved) in &catalogue.0 {
             let visited: Vec<_> = controls
@@ -498,9 +504,13 @@ fn benchmark_visits_every_exact_approved_choice() {
             );
         }
         for (tuple, approved) in catalogue.0.iter().take(1) {
-            let control =
-                TuneControl::benchmark(BenchKind::CatalogueSlot(approved.len()), &device, tier)
-                    .unwrap();
+            let control = TuneControl::benchmark(
+                BenchKind::CatalogueSlot(approved.len()),
+                true,
+                &device,
+                tier,
+            )
+            .unwrap();
             assert!(
                 control
                     .choice(tuple.boundary, tuple.batch, tuple.math.into())
@@ -600,13 +610,11 @@ fn fp16_tuning_retains_the_non_fp16_4060_ti_wide_choice() {
             assert!(choices.iter().any(|choice| matches!(choice,
                 ApprovedChoice::Kernel(config) if matches!(config.pin(), ConfigPin::Wideconv(_)) && config.pin().is_fp16())));
             let visited: Vec<_> = catalogue
-                .benchmark_kinds()
+                .benchmark_kinds(true)
                 .filter_map(|kind| {
-                    TuneControl::benchmark(kind, &device, tier).unwrap().choice(
-                        boundary,
-                        batch,
-                        CudaMath::Tf32,
-                    )
+                    TuneControl::benchmark(kind, true, &device, tier)
+                        .unwrap()
+                        .choice(boundary, batch, CudaMath::Tf32)
                 })
                 .collect();
             assert_eq!(visited, choices);
@@ -644,8 +652,8 @@ fn fp16_tuning_is_discoverable_without_an_ada_recipe_and_never_in_fp32() {
                     .any(|choice| matches!(choice,
                 ApprovedChoice::Kernel(config) if config.pin() == expected))
             );
-            assert!(catalogue.benchmark_kinds().any(|kind| {
-                TuneControl::benchmark(kind, &device, tier)
+            assert!(catalogue.benchmark_kinds(true).any(|kind| {
+                TuneControl::benchmark(kind, true, &device, tier)
                     .unwrap()
                     .choice(boundary, batch, CudaMath::Tf32)
                     .is_some_and(|choice| choice.is_fp16())
@@ -659,4 +667,365 @@ fn fp16_tuning_is_discoverable_without_an_ada_recipe_and_never_in_fp32() {
             .filter(|(tuple, _)| tuple.math == CudaMath::Fp32.into())
             .all(|(_, choices)| choices.iter().all(|choice| !choice.is_fp16()))
     );
+}
+
+#[test]
+#[cfg(feature = "cuda-sm80")]
+fn measured_fp16_dense_does_not_grant_portable_tuner_approval() {
+    use super::accuracy::Policy;
+    use crate::inference::cuda::candidate::{ConfigPin, SegdenseEntry};
+
+    let device = Builder::new(ComputeCapability::new(8, 9))
+        .multiprocessors(34)
+        .shared_optin_bytes(101376)
+        .name("NVIDIA GeForce RTX 4060 Ti")
+        .build();
+    let (boundary, _, _, _, pin, _) =
+        crate::inference::cuda::implementation::tuning_configurations(&device, PtxTier::Sm80)
+            .unwrap()
+            .into_iter()
+            .find(|(_, _, _, _, pin, _)| matches!(pin, ConfigPin::Segdense(pin) if pin.entry() == SegdenseEntry::EmbedB32F16))
+            .expect("the measured device implements the FP16 dense head");
+    for math in [CudaMath::Fp32, CudaMath::Tf32] {
+        assert!(Policy::approve(boundary, math, pin).is_none());
+    }
+}
+
+#[test]
+#[cfg(feature = "cuda-sm80")]
+fn unmeasured_three_product_segmentation_is_approved_only_in_fp32() {
+    use super::accuracy::Policy;
+    use crate::inference::cuda::candidate::{ConfigPin, SegdenseEntry};
+
+    let device = Builder::new(ComputeCapability::new(9, 0))
+        .multiprocessors(132)
+        .shared_optin_bytes(227328)
+        .name("NVIDIA H100")
+        .build();
+    let configurations =
+        crate::inference::cuda::implementation::tuning_configurations(&device, PtxTier::Sm80)
+            .unwrap();
+    for entry in [SegdenseEntry::Conv1B32X3, SegdenseEntry::Conv2B32X3] {
+        let (boundary, _, math, _, pin, _) = configurations.iter()
+            .find(|(_, _, _, _, pin, _)| matches!(pin, ConfigPin::Segdense(pin) if pin.entry() == entry))
+            .expect("the unmeasured H100 FP32 default uses three products");
+        assert_eq!(*math, CudaMath::Fp32);
+        assert!(Policy::approve(*boundary, CudaMath::Fp32, *pin).is_some());
+        assert!(Policy::approve(*boundary, CudaMath::Tf32, *pin).is_none());
+    }
+}
+
+#[test]
+fn tuning_requires_library_opt_in() {
+    use super::CudaTuneOptions;
+    let mut options = CudaTuneOptions::default();
+    assert!(!options.include_library);
+    assert!(options.validate_library().is_ok());
+    options.include_library = true;
+    assert_eq!(
+        options.validate_library().is_ok(),
+        cfg!(feature = "_cuda-libraries")
+    );
+}
+
+#[test]
+#[cfg(feature = "_cuda-libraries")]
+fn kernel_only_tuning_excludes_library_from_timed_and_untimed_plans() {
+    use super::TuneControl;
+    let device = Builder::new(ComputeCapability::new(12, 0)).build();
+    let boundary = BoundaryId::named("sincnet.conv0.abs_pool");
+    let tier = PtxTier::Sm120;
+    let catalogue = Catalogue::new(&device, tier).unwrap();
+    let tuple = Tuple::new(boundary, 1, CudaMath::Tf32).unwrap();
+    assert_eq!(catalogue.choices(tuple), [ApprovedChoice::Library]);
+    for kind in catalogue.benchmark_kinds(false) {
+        let control = TuneControl::benchmark(kind, false, &device, tier).unwrap();
+        assert_eq!(control.choice(boundary, 1, CudaMath::Tf32), None);
+        assert_eq!(control.plan_choice(boundary, 1, CudaMath::Tf32), None);
+    }
+    let control =
+        TuneControl::benchmark(super::BenchKind::CatalogueSlot(0), true, &device, tier).unwrap();
+    assert_eq!(
+        control.choice(boundary, 1, CudaMath::Tf32),
+        Some(ApprovedChoice::Library)
+    );
+    assert_eq!(
+        control.plan_choice(boundary, 1, CudaMath::Tf32),
+        Some(ApprovedChoice::Library)
+    );
+}
+
+#[test]
+fn measured_fp16_trunk_extensions_are_approved_only_in_tf32() {
+    use super::accuracy::{Approval, Policy};
+    use crate::inference::cuda::candidate::{ConfigPin, WideconvPin};
+
+    for name in [
+        "resnet.layer2.0.conv1",
+        "resnet.layer3.0.conv1",
+        "resnet.layer4.0.conv1",
+    ] {
+        let boundary = BoundaryId::named(name);
+        for batch in [1, 4, 8, 16, 32] {
+            let pin = WideconvPin::measured_t4_fp16(name, batch, CudaMath::Tf32)
+                .expect("the T4 has a measured stride-2 FP16 pin");
+            let pin = ConfigPin::Wideconv(pin);
+            assert_eq!(
+                Policy::approve(boundary, CudaMath::Tf32, pin),
+                Some(Approval::Fp16Trunk)
+            );
+            assert_eq!(Policy::approve(boundary, CudaMath::Fp32, pin), None);
+        }
+    }
+
+    for name in [
+        "resnet.layer3.0.conv1",
+        "resnet.layer3.1.conv1",
+        "resnet.layer4.0.conv1",
+        "resnet.layer4.1.conv1",
+    ] {
+        let boundary = BoundaryId::named(name);
+        for batch in [4, 8, 16, 32] {
+            if name == "resnet.layer4.0.conv1" && batch == 4 {
+                assert_eq!(
+                    WideconvPin::measured_a100_fp16(name, batch, CudaMath::Tf32),
+                    None
+                );
+                continue;
+            }
+
+            let pin = WideconvPin::measured_a100_fp16(name, batch, CudaMath::Tf32)
+                .expect("the A100 has a measured wide-trunk FP16 pin");
+            let pin = ConfigPin::Wideconv(pin);
+            assert_eq!(
+                Policy::approve(boundary, CudaMath::Tf32, pin),
+                Some(Approval::Fp16Trunk)
+            );
+            assert_eq!(Policy::approve(boundary, CudaMath::Fp32, pin), None);
+        }
+    }
+}
+
+/// Where the batch-32 `seg_1` default runs FP16 products, which the tuner does not
+/// approve, the catalogue still offers our TF32 kernel against the library
+#[cfg(feature = "cuda-sm80")]
+#[test]
+fn fp16_embedding_default_leaves_an_approved_tf32_alternative() {
+    use crate::inference::cuda::candidate::{ConfigPin, SegdenseEntry};
+    let device = Builder::new(ComputeCapability::new(8, 9))
+        .multiprocessors(128)
+        .shared_optin_bytes(101376)
+        .name("NVIDIA GeForce RTX 4090")
+        .build();
+    let catalogue = Catalogue::new(&device, PtxTier::Sm80).unwrap();
+    let boundary = BoundaryId::named("resnet.seg_1");
+    let entries = |math| {
+        let tuple = Tuple::new(boundary, 32, math).unwrap();
+        catalogue
+            .choices(tuple)
+            .iter()
+            .filter_map(|choice| match choice {
+                ApprovedChoice::Kernel(config) => match config.pin {
+                    ConfigPin::Segdense(pin) => Some((config.family, pin.entry())),
+                    _ => None,
+                },
+                ApprovedChoice::Library => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let tf32 = entries(CudaMath::Tf32);
+    // the kernel bench times the first choice and the scalar bench the "fp32" one
+    assert_eq!(
+        tf32.first(),
+        Some(&("tf32", SegdenseEntry::EmbedB32Tf32)),
+        "{tf32:?}"
+    );
+    assert!(
+        tf32.contains(&("fp32", SegdenseEntry::EmbedB32)),
+        "{tf32:?}"
+    );
+    assert!(
+        tf32.iter()
+            .all(|(_, entry)| *entry != SegdenseEntry::EmbedB32F16),
+        "{tf32:?}"
+    );
+    assert!(
+        entries(CudaMath::Fp32)
+            .iter()
+            .all(|(family, _)| *family != "tf32")
+    );
+}
+
+#[test]
+#[cfg(any(feature = "cuda-sm75", feature = "cuda-sm80"))]
+fn catalogue_contains_every_measured_stride2_fp16_startup_pin() {
+    use crate::inference::cuda::candidate::{ConfigPin, WideconvPin};
+    use crate::inference::cuda::implementation::policy::Recipe;
+    let mut checked = 0;
+    for (cc, sms, name, tier, recipe, minimum_batches) in [
+        (
+            ComputeCapability::new(7, 5),
+            40,
+            "Tesla T4",
+            PtxTier::Sm75,
+            Recipe::TeslaT4,
+            [1, 1, 1],
+        ),
+        (
+            ComputeCapability::new(8, 9),
+            128,
+            "NVIDIA GeForce RTX 4090",
+            PtxTier::Sm80,
+            Recipe::Rtx4090,
+            [1, 4, 4],
+        ),
+        (
+            ComputeCapability::new(8, 0),
+            108,
+            "NVIDIA A100-SXM4-40GB",
+            PtxTier::Sm80,
+            Recipe::A100Sxm4,
+            [33, 4, 8],
+        ),
+        (
+            ComputeCapability::new(8, 0),
+            108,
+            "NVIDIA A100-PCIE-40GB",
+            PtxTier::Sm80,
+            Recipe::A100Pcie,
+            [33, 4, 8],
+        ),
+    ] {
+        if (tier == PtxTier::Sm75 && !cfg!(feature = "cuda-sm75"))
+            || (tier == PtxTier::Sm80 && !cfg!(feature = "cuda-sm80"))
+        {
+            continue;
+        }
+        let device = Builder::new(cc).multiprocessors(sms).name(name).build();
+        let catalogue = Catalogue::new(&device, tier).unwrap();
+        for (name, minimum) in [
+            "resnet.layer2.0.conv1",
+            "resnet.layer3.0.conv1",
+            "resnet.layer4.0.conv1",
+        ]
+        .into_iter()
+        .zip(minimum_batches)
+        {
+            let boundary = BoundaryId::named(name);
+            for batch in boundary.batches().iter().filter(|batch| *batch >= minimum) {
+                let pin = recipe.fp16_pin(boundary, batch, CudaMath::Tf32).unwrap();
+                assert!(pin.is_fp16(), "{recipe:?} {name} b{batch}");
+                let tuple = Tuple::new(boundary, batch, CudaMath::Tf32).unwrap();
+                assert!(
+                    catalogue.choices(tuple).iter().any(|choice| {
+                        matches!(choice, ApprovedChoice::Kernel(config) if config.pin() == pin)
+                    }),
+                    "{recipe:?} {name} b{batch}: {pin:?}"
+                );
+                assert!(
+                    catalogue
+                        .choices(Tuple::new(boundary, batch, CudaMath::Fp32).unwrap())
+                        .iter()
+                        .all(|choice| !choice.is_fp16())
+                );
+                assert_eq!(WideconvPin::fp16_wide(name, batch, CudaMath::Tf32), None);
+                assert!(matches!(pin, ConfigPin::Wideconv(_)));
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 0);
+}
+
+#[test]
+fn runtime_exact_fp32_fallback_does_not_widen_tuner_approval() {
+    use super::accuracy::{Approval, Policy, RuntimePolicy};
+    use crate::inference::cuda::candidate::{ConfigPin, SincPin};
+    use crate::inference::cuda::implementation::Selection;
+    let boundary = BoundaryId::named("sincnet.conv0.abs_pool");
+    let pin = ConfigPin::Sinc(SincPin::ConvAbsPool);
+    assert_eq!(Policy::approve(boundary, CudaMath::Tf32, pin), None);
+    assert_eq!(
+        RuntimePolicy::Strict.approve(boundary, CudaMath::Tf32, pin),
+        None
+    );
+    assert_eq!(
+        Selection::Tuning
+            .accuracy()
+            .approve(boundary, CudaMath::Tf32, pin),
+        None
+    );
+    assert_eq!(
+        Selection::Production
+            .accuracy()
+            .approve(boundary, CudaMath::Tf32, pin),
+        super::super::driver_only().then_some(Approval::DirectFp32)
+    );
+    assert_eq!(
+        Selection::DriverOnly
+            .accuracy()
+            .approve(boundary, CudaMath::Tf32, pin),
+        Some(Approval::DirectFp32)
+    );
+    assert_eq!(
+        RuntimePolicy::ExactFp32.approve(boundary, CudaMath::Tf32, pin),
+        Some(Approval::DirectFp32)
+    );
+    assert_eq!(
+        RuntimePolicy::ExactFp32.approve(boundary, CudaMath::Fp32, pin),
+        Policy::approve(boundary, CudaMath::Fp32, pin)
+    );
+}
+
+#[test]
+fn kernel_only_pass_count_matches_enabled_choices() {
+    use super::TuneControl;
+
+    let device = Builder::new(ComputeCapability::new(12, 0)).build();
+    let tier = PtxTier::Sm120;
+    let catalogue = Catalogue::new(&device, tier).unwrap();
+    let expected = catalogue
+        .0
+        .values()
+        .map(|choices| {
+            choices
+                .iter()
+                .filter(|choice| !matches!(choice, ApprovedChoice::Library))
+                .count()
+        })
+        .max()
+        .unwrap();
+    assert!(expected > 0);
+    let passes: Vec<_> = catalogue.benchmark_kinds(false).collect();
+    assert_eq!(passes.len(), expected);
+    assert_eq!(
+        catalogue.benchmark_kinds(true).count(),
+        expected + usize::from(cfg!(feature = "_cuda-libraries"))
+    );
+
+    let controls: Vec<_> = passes
+        .into_iter()
+        .map(|kind| TuneControl::benchmark(kind, false, &device, tier).unwrap())
+        .collect();
+    for control in &controls {
+        assert!(catalogue.0.keys().any(|tuple| {
+            control
+                .choice(tuple.boundary, tuple.batch, tuple.math.into())
+                .is_some()
+        }));
+    }
+
+    for (tuple, choices) in &catalogue.0 {
+        let enabled: Vec<_> = choices
+            .iter()
+            .filter(|choice| !matches!(choice, ApprovedChoice::Library))
+            .cloned()
+            .collect();
+        let visited: Vec<_> = controls
+            .iter()
+            .filter_map(|control| control.choice(tuple.boundary, tuple.batch, tuple.math.into()))
+            .collect();
+        assert_eq!(visited, enabled, "{tuple:?}");
+    }
 }

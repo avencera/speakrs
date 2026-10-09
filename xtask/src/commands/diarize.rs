@@ -261,44 +261,46 @@ pub fn run(
 
             let total = wav_files.len();
 
-            // load all audio files
-            let load_start = Instant::now();
-            let mut audio_data: Vec<(String, Vec<f32>)> = Vec::with_capacity(total);
-            for wav_path in &wav_files {
-                let file_id = wav_path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "file1".to_string());
-                let (samples, sr) = wav::load_wav_samples(&wav_path.to_string_lossy())?;
-                ensure!(sr == 16000, "expected 16kHz WAV, got {sr}Hz");
-                audio_data.push((file_id, samples));
+            let mut batch_start = Instant::now();
+            let results = if matches!(
+                execution_mode,
+                ExecutionMode::CoreMl | ExecutionMode::CoreMlFast
+            ) {
+                // preserve CoreML's cross-file chunk schedule and load-first behavior
+                let load_start = Instant::now();
+                let mut audio_data = Vec::with_capacity(total);
+                for wav_path in &wav_files {
+                    let file_id = wav_path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "file1".to_string());
+                    let (audio, sr) = wav::load_wav_samples(&wav_path.to_string_lossy())?;
+                    ensure!(sr == 16000, "expected 16kHz WAV, got {sr}Hz");
+                    audio_data.push(speakrs::pipeline::OwnedBatchInput { file_id, audio });
+                }
+                tracing::trace!(
+                    load_ms = load_start.elapsed().as_millis(),
+                    files = total,
+                    "All audio loaded"
+                );
+                batch_start = Instant::now();
+                pipeline.run_batch_stream(audio_data.into_iter().map(Ok::<_, color_eyre::Report>))
+            } else {
+                let decoder = wav::WavBatchDecoder::new(wav_files.clone())?;
+                pipeline.run_batch_stream(decoder)
             }
-            tracing::trace!(
-                load_ms = load_start.elapsed().as_millis(),
-                files = total,
-                "All audio loaded",
-            );
-
-            // build batch inputs
-            let batch_inputs: Vec<speakrs::pipeline::BatchInput<'_>> = audio_data
-                .iter()
-                .map(|(file_id, samples)| speakrs::pipeline::BatchInput {
-                    audio: samples,
-                    file_id,
-                })
-                .collect();
-
-            // run batch
-            let batch_start = Instant::now();
-            let results = pipeline.run_batch(&batch_inputs)?;
+            .map_err(|error| match error {
+                speakrs::pipeline::BatchStreamError::Input(error) => error,
+                speakrs::pipeline::BatchStreamError::Pipeline(error) => error.into(),
+            })?;
             let batch_elapsed = batch_start.elapsed();
             tracing::trace!(batch_ms = batch_elapsed.as_millis(), "Batch timing");
 
             // output results in order
             let output_start = Instant::now();
             for (i, result) in results.iter().enumerate() {
-                let file_id = &audio_data[i].0;
-                let audio_secs = audio_data[i].1.len() as f64 / 16_000.0;
+                let file_id = &result.file_id;
+                let audio_secs = result.audio_secs;
                 let per_file = batch_elapsed.as_secs_f64() / (i + 1) as f64;
                 let eta = format_eta((total - i - 1) as f64 * per_file);
                 let elapsed = format_eta(batch_elapsed.as_secs_f64());
@@ -308,7 +310,7 @@ pub fn run(
                     i + 1,
                     total,
                 );
-                print!("{}", result.rttm(file_id));
+                print!("{}", result.result.rttm(file_id));
             }
 
             eprintln!(

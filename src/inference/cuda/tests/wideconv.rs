@@ -7,13 +7,14 @@
 //! driver_trunk -- --ignored --nocapture`. Each case prints one `TRUNK` or
 //! `TRUNK_FORWARD` JSON line. Environment filters: `TRUNK_BATCHES` (default
 //! `1,7,32,33`), `TRUNK_MATHS`, `TRUNK_LAYERS`, `TRUNK_TIMING=1` for graph-timed
-//! library and kernel medians at batches 1 and 32, and `TRUNK_DEVICE=a100` to plan the
+//! library and kernel medians at every batch, and `TRUNK_DEVICE=a100` to plan the
 //! wideconv layers with the A100 selection on any sm80-capable GPU, `TRUNK_DEVICE=t4`
 //! with the Turing coverage and selection on any GPU, `TRUNK_RESNET=legacy`
 //! or `tensor` to force the ResNet FP32 or TF32 tensor-core kernels.
 //! `TRUNK_CONFIG=<kernel>[:<partition>[:<first split cell>]]` forces one wideconv
 //! configuration on every selected layer, with kernels `tc`, `fp32`, `sweep2`, `wtc1`,
-//! `wtp1`, `wtc2`, `wtc3`, `bf16x3`, `h16` or `h16n` (narrow FP16 tiles) and partitions
+//! `wtp1`, `wtc2`, `wtc3`, `bf16x3`, `h16`, `h16n` (narrow FP16 tiles), `spatial` or
+//! `widestem` and partitions
 //! `whole`, `two`, `four` or `eight`.
 //! `TRUNK_B1_ONLY=1` builds every batch from the batch-1 reference and skips the
 //! batch-32 embedding case.
@@ -384,6 +385,8 @@ fn forced_config(text: &str) -> WideconvConfig {
         "bf16x3" => WideconvAlgorithm::Winograd(WideconvProducts::Bf16x3),
         "h16" => WideconvAlgorithm::Fp16(WideconvFp16Tiles::Wide),
         "h16n" => WideconvAlgorithm::Fp16(WideconvFp16Tiles::Narrow),
+        "spatial" => WideconvAlgorithm::Spatial,
+        "widestem" => WideconvAlgorithm::WideStem,
         other => panic!("unknown TRUNK_CONFIG kernel {other}"),
     };
     let partition = match parts.next().unwrap_or("whole") {
@@ -527,7 +530,7 @@ impl Candidate {
         device: ComputeCapability,
         effective_request: impl FnOnce(ModuleRequest) -> Result<ModuleRequest, CudaError>,
     ) -> Result<Option<ModuleRequest>, CudaError> {
-        if !matches!(override_name, Some("tensor" | "sm80")) {
+        if !matches!(override_name, Some("tensor" | "sm80" | "slim")) {
             return Ok(None);
         }
 
@@ -546,7 +549,8 @@ impl Candidate {
     }
 
     /// The driver-only pin on this device, or the one `TRUNK_RESNET` forces: `legacy`
-    /// for the PR #36 rule, `tensor` for the layer's TF32 tensor-core entry
+    /// for the PR #36 rule, `tensor` for the layer's TF32 tensor-core entry, `slim` for
+    /// the 64-channel 32-column tensor-core entry
     fn resnet_pin(
         runtime: &CudaRuntime,
         spec: &ConvLayerSpec<'_>,
@@ -561,6 +565,9 @@ impl Candidate {
                     (64, _) => ConvKernel::C64Tensor,
                     _ => ConvKernel::C32Stride2Tensor,
                 }))
+            }
+            Some("slim") if conv.math == CudaMath::Tf32 && conv.in_channels == 64 => {
+                Ok(ConvPin::Kernel(ConvKernel::C64TensorSlim))
             }
             _ => {
                 let boundary = super::super::implementation::BoundaryId::named(spec.name);
@@ -817,7 +824,7 @@ fn driver_trunk_layers_match_library() -> Result<(), CudaError> {
                     1e-6
                 };
                 let pass = bitwise && !saturated && kernel_error.1 <= 10.0 * lib_error.1 + floor;
-                let (library_ms, kernel_ms) = if timing && [1, 32].contains(&batch) {
+                let (library_ms, kernel_ms) = if timing {
                     (
                         Some(timed(&lib_graph, stream)?),
                         Some(timed(&graph, stream)?),

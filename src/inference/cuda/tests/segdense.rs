@@ -8,7 +8,8 @@
 //! intermediate tensors from the reference directory. `SEGDENSE_SITE`,
 //! `SEGDENSE_BATCH` and `SEGDENSE_TIERS` (such as `sm80`) narrow the cases, and
 //! `SEGDENSE_HARDWARE=a100` picks the configurations an A100 would get, which checks
-//! their correctness on another GPU without timing them
+//! their correctness on another GPU without timing them. `SEGDENSE_ENTRY` times one
+//! batch-32 embedding entry in place of the device rule's
 
 use cudarc::driver::sys::{CUevent_flags, CUgraphInstantiate_flags, CUstreamCaptureMode};
 use cudarc::driver::{CudaFunction, CudaGraph, CudaSlice, LaunchConfig, PushKernelArg};
@@ -296,8 +297,16 @@ impl Plan {
             }
             Site::Dense(site) => {
                 let spec = DenseSpec::new(site, batch, math).map_err(refused)?;
-                let pin =
-                    DenseOxide::implemented_pin(spec, kernels.tier(), device).map_err(refused)?;
+                let pin = match forced_entry(site, batch) {
+                    Some(name) => {
+                        SegdensePin::forced_embed_b32(&name, math, kernels.tier(), device)
+                            .unwrap_or_else(|| {
+                                panic!("SEGDENSE_ENTRY={name} is no batch-32 embedding entry")
+                            })
+                    }
+                    None => DenseOxide::implemented_pin(spec, kernels.tier(), device)
+                        .map_err(refused)?,
+                };
                 let plan = DenseOxide::plan(runtime, kernels, spec, &case.weight, &case.bias, pin)
                     .map_err(refused)?;
                 Ok((Self::Dense(plan), pin))
@@ -327,6 +336,14 @@ impl Plan {
             ),
         }
     }
+}
+
+/// `SEGDENSE_ENTRY` forces the batch-32 embedding kernel entry, such as `EmbedB32Tf32K2`
+fn forced_entry(site: DenseSite, batch: usize) -> Option<String> {
+    let embedding = site == DenseSite::Embedding && batch == 32;
+    embedding
+        .then(|| std::env::var("SEGDENSE_ENTRY").ok())
+        .flatten()
 }
 
 fn capture(

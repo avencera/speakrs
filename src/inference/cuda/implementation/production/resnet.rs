@@ -17,7 +17,7 @@ pub(crate) const BINDING: ModuleBinding = ModuleBinding::new(
         LoadedArtifact::Cubin {
             arch: ComputeCapability::new(12, 0),
             sha256: ArtifactHash::from_hex(
-                "0950b0d84cd9fa3d9053cd30399fce14a6aa6c3ff8777485598dd8deeba89078",
+                "f9cada62aab90b3a641ee5fb6232fa951bd6a14d4c38926d550fdded7b2a00c3",
             ),
         },
     ),

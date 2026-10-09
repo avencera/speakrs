@@ -24,6 +24,7 @@ impl<S> CudaSession<S> {
         build: impl FnOnce(&CudaRuntime) -> Result<S, CudaError>,
     ) -> Result<Self, CudaError> {
         runtime.context().bind_to_thread()?;
+        runtime.log_tune_hint();
         tracing::info!(
             driver_only = super::driver_only(),
             force_library = runtime.force_library(),

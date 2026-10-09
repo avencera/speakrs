@@ -213,59 +213,6 @@ fn class_default_only_covers_early_tf32_trunk_on_ampere_and_newer() {
 }
 
 #[test]
-#[cfg(feature = "_cuda-libraries")]
-fn retained_a100_pins_do_not_follow_staged_winograd() {
-    use crate::inference::cuda::candidate::{
-        ConfigPin, WideconvAlgorithm, WideconvPartition, WideconvPin, WideconvProducts,
-        WideconvSplitCells, WideconvTensorKernel,
-    };
-    for recipe in [Recipe::A100Pcie, Recipe::A100Sxm4] {
-        for batch in [1, 32] {
-            let Some(ConfigPin::Wideconv(WideconvPin::Configured(c128))) = recipe.fixed_pin(
-                BoundaryId::named("resnet.layer3.1.conv1"),
-                batch,
-                CudaMath::Tf32,
-                Fp16Policy::Allowed,
-            ) else {
-                panic!("retained C128 pin")
-            };
-            assert_eq!(
-                c128.algorithm,
-                WideconvAlgorithm::Winograd(WideconvProducts::Tf32x1)
-            );
-            assert_eq!(c128.partition, WideconvPartition::Whole);
-            assert_eq!(c128.split_cells, WideconvSplitCells::All);
-        }
-        let Some(ConfigPin::Wideconv(WideconvPin::Configured(c256))) = recipe.fixed_pin(
-            BoundaryId::named("resnet.layer4.1.conv1"),
-            1,
-            CudaMath::Tf32,
-            Fp16Policy::Allowed,
-        ) else {
-            panic!("retained C256 b1 pin")
-        };
-        assert_eq!(
-            c256.algorithm,
-            WideconvAlgorithm::Winograd(WideconvProducts::Tf32x3)
-        );
-        assert_eq!(c256.partition, WideconvPartition::Two);
-        let Some(ConfigPin::Wideconv(WideconvPin::Configured(c256))) = recipe.fixed_pin(
-            BoundaryId::named("resnet.layer4.1.conv1"),
-            32,
-            CudaMath::Tf32,
-            Fp16Policy::Allowed,
-        ) else {
-            panic!("retained C256 b32 pin")
-        };
-        assert_eq!(
-            c256.algorithm,
-            WideconvAlgorithm::TensorCore(WideconvTensorKernel::Tf32)
-        );
-        assert_eq!(c256.partition, WideconvPartition::Whole);
-    }
-}
-
-#[test]
 fn rtx_whole_recipes_cover_only_measured_devices_batches_and_precision() {
     for (cc, sms, name, recipe) in [
         (
@@ -387,15 +334,38 @@ fn fp16_recipes_exclude_fp32_strided_layers_and_unmeasured_devices() {
                     None
                 );
             }
-            for name in [
-                "resnet.conv1",
-                "resnet.layer2.0.conv1",
-                "resnet.layer3.0.conv1",
-                "resnet.layer4.0.shortcut.0",
-            ] {
+            for name in ["resnet.conv1", "resnet.layer4.0.shortcut.0"] {
                 assert_eq!(
                     recipe.fp16_pin(BoundaryId::named(name), batch, CudaMath::Tf32),
                     None
+                );
+            }
+            // the 4060 Ti recipe keeps the stride-2 layers off FP16 tiles
+            for name in [
+                "resnet.layer2.0.conv1",
+                "resnet.layer3.0.conv1",
+                "resnet.layer4.0.conv1",
+            ] {
+                let boundary = BoundaryId::named(name);
+                assert_eq!(recipe.fp16_pin(boundary, batch, CudaMath::Fp32), None);
+                let pin = recipe.fp16_pin(boundary, batch, CudaMath::Tf32);
+                if recipe == Recipe::Rtx4060Ti {
+                    assert_eq!(pin, None, "{name} b{batch}");
+                    continue;
+                }
+                let Some(ConfigPin::Wideconv(WideconvPin::Configured(config))) = pin else {
+                    panic!("{name} b{batch}: {pin:?}")
+                };
+                // narrow tiles where wide ones give fewer than two waves on 40 SMs
+                let narrow = batch == 1 && name != "resnet.layer2.0.conv1";
+                assert_eq!(
+                    config.algorithm,
+                    WideconvAlgorithm::Fp16(if narrow {
+                        WideconvFp16Tiles::Narrow
+                    } else {
+                        WideconvFp16Tiles::Wide
+                    }),
+                    "{name} b{batch}"
                 );
             }
         }
@@ -406,6 +376,123 @@ fn fp16_recipes_exclude_fp32_strided_layers_and_unmeasured_devices() {
             .name(name)
             .build();
         assert_eq!(Recipe::fp16_device(&device, PtxTier::Sm80), None);
+    }
+}
+
+#[test]
+fn a100_fp16_covers_only_wide_tf32_trunk_from_batch_4() {
+    let sxm4 = Builder::new(ComputeCapability::new(8, 0))
+        .multiprocessors(108)
+        .name("NVIDIA A100-SXM4-40GB")
+        .build();
+    let pcie = Builder::new(ComputeCapability::new(8, 0))
+        .multiprocessors(108)
+        .name("NVIDIA A100-PCIE-40GB")
+        .build();
+    assert_eq!(
+        Recipe::fp16_device(&sxm4, PtxTier::Sm80),
+        Some(Recipe::A100Sxm4)
+    );
+    assert_eq!(Recipe::fp16_device(&sxm4, PtxTier::Sm75), None);
+    assert_eq!(
+        Recipe::fp16_device(&pcie, PtxTier::Sm80),
+        Some(Recipe::A100Pcie)
+    );
+
+    for recipe in [Recipe::A100Sxm4, Recipe::A100Pcie] {
+        a100_fp16_pins(recipe);
+    }
+}
+
+fn a100_fp16_pins(recipe: Recipe) {
+    use crate::inference::cuda::candidate::{
+        ConfigPin, WideconvAlgorithm, WideconvFp16Tiles, WideconvPin,
+    };
+    for name in [
+        "resnet.layer3.0.conv1",
+        "resnet.layer3.1.conv1",
+        "resnet.layer3.5.conv2",
+        "resnet.layer4.0.conv1",
+        "resnet.layer4.2.conv2",
+    ] {
+        let boundary = BoundaryId::named(name);
+        let pin = recipe.fixed_pin(boundary, 32, CudaMath::Tf32, Fp16Policy::Allowed);
+        let Some(ConfigPin::Wideconv(WideconvPin::Configured(config))) = pin else {
+            panic!("{name}: {pin:?}")
+        };
+        assert_eq!(
+            config.algorithm,
+            WideconvAlgorithm::Fp16(WideconvFp16Tiles::Wide),
+            "{name}"
+        );
+        assert_eq!(recipe.fp16_pin(boundary, 1, CudaMath::Tf32), None);
+        let stride2 = name.ends_with(".0.conv1");
+        if name == "resnet.layer4.0.conv1" {
+            assert_eq!(recipe.fp16_pin(boundary, 4, CudaMath::Tf32), None);
+        }
+        for batch in [4, 8, 16] {
+            if name == "resnet.layer4.0.conv1" && batch == 4 {
+                continue;
+            }
+            let mid = recipe.fp16_pin(boundary, batch, CudaMath::Tf32);
+            let Some(ConfigPin::Wideconv(WideconvPin::Configured(config))) = mid else {
+                panic!("{name} b{batch}: {mid:?}")
+            };
+            let tiles = if stride2 {
+                WideconvFp16Tiles::Wide
+            } else {
+                WideconvFp16Tiles::Narrow
+            };
+            assert_eq!(
+                config.algorithm,
+                WideconvAlgorithm::Fp16(tiles),
+                "{name} b{batch}"
+            );
+        }
+        assert_eq!(recipe.fp16_pin(boundary, 32, CudaMath::Fp32), None);
+        assert_ne!(
+            recipe.fixed_pin(boundary, 32, CudaMath::Tf32, Fp16Policy::Excluded),
+            pin
+        );
+    }
+    for name in [
+        "resnet.conv1",
+        "resnet.layer1.0.conv1",
+        "resnet.layer2.0.conv1",
+        "resnet.layer2.1.conv2",
+        "resnet.layer3.0.shortcut.0",
+        "resnet.layer4.0.shortcut.0",
+    ] {
+        assert_eq!(
+            recipe.fp16_pin(BoundaryId::named(name), 32, CudaMath::Tf32),
+            None,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn t4_stem_recipe_pins_the_measured_fp32_kernel_at_large_batches() {
+    use crate::inference::cuda::candidate::{ConfigPin, WideconvAlgorithm, WideconvPin};
+
+    let boundary = BoundaryId::named("resnet.conv1");
+    for batch in [1, 4, 8, 16, 32] {
+        for fp16 in [Fp16Policy::Allowed, Fp16Policy::Excluded] {
+            let pin = Recipe::TeslaT4.fixed_pin(boundary, batch, CudaMath::Tf32, fp16);
+            if matches!(batch, 16 | 32) {
+                let Some(ConfigPin::Wideconv(WideconvPin::Configured(config))) = pin else {
+                    panic!("stem b{batch}: {pin:?}")
+                };
+                assert_eq!(config.algorithm, WideconvAlgorithm::Spatial);
+                assert_eq!(config.partition.count(), 1);
+            } else {
+                assert_eq!(pin, None);
+            }
+        }
+        assert_eq!(
+            Recipe::TeslaT4.fixed_pin(boundary, batch, CudaMath::Fp32, Fp16Policy::Allowed),
+            None
+        );
     }
 }
 
@@ -461,14 +548,17 @@ fn t4_recipe_requires_its_exact_point_precision_and_batch_classes() {
 }
 
 #[test]
-fn turing_default_changes_only_tf32_same_channel_trunk_layers() {
+fn turing_default_changes_only_tf32_3x3_trunk_layers_after_the_stem() {
     let device = Builder::new(ComputeCapability::new(7, 5))
         .name("unmeasured Turing GPU")
         .build();
     for name in [
         "resnet.layer1.0.conv1",
+        "resnet.layer2.0.conv1",
         "resnet.layer2.0.conv2",
+        "resnet.layer3.0.conv1",
         "resnet.layer3.1.conv1",
+        "resnet.layer4.0.conv1",
         "resnet.layer4.2.conv2",
     ] {
         for batch in [1, 4, 8, 16, 32] {
@@ -490,8 +580,7 @@ fn turing_default_changes_only_tf32_same_channel_trunk_layers() {
     }
     for name in [
         "resnet.conv1",
-        "resnet.layer2.0.conv1",
-        "resnet.layer3.0.conv1",
+        "resnet.layer2.0.shortcut.0",
         "resnet.layer4.0.shortcut.0",
     ] {
         assert_eq!(

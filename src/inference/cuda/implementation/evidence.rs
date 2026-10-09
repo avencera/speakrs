@@ -601,3 +601,6 @@ const fn same_artifact(left: LoadedArtifact, right: LoadedArtifact) -> bool {
 const fn same_architecture(left: ComputeCapability, right: ComputeCapability) -> bool {
     left.major == right.major && (left.major != 8 || (left.minor == 9) == (right.minor == 9))
 }
+
+#[cfg(test)]
+mod tests;

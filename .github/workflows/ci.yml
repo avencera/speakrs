@@ -264,6 +264,7 @@ jobs:
         run: cargo clippy -p speakrs --all-targets --no-default-features --features "online coreml" -- -D warnings
 
   test:
+    timeout-minutes: 30
     name: Test (${{ matrix.name }})
     strategy:
       fail-fast: false
@@ -333,6 +334,7 @@ jobs:
         run: cargo xtask cuda-kernels check
 
   no-default-features:
+    timeout-minutes: 30
     name: Test no-default features (Linux x86_64)
     runs-on: ubuntu-24.04
     steps:

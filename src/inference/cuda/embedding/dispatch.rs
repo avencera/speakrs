@@ -26,6 +26,15 @@ pub(super) enum Plan {
 }
 
 impl Plan {
+    /// Library plans must finish lazy setup before graph capture
+    pub(super) fn requires_warmup(&self) -> bool {
+        match self {
+            #[cfg(feature = "_cuda-libraries")]
+            Self::Library(_) => true,
+            Self::Oxide(_) | Self::Wideconv(_) => false,
+        }
+    }
+
     pub(super) fn workspace_bytes(&self) -> usize {
         match self {
             #[cfg(feature = "_cuda-libraries")]

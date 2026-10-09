@@ -1,7 +1,12 @@
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 
+mod batch;
+pub use batch::WavBatchDecoder;
+
 use color_eyre::eyre::{Result, bail, ensure};
+
+const MAX_FMT_BYTES: usize = 64 * 1024;
 
 fn read_u16(bytes: &[u8], context: &str) -> Result<u16> {
     let raw: [u8; 2] = bytes
@@ -20,7 +25,14 @@ fn read_u32(bytes: &[u8], context: &str) -> Result<u32> {
 /// Load 16-bit PCM mono WAV samples as f32 in [-1.0, 1.0]
 pub fn load_wav_samples(path: &str) -> Result<(Vec<f32>, u32)> {
     let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
+    read_wav_samples(BufReader::new(file), || false)
+}
+
+fn read_wav_samples(
+    mut reader: impl Read + Seek,
+    cancelled: impl Fn() -> bool,
+) -> Result<(Vec<f32>, u32)> {
+    ensure!(!cancelled(), "audio decode cancelled");
     let mut riff_header = [0u8; 12];
     reader.read_exact(&mut riff_header)?;
     ensure!(&riff_header[0..4] == b"RIFF", "expected RIFF WAV");
@@ -31,6 +43,7 @@ pub fn load_wav_samples(path: &str) -> Result<(Vec<f32>, u32)> {
     let mut bits_per_sample = None;
 
     loop {
+        ensure!(!cancelled(), "audio decode cancelled");
         let mut chunk_header = [0u8; 8];
         if reader.read_exact(&mut chunk_header).is_err() {
             break;
@@ -45,8 +58,16 @@ pub fn load_wav_samples(path: &str) -> Result<(Vec<f32>, u32)> {
                     chunk_size >= 16,
                     "wav fmt chunk is {chunk_size} bytes; expected at least 16"
                 );
+                ensure!(
+                    chunk_size <= MAX_FMT_BYTES,
+                    "wav fmt chunk is {chunk_size} bytes; maximum supported size is {MAX_FMT_BYTES}"
+                );
                 let mut fmt = vec![0u8; chunk_size];
-                reader.read_exact(&mut fmt)?;
+                for block in fmt.chunks_mut(8192) {
+                    ensure!(!cancelled(), "audio decode cancelled");
+                    reader.read_exact(block)?;
+                }
+
                 let audio_format = read_u16(&fmt[0..2], "wav fmt audio format")?;
                 let chunk_channels = read_u16(&fmt[2..4], "wav fmt channels")?;
                 let chunk_sample_rate = read_u32(&fmt[4..8], "wav fmt sample rate")?;
@@ -73,6 +94,8 @@ pub fn load_wav_samples(path: &str) -> Result<(Vec<f32>, u32)> {
                 let mut buffer = [0u8; 8192];
 
                 while remaining > 0 {
+                    // bounded PCM reads let speculative work stop after an earlier failure
+                    ensure!(!cancelled(), "audio decode cancelled");
                     let to_read = remaining.min(buffer.len());
                     reader.read_exact(&mut buffer[..to_read])?;
                     for &bytes in buffer[..to_read].as_chunks::<2>().0 {
@@ -103,7 +126,33 @@ pub fn load_wav_samples(path: &str) -> Result<(Vec<f32>, u32)> {
 #[cfg(test)]
 mod tests {
     use super::load_wav_samples;
+    use std::cell::Cell;
     use std::io::Write;
+    use std::io::{Cursor, Read, Seek, SeekFrom};
+
+    struct CancelAfterBlock<'a> {
+        bytes: Cursor<Vec<u8>>,
+        cancelled: &'a Cell<bool>,
+        body_blocks: usize,
+    }
+
+    impl Read for CancelAfterBlock<'_> {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let count = self.bytes.read(buffer)?;
+            if buffer.len() == 8192 {
+                self.body_blocks += 1;
+                self.cancelled.set(true);
+            }
+
+            Ok(count)
+        }
+    }
+
+    impl Seek for CancelAfterBlock<'_> {
+        fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+            self.bytes.seek(position)
+        }
+    }
 
     #[test]
     fn short_fmt_chunk_returns_typed_error() {
@@ -156,5 +205,80 @@ mod tests {
         let (loaded, sample_rate) = load_wav_samples(path.to_str().unwrap()).unwrap();
         assert_eq!(sample_rate, 16_000);
         assert_eq!(loaded.len(), 3);
+    }
+
+    #[test]
+    fn cancellation_stops_between_body_blocks() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("two-blocks.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        for _ in 0..8192 {
+            writer.write_sample(1234_i16).unwrap();
+        }
+
+        writer.finalize().unwrap();
+        let cancelled = Cell::new(false);
+        let mut reader = CancelAfterBlock {
+            bytes: Cursor::new(std::fs::read(path).unwrap()),
+            cancelled: &cancelled,
+            body_blocks: 0,
+        };
+        let error = super::read_wav_samples(&mut reader, || cancelled.get()).unwrap_err();
+        assert_eq!(error.to_string(), "audio decode cancelled");
+        assert_eq!(reader.body_blocks, 1);
+        assert!(reader.bytes.position() < reader.bytes.get_ref().len() as u64);
+    }
+
+    fn fmt_header(chunk_size: usize) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend(b"RIFF");
+        bytes.extend((chunk_size as u32 + 12).to_le_bytes());
+        bytes.extend(b"WAVEfmt ");
+        bytes.extend((chunk_size as u32).to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn oversized_fmt_is_rejected_before_its_body_is_read() {
+        let mut reader = Cursor::new(fmt_header(super::MAX_FMT_BYTES + 1));
+        let error = super::read_wav_samples(&mut reader, || false).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "wav fmt chunk is 65537 bytes; maximum supported size is 65536"
+        );
+        assert_eq!(reader.position(), 20);
+    }
+
+    #[test]
+    fn cancellation_stops_between_fmt_body_blocks() {
+        let cancelled = Cell::new(false);
+        let mut bytes = fmt_header(32 * 1024);
+        bytes.resize(20 + 32 * 1024, 0);
+        let mut reader = CancelAfterBlock {
+            bytes: Cursor::new(bytes),
+            cancelled: &cancelled,
+            body_blocks: 0,
+        };
+        let error = super::read_wav_samples(&mut reader, || cancelled.get()).unwrap_err();
+        assert_eq!(error.to_string(), "audio decode cancelled");
+        assert_eq!(reader.body_blocks, 1);
+        assert_eq!(reader.bytes.position(), 20 + 8192);
+    }
+
+    #[test]
+    fn bounded_fmt_read_still_rejects_a_truncated_body() {
+        let mut bytes = fmt_header(16 * 1024);
+        bytes.resize(20 + 8192, 0);
+        let error = super::read_wav_samples(Cursor::new(bytes), || false).unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
     }
 }
