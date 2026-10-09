@@ -156,9 +156,12 @@ fn loader_proof() -> Result<(), Box<dyn Error>> {
         super::KernelModule::Lstm,
         super::KernelModule::Sincnet,
     ] {
+        let selected = runtime
+            .production_module(area)?
+            .expect("supported driver-only area");
         let loaded = runtime.load_kernels(area)?;
         eprintln!("loader area: {} {}", area.name(), loaded.tier());
-        assert_eq!(loaded.tier(), PtxTier::Sm75);
+        assert_eq!(loaded.request(), selected);
     }
     if !PtxTier::Sm80.is_compiled_in() {
         assert!(matches!(
