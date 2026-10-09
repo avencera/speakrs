@@ -197,16 +197,16 @@ impl ResNetEmbedding {
         self.0.kernels.tier()
     }
 
-    /// Allocate trunk storage at the requested capacity on this runtime
+    /// Allocate one window, or all classes for a multi-window session
     pub(crate) fn activations(
         &self,
         runtime: &CudaRuntime,
         chunks: usize,
     ) -> Result<SharedEmbeddingActivations, CudaError> {
-        let buffers = self.allocate_activations(runtime, chunks)?;
-        Ok(SharedEmbeddingActivations(Arc::new(Mutex::new(
-            ActivationStorage::new(chunks, buffers),
-        ))))
+        let storage = ActivationStorage::allocate(chunks, |capacity| {
+            self.allocate_activations(runtime, capacity)
+        })?;
+        Ok(SharedEmbeddingActivations(Arc::new(Mutex::new(storage))))
     }
 
     /// Grow shared storage only when a larger class first needs it
@@ -446,6 +446,12 @@ impl EmbeddingBatch {
             .is_some_and(|ForwardGraph(graph)| graph.current(&storage).is_none())
         {
             self.capture_graph_in_storage(runtime, &mut storage)?;
+            debug!(
+                target: "speakrs::inference::cuda::embedding::storage",
+                chunks = self.chunks,
+                captured = self.graph.is_some(),
+                "Recaptured CUDA embedding graph for new storage generation"
+            );
         }
 
         if let Some(ForwardGraph(graph)) = &self.graph {
