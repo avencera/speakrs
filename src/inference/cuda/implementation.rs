@@ -750,6 +750,11 @@ pub(crate) trait Modules {
         false
     }
 
+    /// Resolve diagnostic policy before the selected identity is fixed
+    fn effective_request(&self, request: ModuleRequest) -> Result<ModuleRequest, CudaError> {
+        Ok(request)
+    }
+
     /// Load exactly `request` and return the identity the driver accepted
     fn load(&mut self, request: ModuleRequest) -> Result<ModuleRequest, CudaError>;
 
@@ -760,6 +765,10 @@ pub(crate) trait Modules {
 }
 
 impl Modules for &CudaRuntime {
+    fn effective_request(&self, request: ModuleRequest) -> Result<ModuleRequest, CudaError> {
+        CudaRuntime::effective_request(self, request)
+    }
+
     fn force_library(&self) -> bool {
         CudaRuntime::force_library(self)
     }
@@ -872,6 +881,7 @@ impl PlanRequest {
                     let Some(request) = explicit_request(&modules, boundary, batch, math)? else {
                         return Ok(Selected::Library);
                     };
+                    let request = modules.effective_request(request)?;
                     let loaded = modules.load(request)?;
                     return qualification_selection(
                         choice,
@@ -894,7 +904,8 @@ impl PlanRequest {
         else {
             return Ok(Selected::Library);
         };
-        let loaded = match modules.load(route.module) {
+        let request = modules.effective_request(route.module)?;
+        let loaded = match modules.load(request) {
             Ok(loaded) => loaded,
             Err(error) => {
                 return artifact_refusal(
@@ -903,18 +914,16 @@ impl PlanRequest {
                 );
             }
         };
-        // a diagnostic override can load other bytes, which never match the binding
-        Ok(if loaded == route.module {
-            Selected::Oxide(Box::new(Qualified::production(
-                boundary,
-                batch,
-                math,
-                modules.device(),
-                route,
-            )))
-        } else {
-            Selected::Library
-        })
+        if loaded != request {
+            return Ok(Selected::Library);
+        }
+        let mut token = Qualified::production(boundary, batch, math, modules.device(), route);
+        if request != route.module {
+            // cubin measurements do not establish the speed of a diagnostic PTX load
+            token.target.module = request;
+            token.evidence = TokenEvidence::Implemented;
+        }
+        Ok(Selected::Oxide(Box::new(token)))
     }
 }
 

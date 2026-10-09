@@ -759,20 +759,60 @@ fn min_cosine_bound(math: CudaMath) -> f64 {
     }
 }
 
-fn min_cosine(actual: &[f32], expected: &[f32]) -> f64 {
-    actual
-        .chunks(super::super::EMBEDDING_DIM)
-        .zip(expected.chunks(super::super::EMBEDDING_DIM))
-        .map(|(a, e)| {
-            let dot: f64 = a
+fn min_cosine(actual: &[f32], expected: &[f32]) -> Option<f64> {
+    let dimension = super::super::EMBEDDING_DIM;
+    if actual.is_empty()
+        || actual.len() != expected.len()
+        || !actual.len().is_multiple_of(dimension)
+        || !actual.iter().chain(expected).all(|value| value.is_finite())
+    {
+        return None;
+    }
+    let mut minimum = 1.0f64;
+    for (a, e) in actual
+        .chunks_exact(dimension)
+        .zip(expected.chunks_exact(dimension))
+    {
+        let dot: f64 = a
+            .iter()
+            .zip(e)
+            .map(|(&a, &e)| f64::from(a) * f64::from(e))
+            .sum();
+        let norm = |values: &[f32]| {
+            values
                 .iter()
-                .zip(e)
-                .map(|(&a, &e)| f64::from(a) * f64::from(e))
-                .sum();
-            let norm = |v: &[f32]| v.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>().sqrt();
-            dot / (norm(a) * norm(e)).max(f64::MIN_POSITIVE)
-        })
-        .fold(1.0, f64::min)
+                .map(|&value| f64::from(value).powi(2))
+                .sum::<f64>()
+                .sqrt()
+        };
+        let cosine = dot / (norm(a) * norm(e));
+        if !cosine.is_finite() {
+            return None;
+        }
+        minimum = minimum.min(cosine);
+    }
+    Some(minimum)
+}
+
+#[test]
+fn embedding_cosine_rejects_nonfinite_values_and_invalid_rows() {
+    let reference = vec![1.0; 2 * super::super::EMBEDDING_DIM];
+    assert_eq!(min_cosine(&reference, &reference), Some(1.0));
+    assert_eq!(min_cosine(&[], &[]), None);
+    assert_eq!(min_cosine(&reference[..256], &reference), None);
+    assert_eq!(min_cosine(&reference[..257], &reference[..257]), None);
+    assert_eq!(min_cosine(&vec![0.0; reference.len()], &reference), None);
+    assert_eq!(min_cosine(&reference, &vec![0.0; reference.len()]), None);
+    for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let mut values = reference.clone();
+        let last = values.len() - 1;
+        values[last] = invalid;
+        assert_eq!(min_cosine(&values, &reference), None);
+        assert_eq!(min_cosine(&reference, &values), None);
+    }
+    let mut opposite = reference.clone();
+    opposite[super::super::EMBEDDING_DIM..].fill(-1.0);
+    assert_eq!(min_cosine(&opposite, &reference), Some(-1.0));
 }
 
 /// The whole embedding with every trunk convolution requested on a candidate, replayed
@@ -841,8 +881,11 @@ fn driver_trunk_embedding_matches_library() -> Result<(), CudaError> {
                 36,
                 "the control runs every conv on cuDNN"
             );
-            let cosine = min_cosine(&oxide, &expected);
-            let library_cosine = min_cosine(&library, &expected);
+            let cosine = min_cosine(&oxide, &expected).expect(
+                "candidate embedding must contain finite, complete rows and finite cosines",
+            );
+            let library_cosine = min_cosine(&library, &expected)
+                .expect("library embedding must contain finite, complete rows and finite cosines");
             eprintln!(
                 "TRUNK_FORWARD {}",
                 json!({
