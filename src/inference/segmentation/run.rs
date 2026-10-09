@@ -128,11 +128,7 @@ impl SegmentationModel {
                 .map(|output| vec![output]);
         }
 
-        let mut batch = (next..next + plan.useful())
-            .map(|idx| windows.window(idx, "segmentation batch window"))
-            .collect::<Result<Vec<_>, _>>()?;
-        batch.resize(plan.model(), zeros);
-        let mut outputs = self.run_batch(&batch)?;
+        let mut outputs = self.run_windows(windows, next, plan, zeros)?;
         if outputs.len() != plan.model() {
             return Err(SegmentationError::MalformedOutput {
                 context: "segmentation batch output count",
@@ -157,16 +153,54 @@ impl SegmentationModel {
         }
     }
 
-    fn run_batch(&mut self, windows: &[&[f32]]) -> Result<Vec<Array2<f32>>, SegmentationError> {
+    /// Runs the planned windows from `next` as one model batch, zero padded to its size
+    fn run_windows(
+        &mut self,
+        windows: &SegmentationWindows<'_>,
+        next: usize,
+        plan: BatchPlan,
+        zeros: &[f32],
+    ) -> Result<Vec<Array2<f32>>, SegmentationError> {
+        #[cfg(feature = "_cuda")]
+        let window_samples = self.window_samples();
         match &mut self.backend {
             #[cfg(feature = "cpu")]
-            SegmentationBackend::Cpu(backend) => backend.run_batch(windows),
+            SegmentationBackend::Cpu(backend) => {
+                backend.run_batch(&window_batch(windows, next, plan, zeros)?)
+            }
             #[cfg(feature = "migraphx")]
-            SegmentationBackend::Ort(backend) => backend.run_batch(windows),
+            SegmentationBackend::Ort(backend) => {
+                backend.run_batch(&window_batch(windows, next, plan, zeros)?)
+            }
             #[cfg(feature = "coreml")]
-            SegmentationBackend::CoreMl(backend) => backend.run_batch(windows),
+            SegmentationBackend::CoreMl(backend) => {
+                backend.run_batch(&window_batch(windows, next, plan, zeros)?)
+            }
+            // the windows of one recording overlap, so the audio they cover goes to the
+            // device once and the windows are cut out of it there
             #[cfg(feature = "_cuda")]
-            SegmentationBackend::Cuda(backend) => backend.run_batch(windows),
+            SegmentationBackend::Cuda(backend) => {
+                let (span, starts) = windows.span(next, plan.useful(), plan.model());
+                // a step longer than the window leaves gaps that the span would upload
+                if span.len() > plan.useful() * window_samples {
+                    return backend.run_batch(&window_batch(windows, next, plan, zeros)?);
+                }
+                backend.run_span(span, &starts)
+            }
         }
     }
+}
+
+/// The planned windows from `next`, zero padded to the model batch
+fn window_batch<'a>(
+    windows: &'a SegmentationWindows<'_>,
+    next: usize,
+    plan: BatchPlan,
+    zeros: &'a [f32],
+) -> Result<Vec<&'a [f32]>, SegmentationError> {
+    let mut batch = (next..next + plan.useful())
+        .map(|idx| windows.window(idx, "segmentation batch window"))
+        .collect::<Result<Vec<_>, _>>()?;
+    batch.resize(plan.model(), zeros);
+    Ok(batch)
 }

@@ -66,6 +66,62 @@ pub struct MaskedEmbeddingInput<'a> {
     pub clean_mask: Option<&'a [f32]>,
 }
 
+/// Analysis windows of one recording: `window` samples every `step`, for the chunks
+/// in `chunks` (ascending), clipped at the end of `audio`
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AudioWindows<'a> {
+    audio: &'a [f32],
+    step: usize,
+    window: usize,
+    chunks: &'a [usize],
+}
+
+impl<'a> AudioWindows<'a> {
+    pub(crate) fn new(audio: &'a [f32], step: usize, window: usize, chunks: &'a [usize]) -> Self {
+        debug_assert!(chunks.is_sorted());
+        Self {
+            audio,
+            step,
+            window,
+            chunks,
+        }
+    }
+
+    #[cfg(feature = "_cuda")]
+    pub(crate) fn len(&self) -> usize {
+        self.chunks.len()
+    }
+
+    /// The samples of each window, empty past the end of the audio
+    pub(crate) fn slices(&self) -> Vec<&'a [f32]> {
+        self.chunks
+            .iter()
+            .map(|&chunk| {
+                let start = (chunk * self.step).min(self.audio.len());
+                let end = (start + self.window).min(self.audio.len());
+                &self.audio[start..end]
+            })
+            .collect()
+    }
+
+    /// The audio from the first window's start to the last window's end, and where
+    /// each window starts in it
+    #[cfg(feature = "_cuda")]
+    pub(crate) fn span(&self) -> (&'a [f32], impl Iterator<Item = usize> + '_) {
+        let first = self.chunks.first().map_or(0, |&chunk| chunk * self.step);
+        let last = self.chunks.last().map_or(0, |&chunk| chunk * self.step);
+        let start = first.min(self.audio.len());
+        let end = (last + self.window).min(self.audio.len());
+        let span = &self.audio[start..end.max(start)];
+        (
+            span,
+            self.chunks
+                .iter()
+                .map(move |&chunk| chunk * self.step - first),
+        )
+    }
+}
+
 pub(crate) struct SplitTailInput<'a> {
     pub fbank: &'a Array2<f32>,
     pub weights: &'a [f32],
@@ -288,19 +344,35 @@ impl EmbeddingModel {
         )
     }
 
-    /// Filterbanks and multi-mask embeddings for up to one multi-mask batch of audio chunks
+    /// Filterbanks and multi-mask embeddings for up to one multi-mask batch of windows
+    /// of one recording
     ///
-    /// `masks` holds three rows per chunk. The CUDA backend keeps the filterbanks on the
-    /// device; the others compute them with [`Self::compute_chunk_fbanks_batch`] first
-    pub(crate) fn embed_multi_mask_audio_batch(
+    /// `masks` holds three rows per window. The CUDA backend uploads the audio the
+    /// windows cover once and keeps the filterbanks on the device; the others compute
+    /// them with [`Self::compute_chunk_fbanks_batch`] first
+    pub(crate) fn embed_multi_mask_audio_windows(
         &mut self,
-        audios: &[&[f32]],
+        windows: &AudioWindows<'_>,
         masks: &[&[f32]],
     ) -> Result<Array2<f32>, InferenceError> {
-        with_backend!(
-            &mut self.backend,
-            backend => backend.embed_multi_mask_audio_batch(&self.meta, audios, masks)
-        )
+        match &mut self.backend {
+            #[cfg(feature = "cpu")]
+            EmbeddingBackend::Cpu(backend) => {
+                backend.embed_multi_mask_audio_batch(&self.meta, &windows.slices(), masks)
+            }
+            #[cfg(feature = "migraphx")]
+            EmbeddingBackend::Ort(backend) => {
+                backend.embed_multi_mask_audio_batch(&self.meta, &windows.slices(), masks)
+            }
+            #[cfg(feature = "coreml")]
+            EmbeddingBackend::CoreMl(backend) => {
+                backend.embed_multi_mask_audio_batch(&self.meta, &windows.slices(), masks)
+            }
+            #[cfg(feature = "_cuda")]
+            EmbeddingBackend::Cuda(backend) => {
+                backend.embed_multi_mask_audio_windows(&self.meta, windows, masks)
+            }
+        }
     }
 
     pub(crate) fn embed_tail_batch_inputs(
@@ -520,5 +592,27 @@ mod tests {
         let selected = select_mask(&mask, Some(&clean), 16_000, 6_000);
 
         assert_eq!(selected, mask);
+    }
+
+    /// The CUDA upload cuts each window out of the span as `span[start..start + window]`,
+    /// clipped at the span's end; that must give exactly the per-window slices, for
+    /// skipped (inactive) chunks and for windows running past the end of the audio
+    #[cfg(feature = "_cuda")]
+    #[test]
+    fn audio_window_span_cuts_the_same_windows() {
+        let audio: Vec<f32> = (0..1_000).map(|sample| sample as f32).collect();
+        for chunks in [&[0, 1, 2][..], &[3, 7, 8, 30], &[95, 99, 100, 120], &[5]] {
+            let expected: Vec<&[f32]> = chunks
+                .iter()
+                .map(|&chunk| &audio[(chunk * 10).min(1_000)..(chunk * 10 + 100).min(1_000)])
+                .collect();
+            let windows = AudioWindows::new(&audio, 10, 100, chunks);
+            let (span, starts) = windows.span();
+            let cut: Vec<&[f32]> = starts
+                .map(|start| &span[start.min(span.len())..(start + 100).min(span.len())])
+                .collect();
+            assert_eq!(windows.slices(), expected, "chunks {chunks:?}");
+            assert_eq!(cut, expected, "chunks {chunks:?}");
+        }
     }
 }

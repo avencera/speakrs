@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use cudarc::driver::{CudaSlice, CudaStream, DeviceRepr, ValidAsZeroBits};
+use cudarc::driver::{CudaSlice, CudaStream, CudaView, DeviceRepr, ValidAsZeroBits};
 
 use super::CudaError;
 use super::error::{check_len, element_count};
@@ -81,4 +81,42 @@ impl<T> DeviceTensor<T> {
     pub fn data_mut(&mut self) -> &mut CudaSlice<T> {
         &mut self.data
     }
+}
+
+/// Writes rows of `window` samples cut out of a device span into `target`
+///
+/// Row `i` is `span[starts[i]..starts[i] + window]`, clipped at the end of `span` and
+/// zero padded to `window`, so overlapping windows of one recording reach the device
+/// as their shared audio. `target` must hold at least `starts.len() * window` values
+pub fn unfold_windows(
+    stream: &Arc<CudaStream>,
+    span: &CudaView<'_, f32>,
+    starts: &[usize],
+    window: usize,
+    target: &mut CudaSlice<f32>,
+) -> Result<(), CudaError> {
+    let rows = starts.len() * window;
+    if rows > target.len() {
+        return Err(CudaError::BufferLength {
+            context: "unfolded windows",
+            expected: target.len(),
+            actual: rows,
+        });
+    }
+
+    for (row, &start) in starts.iter().enumerate() {
+        let copied = span.len().saturating_sub(start).min(window);
+        let mut target = target.slice_mut(row * window..(row + 1) * window);
+        if copied > 0 {
+            stream.memcpy_dtod(
+                &span.slice(start..start + copied),
+                &mut target.slice_mut(..copied),
+            )?;
+        }
+        if copied < window {
+            stream.memset_zeros(&mut target.slice_mut(copied..))?;
+        }
+    }
+
+    Ok(())
 }

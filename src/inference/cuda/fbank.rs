@@ -27,6 +27,7 @@ use cudarc::driver::{
     PinnedHostSlice, PushKernelArg,
 };
 
+use super::buffer::unfold_windows;
 use super::candidate::{FbankCandidate, FbankOxide, FbankSpec, Phases};
 use super::error::check_len;
 use super::implementation::{Selected, plan_selection};
@@ -210,6 +211,19 @@ impl CudaFbank {
         buffers: &'a mut FbankBuffers,
     ) -> Result<CudaView<'a, f32>, CudaError> {
         buffers.upload(runtime, waveforms)?;
+        self.compute_uploaded(runtime, buffers)
+    }
+
+    /// Uploads windows of one stretch of audio through `buffers` and computes their
+    /// features; see [`FbankBuffers::upload_span`] and [`Self::compute_uploaded`]
+    pub fn compute_span<'a>(
+        &self,
+        runtime: &CudaRuntime,
+        span: &[f32],
+        starts: &[usize],
+        buffers: &'a mut FbankBuffers,
+    ) -> Result<CudaView<'a, f32>, CudaError> {
+        buffers.upload_span(runtime, span, starts)?;
         self.compute_uploaded(runtime, buffers)
     }
 
@@ -499,6 +513,8 @@ pub struct FbankBuffers {
     staging: PinnedHostSlice<f32>,
     /// recorded after each upload; the staging buffer must not change before it fires
     staged: CudaEvent,
+    /// the contiguous audio of the last [`Self::upload_span`], unfolded into `waveform`
+    span: CudaSlice<f32>,
     waveform: CudaSlice<f32>,
     work: FbankWork,
 }
@@ -552,6 +568,7 @@ impl FbankBuffers {
             uploaded_rows: 0,
             staging,
             staged: runtime.context().new_event(None)?,
+            span: stream.alloc_zeros(samples)?,
             waveform: stream.alloc_zeros(samples)?,
             work: FbankWork {
                 producer: FbankProducerWork {
@@ -598,6 +615,62 @@ impl FbankBuffers {
         // next upload, and `Drop`, from touching it until the copy has finished
         unsafe { cudarc::driver::result::memcpy_htod_async(device, staging, stream.cu_stream()) }?;
         self.staged.record(stream)?;
+
+        self.uploaded_rows = rows;
+        Ok(())
+    }
+
+    /// Stages one contiguous stretch of audio, queues its upload, and unfolds the
+    /// rows `span[start..start + FBANK_WINDOW_SAMPLES]` into the device waveform
+    ///
+    /// Each row matches what [`Self::upload`] makes of the same window: truncated to
+    /// [`FBANK_WINDOW_SAMPLES`] and zero padded past the end of `span`. Overlapping
+    /// windows share their samples, so with a 1 s step over 10 s windows the host copy
+    /// and the transfer are about an eighth of a per-window upload
+    pub fn upload_span(
+        &mut self,
+        runtime: &CudaRuntime,
+        span: &[f32],
+        starts: &[usize],
+    ) -> Result<(), CudaError> {
+        let rows = starts.len();
+        self.check_rows(rows)?;
+        // a failed upload leaves no rows to compute
+        self.uploaded_rows = 0;
+        if rows == 0 {
+            return Ok(());
+        }
+        if span.len() > self.span.len() {
+            return Err(CudaError::BufferLength {
+                context: "fbank span samples",
+                expected: self.span.len(),
+                actual: span.len(),
+            });
+        }
+
+        self.staged.synchronize()?;
+
+        let stream = runtime.stream();
+        if !span.is_empty() {
+            let staging = &mut self.staging.as_mut_slice()?[..span.len()];
+            staging.copy_from_slice(span);
+            let (device, _record) = self.span.device_ptr_mut(stream);
+            // SAFETY: `staging` is pinned memory owned by `self` and holds `span.len()`
+            // values, which fit in `self.span`; the `staged` event recorded below keeps
+            // the next upload, and `Drop`, from touching it until the copy has finished
+            unsafe {
+                cudarc::driver::result::memcpy_htod_async(device, staging, stream.cu_stream())
+            }?;
+        }
+        self.staged.record(stream)?;
+
+        unfold_windows(
+            stream,
+            &self.span.slice(..span.len()),
+            starts,
+            FBANK_WINDOW_SAMPLES,
+            &mut self.waveform,
+        )?;
 
         self.uploaded_rows = rows;
         Ok(())
