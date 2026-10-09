@@ -16,6 +16,7 @@ use crate::inference::cuda::{
     CudaError, CudaFbank, CudaGraphs, CudaMath, CudaRuntime, CudaSession, DeviceTensor,
     EMBEDDING_DIM, EmbeddingBatch, EmbeddingBatchClass, FBANK_FRAMES, FBANK_MEL_BINS,
     FBANK_WINDOW_SAMPLES, FbankBuffers, ResNetEmbedding, SPEAKERS_PER_CHUNK, SafetensorsFile,
+    SharedEmbeddingActivations,
 };
 use crate::inference::{ExecutionMode, InferenceError, ModelLoadError, TensorShapeError};
 use crate::pipeline::RuntimeConfig;
@@ -76,6 +77,7 @@ struct Batches {
     model: ResNetEmbedding,
     graphs: bool,
     plans: [Option<EmbeddingBatch>; 5],
+    activations: Option<SharedEmbeddingActivations>,
 }
 
 impl CudaEmbedding {
@@ -390,7 +392,18 @@ impl Batches {
             return Ok(batch);
         }
 
-        let mut batch = self.model.batch(runtime, class.chunks())?;
+        // allocate once at maximum capacity: captured graphs must never see moved pointers
+        let activations = match &self.activations {
+            Some(activations) => activations.clone(),
+            None => {
+                let activations = self.model.activations(runtime, MULTI_MASK_BATCH_SIZE)?;
+                self.activations = Some(activations.clone());
+                activations
+            }
+        };
+        let mut batch = self
+            .model
+            .batch_with_activations(runtime, class.chunks(), activations)?;
         if self.graphs {
             batch.capture_graph(runtime)?;
         }
@@ -426,6 +439,7 @@ fn open_session(
                 model,
                 graphs: graphs.enabled(),
                 plans: std::array::from_fn(|_| None),
+                activations: None,
             },
         })
     })

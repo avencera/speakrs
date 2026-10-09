@@ -18,8 +18,8 @@
 //! - cuBLAS runs the 5120 -> 256 embedding layer
 //!
 //! [`CudaMath`] selects FP32 or TF32 for every cuDNN and cuBLAS call. Device buffers
-//! live in an [`EmbeddingBatch`], allocated once per batch class and reused, which
-//! can also hold a CUDA graph of the whole forward pass
+//! live in an [`EmbeddingBatch`], which can also hold a CUDA graph of the whole
+//! forward pass. Serial class plans share one fixed-address activation allocation
 
 mod batch_class;
 pub(crate) use batch_class::EmbeddingBatchClass;
@@ -29,7 +29,7 @@ mod kernels;
 pub(super) use kernels::REQUIRED_KERNELS;
 mod trunk;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
 use cudarc::driver::{CudaGraph, CudaSlice, CudaView, CudaViewMut};
@@ -97,8 +97,8 @@ pub type EmbeddingTapFn<'a> =
 
 /// The WeSpeaker ResNet34 multi-mask embedding model on one CUDA runtime
 ///
-/// Holds the weights and kernels; [`Self::batch`] creates the per-batch-class
-/// state that runs it. Cloning is cheap and shares the weights
+/// Holds the weights and kernels; class plans create the per-batch state that
+/// runs it. Cloning is cheap and shares the weights
 #[derive(Debug, Clone)]
 pub struct ResNetEmbedding(Arc<Model>);
 
@@ -195,19 +195,57 @@ impl ResNetEmbedding {
         self.0.kernels.tier()
     }
 
-    /// Allocates the device buffers and plans the convolutions for `chunks` fbank
-    /// chunks per forward pass
-    ///
-    /// Do this once per batch class and reuse the batch for every forward pass of
-    /// that size. The batch keeps a handle to this model and must run on
-    /// `runtime`, whose stream owns its buffers
-    pub fn batch(&self, runtime: &CudaRuntime, chunks: usize) -> Result<EmbeddingBatch, CudaError> {
+    /// Allocate fixed-address trunk storage for serial batches on this runtime
+    pub(crate) fn activations(
+        &self,
+        runtime: &CudaRuntime,
+        chunks: usize,
+    ) -> Result<SharedEmbeddingActivations, CudaError> {
+        let lens = self.0.trunk.buffer_lens();
+        let stream = runtime.stream();
+        Ok(SharedEmbeddingActivations(Arc::new(Mutex::new(
+            EmbeddingActivations {
+                trunk: [
+                    stream.alloc_zeros((chunks * lens.trunk[0]).max(1))?,
+                    stream.alloc_zeros((chunks * lens.trunk[1]).max(1))?,
+                ],
+                hidden: stream.alloc_zeros((chunks * lens.hidden).max(1))?,
+                shortcut: stream.alloc_zeros((chunks * lens.shortcut).max(1))?,
+            },
+        ))))
+    }
+
+    /// Plan one class using storage kept alive by every graph that refers to it
+    pub(crate) fn batch_with_activations(
+        &self,
+        runtime: &CudaRuntime,
+        chunks: usize,
+        activations: SharedEmbeddingActivations,
+    ) -> Result<EmbeddingBatch, CudaError> {
         let model = &self.0;
         let stream = runtime.stream();
         let rows = chunks * SPEAKERS_PER_CHUNK;
         let columns = pool_columns(&model.trunk);
 
         let lens = model.trunk.buffer_lens();
+        {
+            let buffers = activations.lock()?;
+            for (expected, actual) in [
+                (chunks * lens.trunk[0], buffers.trunk[0].len()),
+                (chunks * lens.trunk[1], buffers.trunk[1].len()),
+                (chunks * lens.hidden, buffers.hidden.len()),
+                (chunks * lens.shortcut, buffers.shortcut.len()),
+            ] {
+                if actual < expected {
+                    return Err(CudaError::BufferLength {
+                        context: "embedding shared activation capacity",
+                        expected,
+                        actual,
+                    });
+                }
+            }
+        }
+
         let plans = dispatch::plan_layers(runtime, &model.trunk, chunks, model.math)?;
         let workspace_bytes = plans
             .iter()
@@ -234,13 +272,7 @@ impl ResNetEmbedding {
             fbank: DeviceTensor::zeros(stream, &[chunks, FBANK_FRAMES, FBANK_MEL_BINS])?,
             masks: DeviceTensor::zeros(stream, &[rows, MASK_FRAMES])?,
             stem_input: stream.alloc_zeros(stem_len)?,
-            // at least one element, because CUDA cannot allocate zero bytes
-            trunk: [
-                stream.alloc_zeros((chunks * lens.trunk[0]).max(1))?,
-                stream.alloc_zeros((chunks * lens.trunk[1]).max(1))?,
-            ],
-            hidden: stream.alloc_zeros((chunks * lens.hidden).max(1))?,
-            shortcut: stream.alloc_zeros((chunks * lens.shortcut).max(1))?,
+            activations,
             pooled: stream.alloc_zeros(rows * 2 * columns)?,
             output: DeviceTensor::zeros(stream, &[rows, EMBEDDING_DIM])?,
             plans,
@@ -266,18 +298,37 @@ pub struct EmbeddingBatch {
     fbank: DeviceTensor,
     masks: DeviceTensor,
     stem_input: CudaSlice<f32>,
-    /// block inputs and outputs; see [`trunk::BasicBlock`] for which holds what
-    trunk: [CudaSlice<f32>; 2],
-    /// the activation between a block's two convolutions
-    hidden: CudaSlice<f32>,
-    /// the shortcut convolution's output, the residual of a downsampling block
-    shortcut: CudaSlice<f32>,
+    activations: SharedEmbeddingActivations,
     pooled: CudaSlice<f32>,
     output: DeviceTensor,
     plans: Vec<(String, Plan)>,
     /// cuDNN workspace shared by every plan, sized for the largest
     workspace: CudaSlice<u8>,
     graph: Option<ForwardGraph>,
+}
+
+/// Fixed-address activations shared only by serial class plans on one runtime
+///
+/// Each batch retains this owner, so dropping a cache or a different class cannot
+/// free captured pointers. The lock prevents overlapping mutable device views;
+/// all eager and graph launches use the same stream and its execution order
+#[derive(Debug, Clone)]
+pub(crate) struct SharedEmbeddingActivations(Arc<Mutex<EmbeddingActivations>>);
+
+#[derive(Debug)]
+struct EmbeddingActivations {
+    trunk: [CudaSlice<f32>; 2],
+    hidden: CudaSlice<f32>,
+    shortcut: CudaSlice<f32>,
+}
+
+impl SharedEmbeddingActivations {
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, EmbeddingActivations>, CudaError> {
+        self.0.lock().map_err(|_| CudaError::Unsupported {
+            context: "embedding activations",
+            reason: "a previous activation launch panicked".to_owned(),
+        })
+    }
 }
 
 /// Projection plans compose the compiled head classes without padding the trunk
@@ -360,6 +411,7 @@ impl EmbeddingBatch {
     /// example with [`EmbeddingBatch::download_output`]
     pub fn forward(&mut self, runtime: &CudaRuntime) -> Result<(), CudaError> {
         if let Some(ForwardGraph(graph)) = &self.graph {
+            let _activations = self.activations.lock()?;
             graph.launch()?;
             return Ok(());
         }
@@ -430,15 +482,19 @@ impl EmbeddingBatch {
             fbank,
             masks,
             stem_input,
-            trunk,
-            hidden,
-            shortcut,
+            activations,
             pooled,
             output,
             plans,
             workspace,
             ..
         } = self;
+        let mut activations = activations.lock()?;
+        let EmbeddingActivations {
+            trunk,
+            hidden,
+            shortcut,
+        } = &mut *activations;
         let model = &**model;
         #[cfg(not(feature = "_cuda-libraries"))]
         let _ = workspace;
@@ -681,5 +737,5 @@ fn pool_columns(trunk: &Trunk) -> usize {
     channels * bins
 }
 
-#[cfg(all(test, feature = "_cuda-libraries"))]
+#[cfg(test)]
 mod test_support;

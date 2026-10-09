@@ -10,6 +10,7 @@ fn session(weights: &SafetensorsFile, math: CudaMath) -> Result<CudaSession<Batc
             model: ResNetEmbedding::load(runtime, weights, math)?,
             graphs: true,
             plans: std::array::from_fn(|_| None),
+            activations: None,
         })
     })
 }
@@ -90,5 +91,47 @@ fn embedding_wrapper_remainders_and_graph_reuse() -> Result<(), CudaError> {
             "WRAPPER_REUSE math={math:?} remainders=32 changed_inputs=true fresh_session_parity=true"
         );
     }
+    Ok(())
+}
+
+#[test]
+#[ignore = "GPU retained-memory check; run under the GPU lock with reference tensors"]
+fn embedding_32_then_31_retains_one_activation_allocation() -> Result<(), CudaError> {
+    let Some((runtime, root)) = setup("embedding_32_then_31_retains_one_activation_allocation")
+    else {
+        return Ok(());
+    };
+    drop(runtime);
+    let source = load_case(&root, "wespeaker-multimask-tail-b32", "test_and_short_b32");
+    let weights = SafetensorsFile::open(std::env::var_os("TRUNK_WEIGHTS").map_or_else(
+        || root.join("wespeaker-multimask-tail/wespeaker-multimask-tail.safetensors"),
+        std::path::PathBuf::from,
+    ))?;
+    let mut reused = session(&weights, CudaMath::Tf32)?;
+    for chunks in [32, 31] {
+        let case = reordered(&source, chunks, 0);
+        let actual = embed(&mut reused, &case)?;
+        assert!(parity(&actual, &case.expected, 256).min_cosine >= 0.999);
+        reused.run(|_, batches| {
+            // measure real device storage, not the sum of each class's logical views
+            assert_eq!(
+                batches.activations.as_ref().unwrap().retained_bytes(),
+                1_144_586_240
+            );
+            Ok::<_, CudaError>(())
+        })?;
+    }
+    reused.run(|_, batches| {
+        assert!(batches.plans.iter().all(Option::is_some));
+        let allocation = batches.activations.as_ref().unwrap();
+        assert!(
+            batches
+                .plans
+                .iter()
+                .flatten()
+                .all(|batch| batch.shares_activations(allocation))
+        );
+        Ok::<_, CudaError>(())
+    })?;
     Ok(())
 }
