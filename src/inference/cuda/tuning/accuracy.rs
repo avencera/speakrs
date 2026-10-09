@@ -42,6 +42,24 @@ impl Policy {
     // bump when the reviewed algorithm set or its math-mode limits change
     pub(crate) const IDENTITY: &'static str = "end-to-end-algorithms-v6";
 
+    /// Runtime TF32 requests may use an independently approved exact FP32 kernel
+    ///
+    /// This fallback does not grant tuner permission for unreviewed pipeline modes
+    pub(crate) fn approve_runtime(
+        boundary: BoundaryId,
+        math: CudaMath,
+        pin: ConfigPin,
+    ) -> Option<Approval> {
+        Self::approve(boundary, math, pin).or_else(|| {
+            if math != CudaMath::Tf32 {
+                return None;
+            }
+
+            Self::approve(boundary, CudaMath::Fp32, pin)
+                .filter(|approval| *approval == Approval::DirectFp32)
+        })
+    }
+
     /// PR 3 and the C128/T4 branch reports establish unchanged per-file DER or
     /// byte-identical RTTMs for these algorithms; device support is checked separately
     pub(crate) fn approve(

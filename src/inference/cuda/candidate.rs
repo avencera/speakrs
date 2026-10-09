@@ -1543,6 +1543,30 @@ pub(crate) trait DriverCandidate {
             .map(|scope| (scope, Self::speed_summary(math)))
     }
 
+    /// A runtime FP32 alternative without adding choices to the tuning catalogue
+    fn runtime_fp32_pin(
+        boundary: super::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        device: &DeviceAttributes,
+        tier: PtxTier,
+    ) -> Result<Option<ConfigPin>, PlanError> {
+        let conservative = Self::tuning_fp32_pin(boundary, batch, math, device, tier)?;
+        if conservative.is_some() || math != CudaMath::Tf32 {
+            return Ok(conservative);
+        }
+
+        Self::driver_pin(
+            boundary,
+            batch,
+            CudaMath::Fp32,
+            device,
+            tier,
+            Fp16Policy::Excluded,
+        )
+        .map(Some)
+    }
+
     /// A conservative FP32 algorithm with a pin valid for the requested math mode
     ///
     /// Tuning enumerates this pin; unmeasured defaults use it when the normal

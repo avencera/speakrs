@@ -14,7 +14,7 @@ type TuningPins =
     fn(BoundaryId, usize, CudaMath, &DeviceAttributes, PtxTier) -> Vec<(ConfigPin, &'static str)>;
 
 /// Candidate-owned scalar alternative for independent production accuracy checks
-type TuningFp32Pin = fn(
+type RuntimeFp32Pin = fn(
     BoundaryId,
     usize,
     CudaMath,
@@ -53,7 +53,7 @@ pub(super) struct Area {
     speed_evidence: SpeedEvidence,
     pin: DriverPin,
     tuning_pins: TuningPins,
-    tuning_fp32_pin: TuningFp32Pin,
+    runtime_fp32_pin: RuntimeFp32Pin,
 }
 
 impl Area {
@@ -66,7 +66,7 @@ impl Area {
             speed_evidence: C::speed_evidence,
             pin: C::driver_pin,
             tuning_pins: C::tuning_pins,
-            tuning_fp32_pin: C::tuning_fp32_pin,
+            runtime_fp32_pin: C::runtime_fp32_pin,
         }
     }
 }
@@ -285,11 +285,13 @@ pub(super) fn select_from(
                 modules.tier_limit(),
             )
             .is_none()
-            && crate::inference::cuda::tuning::accuracy::Policy::approve(boundary, math, pin)
-                .is_none()
+            && crate::inference::cuda::tuning::accuracy::Policy::approve_runtime(
+                boundary, math, pin,
+            )
+            .is_none()
         {
             // unlisted recipe tuples and class defaults need independent approval
-            let alternate = (candidate.tuning_fp32_pin)(
+            let alternate = (candidate.runtime_fp32_pin)(
                 boundary,
                 batch,
                 math,
@@ -300,8 +302,10 @@ pub(super) fn select_from(
             let Some(approved) = alternate else {
                 continue;
             };
-            if crate::inference::cuda::tuning::accuracy::Policy::approve(boundary, math, approved)
-                .is_none()
+            if crate::inference::cuda::tuning::accuracy::Policy::approve_runtime(
+                boundary, math, approved,
+            )
+            .is_none()
             {
                 continue;
             }

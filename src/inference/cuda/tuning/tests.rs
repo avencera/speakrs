@@ -937,3 +937,20 @@ fn catalogue_contains_every_measured_stride2_fp16_startup_pin() {
     }
     assert!(checked > 0);
 }
+
+#[test]
+fn runtime_exact_fp32_fallback_does_not_widen_tuner_approval() {
+    use super::accuracy::{Approval, Policy};
+    use crate::inference::cuda::candidate::{ConfigPin, SincPin};
+    let boundary = BoundaryId::named("sincnet.conv0.abs_pool");
+    let pin = ConfigPin::Sinc(SincPin::ConvAbsPool);
+    assert_eq!(Policy::approve(boundary, CudaMath::Tf32, pin), None);
+    assert_eq!(
+        Policy::approve_runtime(boundary, CudaMath::Tf32, pin),
+        Some(Approval::DirectFp32)
+    );
+    assert_eq!(
+        Policy::approve_runtime(boundary, CudaMath::Fp32, pin),
+        Policy::approve(boundary, CudaMath::Fp32, pin)
+    );
+}

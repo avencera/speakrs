@@ -1923,7 +1923,7 @@ fn unmeasured_defaults_obey_accuracy_policy() {
                                 #[cfg(not(feature = "_cuda-libraries"))]
                                 let PlanPin::Pinned(pin) = selected.pin;
                                 checked += 1;
-                                if Policy::approve(boundary, math, pin).is_none() {
+                                if Policy::approve_runtime(boundary, math, pin).is_none() {
                                     violations.push(format!("{context}: {pin:?}"));
                                 }
                             }
@@ -2023,7 +2023,7 @@ fn production_rtx4090_dense_head_uses_the_approved_fp32_pin() {
 }
 
 #[test]
-fn unlisted_measured_device_boundary_cannot_bypass_production_accuracy() {
+fn unlisted_measured_device_uses_independent_runtime_accuracy() {
     use super::super::policy::{Recipe, RecipeMode};
     use crate::inference::cuda::tuning::accuracy::Policy;
 
@@ -2050,6 +2050,10 @@ fn unlisted_measured_device_boundary_cannot_bypass_production_accuracy() {
         let pin = ConfigPin::Sinc(SincPin::ConvAbsPool);
         assert_eq!(Policy::approve(boundary, CudaMath::Tf32, pin), None);
         assert_eq!(
+            Policy::approve_runtime(boundary, CudaMath::Tf32, pin),
+            Some(crate::inference::cuda::tuning::accuracy::Approval::DirectFp32)
+        );
+        assert_eq!(
             Recipe::accuracy_exception(
                 boundary,
                 32,
@@ -2060,22 +2064,17 @@ fn unlisted_measured_device_boundary_cannot_bypass_production_accuracy() {
             ),
             None
         );
-        let result = super::select_default(boundary, 32, CudaMath::Tf32, &mut fixture);
-        assert!(
-            matches!(
-                result,
-                Err(CudaError::MissingKernel {
-                    batch: 32,
-                    math: CudaMath::Tf32,
-                    ..
-                })
-            ),
-            "{name}: {result:?}"
-        );
-        assert!(
-            fixture.loads.is_empty(),
-            "{name}: an unapproved pin must not load"
-        );
+        let Selected::Oxide(token) =
+            super::select_default(boundary, 32, CudaMath::Tf32, &mut fixture)
+                .unwrap_or_else(|error| panic!("{name}: {error}"))
+        else {
+            panic!("{name}: exact FP32 kernel must serve TF32")
+        };
+        assert_eq!(token.pin, PlanPin::Pinned(pin));
+        assert_eq!(token.math, CudaMath::Tf32);
+        assert_eq!(token.evidence, TokenEvidence::Implemented);
+        assert!(!token.speed_measured());
+        assert_eq!(fixture.loads, [token.target.module]);
     }
 }
 
@@ -2316,4 +2315,66 @@ fn accuracy_replacement_does_not_inherit_the_old_pins_speed_evidence() {
     );
     assert_eq!(token.evidence, TokenEvidence::Implemented);
     assert!(!token.speed_measured());
+}
+
+#[test]
+#[cfg(not(feature = "_cuda-libraries"))]
+fn target_only_tf32_segmentation_selects_every_stage_boundary() {
+    use super::super::policy::RecipeMode;
+    use crate::inference::cuda::tuning::accuracy::Policy;
+
+    let mut checked = 0;
+    for (cc, tier, shared) in [
+        (ComputeCapability::new(7, 5), PtxTier::Sm75, 65536),
+        (ComputeCapability::new(8, 0), PtxTier::Sm80, 163840),
+        (ComputeCapability::new(8, 9), PtxTier::Sm80, 101376),
+        (ComputeCapability::new(9, 0), PtxTier::Sm90, 227328),
+        (ComputeCapability::new(12, 0), PtxTier::Sm120, 101376),
+    ] {
+        let compiled = match tier {
+            PtxTier::Sm75 => cfg!(feature = "cuda-sm75"),
+            PtxTier::Sm80 => cfg!(feature = "cuda-sm80"),
+            PtxTier::Sm90 => cfg!(feature = "cuda-sm90"),
+            PtxTier::Sm120 => cfg!(feature = "cuda-sm120"),
+        };
+        if !compiled {
+            continue;
+        }
+
+        let mut fixture = Fixture::new();
+        fixture.device = Builder::new(cc).shared_optin_bytes(shared).build();
+        fixture.limit = tier;
+        fixture.recipe_mode = RecipeMode::new(CudaMath::Tf32, CudaMath::Tf32);
+        for batch in [1, 32] {
+            // the projected LSTM stack owns its input projection as part of this boundary
+            for (name, area) in [
+                ("sincnet.conv0.abs_pool", KernelModule::Sincnet),
+                ("sincnet.conv1", KernelModule::Segdense),
+                ("sincnet.conv2", KernelModule::Segdense),
+                ("lstm.stack", KernelModule::LstmProj),
+                ("linear0", KernelModule::Segdense),
+                ("linear1", KernelModule::Segdense),
+                ("linear2", KernelModule::Segdense),
+            ] {
+                let boundary = BoundaryId::named(name);
+                let Selected::Oxide(token) =
+                    super::select_default(boundary, batch, CudaMath::Tf32, &mut fixture)
+                        .unwrap_or_else(|error| panic!("{cc:?} {name} b{batch}: {error}"))
+                else {
+                    panic!("{cc:?} {name} b{batch}: target-only needs a kernel")
+                };
+                checked += 1;
+                let PlanPin::Pinned(pin) = token.pin;
+                assert_eq!(pin.area(), area, "{cc:?} {name} b{batch}");
+                assert_eq!(token.math, CudaMath::Tf32);
+                assert!(Policy::approve_runtime(boundary, CudaMath::Tf32, pin).is_some());
+                if name == "sincnet.conv0.abs_pool" {
+                    assert_eq!(pin, ConfigPin::Sinc(SincPin::ConvAbsPool));
+                    assert_eq!(Policy::approve(boundary, CudaMath::Tf32, pin), None);
+                }
+            }
+        }
+        assert_eq!(fixture.loads.len(), 14);
+    }
+    assert!(checked >= 14);
 }
