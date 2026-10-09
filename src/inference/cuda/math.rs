@@ -28,6 +28,7 @@ pub enum CudaMath {
     /// FP16 is excluded for a layer with non-finite weights or weight magnitudes
     /// above 65504 / 1024. If an activation exceeds that range, the complete
     /// embedding batch is recomputed with plans selected without FP16 tiles
+    ///
     /// [`Self::Fp32`] never selects FP16 tiles
     Tf32,
 }
