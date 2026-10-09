@@ -525,10 +525,17 @@ impl Pin {
     pub(crate) fn fp16_wide(name: &str, batch: usize, math: CudaMath) -> Option<Self> {
         let conv = model_conv(name, batch, math).ok()?;
         let shape = Shape::of(conv).ok()?;
-        if math != CudaMath::Tf32
-            || !shape.fp16_same_channel()
-            || shape.fp16_entry(Fp16Tiles::Wide).is_none()
-        {
+        if !shape.fp16_same_channel() {
+            return None;
+        }
+
+        Self::tuning_fp16_wide(name, batch, math)
+    }
+
+    /// Discover all compiled FP16 shapes without widening recipe coverage
+    fn tuning_fp16_wide(name: &str, batch: usize, math: CudaMath) -> Option<Self> {
+        let shape = Shape::of(model_conv(name, batch, math).ok()?).ok()?;
+        if math != CudaMath::Tf32 || shape.fp16_entry(Fp16Tiles::Wide).is_none() {
             return None;
         }
 
@@ -2329,7 +2336,7 @@ impl super::DriverCandidate for Oxide {
         if device.capability() < TURING {
             return Ok(None);
         }
-        let Some(wide) = Pin::fp16_wide(boundary.name(), batch, math) else {
+        let Some(wide) = Pin::tuning_fp16_wide(boundary.name(), batch, math) else {
             return Ok(None);
         };
         // retain the startup tile size where measured, without limiting discovery

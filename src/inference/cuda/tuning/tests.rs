@@ -159,10 +159,15 @@ fn catalogue_exposes_only_current_pins_and_approved_scalar_trunk_alternatives() 
             _ => None,
         })
         .collect();
-    assert_eq!(kernels.len(), 2);
-    assert_eq!(kernels[0].family, "default");
-    assert_eq!(kernels[1].family, "fp32");
-    assert_ne!(kernels[0].pin(), kernels[1].pin());
+    assert_eq!(kernels.len(), 3);
+    let named = |family| {
+        kernels
+            .iter()
+            .find(|config| config.family == family)
+            .unwrap()
+    };
+    assert!(named("fp16").pin().is_fp16());
+    assert_ne!(named("default").pin(), named("fp32").pin());
     assert!(kernels.iter().all(|config| config.matches(
         tuple.boundary,
         tuple.batch,
@@ -850,4 +855,85 @@ fn fp16_embedding_default_leaves_an_approved_tf32_alternative() {
             .iter()
             .all(|(family, _)| *family != "tf32")
     );
+}
+
+#[test]
+#[cfg(any(feature = "cuda-sm75", feature = "cuda-sm80"))]
+fn catalogue_contains_every_measured_stride2_fp16_startup_pin() {
+    use crate::inference::cuda::candidate::{ConfigPin, WideconvPin};
+    use crate::inference::cuda::implementation::policy::Recipe;
+    let mut checked = 0;
+    for (cc, sms, name, tier, recipe, minimum_batches) in [
+        (
+            ComputeCapability::new(7, 5),
+            40,
+            "Tesla T4",
+            PtxTier::Sm75,
+            Recipe::TeslaT4,
+            [1, 1, 1],
+        ),
+        (
+            ComputeCapability::new(8, 9),
+            128,
+            "NVIDIA GeForce RTX 4090",
+            PtxTier::Sm80,
+            Recipe::Rtx4090,
+            [1, 4, 4],
+        ),
+        (
+            ComputeCapability::new(8, 0),
+            108,
+            "NVIDIA A100-SXM4-40GB",
+            PtxTier::Sm80,
+            Recipe::A100Sxm4,
+            [33, 4, 8],
+        ),
+        (
+            ComputeCapability::new(8, 0),
+            108,
+            "NVIDIA A100-PCIE-40GB",
+            PtxTier::Sm80,
+            Recipe::A100Pcie,
+            [33, 4, 8],
+        ),
+    ] {
+        if (tier == PtxTier::Sm75 && !cfg!(feature = "cuda-sm75"))
+            || (tier == PtxTier::Sm80 && !cfg!(feature = "cuda-sm80"))
+        {
+            continue;
+        }
+        let device = Builder::new(cc).multiprocessors(sms).name(name).build();
+        let catalogue = Catalogue::new(&device, tier).unwrap();
+        for (name, minimum) in [
+            "resnet.layer2.0.conv1",
+            "resnet.layer3.0.conv1",
+            "resnet.layer4.0.conv1",
+        ]
+        .into_iter()
+        .zip(minimum_batches)
+        {
+            let boundary = BoundaryId::named(name);
+            for batch in boundary.batches().iter().filter(|batch| *batch >= minimum) {
+                let pin = recipe.fp16_pin(boundary, batch, CudaMath::Tf32).unwrap();
+                assert!(pin.is_fp16(), "{recipe:?} {name} b{batch}");
+                let tuple = Tuple::new(boundary, batch, CudaMath::Tf32).unwrap();
+                assert!(
+                    catalogue.choices(tuple).iter().any(|choice| {
+                        matches!(choice, ApprovedChoice::Kernel(config) if config.pin() == pin)
+                    }),
+                    "{recipe:?} {name} b{batch}: {pin:?}"
+                );
+                assert!(
+                    catalogue
+                        .choices(Tuple::new(boundary, batch, CudaMath::Fp32).unwrap())
+                        .iter()
+                        .all(|choice| !choice.is_fp16())
+                );
+                assert_eq!(WideconvPin::fp16_wide(name, batch, CudaMath::Tf32), None);
+                assert!(matches!(pin, ConfigPin::Wideconv(_)));
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 0);
 }
