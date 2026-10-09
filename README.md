@@ -161,6 +161,9 @@ VoxConverse dev, collar=0ms:
 | Apple M4 Pro | `speakrs` `coreml` | **7.1%** | 138s | **529x** |
 | Apple M4 Pro | `speakrs` `coreml-fast` | 7.4% | 169s | 434x |
 | Apple M4 Pro | pyannote community-1 (MPS) | 7.2% | 2999s | 24x |
+| Apple M4 Pro | SpeakerKit (March 2026) | 7.8% | 234s | 312x |
+
+SpeakerKit was measured on the same M4 Pro in March 2026 with the version available then, and it has shipped releases since.
 
 The three RTX 4090 rows ran one after another in the same container, with
 16 CPU cores (the cloud host doesn't report the CPU model), 8 GiB of RAM and
