@@ -150,22 +150,26 @@
 //!
 //! | Platform | Implementation | DER | Time | RTFx |
 //! |----------|----------------|-----|------|------|
-//! | Apple M4 Pro | `speakrs` `coreml` | **7.1%** | 138s | 529x |
+//! | Apple M4 Pro | `speakrs` `coreml` | **7.1%** | 138s | **529x** |
 //! | Apple M4 Pro | `speakrs` `coreml-fast` | 7.4% | 169s | 434x |
 //! | Apple M4 Pro | pyannote community-1 (MPS) | 7.2% | 2999s | 24x |
-//! | RTX 4090 | `speakrs` `cuda` | **7.0%** | 1236s | 59x |
-//! | RTX 4090 | `speakrs` `cuda-fast` | 7.4% | 604s | **121x** |
-//! | RTX 4090 | pyannote community-1 (CUDA) | 7.2% | 2312s | 32x |
+//! | RTX 4090 | `speakrs` `cuda` | **7.0%** | 75s | 978x |
+//! | RTX 4090 | `speakrs` `cuda-fast` | 7.4% | 45s | **1627x** |
+//! | RTX 4090 (earlier run) | pyannote community-1 (CUDA) | 7.2% | 2312s | 32x |
+//!
+//! The speakrs CUDA rows use the native CUDA backend on an RTX 4090 with 16 CPU
+//! cores (the cloud host doesn't report its CPU model). The pyannote CUDA row is
+//! from an earlier RTX 4090 run with an AMD EPYC 7B13 CPU.
 //!
 //! On VoxConverse test, `coreml` matches pyannote at 11.1% DER and runs at
-//! 631x realtime versus pyannote's 23x. `cuda` matches pyannote at 11.1% DER
-//! and runs at 50x realtime versus pyannote's 18x. See
+//! 631x realtime versus pyannote's 23x. Native `cuda` matches the earlier pyannote
+//! result at 11.1% DER and runs at 962x realtime on RTX 4090. That pyannote
+//! CUDA run used an L40S with an AMD EPYC 9354 CPU and reached 18x realtime. See
 //! [benchmarks/](https://github.com/avencera/speakrs/tree/master/benchmarks) for
-//! the full tables across all datasets.
+//! the full tables across all datasets and the timing method.
 //!
-//! The RTX 4090 rows were measured with the ONNX Runtime CUDA backend that the native
-//! CUDA backend replaced. CoreML, CUDA and ONNX Runtime can differ slightly even in FP32,
-//! because floating-point reduction order changes rounding.
+//! CoreML, CUDA and ONNX Runtime can differ slightly even in FP32, because
+//! floating-point reduction order changes rounding.
 //!
 //! # Why not pyannote-rs?
 //!
