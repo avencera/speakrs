@@ -25,12 +25,18 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Check dependency policy
-        uses: EmbarkStudios/cargo-deny-action@v2
+      - name: Install Rust 1.89
+        uses: dtolnay/rust-toolchain@1.89
+
+      # a prebuilt binary instead of cargo-deny-action, whose Docker build fails
+      # whenever Docker Hub rate-limits or times out the runner
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
         with:
-          command: check
-          rust-version: "1.89.0"
-          arguments: --no-default-features --features online,cpu,cuda,migraphx,load-dynamic,_metrics
+          tool: cargo-deny@0.20.2
+
+      - name: Check dependency policy
+        run: cargo deny --no-default-features --features online,cpu,cuda,migraphx,load-dynamic,_metrics check
 
   msrv:
     name: MSRV Rust 1.89
