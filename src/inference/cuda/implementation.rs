@@ -1110,19 +1110,30 @@ fn tuned_selection(
         ));
     }
     let fallback_allowed = library_allowed && !modules.is_tuning();
-    let loaded = match modules.load(config.module()) {
+    // a forced PTX JIT load must reach tuned boundaries too, or the area cache
+    // would hold the cubin and refuse the PTX request of a later boundary
+    let request = modules.effective_request(config.module())?;
+    let loaded = match modules.load(request) {
         Ok(loaded) => loaded,
         Err(error) => return artifact_refusal(error, fallback_allowed),
     };
-    if loaded != config.module() {
+    if loaded != request {
         return artifact_refusal(
             CudaError::ArtifactUnavailable {
-                module: config.module().area().name(),
-                artifact: config.module().artifact(),
+                module: request.area().name(),
+                artifact: request.artifact(),
             },
             fallback_allowed,
         );
     }
+    // the tune file timed the saved artifact, not a diagnostic PTX load of it
+    let evidence = if request == config.module() {
+        TokenEvidence::Tuned {
+            acceptance: config.acceptance(),
+        }
+    } else {
+        TokenEvidence::Implemented
+    };
     Ok(Selected::Oxide(Box::new(Qualified {
         boundary,
         batch,
@@ -1132,9 +1143,7 @@ fn tuned_selection(
             device: modules.device().capability(),
         },
         pin: PlanPin::Pinned(config.pin()),
-        evidence: TokenEvidence::Tuned {
-            acceptance: config.acceptance(),
-        },
+        evidence,
         selection: if modules.is_tuning() {
             Selection::Tuning
         } else {

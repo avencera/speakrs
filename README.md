@@ -349,9 +349,9 @@ The same environment variable can set the tuning output path. `--dry-run`
 measures and prints the table without writing or changing a file.
 
 A file is used only when the device name, compute capability, SM count, NVIDIA
-driver identity, numerical-library versions (or a driver-only build), speakrs
-version, embedded artifact digest, and accuracy-policy version all match. A bad
-key or row rejects the complete file; selection then uses recipes and defaults.
+driver release, cuDNN and cuBLAS versions (or driver-only mode), speakrs version,
+embedded artifact digest, and accuracy-policy version all match. A bad key or
+row rejects the complete file; selection then uses recipes and defaults.
 Missing rows use the normal fallback. There is no automatic tuning at startup.
 The library API is `speakrs::inference::cuda::{tune_cuda, CudaTuneOptions}`.
 
