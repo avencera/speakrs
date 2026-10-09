@@ -11,7 +11,7 @@ fmt:
     if command -v cargo-rdme >/dev/null; then
         cargo rdme
     else
-        echo "cargo-rdme not found: README not regenerated (cargo install cargo-rdme)" >&2
+        echo "cargo-rdme not found: README not regenerated (see CONTRIBUTING.md: cargo install cargo-rdme --version 2.2.2 --locked)" >&2
     fi
 
 clippy:
