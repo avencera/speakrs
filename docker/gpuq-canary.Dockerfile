@@ -27,6 +27,8 @@ ENV CARGO_HOME=/root/.cargo \
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
+# Cargo.toml declares [[example]] targets, and cargo checks their files exist
+COPY examples/ examples/
 COPY xtask/Cargo.toml xtask/Cargo.toml
 COPY xtask/src/ xtask/src/
 COPY xtask/build.rs xtask/build.rs
