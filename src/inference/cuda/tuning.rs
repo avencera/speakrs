@@ -510,7 +510,16 @@ fn select_winners(
             return Err(CudaTuneError::Invalid("invalid timing median".into()));
         }
         let tuple = Tuple::new(measurement.boundary, measurement.batch, measurement.math)?;
-        groups.entry(tuple).or_default().push(measurement);
+        let group = groups.entry(tuple).or_default();
+        if group
+            .iter()
+            .any(|previous| previous.choice.key() == measurement.choice.key())
+        {
+            return Err(CudaTuneError::Invalid(
+                "duplicate candidate identity in a timing row".into(),
+            ));
+        }
+        group.push(measurement);
     }
     if groups.is_empty() {
         return Err(CudaTuneError::Invalid("no boundaries were measured".into()));

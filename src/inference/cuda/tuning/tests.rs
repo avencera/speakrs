@@ -509,3 +509,18 @@ fn benchmark_visits_every_exact_approved_choice() {
         assert!(matches!(passes[0], BenchKind::CatalogueSlot(0)));
     }
 }
+
+#[test]
+fn duplicate_candidate_identities_cannot_form_a_report_row() {
+    let boundary = BoundaryId::named("resnet.seg_1");
+    let measurement = || BenchmarkMeasurement {
+        boundary,
+        batch: 1,
+        math: CudaMath::Tf32,
+        choice: ApprovedChoice::Library,
+        median_ms: 0.1,
+    };
+    assert!(
+        matches!(select_winners(vec![measurement(), measurement()]), Err(super::CudaTuneError::Invalid(reason)) if reason.contains("duplicate candidate identity"))
+    );
+}

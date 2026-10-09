@@ -245,7 +245,9 @@ fn measure(models: &[CapturedModel<'_>]) -> Result<Vec<BenchmarkMeasurement>, Cu
             };
             let group = &mut groups[index];
             if group.iter().any(|timed| timed.graph.choice == graph.choice) {
-                continue;
+                return Err(CudaTuneError::Invalid(
+                    "duplicate candidate identity in captured workloads".into(),
+                ));
             }
             group.push(TimedChoice {
                 graph,
