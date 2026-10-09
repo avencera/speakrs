@@ -1,7 +1,7 @@
 use ndarray::{Array2, Array3, s};
 use tracing::{debug, trace};
 
-use crate::inference::embedding::EmbeddingModel;
+use crate::inference::embedding::{AudioWindows, EmbeddingModel};
 use crate::inference::segmentation::{WindowSpec, segmentation_window_count};
 use crate::powerset::PowersetMapping;
 
@@ -289,8 +289,14 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
             .collect();
 
         let embed_start = std::time::Instant::now();
+        let windows = AudioWindows::new(
+            self.audio,
+            self.step_samples,
+            self.window_samples,
+            batch.chunk_indices,
+        );
         let batch_embeddings =
-            embedding_model.embed_multi_mask_audio_batch(batch.audio_slices, &mask_refs)?;
+            embedding_model.embed_multi_mask_audio_windows(&windows, &mask_refs)?;
 
         for (fbank_idx, &chunk_idx) in batch.chunk_indices.iter().enumerate() {
             for speaker_idx in 0..self.num_speakers {

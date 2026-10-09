@@ -23,8 +23,8 @@ use crate::inference::{ExecutionMode, InferenceError, ModelLoadError, TensorShap
 use crate::pipeline::RuntimeConfig;
 
 use super::{
-    EMBEDDING_WIDTH, EmbeddingMeta, FBANK_FEATURES, MASK_FRAMES, MULTI_MASK_BATCH_SIZE,
-    NUM_SPEAKERS, SplitTailInput, prepare_weights, should_use_clean_mask,
+    AudioWindows, EMBEDDING_WIDTH, EmbeddingMeta, FBANK_FEATURES, MASK_FRAMES,
+    MULTI_MASK_BATCH_SIZE, NUM_SPEAKERS, SplitTailInput, prepare_weights, should_use_clean_mask,
 };
 
 /// The weights file CUDA modes load, next to the base embedding ONNX path
@@ -191,6 +191,44 @@ impl CudaEmbedding {
         check_multi_mask_counts(audios.len(), masks.len())?;
         stage_masks(&mut self.masks, masks.iter().copied(), meta.mask_frames);
         let rows = self.embed_audio(audios)?;
+        Ok(rows.slice_axis(Axis(0), (..masks.len()).into()).to_owned())
+    }
+
+    /// [`Self::embed_multi_mask_audio_batch`] for windows of one recording, uploading
+    /// the audio they cover once instead of every window on its own
+    pub(in crate::inference::embedding) fn embed_multi_mask_audio_windows(
+        &mut self,
+        meta: &EmbeddingMeta,
+        windows: &AudioWindows<'_>,
+        masks: &[&[f32]],
+    ) -> Result<Array2<f32>, InferenceError> {
+        // the span is cut on the GPU filterbank's own fixed window
+        if meta.window_samples != FBANK_WINDOW_SAMPLES {
+            return self.embed_multi_mask_audio_batch(meta, &windows.slices(), masks);
+        }
+        check_multi_mask_counts(windows.len(), masks.len())?;
+        let (span, starts) = windows.span();
+        // windows spread over long inactive stretches cover more audio than the
+        // per-window upload would copy
+        if span.len() > windows.len() * FBANK_WINDOW_SAMPLES {
+            return self.embed_multi_mask_audio_batch(meta, &windows.slices(), masks);
+        }
+        let starts: Vec<usize> = starts.collect();
+        stage_masks(&mut self.masks, masks.iter().copied(), meta.mask_frames);
+        let staged = &self.masks;
+        let values = self.session.run(|runtime, state| {
+            let EmbeddingState {
+                fbank,
+                fbank_buffers,
+                batches,
+            } = state;
+            let features = fbank.compute_span(runtime, span, &starts, fbank_buffers)?;
+            batches.embed(runtime, starts.len(), staged, |runtime, rows, target| {
+                let source = features.slice(rows.start * FBANK_LEN..rows.end * FBANK_LEN);
+                copy_device(runtime, &source, target)
+            })
+        })?;
+        let rows = embedding_rows(values)?;
         Ok(rows.slice_axis(Axis(0), (..masks.len()).into()).to_owned())
     }
 
