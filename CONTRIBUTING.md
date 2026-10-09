@@ -35,13 +35,20 @@ just generate-fixtures
 just check    # fmt + lint + test
 just test     # run tests (e2e tests require model assets)
 just check-cpu-dependencies  # keep ORT out of CPU dependency trees
-just fmt      # cargo fmt, Python formatting and README regeneration
+just fmt      # cargo fmt, Python formatting, and README regeneration when cargo-rdme is installed
 just lint     # cargo clippy + Python ty checks
 just clippy   # cargo clippy -- -D warnings
 just python-lint  # ty check across the root and Python subprojects
 ```
 
-The README section between the `cargo-rdme` markers is generated from the `src/lib.rs` doc comments with [cargo-rdme](https://github.com/orium/cargo-rdme). Edit the crate docs, not that part of the README; `just fmt` regenerates it, or run `cargo rdme` directly. CI fails if the README and the crate docs differ.
+The README section between the `cargo-rdme` markers is generated from the `src/lib.rs` doc comments with [cargo-rdme](https://github.com/orium/cargo-rdme). Edit the crate docs, not that part of the README. CI fails if the README and the crate docs differ. To regenerate it locally, install cargo-rdme and its intralink toolchain once:
+
+```sh
+cargo install cargo-rdme --version 2.2.2 --locked
+cargo rdme install-rust-toolchain-for-intralinks
+```
+
+After that, `just fmt` regenerates the README, or you can run `cargo rdme` directly.
 
 Sync the Python environments before running `just python-lint`:
 

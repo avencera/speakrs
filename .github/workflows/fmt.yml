@@ -42,6 +42,10 @@ jobs:
         with:
           tool: cargo-rdme@2.2.2
 
+      # cargo-rdme resolves intralinks with a pinned nightly toolchain
+      - name: Install the intralink toolchain
+        run: cargo rdme install-rust-toolchain-for-intralinks
+
       # README.md between the cargo-rdme markers must match the crate docs in src/lib.rs
       - name: Check README matches the crate docs
         run: cargo rdme --check
