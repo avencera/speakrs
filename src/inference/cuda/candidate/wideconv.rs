@@ -499,6 +499,35 @@ impl Pin {
         .ok()?;
         matches!(config.algorithm, Algorithm::Fp16(_)).then_some(Self::Configured(config))
     }
+
+    /// FP16 tiles on the 128- and 256-channel 3x3 boundaries, stride 2 included, from
+    /// batch 4 in TF32 mode: the A100 SXM4 and PCIe points where they beat cuDNN
+    ///
+    /// The same-channel layers take narrow tiles below batch 32, about 10% faster than
+    /// wide ones there; the stride-2 layers keep wide tiles at every batch. At batch 1 the
+    /// TF32 kernels already beat cuDNN and the FP16 tiles do not, and the 32- and
+    /// 64-channel layers run in the TF32 early trunk. The 128->256 stride-2 layer starts
+    /// at batch 8: at batch 4 the tune times the FP16 route at 0.059 ms against 0.057 ms
+    /// for both cuDNN and the TF32 rule
+    pub(crate) fn measured_a100_fp16(name: &str, batch: usize, math: CudaMath) -> Option<Self> {
+        if batch < 4 || math != CudaMath::Tf32 {
+            return None;
+        }
+
+        let shape = Shape::of(model_conv(name, batch, math).ok()?).ok()?;
+        let tiles = match shape {
+            Shape::C128Stride2 if batch < 8 => return None,
+            Shape::C128 | Shape::C256 if batch < 32 => Fp16Tiles::Narrow,
+            Shape::C128 | Shape::C256 | Shape::C64Stride2 | Shape::C128Stride2 => Fp16Tiles::Wide,
+            _ => return None,
+        };
+        shape.fp16_entry(tiles)?;
+        Some(Self::Configured(Config {
+            algorithm: Algorithm::Fp16(tiles),
+            partition: Partition::Whole,
+            split_cells: SplitCells::All,
+        }))
+    }
 }
 
 /// Most whole waves of Winograd CTAs before which a launch splits its last, partial wave
@@ -965,8 +994,8 @@ impl Shape {
         }
     }
 
-    /// Whether this shape's FP16 tiles keep the channel count at stride 1, the only FP16
-    /// shapes measured outside Turing
+    /// Whether this shape's FP16 tiles keep the channel count at stride 1, the FP16 shapes
+    /// measured on the 4060 Ti
     fn fp16_same_channel(self) -> bool {
         matches!(self, Self::C32 | Self::C64 | Self::C128 | Self::C256)
     }

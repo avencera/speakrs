@@ -340,7 +340,7 @@ fn fp16_recipes_exclude_fp32_strided_layers_and_unmeasured_devices() {
                     None
                 );
             }
-            // only the Turing recipe runs the stride-2 layers on FP16 tiles
+            // the 4060 Ti recipe keeps the stride-2 layers off FP16 tiles
             for name in [
                 "resnet.layer2.0.conv1",
                 "resnet.layer3.0.conv1",
@@ -376,6 +376,98 @@ fn fp16_recipes_exclude_fp32_strided_layers_and_unmeasured_devices() {
             .name(name)
             .build();
         assert_eq!(Recipe::fp16_device(&device, PtxTier::Sm80), None);
+    }
+}
+
+#[test]
+fn a100_fp16_covers_only_wide_tf32_trunk_from_batch_4() {
+    let sxm4 = Builder::new(ComputeCapability::new(8, 0))
+        .multiprocessors(108)
+        .name("NVIDIA A100-SXM4-40GB")
+        .build();
+    let pcie = Builder::new(ComputeCapability::new(8, 0))
+        .multiprocessors(108)
+        .name("NVIDIA A100-PCIE-40GB")
+        .build();
+    assert_eq!(
+        Recipe::fp16_device(&sxm4, PtxTier::Sm80),
+        Some(Recipe::A100Sxm4)
+    );
+    assert_eq!(Recipe::fp16_device(&sxm4, PtxTier::Sm75), None);
+    assert_eq!(
+        Recipe::fp16_device(&pcie, PtxTier::Sm80),
+        Some(Recipe::A100Pcie)
+    );
+
+    for recipe in [Recipe::A100Sxm4, Recipe::A100Pcie] {
+        a100_fp16_pins(recipe);
+    }
+}
+
+fn a100_fp16_pins(recipe: Recipe) {
+    use crate::inference::cuda::candidate::{
+        ConfigPin, WideconvAlgorithm, WideconvFp16Tiles, WideconvPin,
+    };
+    for name in [
+        "resnet.layer3.0.conv1",
+        "resnet.layer3.1.conv1",
+        "resnet.layer3.5.conv2",
+        "resnet.layer4.0.conv1",
+        "resnet.layer4.2.conv2",
+    ] {
+        let boundary = BoundaryId::named(name);
+        let pin = recipe.fixed_pin(boundary, 32, CudaMath::Tf32, Fp16Policy::Allowed);
+        let Some(ConfigPin::Wideconv(WideconvPin::Configured(config))) = pin else {
+            panic!("{name}: {pin:?}")
+        };
+        assert_eq!(
+            config.algorithm,
+            WideconvAlgorithm::Fp16(WideconvFp16Tiles::Wide),
+            "{name}"
+        );
+        assert_eq!(recipe.fp16_pin(boundary, 1, CudaMath::Tf32), None);
+        let stride2 = name.ends_with(".0.conv1");
+        if name == "resnet.layer4.0.conv1" {
+            assert_eq!(recipe.fp16_pin(boundary, 4, CudaMath::Tf32), None);
+        }
+        for batch in [4, 8, 16] {
+            if name == "resnet.layer4.0.conv1" && batch == 4 {
+                continue;
+            }
+            let mid = recipe.fp16_pin(boundary, batch, CudaMath::Tf32);
+            let Some(ConfigPin::Wideconv(WideconvPin::Configured(config))) = mid else {
+                panic!("{name} b{batch}: {mid:?}")
+            };
+            let tiles = if stride2 {
+                WideconvFp16Tiles::Wide
+            } else {
+                WideconvFp16Tiles::Narrow
+            };
+            assert_eq!(
+                config.algorithm,
+                WideconvAlgorithm::Fp16(tiles),
+                "{name} b{batch}"
+            );
+        }
+        assert_eq!(recipe.fp16_pin(boundary, 32, CudaMath::Fp32), None);
+        assert_ne!(
+            recipe.fixed_pin(boundary, 32, CudaMath::Tf32, Fp16Policy::Excluded),
+            pin
+        );
+    }
+    for name in [
+        "resnet.conv1",
+        "resnet.layer1.0.conv1",
+        "resnet.layer2.0.conv1",
+        "resnet.layer2.1.conv2",
+        "resnet.layer3.0.shortcut.0",
+        "resnet.layer4.0.shortcut.0",
+    ] {
+        assert_eq!(
+            recipe.fp16_pin(BoundaryId::named(name), 32, CudaMath::Tf32),
+            None,
+            "{name}"
+        );
     }
 }
 

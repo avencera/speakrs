@@ -105,8 +105,11 @@ impl Recipe {
             Self::TeslaT4 => {
                 "FP16 stride-1 trunk at every batch; 216-file dev DER 7.0125 to 7.0118; 10-file driver 154.5x versus FP32 driver 92.2x; FP32 segmentation and TF32 embedding"
             }
-            Self::A100Pcie | Self::A100Sxm4 => {
-                "108-SM A100 class defaults; PCIe 40GB measurement: 10-file median 8.787 s versus retained pins 8.938 s, hard-file median 1.117 s versus 1.218 s; identical driver RTTMs and per-file DER; FP32 segmentation and TF32 embedding"
+            Self::A100Pcie => {
+                "108-SM A100 class defaults with measured FP16 wide trunk; pcie-e1 C128/C256 from batch 4: 30-file driver 23.64 to 21.98 s with identical RTTMs; FP32 segmentation and TF32 embedding"
+            }
+            Self::A100Sxm4 => {
+                "108-SM A100 class defaults with measured FP16 wide trunk; a100-e4 C128/C256 from batch 4: 10-file driver loop 8370 to 7731 ms with identical RTTMs; FP32 segmentation and TF32 embedding"
             }
         }
     }
@@ -134,13 +137,21 @@ impl Recipe {
 
     /// Exact measured FP16 points, also used by builds without CUDA libraries
     pub(crate) fn fp16_device(device: &DeviceAttributes, tier: PtxTier) -> Option<Self> {
-        [Self::TeslaT4, Self::Rtx4060Ti].into_iter().find(|recipe| {
+        [
+            Self::TeslaT4,
+            Self::Rtx4060Ti,
+            Self::A100Pcie,
+            Self::A100Sxm4,
+        ]
+        .into_iter()
+        .find(|recipe| {
             recipe.scope().contains(device) && (*recipe == Self::TeslaT4 || tier >= PtxTier::Sm80)
         })
     }
 
     /// FP16 changes only 3x3 trunk layers in TF32 mode: every one but the stem on the
-    /// T4, the same-channel stride-1 layers on the 4060 Ti
+    /// T4, the same-channel stride-1 layers on the 4060 Ti, and the 128- and 256-channel
+    /// layers from batch 4 on both A100s (batch 8 for the 128->256 stride-2 layer)
     pub(crate) fn fp16_pin(
         self,
         boundary: BoundaryId,
@@ -159,6 +170,9 @@ impl Recipe {
                 }
 
                 WideconvPin::fp16_wide(boundary.name(), batch, math)
+            }
+            Self::A100Pcie | Self::A100Sxm4 => {
+                WideconvPin::measured_a100_fp16(boundary.name(), batch, math)
             }
             _ => None,
         }?;

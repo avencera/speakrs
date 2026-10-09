@@ -749,3 +749,54 @@ fn kernel_only_tuning_excludes_library_from_timed_and_untimed_plans() {
         Some(ApprovedChoice::Library)
     );
 }
+
+#[test]
+fn measured_fp16_trunk_extensions_are_approved_only_in_tf32() {
+    use super::accuracy::{Approval, Policy};
+    use crate::inference::cuda::candidate::{ConfigPin, WideconvPin};
+
+    for name in [
+        "resnet.layer2.0.conv1",
+        "resnet.layer3.0.conv1",
+        "resnet.layer4.0.conv1",
+    ] {
+        let boundary = BoundaryId::named(name);
+        for batch in [1, 4, 8, 16, 32] {
+            let pin = WideconvPin::measured_t4_fp16(name, batch, CudaMath::Tf32)
+                .expect("the T4 has a measured stride-2 FP16 pin");
+            let pin = ConfigPin::Wideconv(pin);
+            assert_eq!(
+                Policy::approve(boundary, CudaMath::Tf32, pin),
+                Some(Approval::Fp16Trunk)
+            );
+            assert_eq!(Policy::approve(boundary, CudaMath::Fp32, pin), None);
+        }
+    }
+
+    for name in [
+        "resnet.layer3.0.conv1",
+        "resnet.layer3.1.conv1",
+        "resnet.layer4.0.conv1",
+        "resnet.layer4.1.conv1",
+    ] {
+        let boundary = BoundaryId::named(name);
+        for batch in [4, 8, 16, 32] {
+            if name == "resnet.layer4.0.conv1" && batch == 4 {
+                assert_eq!(
+                    WideconvPin::measured_a100_fp16(name, batch, CudaMath::Tf32),
+                    None
+                );
+                continue;
+            }
+
+            let pin = WideconvPin::measured_a100_fp16(name, batch, CudaMath::Tf32)
+                .expect("the A100 has a measured wide-trunk FP16 pin");
+            let pin = ConfigPin::Wideconv(pin);
+            assert_eq!(
+                Policy::approve(boundary, CudaMath::Tf32, pin),
+                Some(Approval::Fp16Trunk)
+            );
+            assert_eq!(Policy::approve(boundary, CudaMath::Fp32, pin), None);
+        }
+    }
+}
