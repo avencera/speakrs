@@ -117,7 +117,7 @@ impl CudaRuntime {
             tuning: None,
         };
         if read_tune_file {
-            runtime.tuning = TuneControl::load(&runtime.device, ptx_tier);
+            runtime.tuning = TuneControl::load(&runtime);
         }
         debug!(
             device_name = runtime.device.name(),
@@ -134,11 +134,6 @@ impl CudaRuntime {
         if std::env::var_os(super::kernels::FORCE_PTX_JIT_ENV).is_some_and(|value| value == "1") {
             return Err(super::tuning::invalid(
                 "unset SPEAKRS_CUDA_FORCE_PTX_JIT before tuning",
-            ));
-        }
-        if matches!(kind, BenchKind::Library) && super::driver_only() {
-            return Err(super::tuning::invalid(
-                "this build has no Library candidate",
             ));
         }
         let mut runtime = Self::open(ordinal, PtxTier::from_env()?, false)?;
@@ -159,7 +154,21 @@ impl CudaRuntime {
     ) -> Option<ApprovedChoice> {
         self.tuning
             .as_ref()
-            .and_then(|tuning| tuning.choice(boundary, batch, math))
+            .and_then(|tuning| tuning.plan_choice(boundary, batch, math))
+    }
+
+    pub(crate) fn tuning_library_versions(
+        &self,
+    ) -> Result<super::tuning::LibraryVersions, CudaError> {
+        #[cfg(feature = "_cuda-libraries")]
+        {
+            self.context.bind_to_thread()?;
+            self.libraries.versions(&self.stream)
+        }
+        #[cfg(not(feature = "_cuda-libraries"))]
+        {
+            Ok(super::tuning::LibraryVersions::DriverOnly)
+        }
     }
 
     pub(crate) fn is_tuning(&self) -> bool {

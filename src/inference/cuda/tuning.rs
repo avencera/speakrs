@@ -16,6 +16,7 @@ use super::{CudaError, CudaMath, CudaRuntime, KernelModule, PtxTier};
 
 mod accuracy;
 mod bench;
+mod driver_version;
 mod file;
 
 /// Inputs to the opt-in tuner; precision must match the pipeline that will use it
@@ -117,11 +118,11 @@ impl From<file::FileError> for CudaTuneError {
 /// The caller must serialize GPU benchmarking against other workloads.
 /// Set `dry_run` to keep the existing file unchanged.
 pub fn tune_cuda(options: &CudaTuneOptions) -> Result<CudaTuneReport, CudaTuneError> {
-    let runtime = CudaRuntime::for_tuning(options.device, BenchKind::Kernel)?;
+    let runtime = CudaRuntime::for_tuning(options.device, BenchKind::CatalogueSlot(0))?;
     let catalogue = Catalogue::new(runtime.device(), runtime.ptx_tier())?;
-    let key = device_key(runtime.device(), Some(&catalogue))?;
-    let path = file::path(&key, options.output_path.as_deref())?;
-    let measurements = bench::run(options, runtime)?;
+    let key = device_key(&runtime, Some(&catalogue))?;
+    let path = file::path(runtime.device(), options.output_path.as_deref())?;
+    let measurements = bench::run(options, runtime, &catalogue)?;
     let (rows, entries) = select_winners(measurements)?;
     let tuned = file::TuneFile::new(key.clone(), entries);
     // a writer and a reader share validation, so no emitted choice can bypass it
@@ -135,6 +136,14 @@ pub fn tune_cuda(options: &CudaTuneOptions) -> Result<CudaTuneReport, CudaTuneEr
         written: !options.dry_run,
         rows,
     })
+}
+
+/// Numerical implementations compared during tuning, separate from driver-only runs
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum LibraryVersions {
+    DriverOnly,
+    Hybrid { cudnn: usize, cublas: i32 },
 }
 
 /// A validated tuple; boundary-specific batch restrictions cannot be omitted
@@ -208,7 +217,12 @@ impl ApprovedChoice {
     pub(crate) fn label(&self) -> String {
         match self {
             Self::Library => "Library".into(),
-            Self::Kernel(config) => format!("{}/{}", config.module.area().name(), config.family),
+            Self::Kernel(config) => format!(
+                "{}/{} [{:?}]",
+                config.module.area().name(),
+                config.family,
+                config.pin
+            ),
         }
     }
 
@@ -272,17 +286,20 @@ impl Catalogue {
         Ok(Self(choices))
     }
 
+    fn benchmark_kinds(&self) -> impl Iterator<Item = BenchKind> {
+        let count = self.0.values().map(Vec::len).max().unwrap_or(0);
+        (0..count).map(BenchKind::CatalogueSlot)
+    }
+
     fn choices(&self, tuple: Tuple) -> &[ApprovedChoice] {
         self.0.get(&tuple).map_or(&[], Vec::as_slice)
     }
 }
 
-/// Benchmark families contain only catalogue choices, not arbitrary configurations
+/// Each pass selects one exact catalogue slot for every tuple
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum BenchKind {
-    Kernel,
-    Fp32,
-    Library,
+    CatalogueSlot(usize),
 }
 
 #[derive(Debug)]
@@ -317,16 +334,17 @@ impl TuneControl {
         })
     }
 
-    pub(crate) fn load(device: &DeviceAttributes, tier: PtxTier) -> Option<Self> {
+    pub(crate) fn load(runtime: &CudaRuntime) -> Option<Self> {
+        let device = runtime.device();
+        let tier = runtime.ptx_tier();
         let load = || -> Result<Option<Self>, CudaTuneError> {
             // computing only the path does not hash artifacts or load candidate modules
-            let location_key = device_key_without_artifacts(device);
-            let path = file::path(&location_key, None)?;
+            let path = file::path(device, None)?;
             let Some(file) = file::read(&path)? else {
                 return Ok(None);
             };
             let catalogue = Catalogue::new(device, tier)?;
-            let expected = device_key(device, Some(&catalogue))?;
+            let expected = device_key(runtime, Some(&catalogue))?;
             let selection = TuneSelection::File(file.validate(&expected, &catalogue)?);
             tracing::info!(path = %path.display(), "Loaded CUDA tune file");
             Ok(Some(Self {
@@ -355,13 +373,26 @@ impl TuneControl {
             TuneSelection::File(file) => file.choice(tuple),
             TuneSelection::Bench { kind, catalogue } => {
                 let choices = catalogue.choices(tuple);
-                match kind {
-                    BenchKind::Library => choices.iter().find(|choice| matches!(choice, ApprovedChoice::Library)),
-                    BenchKind::Kernel => choices.first(),
-                    BenchKind::Fp32 => choices.iter().find(|choice| matches!(choice, ApprovedChoice::Kernel(config) if config.family == "fp32")).or_else(|| choices.first()),
-                }.cloned()
+                let BenchKind::CatalogueSlot(index) = kind;
+                choices.get(*index).cloned()
             }
         }
+    }
+
+    pub(crate) fn plan_choice(
+        &self,
+        boundary: BoundaryId,
+        batch: usize,
+        math: CudaMath,
+    ) -> Option<ApprovedChoice> {
+        self.choice(boundary, batch, math).or_else(|| {
+            let TuneSelection::Bench { catalogue, .. } = &self.selection else {
+                return None;
+            };
+            let tuple = Tuple::new(boundary, batch, math).ok()?;
+            // untimed boundaries need an approved plan to complete the model pass
+            catalogue.choices(tuple).first().cloned()
+        })
     }
 
     pub(crate) fn is_benchmark(&self) -> bool {
@@ -403,9 +434,10 @@ impl TuneControl {
         if !self.collecting.load(Ordering::Relaxed) {
             return run();
         }
-        let choice = self
-            .choice(boundary, batch, math)
-            .ok_or_else(|| invalid("no production-policy choice for boundary capture"))?;
+        let Some(choice) = self.choice(boundary, batch, math) else {
+            // shorter catalogues still execute the full model but add no duplicate timing
+            return run();
+        };
         runtime.synchronize()?;
         let context = runtime.context();
         let tracking = context.is_event_tracking();
@@ -483,7 +515,16 @@ fn select_winners(
             return Err(CudaTuneError::Invalid("invalid timing median".into()));
         }
         let tuple = Tuple::new(measurement.boundary, measurement.batch, measurement.math)?;
-        groups.entry(tuple).or_default().push(measurement);
+        let group = groups.entry(tuple).or_default();
+        if group
+            .iter()
+            .any(|previous| previous.choice.key() == measurement.choice.key())
+        {
+            return Err(CudaTuneError::Invalid(
+                "duplicate candidate identity in a timing row".into(),
+            ));
+        }
+        group.push(measurement);
     }
     if groups.is_empty() {
         return Err(CudaTuneError::Invalid("no boundaries were measured".into()));
@@ -519,33 +560,22 @@ fn select_winners(
     Ok((rows, entries))
 }
 
-fn device_key_without_artifacts(device: &DeviceAttributes) -> file::DeviceKey {
+fn device_key(
+    runtime: &CudaRuntime,
+    catalogue: Option<&Catalogue>,
+) -> Result<file::DeviceKey, CudaTuneError> {
+    let device = runtime.device();
     let cc = device.capability();
-    file::DeviceKey {
+    let mut key = file::DeviceKey {
         device_name: device.name().into(),
         capability: [cc.major, cc.minor],
         sm_count: device.multiprocessors().get(),
-        driver_version: String::new(),
+        driver_version: driver_version::DriverVersion::read()?,
+        libraries: runtime.tuning_library_versions()?,
         speakrs_version: env!("CARGO_PKG_VERSION").into(),
         artifact_version: String::new(),
         accuracy_policy: accuracy::Policy::IDENTITY.into(),
-    }
-}
-
-fn device_key(
-    device: &DeviceAttributes,
-    catalogue: Option<&Catalogue>,
-) -> Result<file::DeviceKey, CudaTuneError> {
-    let mut key = device_key_without_artifacts(device);
-    // the CUDA API version omits NVIDIA driver patch releases; use the actual module
-    key.driver_version = std::fs::read_to_string("/sys/module/nvidia/version")
-        .or_else(|_| std::fs::read_to_string("/proc/driver/nvidia/version"))?
-        .lines()
-        .next()
-        .filter(|line| !line.trim().is_empty())
-        .ok_or_else(|| CudaTuneError::Invalid("NVIDIA driver version is empty".into()))?
-        .trim()
-        .into();
+    };
     let mut digest = Sha256::new();
     digest.update(b"speakrs-cuda-tuning-catalogue-v3");
     digest.update([u8::from(cfg!(feature = "_cuda-libraries"))]);

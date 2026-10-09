@@ -432,3 +432,105 @@ fn fp16_accuracy_approval_is_tf32_only_for_both_tile_sizes() {
         assert_eq!(Policy::approve(boundary, CudaMath::Fp32, pin), None);
     }
 }
+
+#[test]
+fn benchmark_visits_every_exact_approved_choice() {
+    use super::{BenchKind, TuneControl};
+    for (cc, sms, name, tier) in [
+        (ComputeCapability::new(7, 5), 40, "Tesla T4", PtxTier::Sm75),
+        (
+            ComputeCapability::new(8, 9),
+            128,
+            "NVIDIA GeForce RTX 4090",
+            PtxTier::Sm80,
+        ),
+        (
+            ComputeCapability::new(12, 0),
+            36,
+            "NVIDIA GeForce RTX 5060 Ti",
+            PtxTier::Sm120,
+        ),
+    ] {
+        if (cc.major == 7 && !cfg!(feature = "cuda-sm75"))
+            || (cc.major == 8 && !cfg!(feature = "cuda-sm80"))
+            || (cc.major == 12 && !cfg!(feature = "cuda-sm120"))
+        {
+            continue;
+        }
+        let device = Builder::new(cc).multiprocessors(sms).name(name).build();
+        let catalogue = Catalogue::new(&device, tier).unwrap();
+        let passes: Vec<_> = catalogue.benchmark_kinds().collect();
+        let controls: Vec<_> = passes
+            .iter()
+            .map(|kind| TuneControl::benchmark(*kind, &device, tier).unwrap())
+            .collect();
+        for (tuple, approved) in &catalogue.0 {
+            let visited: Vec<_> = controls
+                .iter()
+                .filter_map(|control| {
+                    control
+                        .choice(tuple.boundary, tuple.batch, tuple.math.into())
+                        .map(|choice| choice.key())
+                })
+                .collect();
+            assert_eq!(
+                visited,
+                approved.iter().map(ApprovedChoice::key).collect::<Vec<_>>(),
+                "{name} {tuple:?}"
+            );
+        }
+        for (tuple, approved) in catalogue.0.iter().take(1) {
+            let control =
+                TuneControl::benchmark(BenchKind::CatalogueSlot(approved.len()), &device, tier)
+                    .unwrap();
+            assert!(
+                control
+                    .choice(tuple.boundary, tuple.batch, tuple.math.into())
+                    .is_none()
+            );
+            assert_eq!(
+                control.plan_choice(tuple.boundary, tuple.batch, tuple.math.into()),
+                approved.first().cloned()
+            );
+        }
+        if cc.major == 7 {
+            let tuple = Tuple::new(
+                BoundaryId::named("resnet.layer2.1.conv1"),
+                32,
+                CudaMath::Tf32,
+            )
+            .unwrap();
+            let kernels: Vec<_> = catalogue
+                .choices(tuple)
+                .iter()
+                .filter_map(|choice| match choice {
+                    ApprovedChoice::Kernel(config) => Some(config),
+                    ApprovedChoice::Library => None,
+                })
+                .collect();
+            assert_eq!(kernels.len(), 2);
+            assert!(kernels.iter().all(|config| config.family == "default"));
+            assert_ne!(kernels[0].module(), kernels[1].module());
+            assert_ne!(
+                catalogue.choices(tuple)[0].label(),
+                catalogue.choices(tuple)[1].label()
+            );
+        }
+        assert!(matches!(passes[0], BenchKind::CatalogueSlot(0)));
+    }
+}
+
+#[test]
+fn duplicate_candidate_identities_cannot_form_a_report_row() {
+    let boundary = BoundaryId::named("resnet.seg_1");
+    let measurement = || BenchmarkMeasurement {
+        boundary,
+        batch: 1,
+        math: CudaMath::Tf32,
+        choice: ApprovedChoice::Library,
+        median_ms: 0.1,
+    };
+    assert!(
+        matches!(select_winners(vec![measurement(), measurement()]), Err(super::CudaTuneError::Invalid(reason)) if reason.contains("duplicate candidate identity"))
+    );
+}

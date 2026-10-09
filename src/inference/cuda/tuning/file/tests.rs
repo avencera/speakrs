@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::{ChoiceKey, DeviceKey, Entry, FileError, MathKey, TuneFile, read};
 use crate::inference::cuda::device::test_support::Builder;
 use crate::inference::cuda::implementation::BoundaryId;
+use crate::inference::cuda::tuning::driver_version::DriverVersion;
 use crate::inference::cuda::tuning::{Catalogue, Tuple};
 use crate::inference::cuda::{ComputeCapability, CudaMath, PtxTier};
 
@@ -13,7 +14,8 @@ fn key() -> DeviceKey {
         device_name: "NVIDIA GeForce RTX 4060 Ti".into(),
         capability: [8, 9],
         sm_count: 34,
-        driver_version: "595.91.07".into(),
+        driver_version: DriverVersion::Nvml("595.91.07".into()),
+        libraries: crate::inference::cuda::tuning::LibraryVersions::DriverOnly,
         speakrs_version: "0.6.0".into(),
         artifact_version: "exact-artifact-and-catalogue-digest".into(),
         accuracy_policy: crate::inference::cuda::tuning::accuracy::Policy::IDENTITY.into(),
@@ -66,16 +68,17 @@ fn exact_key_and_execution_pin_are_required() {
             .is_none()
     );
 
-    for component in 0..7 {
+    for component in 0..8 {
         let mut wrong = key();
         match component {
             0 => wrong.device_name.push_str(" other"),
             1 => wrong.capability = [8, 6],
             2 => wrong.sm_count = 35,
-            3 => wrong.driver_version = "595.91.08".into(),
+            3 => wrong.driver_version = DriverVersion::Nvml("595.91.08".into()),
             4 => wrong.speakrs_version = "0.7.0".into(),
             5 => wrong.artifact_version.push_str(" changed"),
             6 => wrong.accuracy_policy.push_str(" changed"),
+            7 => wrong.driver_version = DriverVersion::Sysfs("595.91.07".into()),
             _ => unreachable!(),
         }
         assert!(matches!(
@@ -216,4 +219,57 @@ fn a_colliding_temp_file_is_preserved_and_the_complete_file_is_written() {
         );
     }
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn the_old_string_key_is_rejected_before_key_decoding() {
+    let directory = std::env::temp_dir().join(format!("speakrs-old-tune-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("device.json");
+    let (_, file) = fixture();
+    let mut old = serde_json::to_value(file).unwrap();
+    old["format_version"] = 1.into();
+    old["key"]["driver_version"] = "595.91.07".into();
+    std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+    assert!(matches!(
+        read(&path),
+        Err(FileError::Invalid(reason)) if reason == "unsupported tune-file format"
+    ));
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn numerical_library_versions_are_required_even_for_a_kernel_winner() {
+    use crate::inference::cuda::tuning::LibraryVersions;
+    let (catalogue, mut file) = fixture();
+    file.key.libraries = LibraryVersions::Hybrid {
+        cudnn: 91000,
+        cublas: 120604,
+    };
+    assert!(file.clone().validate(&file.key, &catalogue).is_ok());
+    for libraries in [
+        LibraryVersions::Hybrid {
+            cudnn: 91001,
+            cublas: 120604,
+        },
+        LibraryVersions::Hybrid {
+            cudnn: 91000,
+            cublas: 120605,
+        },
+        LibraryVersions::DriverOnly,
+    ] {
+        let mut expected = file.key.clone();
+        expected.libraries = libraries;
+        assert!(matches!(
+            file.clone().validate(&expected, &catalogue),
+            Err(FileError::KeyMismatch)
+        ));
+    }
+    let (catalogue, driver_file) = fixture();
+    assert!(
+        driver_file
+            .clone()
+            .validate(&driver_file.key, &catalogue)
+            .is_ok()
+    );
 }

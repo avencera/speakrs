@@ -357,6 +357,10 @@ impl EmbeddingHead {
         if chunks == 32 { 32 } else { 1 }
     }
 
+    fn measurement_batch(chunks: usize) -> Option<usize> {
+        (chunks == Self::chunks_per_pass(chunks)).then_some(chunks)
+    }
+
     fn new(runtime: &CudaRuntime, model: &Model, chunks: usize) -> Result<Self, CudaError> {
         // the head kernels bake in 1 or 32 chunks; intermediate trunks reuse the
         // single-chunk head so its reduction order and precision stay unchanged
@@ -635,7 +639,7 @@ impl EmbeddingBatch {
         )?;
         tap(EmbeddingTap::Pooled, &pooled.as_view())?;
 
-        runtime.record_boundary(HEAD, EmbeddingHead::chunks_per_pass(chunks), math, || {
+        let mut enqueue_head = || {
             head.enqueue(
                 runtime,
                 &pooled.as_view(),
@@ -658,7 +662,11 @@ impl EmbeddingBatch {
                     Ok(())
                 },
             )
-        })?;
+        };
+        match EmbeddingHead::measurement_batch(chunks) {
+            Some(batch) => runtime.record_boundary(HEAD, batch, math, enqueue_head)?,
+            None => enqueue_head()?,
+        }
         tap(EmbeddingTap::Output, &embeddings.as_view())?;
 
         Ok(())
@@ -819,3 +827,6 @@ fn pool_columns(trunk: &Trunk) -> usize {
 mod range_test_support;
 #[cfg(all(test, feature = "_cuda-libraries"))]
 mod test_support;
+
+#[cfg(test)]
+mod tests;
