@@ -92,7 +92,9 @@ impl Stage {
             Self::Embedding => {
                 let model =
                     ResNetEmbedding::load(runtime, embedding_weights, options.embedding_math)?;
-                let mut model = model.batch(runtime, batch)?;
+                // each captured class owns storage on its candidate runtime
+                let activations = model.activations(runtime, batch)?;
+                let mut model = model.batch_with_activations(runtime, batch, activations)?;
                 let features: Vec<_> = (0..batch * FBANK_FRAMES * FBANK_MEL_BINS)
                     .map(|index| ((index % 157) as f32 - 78.0) / 80.0)
                     .collect();

@@ -39,6 +39,7 @@ use super::super::candidate::{
 use super::super::dnn::ConvPlanner;
 use super::super::geometry::{Conv2d, Residual};
 use super::super::implementation::Choice;
+use super::super::kernels::ModuleRequest;
 use super::super::{
     ComputeCapability, CudaError, CudaMath, CudaRuntime, KernelModule, PtxTier, ResNetEmbedding,
     SafetensorsFile,
@@ -402,6 +403,50 @@ fn forced_config(text: &str) -> WideconvConfig {
     }
 }
 
+#[test]
+fn trunk_resnet_override_obeys_forced_ptx_jit() -> Result<(), CudaError> {
+    use super::super::kernels::{ArtifactHash, LoadedArtifact};
+
+    let area = KernelModule::Resnet;
+    let device = ComputeCapability::new(8, 9);
+    let tier = if area.variants().embedded(PtxTier::Sm80).is_some() {
+        PtxTier::Sm80
+    } else {
+        PtxTier::Sm75
+    };
+    let embedded = area.variants().embedded(tier).expect("ResNet PTX");
+    let cubin = embedded.cubin(device).expect("RTX 4090 cubin");
+    for override_name in ["tensor", "sm80"] {
+        for force_jit in [false, true] {
+            let request = Candidate::resnet_override_request(
+                Some(override_name),
+                PtxTier::Sm80,
+                device,
+                |request| request.diagnostic_request(force_jit),
+            )?
+            .expect("trunk override selects an artifact");
+            let artifact = if force_jit {
+                LoadedArtifact::PtxJit {
+                    sha256: ArtifactHash::of(embedded.text.as_bytes()),
+                }
+            } else {
+                LoadedArtifact::Cubin {
+                    arch: device,
+                    sha256: ArtifactHash::of(cubin.bytes),
+                }
+            };
+            assert_eq!(request.area(), area);
+            assert_eq!(request.tier(), tier);
+            assert_eq!(
+                request.artifact(),
+                artifact,
+                "{override_name} JIT={force_jit}"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// The candidate that owns a trunk layer
 enum Candidate {
     Resnet(ConvOxide, ConvPin),
@@ -458,23 +503,13 @@ impl Candidate {
             };
             return Ok(Self::Wide(plan));
         }
-        let kernels = if matches!(
-            std::env::var("TRUNK_RESNET").as_deref(),
-            Ok("tensor" | "sm80")
-        ) {
-            // load the newest runnable tier directly so the comparison does not depend
-            // on a production binding
-            let area = KernelModule::Resnet;
-            let device = runtime.device().capability();
-            let request = area
-                .variants()
-                .driver_request(area, runtime.ptx_tier(), device)
-                .ok_or(CudaError::AreaTierNotCompiledIn {
-                    area: area.name(),
-                    tier: runtime.ptx_tier(),
-                    device,
-                    feature: runtime.ptx_tier().feature(),
-                })?;
+        let resnet_override = std::env::var("TRUNK_RESNET").ok();
+        let kernels = if let Some(request) = Self::resnet_override_request(
+            resnet_override.as_deref(),
+            runtime.ptx_tier(),
+            runtime.device().capability(),
+            |request| runtime.effective_request(request),
+        )? {
             runtime.load_module(request)?
         } else {
             tier(KernelModule::Resnet)?
@@ -484,6 +519,30 @@ impl Candidate {
             ConvOxide::plan(runtime, &kernels, spec, pin)?,
             pin,
         ))
+    }
+
+    fn resnet_override_request(
+        override_name: Option<&str>,
+        tier: PtxTier,
+        device: ComputeCapability,
+        effective_request: impl FnOnce(ModuleRequest) -> Result<ModuleRequest, CudaError>,
+    ) -> Result<Option<ModuleRequest>, CudaError> {
+        if !matches!(override_name, Some("tensor" | "sm80")) {
+            return Ok(None);
+        }
+
+        // select the newest runnable tier independently of production bindings,
+        // but retain the runtime's artifact policy for the diagnostic load
+        let area = KernelModule::Resnet;
+        let request = area.variants().driver_request(area, tier, device).ok_or(
+            CudaError::AreaTierNotCompiledIn {
+                area: area.name(),
+                tier,
+                device,
+                feature: tier.feature(),
+            },
+        )?;
+        effective_request(request).map(Some)
     }
 
     /// The driver-only pin on this device, or the one `TRUNK_RESNET` forces: `legacy`
@@ -796,20 +855,60 @@ fn min_cosine_bound(math: CudaMath) -> f64 {
     }
 }
 
-fn min_cosine(actual: &[f32], expected: &[f32]) -> f64 {
-    actual
-        .chunks(super::super::EMBEDDING_DIM)
-        .zip(expected.chunks(super::super::EMBEDDING_DIM))
-        .map(|(a, e)| {
-            let dot: f64 = a
+fn min_cosine(actual: &[f32], expected: &[f32]) -> Option<f64> {
+    let dimension = super::super::EMBEDDING_DIM;
+    if actual.is_empty()
+        || actual.len() != expected.len()
+        || !actual.len().is_multiple_of(dimension)
+        || !actual.iter().chain(expected).all(|value| value.is_finite())
+    {
+        return None;
+    }
+    let mut minimum = 1.0f64;
+    for (a, e) in actual
+        .chunks_exact(dimension)
+        .zip(expected.chunks_exact(dimension))
+    {
+        let dot: f64 = a
+            .iter()
+            .zip(e)
+            .map(|(&a, &e)| f64::from(a) * f64::from(e))
+            .sum();
+        let norm = |values: &[f32]| {
+            values
                 .iter()
-                .zip(e)
-                .map(|(&a, &e)| f64::from(a) * f64::from(e))
-                .sum();
-            let norm = |v: &[f32]| v.iter().map(|&v| f64::from(v).powi(2)).sum::<f64>().sqrt();
-            dot / (norm(a) * norm(e)).max(f64::MIN_POSITIVE)
-        })
-        .fold(1.0, f64::min)
+                .map(|&value| f64::from(value).powi(2))
+                .sum::<f64>()
+                .sqrt()
+        };
+        let cosine = dot / (norm(a) * norm(e));
+        if !cosine.is_finite() {
+            return None;
+        }
+        minimum = minimum.min(cosine);
+    }
+    Some(minimum)
+}
+
+#[test]
+fn embedding_cosine_rejects_nonfinite_values_and_invalid_rows() {
+    let reference = vec![1.0; 2 * super::super::EMBEDDING_DIM];
+    assert_eq!(min_cosine(&reference, &reference), Some(1.0));
+    assert_eq!(min_cosine(&[], &[]), None);
+    assert_eq!(min_cosine(&reference[..256], &reference), None);
+    assert_eq!(min_cosine(&reference[..257], &reference[..257]), None);
+    assert_eq!(min_cosine(&vec![0.0; reference.len()], &reference), None);
+    assert_eq!(min_cosine(&reference, &vec![0.0; reference.len()]), None);
+    for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let mut values = reference.clone();
+        let last = values.len() - 1;
+        values[last] = invalid;
+        assert_eq!(min_cosine(&values, &reference), None);
+        assert_eq!(min_cosine(&reference, &values), None);
+    }
+    let mut opposite = reference.clone();
+    opposite[super::super::EMBEDDING_DIM..].fill(-1.0);
+    assert_eq!(min_cosine(&opposite, &reference), Some(-1.0));
 }
 
 /// The whole embedding with every trunk convolution requested on a candidate, replayed
@@ -878,8 +977,11 @@ fn driver_trunk_embedding_matches_library() -> Result<(), CudaError> {
                 36,
                 "the control runs every conv on cuDNN"
             );
-            let cosine = min_cosine(&oxide, &expected);
-            let library_cosine = min_cosine(&library, &expected);
+            let cosine = min_cosine(&oxide, &expected).expect(
+                "candidate embedding must contain finite, complete rows and finite cosines",
+            );
+            let library_cosine = min_cosine(&library, &expected)
+                .expect("library embedding must contain finite, complete rows and finite cosines");
             eprintln!(
                 "TRUNK_FORWARD {}",
                 json!({

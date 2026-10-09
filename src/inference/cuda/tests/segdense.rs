@@ -472,7 +472,7 @@ fn truth_errors(site: Site, data: &Data, indices: &[usize], actual: &[f32]) -> (
         scale += truth * truth;
     }
 
-    (max, (squares / scale).sqrt())
+    (max, (squares / scale.max(f64::MIN_POSITIVE)).sqrt())
 }
 
 /// Max-abs and relative-L2 difference of `actual` from `expected` over every element
@@ -484,7 +484,81 @@ fn difference(actual: &[f32], expected: &[f32]) -> (f64, f64) {
         squares += error * error;
         scale += f64::from(e) * f64::from(e);
     }
-    (max, (squares / scale).sqrt())
+    (max, (squares / scale.max(f64::MIN_POSITIVE)).sqrt())
+}
+
+/// Per-site floors cover rounding when the library happens to be exact
+fn numerical_pass(site: Site, math: CudaMath, ours: (f64, f64), library: (f64, f64)) -> bool {
+    if ![ours.0, ours.1, library.0, library.1]
+        .into_iter()
+        .all(f64::is_finite)
+    {
+        return false;
+    }
+    let (absolute, relative) = match (site, math) {
+        (Site::Conv(_), CudaMath::Fp32) => (1e-4, 1e-5),
+        (Site::Dense(DenseSite::Classifier), CudaMath::Fp32) => (1e-5, 1e-6),
+        (Site::Dense(DenseSite::Embedding), CudaMath::Fp32) => (1e-3, 1e-4),
+        (Site::Dense(_), CudaMath::Fp32) => (1e-4, 1e-5),
+        (Site::Conv(_), CudaMath::Tf32) => (1e-2, 2e-3),
+        (Site::Dense(DenseSite::Classifier), CudaMath::Tf32) => (1e-3, 2e-3),
+        (Site::Dense(DenseSite::Embedding), CudaMath::Tf32) => (1e-2, 2e-3),
+        (Site::Dense(_), CudaMath::Tf32) => (1e-2, 2e-3),
+    };
+    // a bad library control cannot make a grossly wrong kernel acceptable
+    let ceiling = match math {
+        CudaMath::Fp32 => 1e-3,
+        CudaMath::Tf32 => 2e-2,
+    };
+    ours.0 <= 10.0 * library.0 + absolute && ours.1 <= (10.0 * library.1 + relative).min(ceiling)
+}
+
+#[test]
+fn numerical_limits_reject_zero_for_nonzero_f64_truth_at_every_site() {
+    for (site, name) in Site::ALL {
+        let (rows, n, k, input_len) = site.dimensions();
+        let data = Data {
+            input: vec![
+                1.0;
+                if input_len == 0 {
+                    rows * k
+                } else {
+                    k / 5 * input_len
+                }
+            ],
+            weight: vec![1.0; k * n],
+            bias: vec![0.0; n],
+        };
+        let truth = if site == Site::Dense(DenseSite::Classifier) {
+            -7f32.ln()
+        } else {
+            k as f32
+        };
+        let correct = vec![truth; rows * n];
+        let zero = vec![0.0; correct.len()];
+        let indices = [0, correct.len() - 1];
+        let library = truth_errors(site, &data, &indices, &correct);
+        let wrong = truth_errors(site, &data, &indices, &zero);
+        assert!(wrong.0 > 0.0 && wrong.1 > 0.9, "{name}: nonzero reference");
+        for math in [CudaMath::Fp32, CudaMath::Tf32] {
+            assert!(
+                numerical_pass(site, math, library, library),
+                "{name} {math:?}: correct result"
+            );
+            assert!(
+                !numerical_pass(site, math, wrong, library),
+                "{name} {math:?}: zero result"
+            );
+            assert!(
+                !numerical_pass(site, math, wrong, wrong),
+                "{name} {math:?}: bad control"
+            );
+            for invalid in [f64::NAN, f64::INFINITY] {
+                assert!(!numerical_pass(site, math, (invalid, 0.0), library));
+                assert!(!numerical_pass(site, math, library, (0.0, invalid)));
+            }
+        }
+    }
 }
 
 fn same(a: &[f32], b: &[f32]) -> bool {
@@ -654,13 +728,17 @@ fn run_case(
     let eager = stream.clone_dtoh(actual)?;
     let library_values = stream.clone_dtoh(expected)?;
     assert!(
-        eager.iter().all(|v| v.is_finite()),
+        eager.iter().chain(&library_values).all(|v| v.is_finite()),
         "{name} b{batch} {math:?} {tier}: nonfinite output"
     );
 
     let ours = truth_errors(site, data, indices, &eager);
     let theirs = truth_errors(site, data, indices, &library_values);
     let versus = difference(&eager, &library_values);
+    assert!(
+        numerical_pass(site, math, ours, theirs) && versus.0.is_finite() && versus.1.is_finite(),
+        "{name} b{batch} {math:?} {tier}: f64 error {ours:?}, library {theirs:?}, versus {versus:?}"
+    );
     let repetitions = if std::env::var_os("SEGDENSE_SANITIZE").is_some() {
         1
     } else {

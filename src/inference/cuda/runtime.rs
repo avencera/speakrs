@@ -43,6 +43,7 @@ pub struct CudaRuntime {
     force_library: bool,
     recipe_mode: super::implementation::policy::RecipeMode,
     tuning: Option<TuneControl>,
+    force_ptx_jit: bool,
 }
 
 impl CudaRuntime {
@@ -115,6 +116,8 @@ impl CudaRuntime {
             force_library: !super::driver_only() && force_library_from_env(),
             recipe_mode: super::implementation::policy::RecipeMode::Disabled,
             tuning: None,
+            force_ptx_jit: std::env::var_os(super::kernels::FORCE_PTX_JIT_ENV)
+                .is_some_and(|value| value == "1"),
         };
         if read_tune_file {
             runtime.tuning = TuneControl::load(&runtime);
@@ -299,7 +302,17 @@ impl CudaRuntime {
             &self.device,
             self.ptx_tier,
             module.variants(),
-        )
+        )?
+        .map(|request| self.effective_request(request))
+        .transpose()
+    }
+
+    /// Resolve the diagnostic artifact before selection fixes a token or cache identity
+    pub(crate) fn effective_request(
+        &self,
+        request: ModuleRequest,
+    ) -> Result<ModuleRequest, CudaError> {
+        request.diagnostic_request(self.force_ptx_jit)
     }
 
     /// The same area artifact for explicit and production plans, so their cache
@@ -348,14 +361,6 @@ impl CudaRuntime {
         let ptx = embedded.text;
         let ptx_sha256 = embedded.sha256();
         let cubin = embedded.cubin(self.device.capability());
-        let force_jit =
-            std::env::var_os(super::kernels::FORCE_PTX_JIT_ENV).is_some_and(|value| value == "1");
-        // the diagnostic override keeps the tier and changes only the artifact format
-        let request = if force_jit {
-            request.ptx_jit(ptx_sha256)
-        } else {
-            request
-        };
         let requested = request.artifact();
         let mut modules = self
             .modules

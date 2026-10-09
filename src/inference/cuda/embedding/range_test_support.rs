@@ -12,7 +12,8 @@ impl ResNetEmbedding {
         runtime: &CudaRuntime,
         chunks: usize,
     ) -> Result<EmbeddingBatch, CudaError> {
-        self.batch_with(runtime, chunks, Fp16Policy::Excluded)
+        let activations = self.activations(runtime, chunks)?;
+        self.batch_with_policy(runtime, chunks, activations, Fp16Policy::Excluded)
     }
 }
 
