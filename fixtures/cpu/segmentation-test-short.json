@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "input": "fixtures/test_short.wav",
+  "input_sha256": "78355fd0062a4e2dd14826c51270e48cec540dc04f86231fd8d3eeadcae1fb29",
+  "input_samples": 52623,
+  "model_repository": "avencera/speakrs-models",
+  "model_revision": "67f963b6a1d94fcd4678948237b3cc8bd69bf1d8",
+  "source_model": "segmentation-3.0.onnx",
+  "source_model_sha256": "038b971741ed623af9773ecafdefa4b7bc523520099c2a68f8568b24189e8ad9",
+  "runtime": {
+    "numpy": "2.2.6",
+    "onnx": "1.18.0",
+    "onnxruntime": "1.22.1",
+    "optimizations": "disabled for node capture; all enabled for final-value comparison",
+    "provider": "CPUExecutionProvider",
+    "threads": 1
+  },
+  "reference_tensor": "output",
+  "shape": [
+    589,
+    7
+  ],
+  "dtype": "float32",
+  "preparation": "PCM16 / 32768; pad to 160000 samples; run original ONNX graph with CPUExecutionProvider",
+  "source_capture_sha256": "576adf5ceb680dd270400bce7efd76388ae89e8d6991382c55b1255921f74724",
+  "fixture_sha256": "8e2a7468a44c998d42057c92027b503d6e9e68950c5fd247748dd3e319da89db"
+}

@@ -142,6 +142,18 @@ fn required_model_reuse_short_full_truncation_and_weight_sharing() {
 }
 
 #[test]
+fn pinned_short_window_matches_independent_ort_reference() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let expected: Array2<f32> = read_npy(root.join("fixtures/cpu/segmentation-test-short.npy"))
+        .expect("required independent ORT segmentation reference");
+    let audio = wav(&root.join("fixtures/test_short.wav"));
+    let model = load();
+    let actual = model.forward(&audio, &mut model.workspace()).unwrap();
+
+    assert_eq!(compare(&actual, &expected, "pinned short window"), 0);
+}
+
+#[test]
 #[ignore = "requires explicit SPEAKRS_CPU_BASELINE_DIR pinned acceptance captures"]
 fn all_pinned_raw_and_saved_rust_windows() {
     let baseline = PathBuf::from(
