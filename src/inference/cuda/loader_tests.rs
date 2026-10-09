@@ -104,7 +104,12 @@ fn loader_proof() -> Result<(), Box<dyn Error>> {
             let samples = vec![0.0; 160_000 * batch];
             let output = segmenter.run(&runtime, batch, &samples)?;
             assert!(!output.is_empty() && output.iter().all(|value| value.is_finite()));
-            let waveforms: Vec<_> = samples.chunks_exact(super::FBANK_WINDOW_SAMPLES).collect();
+            let waveforms: Vec<&[f32]> = samples
+                .as_chunks::<{ super::FBANK_WINDOW_SAMPLES }>()
+                .0
+                .iter()
+                .map(<[f32; super::FBANK_WINDOW_SAMPLES]>::as_slice)
+                .collect();
             let features = fbank.compute_host(&runtime, &waveforms, &mut buffers)?;
             let values = runtime.stream().clone_dtoh(&features)?;
             assert_eq!(

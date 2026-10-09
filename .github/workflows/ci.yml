@@ -214,8 +214,8 @@ jobs:
             cargo check -p speakrs --no-default-features --features "$features"
             cargo test -p speakrs --no-default-features --features "$features" --lib inference::cuda::tier::tests
             cargo test -p speakrs --no-default-features --features "$features" --lib inference::cuda::kernels::tests
-            cargo tree -p speakrs --no-default-features --features "$features" -e features > cuda-features.log
-            if rg 'cudarc feature "(cublas|cudnn)"' cuda-features.log; then
+            cargo tree -p speakrs --no-default-features --features "$features" -e features -i cudarc > cuda-features.log
+            if grep -E 'cudarc feature "(cublas|cudnn)"' cuda-features.log; then
               echo "optional CUDA library feature in a minimal backend" >&2
               exit 1
             fi
@@ -224,7 +224,7 @@ jobs:
             echo "internal CUDA backend compiled without a GPU target" >&2
             exit 1
           fi
-          rg 'CUDA requires a GPU target' cuda-target.log
+          grep -F 'CUDA requires a GPU target' cuda-target.log
 
 
   coreml-only:
