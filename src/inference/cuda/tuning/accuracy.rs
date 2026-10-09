@@ -14,6 +14,7 @@ pub(super) enum Approval {
     DirectTf32,
     StagedWinograd,
     C64FfmaWinograd,
+    Fp16Trunk,
 }
 
 impl Approval {
@@ -22,6 +23,9 @@ impl Approval {
             Self::DirectFp32 => "reviewed direct FP32 end-to-end accuracy",
             Self::DirectTf32 => "reviewed direct TF32 end-to-end accuracy",
             Self::StagedWinograd => "reviewed wtp1 end-to-end accuracy",
+            Self::Fp16Trunk => {
+                "FP16 trunk: T4 216-file DER 7.0125 to 7.0118; 4060 Ti identical RTTMs"
+            }
             Self::C64FfmaWinograd => "reviewed C64 FFMA Winograd end-to-end accuracy",
         }
     }
@@ -32,7 +36,7 @@ pub(super) struct Policy;
 
 impl Policy {
     // bump when the reviewed algorithm set or its math-mode limits change
-    pub(super) const IDENTITY: &'static str = "end-to-end-algorithms-v1";
+    pub(super) const IDENTITY: &'static str = "end-to-end-algorithms-v2";
 
     /// PR 3 and the C128/T4 branch reports establish unchanged per-file DER or
     /// byte-identical RTTMs for these algorithms; device support is checked separately
@@ -53,6 +57,7 @@ impl Policy {
                 }
             },
             ConfigPin::Wideconv(WideconvPin::Configured(config)) => match config.algorithm {
+                WideconvAlgorithm::Fp16(_) => Approval::Fp16Trunk,
                 WideconvAlgorithm::Spatial | WideconvAlgorithm::WideStem => Approval::DirectFp32,
                 WideconvAlgorithm::TensorCore(
                     WideconvTensorKernel::Tf32 | WideconvTensorKernel::Tf32Slim,

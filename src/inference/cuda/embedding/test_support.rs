@@ -21,7 +21,12 @@ impl EmbeddingBatch {
     ) -> Result<(), CudaError> {
         let activations = self.activations.clone();
         let mut storage = activations.lock()?;
-        self.run_with_activations(runtime, tap, storage.buffers_mut())
+        self.run_with_activations(
+            runtime,
+            super::PlanSet::Selected,
+            tap,
+            storage.buffers_mut(),
+        )
     }
 
     /// Copies host fbank and masks into the batch, runs the forward pass and

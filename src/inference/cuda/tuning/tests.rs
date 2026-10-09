@@ -21,6 +21,24 @@ pub(crate) fn approved_choice(
         .clone()
 }
 
+/// Select an approved FP16 choice without depending on catalogue order
+#[cfg(feature = "_cuda-libraries")]
+pub(crate) fn approved_fp16_choice(
+    device: &DeviceAttributes,
+    boundary: BoundaryId,
+    batch: usize,
+    math: CudaMath,
+    tier: PtxTier,
+) -> ApprovedChoice {
+    let catalogue = Catalogue::new(device, tier).unwrap();
+    catalogue
+        .choices(Tuple::new(boundary, batch, math).unwrap())
+        .iter()
+        .find(|choice| choice.is_fp16())
+        .unwrap()
+        .clone()
+}
+
 #[test]
 fn winner_is_fastest_approved_choice_for_the_exact_tuple() {
     let boundary = BoundaryId::named("resnet.layer1.0.conv1");
@@ -214,17 +232,7 @@ fn catalogue_filters_the_pipeline_points_and_batch_classes() {
             let batches = boundary.batches().iter();
             for batch in batches {
                 let tuple = Tuple::new(boundary, batch, math).unwrap();
-                // these implemented defaults lack portable algorithm evidence;
-                // measured recipes remain outside the tuner's approval owner
-                let t4_wide_winograd = cc.major == 7
-                    && (boundary.name().starts_with("resnet.layer3.")
-                        || boundary.name().starts_with("resnet.layer4."))
-                    && !boundary.name().ends_with("shortcut.0")
-                    && !matches!(
-                        boundary.name(),
-                        "resnet.layer3.0.conv1" | "resnet.layer4.0.conv1"
-                    );
-                let expects_kernel = !t4_wide_winograd;
+                let expects_kernel = true;
                 assert_eq!(
                     catalogue
                         .choices(tuple)
@@ -424,6 +432,26 @@ fn winograd_approval_is_limited_to_the_reviewed_algorithms_and_mode() {
 }
 
 #[test]
+fn fp16_accuracy_approval_is_tf32_only_for_both_tile_sizes() {
+    use super::accuracy::{Approval, Policy};
+    use crate::inference::cuda::candidate::{ConfigPin, WideconvFp16Tiles, WideconvPin};
+    let boundary = BoundaryId::named("resnet.layer3.1.conv1");
+    let pin = WideconvPin::fp16_wide(boundary.name(), 32, CudaMath::Tf32).unwrap();
+    let WideconvPin::Configured(mut config) = pin else {
+        panic!("FP16 pin")
+    };
+    for tiles in [WideconvFp16Tiles::Wide, WideconvFp16Tiles::Narrow] {
+        config.algorithm = crate::inference::cuda::candidate::WideconvAlgorithm::Fp16(tiles);
+        let pin = ConfigPin::Wideconv(WideconvPin::Configured(config));
+        assert_eq!(
+            Policy::approve(boundary, CudaMath::Tf32, pin),
+            Some(Approval::Fp16Trunk)
+        );
+        assert_eq!(Policy::approve(boundary, CudaMath::Fp32, pin), None);
+    }
+}
+
+#[test]
 fn benchmark_visits_every_exact_approved_choice() {
     use super::{BenchKind, TuneControl};
     for (cc, sms, name, tier) in [
@@ -498,9 +526,22 @@ fn benchmark_visits_every_exact_approved_choice() {
                     ApprovedChoice::Library => None,
                 })
                 .collect();
-            assert_eq!(kernels.len(), 2);
-            assert!(kernels.iter().all(|config| config.family == "default"));
-            assert_ne!(kernels[0].module(), kernels[1].module());
+            assert_eq!(kernels.len(), 3);
+            assert_eq!(
+                kernels
+                    .iter()
+                    .filter(|config| config.family == "default")
+                    .count(),
+                2
+            );
+            assert_eq!(
+                kernels
+                    .iter()
+                    .filter(|config| config.family == "fp16")
+                    .count(),
+                1
+            );
+            assert_ne!(kernels[0].module(), kernels[2].module());
             assert_ne!(
                 catalogue.choices(tuple)[0].label(),
                 catalogue.choices(tuple)[1].label()
@@ -522,5 +563,100 @@ fn duplicate_candidate_identities_cannot_form_a_report_row() {
     };
     assert!(
         matches!(select_winners(vec![measurement(), measurement()]), Err(super::CudaTuneError::Invalid(reason)) if reason.contains("duplicate candidate identity"))
+    );
+}
+
+#[test]
+#[cfg(feature = "cuda-sm80")]
+fn fp16_tuning_retains_the_non_fp16_4060_ti_wide_choice() {
+    use super::TuneControl;
+    use crate::inference::cuda::candidate::{
+        ConfigPin, DriverCandidate, Fp16Policy, WideconvOxide,
+    };
+
+    let device = Builder::new(ComputeCapability::new(8, 9))
+        .multiprocessors(34)
+        .name("NVIDIA GeForce RTX 4060 Ti")
+        .build();
+    let tier = PtxTier::Sm80;
+    let catalogue = Catalogue::new(&device, tier).unwrap();
+    for name in ["resnet.layer3.1.conv1", "resnet.layer4.1.conv1"] {
+        let boundary = BoundaryId::named(name);
+        for batch in [8, 16, 32] {
+            let tuple = Tuple::new(boundary, batch, CudaMath::Tf32).unwrap();
+            let choices = catalogue.choices(tuple);
+            let non_fp16 = WideconvOxide::driver_pin(
+                boundary,
+                batch,
+                CudaMath::Tf32,
+                &device,
+                tier,
+                Fp16Policy::Excluded,
+            )
+            .unwrap();
+            assert!(!non_fp16.is_fp16());
+            assert!(choices.iter().any(|choice| matches!(choice,
+                ApprovedChoice::Kernel(config) if config.pin() == non_fp16)));
+            assert!(choices.iter().any(|choice| matches!(choice,
+                ApprovedChoice::Kernel(config) if matches!(config.pin(), ConfigPin::Wideconv(_)) && config.pin().is_fp16())));
+            let visited: Vec<_> = catalogue
+                .benchmark_kinds()
+                .filter_map(|kind| {
+                    TuneControl::benchmark(kind, &device, tier).unwrap().choice(
+                        boundary,
+                        batch,
+                        CudaMath::Tf32,
+                    )
+                })
+                .collect();
+            assert_eq!(visited, choices);
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "cuda-sm80")]
+fn fp16_tuning_is_discoverable_without_an_ada_recipe_and_never_in_fp32() {
+    use super::TuneControl;
+    use crate::inference::cuda::candidate::{ConfigPin, WideconvPin};
+
+    let device = Builder::new(ComputeCapability::new(8, 9))
+        .multiprocessors(46)
+        .name("NVIDIA GeForce RTX 4070")
+        .build();
+    let tier = PtxTier::Sm80;
+    let catalogue = Catalogue::new(&device, tier).unwrap();
+    for name in [
+        "resnet.layer1.1.conv1",
+        "resnet.layer2.1.conv1",
+        "resnet.layer3.1.conv1",
+        "resnet.layer4.1.conv1",
+    ] {
+        let boundary = BoundaryId::named(name);
+        for batch in [1, 4, 8, 16, 32] {
+            let expected =
+                ConfigPin::Wideconv(WideconvPin::fp16_wide(name, batch, CudaMath::Tf32).unwrap());
+            let tuple = Tuple::new(boundary, batch, CudaMath::Tf32).unwrap();
+            assert!(
+                catalogue
+                    .choices(tuple)
+                    .iter()
+                    .any(|choice| matches!(choice,
+                ApprovedChoice::Kernel(config) if config.pin() == expected))
+            );
+            assert!(catalogue.benchmark_kinds().any(|kind| {
+                TuneControl::benchmark(kind, &device, tier)
+                    .unwrap()
+                    .choice(boundary, batch, CudaMath::Tf32)
+                    .is_some_and(|choice| choice.is_fp16())
+            }));
+        }
+    }
+    assert!(
+        catalogue
+            .0
+            .iter()
+            .filter(|(tuple, _)| tuple.math == CudaMath::Fp32.into())
+            .all(|(_, choices)| choices.iter().all(|choice| !choice.is_fp16()))
     );
 }

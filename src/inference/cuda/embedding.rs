@@ -20,6 +20,12 @@
 //! [`CudaMath`] selects FP32 or TF32 for every cuDNN and cuBLAS call. Device buffers
 //! live in an [`EmbeddingBatch`], which can also hold a CUDA graph of the whole
 //! forward pass. Serial class plans share one fixed-address activation allocation
+//!
+//! TF32 mode may run same-channel trunk layers on FP16 tiles, which saturate operands
+//! above [`FP16_OPERAND_LIMIT`]. Layers whose weights exceed it never select them. An
+//! activation that exceeds it sets a word that follows the embeddings in the output
+//! buffer, so the download that already ends every batch reads it; the batch is then
+//! recomputed with plans selected without FP16 tiles
 
 mod batch_class;
 pub(crate) use batch_class::EmbeddingBatchClass;
@@ -30,22 +36,24 @@ pub(super) use kernels::REQUIRED_KERNELS;
 mod storage;
 mod trunk;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 
 use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
 use cudarc::driver::{CudaGraph, CudaSlice, CudaView, CudaViewMut};
-use tracing::debug;
+use tracing::{debug, warn};
 
 use self::dispatch::Plan;
 use self::kernels::{ChannelBias, EmbeddingKernels, PoolShape};
 use self::storage::{ActivationStorage, Captured};
 use self::trunk::{ConvLayer, STEM_SLOT, Trunk};
-use super::candidate::{DenseSite, DenseSpec};
+use super::candidate::{DenseSite, DenseSpec, FP16_OPERAND_LIMIT, Fp16Policy};
 use super::dense::DensePlan;
 use super::error::{check_len, element_count};
 use super::fbank::{FBANK_FRAMES, FBANK_MEL_BINS};
 use super::geometry::Residual;
-use super::implementation::{AreaTarget, BoundaryId, LibraryNeed, Selected, plan_selection};
+use super::implementation::{
+    AreaTarget, BoundaryId, LibraryNeed, Selected, plan_selection, plan_selection_with,
+};
 use super::{CudaError, CudaMath, CudaRuntime, DeviceTensor, PtxTier, SafetensorsFile, Sgemm};
 use super::{CudaLibrary, KernelModule};
 
@@ -63,6 +71,13 @@ const HEAD_WEIGHT: &str = "resnet.seg_1.weight";
 const HEAD_BIAS: &str = "resnet.seg_1.bias";
 /// The embedding head GEMM
 const HEAD: BoundaryId = BoundaryId::named("resnet.seg_1");
+
+/// Words after the embeddings in a batch's output buffer: the out-of-range word, which
+/// FP16 trunk tiles set nonzero when an activation saturates
+const RANGE_WORDS: usize = 1;
+
+/// The first batch recomputed without FP16 tiles in this process logs a warning
+static FP16_RANGE_WARNING: Once = Once::new();
 
 /// A point in the forward pass whose activation [`EmbeddingBatch::forward_with_taps`]
 /// exposes, for comparing layers against reference intermediates
@@ -134,11 +149,12 @@ impl ResNetEmbedding {
             let batch = class.chunks();
             for (layer, _) in trunk.layers() {
                 if matches!(
-                    plan_selection(
+                    plan_selection_with(
                         runtime,
                         layer.boundary(),
                         batch,
                         math,
+                        layer.fp16(),
                         #[cfg(all(test, feature = "_cuda-libraries"))]
                         None,
                     )?,
@@ -247,6 +263,17 @@ impl ResNetEmbedding {
         chunks: usize,
         activations: SharedEmbeddingActivations,
     ) -> Result<EmbeddingBatch, CudaError> {
+        self.batch_with_policy(runtime, chunks, activations, Fp16Policy::Allowed)
+    }
+
+    /// Plan a class with the activation owner and an explicit FP16 policy
+    fn batch_with_policy(
+        &self,
+        runtime: &CudaRuntime,
+        chunks: usize,
+        activations: SharedEmbeddingActivations,
+        fp16: Fp16Policy,
+    ) -> Result<EmbeddingBatch, CudaError> {
         let model = &self.0;
         let stream = runtime.stream();
         let rows = chunks * SPEAKERS_PER_CHUNK;
@@ -272,12 +299,8 @@ impl ResNetEmbedding {
             }
         }
 
-        let plans = dispatch::plan_layers(runtime, &model.trunk, chunks, model.math)?;
-        let workspace_bytes = plans
-            .iter()
-            .map(|(_, plan)| plan.workspace_bytes())
-            .max()
-            .unwrap_or(0);
+        let plans = dispatch::plan_layers(runtime, &model.trunk, chunks, model.math, fp16)?;
+        let workspace_bytes = dispatch::workspace_bytes(&plans);
         debug!(
             chunks,
             math = ?model.math,
@@ -300,9 +323,10 @@ impl ResNetEmbedding {
             stem_input: stream.alloc_zeros(stem_len)?,
             activations,
             pooled: stream.alloc_zeros(rows * 2 * columns)?,
-            output: DeviceTensor::zeros(stream, &[rows, EMBEDDING_DIM])?,
+            output: stream.alloc_zeros(rows * EMBEDDING_DIM + RANGE_WORDS)?,
             plans,
             workspace: stream.alloc_zeros(workspace_bytes.max(1))?,
+            fallback: None,
             graph: None,
         })
     }
@@ -326,11 +350,52 @@ pub struct EmbeddingBatch {
     stem_input: CudaSlice<f32>,
     activations: SharedEmbeddingActivations,
     pooled: CudaSlice<f32>,
-    output: DeviceTensor,
+    /// embeddings `[chunks * 3, 256]`, then the out-of-range word of `RANGE_WORDS`
+    output: CudaSlice<f32>,
     plans: Vec<(String, Plan)>,
     /// cuDNN workspace shared by every plan, sized for the largest
     workspace: CudaSlice<u8>,
+    /// plans without FP16 tiles, built when an activation first saturates one
+    fallback: Option<Box<Fallback>>,
     graph: Option<ForwardGraph>,
+}
+
+/// The plans a batch recomputes with after an FP16 tile saturated an activation
+#[derive(Debug)]
+struct Fallback {
+    plans: Vec<(String, Plan)>,
+    workspace: CudaSlice<u8>,
+}
+
+impl Fallback {
+    /// Selects every trunk layer with FP16 tiles excluded; runs outside graph capture
+    fn new(runtime: &CudaRuntime, model: &Model, chunks: usize) -> Result<Self, CudaError> {
+        let plans = dispatch::plan_layers(
+            runtime,
+            &model.trunk,
+            chunks,
+            model.math,
+            Fp16Policy::Excluded,
+        )?;
+        let workspace_bytes = dispatch::workspace_bytes(&plans);
+        debug!(
+            chunks,
+            workspace_bytes, "Planned CUDA embedding batch without FP16 tiles"
+        );
+        Ok(Self {
+            plans,
+            workspace: runtime.stream().alloc_zeros(workspace_bytes.max(1))?,
+        })
+    }
+}
+
+/// Which plans a forward pass runs
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanSet {
+    /// The plans selected when the batch was constructed
+    Selected,
+    /// The plans without FP16 tiles
+    Fallback,
 }
 
 /// Growing activation storage shared only by serial class plans on one runtime
@@ -467,7 +532,12 @@ impl EmbeddingBatch {
             return Ok(());
         }
 
-        self.run_with_activations(runtime, &mut |_, _| Ok(()), storage.buffers_mut())
+        self.run_with_activations(
+            runtime,
+            PlanSet::Selected,
+            &mut |_, _| Ok(()),
+            storage.buffers_mut(),
+        )
     }
 
     /// Records the batch's forward pass as a CUDA graph, which [`Self::forward`]
@@ -490,7 +560,12 @@ impl EmbeddingBatch {
     ) -> Result<(), CudaError> {
         self.graph = None;
         if !super::driver_only() {
-            self.run_with_activations(runtime, &mut |_, _| Ok(()), storage.buffers_mut())?;
+            self.run_with_activations(
+                runtime,
+                PlanSet::Selected,
+                &mut |_, _| Ok(()),
+                storage.buffers_mut(),
+            )?;
         }
         // finish weight packing and prior buffer work before capture drops their events
         runtime.synchronize()?;
@@ -509,8 +584,12 @@ impl EmbeddingBatch {
             .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)
             .map_err(CudaError::from)
             .and_then(|()| {
-                let run =
-                    self.run_with_activations(runtime, &mut |_, _| Ok(()), storage.buffers_mut());
+                let run = self.run_with_activations(
+                    runtime,
+                    PlanSet::Selected,
+                    &mut |_, _| Ok(()),
+                    storage.buffers_mut(),
+                );
                 // always end the capture, even after a failed launch, so the stream
                 // leaves capture mode
                 let graph = stream.end_capture(CUgraphInstantiate_flags(0));
@@ -535,6 +614,7 @@ impl EmbeddingBatch {
     fn run_with_activations(
         &mut self,
         runtime: &CudaRuntime,
+        set: PlanSet,
         tap: &mut EmbeddingTapFn<'_>,
         activations: &mut EmbeddingActivations,
     ) -> Result<(), CudaError> {
@@ -549,8 +629,23 @@ impl EmbeddingBatch {
             output,
             plans,
             workspace,
+            fallback,
             ..
         } = self;
+        let (plans, workspace) = match (set, fallback) {
+            (PlanSet::Selected, _) => (&*plans, workspace),
+            (PlanSet::Fallback, Some(fallback)) => {
+                let Fallback { plans, workspace } = &mut **fallback;
+                (&*plans, workspace)
+            }
+            (PlanSet::Fallback, None) => {
+                return Err(CudaError::Unsupported {
+                    context: "embedding fallback",
+                    reason: "the plans without FP16 tiles were not built".to_owned(),
+                });
+            }
+        };
+
         let EmbeddingActivations {
             trunk,
             hidden,
@@ -561,12 +656,15 @@ impl EmbeddingBatch {
         let _ = workspace;
         let chunks = *chunks;
         let math = model.math;
+        let embeddings_len = chunks * SPEAKERS_PER_CHUNK * EMBEDDING_DIM;
+        let (mut embeddings, range) = output.split_at_mut(embeddings_len);
         let mut convs = Convs {
             runtime,
             kernels: &model.kernels,
             plans,
             #[cfg(feature = "_cuda-libraries")]
             workspace,
+            range,
             chunks,
             math: model.math,
         };
@@ -670,8 +768,6 @@ impl EmbeddingBatch {
         )?;
         tap(EmbeddingTap::Pooled, &pooled.as_view())?;
 
-        let mut embeddings = output.data_mut().as_view_mut();
-
         let mut enqueue_head = || {
             head.enqueue(
                 runtime,
@@ -716,8 +812,63 @@ impl EmbeddingBatch {
     }
 
     /// Copies the embeddings to the host; this waits for the runtime's stream
-    pub fn download_output(&self, runtime: &CudaRuntime) -> Result<Vec<f32>, CudaError> {
-        self.output.download(runtime.stream())
+    ///
+    /// The same copy reads the out-of-range word. When an FP16 tile saturated an
+    /// activation, this recomputes the batch with plans selected without FP16 tiles,
+    /// built on first use, and returns that output instead
+    pub fn download_output(&mut self, runtime: &CudaRuntime) -> Result<Vec<f32>, CudaError> {
+        let (embeddings, saturated) = self.read_output(runtime)?;
+        if !saturated {
+            return Ok(embeddings);
+        }
+
+        FP16_RANGE_WARNING.call_once(|| {
+            warn!(
+                limit = FP16_OPERAND_LIMIT,
+                "CUDA embedding activation exceeded the FP16 operand range; recomputing without FP16 tiles"
+            );
+        });
+        debug!(
+            chunks = self.chunks,
+            "Recomputing CUDA embedding batch without FP16 tiles"
+        );
+        if self.fallback.is_none() {
+            let fallback = Fallback::new(runtime, &self.model, self.chunks)?;
+            self.fallback = Some(Box::new(fallback));
+        }
+        // the next batch, which may replay the graph, must start from a clear word
+        let embeddings_len = self.output.len() - RANGE_WORDS;
+        runtime
+            .stream()
+            .memset_zeros(&mut self.output.slice_mut(embeddings_len..))?;
+        {
+            let activations = self.activations.clone();
+            let mut storage = activations.lock()?;
+            self.run_with_activations(
+                runtime,
+                PlanSet::Fallback,
+                &mut |_, _| Ok(()),
+                storage.buffers_mut(),
+            )?;
+        }
+
+        let (embeddings, saturated) = self.read_output(runtime)?;
+        if saturated {
+            return Err(CudaError::Unsupported {
+                context: "embedding fallback",
+                reason: "a plan without FP16 tiles set the out-of-range word".to_owned(),
+            });
+        }
+        Ok(embeddings)
+    }
+
+    /// The embeddings and whether the out-of-range word is set, in one copy
+    fn read_output(&self, runtime: &CudaRuntime) -> Result<(Vec<f32>, bool), CudaError> {
+        let mut embeddings = runtime.stream().clone_dtoh(&self.output)?;
+        // cuMemcpyDtoHAsync into pageable memory has no completion guarantee
+        runtime.synchronize()?;
+        let range = embeddings.split_off(self.output.len() - RANGE_WORDS);
+        Ok((embeddings, range.iter().any(|word| word.to_bits() != 0)))
     }
 }
 
@@ -729,6 +880,8 @@ struct Convs<'a> {
     plans: &'a [(String, Plan)],
     #[cfg(feature = "_cuda-libraries")]
     workspace: &'a mut CudaSlice<u8>,
+    /// the out-of-range word FP16 tiles set
+    range: CudaViewMut<'a, f32>,
     chunks: usize,
 }
 
@@ -808,6 +961,8 @@ fn pool_columns(trunk: &Trunk) -> usize {
     channels * bins
 }
 
+#[cfg(test)]
+mod range_test_support;
 #[cfg(test)]
 mod test_support;
 

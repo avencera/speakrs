@@ -1,3 +1,4 @@
+use super::super::candidate::{FP16_OPERAND_LIMIT, Fp16Policy};
 use super::super::geometry::Conv2d;
 use super::super::implementation::BoundaryId;
 #[cfg(all(test, feature = "_cuda-libraries"))]
@@ -57,6 +58,8 @@ pub(super) struct ConvLayer {
     weight: DeviceTensor,
     bias: DeviceTensor,
     shape: ConvShape,
+    /// whether the weights fit the FP16 tiles' operand range
+    fp16: Fp16Policy,
     /// Layer identity and development-only override
     plan: LayerPlan,
 }
@@ -84,11 +87,22 @@ impl ConvLayer {
             kernel,
             ..
         } = shape;
-        let weight = weights.upload(
-            runtime,
-            &format!("{prefix}.weight"),
-            &[out_channels, in_channels, kernel, kernel],
-        )?;
+        let weight_shape = [out_channels, in_channels, kernel, kernel];
+        let host_weight = weights.read_f32(&format!("{prefix}.weight"), &weight_shape)?;
+        let fp16 = Fp16Policy::of_weights(&host_weight);
+        // only the same-channel stride-1 3x3 layers have FP16 tiles
+        if fp16 == Fp16Policy::Excluded
+            && in_channels == out_channels
+            && shape.stride == 1
+            && kernel == 3
+        {
+            tracing::warn!(
+                layer = prefix,
+                limit = FP16_OPERAND_LIMIT,
+                "CUDA trunk weights exceed the FP16 operand range; this layer will not use FP16 tiles"
+            );
+        }
+        let weight = DeviceTensor::upload(runtime.stream(), &host_weight, &weight_shape)?;
         let bias = weights.upload(runtime, &format!("{prefix}.weight_bias"), &[out_channels])?;
         let boundary = BoundaryId::parse(prefix).map_err(|error| CudaError::Unsupported {
             context: "ResNet trunk",
@@ -99,6 +113,7 @@ impl ConvLayer {
             weight,
             bias,
             shape,
+            fp16,
             plan: LayerPlan {
                 #[cfg(all(test, feature = "_cuda-libraries"))]
                 override_choice: None,
@@ -124,6 +139,11 @@ impl ConvLayer {
     /// The model boundary this layer computes
     pub(super) fn boundary(&self) -> BoundaryId {
         self.plan.boundary
+    }
+
+    /// Whether selection may give this layer FP16 tiles, from its weights
+    pub(super) fn fp16(&self) -> Fp16Policy {
+        self.fp16
     }
 
     /// The trunk-owned operation after this layer's convolution

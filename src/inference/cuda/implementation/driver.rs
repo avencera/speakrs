@@ -3,31 +3,39 @@
 use super::policy::{DeviceDefault, Recipe, RecipeChoice};
 use super::{BoundaryId, Modules, PlanPin, Qualified, Selected, Selection, Target, TokenEvidence};
 use crate::inference::cuda::candidate::{
-    ConfigPin, ConvOxide, Coverage, DriverCandidate, FbankOxide, LstmProjOxide, PlanError,
-    SegdenseArea, SincOxide, WideconvOxide,
+    ConfigPin, ConvOxide, Coverage, DriverCandidate, FbankOxide, Fp16Policy, LstmProjOxide,
+    PlanError, SegdenseArea, SincOxide, WideconvOxide,
 };
 use crate::inference::cuda::device::DeviceAttributes;
 use crate::inference::cuda::{CudaError, CudaMath, KernelModule, PtxTier};
 
-/// Candidate-owned scalar pin construction for the requested pipeline tuple
-type TuningFp32Pin = fn(
+/// Candidate-owned distinct tuning choices, independent of startup routing
+type TuningPins =
+    fn(BoundaryId, usize, CudaMath, &DeviceAttributes, PtxTier) -> Vec<(ConfigPin, &'static str)>;
+
+/// Candidate-owned pin construction under a selection's FP16 policy
+type DriverPin = fn(
     BoundaryId,
     usize,
     CudaMath,
     &DeviceAttributes,
     PtxTier,
-) -> Result<Option<ConfigPin>, PlanError>;
+    Fp16Policy,
+) -> Result<ConfigPin, PlanError>;
+
+/// Candidate-owned operand policy shared by hybrid coverage and pin selection
+type HybridFp16 = fn(&DeviceAttributes, PtxTier, Option<Recipe>, Fp16Policy) -> Fp16Policy;
 
 /// One area's library-free candidate interface, independent of artifact loading
 pub(super) struct Area {
     area: KernelModule,
     hybrid: HybridPolicy,
-    coverage: fn(PtxTier, &DeviceAttributes) -> Coverage,
+    coverage: fn(PtxTier, &DeviceAttributes, Fp16Policy) -> Coverage,
+    hybrid_fp16: HybridFp16,
     scope: fn(BoundaryId, usize, CudaMath, &DeviceAttributes, PtxTier) -> Option<super::SpeedScope>,
     summary: fn(CudaMath) -> &'static str,
-    pin:
-        fn(BoundaryId, usize, CudaMath, &DeviceAttributes, PtxTier) -> Result<ConfigPin, PlanError>,
-    tuning_fp32_pin: TuningFp32Pin,
+    pin: DriverPin,
+    tuning_pins: TuningPins,
 }
 
 /// A port either owns speed selection or retains the frozen qualified table
@@ -44,10 +52,11 @@ impl Area {
             area: C::AREA,
             hybrid: HybridPolicy::Scoped,
             coverage: C::driver_coverage,
+            hybrid_fp16: C::hybrid_fp16,
             scope: C::speed_scope,
             summary: C::speed_summary,
             pin: C::driver_pin,
-            tuning_fp32_pin: C::tuning_fp32_pin,
+            tuning_pins: C::tuning_pins,
         }
     }
 
@@ -94,21 +103,12 @@ pub(super) fn tuning_configurations(
                     if area.area == KernelModule::Sincnet && math == CudaMath::Tf32 {
                         continue;
                     }
-                    if !(area.coverage)(module.tier(), device).covers(boundary.name(), batch, math)
+                    // implementation support belongs to the candidate; accuracy
+                    // approval remains an independent catalogue step
+                    for (pin, family) in
+                        (area.tuning_pins)(boundary, batch, math, device, module.tier())
                     {
-                        continue;
-                    }
-                    let Ok(pin) = (area.pin)(boundary, batch, math, device, module.tier()) else {
-                        continue;
-                    };
-                    configurations.push((boundary, batch, math, module, pin, "default"));
-                    // only the candidate owner can construct a pin for this math mode;
-                    // the independent policy still has to approve its arithmetic
-                    if let Ok(Some(fp32)) =
-                        (area.tuning_fp32_pin)(boundary, batch, math, device, module.tier())
-                        && fp32 != pin
-                    {
-                        configurations.push((boundary, batch, math, module, fp32, "fp32"));
+                        configurations.push((boundary, batch, math, module, pin, family));
                     }
                 }
             }
@@ -179,7 +179,8 @@ pub(super) fn select_from(
             .filter(|recipe| recipe.allows_tier_limit(modules.tier_limit()))
         })
         .flatten();
-    let recipe_choice = recipe.map(|recipe| recipe.choice(boundary, batch, math));
+    let fp16 = modules.fp16();
+    let recipe_choice = recipe.map(|recipe| recipe.choice(boundary, batch, math, fp16));
     if recipe_choice == Some(RecipeChoice::Library) {
         return Ok(Some(Selected::Library));
     }
@@ -206,7 +207,12 @@ pub(super) fn select_from(
         };
         let selected_request = request;
         let request = modules.effective_request(request)?;
-        if !(candidate.coverage)(request.tier(), modules.device()).covers(
+        let fp16 = if selection == Selection::Production {
+            (candidate.hybrid_fp16)(modules.device(), request.tier(), recipe, fp16)
+        } else {
+            fp16
+        };
+        if !(candidate.coverage)(request.tier(), modules.device(), fp16).covers(
             boundary.name(),
             batch,
             math,
@@ -216,7 +222,17 @@ pub(super) fn select_from(
         let scope = (candidate.scope)(boundary, batch, math, modules.device(), request.tier())
             .filter(|scope| scope.contains(modules.device()) && scope.allows_tier(request.tier()));
         let default = (selection == Selection::Production)
-            .then(|| DeviceDefault::select(*area, batch, math, modules.device(), request.tier()))
+            .then(|| {
+                DeviceDefault::select(
+                    *area,
+                    boundary,
+                    batch,
+                    math,
+                    modules.device(),
+                    request.tier(),
+                    fp16,
+                )
+            })
             .flatten();
         if selection == Selection::Production
             && recipe.is_none()
@@ -228,7 +244,14 @@ pub(super) fn select_from(
         }
         let pin = match recipe_choice {
             Some(RecipeChoice::FixedPin(pin)) => Ok(pin),
-            _ => (candidate.pin)(boundary, batch, math, modules.device(), request.tier()),
+            _ => (candidate.pin)(
+                boundary,
+                batch,
+                math,
+                modules.device(),
+                request.tier(),
+                fp16,
+            ),
         };
         if selection == Selection::Production
             && matches!(
@@ -297,10 +320,7 @@ pub(super) fn select_from(
             {
                 TokenEvidence::Recipe(recipe)
             } else if let Some(scope) = scope {
-                TokenEvidence::Port {
-                    scope,
-                    summary: (candidate.summary)(math),
-                }
+                TokenEvidence::non_fp16_port(scope, (candidate.summary)(math), pin)
             } else if let Some(default) = default {
                 TokenEvidence::DeviceDefault(default)
             } else {

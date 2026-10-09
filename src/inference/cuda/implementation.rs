@@ -70,9 +70,9 @@ pub(crate) use evidence::{
 use super::candidate::{Batches, Coverage, CoverageEntry, Maths};
 use super::candidate::{
     ConfigPin, ConvCandidate, ConvLayerSpec, ConvOxide, DenseCandidate, DenseOxide, DenseSpec,
-    FbankCandidate, FbankOxide, FbankSpec, LstmCandidate, LstmOxide, LstmProjOxide, LstmSpec,
-    PlanError, SegConvCandidate, SegConvOxide, SegConvSpec, SincCandidate, SincOxide, SincSpec,
-    WideconvOxide,
+    FbankCandidate, FbankOxide, FbankSpec, Fp16Policy, LstmCandidate, LstmOxide, LstmProjOxide,
+    LstmSpec, PlanError, SegConvCandidate, SegConvOxide, SegConvSpec, SincCandidate, SincOxide,
+    SincSpec, WideconvOxide,
 };
 use super::device::DeviceAttributes;
 use super::error::GeometryError;
@@ -348,6 +348,19 @@ pub(crate) enum TokenEvidence {
     /// An explicit development control, which grants no production evidence
     #[cfg(all(test, feature = "_cuda-libraries"))]
     Qualification,
+}
+
+impl TokenEvidence {
+    /// Match non-FP16 port measurements to the selected configuration
+    fn non_fp16_port(scope: SpeedScope, summary: &'static str, pin: ConfigPin) -> Self {
+        // recipe and tuned evidence own FP16 measurements separately; a device
+        // speed scope alone does not extend these port measurements to FP16 tiles
+        if pin.is_fp16() {
+            return Self::Implemented;
+        }
+
+        Self::Port { scope, summary }
+    }
 }
 
 /// A boundary accepted by a pinned record, or an explicit development control
@@ -826,6 +839,11 @@ pub(crate) trait Modules {
         false
     }
 
+    /// Whether this selection may choose FP16 tiles
+    fn fp16(&self) -> Fp16Policy {
+        Fp16Policy::Allowed
+    }
+
     /// Resolve diagnostic policy before the selected identity is fixed
     fn effective_request(&self, request: ModuleRequest) -> Result<ModuleRequest, CudaError> {
         Ok(request)
@@ -840,9 +858,15 @@ pub(crate) trait Modules {
     fn embedded_exact(&self, area: KernelModule) -> Result<ModuleRequest, CudaError>;
 }
 
-impl Modules for &CudaRuntime {
+/// A runtime's modules for one selection, with that selection's FP16 policy
+struct RuntimeModules<'a> {
+    runtime: &'a CudaRuntime,
+    fp16: Fp16Policy,
+}
+
+impl Modules for RuntimeModules<'_> {
     fn is_tuning(&self) -> bool {
-        CudaRuntime::is_tuning(self)
+        self.runtime.is_tuning()
     }
 
     fn tune_choice(
@@ -851,7 +875,7 @@ impl Modules for &CudaRuntime {
         batch: usize,
         math: CudaMath,
     ) -> Result<Option<ApprovedChoice>, CudaError> {
-        let choice = self.tuned_choice(boundary, batch, math);
+        let choice = self.runtime.tuned_choice(boundary, batch, math);
         if self.is_tuning() && choice.is_none() {
             return Err(super::tuning::invalid(
                 "no accuracy-approved choice for this tuning tuple",
@@ -861,32 +885,36 @@ impl Modules for &CudaRuntime {
     }
 
     fn recipe_mode(&self) -> policy::RecipeMode {
-        CudaRuntime::recipe_mode(self)
+        self.runtime.recipe_mode()
     }
 
     fn effective_request(&self, request: ModuleRequest) -> Result<ModuleRequest, CudaError> {
-        CudaRuntime::effective_request(self, request)
+        self.runtime.effective_request(request)
     }
 
     fn force_library(&self) -> bool {
-        CudaRuntime::force_library(self)
+        self.runtime.force_library()
+    }
+
+    fn fp16(&self) -> Fp16Policy {
+        self.fp16
     }
 
     fn device(&self) -> &DeviceAttributes {
-        CudaRuntime::device(self)
+        self.runtime.device()
     }
 
     fn tier_limit(&self) -> PtxTier {
-        self.ptx_tier()
+        self.runtime.ptx_tier()
     }
 
     fn load(&mut self, request: ModuleRequest) -> Result<ModuleRequest, CudaError> {
-        Ok(self.load_module(request)?.request())
+        Ok(self.runtime.load_module(request)?.request())
     }
 
     #[cfg(all(test, feature = "_cuda-libraries"))]
     fn embedded_exact(&self, area: KernelModule) -> Result<ModuleRequest, CudaError> {
-        self.embedded_exact_request(area)
+        self.runtime.embedded_exact_request(area)
     }
 }
 
@@ -898,10 +926,31 @@ pub(crate) fn plan_selection(
     math: CudaMath,
     #[cfg(all(test, feature = "_cuda-libraries"))] override_choice: Option<Choice>,
 ) -> Result<Selected, CudaError> {
+    plan_selection_with(
+        runtime,
+        boundary,
+        batch,
+        math,
+        Fp16Policy::Allowed,
+        #[cfg(all(test, feature = "_cuda-libraries"))]
+        override_choice,
+    )
+}
+
+/// [`plan_selection`] for a boundary that may run FP16 tiles, under `fp16`
+pub(crate) fn plan_selection_with(
+    runtime: &CudaRuntime,
+    boundary: BoundaryId,
+    batch: usize,
+    math: CudaMath,
+    fp16: Fp16Policy,
+    #[cfg(all(test, feature = "_cuda-libraries"))] override_choice: Option<Choice>,
+) -> Result<Selected, CudaError> {
     let request = PlanRequest::Hybrid;
     #[cfg(all(test, feature = "_cuda-libraries"))]
     let request = override_choice.map_or(request, PlanRequest::Qualification);
-    let selected = request.resolve(boundary, batch, math, runtime)?;
+    let modules = RuntimeModules { runtime, fp16 };
+    let selected = request.resolve(boundary, batch, math, modules)?;
     match &selected {
         Selected::Oxide(token) => {
             tracing::info!(boundary = boundary.name(), batch, ?math, area = token.area().name(), source = token.source().name(), speed_measured = token.speed_measured(), evidence = ?token.evidence, "CUDA route selected implementation=Oxide")
@@ -971,10 +1020,19 @@ impl PlanRequest {
             return Ok(Selected::Library);
         }
 
+        // an excluded FP16 measurement leaves the selection made without the tune file
         if matches!(self, Self::Hybrid)
             && let Some(choice) = modules.tune_choice(boundary, batch, math)?
         {
-            return tuned_selection(choice, boundary, batch, math, &mut modules, !driver);
+            if !modules.fp16().allows() && choice.is_fp16() {
+                if modules.is_tuning() {
+                    return Err(super::tuning::invalid(
+                        "FP16 tuning candidate is excluded by the layer weights",
+                    ));
+                }
+            } else {
+                return tuned_selection(choice, boundary, batch, math, &mut modules, !driver);
+            }
         }
         if driver {
             return driver::select(boundary, batch, math, modules);

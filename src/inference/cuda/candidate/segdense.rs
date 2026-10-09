@@ -1291,7 +1291,11 @@ impl SegConvCandidate for SegConvOxide {
 pub(crate) struct Area;
 impl super::DriverCandidate for Area {
     const AREA: KernelModule = KernelModule::Segdense;
-    fn driver_coverage(_tier: PtxTier, _device: &DeviceAttributes) -> Coverage {
+    fn driver_coverage(
+        _tier: PtxTier,
+        _device: &DeviceAttributes,
+        _fp16: super::Fp16Policy,
+    ) -> Coverage {
         Coverage(&[CoverageEntry {
             layers: &[
                 "sincnet.conv1",
@@ -1342,6 +1346,7 @@ impl super::DriverCandidate for Area {
         math: CudaMath,
         device: &DeviceAttributes,
         tier: PtxTier,
+        _fp16: super::Fp16Policy,
     ) -> Result<super::ConfigPin, PlanError> {
         let site = Site::from_boundary(boundary)?;
         SegdensePin::select(site, batch, math, tier, device).map(super::ConfigPin::Segdense)
