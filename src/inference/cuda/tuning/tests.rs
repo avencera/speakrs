@@ -483,7 +483,7 @@ fn benchmark_visits_every_exact_approved_choice() {
         }
         let device = Builder::new(cc).multiprocessors(sms).name(name).build();
         let catalogue = Catalogue::new(&device, tier).unwrap();
-        let passes: Vec<_> = catalogue.benchmark_kinds().collect();
+        let passes: Vec<_> = catalogue.benchmark_kinds(true).collect();
         let controls: Vec<_> = passes
             .iter()
             .map(|kind| TuneControl::benchmark(*kind, true, &device, tier).unwrap())
@@ -610,7 +610,7 @@ fn fp16_tuning_retains_the_non_fp16_4060_ti_wide_choice() {
             assert!(choices.iter().any(|choice| matches!(choice,
                 ApprovedChoice::Kernel(config) if matches!(config.pin(), ConfigPin::Wideconv(_)) && config.pin().is_fp16())));
             let visited: Vec<_> = catalogue
-                .benchmark_kinds()
+                .benchmark_kinds(true)
                 .filter_map(|kind| {
                     TuneControl::benchmark(kind, true, &device, tier)
                         .unwrap()
@@ -652,7 +652,7 @@ fn fp16_tuning_is_discoverable_without_an_ada_recipe_and_never_in_fp32() {
                     .any(|choice| matches!(choice,
                 ApprovedChoice::Kernel(config) if config.pin() == expected))
             );
-            assert!(catalogue.benchmark_kinds().any(|kind| {
+            assert!(catalogue.benchmark_kinds(true).any(|kind| {
                 TuneControl::benchmark(kind, true, &device, tier)
                     .unwrap()
                     .choice(boundary, batch, CudaMath::Tf32)
@@ -738,7 +738,7 @@ fn kernel_only_tuning_excludes_library_from_timed_and_untimed_plans() {
     let catalogue = Catalogue::new(&device, tier).unwrap();
     let tuple = Tuple::new(boundary, 1, CudaMath::Tf32).unwrap();
     assert_eq!(catalogue.choices(tuple), [ApprovedChoice::Library]);
-    for kind in catalogue.benchmark_kinds() {
+    for kind in catalogue.benchmark_kinds(false) {
         let control = TuneControl::benchmark(kind, false, &device, tier).unwrap();
         assert_eq!(control.choice(boundary, 1, CudaMath::Tf32), None);
         assert_eq!(control.plan_choice(boundary, 1, CudaMath::Tf32), None);
@@ -953,4 +953,56 @@ fn runtime_exact_fp32_fallback_does_not_widen_tuner_approval() {
         Policy::approve_runtime(boundary, CudaMath::Fp32, pin),
         Policy::approve(boundary, CudaMath::Fp32, pin)
     );
+}
+
+#[test]
+fn kernel_only_pass_count_matches_enabled_choices() {
+    use super::TuneControl;
+
+    let device = Builder::new(ComputeCapability::new(12, 0)).build();
+    let tier = PtxTier::Sm120;
+    let catalogue = Catalogue::new(&device, tier).unwrap();
+    let expected = catalogue
+        .0
+        .values()
+        .map(|choices| {
+            choices
+                .iter()
+                .filter(|choice| !matches!(choice, ApprovedChoice::Library))
+                .count()
+        })
+        .max()
+        .unwrap();
+    assert!(expected > 0);
+    let passes: Vec<_> = catalogue.benchmark_kinds(false).collect();
+    assert_eq!(passes.len(), expected);
+    assert_eq!(
+        catalogue.benchmark_kinds(true).count(),
+        expected + usize::from(cfg!(feature = "_cuda-libraries"))
+    );
+
+    let controls: Vec<_> = passes
+        .into_iter()
+        .map(|kind| TuneControl::benchmark(kind, false, &device, tier).unwrap())
+        .collect();
+    for control in &controls {
+        assert!(catalogue.0.keys().any(|tuple| {
+            control
+                .choice(tuple.boundary, tuple.batch, tuple.math.into())
+                .is_some()
+        }));
+    }
+
+    for (tuple, choices) in &catalogue.0 {
+        let enabled: Vec<_> = choices
+            .iter()
+            .filter(|choice| !matches!(choice, ApprovedChoice::Library))
+            .cloned()
+            .collect();
+        let visited: Vec<_> = controls
+            .iter()
+            .filter_map(|control| control.choice(tuple.boundary, tuple.batch, tuple.math.into()))
+            .collect();
+        assert_eq!(visited, enabled, "{tuple:?}");
+    }
 }

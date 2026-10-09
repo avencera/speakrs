@@ -331,9 +331,24 @@ impl Catalogue {
         Ok(Self(choices))
     }
 
-    fn benchmark_kinds(&self) -> impl Iterator<Item = BenchKind> {
-        let count = self.0.values().map(Vec::len).max().unwrap_or(0);
+    fn benchmark_kinds(&self, include_library: bool) -> impl Iterator<Item = BenchKind> {
+        let count = self
+            .0
+            .keys()
+            .map(|tuple| self.enabled_choices(*tuple, include_library).count())
+            .max()
+            .unwrap_or(0);
         (0..count).map(BenchKind::CatalogueSlot)
+    }
+
+    fn enabled_choices(
+        &self,
+        tuple: Tuple,
+        include_library: bool,
+    ) -> impl Iterator<Item = &ApprovedChoice> {
+        self.choices(tuple)
+            .iter()
+            .filter(move |choice| include_library || !matches!(choice, ApprovedChoice::Library))
     }
 
     fn choices(&self, tuple: Tuple) -> &[ApprovedChoice] {
@@ -459,11 +474,9 @@ impl TuneControl {
                 catalogue,
                 include_library,
             } => {
-                let choices = catalogue.choices(tuple);
                 let BenchKind::CatalogueSlot(index) = kind;
-                choices
-                    .iter()
-                    .filter(|choice| *include_library || !matches!(choice, ApprovedChoice::Library))
+                catalogue
+                    .enabled_choices(tuple, *include_library)
                     .nth(*index)
                     .cloned()
             }
@@ -488,9 +501,8 @@ impl TuneControl {
             let tuple = Tuple::new(boundary, batch, math).ok()?;
             // untimed boundaries need an approved plan to complete the model pass
             catalogue
-                .choices(tuple)
-                .iter()
-                .find(|choice| *include_library || !matches!(choice, ApprovedChoice::Library))
+                .enabled_choices(tuple, *include_library)
+                .next()
                 .cloned()
         })
     }
