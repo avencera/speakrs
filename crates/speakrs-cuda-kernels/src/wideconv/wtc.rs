@@ -31,6 +31,14 @@
 //! `spk_wideconv_pack_wtc` and go straight from global memory into registers, one
 //! element of the next chunk while the other element computes
 //!
+//! The staged one-product entries (`wtp1`) keep three raw stages and split the warps
+//! into two phases: warps 0..4 transform the next chunk before their products and
+//! warps 4..8 after them, so on each scheduler one warp feeds the tensor pipe while
+//! the other transforms, and a chunk ends with one barrier instead of two. Their `V`
+//! holds TF32 values rounded at the transform, `[element][channel][32]` with the tile
+//! index swizzled by `(channel % 4) * 8`, which keeps B fragment loads and transform
+//! stores on 32 banks without padding
+//!
 //! These entries exist in the sm75 variant only to keep the area's ABI equal; there
 //! they trap, and the host plans them only for the sm80 tier
 
@@ -80,8 +88,18 @@ const EPILOGUE_ROW: u32 = 40;
 pub const WTC_SHARED_BYTES: u32 = 2 * (RAW_WORDS + V_WORDS) * 4;
 /// Floats of one packed fragment block: 32 lanes of four registers
 const FRAGMENT: u32 = 128;
+/// Words per channel row of a staged `V`: one per tile, swizzled instead of padded
+const VP_STRIDE: u32 = WTC_TILES;
+/// Staged `V` words per stage, `[element][channel][VP_STRIDE]`
+const VP_WORDS: u32 = 16 * WTC_CHUNK * VP_STRIDE;
+/// Raw stages of a staged launch
+const RAW_STAGES: u32 = 3;
+/// Dynamic shared bytes of a staged launch: three raw stages and two of `V`, which
+/// also hold the epilogue tile
+pub const WTP_SHARED_BYTES: u32 = (RAW_STAGES * RAW_WORDS + 2 * VP_WORDS) * 4;
 
 const _: () = assert!(16 * 16 * EPILOGUE_ROW * 4 <= WTC_SHARED_BYTES && HALVES == 2);
+const _: () = assert!(16 * 16 * EPILOGUE_ROW * 4 <= WTP_SHARED_BYTES && VP_STRIDE == 32);
 const _: () = assert!(WTC_CHUNK * WTC_TILES == WTC_THREADS);
 #[cfg(feature = "tier-sm80")]
 const _: () =
@@ -248,6 +266,61 @@ unsafe fn store_column_transform(dst: u32, [r0, r1, r2, r3]: [f32; 4]) {
     }
 }
 
+/// As [`transform`], into a staged `V`: values rounded to TF32 and the tile index
+/// swizzled by `(channel % 4) * 8`
+///
+/// # Safety
+///
+/// As [`transform`], with `v` the word offset of a staged `V` stage
+#[cfg(feature = "tier-sm80")]
+#[inline(always)]
+unsafe fn transform_staged(smem: u32, raw: u32, v: u32, half: u32, channel: u32, tile: u32) {
+    use super::tensor::ops::opaque;
+
+    let src = opaque(smem + (raw + (channel * 4 + half) * RAW_ROW + tile) * 4);
+    // safety: inside the published raw stage per this function's contract
+    let d = unsafe {
+        [
+            raw_row(src),
+            raw_row(src + RAW_ROW * 4),
+            raw_row(src + 2 * RAW_ROW * 4),
+        ]
+    };
+    let rows = if half == 0 {
+        [sub4(d[0], d[2]), add4(d[1], d[2])]
+    } else {
+        [sub4(d[1], d[0]), sub4(d[0], d[2])]
+    };
+    let column = tile ^ ((channel % 4) << 3);
+    let dst = opaque(smem + (v + (half * 8 * WTC_CHUNK + channel) * VP_STRIDE + column) * 4);
+    // safety: this thread's slots per this function's contract
+    unsafe {
+        store_column_rounded(dst, rows[0]);
+        store_column_rounded(dst + 4 * WTC_CHUNK * VP_STRIDE * 4, rows[1]);
+    }
+}
+
+/// As [`store_column_transform`], rounded to TF32, in a staged `V`
+///
+/// # Safety
+///
+/// `dst` must address this thread's slot of the first of four consecutive elements
+#[cfg(feature = "tier-sm80")]
+#[inline(always)]
+unsafe fn store_column_rounded(dst: u32, [r0, r1, r2, r3]: [f32; 4]) {
+    use super::sts1;
+
+    const STEP: u32 = WTC_CHUNK * VP_STRIDE * 4;
+    let round = |value: f32| f32::from_bits(high_bits(value));
+    // safety: forwarded from this function's contract
+    unsafe {
+        sts1(dst, round(r0 - r2));
+        sts1(dst + STEP, round(r1 + r2));
+        sts1(dst + 2 * STEP, round(r2 - r1));
+        sts1(dst + 3 * STEP, round(r1 - r3));
+    }
+}
+
 /// Expands to one tensor-core Winograd convolution for a fixed same-channel shape
 macro_rules! wtc3x3 {
     (
@@ -256,7 +329,8 @@ macro_rules! wtc3x3 {
         channels = $channels:expr,
         h = $h:expr,
         w = $w:expr,
-        products = $products:expr $(,)?
+        products = $products:expr,
+        stages = $stages:expr $(,)?
     ) => {
         $(#[$doc])*
         #[kernel]
@@ -297,9 +371,13 @@ macro_rules! wtc3x3 {
                 const T: u32 = WTC_TILES;
                 const CC: u32 = WTC_CHUNK;
                 const PRODUCTS: u32 = $products;
+                // 2: the plain pipeline; 3: the staged one-product pipeline
+                const STAGES: u32 = $stages;
                 const RPT: usize = RAW_PASSES as usize;
                 const STAGE_V: u32 = 2 * RAW_WORDS;
+                const STAGED_V: u32 = RAW_STAGES * RAW_WORDS;
                 const _: () = assert!(C % KB == 0 && C % CC == 0 && PRODUCTS >= 1 && PRODUCTS <= 3);
+                const _: () = assert!(STAGES == 2 || (STAGES == RAW_STAGES && PRODUCTS == 1));
 
                 let len = batch * C * HW;
                 if len as usize > x.len()
@@ -374,126 +452,156 @@ macro_rules! wtc3x3 {
                 // [element][tile][high, low]
                 let mut frag = [[[[0u32; 4]; 2]; 4]; 2];
 
-                // prologue: raw windows of chunks 0 and 1, fragments of chunk 0, V of chunk 0
-                let mut stage = 0;
-                #[unroll]
-                while stage < 2 {
-                    let chunk = if (stage as u32) < chunks { stage as u32 } else { chunks - 1 };
-                    let dst = smem + stage as u32 * RAW_WORDS * 4;
-                    let mut i = 0;
-                    #[unroll]
-                    while i < RPT {
-                        let valid = (raw_valid >> i) & 1 != 0;
-                        let column = (col0 + 8 * i as i32).clamp(0, W as i32 - 1) as u32;
-                        // safety: valid copies stay inside the checked input; others read nothing
-                        unsafe {
-                            copy4(dst + (raw_slot + 4 * i as u32) * 4, x_ptr.add((chunk * CC * HW + row_offset + column) as usize), valid)
-                        };
-                        i += 1;
-                    }
-                    commit();
-                    stage += 1;
-                }
-                let mut e = 0;
-                #[unroll]
-                while e < 2 {
-                    let mut m = 0;
-                    #[unroll]
-                    while m < 4 {
-                        let block = ((e * 4 + m) * 2) as u32 * FRAGMENT;
-                        // safety: fragments of chunk 0 of this warp's elements
-                        unsafe {
-                            frag[e][m][0] = fragment(fragments.add(block as usize));
-                            if PRODUCTS > 1 {
-                                frag[e][m][1] = fragment(fragments.add((block + FRAGMENT) as usize));
-                            }
-                        }
-                        m += 1;
-                    }
-                    e += 1;
-                }
-                wait_all();
-                thread::sync_threads();
                 // transform slots: both halves of the patch of channel `vc`, tile `vt`
                 let vc = tid / T;
                 let vt = tid % T;
-                // safety: reads published raw stage 0 and writes this thread's V slots
-                unsafe {
-                    transform(smem, 0, STAGE_V, 0, vc, vt);
-                    transform(smem, 0, STAGE_V, 1, vc, vt);
-                }
-                thread::sync_threads();
-
-                let mut c = 0;
-                while c < chunks {
-                    let next = if c + 1 < chunks { c + 1 } else { chunks - 1 };
-                    let after = if c + 2 < chunks { c + 2 } else { chunks - 1 };
-                    // raw(c + 2) goes into the buffer raw(c) left in iteration c - 1's transform
-                    let dst = opaque(smem + c % 2 * RAW_WORDS * 4);
-                    let mut i = 0;
+                if STAGES == RAW_STAGES {
+                    // prologue: raw windows of chunks 0 and 1, fragments of chunk 0, V of chunk 0
+                    let mut stage = 0;
                     #[unroll]
-                    while i < RPT {
-                        let valid = (raw_valid >> i) & 1 != 0;
-                        let column = (col0 + 8 * i as i32).clamp(0, W as i32 - 1) as u32;
-                        // safety: valid copies stay inside the checked input; others read nothing
-                        unsafe {
-                            copy4(dst + (raw_slot + 4 * i as u32) * 4, x_ptr.add((after * CC * HW + row_offset + column) as usize), valid)
-                        };
-                        i += 1;
+                    while stage < 2 {
+                        let chunk = if (stage as u32) < chunks { stage as u32 } else { chunks - 1 };
+                        let dst = smem + stage as u32 * RAW_WORDS * 4;
+                        let mut i = 0;
+                        #[unroll]
+                        while i < RPT {
+                            let valid = (raw_valid >> i) & 1 != 0;
+                            let column = (col0 + 8 * i as i32).clamp(0, W as i32 - 1) as u32;
+                            // safety: valid copies stay inside the checked input; others read nothing
+                            unsafe {
+                                copy4(dst + (raw_slot + 4 * i as u32) * 4, x_ptr.add((chunk * CC * HW + row_offset + column) as usize), valid)
+                            };
+                            i += 1;
+                        }
+                        commit();
+                        stage += 1;
                     }
-                    commit();
-
-                    let sv = opaque(smem + (STAGE_V + c % 2 * V_WORDS) * 4);
                     let mut e = 0;
                     #[unroll]
                     while e < 2 {
-                        let element = 2 * warp + e as u32;
-                        let mut n = 0;
-                        #[unroll]
-                        while n < 4 {
-                            let at = sv + ((element * CC + t4) * V_STRIDE + 8 * n as u32 + g) * 4;
-                            // safety: words of the published V stage
-                            let (v0, v1) = unsafe { (lds(at), lds(at + 4 * V_STRIDE * 4)) };
-                            let (h0, h1) = (high_bits(v0), high_bits(v1));
-                            let (l0, l1) = if PRODUCTS == 3 {
-                                // the exact remainder; the tensor core ignores its low 13 bits
-                                ((v0 - f32::from_bits(h0)).to_bits(), (v1 - f32::from_bits(h1)).to_bits())
-                            } else {
-                                (0, 0)
-                            };
-                            let mut m = 0;
-                            #[unroll]
-                            while m < 4 && PRODUCTS == 1 {
-                                acc[e][m][n] = mma(acc[e][m][n], frag[e][m][0], h0, h1);
-                                m += 1;
-                            }
-                            #[unroll]
-                            while m < 4 {
-                                // tensor cores truncate while accumulating: the chunk's products
-                                // start from zero and join the running sum with rounded FADDs
-                                let mut part = [0.0f32; 4];
-                                if PRODUCTS == 3 {
-                                    part = mma(part, frag[e][m][0], l0, l1);
-                                }
-                                part = mma(part, frag[e][m][1], h0, h1);
-                                part = mma(part, frag[e][m][0], h0, h1);
-                                let mut r = 0;
-                                #[unroll]
-                                while r < 4 {
-                                    acc[e][m][n][r] += part[r];
-                                    r += 1;
-                                }
-                                m += 1;
-                            }
-                            n += 1;
-                        }
-                        // this element's fragments of the next chunk land while the other
-                        // element computes
                         let mut m = 0;
                         #[unroll]
                         while m < 4 {
-                            let block = ((next * 16 * 4 * 2) + ((e * 4 + m) * 2) as u32) * FRAGMENT;
-                            // safety: fragments of a chunk of this warp's elements
+                            let block = ((e * 4 + m) * 2) as u32 * FRAGMENT;
+                            // safety: fragments of chunk 0 of this warp's elements
+                            unsafe { frag[e][m][0] = fragment(fragments.add(block as usize)) };
+                            m += 1;
+                        }
+                        e += 1;
+                    }
+                    wait_all();
+                    thread::sync_threads();
+                    // safety: reads published raw stage 0 and writes this thread's V slots
+                    unsafe {
+                        transform_staged(smem, 0, STAGED_V, 0, vc, vt);
+                        transform_staged(smem, 0, STAGED_V, 1, vc, vt);
+                    }
+                    thread::sync_threads();
+
+                    // warps 0..4 transform raw(c + 1) before their products, warps 4..8
+                    // after them: each scheduler runs one warp of each phase
+                    let early = warp < 4;
+                    let mut c = 0;
+                    while c < chunks {
+                        let next = if c + 1 < chunks { c + 1 } else { chunks - 1 };
+                        let after = if c + 2 < chunks { c + 2 } else { chunks - 1 };
+                        // raw(c + 2) goes into the stage of raw(c - 1), transformed in
+                        // iteration c - 2
+                        let dst = opaque(smem + (c + 2) % RAW_STAGES * RAW_WORDS * 4);
+                        let mut i = 0;
+                        #[unroll]
+                        while i < RPT {
+                            let valid = (raw_valid >> i) & 1 != 0;
+                            let column = (col0 + 8 * i as i32).clamp(0, W as i32 - 1) as u32;
+                            // safety: valid copies stay inside the checked input; others read nothing
+                            unsafe {
+                                copy4(dst + (raw_slot + 4 * i as u32) * 4, x_ptr.add((after * CC * HW + row_offset + column) as usize), valid)
+                            };
+                            i += 1;
+                        }
+                        commit();
+
+                        let raw = (c + 1) % RAW_STAGES * RAW_WORDS;
+                        let v_next = STAGED_V + (c + 1) % 2 * VP_WORDS;
+                        if early {
+                            // safety: reads raw(c + 1), published by the last barrier, and
+                            // writes V stage (c + 1) % 2, last read in iteration c - 1
+                            unsafe {
+                                transform_staged(smem, raw, v_next, 0, vc, vt);
+                                transform_staged(smem, raw, v_next, 1, vc, vt);
+                            }
+                        }
+                        let sv = opaque(smem + (STAGED_V + c % 2 * VP_WORDS) * 4);
+                        let mut e = 0;
+                        #[unroll]
+                        while e < 2 {
+                            let element = 2 * warp + e as u32;
+                            let mut n = 0;
+                            #[unroll]
+                            while n < 4 {
+                                let tile = (8 * n as u32 + g) ^ (t4 << 3);
+                                let at = sv + ((element * CC + t4) * VP_STRIDE + tile) * 4;
+                                // safety: words of the published V stage, already rounded
+                                let (h0, h1) = unsafe { (lds(at).to_bits(), lds(at + 4 * VP_STRIDE * 4).to_bits()) };
+                                let mut m = 0;
+                                #[unroll]
+                                while m < 4 {
+                                    acc[e][m][n] = mma(acc[e][m][n], frag[e][m][0], h0, h1);
+                                    m += 1;
+                                }
+                                n += 1;
+                            }
+                            let mut m = 0;
+                            #[unroll]
+                            while m < 4 {
+                                let block = ((next * 16 * 4 * 2) + ((e * 4 + m) * 2) as u32) * FRAGMENT;
+                                // safety: fragments of a chunk of this warp's elements
+                                unsafe { frag[e][m][0] = fragment(fragments.add(block as usize)) };
+                                m += 1;
+                            }
+                            e += 1;
+                        }
+                        if !early {
+                            // safety: as the early transform above
+                            unsafe {
+                                transform_staged(smem, raw, v_next, 0, vc, vt);
+                                transform_staged(smem, raw, v_next, 1, vc, vt);
+                            }
+                        }
+                        wait_all();
+                        // publishes raw(c + 2) and V(c + 1) and closes all reads of V(c)
+                        thread::sync_threads();
+                        c += 1;
+                    }
+                } else {
+                    // prologue: raw windows of chunks 0 and 1, fragments of chunk 0, V of chunk 0
+                    let mut stage = 0;
+                    #[unroll]
+                    while stage < 2 {
+                        let chunk = if (stage as u32) < chunks { stage as u32 } else { chunks - 1 };
+                        let dst = smem + stage as u32 * RAW_WORDS * 4;
+                        let mut i = 0;
+                        #[unroll]
+                        while i < RPT {
+                            let valid = (raw_valid >> i) & 1 != 0;
+                            let column = (col0 + 8 * i as i32).clamp(0, W as i32 - 1) as u32;
+                            // safety: valid copies stay inside the checked input; others read nothing
+                            unsafe {
+                                copy4(dst + (raw_slot + 4 * i as u32) * 4, x_ptr.add((chunk * CC * HW + row_offset + column) as usize), valid)
+                            };
+                            i += 1;
+                        }
+                        commit();
+                        stage += 1;
+                    }
+                    let mut e = 0;
+                    #[unroll]
+                    while e < 2 {
+                        let mut m = 0;
+                        #[unroll]
+                        while m < 4 {
+                            let block = ((e * 4 + m) * 2) as u32 * FRAGMENT;
+                            // safety: fragments of chunk 0 of this warp's elements
                             unsafe {
                                 frag[e][m][0] = fragment(fragments.add(block as usize));
                                 if PRODUCTS > 1 {
@@ -504,19 +612,109 @@ macro_rules! wtc3x3 {
                         }
                         e += 1;
                     }
-
-                    // safety: reads raw stage (c + 1) % 2, published by the last barrier,
-                    // and writes V stage (c + 1) % 2, last read in iteration c - 1
-                    unsafe {
-                        let raw = (c + 1) % 2 * RAW_WORDS;
-                        let v = STAGE_V + (c + 1) % 2 * V_WORDS;
-                        transform(smem, raw, v, 0, vc, vt);
-                        transform(smem, raw, v, 1, vc, vt);
-                    }
                     wait_all();
-                    // publishes this iteration's stages and closes all reads of the others
                     thread::sync_threads();
-                    c += 1;
+                    // safety: reads published raw stage 0 and writes this thread's V slots
+                    unsafe {
+                        transform(smem, 0, STAGE_V, 0, vc, vt);
+                        transform(smem, 0, STAGE_V, 1, vc, vt);
+                    }
+                    thread::sync_threads();
+
+                    let mut c = 0;
+                    while c < chunks {
+                        let next = if c + 1 < chunks { c + 1 } else { chunks - 1 };
+                        let after = if c + 2 < chunks { c + 2 } else { chunks - 1 };
+                        // raw(c + 2) goes into the buffer raw(c) left in iteration c - 1's transform
+                        let dst = opaque(smem + c % 2 * RAW_WORDS * 4);
+                        let mut i = 0;
+                        #[unroll]
+                        while i < RPT {
+                            let valid = (raw_valid >> i) & 1 != 0;
+                            let column = (col0 + 8 * i as i32).clamp(0, W as i32 - 1) as u32;
+                            // safety: valid copies stay inside the checked input; others read nothing
+                            unsafe {
+                                copy4(dst + (raw_slot + 4 * i as u32) * 4, x_ptr.add((after * CC * HW + row_offset + column) as usize), valid)
+                            };
+                            i += 1;
+                        }
+                        commit();
+
+                        let sv = opaque(smem + (STAGE_V + c % 2 * V_WORDS) * 4);
+                        let mut e = 0;
+                        #[unroll]
+                        while e < 2 {
+                            let element = 2 * warp + e as u32;
+                            let mut n = 0;
+                            #[unroll]
+                            while n < 4 {
+                                let at = sv + ((element * CC + t4) * V_STRIDE + 8 * n as u32 + g) * 4;
+                                // safety: words of the published V stage
+                                let (v0, v1) = unsafe { (lds(at), lds(at + 4 * V_STRIDE * 4)) };
+                                let (h0, h1) = (high_bits(v0), high_bits(v1));
+                                let (l0, l1) = if PRODUCTS == 3 {
+                                    // the exact remainder; the tensor core ignores its low 13 bits
+                                    ((v0 - f32::from_bits(h0)).to_bits(), (v1 - f32::from_bits(h1)).to_bits())
+                                } else {
+                                    (0, 0)
+                                };
+                                let mut m = 0;
+                                #[unroll]
+                                while m < 4 && PRODUCTS == 1 {
+                                    acc[e][m][n] = mma(acc[e][m][n], frag[e][m][0], h0, h1);
+                                    m += 1;
+                                }
+                                #[unroll]
+                                while m < 4 {
+                                    // tensor cores truncate while accumulating: the chunk's products
+                                    // start from zero and join the running sum with rounded FADDs
+                                    let mut part = [0.0f32; 4];
+                                    if PRODUCTS == 3 {
+                                        part = mma(part, frag[e][m][0], l0, l1);
+                                    }
+                                    part = mma(part, frag[e][m][1], h0, h1);
+                                    part = mma(part, frag[e][m][0], h0, h1);
+                                    let mut r = 0;
+                                    #[unroll]
+                                    while r < 4 {
+                                        acc[e][m][n][r] += part[r];
+                                        r += 1;
+                                    }
+                                    m += 1;
+                                }
+                                n += 1;
+                            }
+                            // this element's fragments of the next chunk land while the other
+                            // element computes
+                            let mut m = 0;
+                            #[unroll]
+                            while m < 4 {
+                                let block = ((next * 16 * 4 * 2) + ((e * 4 + m) * 2) as u32) * FRAGMENT;
+                                // safety: fragments of a chunk of this warp's elements
+                                unsafe {
+                                    frag[e][m][0] = fragment(fragments.add(block as usize));
+                                    if PRODUCTS > 1 {
+                                        frag[e][m][1] = fragment(fragments.add((block + FRAGMENT) as usize));
+                                    }
+                                }
+                                m += 1;
+                            }
+                            e += 1;
+                        }
+
+                        // safety: reads raw stage (c + 1) % 2, published by the last barrier,
+                        // and writes V stage (c + 1) % 2, last read in iteration c - 1
+                        unsafe {
+                            let raw = (c + 1) % 2 * RAW_WORDS;
+                            let v = STAGE_V + (c + 1) % 2 * V_WORDS;
+                            transform(smem, raw, v, 0, vc, vt);
+                            transform(smem, raw, v, 1, vc, vt);
+                        }
+                        wait_all();
+                        // publishes this iteration's stages and closes all reads of the others
+                        thread::sync_threads();
+                        c += 1;
+                    }
                 }
 
                 // round `r` moves 16-channel tile `r` of both elements to
@@ -659,6 +857,7 @@ wtc3x3! {
     h = 20,
     w = 250,
     products = 3,
+    stages = 2,
 }
 
 wtc3x3! {
@@ -670,6 +869,7 @@ wtc3x3! {
     h = 10,
     w = 125,
     products = 3,
+    stages = 2,
 }
 
 wtc3x3! {
@@ -680,6 +880,7 @@ wtc3x3! {
     h = 20,
     w = 250,
     products = 2,
+    stages = 2,
 }
 
 wtc3x3! {
@@ -690,6 +891,7 @@ wtc3x3! {
     h = 10,
     w = 125,
     products = 2,
+    stages = 2,
 }
 
 wtc3x3! {
@@ -700,4 +902,38 @@ wtc3x3! {
     h = 20,
     w = 250,
     products = 1,
+    stages = 2,
+}
+
+wtc3x3! {
+    /// One-product TF32 Winograd 256 -> 256 3x3 convolution for TF32 mode; launch as
+    /// `spk_wideconv_wtc3_c256`
+    spk_wideconv_wtc1_c256,
+    channels = 256,
+    h = 10,
+    w = 125,
+    products = 1,
+    stages = 2,
+}
+
+wtc3x3! {
+    /// Staged one-product TF32 Winograd 128 -> 128 3x3 convolution for TF32 mode; launch
+    /// as `spk_wideconv_wtc3_c128` with `WTP_SHARED_BYTES` of dynamic shared memory
+    spk_wideconv_wtp1_c128,
+    channels = 128,
+    h = 20,
+    w = 250,
+    products = 1,
+    stages = 3,
+}
+
+wtc3x3! {
+    /// Staged one-product TF32 Winograd 256 -> 256 3x3 convolution for TF32 mode; launch
+    /// as `spk_wideconv_wtc3_c256` with `WTP_SHARED_BYTES` of dynamic shared memory
+    spk_wideconv_wtp1_c256,
+    channels = 256,
+    h = 10,
+    w = 125,
+    products = 1,
+    stages = 3,
 }

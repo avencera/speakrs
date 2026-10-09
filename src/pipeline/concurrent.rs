@@ -136,6 +136,18 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
         batch_size: usize,
         min_num_samples: usize,
     ) -> Result<ConcurrentEmbeddingResult, PipelineError> {
+        self.run_multi_mask_with(receiver, batch_size, min_num_samples, |batch, emb| {
+            self.flush_multi_mask_flat(embedding_model, batch, &mut Array3Writer(emb))
+        })
+    }
+
+    fn run_multi_mask_with(
+        &self,
+        receiver: crossbeam_channel::Receiver<Array2<f32>>,
+        batch_size: usize,
+        min_num_samples: usize,
+        mut flush: impl FnMut(&MultiMaskBatch<'_>, &mut Array3<f32>) -> Result<u64, PipelineError>,
+    ) -> Result<ConcurrentEmbeddingResult, PipelineError> {
         let total_windows = self.total_windows();
         let mut seg_array: Option<Array3<f32>> = None;
         let mut emb_array: Option<Array3<f32>> = None;
@@ -155,6 +167,7 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
         let mut total_decode_us = 0u64;
         let mut total_embed_us = 0u64;
         let mut flush_count = 0u32;
+        let mut inactive_windows = 0usize;
 
         loop {
             let recv_start = std::time::Instant::now();
@@ -201,6 +214,14 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
                 );
                 active_flags.push(active);
             }
+            if !active_flags[mask_base..].iter().any(|active| *active) {
+                inactive_windows += 1;
+                // keep decoded windows and original indices, but do not enqueue unused trunk work
+                audio_buffer.pop();
+                chunk_indices.pop();
+                active_flags.truncate(mask_base);
+                flat_masks[mask_base * nf..(mask_base + self.num_speakers) * nf].fill(0.0);
+            }
             total_decode_us += decode_start.elapsed().as_micros() as u64;
 
             if audio_buffer.len() == batch_size {
@@ -214,8 +235,7 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
                     active_flags: &active_flags,
                     chunk_indices: &chunk_indices,
                 };
-                total_embed_us +=
-                    self.flush_multi_mask_flat(embedding_model, &batch, &mut Array3Writer(emb))?;
+                total_embed_us += flush(&batch, emb)?;
                 flush_count += 1;
                 audio_buffer.clear();
                 flat_masks.fill(0.0);
@@ -237,14 +257,15 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
                 active_flags: &active_flags,
                 chunk_indices: &chunk_indices,
             };
-            total_embed_us +=
-                self.flush_multi_mask_flat(embedding_model, &batch, &mut Array3Writer(emb))?;
+            total_embed_us += flush(&batch, emb)?;
             flush_count += 1;
         }
 
         trace!(
+            target: "speakrs::timing",
             flushes = flush_count,
             chunks = chunk_idx,
+            inactive_windows,
             recv_wait_ms = total_recv_wait_us / 1000,
             decode_ms = total_decode_us / 1000,
             embed_ms = total_embed_us / 1000,
@@ -484,5 +505,111 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
 
         let values = row.to_vec();
         storage.store(chunk_idx, speaker_idx, &values);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConcurrentEmbeddingResult, ConcurrentEmbeddingRunner};
+    use crate::powerset::PowersetMapping;
+    use ndarray::{Array2, s};
+
+    fn run_windows(
+        active: &[bool],
+        batch_size: usize,
+    ) -> (ConcurrentEmbeddingResult, Vec<Vec<usize>>) {
+        let powerset = PowersetMapping::new(3, 2);
+        // equal window and step sizes make each audio slice a distinct window
+        let audio: Vec<f32> = (0..active.len())
+            .flat_map(|index| [index as f32; 16])
+            .collect();
+        let runner = ConcurrentEmbeddingRunner {
+            powerset: &powerset,
+            audio: &audio,
+            step_samples: 16,
+            window_samples: 16,
+            num_speakers: 3,
+        };
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        for &is_active in active {
+            let mut logits = Array2::zeros((589, 7));
+            logits.column_mut(usize::from(is_active)).fill(1.0);
+            sender.send(logits).unwrap();
+        }
+        drop(sender);
+
+        let mut batches = Vec::new();
+        let result = runner
+            .run_multi_mask_with(receiver, batch_size, 0, |batch, embeddings| {
+                batches.push(batch.chunk_indices.to_vec());
+                assert_eq!(batch.audio_slices.len(), batch.chunk_indices.len());
+                for (row, &index) in batch.chunk_indices.iter().enumerate() {
+                    assert!(active[index]);
+                    assert!(
+                        batch.audio_slices[row]
+                            .iter()
+                            .all(|&value| value == index as f32)
+                    );
+                    assert_eq!(
+                        &batch.active_flags[row * 3..row * 3 + 3],
+                        &[true, false, false]
+                    );
+                    let mask = &batch.flat_masks[row * 3 * 589..(row + 1) * 3 * 589];
+                    assert!(mask[..589].iter().all(|&value| value == 1.0));
+                    assert!(mask[589..].iter().all(|&value| value == 0.0));
+                    embeddings
+                        .slice_mut(s![index, 0, ..])
+                        .fill(index as f32 + 1.0);
+                }
+                Ok(0)
+            })
+            .unwrap();
+        (result, batches)
+    }
+
+    #[test]
+    fn inactive_windows_keep_indices_across_full_and_partial_batches() {
+        let active = [false, true, false, true, true, false, true, false, true];
+        let (result, batches) = run_windows(&active, 2);
+        assert_eq!(batches, [vec![1, 3], vec![4, 6], vec![8]]);
+        assert_eq!(result.num_chunks, active.len());
+        assert_eq!(result.embeddings.dim(), (9, 3, 256));
+        for (index, &is_active) in active.iter().enumerate() {
+            assert!(
+                result
+                    .segmentations
+                    .slice(s![index, .., 0])
+                    .iter()
+                    .all(|&value| value == if is_active { 1.0 } else { 0.0 })
+            );
+            for speaker in 0..3 {
+                let row = result.embeddings.slice(s![index, speaker, ..]);
+                if is_active && speaker == 0 {
+                    assert!(row.iter().all(|&value| value == index as f32 + 1.0));
+                } else {
+                    assert!(row.iter().all(|value| value.is_nan()));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn all_inactive_windows_do_not_flush() {
+        let (result, batches) = run_windows(&[false; 5], 2);
+        assert!(batches.is_empty());
+        assert_eq!(result.num_chunks, 5);
+        assert_eq!(result.segmentations.dim(), (5, 589, 3));
+        assert!(result.segmentations.iter().all(|&value| value == 0.0));
+        assert_eq!(result.embeddings.dim(), (5, 3, 256));
+        assert!(result.embeddings.iter().all(|value| value.is_nan()));
+    }
+
+    #[test]
+    fn empty_input_keeps_empty_result() {
+        let (result, batches) = run_windows(&[], 2);
+        assert!(batches.is_empty());
+        assert!(result.is_empty());
+        assert_eq!(result.segmentations.dim(), (0, 0, 0));
+        assert_eq!(result.embeddings.dim(), (0, 0, 0));
     }
 }

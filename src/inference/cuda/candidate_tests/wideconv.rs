@@ -339,35 +339,44 @@ fn selection_follows_device_attributes() {
     };
     let c64s2 = |batch, math| strided(batch, 64, [40, 499], math);
     let c128s2 = |batch, math| strided(batch, 128, [20, 250], math);
-    use Partition::{Four, Two, Whole};
+    use Partition::{Eight, Four, Two, Whole};
     use SplitCells::{All, From};
-    use WinogradProducts::{Fp32, Fp32Sweep2, Tf32x1, Tf32x2, Tf32x3};
+    use WinogradProducts::{Fp32, Fp32Sweep2, Tf32x1Staged, Tf32x2, Tf32x3};
     let (f, t) = (CudaMath::Fp32, CudaMath::Tf32);
     // batch 1 has 80 (128 channels) or 40 (256 channels) CTAs: 34 or 36 SMs run the
-    // 128-channel layers' whole waves and split the cells of the partial wave to fill
-    // one wave, and split every cell of the 256-channel layers' one wave and a bit;
-    // 108 SMs split the tensor-core products of every cell up to one wave, and in FP32
-    // mode in at least two; batch 32 has thousands of CTAs
+    // whole waves and split the cells of the partial wave to fill one wave, except
+    // that FFMA products split every cell of the 256-channel layers' one wave and a
+    // bit; 108 SMs split the tensor-core products of every cell up to one wave, and in
+    // FP32 mode in at least two; batch 32 has thousands of CTAs
     for (device, conv, expected) in [
         (ada, c128(1, f), wino(Fp32Sweep2, Two, From(34))),
         (ada, c256(1, f), wino(Fp32, Four, All)),
         (ada, c128(32, f), wino(Fp32Sweep2, Whole, All)),
         (ada, c256(32, f), wino(Fp32, Whole, All)),
         (blackwell, c128(32, f), wino(Fp32Sweep2, Whole, All)),
-        (ada, c128(1, t), wino(Fp32, Two, From(34))),
-        (ada, c128(32, t), tensor),
+        (ada, c128(1, t), wino(Tf32x1Staged, Two, From(34))),
+        (ada, c256(1, t), wino(Tf32x1Staged, Four, From(8))),
+        (ada, c128(32, t), wino(Tf32x1Staged, Whole, All)),
+        (ada, c256(32, t), wino(Tf32x1Staged, Whole, All)),
+        (blackwell, c128(1, t), wino(Tf32x1Staged, Four, From(36))),
+        (blackwell, c256(1, t), wino(Tf32x1Staged, Eight, From(9))),
+        (blackwell, c256(32, t), wino(Tf32x1Staged, Whole, All)),
         (ada_sm75, c128(32, t), wino(Fp32, Whole, All)),
         (blackwell, c128(1, f), wino(Fp32Sweep2, Four, From(36))),
         (blackwell, c256(1, f), wino(Fp32, Four, All)),
         (a100, c128(1, f), wino(Tf32x3, Two, All)),
         (a100, c256(1, f), wino(Tf32x3, Two, All)),
-        (a100, c128(1, t), wino(Tf32x1, Whole, All)),
+        (a100, c128(1, t), wino(Tf32x1Staged, Whole, All)),
         (a100, c128(32, f), wino(Tf32x3, Whole, All)),
-        (a100, c128(32, t), wino(Tf32x1, Whole, All)),
-        // other TF32-rich parts keep two products until measured
+        (a100, c128(32, t), wino(Tf32x1Staged, Whole, All)),
+        (a100, c256(1, t), wino(Tf32x1Staged, Two, All)),
+        (a100, c256(32, t), wino(Tf32x1Staged, Whole, All)),
+        // other TF32-rich parts keep the earlier rules until measured: two products on
+        // the 128-channel layers, 3xTF32 below batch 8 and direct above on the
+        // 256-channel layers
         (h100, c128(32, t), wino(Tf32x2, Whole, All)),
-        (a100, c256(1, t), wino(Tf32x3, Two, All)),
-        (a100, c256(32, t), tensor),
+        (h100, c256(1, t), wino(Tf32x3, Two, All)),
+        (h100, c256(32, t), tensor),
         (a100_sm75, c128(32, f), wino(Fp32Sweep2, Whole, All)),
         // stride 2: TF32 mode on the sm80 tier runs one TF32 product everywhere, in
         // slim tiles where the SMs outnumber the narrow tiles; FP32 mode runs 3xTF32

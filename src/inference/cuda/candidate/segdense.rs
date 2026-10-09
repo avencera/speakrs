@@ -1241,7 +1241,7 @@ impl SegConvCandidate for SegConvOxide {
 pub(crate) struct Area;
 impl super::DriverCandidate for Area {
     const AREA: KernelModule = KernelModule::Segdense;
-    fn driver_coverage(_tier: PtxTier) -> Coverage {
+    fn driver_coverage(_tier: PtxTier, _device: &DeviceAttributes) -> Coverage {
         Coverage(&[CoverageEntry {
             layers: &[
                 "sincnet.conv1",

@@ -78,6 +78,11 @@
 //! accurate `expf` (about 2 ulp) and the reciprocals take one Newton step, so neither
 //! uses a fast approximation on its own
 //!
+//! # Batched windows
+//!
+//! [`tiled::spk_lstm_recurrence_tiled`] computes the same recurrence bit for bit with
+//! eight-window tiles of sixteen-unit blocks, which the host runs for full batches
+//!
 //! TF32 mode may round input-projection operands to TF32 in sm80+ variants
 //! Recurrent products, state, gates, and outputs remain FP32 in every tier
 //! The sm75 baseline uses genuine FP32 for both math modes
@@ -143,6 +148,8 @@ macro_rules! unroll {
 mod projection;
 #[cfg(feature = "tier-sm80")]
 mod tensor;
+mod tiled;
+mod tiled_exchange;
 
 /// `a * b + c` with one rounding
 ///

@@ -14,7 +14,7 @@ use tracing::debug;
 
 use super::device::DeviceAttributes;
 use super::error::CudaLibrary;
-use super::kernels::{ArtifactHash, ArtifactLoadError, ModuleRequest};
+use super::kernels::{ArtifactLoadError, ModuleRequest};
 use super::{ComputeCapability, CudaError, KernelModule, LoadedKernels, PtxTier};
 #[cfg(feature = "_cuda-libraries")]
 use super::{CudaMath, libraries::Libraries};
@@ -253,7 +253,7 @@ impl CudaRuntime {
             .embedded(tier)
             .ok_or_else(|| unavailable(request.artifact()))?;
         let ptx = embedded.text;
-        let ptx_sha256 = ArtifactHash::of(ptx.as_bytes());
+        let ptx_sha256 = embedded.sha256();
         let cubin = embedded.cubin(self.device.capability());
         let requested = request.artifact();
         let mut modules = self
@@ -477,7 +477,8 @@ mod direct_request_tests {
 
 #[cfg(all(test, feature = "_cuda-libraries"))]
 mod module_policy_tests {
-    use super::{ArtifactHash, ComputeCapability, CudaError, KernelModule, ModuleRequest, PtxTier};
+    use super::{ComputeCapability, CudaError, KernelModule, ModuleRequest, PtxTier};
+    use crate::inference::cuda::kernels::ArtifactHash;
     use crate::inference::cuda::kernels::LoadedArtifact;
 
     #[test]

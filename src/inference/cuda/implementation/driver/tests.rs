@@ -58,7 +58,7 @@ impl Modules for &mut Fixture {
 struct Stub;
 impl DriverCandidate for Stub {
     const AREA: KernelModule = KernelModule::Sincnet;
-    fn driver_coverage(_tier: PtxTier) -> Coverage {
+    fn driver_coverage(_tier: PtxTier, _device: &DeviceAttributes) -> Coverage {
         Coverage(&[CoverageEntry {
             layers: &["sincnet.conv0.abs_pool"],
             batches: Batches::Only(&[1]),
@@ -166,8 +166,8 @@ fn driver_configuration_is_fixed_from_cached_device_attributes() {
 struct BroadStub;
 impl DriverCandidate for BroadStub {
     const AREA: KernelModule = KernelModule::Sincnet;
-    fn driver_coverage(tier: PtxTier) -> Coverage {
-        Stub::driver_coverage(tier)
+    fn driver_coverage(tier: PtxTier, device: &DeviceAttributes) -> Coverage {
+        Stub::driver_coverage(tier, device)
     }
     fn broad_evidence() -> Option<&'static crate::inference::cuda::implementation::BroadEvidence> {
         use crate::inference::cuda::implementation::{ArchitectureSpeed, BroadEvidence};
@@ -227,8 +227,8 @@ struct RefusingBroad;
 #[cfg(feature = "_cuda-libraries")]
 impl DriverCandidate for RefusingBroad {
     const AREA: KernelModule = KernelModule::Sincnet;
-    fn driver_coverage(tier: PtxTier) -> Coverage {
-        Stub::driver_coverage(tier)
+    fn driver_coverage(tier: PtxTier, device: &DeviceAttributes) -> Coverage {
+        Stub::driver_coverage(tier, device)
     }
     fn broad_evidence() -> Option<&'static crate::inference::cuda::implementation::BroadEvidence> {
         BroadStub::broad_evidence()
@@ -642,6 +642,86 @@ fn tensor_core_trunk_kernels_are_selected_only_for_tf32_on_measured_capabilities
                 "{major}.{minor} {name}: {selected:?}"
             );
         }
+    }
+}
+
+#[test]
+fn only_turing_routes_the_64_channel_layers_to_ffma_winograd() {
+    use crate::inference::cuda::candidate::{WideconvAlgorithm, WideconvPin, WideconvProducts};
+    let devices = [
+        (
+            ComputeCapability::new(7, 5),
+            40,
+            PtxTier::Sm75,
+            KernelModule::Wideconv,
+        ),
+        // an sm75-tier build on a newer part keeps the direct kernel
+        (
+            ComputeCapability::new(8, 6),
+            84,
+            PtxTier::Sm75,
+            KernelModule::Resnet,
+        ),
+        (
+            ComputeCapability::new(8, 9),
+            34,
+            PtxTier::Sm120,
+            KernelModule::Resnet,
+        ),
+        (
+            ComputeCapability::new(12, 0),
+            36,
+            PtxTier::Sm120,
+            KernelModule::Resnet,
+        ),
+    ];
+    // a build without the device's tier, such as `cuda-rtx50` on Turing, has no such route
+    let devices = devices
+        .into_iter()
+        .filter(|(_, _, limit, _)| limit.is_compiled_in());
+    for (capability, sms, limit, area) in devices {
+        let mut fixture = Fixture::new();
+        fixture.device = Builder::new(capability)
+            .multiprocessors(sms)
+            .shared_optin_bytes(64 << 10)
+            .build();
+        fixture.limit = limit;
+        for name in ["resnet.layer2.0.conv2", "resnet.layer2.3.conv2"] {
+            for (batch, math) in [(1, CudaMath::Fp32), (32, CudaMath::Tf32)] {
+                let Selected::Oxide(token) = PlanRequest::DriverOnly
+                    .resolve(BoundaryId::named(name), batch, math, &mut fixture)
+                    .unwrap()
+                else {
+                    panic!("{capability:?} {name}: no driver route")
+                };
+                assert_eq!(token.area(), area, "{capability:?} {name} b{batch}");
+                if area != KernelModule::Wideconv {
+                    continue;
+                }
+                let PlanPin::Pinned(ConfigPin::Wideconv(WideconvPin::Configured(config))) =
+                    token.pin
+                else {
+                    panic!("{name}: unexpected pin {:?}", token.pin)
+                };
+                assert_eq!(
+                    config.algorithm,
+                    WideconvAlgorithm::Winograd(WideconvProducts::Fp32)
+                );
+            }
+        }
+        // the stride-2 entry of the stage keeps its ResNet kernel everywhere
+        let Selected::Oxide(token) = PlanRequest::DriverOnly
+            .resolve(
+                BoundaryId::named("resnet.layer2.0.conv1"),
+                32,
+                CudaMath::Tf32,
+                &mut fixture,
+            )
+            .unwrap()
+        else {
+            panic!("{capability:?}: no driver route for the stride-2 layer")
+        };
+        assert_eq!(token.area(), KernelModule::Resnet);
     }
 }
 

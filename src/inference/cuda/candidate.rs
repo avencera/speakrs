@@ -50,49 +50,7 @@ pub(super) use kernel_inventory::conv_kernel_inventory;
 
 #[cfg(test)]
 mod kernel_inventory {
-    pub(crate) const WIDECONV_KERNELS: [&str; 41] = [
-        "spk_wideconv_c128",
-        "spk_wideconv_c128s2",
-        "spk_wideconv_c256",
-        "spk_wideconv_c64s2",
-        "spk_wideconv_gemm",
-        "spk_wideconv_pack_tc",
-        "spk_wideconv_pack_tc3",
-        "spk_wideconv_pack_wbf",
-        "spk_wideconv_pack_weights",
-        "spk_wideconv_pack_winograd",
-        "spk_wideconv_pack_wtc",
-        "spk_wideconv_reduce",
-        "spk_wideconv_shortcut_c128",
-        "spk_wideconv_shortcut_c128_wide",
-        "spk_wideconv_shortcut_c32",
-        "spk_wideconv_shortcut_c64",
-        "spk_wideconv_shortcut_c64_wide",
-        "spk_wideconv_stem",
-        "spk_wideconv_stem_wide",
-        "spk_wideconv_tc3_c128s2",
-        "spk_wideconv_tc3_c128s2_wide",
-        "spk_wideconv_tc3_c64s2",
-        "spk_wideconv_tc3_c64s2_wide",
-        "spk_wideconv_tc_c128",
-        "spk_wideconv_tc_c128s2",
-        "spk_wideconv_tc_c128s2_narrow",
-        "spk_wideconv_tc_c128s2_slim",
-        "spk_wideconv_tc_c256",
-        "spk_wideconv_tc_c64s2",
-        "spk_wideconv_tc_c64s2_narrow",
-        "spk_wideconv_tc_c64s2_slim",
-        "spk_wideconv_wbf_c128",
-        "spk_wideconv_wbf_c256",
-        "spk_wideconv_wino_c128",
-        "spk_wideconv_wino_c128_sweep2",
-        "spk_wideconv_wino_c256",
-        "spk_wideconv_wino_fixup",
-        "spk_wideconv_wtc2_c128",
-        "spk_wideconv_wtc2_c256",
-        "spk_wideconv_wtc3_c128",
-        "spk_wideconv_wtc3_c256",
-    ];
+    pub(crate) const WIDECONV_KERNELS: &[&str] = super::wideconv::entries::ALL;
 
     /// Every kernel entry a plan can launch, for the PTX inventory check
     pub(crate) const SEGDENSE_KERNELS: [&str; 32] = [
@@ -170,7 +128,14 @@ pub(crate) use lstmproj::Oxide as LstmProjOxide;
 pub(crate) use sinc::Oxide as SincOxide;
 // the GPU development checks force selections made for other devices
 #[cfg(all(test, feature = "_cuda-libraries"))]
-pub(crate) use wideconv::{Config as WideconvConfig, Device as WideconvDevice};
+pub(crate) use lstmproj::RecurrencePlan;
+#[cfg(test)]
+pub(crate) use wideconv::{Algorithm as WideconvAlgorithm, WinogradProducts as WideconvProducts};
+#[cfg(all(test, feature = "_cuda-libraries"))]
+pub(crate) use wideconv::{
+    Config as WideconvConfig, Device as WideconvDevice, Partition as WideconvPartition,
+    SplitCells as WideconvSplitCells, TensorKernel as WideconvTensorKernel,
+};
 pub(crate) use wideconv::{Oxide as WideconvOxide, Pin as WideconvPin};
 
 /// A planning refusal that is distinct from a CUDA or model error
@@ -1501,8 +1466,8 @@ fn validate_fixed_batch(
 pub(crate) trait DriverCandidate {
     /// The kernel module that owns this candidate
     const AREA: KernelModule;
-    /// Only tuples whose complete operation needs no numerical library
-    fn driver_coverage(tier: PtxTier) -> Coverage;
+    /// Only tuples whose complete operation needs no numerical library on `device`
+    fn driver_coverage(tier: PtxTier, device: &DeviceAttributes) -> Coverage;
     /// Structural speed evidence, if this complete port is accepted on all devices
     fn broad_evidence() -> Option<&'static super::implementation::BroadEvidence> {
         None

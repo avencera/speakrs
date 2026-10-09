@@ -53,6 +53,8 @@ mod session;
 mod tier;
 mod weights;
 
+#[cfg(test)]
+pub(crate) mod batch_class_tests;
 #[cfg(all(test, feature = "_cuda-libraries"))]
 mod test_support;
 #[cfg(all(test, feature = "_cuda-libraries"))]
@@ -61,7 +63,10 @@ mod tests;
 pub(crate) use buffer::DeviceTensor;
 #[cfg(all(test, feature = "_cuda-libraries"))]
 use dnn::ConvPlanner;
-pub(crate) use embedding::{EMBEDDING_DIM, EmbeddingBatch, ResNetEmbedding, SPEAKERS_PER_CHUNK};
+pub(crate) use embedding::{
+    EMBEDDING_DIM, EmbeddingBatch, EmbeddingBatchClass, ResNetEmbedding, SPEAKERS_PER_CHUNK,
+    SharedEmbeddingActivations,
+};
 pub use error::{CudaError, CudaLibrary, GeometryError, WeightFault};
 pub(crate) use fbank::{
     CudaFbank, FBANK_FRAMES, FBANK_MEL_BINS, FBANK_WINDOW_SAMPLES, FbankBuffers,

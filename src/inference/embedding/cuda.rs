@@ -10,12 +10,13 @@ use std::path::{Path, PathBuf};
 
 use cudarc::driver::CudaView;
 use ndarray::{Array1, Array2, ArrayView2, Axis};
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::inference::cuda::{
     CudaError, CudaFbank, CudaGraphs, CudaMath, CudaRuntime, CudaSession, DeviceTensor,
-    EMBEDDING_DIM, EmbeddingBatch, FBANK_FRAMES, FBANK_MEL_BINS, FBANK_WINDOW_SAMPLES,
-    FbankBuffers, ResNetEmbedding, SPEAKERS_PER_CHUNK, SafetensorsFile,
+    EMBEDDING_DIM, EmbeddingBatch, EmbeddingBatchClass, FBANK_FRAMES, FBANK_MEL_BINS,
+    FBANK_WINDOW_SAMPLES, FbankBuffers, ResNetEmbedding, SPEAKERS_PER_CHUNK, SafetensorsFile,
+    SharedEmbeddingActivations,
 };
 use crate::inference::{ExecutionMode, InferenceError, ModelLoadError, TensorShapeError};
 use crate::pipeline::RuntimeConfig;
@@ -71,12 +72,12 @@ struct EmbeddingState {
 // the runtime's context current on the thread that uses or frees them
 unsafe impl Send for CudaSession<EmbeddingState> {}
 
-/// The multi-mask model and its two batch classes, each allocated on first use
+/// The multi-mask model and its exact batch classes, each allocated on first use
 struct Batches {
     model: ResNetEmbedding,
     graphs: bool,
-    single: Option<EmbeddingBatch>,
-    full: Option<EmbeddingBatch>,
+    plans: [Option<EmbeddingBatch>; 5],
+    activations: Option<SharedEmbeddingActivations>,
 }
 
 impl CudaEmbedding {
@@ -338,8 +339,7 @@ impl Batches {
     /// Runs `chunks` chunks whose masks are in `masks`; `fill` writes the filterbanks
     /// of a range of chunks into a batch's input
     ///
-    /// A full [`MULTI_MASK_BATCH_SIZE`] batch runs at once and anything smaller runs
-    /// one chunk at a time, the batch classes the ONNX CUDA path used
+    /// Partial batches use the largest exact class that fits each remaining range
     fn embed(
         &mut self,
         runtime: &CudaRuntime,
@@ -347,23 +347,35 @@ impl Batches {
         masks: &[f32],
         mut fill: impl FnMut(&CudaRuntime, Range<usize>, &mut DeviceTensor) -> Result<(), CudaError>,
     ) -> Result<Vec<f32>, CudaError> {
-        let class = if chunks == MULTI_MASK_BATCH_SIZE {
-            MULTI_MASK_BATCH_SIZE
-        } else {
-            1
-        };
-
         let mut embeddings = Vec::with_capacity(chunks * SPEAKERS_PER_CHUNK * EMBEDDING_DIM);
-        for start in (0..chunks).step_by(class) {
-            let rows = start..start + class;
+        let mut start = 0;
+        while let Some(class) = EmbeddingBatchClass::fitting(chunks - start) {
+            let rows = start..start + class.chunks();
+            let plan_start = std::time::Instant::now();
             let batch = self.batch(runtime, class)?;
+            let plan_us = plan_start.elapsed().as_micros();
+            let stage_start = std::time::Instant::now();
             fill(runtime, rows.clone(), batch.fbank_mut())?;
             let chunk_masks = &masks[rows.start * CHUNK_MASKS_LEN..rows.end * CHUNK_MASKS_LEN];
             batch
                 .masks_mut()
                 .copy_from_host(runtime.stream(), chunk_masks)?;
+            let stage_us = stage_start.elapsed().as_micros();
+            let launch_start = std::time::Instant::now();
             batch.forward(runtime)?;
+            let launch_us = launch_start.elapsed().as_micros();
+            let output_start = std::time::Instant::now();
             embeddings.extend(batch.download_output(runtime)?);
+            trace!(
+                target: "speakrs::timing",
+                class = class.chunks(),
+                plan_us,
+                stage_us,
+                launch_us,
+                output_wait_us = output_start.elapsed().as_micros(),
+                "CUDA embedding batch timing"
+            );
+            start = rows.end;
         }
 
         Ok(embeddings)
@@ -373,18 +385,28 @@ impl Batches {
     fn batch(
         &mut self,
         runtime: &CudaRuntime,
-        chunks: usize,
+        class: EmbeddingBatchClass,
     ) -> Result<&mut EmbeddingBatch, CudaError> {
-        let slot = if chunks == 1 {
-            &mut self.single
-        } else {
-            &mut self.full
+        let activations = match &self.activations {
+            Some(activations) => {
+                self.model
+                    .grow_activations(runtime, activations, class.chunks())?;
+                activations.clone()
+            }
+            None => {
+                let activations = self.model.activations(runtime, class.chunks())?;
+                self.activations = Some(activations.clone());
+                activations
+            }
         };
+        let slot = &mut self.plans[class.slot()];
         if let Some(batch) = slot {
             return Ok(batch);
         }
 
-        let mut batch = self.model.batch(runtime, chunks)?;
+        let mut batch = self
+            .model
+            .batch_with_activations(runtime, class.chunks(), activations)?;
         if self.graphs {
             batch.capture_graph(runtime)?;
         }
@@ -419,8 +441,8 @@ fn open_session(
             batches: Batches {
                 model,
                 graphs: graphs.enabled(),
-                single: None,
-                full: None,
+                plans: std::array::from_fn(|_| None),
+                activations: None,
             },
         })
     })
@@ -538,3 +560,6 @@ fn first_row(rows: Array2<f32>) -> Result<Array1<f32>, InferenceError> {
 
     Ok(rows.row(0).to_owned())
 }
+
+#[cfg(test)]
+mod tests;

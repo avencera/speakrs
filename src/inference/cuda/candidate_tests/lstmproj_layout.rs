@@ -1,11 +1,14 @@
-// both compilation targets must use the same physical ownership map
+// both compilation targets must use the same physical ownership maps
 #[path = "../../../../crates/speakrs-cuda-kernels/src/lstmproj/exchange.rs"]
 mod device_exchange;
+#[path = "../../../../crates/speakrs-cuda-kernels/src/lstmproj/tiled_exchange.rs"]
+mod device_tiled_exchange;
 
+use super::super::lstmproj::RecurrencePlan;
 use super::super::lstmproj::layout::{
     AlignedSpan, ExchangeLayout, GATE_COLUMNS, GROUPS, HIDDEN, ProjectionLayout, STATE_TILE,
-    Schedule, THREADS, TILE_ROWS, exchange, pack_directions, pack_input_directions, padded_input,
-    round_tf32,
+    Schedule, THREADS, TILE_ROWS, TILED_GROUPS, TILED_ROWS, exchange, pack_directions,
+    pack_input_directions, padded_input, round_tf32, tiled_exchange,
 };
 
 #[test]
@@ -124,7 +127,52 @@ fn exchange_words_stay_inside_their_tile_and_producer_regions() {
         }
     }
 
-    let layout = ExchangeLayout::new(3);
+    let layout = ExchangeLayout::new(3, STATE_TILE);
     assert_eq!(layout.direction(1), 3 * STATE_TILE + exchange::PAD);
     assert_eq!(layout.words(), 2 * layout.direction(1));
+}
+
+#[test]
+fn tiled_exchange_gives_each_producer_row_one_line() {
+    assert_eq!(tiled_exchange::TILE, device_tiled_exchange::TILE);
+    assert_eq!(tiled_exchange::SLOT, device_tiled_exchange::SLOT);
+    assert_eq!(tiled_exchange::ROWS, device_tiled_exchange::ROWS);
+    assert_eq!(tiled_exchange::LINE, device_tiled_exchange::LINE);
+    assert_eq!(tiled_exchange::SLOT % tiled_exchange::LINE, 0);
+    assert_eq!(tiled_exchange::TILE % tiled_exchange::LINE, 0);
+
+    let units = HIDDEN / TILED_GROUPS;
+    let mut words = std::collections::BTreeSet::new();
+    for row in 0..TILED_ROWS {
+        for unit in 0..HIDDEN {
+            let word = tiled_exchange::word(row, unit);
+            assert_eq!(word, device_tiled_exchange::word(row, unit));
+            assert!(word + tiled_exchange::PAD < tiled_exchange::SLOT + 1);
+            assert!(words.insert(word), "two hidden values share word {word}");
+            // a block's units of one row fill exactly one 128-byte line
+            let first = tiled_exchange::word(row, unit / units * units);
+            assert_eq!(word / tiled_exchange::LINE, first / tiled_exchange::LINE);
+            assert_eq!(first % tiled_exchange::LINE, 0);
+        }
+    }
+}
+
+#[test]
+fn tiled_recurrence_needs_full_tiles_and_both_directions_resident() {
+    // two directions of eight blocks per tile
+    let tiled = |tiles| Some(RecurrencePlan::Tiled { tiles });
+    assert_eq!(RecurrencePlan::tiled(32, Some(72)), tiled(4));
+    assert_eq!(RecurrencePlan::tiled(32, Some(64)), tiled(4));
+    assert_eq!(RecurrencePlan::tiled(32, Some(63)), None);
+    assert_eq!(RecurrencePlan::tiled(33, Some(72)), None);
+    assert_eq!(RecurrencePlan::tiled(33, Some(80)), tiled(5));
+    assert_eq!(RecurrencePlan::tiled(9, Some(32)), tiled(2));
+    assert_eq!(RecurrencePlan::tiled(9, Some(31)), None);
+    // one tile leaves most SMs idle, and the wide kernel was as fast or faster
+    assert_eq!(RecurrencePlan::tiled(8, Some(1000)), None);
+    // an unknown budget must not run both grids together
+    assert_eq!(RecurrencePlan::tiled(32, None), None);
+    // a lone window keeps the wide kernel, though one tile would fit
+    assert_eq!(RecurrencePlan::tiled(1, Some(1000)), None);
+    assert_eq!(RecurrencePlan::tiled_fit(1, Some(16)), tiled(1));
 }

@@ -1,9 +1,13 @@
 //! Inspection helpers for direct CUDA tests
 
-use super::{EmbeddingBatch, EmbeddingTapFn, SPEAKERS_PER_CHUNK};
+use super::{EmbeddingBatch, ResNetEmbedding, SharedEmbeddingActivations};
+#[cfg(feature = "_cuda-libraries")]
+use super::{EmbeddingTapFn, SPEAKERS_PER_CHUNK};
 use crate::inference::cuda::{CudaError, CudaRuntime};
 use cudarc::driver::CudaSlice;
+use std::sync::Arc;
 
+#[cfg(feature = "_cuda-libraries")]
 impl EmbeddingBatch {
     /// Runs the forward pass eagerly and calls `tap` with every intermediate
     /// activation listed in [`EmbeddingTap`], in execution order
@@ -15,7 +19,9 @@ impl EmbeddingBatch {
         runtime: &CudaRuntime,
         tap: &mut EmbeddingTapFn<'_>,
     ) -> Result<(), CudaError> {
-        self.run(runtime, tap)
+        let activations = self.activations.clone();
+        let mut storage = activations.lock()?;
+        self.run_with_activations(runtime, tap, storage.buffers_mut())
     }
 
     /// Copies host fbank and masks into the batch, runs the forward pass and
@@ -62,11 +68,38 @@ impl EmbeddingBatch {
         let floats = self.fbank.len()
             + self.masks.len()
             + self.stem_input.len()
-            + self.trunk.iter().map(CudaSlice::len).sum::<usize>()
-            + self.hidden.len()
-            + self.shortcut.len()
             + self.pooled.len()
             + self.output.len();
-        floats * size_of::<f32>()
+        floats * size_of::<f32>() + self.activations.retained_bytes()
+    }
+}
+
+impl ResNetEmbedding {
+    /// Allocates the device buffers and plans the convolutions for `chunks` fbank
+    /// chunks per forward pass
+    ///
+    /// Do this once per batch class and reuse the batch for every forward pass of
+    /// that size. The batch keeps a handle to this model and must run on
+    /// `runtime`, whose stream owns its buffers
+    pub fn batch(&self, runtime: &CudaRuntime, chunks: usize) -> Result<EmbeddingBatch, CudaError> {
+        let activations = self.activations(runtime, chunks)?;
+        self.batch_with_activations(runtime, chunks, activations)
+    }
+}
+
+impl SharedEmbeddingActivations {
+    pub(crate) fn retained_bytes(&self) -> usize {
+        let storage = self.lock().unwrap();
+        let buffers = storage.buffers();
+        (buffers.trunk.iter().map(CudaSlice::len).sum::<usize>()
+            + buffers.hidden.len()
+            + buffers.shortcut.len())
+            * size_of::<f32>()
+    }
+}
+
+impl EmbeddingBatch {
+    pub(crate) fn shares_activations(&self, other: &SharedEmbeddingActivations) -> bool {
+        Arc::ptr_eq(&self.activations.0, &other.0)
     }
 }
