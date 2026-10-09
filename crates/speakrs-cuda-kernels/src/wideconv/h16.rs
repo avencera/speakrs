@@ -33,6 +33,14 @@
 //!
 //! The epilogue adds the residual before the bias and applies a ReLU that keeps NaN
 //! and negative zero, as the other wideconv kernels do
+//!
+//! The `_half_out` and `_half_in` instances pass a residual block's hidden activation,
+//! which only the block's second convolution reads, in the form that convolution's
+//! staging would make of it: FP16 scaled by 2^10, saturated and range-checked, as
+//! `[batch, channels / 8, h, w, 8]` with 16 bytes per pixel and channel group. A
+//! `_half_out` epilogue converts with the same instructions and sets the range word for
+//! the same values, and a `_half_in` stage copies the 16-byte pixels as they are, so the
+//! pair computes bit for bit what the FP32 pair does while moving half the bytes
 
 use cuda_device::shared::cvta_generic_to_shared_u32;
 use cuda_device::{DisjointSlice, DynamicSharedArray, kernel, launch_bounds, ptx_asm, thread};
@@ -72,6 +80,58 @@ fn half2_checked(lo: f32, hi: f32) -> (u32, u32) {
         );
     }
     (packed, out_of_range)
+}
+
+/// As [`half2_checked`] for one value: its FP16 bits in the low half, and 1 when the
+/// scaled value is above the largest finite FP16 value in magnitude or is NaN
+#[inline(always)]
+fn half1_checked(value: f32) -> (u32, u32) {
+    let (bits, out_of_range): (u32, u32);
+    // safety: register arithmetic and conversions with no memory access
+    unsafe {
+        ptx_asm!(
+            "{ .reg .b16 h, z; .reg .f32 a, m; .reg .pred p; mul.rn.f32 a, %2, 0f44800000; abs.f32 m, a; setp.gtu.f32 p, m, 0f477FE000; selp.u32 %1, 1, 0, p; max.f32 a, a, 0fC77FE000; min.f32 a, a, 0f477FE000; cvt.rn.f16.f32 h, a; mov.b16 z, 0; mov.b32 %0, {h, z}; }",
+            out("=r") bits,
+            out("=r") out_of_range,
+            in("f") value,
+            options(register_only),
+        );
+    }
+    (bits, out_of_range)
+}
+
+/// Stores the low half of `bits` at half-word `half_offset` of a global buffer
+#[inline(always)]
+unsafe fn sth(pointer: *mut f32, half_offset: usize, bits: u32) {
+    // safety: the caller passes a half-word inside the checked output that only this
+    // lane writes
+    unsafe {
+        ptx_asm!(
+            "{ .reg .u64 g; .reg .u16 v; cvta.to.global.u64 g, %0; cvt.u16.u32 v, %1; st.global.u16 [g], v; }",
+            in("l") (pointer as *mut u16).add(half_offset) as u64,
+            in("r") bits,
+            clobber("memory"),
+        );
+    }
+}
+
+/// Four words at a 16-byte aligned address of a global buffer no kernel writes during
+/// this launch
+#[inline(always)]
+unsafe fn ldg4(pointer: *const f32) -> [u32; 4] {
+    let (a, b, c, d): (u32, u32, u32, u32);
+    // safety: the caller passes a readable, 16-byte aligned run of four words
+    unsafe {
+        ptx_asm!(
+            "{ .reg .u64 g; cvta.to.global.u64 g, %4; ld.global.nc.v4.u32 {%0, %1, %2, %3}, [g]; }",
+            out("=r") a,
+            out("=r") b,
+            out("=r") c,
+            out("=r") d,
+            in("l") pointer as u64,
+        );
+    }
+    [a, b, c, d]
 }
 
 /// Sets the host's out-of-range word; only threads that saw a saturating activation
@@ -268,7 +328,9 @@ macro_rules! h16_conv3x3 {
         rows = $rows:expr,
         n_tiles = $nt:expr,
         threads = $threads:literal,
-        min_blocks = $min_blocks:literal $(,)?
+        min_blocks = $min_blocks:literal,
+        half_input = $half_input:literal,
+        half_output = $half_output:literal $(,)?
     ) => {
         $(#[$doc])*
         #[kernel]
@@ -283,6 +345,8 @@ macro_rules! h16_conv3x3 {
             mut y: DisjointSlice<f32>,
             mut range: DisjointSlice<f32>,
         ) {
+            const HALF_IN: bool = $half_input;
+            const HALF_OUT: bool = $half_output;
             const C: u32 = $channels;
             const H: u32 = $h;
             const W: u32 = $w;
@@ -321,8 +385,11 @@ macro_rules! h16_conv3x3 {
             let oy0 = thread::blockIdx_y() * ROWS;
             let ox0 = thread::blockIdx_x() * COLS;
             // the host sizes every buffer; a mismatch must not touch other memory
-            if (batch * C * HW) as usize > x.len()
-                || (batch * C * HW) as usize > y.len()
+            // a half tensor holds two values per word
+            let x_words = if HALF_IN { batch * C * HW / 2 } else { batch * C * HW };
+            let y_words = if HALF_OUT { batch * C * HW / 2 } else { batch * C * HW };
+            if x_words as usize > x.len()
+                || y_words as usize > y.len()
                 || (add_residual != 0 && (batch * C * HW) as usize > residual.len())
                 || (C * C * 9 / 2) as usize > weight.len()
                 || C as usize > bias.len()
@@ -362,6 +429,7 @@ macro_rules! h16_conv3x3 {
             }
             let mut acc = [[[0.0f32; 4]; NT]; MT];
             let mut staged = [[0.0f32; 8]; SLOTS];
+            let mut staged_half = [[0u32; 4]; SLOTS];
             // nonzero once this thread converts an activation that saturates
             let mut out_of_range = 0u32;
 
@@ -383,16 +451,27 @@ macro_rules! h16_conv3x3 {
                         let iy = oy0 + r;
                         let ix = ox0 + column;
                         let inside = e < PIXELS && iy >= 1 && iy <= H && ix >= 1 && ix <= W;
-                        // padding loads the item's first word and discards it, so every
-                        // lane issues the same loads
-                        let offset = if inside { channels + (iy - 1) * W + ix - 1 } else { base };
-                        let mut ci = 0;
-                        #[unroll]
-                        while ci < 8 {
-                            // safety: inside the checked input
-                            let value = unsafe { ldg(x_ptr.add((offset + ci as u32 * HW) as usize)) };
-                            staged[k][ci] = if inside { value } else { 0.0 };
-                            ci += 1;
+                        if HALF_IN {
+                            // the staged pixel is already in global memory: channel group
+                            // `i_stage` of the item, four words per pixel; padding loads the
+                            // item's first pixel and discards it
+                            let group = (item * CHUNKS + i_stage) * HW;
+                            let offset = if inside { (group + (iy - 1) * W + ix - 1) * 4 } else { item * CHUNKS * HW * 4 };
+                            // safety: inside the checked half input, 16-byte aligned
+                            let words = unsafe { ldg4(x_ptr.add(offset as usize)) };
+                            staged_half[k] = if inside { words } else { [0; 4] };
+                        } else {
+                            // padding loads the item's first word and discards it, so every
+                            // lane issues the same loads
+                            let offset = if inside { channels + (iy - 1) * W + ix - 1 } else { base };
+                            let mut ci = 0;
+                            #[unroll]
+                            while ci < 8 {
+                                // safety: inside the checked input
+                                let value = unsafe { ldg(x_ptr.add((offset + ci as u32 * HW) as usize)) };
+                                staged[k][ci] = if inside { value } else { 0.0 };
+                                ci += 1;
+                            }
                         }
                         k += 1;
                     }
@@ -466,13 +545,18 @@ macro_rules! h16_conv3x3 {
                     while k < SLOTS {
                         let e = tid + k as u32 * THREADS;
                         if e < PIXELS {
-                            let s = staged[k];
-                            let (w0, r0) = half2_checked(s[0], s[1]);
-                            let (w1, r1) = half2_checked(s[2], s[3]);
-                            let (w2, r2) = half2_checked(s[4], s[5]);
-                            let (w3, r3) = half2_checked(s[6], s[7]);
-                            out_of_range |= r0 | r1 | r2 | r3;
-                            let words = [w0, w1, w2, w3];
+                            // the producer of a half input converted and range-checked it
+                            let words = if HALF_IN {
+                                staged_half[k]
+                            } else {
+                                let s = staged[k];
+                                let (w0, r0) = half2_checked(s[0], s[1]);
+                                let (w1, r1) = half2_checked(s[2], s[3]);
+                                let (w2, r2) = half2_checked(s[4], s[5]);
+                                let (w3, r3) = half2_checked(s[6], s[7]);
+                                out_of_range |= r0 | r1 | r2 | r3;
+                                [w0, w1, w2, w3]
+                            };
                             // safety: pixel `e` of the stage that no warp reads until
                             // the barrier below
                             unsafe { sts4(stage + e * 16, words) };
@@ -495,6 +579,8 @@ macro_rules! h16_conv3x3 {
                 return;
             }
             let row = base + oy * W;
+            // nonzero once this thread converts an output that saturates
+            let mut output_out_of_range = 0u32;
             let mut i = 0;
             #[unroll]
             while i < MT {
@@ -551,19 +637,33 @@ macro_rules! h16_conv3x3 {
                     // safety: `channel < C`, inside the checked bias
                     let b = unsafe { *bias_ptr.add(channel as usize) };
                     let channel_row = row + channel * HW;
+                    // the half output's half-word of this channel at column 0 of the row
+                    let half_row = base + channel / 8 * 8 * HW + oy * W * 8 + channel % 8;
                     let mut j = 0;
                     #[unroll]
                     while j < NT {
                         let ox = ox0 + j as u32 * 8 + 2 * t + slot as u32 % 2;
                         if ox < W {
-                            // safety: inside the checked output; this lane is its only writer
-                            unsafe { *y.get_unchecked_mut((channel_row + ox) as usize) = relu(acc[i][j][slot] + b) };
+                            let value = relu(acc[i][j][slot] + b);
+                            if HALF_OUT {
+                                let (bits, out_of_range) = half1_checked(value);
+                                output_out_of_range |= out_of_range;
+                                // safety: inside the checked half output; this lane is its only writer
+                                unsafe { sth(y.as_mut_ptr(), (half_row + ox * 8) as usize, bits) };
+                            } else {
+                                // safety: inside the checked output; this lane is its only writer
+                                unsafe { *y.get_unchecked_mut((channel_row + ox) as usize) = value };
+                            }
                         }
                         j += 1;
                     }
                     slot += 1;
                 }
                 i += 1;
+            }
+            if HALF_OUT && output_out_of_range != 0 {
+                // safety: `range` holds at least one word, checked above
+                unsafe { flag_out_of_range(range.as_mut_ptr()) };
             }
         }
     };
@@ -587,6 +687,8 @@ h16_conv3x3! {
     n_tiles = 8,
     threads = 128,
     min_blocks = 3,
+    half_input = false,
+    half_output = false,
 }
 
 h16_conv3x3! {
@@ -607,6 +709,76 @@ h16_conv3x3! {
     n_tiles = 8,
     threads = 128,
     min_blocks = 2,
+    half_input = false,
+    half_output = false,
+}
+
+h16_conv3x3! {
+    /// As `spk_wideconv_h16_c32`, writing `y` as the half `[batch, 4, 80, 998, 8]`
+    /// tensor `spk_wideconv_h16_c32_half_in` reads, for a block's first convolution
+    spk_wideconv_h16_c32_half_out,
+    channels = 32,
+    h = 80,
+    w = 998,
+    m_tiles = 2,
+    channel_warps = 1,
+    rows = 4,
+    n_tiles = 8,
+    threads = 128,
+    min_blocks = 3,
+    half_input = false,
+    half_output = true,
+}
+
+h16_conv3x3! {
+    /// As `spk_wideconv_h16_c32`, reading `x` as the half tensor
+    /// `spk_wideconv_h16_c32_half_out` writes, for a block's second convolution
+    spk_wideconv_h16_c32_half_in,
+    channels = 32,
+    h = 80,
+    w = 998,
+    m_tiles = 2,
+    channel_warps = 1,
+    rows = 4,
+    n_tiles = 8,
+    threads = 128,
+    min_blocks = 3,
+    half_input = true,
+    half_output = false,
+}
+
+h16_conv3x3! {
+    /// As `spk_wideconv_h16_c64`, writing `y` as the half `[batch, 8, 40, 499, 8]`
+    /// tensor `spk_wideconv_h16_c64_half_in` reads, for a block's first convolution
+    spk_wideconv_h16_c64_half_out,
+    channels = 64,
+    h = 40,
+    w = 499,
+    m_tiles = 4,
+    channel_warps = 1,
+    rows = 4,
+    n_tiles = 8,
+    threads = 128,
+    min_blocks = 2,
+    half_input = false,
+    half_output = true,
+}
+
+h16_conv3x3! {
+    /// As `spk_wideconv_h16_c64`, reading `x` as the half tensor
+    /// `spk_wideconv_h16_c64_half_out` writes, for a block's second convolution
+    spk_wideconv_h16_c64_half_in,
+    channels = 64,
+    h = 40,
+    w = 499,
+    m_tiles = 4,
+    channel_warps = 1,
+    rows = 4,
+    n_tiles = 8,
+    threads = 128,
+    min_blocks = 2,
+    half_input = true,
+    half_output = false,
 }
 
 h16_conv3x3! {
@@ -627,6 +799,8 @@ h16_conv3x3! {
     n_tiles = 8,
     threads = 128,
     min_blocks = 2,
+    half_input = false,
+    half_output = false,
 }
 
 h16_conv3x3! {
@@ -642,6 +816,8 @@ h16_conv3x3! {
     n_tiles = 8,
     threads = 128,
     min_blocks = 3,
+    half_input = false,
+    half_output = false,
 }
 
 h16_conv3x3! {
@@ -662,6 +838,8 @@ h16_conv3x3! {
     n_tiles = 8,
     threads = 128,
     min_blocks = 2,
+    half_input = false,
+    half_output = false,
 }
 
 h16_conv3x3! {
@@ -677,6 +855,8 @@ h16_conv3x3! {
     n_tiles = 8,
     threads = 128,
     min_blocks = 3,
+    half_input = false,
+    half_output = false,
 }
 
 /// Expands to one 3x3, stride-2, padding-1 FP16 convolution from `in_channels` to

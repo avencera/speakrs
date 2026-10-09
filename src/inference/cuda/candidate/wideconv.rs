@@ -96,6 +96,10 @@ kernel_entries! {
     H16_C256_NARROW => "spk_wideconv_h16_c256_narrow",
     H16_C32 => "spk_wideconv_h16_c32",
     H16_C64 => "spk_wideconv_h16_c64",
+    H16_C32_HALF_OUT => "spk_wideconv_h16_c32_half_out",
+    H16_C32_HALF_IN => "spk_wideconv_h16_c32_half_in",
+    H16_C64_HALF_OUT => "spk_wideconv_h16_c64_half_out",
+    H16_C64_HALF_IN => "spk_wideconv_h16_c64_half_in",
     H16_C32S2 => "spk_wideconv_h16_c32s2",
     H16_C64S2 => "spk_wideconv_h16_c64s2",
     H16_C64S2_NARROW => "spk_wideconv_h16_c64s2_narrow",
@@ -229,6 +233,25 @@ pub(crate) enum Fp16Tiles {
     Wide,
     /// 64 channels of the 128- and 256-channel shapes, which doubles the CTAs of a batch
     Narrow,
+}
+
+/// The form of the activation a wide FP16 32- or 64-channel launch passes to the
+/// next convolution
+///
+/// A residual block's hidden activation is only read by the block's second
+/// convolution, whose staging converts it to FP16 scaled by 2^10. `HalfOut` makes the
+/// first convolution store it already converted, as `[batch, channels / 8, h, w, 8]`
+/// halves, and flag saturation as the second's staging would; `HalfIn` makes the
+/// second read that form. The pair computes exactly what the FP32 pair does while
+/// moving half the hidden bytes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HalfIo {
+    /// FP32 input and output
+    Fp32,
+    /// FP32 input, half output
+    HalfOut,
+    /// Half input, FP32 output
+    HalfIn,
 }
 
 /// Largest operand magnitude the FP16 tiles convert without saturating: the largest
@@ -1106,6 +1129,19 @@ impl Shape {
         matches!(self, Self::C32 | Self::C64 | Self::C128 | Self::C256)
     }
 
+    /// The `HalfOut` and `HalfIn` entries of the shapes whose wide FP16 tiles have them
+    fn fp16_half_entries(self, tiles: Fp16Tiles) -> Option<[&'static str; 2]> {
+        match (self, tiles) {
+            (Self::C32, Fp16Tiles::Wide) => {
+                Some([entries::H16_C32_HALF_OUT, entries::H16_C32_HALF_IN])
+            }
+            (Self::C64, Fp16Tiles::Wide) => {
+                Some([entries::H16_C64_HALF_OUT, entries::H16_C64_HALF_IN])
+            }
+            _ => None,
+        }
+    }
+
     /// Direct FP16 grid and dynamic shared bytes, mirroring the device instances: output
     /// rows and channels per CTA, `FP16_COLUMNS` columns, and two stages of the CTA's
     /// input rows and columns with their halo at 16 bytes per pixel. A stride-2 stage
@@ -1435,6 +1471,8 @@ pub(crate) struct Oxide {
     partition: Partition,
     epilogue: Epilogue,
     function: CudaFunction,
+    /// The `HalfOut` and `HalfIn` variants of `function`, for the shapes that have them
+    half: Option<Box<[CudaFunction; 2]>>,
     reduce: CudaFunction,
     fixup: CudaFunction,
     packed: CudaSlice<f32>,
@@ -1571,14 +1609,25 @@ impl Oxide {
             unsafe { launch.launch(linear_config(weight_len_u32)) }?;
         }
 
-        let function = kernels.function(entry)?;
         let shared = layout.config.shared_mem_bytes;
-        if shared > DEFAULT_SHARED_LIMIT {
-            function.set_attribute(
-                CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                shared as i32,
-            )?;
-        }
+        let load = |entry| -> Result<CudaFunction, CudaError> {
+            let function = kernels.function(entry)?;
+            if shared > DEFAULT_SHARED_LIMIT {
+                function.set_attribute(
+                    CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                    shared as i32,
+                )?;
+            }
+            Ok(function)
+        };
+        let function = load(entry)?;
+        let half = match algorithm {
+            Algorithm::Fp16(tiles) => shape
+                .fp16_half_entries(tiles)
+                .map(|[out, input]| Ok::<_, CudaError>(Box::new([load(out)?, load(input)?])))
+                .transpose()?,
+            _ => None,
+        };
 
         Ok(Self {
             conv,
@@ -1587,6 +1636,7 @@ impl Oxide {
             partition,
             epilogue,
             function,
+            half,
             reduce: kernels.function(entries::REDUCE)?,
             fixup: kernels.function(entries::WINO_FIXUP)?,
             packed,
@@ -1642,11 +1692,27 @@ impl Oxide {
         output: &mut CudaViewMut<'a, f32>,
         workspace: &mut CudaViewMut<'a, f32>,
         range: Option<&mut CudaViewMut<'_, f32>>,
+        io: HalfIo,
         stream: &CudaStream,
     ) -> Result<(), CudaError> {
-        check_len("wideconv input", self.layout.input_len, inputs.x.len())?;
+        let function = match (io, self.half.as_deref()) {
+            (HalfIo::Fp32, _) => &self.function,
+            (HalfIo::HalfOut, Some([out, _])) => out,
+            (HalfIo::HalfIn, Some([_, input])) => input,
+            (_, None) => return Err(unsupported("no half input or output for this plan")),
+        };
+        // a half tensor holds two values per word
+        let input_len = match io {
+            HalfIo::HalfIn => self.layout.input_len / 2,
+            _ => self.layout.input_len,
+        };
+        let output_len = match io {
+            HalfIo::HalfOut => self.layout.output_len / 2,
+            _ => self.layout.output_len,
+        };
+        check_len("wideconv input", input_len, inputs.x.len())?;
         check_len("wideconv bias", self.conv.out_channels, inputs.bias.len())?;
-        check_len("wideconv output", self.layout.output_len, output.len())?;
+        check_len("wideconv output", output_len, output.len())?;
         check_len(
             "wideconv workspace",
             self.layout.workspace_len,
@@ -1758,8 +1824,16 @@ impl Oxide {
                 }
                 _ => None,
             };
+            if io == HalfIo::HalfIn {
+                // a half input stages each pixel's eight channels with one 16-byte load
+                let (x_ptr, _x) = inputs.x.device_ptr(stream);
+                if !x_ptr.is_multiple_of(16) {
+                    return Err(unsupported("half inputs need 16-byte alignment"));
+                }
+                drop(_x);
+            }
             let range_len = range.as_ref().map_or(0, |range| range.len() as u64);
-            let mut launch = stream.launch_builder(&self.function);
+            let mut launch = stream.launch_builder(function);
             launch
                 .arg(inputs.x)
                 .arg(&lengths[0])
@@ -2036,7 +2110,7 @@ impl ConvCandidate for Oxide {
         phases: &Phases,
         stream: &CudaStream,
     ) -> Result<(), CudaError> {
-        self.enqueue_with(inputs, y, None, phases, stream)
+        self.enqueue_with(inputs, y, None, HalfIo::Fp32, phases, stream)
     }
 }
 
@@ -2058,8 +2132,29 @@ impl Oxide {
         phases: &Phases,
         stream: &CudaStream,
     ) -> Result<(), CudaError> {
+        self.enqueue_half(inputs, y, range, HalfIo::Fp32, phases, stream)
+    }
+
+    /// Whether this plan has the [`HalfIo`] launches, which wide FP16 tiles of the 32-
+    /// and 64-channel shapes do
+    pub(crate) fn has_half_io(&self) -> bool {
+        self.half.is_some()
+    }
+
+    /// Enqueues the layer as [`Self::enqueue_checked`] does, with the input or output in
+    /// the half form of `io`, which holds half the FP32 tensor's words; plans without
+    /// [`Self::has_half_io`] refuse every form but FP32
+    pub(crate) fn enqueue_half(
+        &self,
+        inputs: ConvInputs<'_, '_>,
+        y: &mut CudaViewMut<'_, f32>,
+        range: &mut CudaViewMut<'_, f32>,
+        io: HalfIo,
+        phases: &Phases,
+        stream: &CudaStream,
+    ) -> Result<(), CudaError> {
         check_len("wideconv out-of-range word", 1, range.len())?;
-        self.enqueue_with(inputs, y, Some(range), phases, stream)
+        self.enqueue_with(inputs, y, Some(range), io, phases, stream)
     }
 
     fn enqueue_with(
@@ -2067,6 +2162,7 @@ impl Oxide {
         inputs: ConvInputs<'_, '_>,
         y: &mut CudaViewMut<'_, f32>,
         range: Option<&mut CudaViewMut<'_, f32>>,
+        io: HalfIo,
         phases: &Phases,
         stream: &CudaStream,
     ) -> Result<(), CudaError> {
@@ -2093,7 +2189,7 @@ impl Oxide {
             residual: inputs.residual,
         };
         phases.op(Op::Main, || {
-            self.launch(inputs, &mut output, &mut workspace, range, stream)
+            self.launch(inputs, &mut output, &mut workspace, range, io, stream)
         })
     }
 }

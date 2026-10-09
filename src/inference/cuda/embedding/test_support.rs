@@ -24,6 +24,7 @@ impl EmbeddingBatch {
         self.run_with_activations(
             runtime,
             super::PlanSet::Selected,
+            super::HiddenForm::Fp32,
             tap,
             storage.buffers_mut(),
         )

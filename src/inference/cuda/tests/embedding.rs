@@ -261,6 +261,14 @@ fn embedding_b32_matches_reference() -> Result<(), CudaError> {
             again, eager,
             "b32 {math:?}: eager forward is not deterministic"
         );
+        // the taps keep every hidden activation FP32, which must give the forward
+        // pass's result bit for bit where it passes them as halves
+        batch.forward_with_taps(&runtime, &mut |_, _| Ok(()))?;
+        let fp32_hidden = batch.download_output(&runtime)?;
+        assert_eq!(
+            fp32_hidden, eager,
+            "b32 {math:?}: half hidden activations change the result"
+        );
         batch.capture_graph(&runtime)?;
         assert!(batch.has_graph());
         let graphed = run_case(&runtime, &mut batch, &case);

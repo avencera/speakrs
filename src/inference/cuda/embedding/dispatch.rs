@@ -6,7 +6,7 @@ use std::rc::Rc;
 use cudarc::driver::{CudaView, CudaViewMut};
 
 use super::super::candidate::{
-    ConvCandidate, ConvInputs, ConvLayerSpec, ConvOxide, Fp16Policy, Phases, WideconvOxide,
+    ConvCandidate, ConvInputs, ConvLayerSpec, ConvOxide, Fp16Policy, HalfIo, Phases, WideconvOxide,
 };
 #[cfg(feature = "_cuda-libraries")]
 use super::super::dnn::{ConvPlan, ConvPlanner};
@@ -69,17 +69,33 @@ impl Plan {
 }
 
 impl Convs<'_> {
-    /// Run only the owner built for this layer and batch class
+    /// Whether both of a block's convolutions run plans with [`HalfIo`] launches, so
+    /// the hidden activation between them can be half
+    pub(super) fn half_pair(
+        &self,
+        conv1: &ConvLayer,
+        conv2: &ConvLayer,
+    ) -> Result<bool, CudaError> {
+        let half = |layer| {
+            self.plan(layer)
+                .map(|plan| matches!(plan, Plan::Wideconv(plan) if plan.has_half_io()))
+        };
+        Ok(half(conv1)? && half(conv2)?)
+    }
+
+    /// Run only the owner built for this layer and batch class, with the input or
+    /// output in the half form of `io`, which only [`Self::half_pair`] plans accept
     pub(super) fn conv_bias_relu(
         &mut self,
         layer: &ConvLayer,
         x: &CudaView<'_, f32>,
         residual: Residual<'_, '_>,
         y: &mut CudaViewMut<'_, f32>,
+        io: HalfIo,
     ) -> Result<(), CudaError> {
         let runtime = self.runtime;
         runtime.record_boundary(layer.boundary(), self.chunks, self.math, || {
-            self.conv_bias_relu_inner(layer, x, residual, y)
+            self.conv_bias_relu_inner(layer, x, residual, y, io)
         })
     }
 
@@ -89,8 +105,17 @@ impl Convs<'_> {
         x: &CudaView<'_, f32>,
         residual: Residual<'_, '_>,
         y: &mut CudaViewMut<'_, f32>,
+        io: HalfIo,
     ) -> Result<(), CudaError> {
-        match self.plan(layer)? {
+        let plan = self.plan(layer)?;
+        if io != HalfIo::Fp32 && !matches!(plan, Plan::Wideconv(_)) {
+            return Err(CudaError::Unsupported {
+                context: "embedding half activation",
+                reason: format!("{} has no half input or output", layer.name()),
+            });
+        }
+
+        match plan {
             #[cfg(feature = "_cuda-libraries")]
             Plan::Library(plan) => {
                 plan.forward_bias_relu(
@@ -105,7 +130,7 @@ impl Convs<'_> {
                 Ok(())
             }
             Plan::Oxide(plan) => self.candidate(plan, layer, x, residual, y),
-            Plan::Wideconv(plan) => self.wideconv(plan, layer, x, residual, y),
+            Plan::Wideconv(plan) => self.wideconv(plan, layer, x, residual, y, io),
         }
     }
 }
@@ -137,7 +162,7 @@ impl Convs<'_> {
                     #[cfg(feature = "_cuda-libraries")]
                     scratch: x,
                 };
-                self.wideconv(plan, layer, x, none, y)
+                self.wideconv(plan, layer, x, none, y, HalfIo::Fp32)
             }
             _ => {
                 self.conv(layer, x, y)?;
@@ -155,6 +180,7 @@ impl Convs<'_> {
         x: &CudaView<'_, f32>,
         residual: Residual<'_, '_>,
         y: &mut CudaViewMut<'_, f32>,
+        io: HalfIo,
     ) -> Result<(), CudaError> {
         let residual = match residual {
             Residual::Add(value) => Some(value),
@@ -162,7 +188,7 @@ impl Convs<'_> {
         };
         let stream = self.runtime.stream();
 
-        plan.enqueue_checked(
+        plan.enqueue_half(
             ConvInputs {
                 x,
                 residual,
@@ -171,6 +197,7 @@ impl Convs<'_> {
             },
             y,
             &mut self.range,
+            io,
             &Phases::new(),
             stream,
         )
