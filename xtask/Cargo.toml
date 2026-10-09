@@ -13,14 +13,24 @@ path = "src/main.rs"
 [[bin]]
 name = "speakrs-bm"
 path = "src/bin/speakrs_bm.rs"
-required-features = ["cuda"]
+required-features = ["_cuda"]
 
 [features]
 default = ["cpu"]
 # enables the native CPU backend and CPU profiling commands
 cpu = ["speakrs/cpu"]
 coreml = ["speakrs/coreml"]
-cuda = ["speakrs/cuda"]
+cuda = ["_cuda", "speakrs/cuda"]
+cuda-sm75 = ["_cuda", "speakrs/cuda-sm75"]
+cuda-sm80 = ["_cuda", "speakrs/cuda-sm80"]
+cuda-sm90 = ["_cuda", "speakrs/cuda-sm90"]
+cuda-sm120 = ["_cuda", "speakrs/cuda-sm120"]
+cuda-rtx20 = ["_cuda", "speakrs/cuda-rtx20"]
+cuda-rtx30 = ["_cuda", "speakrs/cuda-rtx30"]
+cuda-rtx40 = ["_cuda", "speakrs/cuda-rtx40"]
+cuda-a100 = ["_cuda", "speakrs/cuda-a100"]
+cuda-rtx50 = ["_cuda", "speakrs/cuda-rtx50"]
+_cuda = []
 migraphx = ["speakrs/migraphx"]
 load-dynamic = ["speakrs/load-dynamic"]
 _metrics = ["speakrs/_metrics"]

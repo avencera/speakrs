@@ -142,35 +142,11 @@ pub(super) mod test_support {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use safetensors::Dtype;
     use serde_json::Value;
 
     use super::WeightsFile;
 
     impl WeightsFile {
-        /// Makes a host-only copy with each FP32 value transformed in metadata order
-        pub(crate) fn map_f32(&self, mut transform: impl FnMut(f32) -> f32) -> Self {
-            let mut bytes = self.bytes.clone();
-            for info in self.metadata.tensors().into_values() {
-                if info.dtype != Dtype::F32 {
-                    continue;
-                }
-
-                let (start, end) = info.data_offsets;
-                let data = &mut bytes[self.data_start + start..self.data_start + end];
-                for chunk in data.as_chunks_mut::<4>().0 {
-                    *chunk = transform(f32::from_le_bytes(*chunk)).to_le_bytes();
-                }
-            }
-
-            Self {
-                path: PathBuf::from("<in-memory perturbed weights>"),
-                bytes,
-                data_start: self.data_start,
-                metadata: self.metadata.clone(),
-            }
-        }
-
         /// The file this was read from
         pub(crate) fn path(&self) -> &Path {
             &self.path
@@ -292,23 +268,5 @@ mod tests {
                 ..
             })
         ));
-    }
-
-    #[test]
-    fn in_memory_transform_changes_only_fp32_values() {
-        let mut data = 2.0_f32.to_le_bytes().to_vec();
-        data.push(7);
-        let file = TestFile::new(
-            &json!({
-                "float": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]},
-                "other": {"dtype": "U8", "shape": [1], "data_offsets": [4, 5]}
-            }),
-            &data,
-        );
-        let weights = WeightsFile::open(&file.0).unwrap();
-        let mapped = weights.map_f32(|value| value * 3.0);
-        assert_eq!(mapped.read_f32("float", &[1]).unwrap(), [6.0]);
-        assert_eq!(weights.read_f32("float", &[1]).unwrap(), [2.0]);
-        assert_eq!(mapped.bytes.last(), Some(&7));
     }
 }

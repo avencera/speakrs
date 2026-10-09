@@ -1,8 +1,10 @@
 use super::super::CudaError;
 
+#[cfg(feature = "_cuda-libraries")]
+pub(super) use crate::inference::native_model::segmentation::LSTM_LAYERS;
 pub(super) use crate::inference::native_model::segmentation::{
-    CLASSES, CONV_KERNEL, FEATURES, HIDDEN, LEAKY_SLOPE, LINEAR, LSTM_LAYERS, NORM_EPSILON, POOL,
-    SINC_CHANNELS, SINC_KERNEL, SINC_STRIDE, WINDOW_SAMPLES,
+    CLASSES, CONV_KERNEL, FEATURES, HIDDEN, LEAKY_SLOPE, LINEAR, NORM_EPSILON, POOL, SINC_CHANNELS,
+    SINC_KERNEL, SINC_STRIDE, WINDOW_SAMPLES,
 };
 
 /// Activation lengths of one forward pass for a batch of equal-length windows

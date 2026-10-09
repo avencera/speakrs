@@ -244,27 +244,42 @@
 //!
 //! - `coreml`: native CoreML backend on macOS, without ONNX Runtime
 //! - `cpu`: native Rust CPU backend, without ONNX Runtime
-//! - `cuda`: native NVIDIA backend (cuBLAS, cuDNN and speakrs kernels), without ONNX
-//!   Runtime
+//! - `cuda`: Linux-only native NVIDIA backend with all target kernels plus cuDNN and cuBLAS,
+//!   without ONNX Runtime. Libraries load only when a selected plan needs them
 //! - `migraphx`: AMD GPU backend via ONNX Runtime MIGraphX
 //!
 //! Other features:
 //!
-//! - `online` (default): model download via [`ModelManager`]
+//! - `online` (default): model download via `ModelManager`
 //! - `load-dynamic`: load ONNX Runtime dynamically for MIGraphX or the external ONNX session
 //!   helper; use it with `migraphx` or `cpu`. Native CPU inference does not load this library
-//! - `cuda-sm80`, `cuda-sm90`, `cuda-sm120`: also embed native CUDA kernels built for newer
-//!   NVIDIA GPUs (Ampere, Hopper, consumer Blackwell); each implies `cuda`. Without them the
-//!   native kernels target Turing (`sm_75`), and the driver compiles them for newer GPUs when
-//!   they load. At run time speakrs uses the highest compiled-in tier the GPU supports, and
-//!   `SPEAKRS_CUDA_PTX_TIER=sm75` forces a lower one
+//! - `cuda-sm75`, `cuda-sm80`, `cuda-sm90`, `cuda-sm120`: driver-only targets for
+//!   Turing, Ampere/Ada, Hopper, and consumer Blackwell. Each embeds every area's best
+//!   shipped kernel variant. These features do not include cuDNN or cuBLAS
+//! - `cuda-rtx20`: RTX 20 (Turing); `cuda-rtx30`: RTX 30 (Ampere);
+//!   `cuda-rtx40`: RTX 40 (Ada); `cuda-a100`: A100 (Ampere);
+//!   `cuda-rtx50`: RTX 50 (consumer Blackwell)
 //!
-//! The `cuda` feature compiles without a CUDA toolkit: it loads the NVIDIA driver, cuBLAS,
-//! cuDNN 9 and (only for the `PersistDynamic` LSTM algorithm) NVRTC at run time, and needs
-//! a Turing (compute capability 7.5) or newer GPU. CUDA modes load
-//! `segmentation-3.0.safetensors` and `wespeaker-multimask-tail.safetensors` instead of
-//! ONNX models. [`RuntimeConfig`] selects their precision (FP32 by default for segmentation,
-//! TF32 for embedding, always FP32 for the filterbank), the segmentation LSTM algorithm, and CUDA graphs.
+//! CUDA is not in `default`, because the backend runs only on Linux. For a driver-only
+//! build, use `speakrs = { default-features = false, features = ["cuda-rtx50"] }`.
+//! Features are additive: adding `cuda` also adds cuDNN and cuBLAS. A target-only model
+//! load returns a typed error with the boundary, batch and math if a kernel is missing.
+//!
+//! The CUDA backend builds without a CUDA toolkit. It needs an NVIDIA driver and a
+//! Turing (compute capability 7.5) or newer GPU. The `cuda` feature also needs cuDNN 9
+//! and cuBLAS when a selected plan uses them, and NVRTC for `PersistDynamic` LSTM.
+//! CUDA modes use `segmentation-3.0.safetensors` and
+//! `wespeaker-multimask-tail.safetensors`. `RuntimeConfig` selects precision and graphs.
+//! `SPEAKRS_CUDA_PTX_TIER=sm75` limits the kernel tier. Hybrid selection uses measured
+//! speed for device-sensitive kernels and explicit all-device evidence for broad winners.
+//! The FP32 fbank FFT/mel producer is a broad winner on cc 8.0 and newer; segdense is a broad
+//! winner on cc 8.0 and newer with the sm80 tier. These fused kernels won by at least
+//! 1.05x in every measured case on at least two architectures. Full `cuda` embeds all
+//! target kernels alongside cuDNN and cuBLAS. LSTM and the ResNet trunk use kernels only
+//! where their speed was measured faster; other devices use Library. TF32 fbank uses
+//! the kernel only on cc 8.9, where it was measured faster.
+//! `SPEAKRS_CUDA_FORCE_LIBRARY=1` makes a `cuda` build use Library at each replaceable
+//! boundary. The choice is logged when the model loads.
 //!
 //! The ONNX Runtime dependency for `migraphx` and the optional external session helper
 //! (`ort` 2.0.0-rc.13) is still pre-release.
@@ -278,8 +293,21 @@
 //! - [`QueueConfig`]: in-process queue capacity
 //! - [`DiarizationResult`]: frame-level activations, segments, clusters, embeddings, RTTM
 //! - [`PipelineConfig`] and [`RuntimeConfig`]: tuning knobs
-//! - [`ModelManager`]: model download when `online` is enabled
+//! - `ModelManager`: model download when `online` is enabled
 //! - [`Segment`]: a single speaker turn
+
+#[cfg(all(
+    feature = "_cuda",
+    not(any(
+        feature = "cuda-sm75",
+        feature = "cuda-sm80",
+        feature = "cuda-sm90",
+        feature = "cuda-sm120"
+    ))
+))]
+compile_error!(
+    "CUDA requires a GPU target; enable `cuda`, `cuda-sm75`, `cuda-sm80`, `cuda-sm90`, or `cuda-sm120`"
+);
 
 #[cfg(all(feature = "coreml", not(target_os = "macos")))]
 compile_error!("the `coreml` feature is only supported on macOS");
@@ -288,7 +316,7 @@ compile_error!("the `coreml` feature is only supported on macOS");
 compile_error!(
     "speakrs needs an inference backend; enable at least one of these Cargo features:\n\
      - macOS (Apple Silicon): `coreml`\n\
-     - NVIDIA GPU: `cuda` (native, no ONNX Runtime)\n\
+     - NVIDIA GPU: `cuda`, or a `cuda-sm75`/`cuda-sm80`/`cuda-sm90`/`cuda-sm120` target (native, no ONNX Runtime)\n\
      - AMD GPU: `migraphx`\n\
      - CPU (native Rust): `cpu`\n\
      for example: speakrs = { version = \"0.6\", features = [\"coreml\"] }"

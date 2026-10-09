@@ -18,7 +18,7 @@ pub(crate) const STATE_TILE: usize = 2 * TILE_ROWS * HIDDEN;
 
 /// ONNX LSTM gates are stored `[i, o, f, c]`; packed gate `g` is ONNX gate
 /// `ONNX_GATE[g]`
-const ONNX_GATE: [usize; GATES] = [0, 2, 3, 1];
+pub(crate) const ONNX_GATE: [usize; GATES] = [0, 2, 3, 1];
 
 /// The recurrence kernel, for errors
 pub(crate) const KERNEL: &str = "spk_lstm_recurrence";
@@ -56,7 +56,17 @@ impl Schedule {
         capacity: usize,
         concurrent_capacity: Option<usize>,
     ) -> Result<Self, PlanError> {
-        let pair = 2 * GROUPS;
+        Self::for_groups(GROUPS, batch, capacity, concurrent_capacity)
+    }
+
+    /// [`Self::new`] for a recurrence whose batch tile spans `groups` blocks
+    pub(crate) fn for_groups(
+        groups: usize,
+        batch: usize,
+        capacity: usize,
+        concurrent_capacity: Option<usize>,
+    ) -> Result<Self, PlanError> {
+        let pair = 2 * groups;
         let joint = concurrent_capacity.unwrap_or(0).min(capacity);
         for tile_rows in Self::TILE_HEIGHTS {
             let tiles = batch.div_ceil(tile_rows);
@@ -71,18 +81,18 @@ impl Schedule {
         }
 
         let tiles = batch.div_ceil(TILE_ROWS);
-        if GROUPS <= capacity {
+        if groups <= capacity {
             return Ok(Self {
                 tile_rows: TILE_ROWS,
                 tiles,
-                tiles_per_launch: capacity / GROUPS,
+                tiles_per_launch: capacity / groups,
                 concurrent: false,
             });
         }
 
         Err(PlanError::DeviceUnsupported {
             reason: format!(
-                "needs {GROUPS} co-resident blocks, but the GPU holds {capacity} in a cooperative launch"
+                "needs {groups} co-resident blocks, but the GPU holds {capacity} in a cooperative launch"
             ),
         })
     }

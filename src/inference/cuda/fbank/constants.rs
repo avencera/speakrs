@@ -65,7 +65,10 @@ impl FbankConstants {
         &self.mel
     }
 
-    pub(super) fn mel_table(&self) -> &MelTable {
+    /// Contiguous filter runs
+    ///
+    /// The Library's sparse mel kernel and the record-owned DFT producer read the same runs
+    pub(in crate::inference::cuda) fn mel_table(&self) -> &MelTable {
         &self.mel_table
     }
 }

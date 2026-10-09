@@ -1,11 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use ndarray::Array2;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::inference::cuda::{
-    CudaError, CudaLstmAlgorithm, CudaRuntime, CudaSegmentation, CudaSession, SafetensorsFile,
-    SegmentationOptions,
+    CudaError, CudaRuntime, CudaSegmentation, CudaSession, SafetensorsFile, SegmentationOptions,
 };
 use crate::inference::{ExecutionMode, InferenceError, ModelLoadError};
 use crate::pipeline::RuntimeConfig;
@@ -57,6 +56,7 @@ impl CudaSegmentationBackend {
 
         let options = SegmentationOptions {
             math: config.cuda_segmentation_math,
+            #[cfg(feature = "_cuda-libraries")]
             lstm_algo: config.cuda_lstm_algorithm,
             cuda_graph: config.cuda_graphs.enabled(),
         };
@@ -128,57 +128,21 @@ impl CudaSegmentationBackend {
     }
 }
 
-/// Opens a runtime and uploads the weights, falling back from
-/// [`CudaLstmAlgorithm::PersistDynamic`] to [`CudaLstmAlgorithm::Standard`] when cuDNN
-/// cannot compile its kernels
+/// Opens the driver runtime and constructs only selected model state
 fn open_session(
     weights: &Path,
     options: SegmentationOptions,
     window_samples: usize,
 ) -> Result<(CudaSession<SegmentationState>, SegmentationOptions), CudaError> {
     let file = SafetensorsFile::open(weights)?;
-    let mut options = options;
-    if options.lstm_algo == CudaLstmAlgorithm::PersistDynamic && !nvrtc_present() {
-        warn!(
-            "CUDA LSTM algorithm PersistDynamic needs the NVRTC library, which could not be loaded; using Standard"
-        );
-        options.lstm_algo = CudaLstmAlgorithm::Standard;
-    }
-
-    let build = |runtime: &CudaRuntime, options| -> Result<SegmentationState, CudaError> {
+    let session = CudaSession::new(CudaRuntime::new(0)?, |runtime| {
         let mut model = CudaSegmentation::new(runtime, &file, options)?;
-        debug!(
-            capability = %runtime.compute_capability(),
-            ptx_tier = %model.kernel_tier(),
-            ?options,
-            "Loaded CUDA segmentation"
-        );
-        // a persistent-dynamic plan compiles its kernels when the workspace is built;
-        // building the single-window one here surfaces an NVRTC failure at load time
-        if options.lstm_algo == CudaLstmAlgorithm::PersistDynamic {
-            model.workspace(runtime, 1, window_samples)?;
+        // construct production classes before load returns, outside graph capture
+        for batch in [1, 32] {
+            model.workspace(runtime, batch, window_samples)?;
         }
+        debug!(capability = %runtime.compute_capability(), ptx_tier = %model.kernel_tier(), ?options, "Loaded CUDA segmentation");
         Ok(SegmentationState(model))
-    };
-
-    match CudaSession::new(CudaRuntime::new(0)?, |runtime| build(runtime, options)) {
-        Ok(session) => Ok((session, options)),
-        Err(error) if options.lstm_algo == CudaLstmAlgorithm::PersistDynamic => {
-            warn!(%error, "CUDA LSTM algorithm PersistDynamic failed to build; using Standard");
-            let options = SegmentationOptions {
-                lstm_algo: CudaLstmAlgorithm::Standard,
-                ..options
-            };
-            let session =
-                CudaSession::new(CudaRuntime::new(0)?, |runtime| build(runtime, options))?;
-            Ok((session, options))
-        }
-        Err(error) => Err(error),
-    }
-}
-
-fn nvrtc_present() -> bool {
-    // SAFETY: probing loads the NVRTC shared library, whose initializers have no
-    // preconditions on our side
-    unsafe { cudarc::nvrtc::sys::is_culib_present() }
+    })?;
+    Ok((session, options))
 }

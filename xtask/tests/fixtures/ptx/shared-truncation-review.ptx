@@ -1,0 +1,50 @@
+// regression paths from the fresh review; each function has independent registers
+.visible .entry dollar_origin() {
+ .reg .b64 $base;
+ cvta.shared.u64 $base, smem;
+ cvt.u32.u64 %narrow, $base;
+}
+.visible .entry dollar_copy() {
+ cvta.shared.u64 %base, smem;
+ mov.b64 $copy, %base;
+ cvt.u32.u64 %narrow, $copy;
+}
+.visible .entry wide_mad() {
+ cvta.shared.u64 %base, smem;
+ mad.wide.u32 %wide, 0, 1, %base;
+ cvt.u32.u64 %narrow, %wide;
+}
+.visible .entry wide_mul() {
+ cvta.shared.u32 %base, smem;
+ mul.wide.u32 %wide, %base, 1;
+ mov.b32 %narrow, %wide;
+}
+.visible .entry vector_load() {
+ cvta.shared.u64 %base, smem;
+ ld.v2.u64 {%first, %second}, [%base];
+ mov.b32 %left, %first;
+ mov.b32 %right, %second;
+}
+.visible .entry unsigned16() {
+ cvta.shared.u64 %base, smem;
+ cvt.u16.u64 %low, %base;
+ cvt.u32.u16 %narrow, %low;
+}
+.visible .entry signed16() {
+ cvta.shared.u64 %base, smem;
+ cvt.s16.s64 %low, %base;
+}
+.visible .entry unsigned8() {
+ cvta.shared.u64 %base, smem;
+ cvt.u8.u64 %low, %base;
+}
+.visible .entry packed16() {
+ cvta.shared.u64 %base, smem;
+ mov.b32 {%first, %second}, %base;
+}
+.visible .entry unknown_reuse() {
+ cvta.shared.u64 %base, smem;
+ call (%value), helper, (%base);
+ mov.b32 %value, 0;
+ mov.b32 %narrow, %value;
+}

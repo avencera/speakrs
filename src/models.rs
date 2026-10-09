@@ -76,7 +76,7 @@ fn download_error(
     mode: ExecutionMode,
     source: hf_hub::api::sync::ApiError,
 ) -> crate::inference::ModelLoadError {
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda")]
     if mode.is_cuda() {
         return crate::inference::ModelLoadError::CudaAssetsUnavailable { mode, source };
     }

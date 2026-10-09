@@ -1,4 +1,0 @@
-# the nightly that cuda-oxide pins in its own rust-toolchain.toml
-[toolchain]
-channel = "nightly-2026-08-28"
-components = ["rust-src", "rustc-dev", "llvm-tools", "rustfmt", "clippy"]

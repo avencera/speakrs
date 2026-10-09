@@ -1,0 +1,42 @@
+.version 7.0
+.target sm_80
+.address_size 64
+// comments must not create taint or instructions
+// cvta.shared.u64 %rd9, smem; cvt.u32.u64 %r9, %rd9;
+.visible .entry converted()
+{
+    .reg .u64 %rd<4>;
+    .reg .u32 %r<2>;
+    cvta.shared.u64 %rd1, smem;
+    add.u64 %rd2, %rd1, 16;
+    cvta.to.shared.u64 %rd3, %rd2;
+    cvt.u32.u64 %r1, %rd3;
+    ret;
+}
+.visible .entry independent()
+{
+    .reg .u64 %rd<4>;
+    .reg .u32 %r<2>;
+    /* cvta.shared.u64 %rd2, smem; */
+    mov.u64 %rd2, 16;
+    cvt.u32.u64 %r1, %rd2;
+    ret;
+}
+
+.visible .entry converted_variants()
+{
+    cvta.shared.u64 %base, smem;
+    cvta.to.shared.u64 %safe, %base;
+    cvt.rn.u32.s64 %a, %safe;
+    mov.b64 {%lo, %hi}, %safe;
+    cvta.to.shared.u32 %direct, %base;
+    mov.b32 %copy, %direct;
+}
+
+.visible .entry calls_without_returns()
+{
+    cvta.shared.u64 %base, smem;
+    call external, (%base);
+    call (%out), external, (1);
+    cvt.u32.u64 %narrow, %out;
+}

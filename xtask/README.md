@@ -3,7 +3,7 @@
 Development CLI for speakrs. Two binaries:
 
 - **`xtask`** -- local dev tasks (benchmarks, model management, comparisons)
-- **`speakrs-bm`** -- GPU benchmark runner for dstack containers (requires `cuda` feature)
+- **`speakrs-bm`** -- GPU benchmark runner for dstack containers (requires a CUDA backend feature, such as `cuda` or `cuda-rtx50`)
 
 ## Commands
 

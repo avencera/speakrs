@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
 use crate::commands;
+#[cfg(feature = "cuda")]
+use crate::commands::diarize::CudaLstm;
 use crate::commands::diarize::{ChunkEmbeddingComputeUnits, CudaPrecision, DiarizeMode};
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::Result;
@@ -60,14 +62,6 @@ enum Command {
         #[command(subcommand)]
         cmd: CudaKernelsCmd,
     },
-    /// Qualify one CUDA layer target against the locked harness
-    CudaQualify {
-        /// Target: resnet, lstm or sincnet
-        #[arg(value_parser = ["resnet", "lstm", "sincnet"])]
-        target: String,
-        /// Internal implementation name; Library is the control
-        implementation: String,
-    },
     /// Run speaker diarization on WAV files
     Diarize {
         #[arg(long, default_value = "cpu", value_parser = clap::value_parser!(DiarizeMode))]
@@ -84,6 +78,10 @@ enum Command {
         /// Embedding precision in CUDA modes; the filterbank always runs in FP32
         #[arg(long, default_value = "tf32", value_enum)]
         cuda_embedding_math: CudaPrecision,
+        /// Algorithm for selected Library LSTM plans
+        #[cfg(feature = "cuda")]
+        #[arg(long, default_value = "persist-static-small-h", value_enum)]
+        cuda_lstm_algorithm: CudaLstm,
         /// WAV files to diarize
         wav_files: Vec<PathBuf>,
     },
@@ -112,16 +110,14 @@ impl Command {
             Self::Dstack { cmd } => cmd.run(),
             Self::Dataset { cmd } => cmd.run(),
             Self::CudaKernels { cmd } => cmd.run(),
-            Self::CudaQualify {
-                target,
-                implementation,
-            } => commands::cuda_qualify::run(&target, &implementation),
             Self::Diarize {
                 mode,
                 models_dir,
                 chunk_emb_compute_units,
                 cuda_segmentation_math,
                 cuda_embedding_math,
+                #[cfg(feature = "cuda")]
+                cuda_lstm_algorithm,
                 wav_files,
             } => commands::diarize::run(
                 mode,
@@ -130,6 +126,8 @@ impl Command {
                     chunk_emb_compute_units,
                     cuda_segmentation_math,
                     cuda_embedding_math,
+                    #[cfg(feature = "cuda")]
+                    cuda_lstm_algorithm,
                 },
                 wav_files,
             ),
@@ -151,20 +149,30 @@ impl Command {
 
 #[derive(Subcommand)]
 enum CudaKernelsCmd {
-    /// Regenerate the committed PTX (GPU box only: needs cargo-oxide and CUDA 13)
+    /// Regenerate PTX and cubins (GPU box only: needs cargo-oxide and CUDA 13.0)
     Build {
         /// Areas to rebuild; all areas when empty
         areas: Vec<String>,
     },
-    /// Fail when the committed PTX is stale against the kernel sources (runs anywhere)
-    Check,
+    /// Check committed PTX and cubins against sources, hashes and pins (runs anywhere)
+    Check {
+        /// Rebuild cubins with pinned ptxas and require byte identity (GPU box only)
+        #[arg(long)]
+        rebuild: bool,
+    },
+    /// Build cubins only from committed PTX, without cuda-oxide (needs CUDA 13.0)
+    BuildCubins {
+        /// Areas to rebuild; all areas when empty
+        areas: Vec<String>,
+    },
 }
 
 impl CudaKernelsCmd {
     fn run(self) -> Result<()> {
         match self {
             Self::Build { areas } => commands::cuda_kernels::build(&areas),
-            Self::Check => commands::cuda_kernels::check(),
+            Self::Check { rebuild } => commands::cuda_kernels::check(rebuild),
+            Self::BuildCubins { areas } => commands::cuda_kernels::build_cubins(&areas),
         }
     }
 }

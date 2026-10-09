@@ -7,7 +7,7 @@ pub(super) enum Batching {
     Single,
     #[cfg(any(feature = "cpu", test))]
     Useful(NonZeroUsize),
-    #[cfg(any(feature = "migraphx", feature = "coreml", feature = "cuda", test))]
+    #[cfg(any(feature = "migraphx", feature = "coreml", feature = "_cuda", test))]
     Fixed(NonZeroUsize),
 }
 
@@ -41,7 +41,7 @@ impl Batching {
                     model: useful,
                 }
             }
-            #[cfg(any(feature = "migraphx", feature = "coreml", feature = "cuda", test))]
+            #[cfg(any(feature = "migraphx", feature = "coreml", feature = "_cuda", test))]
             Self::Fixed(capacity) => {
                 let one = NonZeroUsize::MIN;
                 if remaining >= capacity {

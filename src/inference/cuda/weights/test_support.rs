@@ -3,16 +3,6 @@
 use super::{Path, SafetensorsFile};
 
 impl SafetensorsFile {
-    /// A copy with every FP32 value scaled by `1 + relative * u`, `u` uniform in
-    /// [-1, 1) from `seed`; it exists only in memory and is never written to a path
-    pub fn perturbed(&self, seed: u64, relative: f32) -> Self {
-        let mut state = seed;
-        Self(self.0.map_f32(|value| {
-            let scale = 1.0 + relative * (2.0 * uniform(&mut state) - 1.0);
-            value * scale
-        }))
-    }
-
     /// The file this was read from
     pub fn path(&self) -> &Path {
         self.0.path()
@@ -22,16 +12,6 @@ impl SafetensorsFile {
     pub fn shape(&self, name: &str) -> Option<&[usize]> {
         self.0.shape(name)
     }
-}
-
-/// SplitMix64 mapped to [0, 1), for in-process qualification inputs
-pub(crate) fn uniform(state: &mut u64) -> f32 {
-    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    let mut z = *state;
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^= z >> 31;
-    (z >> 40) as f32 / (1u64 << 24) as f32
 }
 
 mod tests {

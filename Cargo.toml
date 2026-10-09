@@ -28,14 +28,26 @@ coreml = [
     "dep:objc2-foundation",
     "_backend",
 ]
-# native NVIDIA backend: cuBLAS, cuDNN and committed cuda-oxide PTX through cudarc, with
-# safetensors weights; no ONNX Runtime
-cuda = ["dep:cudarc", "dep:safetensors", "_backend"]
-# native CUDA kernels for newer GPUs, off by default: without them the binary carries
-# only sm_75 PTX, which the driver JIT-compiles for Turing and every newer GPU
-cuda-sm80 = ["cuda"]
-cuda-sm90 = ["cuda"]
-cuda-sm120 = ["cuda"]
+# Linux-only native NVIDIA backend; CUDA is never part of default
+# cuda includes all target kernels plus cuDNN and cuBLAS for hybrid selection
+cuda = ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120", "_cuda-libraries"]
+# internal: optional numerical libraries, added only by cuda
+_cuda-libraries = ["_cuda", "cudarc/cublas", "cudarc/cudnn", "dep:libloading"]
+# internal: driver and committed PTX, without optional numerical libraries
+_cuda = ["dep:cudarc", "dep:safetensors", "dep:sha2", "_backend"]
+# each target embeds every area's best shipped variant for that target
+# default-features = false with cuda-rtx50 alone is a driver-only build
+cuda-sm75 = ["_cuda"]
+cuda-sm80 = ["_cuda"]
+cuda-sm90 = ["_cuda"]
+cuda-sm120 = ["_cuda"]
+# RTX 20: Turing; RTX 30: Ampere; RTX 40: Ada; A100: Ampere
+cuda-rtx20 = ["cuda-sm75"]
+cuda-rtx30 = ["cuda-sm80"]
+cuda-rtx40 = ["cuda-sm80"]
+cuda-a100 = ["cuda-sm80"]
+# RTX 50: consumer Blackwell
+cuda-rtx50 = ["cuda-sm120"]
 migraphx = ["_ort", "ort/migraphx", "_backend"]
 # load ONNX Runtime at run time for MIGraphX or caller-created CPU sessions
 # native CPU model execution does not use this runtime
@@ -48,9 +60,10 @@ _backend = []
 _metrics = []
 
 [package.metadata.docs.rs]
-features = ["cpu", "cuda", "migraphx", "load-dynamic", "_metrics"]
+features = ["cpu", "cuda", "cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120", "migraphx", "load-dynamic", "_metrics"]
 
 [dependencies]
+sha2 = { version = "0.10", optional = true }
 hf-hub = { version = "0.5", optional = true, default-features = false }
 
 # math
@@ -67,11 +80,8 @@ ort = { version = "2.0.0-rc.13", features = ["ndarray"], optional = true }
 cudarc = { version = "0.19.10", optional = true, default-features = false, features = [
     "std",
     "driver",
-    # the `Ptx` type that module loading takes, and the probe for the NVRTC library that
-    # cuDNN's persistent-dynamic LSTM needs; speakrs itself never compiles with NVRTC
+    # the precompiled `Ptx` type requires this feature but does not load NVRTC
     "nvrtc",
-    "cublas",
-    "cudnn",
     "dynamic-loading",
     "cuda-12040",
 ] }

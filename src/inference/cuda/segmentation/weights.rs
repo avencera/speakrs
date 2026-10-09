@@ -8,6 +8,7 @@ pub(super) use crate::inference::native_model::segmentation::LstmLayer;
 
 /// ONNX LSTM gates are stored `[i, o, f, c]`; cuDNN gate `g` is ONNX gate
 /// `ONNX_GATE[g]`, because cuDNN orders them `[i, f, c, o]`
+#[cfg(feature = "_cuda-libraries")]
 pub(super) const ONNX_GATE: [usize; 4] = [0, 2, 3, 1];
 
 /// CUDA load adapter for the shared host PyanNet weights

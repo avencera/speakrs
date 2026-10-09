@@ -4,7 +4,7 @@ use crossbeam_channel::Sender;
 use ndarray::Array2;
 use tracing::debug;
 
-#[cfg(any(feature = "migraphx", feature = "coreml", feature = "cuda"))]
+#[cfg(any(feature = "migraphx", feature = "coreml", feature = "_cuda"))]
 use super::PRIMARY_BATCH_SIZE;
 use super::{SegmentationBackend, SegmentationError, SegmentationModel};
 use crate::inference::segmentation::tensor::SegmentationWindows;
@@ -91,7 +91,7 @@ impl SegmentationModel {
 
     /// Batch geometry owned by the loaded backend
     fn batching(&self) -> Batching {
-        #[cfg(any(feature = "migraphx", feature = "coreml", feature = "cuda"))]
+        #[cfg(any(feature = "migraphx", feature = "coreml", feature = "_cuda"))]
         let fixed = Batching::Fixed(
             NonZeroUsize::new(PRIMARY_BATCH_SIZE).expect("nonzero fixed batch size"),
         );
@@ -110,7 +110,7 @@ impl SegmentationModel {
             }
             #[cfg(feature = "coreml")]
             SegmentationBackend::CoreMl(_) => fixed,
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda")]
             SegmentationBackend::Cuda(_) => fixed,
         }
     }
@@ -152,7 +152,7 @@ impl SegmentationModel {
             SegmentationBackend::Ort(backend) => backend.run_window(window),
             #[cfg(feature = "coreml")]
             SegmentationBackend::CoreMl(backend) => backend.run_window(window),
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda")]
             SegmentationBackend::Cuda(backend) => backend.run_window(window),
         }
     }
@@ -165,7 +165,7 @@ impl SegmentationModel {
             SegmentationBackend::Ort(backend) => backend.run_batch(windows),
             #[cfg(feature = "coreml")]
             SegmentationBackend::CoreMl(backend) => backend.run_batch(windows),
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda")]
             SegmentationBackend::Cuda(backend) => backend.run_batch(windows),
         }
     }

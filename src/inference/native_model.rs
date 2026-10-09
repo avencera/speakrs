@@ -7,7 +7,7 @@ mod weights;
 pub use weights::NativeWeightsError;
 pub(crate) use weights::WeightsFile;
 
-#[cfg(all(test, feature = "cuda"))]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 pub(crate) mod test_support {
     pub(crate) use super::weights::test_support::TestFile;
 }

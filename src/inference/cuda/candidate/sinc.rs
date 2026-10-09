@@ -11,11 +11,19 @@ use cudarc::driver::{
 };
 
 use super::{
-    Batches, Coverage, CoverageEntry, Maths, Phases, PlanError, SincCandidate, SincInputs,
-    SincOutput, SincSpec,
+    Batches, Coverage, CoverageEntry, FiniteContract, InfinityContract, Maths, NanContract, Phases,
+    PlanError, SignedZeroContract, SincCandidate, SincInputs, SincOutput, SincPin, SincSpec,
+    SpecialValues,
 };
 use crate::inference::cuda::error::check_len;
-use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, KernelModule};
+use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, LoadedKernels};
+
+const SPK_SINCNET_PACK_FILTERS: &str = "spk_sincnet_pack_filters";
+const SPK_SINCNET_CONV_ABS_POOL: &str = "spk_sincnet_conv_abs_pool";
+
+/// Kernel entries loaded by this host plan
+pub(crate) const REQUIRED_KERNELS: [&str; 2] =
+    [SPK_SINCNET_PACK_FILTERS, SPK_SINCNET_CONV_ABS_POOL];
 
 /// The boundary name
 const LAYER: &str = "sincnet.conv0.abs_pool";
@@ -35,6 +43,13 @@ const GROUP: usize = 16;
 const TILE: usize = 256;
 /// Threads of one block; `THREADS` in the kernel crate
 const THREADS: u32 = 256;
+
+/// Every batch in both modes
+const IMPLEMENTED: Coverage = Coverage(&[CoverageEntry {
+    layers: &[LAYER],
+    batches: Batches::All,
+    maths: Maths::All,
+}]);
 
 /// Threads of one filter-packing block
 const PACK_THREADS: u32 = 256;
@@ -58,9 +73,30 @@ impl SincCandidate for Oxide {
         batches: Batches::All,
         maths: Maths::Only(&[CudaMath::Fp32]),
     }]);
+    // TF32 mode was left out for qualification, not implementation: the kernel runs
+    // full-precision FP32 in both modes, and a driver-only build has no cuDNN to defer to
+
+    // the pooling maximum is PTX `max.f32`, which returns the non-NaN operand, and it
+    // starts at negative infinity over absolute values
+    const SPECIAL_VALUES: SpecialValues = SpecialValues {
+        finite: FiniteContract::AbsoluteSum { headroom: 2 },
+        nan: NanContract::PoolingIgnores,
+        infinity: InfinityContract::Ieee,
+        signed_zero: SignedZeroContract::Positive,
+    };
     const OUTPUT: SincOutput = SincOutput::Pooled;
 
-    fn plan(runtime: &CudaRuntime, spec: SincSpec<'_>) -> Result<Self, PlanError> {
+    fn implemented_pin(_spec: &SincSpec<'_>) -> Result<SincPin, PlanError> {
+        Ok(SincPin::ConvAbsPool)
+    }
+
+    fn plan(
+        runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
+        spec: SincSpec<'_>,
+        pin: SincPin,
+    ) -> Result<Self, PlanError> {
+        let SincPin::ConvAbsPool = pin;
         check_len(CONTEXT, CHANNELS * TAPS, spec.filters.len())?;
         // every valid pooled output reads only samples of its own row when the pooled
         // length is the pooled length of a valid convolution
@@ -72,11 +108,10 @@ impl SincCandidate for Oxide {
 
         // packing once per plan measured slightly faster than packing on every call;
         // every plan packs the filters it is given
-        let kernels = runtime.load_kernels(KernelModule::Sincnet)?;
         let mut packed = runtime.stream().alloc_zeros(CHANNELS * TAPS)?;
         pack(
             runtime.stream(),
-            &kernels.function("spk_sincnet_pack_filters")?,
+            &kernels.function(SPK_SINCNET_PACK_FILTERS)?,
             &spec.filters.as_view(),
             &mut packed,
         )?;
@@ -84,7 +119,7 @@ impl SincCandidate for Oxide {
         runtime.synchronize()?;
 
         Ok(Self {
-            produce: kernels.function("spk_sincnet_conv_abs_pool")?,
+            produce: kernels.function(SPK_SINCNET_CONV_ABS_POOL)?,
             packed,
             batch: spec.batch,
             samples: spec.samples,
@@ -187,4 +222,22 @@ fn to_u32(value: usize) -> Result<u32, CudaError> {
         context: CONTEXT,
         value,
     })
+}
+
+impl super::DriverCandidate for Oxide {
+    const AREA: super::KernelModule = super::KernelModule::Sincnet;
+
+    fn driver_coverage(_tier: super::PtxTier) -> Coverage {
+        IMPLEMENTED
+    }
+
+    fn driver_pin(
+        _boundary: super::super::implementation::BoundaryId,
+        _batch: usize,
+        _math: CudaMath,
+        _device: &super::super::device::DeviceAttributes,
+        _tier: super::PtxTier,
+    ) -> Result<super::ConfigPin, PlanError> {
+        Ok(super::ConfigPin::Sinc(SincPin::ConvAbsPool))
+    }
 }

@@ -83,37 +83,303 @@ fn unknown_or_reduced_context_budget_selects_sequential() {
 }
 
 #[test]
-fn insufficient_cooperative_capacity_falls_back_only_in_production() {
-    use crate::inference::cuda::CudaError;
-    use crate::inference::cuda::dispatch::candidate_plan;
-    use crate::inference::cuda::implementation::{Choice, Selection};
+fn insufficient_cooperative_capacity_falls_back_only_in_library_allowed_production() {
+    use crate::inference::cuda::device::test_support::Builder;
+    use crate::inference::cuda::implementation::{BoundaryId, Selected, select};
+    use crate::inference::cuda::kernels::{ArtifactHash, LoadedArtifact, ModuleRequest};
+    use crate::inference::cuda::{ComputeCapability, CudaError, CudaMath, KernelModule, PtxTier};
 
     let schedule = || layout::Schedule::new(1, layout::GROUPS - 1, Some(350));
-    assert!(matches!(
-        schedule(),
-        Err(super::PlanError::DeviceUnsupported { .. })
-    ));
-    let production = crate::inference::cuda::implementation::production(
-        "lstm.stack",
-        1,
-        crate::inference::cuda::CudaMath::Fp32,
+    let device = Builder::new(ComputeCapability::new(12, 0)).build();
+    let module = ModuleRequest::new(
+        KernelModule::Lstm,
+        PtxTier::Sm75,
+        LoadedArtifact::PtxJit {
+            sha256: ArtifactHash::of(include_str!("ptx/lstm.sm75.ptx").as_bytes()),
+        },
     );
+    let Selected::Oxide(token) = select(
+        BoundaryId::named("lstm.stack"),
+        1,
+        CudaMath::Fp32,
+        &device,
+        module,
+    )
+    .unwrap() else {
+        panic!("qualified production token")
+    };
     assert!(
-        candidate_plan(production, "lstm.stack", 1, schedule())
+        token
+            .finish(KernelModule::Lstm, false, schedule())
             .unwrap()
             .is_none()
     );
-    let explicit = candidate_plan(
-        Choice::Oxide(Selection::Explicit),
-        "lstm.stack",
-        1,
-        schedule(),
-    );
     assert!(matches!(
-        explicit,
-        Err(CudaError::Unsupported {
-            context: "explicit CUDA candidate plan",
+        token.finish(KernelModule::Lstm, true, schedule()),
+        Err(CudaError::CandidateDeviceUnsupported {
+            area: "lstm",
+            batch: 1,
+            math: CudaMath::Fp32,
+            tier: PtxTier::Sm75,
             ..
         })
     ));
 }
+
+#[test]
+fn schedules_cover_every_tile_without_exceeding_residency() {
+    // adapted from the supplied geometry test; this branch has one fixed geometry
+    for batch in [1usize, 7, 32, 33, 64, 65] {
+        for capacity in [
+            layout::GROUPS - 1,
+            layout::GROUPS,
+            2 * layout::GROUPS,
+            140,
+            280,
+        ] {
+            for joint in [
+                None,
+                Some(0),
+                Some(layout::GROUPS),
+                Some(capacity),
+                Some(420),
+            ] {
+                let result = layout::Schedule::new(batch, capacity, joint);
+                if capacity < layout::GROUPS {
+                    assert!(result.is_err());
+                    continue;
+                }
+                let schedule = result.expect("one group fits");
+                let mut covered = Vec::new();
+                for (first, count) in schedule.launches() {
+                    assert!(count * layout::GROUPS <= capacity);
+                    covered.extend(first..first + count);
+                }
+                assert_eq!(
+                    covered,
+                    (0..batch.div_ceil(schedule.tile_rows)).collect::<Vec<_>>()
+                );
+                if schedule.concurrent {
+                    let budget = joint
+                        .expect("concurrency needs a known budget")
+                        .min(capacity);
+                    assert!(2 * schedule.tiles * layout::GROUPS <= budget);
+                }
+            }
+        }
+    }
+}
+
+/// Every complete fbank pin, listed through an exhaustive match so a new variant must
+/// join the planning tests
+fn fbank_pins() -> [super::FbankPin; 1] {
+    let pins = [super::FbankPin::FftMelAccurate];
+    for pin in pins {
+        match pin {
+            super::FbankPin::FftMelAccurate => {}
+        }
+    }
+    pins
+}
+
+#[test]
+fn fbank_plan_shape_comes_from_every_pin_at_every_batch() {
+    use super::fbank::Launch;
+    use super::{FbankCandidate, FbankOxide, FbankSpec};
+    use crate::inference::cuda::implementation::BoundaryId;
+    use crate::inference::cuda::{CudaMath, PtxTier};
+
+    let boundary = BoundaryId::named("fbank.dft");
+    for math in [CudaMath::Fp32, CudaMath::Tf32] {
+        for batch in 0..=64 {
+            // implemented coverage is exactly the boundary's own batch domain
+            assert_eq!(
+                FbankOxide::coverage(PtxTier::Sm75).covers("fbank.dft", batch, math),
+                boundary.batches().contains(batch),
+                "b{batch} {math:?}"
+            );
+            let Ok(spec) = FbankSpec::new(batch, math) else {
+                assert!(!(1..=32).contains(&batch));
+                continue;
+            };
+            assert_eq!(
+                FbankOxide::implemented_pin(spec).expect("implemented pin"),
+                super::FbankPin::FftMelAccurate
+            );
+            for pin in fbank_pins() {
+                let launch = Launch::new(spec, pin).expect("pinned shape");
+                let config = launch.config();
+                assert_eq!(config.grid_dim, (125, batch as u32, 1));
+                assert_eq!(config.block_dim, (256, 1, 1));
+                assert_eq!(config.shared_mem_bytes, 0);
+                // eight frames per block cover all 998 frames of a row exactly once
+                let blocks = config.grid_dim.0 as usize;
+                assert!(blocks * 8 >= 998 && (blocks - 1) * 8 < 998);
+                assert_eq!(launch.waveform_len(), batch * 160_000);
+                assert_eq!(launch.energies_len(), batch * 998 * 80);
+                launch
+                    .check(batch * 160_000, batch * 998 * 80)
+                    .expect("exact buffers");
+            }
+        }
+    }
+}
+
+#[test]
+fn fbank_launch_refuses_buffers_of_another_shape() {
+    use super::fbank::Launch;
+    use super::{FbankPin, FbankSpec, GeometryError, PlanError};
+    use crate::inference::cuda::{CudaError, CudaMath};
+
+    for batch in [0, 33, 64] {
+        assert!(matches!(
+            FbankSpec::new(batch, CudaMath::Fp32),
+            Err(PlanError::Geometry(GeometryError::Invalid { .. }))
+        ));
+    }
+    let launch = Launch::new(
+        FbankSpec::new(7, CudaMath::Tf32).expect("batch"),
+        FbankPin::FftMelAccurate,
+    )
+    .expect("pinned shape");
+    let waveform = 7 * 160_000;
+    let energies = 7 * 998 * 80;
+    for (actual_waveform, actual_energies, expected, actual) in [
+        (waveform - 1, energies, waveform, waveform - 1),
+        (6 * 160_000, energies, waveform, 6 * 160_000),
+        (waveform, energies + 80, energies, energies + 80),
+        (waveform, 8 * 998 * 80, energies, 8 * 998 * 80),
+    ] {
+        let error = launch
+            .check(actual_waveform, actual_energies)
+            .expect_err("wrong buffer length");
+        assert!(
+            matches!(
+                error,
+                CudaError::BufferLength { expected: e, actual: a, .. } if e == expected && a == actual
+            ),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn fbank_tables_satisfy_the_staged_kernel_layout() {
+    use super::fbank::Tables;
+    use super::{FbankConstants, GeometryError, PlanError};
+
+    let constants = FbankConstants::new();
+    let tables = Tables::new(&constants).expect("the Library constants fit the kernel");
+    assert_eq!(tables.window, constants.window());
+    assert_eq!(tables.twiddle.len(), 1024);
+    // the kernel indexes these without bounds checks: 16 staged weights per filter and
+    // power rows that hold only bins 1..=255
+    assert_eq!(tables.weights.len(), 80 * 16);
+    for (filter, (&first, &count)) in tables.first.iter().zip(&tables.count).enumerate() {
+        assert!(
+            (1..=16).contains(&count) && first >= 1 && first + count - 1 <= 255,
+            "filter {filter}: {count} bins from {first}"
+        );
+        let row = &tables.weights[filter * 16..(filter + 1) * 16];
+        assert!(row[count as usize..].iter().all(|&weight| weight == 0.0));
+    }
+
+    let mel = constants.mel_table();
+    let window = constants.window().to_vec();
+    let refused = |window: Vec<f32>, first: Vec<u32>, count: Vec<u32>, width, weights| {
+        matches!(
+            Tables::checked(window, first, count, width, weights),
+            Err(PlanError::Geometry(GeometryError::Invalid { .. }))
+        )
+    };
+    let with = |filter: usize, first: u32, count: u32| {
+        let mut starts = mel.first.clone();
+        let mut counts = mel.count.clone();
+        starts[filter] = first;
+        counts[filter] = count;
+        (starts, counts)
+    };
+
+    assert!(refused(
+        window[..399].to_vec(),
+        mel.first.clone(),
+        mel.count.clone(),
+        16,
+        mel.weights.clone()
+    ));
+    assert!(refused(
+        window.clone(),
+        mel.first.clone(),
+        mel.count.clone(),
+        15,
+        mel.weights[..80 * 15].to_vec()
+    ));
+    assert!(refused(
+        window.clone(),
+        mel.first[..79].to_vec(),
+        mel.count.clone(),
+        16,
+        mel.weights.clone()
+    ));
+    for (filter, first, count) in [
+        // DC and Nyquist are never written to staged power
+        (0, 0, 4),
+        (79, 250, 7),
+        // more bins than the staged stride, and an empty run
+        (40, 100, 17),
+        (40, 100, 0),
+        (0, 0, 0),
+    ] {
+        let (starts, counts) = with(filter, first, count);
+        assert!(
+            refused(window.clone(), starts, counts, 16, mel.weights.clone()),
+            "filter {filter}: {count} bins from {first}"
+        );
+    }
+    let (starts, counts) = with(79, 240, 16);
+    assert!(Tables::checked(window, starts, counts, 16, mel.weights.clone()).is_ok());
+}
+
+#[path = "candidate_tests/segdense.rs"]
+pub(super) mod segdense;
+
+#[path = "candidate_tests/lstmproj.rs"]
+mod lstmproj;
+
+#[path = "candidate_tests/lstmproj_layout.rs"]
+mod lstmproj_layout;
+
+#[test]
+fn fixed_dense_and_temporal_ports_refuse_other_window_lengths_before_enqueue() {
+    use super::{DenseSite, DenseSpec, GeometryError, PlanError, SegConvSite, SegConvSpec};
+    use crate::inference::cuda::{CudaMath, geometry::Conv2d};
+    let dense = DenseSpec::new(DenseSite::Linear0, 1, CudaMath::Fp32).unwrap();
+    assert!(dense.check_rows(589).is_ok());
+    assert!(matches!(
+        dense.check_rows(590),
+        Err(PlanError::Geometry(GeometryError::Unimplemented { .. }))
+    ));
+    let temporal = SegConvSpec::new(SegConvSite::Conv1, 1, CudaMath::Fp32).unwrap();
+    let conv = Conv2d {
+        batch: 1,
+        in_channels: 80,
+        out_channels: 60,
+        input: [1, 5325],
+        kernel: [1, 5],
+        padding: [0, 0],
+        stride: [1, 1],
+        dilation: [1, 1],
+        math: CudaMath::Fp32,
+    };
+    assert!(temporal.check_conv(conv).is_ok());
+    assert!(matches!(
+        temporal.check_conv(Conv2d {
+            input: [1, 5326],
+            ..conv
+        }),
+        Err(PlanError::Geometry(GeometryError::Unimplemented { .. }))
+    ));
+}
+
+#[path = "candidate_tests/wideconv.rs"]
+mod wideconv;

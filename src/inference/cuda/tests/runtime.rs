@@ -153,7 +153,11 @@ fn ptx_tier_selection_follows_capability_and_build() {
         assert_eq!(automatic, Some(PtxTier::Sm75));
         assert!(matches!(
             PtxTier::select(blackwell, Some(PtxTier::Sm80)),
-            Err(CudaError::PtxTierNotCompiled { .. })
+            Err(CudaError::TierNotCompiledIn {
+                tier: PtxTier::Sm80,
+                device,
+                feature: "cuda-sm80",
+            }) if device == blackwell
         ));
     }
 
@@ -216,6 +220,7 @@ fn sgemm_matches_cpu_in_both_math_modes() -> Result<(), CudaError> {
         let a_dev = DeviceTensor::upload(stream, &a, &[a.len()])?;
         let b_dev = DeviceTensor::upload(stream, &b, &[b.len()])?;
         let mut c_dev = DeviceTensor::upload(stream, &c0, &[m, n])?;
+        runtime.prepare_library(super::super::CudaLibrary::Cublas)?;
         runtime.sgemm(spec, a_dev.data(), b_dev.data(), c_dev.data_mut())?;
         let actual = c_dev.download(stream)?;
 

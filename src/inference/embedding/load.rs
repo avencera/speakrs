@@ -7,7 +7,7 @@ use crate::pipeline::RuntimeConfig;
 use super::CoreMlEmbedding;
 #[cfg(feature = "cpu")]
 use super::CpuEmbedding;
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda")]
 use super::CudaEmbedding;
 #[cfg(feature = "migraphx")]
 use super::OrtEmbedding;
@@ -26,7 +26,7 @@ impl EmbeddingModel {
             not(any(
                 feature = "migraphx",
                 feature = "coreml",
-                feature = "cuda",
+                feature = "_cuda",
                 feature = "_metrics"
             )),
             allow(unused_variables)
@@ -45,7 +45,7 @@ impl EmbeddingModel {
         }
 
         let model_path = model_path.as_ref();
-        #[cfg(any(feature = "migraphx", feature = "coreml", feature = "cuda"))]
+        #[cfg(any(feature = "migraphx", feature = "coreml", feature = "_cuda"))]
         let default_metadata = model_path.with_extension("min_num_samples.txt");
         let (backend, metadata_path) = match backend {
             #[cfg(feature = "cpu")]
@@ -68,7 +68,7 @@ impl EmbeddingModel {
                 )?)),
                 default_metadata,
             ),
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda")]
             InferenceBackend::Cuda => (
                 EmbeddingBackend::Cuda(Box::new(CudaEmbedding::load(model_path, mode, config)?)),
                 default_metadata,
