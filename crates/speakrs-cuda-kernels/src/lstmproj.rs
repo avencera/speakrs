@@ -81,7 +81,10 @@
 //! # Batched windows
 //!
 //! [`tiled::spk_lstm_recurrence_tiled`] computes the same recurrence bit for bit with
-//! eight-window tiles of sixteen-unit blocks, which the host runs for full batches
+//! eight-window tiles of sixteen-unit blocks, which the host runs for full batches.
+//! [`resident::spk_lstm_recurrence_resident`] computes it bit for bit with one window
+//! of one direction per block and no exchange, on GPUs whose SMs hold a whole
+//! recurrent matrix
 //!
 //! TF32 mode may round input-projection operands to TF32 in sm80+ variants
 //! Recurrent products, state, gates, and outputs remain FP32 in every tier
@@ -145,7 +148,17 @@ macro_rules! unroll {
     };
 }
 
+/// Adds lane pairs `$offset` apart, keeping values `0..$half` and sending the rest
+macro_rules! scatter {
+    ($values:ident, $offset:literal, $half:literal, [$($i:literal),*]) => {
+        $({
+            $values[$i] += warp::shuffle_xor_f32($values[$i + $half], $offset);
+        })*
+    };
+}
+
 mod projection;
+mod resident;
 #[cfg(feature = "tier-sm80")]
 mod tensor;
 mod tiled;

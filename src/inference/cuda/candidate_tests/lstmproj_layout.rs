@@ -176,3 +176,31 @@ fn tiled_recurrence_needs_full_tiles_and_both_directions_resident() {
     assert_eq!(RecurrencePlan::tiled(1, Some(1000)), None);
     assert_eq!(RecurrencePlan::tiled_fit(1, Some(16)), tiled(1));
 }
+
+#[test]
+fn resident_recurrence_runs_only_on_measured_parts_that_hold_the_matrix() {
+    use crate::inference::cuda::ComputeCapability;
+
+    // A100 and A30 opt-in shared memory per block
+    assert!(RecurrencePlan::resident_device(
+        ComputeCapability::new(8, 0),
+        166_912
+    ));
+    // one direction's matrix is 256 KiB; half must fit beside the static hidden vectors
+    assert!(!RecurrencePlan::resident_device(
+        ComputeCapability::new(8, 0),
+        131_071
+    ));
+    // Ampere consumer, Ada and Blackwell consumer parts allow about 100 KiB
+    for (major, minor) in [(8, 6), (8, 9), (12, 0)] {
+        assert!(!RecurrencePlan::resident_device(
+            ComputeCapability::new(major, minor),
+            101_376
+        ));
+    }
+    // Hopper holds the matrix but was not measured
+    assert!(!RecurrencePlan::resident_device(
+        ComputeCapability::new(9, 0),
+        232_448
+    ));
+}
