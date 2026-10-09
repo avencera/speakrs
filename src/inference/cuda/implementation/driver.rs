@@ -320,10 +320,7 @@ pub(super) fn select_from(
             {
                 TokenEvidence::Recipe(recipe)
             } else if let Some(scope) = scope {
-                TokenEvidence::Port {
-                    scope,
-                    summary: (candidate.summary)(math),
-                }
+                TokenEvidence::non_fp16_port(scope, (candidate.summary)(math), pin)
             } else if let Some(default) = default {
                 TokenEvidence::DeviceDefault(default)
             } else {

@@ -1500,7 +1500,10 @@ pub(crate) trait DriverCandidate {
     fn broad_evidence() -> Option<&'static super::implementation::BroadEvidence> {
         None
     }
-    /// Speed policy of the complete port, separate from implemented coverage
+    /// Non-FP16 speed policy of the complete port, separate from implemented coverage
+    ///
+    /// The evidence owner must match this scope to the selected pin; FP16
+    /// measurements belong to separate recipe or tuned evidence
     fn speed_scope(
         _boundary: super::implementation::BoundaryId,
         _batch: usize,

@@ -350,6 +350,19 @@ pub(crate) enum TokenEvidence {
     Qualification,
 }
 
+impl TokenEvidence {
+    /// Match non-FP16 port measurements to the selected configuration
+    fn non_fp16_port(scope: SpeedScope, summary: &'static str, pin: ConfigPin) -> Self {
+        // recipe and tuned evidence own FP16 measurements separately; a device
+        // speed scope alone does not extend these port measurements to FP16 tiles
+        if pin.is_fp16() {
+            return Self::Implemented;
+        }
+
+        Self::Port { scope, summary }
+    }
+}
+
 /// A boundary accepted by a pinned record, or an explicit development control
 #[derive(Debug)]
 pub(crate) struct Qualified {

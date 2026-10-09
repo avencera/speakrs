@@ -1140,6 +1140,75 @@ fn tuner_plan_refusal_after_loading_cannot_be_a_library_timing() {
 }
 
 #[test]
+fn driver_4060_fp16_pins_do_not_inherit_non_fp16_speed() {
+    use crate::inference::cuda::candidate::{WideconvAlgorithm, WideconvFp16Tiles, WideconvPin};
+
+    if !PtxTier::Sm80.is_compiled_in() {
+        return;
+    }
+
+    let mut fixture = Fixture::new();
+    fixture.device = Builder::new(ComputeCapability::new(8, 9))
+        .multiprocessors(34)
+        .name("NVIDIA GeForce RTX 4060 Ti")
+        .build();
+    fixture.limit = PtxTier::Sm80;
+    for (name, batches) in [
+        ("resnet.layer1.0.conv1", &[1, 32][..]),
+        ("resnet.layer2.1.conv2", &[1, 32][..]),
+        ("resnet.layer3.1.conv1", &[32][..]),
+        ("resnet.layer4.2.conv2", &[32][..]),
+    ] {
+        let boundary = BoundaryId::named(name);
+        for &batch in batches {
+            let Selected::Oxide(token) = PlanRequest::DriverOnly
+                .resolve(boundary, batch, CudaMath::Tf32, &mut fixture)
+                .unwrap()
+            else {
+                panic!("{boundary} b{batch}: no driver route")
+            };
+            let PlanPin::Pinned(ConfigPin::Wideconv(WideconvPin::Configured(config))) = token.pin
+            else {
+                panic!("{boundary} b{batch}: unexpected pin {:?}", token.pin)
+            };
+            assert_eq!(
+                config.algorithm,
+                WideconvAlgorithm::Fp16(WideconvFp16Tiles::Wide),
+                "{boundary} b{batch}"
+            );
+            assert_eq!(
+                token.evidence,
+                TokenEvidence::Implemented,
+                "{boundary} b{batch}"
+            );
+            assert!(!token.speed_measured(), "{boundary} b{batch}");
+            assert_eq!(
+                token.source(),
+                super::super::policy::Source::Default,
+                "{boundary} b{batch}"
+            );
+        }
+    }
+
+    fixture.fp16 = Fp16Policy::Excluded;
+    let Selected::Oxide(token) = PlanRequest::DriverOnly
+        .resolve(
+            BoundaryId::named("resnet.layer3.1.conv1"),
+            32,
+            CudaMath::Tf32,
+            &mut fixture,
+        )
+        .unwrap()
+    else {
+        panic!("non-FP16 reference route")
+    };
+    assert!(matches!(token.pin, PlanPin::Pinned(pin) if !pin.is_fp16()));
+    assert!(matches!(token.evidence, TokenEvidence::Port { .. }));
+    assert!(token.speed_measured());
+    assert_eq!(token.source(), super::super::policy::Source::Recipe);
+}
+
+#[test]
 #[cfg(feature = "_cuda-libraries")]
 fn disabled_4060_recipe_uses_non_fp16_coverage_and_pins() {
     use crate::inference::cuda::candidate::WideconvOxide;
