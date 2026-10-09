@@ -3,7 +3,7 @@ use cudarc::cublas::sys::cublasMath_t;
 #[cfg(feature = "_cuda-libraries")]
 use cudarc::cudnn::sys::cudnnMathType_t;
 
-/// Arithmetic precision of the CUDA modes' cuBLAS and cuDNN work on FP32 data
+/// Arithmetic precision of CUDA kernels, cuBLAS and cuDNN work on FP32 data
 ///
 /// Segmentation and embedding choose it separately through
 /// [`RuntimeConfig`](crate::pipeline::RuntimeConfig), which defaults to [`Self::Fp32`]
@@ -12,13 +12,23 @@ use cudarc::cudnn::sys::cudnnMathType_t;
 #[non_exhaustive]
 pub enum CudaMath {
     /// Full FP32 multiply and accumulate; tensor cores only where they keep FP32
-    /// precision
+    /// precision; never uses FP16 operands
     ///
     /// The closest match to the ONNX references, at some cost in speed. Embedding drift
     /// can change PLDA/VBx clustering (adr/001), so this is the choice to compare against
     Fp32,
-    /// FP32 storage and accumulation with TF32 (10-bit mantissa) tensor-core
-    /// multiplies on Ampere and newer
+    /// FP32 storage and accumulation with reduced-precision tensor-core multiplies
+    ///
+    /// Ampere and newer may use TF32 (10-bit mantissa) operands. Same-channel,
+    /// stride-1 embedding trunk layers may instead use scaled FP16 operands on
+    /// Turing and newer, with FP32 accumulation. Startup recipes and defaults
+    /// select these on Turing and the RTX 4060 Ti; tuning can select them on other
+    /// supported devices. This mode does not require every multiply to use TF32
+    ///
+    /// FP16 is excluded for a layer with non-finite weights or weight magnitudes
+    /// above 65504 / 1024. If an activation exceeds that range, the complete
+    /// embedding batch is recomputed with plans selected without FP16 tiles
+    /// [`Self::Fp32`] never selects FP16 tiles
     Tf32,
 }
 
