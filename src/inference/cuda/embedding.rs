@@ -27,6 +27,7 @@ mod dispatch;
 mod kernels;
 #[cfg(test)]
 pub(super) use kernels::REQUIRED_KERNELS;
+mod storage;
 mod trunk;
 
 use std::sync::{Arc, Mutex};
@@ -37,6 +38,7 @@ use tracing::debug;
 
 use self::dispatch::Plan;
 use self::kernels::{ChannelBias, EmbeddingKernels, PoolShape};
+use self::storage::{ActivationStorage, Captured};
 use self::trunk::{ConvLayer, STEM_SLOT, Trunk};
 use super::candidate::{DenseSite, DenseSpec};
 use super::dense::DensePlan;
@@ -195,27 +197,50 @@ impl ResNetEmbedding {
         self.0.kernels.tier()
     }
 
-    /// Allocate fixed-address trunk storage for serial batches on this runtime
+    /// Allocate trunk storage at the requested capacity on this runtime
     pub(crate) fn activations(
         &self,
         runtime: &CudaRuntime,
         chunks: usize,
     ) -> Result<SharedEmbeddingActivations, CudaError> {
-        let lens = self.0.trunk.buffer_lens();
-        let stream = runtime.stream();
+        let buffers = self.allocate_activations(runtime, chunks)?;
         Ok(SharedEmbeddingActivations(Arc::new(Mutex::new(
-            EmbeddingActivations {
-                trunk: [
-                    stream.alloc_zeros((chunks * lens.trunk[0]).max(1))?,
-                    stream.alloc_zeros((chunks * lens.trunk[1]).max(1))?,
-                ],
-                hidden: stream.alloc_zeros((chunks * lens.hidden).max(1))?,
-                shortcut: stream.alloc_zeros((chunks * lens.shortcut).max(1))?,
-            },
+            ActivationStorage::new(chunks, buffers),
         ))))
     }
 
-    /// Plan one class using storage kept alive by every graph that refers to it
+    /// Grow shared storage only when a larger class first needs it
+    pub(crate) fn grow_activations(
+        &self,
+        runtime: &CudaRuntime,
+        activations: &SharedEmbeddingActivations,
+        chunks: usize,
+    ) -> Result<(), CudaError> {
+        activations.lock()?.grow(chunks, |capacity| {
+            // captured work may still use old pointers after the host-side lock is released
+            runtime.synchronize()?;
+            self.allocate_activations(runtime, capacity)
+        })
+    }
+
+    fn allocate_activations(
+        &self,
+        runtime: &CudaRuntime,
+        chunks: usize,
+    ) -> Result<EmbeddingActivations, CudaError> {
+        let lens = self.0.trunk.buffer_lens();
+        let stream = runtime.stream();
+        Ok(EmbeddingActivations {
+            trunk: [
+                stream.alloc_zeros((chunks * lens.trunk[0]).max(1))?,
+                stream.alloc_zeros((chunks * lens.trunk[1]).max(1))?,
+            ],
+            hidden: stream.alloc_zeros((chunks * lens.hidden).max(1))?,
+            shortcut: stream.alloc_zeros((chunks * lens.shortcut).max(1))?,
+        })
+    }
+
+    /// Plan one class using storage whose generation guards its captured pointers
     pub(crate) fn batch_with_activations(
         &self,
         runtime: &CudaRuntime,
@@ -229,7 +254,8 @@ impl ResNetEmbedding {
 
         let lens = model.trunk.buffer_lens();
         {
-            let buffers = activations.lock()?;
+            let storage = activations.lock()?;
+            let buffers = storage.buffers();
             for (expected, actual) in [
                 (chunks * lens.trunk[0], buffers.trunk[0].len()),
                 (chunks * lens.trunk[1], buffers.trunk[1].len()),
@@ -307,13 +333,13 @@ pub struct EmbeddingBatch {
     graph: Option<ForwardGraph>,
 }
 
-/// Fixed-address activations shared only by serial class plans on one runtime
+/// Growing activation storage shared only by serial class plans on one runtime
 ///
-/// Each batch retains this owner, so dropping a cache or a different class cannot
-/// free captured pointers. The lock prevents overlapping mutable device views;
-/// all eager and graph launches use the same stream and its execution order
+/// A successful growth changes the generation; each batch must recapture a graph
+/// before it can replay with the new pointers. The lock covers generation checks,
+/// capture and launch, preventing storage replacement between these steps
 #[derive(Debug, Clone)]
-pub(crate) struct SharedEmbeddingActivations(Arc<Mutex<EmbeddingActivations>>);
+pub(crate) struct SharedEmbeddingActivations(Arc<Mutex<ActivationStorage<EmbeddingActivations>>>);
 
 #[derive(Debug)]
 struct EmbeddingActivations {
@@ -323,7 +349,9 @@ struct EmbeddingActivations {
 }
 
 impl SharedEmbeddingActivations {
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, EmbeddingActivations>, CudaError> {
+    fn lock(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, ActivationStorage<EmbeddingActivations>>, CudaError> {
         self.0.lock().map_err(|_| CudaError::Unsupported {
             context: "embedding activations",
             reason: "a previous activation launch panicked".to_owned(),
@@ -395,7 +423,7 @@ impl EmbeddingHead {
 }
 
 /// A captured forward pass; cudarc's graph type has no `Debug`
-struct ForwardGraph(CudaGraph);
+struct ForwardGraph(Captured<CudaGraph>);
 
 impl std::fmt::Debug for ForwardGraph {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -410,26 +438,49 @@ impl EmbeddingBatch {
     /// Work is queued on the runtime's stream; read the output after it, for
     /// example with [`EmbeddingBatch::download_output`]
     pub fn forward(&mut self, runtime: &CudaRuntime) -> Result<(), CudaError> {
+        let activations = self.activations.clone();
+        let mut storage = activations.lock()?;
+        if self
+            .graph
+            .as_ref()
+            .is_some_and(|ForwardGraph(graph)| graph.current(&storage).is_none())
+        {
+            self.capture_graph_in_storage(runtime, &mut storage)?;
+        }
+
         if let Some(ForwardGraph(graph)) = &self.graph {
-            let _activations = self.activations.lock()?;
-            graph.launch()?;
+            // the lock keeps this generation current through launch
+            graph
+                .current(&storage)
+                .expect("captured current storage")
+                .launch()?;
             return Ok(());
         }
 
-        self.run(runtime, &mut |_, _| Ok(()))
+        self.run_with_activations(runtime, &mut |_, _| Ok(()), storage.buffers_mut())
     }
 
     /// Records the batch's forward pass as a CUDA graph, which [`Self::forward`]
     /// then replays instead of issuing each launch
     ///
-    /// The graph bakes in the batch's buffer addresses and its model's weights,
-    /// both of which the batch keeps alive. Library builds run one eager pass first
-    /// so cuDNN and cuBLAS finish their lazy setup outside the capture. Driver-only
+    /// The graph records the current storage generation and model weights. When
+    /// storage grows, forward must recapture before replay. Library builds run one
+    /// eager pass so cuDNN and cuBLAS finish lazy setup outside capture. Driver-only
     /// plans are prepared by batch construction and do not need this extra pass
     pub fn capture_graph(&mut self, runtime: &CudaRuntime) -> Result<(), CudaError> {
+        let activations = self.activations.clone();
+        let mut storage = activations.lock()?;
+        self.capture_graph_in_storage(runtime, &mut storage)
+    }
+
+    fn capture_graph_in_storage(
+        &mut self,
+        runtime: &CudaRuntime,
+        storage: &mut ActivationStorage<EmbeddingActivations>,
+    ) -> Result<(), CudaError> {
         self.graph = None;
         if !super::driver_only() {
-            self.run(runtime, &mut |_, _| Ok(()))?;
+            self.run_with_activations(runtime, &mut |_, _| Ok(()), storage.buffers_mut())?;
         }
         // finish weight packing and prior buffer work before capture drops their events
         runtime.synchronize()?;
@@ -448,7 +499,8 @@ impl EmbeddingBatch {
             .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)
             .map_err(CudaError::from)
             .and_then(|()| {
-                let run = self.run(runtime, &mut |_, _| Ok(()));
+                let run =
+                    self.run_with_activations(runtime, &mut |_, _| Ok(()), storage.buffers_mut());
                 // always end the capture, even after a failed launch, so the stream
                 // leaves capture mode
                 let graph = stream.end_capture(CUgraphInstantiate_flags(0));
@@ -461,7 +513,7 @@ impl EmbeddingBatch {
             unsafe { context.enable_event_tracking() };
         }
 
-        self.graph = captured?.map(ForwardGraph);
+        self.graph = captured?.map(|graph| ForwardGraph(Captured::new(graph, storage)));
         debug!(
             chunks = self.chunks,
             captured = self.graph.is_some(),
@@ -470,10 +522,11 @@ impl EmbeddingBatch {
         Ok(())
     }
 
-    fn run(
+    fn run_with_activations(
         &mut self,
         runtime: &CudaRuntime,
         tap: &mut EmbeddingTapFn<'_>,
+        activations: &mut EmbeddingActivations,
     ) -> Result<(), CudaError> {
         let EmbeddingBatch {
             model,
@@ -482,19 +535,17 @@ impl EmbeddingBatch {
             fbank,
             masks,
             stem_input,
-            activations,
             pooled,
             output,
             plans,
             workspace,
             ..
         } = self;
-        let mut activations = activations.lock()?;
         let EmbeddingActivations {
             trunk,
             hidden,
             shortcut,
-        } = &mut *activations;
+        } = activations;
         let model = &**model;
         #[cfg(not(feature = "_cuda-libraries"))]
         let _ = workspace;
