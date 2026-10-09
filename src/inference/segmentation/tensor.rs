@@ -93,6 +93,9 @@ pub(super) struct SegmentationWindows<'a> {
     audio: &'a [f32],
     offsets: Vec<usize>,
     padded: Option<Vec<f32>>,
+    /// where the zero padded last window starts in `audio`
+    #[cfg(feature = "_cuda")]
+    tail_offset: usize,
     window_samples: usize,
 }
 
@@ -126,6 +129,8 @@ impl<'a> SegmentationWindows<'a> {
                 audio,
                 offsets: Vec::new(),
                 padded: Some(padded),
+                #[cfg(feature = "_cuda")]
+                tail_offset: 0,
                 window_samples,
             };
         }
@@ -154,8 +159,31 @@ impl<'a> SegmentationWindows<'a> {
             audio,
             offsets,
             padded,
+            #[cfg(feature = "_cuda")]
+            tail_offset: offset,
             window_samples,
         }
+    }
+
+    /// The audio that windows `next..next + useful` cover and where each starts in it,
+    /// then `model - useful` starts at its end, which stand for zero windows
+    ///
+    /// Cutting `span[start..start + window]`, clipped and zero padded, gives exactly
+    /// [`Self::window`], including the padded last window
+    #[cfg(feature = "_cuda")]
+    pub(super) fn span(&self, next: usize, useful: usize, model: usize) -> (&'a [f32], Vec<usize>) {
+        let start_of = |idx: usize| self.offsets.get(idx).copied().unwrap_or(self.tail_offset);
+        let first = start_of(next).min(self.audio.len());
+        let last = start_of(next + useful.max(1) - 1);
+        let end = (last + self.window_samples)
+            .min(self.audio.len())
+            .max(first);
+        let span = &self.audio[first..end];
+        let mut starts: Vec<usize> = (next..next + useful)
+            .map(|idx| start_of(idx) - first)
+            .collect();
+        starts.resize(model, span.len());
+        (span, starts)
     }
 
     pub(super) fn total_windows(&self) -> usize {
@@ -427,5 +455,43 @@ mod tests {
         let spec = window_spec(1, usize::MAX - 1);
 
         assert_eq!(segmentation_window_count(usize::MAX, spec), 2);
+    }
+
+    /// The CUDA backend cuts `span[start..start + window]`, clipped and zero padded;
+    /// every batch, including the padded last window and zero pad rows, must come out
+    /// as the windows the other backends upload
+    #[cfg(feature = "_cuda")]
+    #[test]
+    fn span_cuts_the_same_windows_as_window() {
+        let window = 100;
+        for len in [40, 100, 1_000, 1_005, 1_037] {
+            let audio: Vec<f32> = (0..len).map(|sample| sample as f32 + 1.0).collect();
+            let windows = SegmentationWindows::collect(&audio, window_spec(window, 10));
+            let total = windows.total_windows();
+            let zeros = vec![0.0; window];
+            for (next, useful) in [
+                (0, 1),
+                (0, total),
+                (total - 1, 1),
+                (total / 2, total - total / 2),
+            ] {
+                let model = useful + 3;
+                let (span, starts) = windows.span(next, useful, model);
+                let cut: Vec<Vec<f32>> = starts
+                    .iter()
+                    .map(|&start| {
+                        let mut row =
+                            span[start.min(span.len())..(start + window).min(span.len())].to_vec();
+                        row.resize(window, 0.0);
+                        row
+                    })
+                    .collect();
+                let mut expected: Vec<Vec<f32>> = (next..next + useful)
+                    .map(|idx| windows.window(idx, "test").unwrap().to_vec())
+                    .collect();
+                expected.resize(model, zeros.clone());
+                assert_eq!(cut, expected, "len {len} next {next} useful {useful}");
+            }
+        }
     }
 }

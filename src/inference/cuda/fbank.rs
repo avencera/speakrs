@@ -27,6 +27,7 @@ use cudarc::driver::{
     PinnedHostSlice, PushKernelArg,
 };
 
+use super::buffer::unfold_windows;
 use super::candidate::{FbankCandidate, FbankOxide, FbankSpec, Phases};
 use super::error::check_len;
 use super::implementation::{Selected, plan_selection};
@@ -663,19 +664,13 @@ impl FbankBuffers {
         }
         self.staged.record(stream)?;
 
-        for (row, &start) in starts.iter().enumerate() {
-            let copied = span.len().saturating_sub(start).min(FBANK_WINDOW_SAMPLES);
-            let mut target = self
-                .waveform
-                .slice_mut(row * FBANK_WINDOW_SAMPLES..(row + 1) * FBANK_WINDOW_SAMPLES);
-            if copied > 0 {
-                let source = self.span.slice(start..start + copied);
-                stream.memcpy_dtod(&source, &mut target.slice_mut(..copied))?;
-            }
-            if copied < FBANK_WINDOW_SAMPLES {
-                stream.memset_zeros(&mut target.slice_mut(copied..))?;
-            }
-        }
+        unfold_windows(
+            stream,
+            &self.span.slice(..span.len()),
+            starts,
+            FBANK_WINDOW_SAMPLES,
+            &mut self.waveform,
+        )?;
 
         self.uploaded_rows = rows;
         Ok(())

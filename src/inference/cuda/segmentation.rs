@@ -37,6 +37,7 @@ use self::shape::{SINC_KERNEL, SINC_STRIDE};
 use self::weights::{LstmLayer, SegmentationWeights};
 #[cfg(feature = "_cuda-libraries")]
 use super::CudaLstmAlgorithm;
+use super::buffer::unfold_windows;
 use super::candidate::{
     DenseSite, DenseSpec, LstmOxide, LstmProjOxide, Phases, SegConvCandidate, SegConvOxide,
     SegConvSite, SegConvSpec, SincCandidate, SincOutput, SincOxide,
@@ -87,6 +88,8 @@ pub struct SegmentationOptions {
 pub struct CudaSegmentation {
     workspaces: Vec<SegmentationWorkspace>,
     network: Network,
+    /// the audio of the last [`Self::run_span`], grown on demand
+    span: Option<CudaSlice<f32>>,
 }
 
 #[cfg(all(test, feature = "_cuda-libraries"))]
@@ -277,6 +280,7 @@ impl CudaSegmentation {
         Ok(Self {
             network: Network::new(runtime, &SegmentationWeights::load(weights)?, options)?,
             workspaces: Vec::new(),
+            span: None,
         })
     }
 
@@ -316,6 +320,44 @@ impl CudaSegmentation {
         let index = self.workspace_index(runtime, batch, samples)?;
         let workspace = &mut self.workspaces[index];
         workspace.upload_input(runtime, input)?;
+        self.network.forward(runtime, workspace)?;
+        workspace.download_output(runtime)
+    }
+
+    /// [`Self::run`] for windows of `samples` cut out of one stretch of audio
+    ///
+    /// Row `i` is `span[starts[i]..starts[i] + samples]`, clipped at the end of `span`
+    /// and zero padded, which is how [`Self::run`] pads a short window; the samples
+    /// that overlapping windows share are copied and uploaded once
+    pub fn run_span(
+        &mut self,
+        runtime: &CudaRuntime,
+        samples: usize,
+        span: &[f32],
+        starts: &[usize],
+    ) -> Result<Vec<f32>, CudaError> {
+        let index = self.workspace_index(runtime, starts.len(), samples)?;
+        let stream = runtime.stream();
+        if self
+            .span
+            .as_ref()
+            .is_none_or(|device| device.len() < span.len())
+        {
+            self.span = Some(stream.alloc_zeros(span.len().max(1))?);
+        }
+        let device = self.span.as_mut().expect("span buffer allocated above");
+        if !span.is_empty() {
+            stream.memcpy_htod(span, &mut device.slice_mut(..span.len()))?;
+        }
+
+        let workspace = &mut self.workspaces[index];
+        unfold_windows(
+            stream,
+            &device.slice(..span.len()),
+            starts,
+            samples,
+            workspace.tensors.input.data_mut(),
+        )?;
         self.network.forward(runtime, workspace)?;
         workspace.download_output(runtime)
     }

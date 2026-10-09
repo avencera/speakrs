@@ -123,21 +123,40 @@ impl CudaSegmentationBackend {
             .session
             .run(|runtime, state| state.0.run(runtime, batch, staging))
             .map_err(InferenceError::from)?;
-
-        let stride = output.len().checked_div(batch).unwrap_or(0);
-        let frames = stride / CudaSegmentation::CLASSES;
-        output
-            .chunks_exact(stride.max(1))
-            .map(|row| {
-                Array2::from_shape_vec((frames, CudaSegmentation::CLASSES), row.to_vec()).map_err(
-                    |error| SegmentationError::MalformedOutput {
-                        context: "cuda segmentation batch output",
-                        message: format!("invalid output shape: {error}"),
-                    },
-                )
-            })
-            .collect()
+        logit_rows(output, batch)
     }
+
+    /// [`Self::run_batch`] for windows cut out of one stretch of audio: row `i` is
+    /// `span[starts[i]..]`, clipped to the window and zero padded
+    pub(super) fn run_span(
+        &mut self,
+        span: &[f32],
+        starts: &[usize],
+    ) -> Result<Vec<Array2<f32>>, SegmentationError> {
+        let samples = self.window_samples;
+        let output = self
+            .session
+            .run(|runtime, state| state.0.run_span(runtime, samples, span, starts))
+            .map_err(InferenceError::from)?;
+        logit_rows(output, starts.len())
+    }
+}
+
+/// Splits `[batch, frames, 7]` logits into one `[frames, 7]` array per window
+fn logit_rows(output: Vec<f32>, batch: usize) -> Result<Vec<Array2<f32>>, SegmentationError> {
+    let stride = output.len().checked_div(batch).unwrap_or(0);
+    let frames = stride / CudaSegmentation::CLASSES;
+    output
+        .chunks_exact(stride.max(1))
+        .map(|row| {
+            Array2::from_shape_vec((frames, CudaSegmentation::CLASSES), row.to_vec()).map_err(
+                |error| SegmentationError::MalformedOutput {
+                    context: "cuda segmentation batch output",
+                    message: format!("invalid output shape: {error}"),
+                },
+            )
+        })
+        .collect()
 }
 
 /// Opens the driver runtime and constructs only selected model state
