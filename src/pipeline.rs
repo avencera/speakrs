@@ -46,6 +46,10 @@ pub(crate) mod clustering;
 use clustering::mark_inactive_speakers;
 pub(crate) use clustering::{clean_masks, select_speaker_weights, write_speaker_mask_to_slice};
 
+mod batch;
+use batch::BatchPostProcessor;
+pub use batch::{BatchOutput, BatchStreamError, OwnedBatchInput};
+
 mod concurrent;
 use concurrent::ConcurrentEmbeddingRunner;
 
@@ -138,6 +142,30 @@ macro_rules! pipeline_run_methods {
             config: &PipelineConfig,
         ) -> Result<Vec<DiarizationResult>, PipelineError> {
             self.runner().run_batch(files, config)
+        }
+
+        /// Diarize owned inputs as they arrive, returning outputs in input order
+        ///
+        /// The producer is consumed on the calling thread. Audio is released after
+        /// inference. No partial output is returned if an input or pipeline stage
+        /// fails. CoreML retains its existing whole-batch chunk schedule
+        pub fn run_batch_stream<E>(
+            &mut self,
+            files: impl IntoIterator<Item = Result<OwnedBatchInput, E>>,
+        ) -> Result<Vec<BatchOutput>, BatchStreamError<E>> {
+            let config = self.pipeline_config();
+            self.run_batch_stream_with_config(files, &config)
+        }
+
+        /// Diarize an ordered input stream with a custom pipeline config
+        ///
+        /// Errors from the producer are kept separate from pipeline errors
+        pub fn run_batch_stream_with_config<E>(
+            &mut self,
+            files: impl IntoIterator<Item = Result<OwnedBatchInput, E>>,
+            config: &PipelineConfig,
+        ) -> Result<Vec<BatchOutput>, BatchStreamError<E>> {
+            self.runner().run_batch_stream(files, config)
         }
 
         /// Segmentation step size in seconds for the current execution mode
@@ -427,11 +455,99 @@ impl<'a> PipelineRunner<'a> {
             return Ok(results);
         }
 
-        // fallback: per-file sequential with post-inference overlap
-        files
+        if matches!(
+            self.seg_model.mode(),
+            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast
+        ) || files.len() == 1
+        {
+            return files
+                .iter()
+                .map(|file| self.run(file.audio, file.file_id, config))
+                .collect();
+        }
+
+        let inputs = files
             .iter()
-            .map(|f| self.run(f.audio, f.file_id, config))
-            .collect()
+            .map(|file| Ok::<_, std::convert::Infallible>((file.file_id, file.audio)));
+        self.run_ordered_stream(inputs, config)
+            .map(|outputs| outputs.into_iter().map(|output| output.result).collect())
+            .map_err(|error| match error {
+                BatchStreamError::Input(never) => match never {},
+                BatchStreamError::Pipeline(error) => error,
+            })
+    }
+
+    fn run_batch_stream<E>(
+        &mut self,
+        files: impl IntoIterator<Item = Result<OwnedBatchInput, E>>,
+        config: &PipelineConfig,
+    ) -> Result<Vec<BatchOutput>, BatchStreamError<E>> {
+        if matches!(
+            self.seg_model.mode(),
+            ExecutionMode::CoreMl | ExecutionMode::CoreMlFast
+        ) {
+            let audio = files
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(BatchStreamError::Input)?;
+            let inputs: Vec<_> = audio
+                .iter()
+                .map(|file| BatchInput {
+                    audio: &file.audio,
+                    file_id: &file.file_id,
+                })
+                .collect();
+            let results = self.run_batch(&inputs, config)?;
+            return Ok(audio
+                .into_iter()
+                .zip(results)
+                .map(|(file, result)| BatchOutput {
+                    file_id: file.file_id,
+                    audio_secs: file.audio.len() as f64 / 16_000.0,
+                    result,
+                })
+                .collect());
+        }
+
+        let inputs = files
+            .into_iter()
+            .map(|file| file.map(|file| (file.file_id, file.audio)));
+        self.run_ordered_stream(inputs, config)
+    }
+
+    fn run_ordered_stream<E, A: AsRef<[f32]>, S: AsRef<str>>(
+        &mut self,
+        files: impl IntoIterator<Item = Result<(S, A), E>>,
+        config: &PipelineConfig,
+    ) -> Result<Vec<BatchOutput>, BatchStreamError<E>> {
+        let plda = self.plda;
+        std::thread::scope(|scope| {
+            let mut post = BatchPostProcessor::new(scope, plda, config)?;
+            let run = (|| {
+                let mut files = files.into_iter();
+                loop {
+                    post.collect_ready()?;
+                    let Some(file) = files.next() else {
+                        break;
+                    };
+                    let (file_id, audio) = file.map_err(BatchStreamError::Input)?;
+                    let file_id = file_id.as_ref().to_owned();
+                    let start = std::time::Instant::now();
+                    let span = tracing::debug_span!("batch_inference", %file_id);
+                    let artifacts = span.in_scope(|| self.run_inference(audio.as_ref()))?;
+                    let inference_ms = start.elapsed().as_millis();
+                    let audio_secs = audio.as_ref().len() as f64 / 16_000.0;
+                    drop(audio);
+                    post.submit(artifacts, file_id, audio_secs, start, inference_ms)?;
+                }
+
+                Ok::<_, BatchStreamError<E>>(())
+            })();
+            // an earlier post-inference error takes precedence over a later input or inference error
+            let outputs = post.finish()?;
+            run?;
+            Ok(outputs)
+        })
     }
 
     fn run_inference(&mut self, audio: &[f32]) -> Result<InferenceArtifacts, PipelineError> {

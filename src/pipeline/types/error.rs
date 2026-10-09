@@ -41,6 +41,14 @@ pub enum PipelineError {
         /// Worker or thread name
         worker: String,
     },
+    /// A background worker could not be started
+    #[error("could not start {worker} thread: {source}")]
+    WorkerSpawn {
+        /// Worker or thread name
+        worker: &'static str,
+        /// Operating system thread creation error
+        source: std::io::Error,
+    },
     /// Backend-specific execution failed with additional context
     #[error("{context}: {message}")]
     Backend {
