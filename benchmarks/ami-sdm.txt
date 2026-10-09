@@ -7,3 +7,12 @@ pyannote MPS              19.3%       9.6%          4.3%         5.3%  3347.4s  
 speakrs CoreML            19.7%       9.6%          4.4%         5.8%   120.2s    561x
 speakrs CoreML Fast       20.8%       9.4%          4.6%         6.9%    80.7s    835x
 SpeakerKit                19.9%       9.8%          5.3%         4.9%    86.6s    778x
+
+Linux — speakrs: NVIDIA RTX 4090; 16 CPU cores (model not reported by the host)
+AMI SDM DER (34 files, 1123.8 min, collar=0ms)
+Native speakrs CUDA: 1s step; CUDA Fast: 2s step. Audio and models use local disk.
+
+Implementation                                 DER%   Missed%   FalseAlarm%   Confusion%      Time    RTFx
+──────────────────────────────────────────────────────────────────────────────────────────────────────────
+speakrs CUDA                                  19.7%      9.6%          4.3%         5.7%     75.0s    899x
+speakrs CUDA Fast                             20.6%      9.6%          4.3%         6.6%     45.3s   1489x

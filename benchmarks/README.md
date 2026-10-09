@@ -87,51 +87,93 @@ Hardware: Apple M4 Pro, macOS 26.3
 
 ## Linux (CUDA)
 
+The speakrs rows use one NVIDIA RTX 4090, with 16 CPU cores and 8 GiB of
+RAM. The cloud host doesn't report its CPU model.
+Average CPU use over the complete benchmark processes was 0.95–1.18 cores;
+this is measured CPU use, not a thread limit.
+
+Audio and models were copied to the container's local disk before each dataset
+run. Time and RTFx use the unchanged `speakrs-bm` timer: WAV loading, inference,
+clustering and RTTM output are included; downloads, data copy, model and
+pipeline construction, and DER scoring are excluded.
+
+The pyannote rows are from earlier runs on the hardware listed for each table.
+They were not rerun with the new speakrs rows, so their times are not a
+same-hardware comparison.
+
 | Name | Description |
 |------|-------------|
-| pyannote community-1 (CUDA) | [`pyannote/speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1) on NVIDIA GPU |
-| speakrs CUDA | speakrs with ONNX Runtime CUDA EP, 1s step |
-| speakrs CUDA Fast | speakrs with ONNX Runtime CUDA EP, 2s step |
+| pyannote CUDA (earlier run) | [`pyannote/speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1) on the NVIDIA GPU listed in its row |
+| speakrs CUDA | Native CUDA with speakrs kernels, 1s step |
+| speakrs CUDA Fast | Native CUDA with speakrs kernels, 2s step |
 
 ### VoxConverse Dev (216 files, 1217.8 min)
 
-Hardware: NVIDIA RTX 4090, AMD EPYC 7B13
+Earlier pyannote hardware: NVIDIA RTX 4090, AMD EPYC 7B13.
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
-| **speakrs CUDA** | **7.0%** | 2.3% | 2.3% | 2.4% | 1236.3s | 59x |
-| speakrs CUDA Fast | 7.4% | 2.3% | 2.2% | 2.8% | 604.4s | **121x** |
-| pyannote CUDA | 7.2% | 2.3% | 2.3% | 2.6% | 2312.1s | 32x |
+| **speakrs CUDA** | **7.0%** | 2.3% | 2.3% | 2.4% | 74.7s | 978x |
+| speakrs CUDA Fast | 7.4% | 2.3% | 2.3% | 2.8% | 44.9s | **1627x** |
+| pyannote CUDA (RTX 4090, earlier run) | 7.2% | 2.3% | 2.3% | 2.6% | 2312.1s | 32x |
 
 ### VoxConverse Test (232 files, 2612.2 min)
 
-Hardware: NVIDIA L40S, AMD EPYC 9354
+Earlier pyannote hardware: NVIDIA L40S, AMD EPYC 9354.
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
-| **speakrs CUDA** | **11.1%** | 3.4% | 4.1% | 3.7% | 3109.7s | 50x |
-| speakrs CUDA Fast | 11.2% | 3.3% | 4.1% | 3.8% | 1566.2s | **100x** |
-| pyannote CUDA | 11.1% | 3.4% | 4.1% | 3.7% | 8677.9s | 18x |
+| **speakrs CUDA** | **11.1%** | 3.4% | 4.1% | 3.7% | 162.9s | 962x |
+| speakrs CUDA Fast | 11.2% | 3.3% | 4.1% | 3.8% | 100.4s | **1562x** |
+| **pyannote CUDA (L40S, earlier run)** | **11.1%** | 3.4% | 4.1% | 3.7% | 8677.9s | 18x |
 
 ### AMI IHM (34 files, 1123.8 min)
 
-Hardware: NVIDIA L40S, AMD EPYC 9354
+Earlier pyannote hardware: NVIDIA L40S, AMD EPYC 9354.
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
-| **speakrs CUDA** | **17.0%** | 8.1% | 4.3% | 4.5% | 1375.1s | 49x |
-| speakrs CUDA Fast | 17.4% | 8.2% | 4.3% | 4.9% | 675.3s | **100x** |
-| pyannote CUDA | 17.0% | 8.1% | 4.3% | 4.5% | 4388.1s | 15x |
+| **speakrs CUDA** | **17.0%** | 8.1% | 4.3% | 4.5% | 73.7s | 914x |
+| speakrs CUDA Fast | 17.4% | 8.2% | 4.3% | 4.9% | 42.4s | **1589x** |
+| **pyannote CUDA (L40S, earlier run)** | **17.0%** | 8.1% | 4.3% | 4.5% | 4388.1s | 15x |
+
+### AMI SDM (34 files, 1123.8 min)
+
+| Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
+|---|---|---|---|---|---|---|
+| **speakrs CUDA** | **19.7%** | 9.6% | 4.3% | 5.7% | 75.0s | 899x |
+| speakrs CUDA Fast | 20.6% | 9.6% | 4.3% | 6.6% | 45.3s | **1489x** |
+
+### AISHELL-4 (20 files, 763.5 min)
+
+| Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
+|---|---|---|---|---|---|---|
+| **speakrs CUDA** | **11.1%** | 3.9% | 3.9% | 3.3% | 43.8s | 1046x |
+| speakrs CUDA Fast | 11.4% | 3.9% | 3.9% | 3.6% | 23.7s | **1929x** |
 
 ### Earnings-21 (44 files, 2355.8 min)
 
-Hardware: NVIDIA RTX 4090, AMD EPYC 7B13
+Earlier pyannote hardware: NVIDIA RTX 4090, AMD EPYC 7B13.
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
-| speakrs CUDA | 9.7% | 2.6% | 2.4% | 4.7% | 2692.1s | 53x |
-| **speakrs CUDA Fast** | **9.2%** | 2.5% | 2.4% | 4.2% | 1284.1s | **110x** |
-| pyannote CUDA | 9.7% | 2.6% | 2.4% | 4.7% | 8036.8s | 18x |
+| speakrs CUDA | 9.7% | 2.6% | 2.4% | 4.7% | 154.5s | 915x |
+| **speakrs CUDA Fast** | **9.2%** | 2.5% | 2.5% | 4.2% | 90.2s | **1567x** |
+| pyannote CUDA (RTX 4090, earlier run) | 9.7% | 2.6% | 2.4% | 4.7% | 8036.8s | 18x |
+
+### ICSI (75 files, 4301.2 min)
+
+| Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
+|---|---|---|---|---|---|---|
+| **speakrs CUDA** | **33.3%** | 19.5% | 9.5% | 4.3% | 248.8s | 1037x |
+| speakrs CUDA Fast | 33.7% | 19.4% | 9.6% | 4.7% | 134.7s | **1917x** |
+
+### AVA-AVD (54 files, 266.1 min)
+
+| Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
+|---|---|---|---|---|---|---|
+| **speakrs CUDA** | **45.4%** | 16.1% | 10.8% | 18.6% | 15.2s | 1047x |
+| speakrs CUDA Fast | 48.9% | 15.9% | 11.3% | 21.8% | 8.2s | **1942x** |
 
 ## Other implementations
 
