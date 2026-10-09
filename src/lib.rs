@@ -166,10 +166,6 @@
 //!
 //! SpeakerKit was measured on the same M4 Pro in March 2026 with the version available then, and it has shipped releases since.
 //!
-//! The three RTX 4090 rows ran one after another in the same container, with
-//! 16 CPU cores (the cloud host doesn't report the CPU model), 8 GiB of RAM and
-//! NVIDIA driver 580.126.18.
-//!
 //! ## All datasets on an RTX 4090
 //!
 //! | Dataset | Audio | `cuda` DER | `cuda` RTFx | `cuda-fast` DER | `cuda-fast` RTFx |
