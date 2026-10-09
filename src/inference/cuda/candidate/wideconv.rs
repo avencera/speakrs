@@ -364,14 +364,44 @@ pub(crate) struct Config {
 
 /// The execution choice of a wide convolution
 ///
-/// Only the device rule is a pin; development checks force an exact [`Config`]
-/// through [`Oxide::with_config`]
+/// Production routes fix an exact configuration before loading; development
+/// checks can also force an exact [`Config`] through [`Oxide::with_config`]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Pin {
     /// [`Config::select`] for the plan's device and loaded tier
     DeviceRule,
     /// Fixed configuration selected from cached attributes before loading
     Configured(Config),
+}
+
+impl Pin {
+    /// The retained A100 TF32 recipe pins at the measured batch classes
+    pub(crate) fn measured_a100(name: &str, batch: usize) -> Option<Self> {
+        if !matches!(batch, 1 | 32) || !LAYERS.contains(&name) {
+            return None;
+        }
+        let (algorithm, partition) = match name {
+            "resnet.layer3.0.conv1" | "resnet.layer4.0.conv1" => return None,
+            _ if name.ends_with("shortcut.0") => return None,
+            _ if name.starts_with("resnet.layer3.") => (
+                Algorithm::Winograd(WinogradProducts::Tf32x1),
+                Partition::Whole,
+            ),
+            _ if name.starts_with("resnet.layer4.") && batch == 1 => (
+                Algorithm::Winograd(WinogradProducts::Tf32x3),
+                Partition::Two,
+            ),
+            _ if name.starts_with("resnet.layer4.") => {
+                (Algorithm::TensorCore(TensorKernel::Tf32), Partition::Whole)
+            }
+            _ => return None,
+        };
+        Some(Self::Configured(Config {
+            algorithm,
+            partition,
+            split_cells: SplitCells::All,
+        }))
+    }
 }
 
 /// Most whole waves of Winograd CTAs before which a launch splits its last, partial wave
@@ -390,8 +420,8 @@ const WINOGRAD_WAVES: u32 = 3;
 /// the partial wave
 ///
 /// The partition count also bounds the length of the FP32 accumulation chains, and the
-/// harness compares error per layer over its batches. On a 4060 Ti the 256-channel
-/// batch-1 layers (40 CTAs on 34 SMs) ran 1.56x cuDNN with four partitions on the
+/// development check compares error per layer over its batches. On a 4060 Ti the
+/// 256-channel batch-1 layers (40 CTAs on 34 SMs) ran 1.56x cuDNN with four partitions on the
 /// partial wave only, at cuDNN's maximum error, and 1.30x with every cell in four
 /// partitions at 0.4-0.6x of it. The 128-channel layers (80 CTAs) take two whole waves,
 /// where splitting every cell in two ran no faster than cuDNN

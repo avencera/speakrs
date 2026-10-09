@@ -12,12 +12,15 @@ use cudarc::driver::{CudaContext, CudaStream, DriverError};
 use cudarc::nvrtc::Ptx;
 use tracing::debug;
 
+use super::CudaMath;
 use super::device::DeviceAttributes;
 use super::error::CudaLibrary;
+use super::implementation::BoundaryId;
 use super::kernels::{ArtifactLoadError, ModuleRequest};
-use super::{ComputeCapability, CudaError, KernelModule, LoadedKernels, PtxTier};
 #[cfg(feature = "_cuda-libraries")]
-use super::{CudaMath, libraries::Libraries};
+use super::libraries::Libraries;
+use super::tuning::{ApprovedChoice, BenchKind, BoundaryGraph, TuneControl};
+use super::{ComputeCapability, CudaError, KernelModule, LoadedKernels, PtxTier};
 
 /// One CUDA device context and stream, with optional libraries prepared by plans
 ///
@@ -38,6 +41,8 @@ pub struct CudaRuntime {
     ptx_tier: PtxTier,
     modules: Mutex<HashMap<KernelModule, LoadedKernels>>,
     force_library: bool,
+    recipe_mode: super::implementation::policy::RecipeMode,
+    tuning: Option<TuneControl>,
     force_ptx_jit: bool,
 }
 
@@ -57,6 +62,14 @@ impl CudaRuntime {
     /// [`CudaError::UnsupportedDevice`] below the `sm_75` baseline, and when
     /// `requested` is not compiled in or is above what the device supports
     pub fn with_ptx_tier(ordinal: usize, requested: Option<PtxTier>) -> Result<Self, CudaError> {
+        Self::open(ordinal, requested, true)
+    }
+
+    fn open(
+        ordinal: usize,
+        requested: Option<PtxTier>,
+        read_tune_file: bool,
+    ) -> Result<Self, CudaError> {
         ensure_driver()?;
 
         let count = device_count()?;
@@ -92,7 +105,7 @@ impl CudaRuntime {
         // separate runtimes do not serialize against each other
         let stream = context.new_stream()?;
 
-        let runtime = Self {
+        let mut runtime = Self {
             #[cfg(feature = "_cuda-libraries")]
             libraries: Libraries::default(),
             context,
@@ -101,9 +114,14 @@ impl CudaRuntime {
             ptx_tier,
             modules: Mutex::new(HashMap::new()),
             force_library: !super::driver_only() && force_library_from_env(),
+            recipe_mode: super::implementation::policy::RecipeMode::Disabled,
+            tuning: None,
             force_ptx_jit: std::env::var_os(super::kernels::FORCE_PTX_JIT_ENV)
                 .is_some_and(|value| value == "1"),
         };
+        if read_tune_file {
+            runtime.tuning = TuneControl::load(&runtime);
+        }
         debug!(
             device_name = runtime.device.name(),
             sm_count = runtime.device.multiprocessors(),
@@ -112,6 +130,94 @@ impl CudaRuntime {
             "CUDA device properties"
         );
         Ok(runtime)
+    }
+
+    /// The tuner never reads old measurements or inherits the force-Library policy
+    pub(crate) fn for_tuning(ordinal: usize, kind: BenchKind) -> Result<Self, CudaError> {
+        if std::env::var_os(super::kernels::FORCE_PTX_JIT_ENV).is_some_and(|value| value == "1") {
+            return Err(super::tuning::invalid(
+                "unset SPEAKRS_CUDA_FORCE_PTX_JIT before tuning",
+            ));
+        }
+        let mut runtime = Self::open(ordinal, PtxTier::from_env()?, false)?;
+        runtime.force_library = false;
+        runtime.tuning = Some(TuneControl::benchmark(
+            kind,
+            &runtime.device,
+            runtime.ptx_tier,
+        )?);
+        Ok(runtime)
+    }
+
+    pub(crate) fn tuned_choice(
+        &self,
+        boundary: BoundaryId,
+        batch: usize,
+        math: CudaMath,
+    ) -> Option<ApprovedChoice> {
+        self.tuning
+            .as_ref()
+            .and_then(|tuning| tuning.plan_choice(boundary, batch, math))
+    }
+
+    pub(crate) fn tuning_library_versions(
+        &self,
+    ) -> Result<super::tuning::LibraryVersions, CudaError> {
+        #[cfg(feature = "_cuda-libraries")]
+        {
+            self.context.bind_to_thread()?;
+            self.libraries.versions(&self.stream)
+        }
+        #[cfg(not(feature = "_cuda-libraries"))]
+        {
+            Ok(super::tuning::LibraryVersions::DriverOnly)
+        }
+    }
+
+    pub(crate) fn is_tuning(&self) -> bool {
+        self.tuning.as_ref().is_some_and(TuneControl::is_benchmark)
+    }
+
+    pub(crate) fn begin_tune_capture(&self) -> Result<(), CudaError> {
+        self.tuning
+            .as_ref()
+            .ok_or_else(|| super::tuning::invalid("no explicit tuner"))?
+            .begin_capture()
+    }
+
+    pub(crate) fn take_tune_graphs(&self) -> Result<Vec<BoundaryGraph>, CudaError> {
+        self.tuning
+            .as_ref()
+            .ok_or_else(|| super::tuning::invalid("no explicit tuner"))?
+            .take_graphs()
+    }
+
+    /// Normal forward execution performs no capture, allocation or tuning work
+    pub(crate) fn record_boundary(
+        &self,
+        boundary: BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        run: impl FnOnce() -> Result<(), CudaError>,
+    ) -> Result<(), CudaError> {
+        match &self.tuning {
+            Some(tuning) => tuning.record(self, boundary, batch, math, run),
+            None => run(),
+        }
+    }
+
+    /// Bind whole-pipeline precision before any model plans are built
+    pub(crate) fn with_recipe_mode(
+        mut self,
+        mode: super::implementation::policy::RecipeMode,
+    ) -> Self {
+        self.recipe_mode = mode;
+        self
+    }
+
+    /// Whole-plan recipe eligibility, fixed for this model session
+    pub(crate) fn recipe_mode(&self) -> super::implementation::policy::RecipeMode {
+        self.recipe_mode
     }
 
     /// The model-load policy snapshot, shared by all boundary plans
@@ -228,7 +334,7 @@ impl CudaRuntime {
     /// The area's production module, reusing only a cache entry with the same identity
     ///
     /// Plan selection skips uncovered areas before a candidate plan calls this. A
-    /// qualification load cannot change what a later production request loads
+    /// development load cannot change what a later production request loads
     pub fn load_kernels(&self, module: KernelModule) -> Result<LoadedKernels, CudaError> {
         let request = self
             .production_module(module)?

@@ -57,7 +57,7 @@ pub(super) struct ConvLayer {
     weight: DeviceTensor,
     bias: DeviceTensor,
     shape: ConvShape,
-    /// layer identity and qualification-only override
+    /// Layer identity and development-only override
     plan: LayerPlan,
 }
 

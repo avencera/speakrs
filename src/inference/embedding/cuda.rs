@@ -12,6 +12,7 @@ use cudarc::driver::CudaView;
 use ndarray::{Array1, Array2, ArrayView2, Axis};
 use tracing::{debug, trace};
 
+use crate::inference::cuda::implementation::policy::RecipeMode;
 use crate::inference::cuda::{
     CudaError, CudaFbank, CudaGraphs, CudaMath, CudaRuntime, CudaSession, DeviceTensor,
     EMBEDDING_DIM, EmbeddingBatch, EmbeddingBatchClass, FBANK_FRAMES, FBANK_MEL_BINS,
@@ -47,6 +48,8 @@ pub(super) struct CudaEmbedding {
     math: CudaMath,
     #[cfg_attr(feature = "coreml", allow(dead_code))]
     graphs: CudaGraphs,
+    #[cfg_attr(feature = "coreml", allow(dead_code))]
+    recipe_mode: RecipeMode,
     /// `[chunks * 3, 589]` speaker masks for the next batch
     masks: Vec<f32>,
     /// `[chunks, 998, 80]` host filterbanks for the next batch
@@ -96,8 +99,15 @@ impl CudaEmbedding {
 
         let math = config.cuda_embedding_math;
         let graphs = config.cuda_graphs;
-        let session = open_session(&weights, math, graphs)?;
-        Ok(Self::with_session(session, weights, math, graphs))
+        let recipe_mode = RecipeMode::new(config.cuda_segmentation_math, math);
+        let session = open_session(&weights, math, graphs, recipe_mode)?;
+        Ok(Self::with_session(
+            session,
+            weights,
+            math,
+            graphs,
+            recipe_mode,
+        ))
     }
 
     fn with_session(
@@ -105,12 +115,14 @@ impl CudaEmbedding {
         weights: PathBuf,
         math: CudaMath,
         graphs: CudaGraphs,
+        recipe_mode: RecipeMode,
     ) -> Self {
         Self {
             session,
             weights,
             math,
             graphs,
+            recipe_mode,
             masks: Vec::new(),
             fbanks: Vec::new(),
         }
@@ -119,12 +131,13 @@ impl CudaEmbedding {
     /// A handle with its own runtime, stream and device copy of the same weights
     #[cfg(not(feature = "coreml"))]
     pub(super) fn reload(&self) -> Result<Self, InferenceError> {
-        let session = open_session(&self.weights, self.math, self.graphs)?;
+        let session = open_session(&self.weights, self.math, self.graphs, self.recipe_mode)?;
         Ok(Self::with_session(
             session,
             self.weights.clone(),
             self.math,
             self.graphs,
+            self.recipe_mode,
         ))
     }
 
@@ -418,34 +431,38 @@ fn open_session(
     weights: &Path,
     math: CudaMath,
     graphs: CudaGraphs,
+    recipe_mode: RecipeMode,
 ) -> Result<CudaSession<EmbeddingState>, CudaError> {
     let file = SafetensorsFile::open(weights)?;
-    CudaSession::new(CudaRuntime::new(0)?, |runtime| {
-        // the filterbank stays FP32 whatever the embedding precision: TF32 moves
-        // low-energy log-mel bins by up to 2.7 for a 0.16 ms gain
-        let fbank = CudaFbank::new(runtime, CudaMath::Fp32)?;
-        let model = ResNetEmbedding::load(runtime, &file, math)?;
-        debug!(
-            capability = %runtime.compute_capability(),
-            ptx_limit = %runtime.ptx_tier(),
-            fbank_tier = %fbank.tier(),
-            embedding_tier = %model.kernel_tier(),
-            ?math,
-            ?graphs,
-            "Loaded CUDA embedding"
-        );
+    CudaSession::new(
+        CudaRuntime::new(0)?.with_recipe_mode(recipe_mode),
+        |runtime| {
+            // the filterbank stays FP32 whatever the embedding precision: TF32 moves
+            // low-energy log-mel bins by up to 2.7 for a 0.16 ms gain
+            let fbank = CudaFbank::new(runtime, CudaMath::Fp32)?;
+            let model = ResNetEmbedding::load(runtime, &file, math)?;
+            debug!(
+                capability = %runtime.compute_capability(),
+                ptx_limit = %runtime.ptx_tier(),
+                fbank_tier = %fbank.tier(),
+                embedding_tier = %model.kernel_tier(),
+                ?math,
+                ?graphs,
+                "Loaded CUDA embedding"
+            );
 
-        Ok(EmbeddingState {
-            fbank_buffers: fbank.buffers(runtime, MULTI_MASK_BATCH_SIZE)?,
-            fbank,
-            batches: Batches {
-                model,
-                graphs: graphs.enabled(),
-                plans: std::array::from_fn(|_| None),
-                activations: None,
-            },
-        })
-    })
+            Ok(EmbeddingState {
+                fbank_buffers: fbank.buffers(runtime, MULTI_MASK_BATCH_SIZE)?,
+                fbank,
+                batches: Batches {
+                    model,
+                    graphs: graphs.enabled(),
+                    plans: std::array::from_fn(|_| None),
+                    activations: None,
+                },
+            })
+        },
+    )
 }
 
 /// Copies device filterbank values into a batch's input, which must have their length

@@ -269,20 +269,22 @@ impl CudaFbank {
             return Ok(());
         }
 
-        let frames = rows * FBANK_FRAMES;
-        self.produce(
-            runtime,
-            waveform,
-            rows,
-            &mut work.producer,
-            &mut work.energies.slice_mut(..frames * FBANK_MEL_BINS),
-        )?;
-        self.log_cmn(
-            runtime,
-            rows,
-            &work.energies.slice(..frames * FBANK_MEL_BINS),
-            &mut work.features.slice_mut(..frames * FBANK_MEL_BINS),
-        )
+        runtime.record_boundary(DFT, rows, self.math, || {
+            let frames = rows * FBANK_FRAMES;
+            self.produce(
+                runtime,
+                waveform,
+                rows,
+                &mut work.producer,
+                &mut work.energies.slice_mut(..frames * FBANK_MEL_BINS),
+            )?;
+            self.log_cmn(
+                runtime,
+                rows,
+                &work.energies.slice(..frames * FBANK_MEL_BINS),
+                &mut work.features.slice_mut(..frames * FBANK_MEL_BINS),
+            )
+        })
     }
 
     fn produce(

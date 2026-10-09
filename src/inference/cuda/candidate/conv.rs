@@ -16,7 +16,7 @@
 //!
 //! The sm80 tier adds single-product TF32 tensor-core kernels for the three shapes,
 //! with weights packed in `mma.sync` fragment order. Driver-only routing selects them
-//! only in TF32 mode on the capabilities in `TENSOR_TRUNK`: on the A100 the FP32
+//! only in TF32 mode on Ampere and newer: on the A100 the FP32
 //! kernels left these layers at 4.3 s of a 4.4 s gap to cuDNN over ten VoxConverse
 //! files
 
@@ -558,6 +558,20 @@ impl super::DriverCandidate for Oxide {
         )
     }
 
+    fn tuning_fp32_pin(
+        boundary: super::super::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        device: &super::super::device::DeviceAttributes,
+        tier: PtxTier,
+    ) -> Result<Option<super::ConfigPin>, PlanError> {
+        if math == CudaMath::Fp32 {
+            return Ok(None);
+        }
+
+        Self::driver_pin(boundary, batch, CudaMath::Fp32, device, tier).map(Some)
+    }
+
     fn driver_pin(
         boundary: super::super::implementation::BoundaryId,
         batch: usize,
@@ -606,18 +620,10 @@ impl super::DriverCandidate for Oxide {
     }
 }
 
-/// Capabilities whose TF32 tensor-core trunk kernels were measured faster than both the
-/// FP32 kernels and cuDNN over the 14 early layers at b1 and b32
+/// The TF32 class default uses the same tensor entries on Ampere and newer
 ///
-/// The A100 (8.0) runs TF32 at eight times its FP32 rate. An RTX 4060 Ti (8.9) measured
-/// 2.18x and 1.90x of cuDNN against 1.76x and 1.47x for the FP32 kernels. The
-/// measured 36-SM RTX 5060 Ti uses the same entries through its point binding
-const TENSOR_TRUNK: [ComputeCapability; 2] =
-    [ComputeCapability::new(8, 0), ComputeCapability::new(8, 9)];
-
-/// The TF32 tensor-core entry of a shape where it is the measured choice
-///
-/// Other sm80-tier parts keep the FP32 kernels until they are measured
+/// FP32 and sm75 keep their current pins; whole-trunk group measurements on
+/// A100, Ada and Blackwell support this default, not a per-layer speed claim
 fn tensor_kernel(
     shape: ConvShape,
     math: CudaMath,
@@ -626,7 +632,7 @@ fn tensor_kernel(
 ) -> Option<ConvKernel> {
     if math != CudaMath::Tf32
         || tier < PtxTier::Sm80
-        || !(TENSOR_TRUNK.contains(&device.capability()) || Oxide::RTX50_SCOPE.contains(device))
+        || device.capability() < ComputeCapability::new(8, 0)
     {
         return None;
     }

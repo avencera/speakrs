@@ -68,6 +68,19 @@ impl Convs<'_> {
         residual: Residual<'_, '_>,
         y: &mut CudaViewMut<'_, f32>,
     ) -> Result<(), CudaError> {
+        let runtime = self.runtime;
+        runtime.record_boundary(layer.boundary(), self.chunks, self.math, || {
+            self.conv_bias_relu_inner(layer, x, residual, y)
+        })
+    }
+
+    fn conv_bias_relu_inner(
+        &mut self,
+        layer: &ConvLayer,
+        x: &CudaView<'_, f32>,
+        residual: Residual<'_, '_>,
+        y: &mut CudaViewMut<'_, f32>,
+    ) -> Result<(), CudaError> {
         match self.plan(layer)? {
             #[cfg(feature = "_cuda-libraries")]
             Plan::Library(plan) => {
@@ -92,6 +105,18 @@ impl Convs<'_> {
     /// `y = conv(x) + bias` for a 1x1 shortcut: Library runs the bare convolution and
     /// the shared bias kernel, a candidate its fused bias epilogue
     pub(super) fn shortcut(
+        &mut self,
+        layer: &ConvLayer,
+        x: &CudaView<'_, f32>,
+        y: &mut CudaViewMut<'_, f32>,
+    ) -> Result<(), CudaError> {
+        let runtime = self.runtime;
+        runtime.record_boundary(layer.boundary(), self.chunks, self.math, || {
+            self.shortcut_inner(layer, x, y)
+        })
+    }
+
+    fn shortcut_inner(
         &mut self,
         layer: &ConvLayer,
         x: &CudaView<'_, f32>,

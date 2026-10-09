@@ -27,6 +27,12 @@ impl<S> CudaSession<S> {
         tracing::info!(
             driver_only = super::driver_only(),
             force_library = runtime.force_library(),
+            precedence = ?[
+                super::implementation::policy::Source::TuneFile.name(),
+                super::implementation::policy::Source::Recipe.name(),
+                super::implementation::policy::Source::Default.name(),
+                super::implementation::policy::Source::Library.name(),
+            ],
             "CUDA model-load routing policy"
         );
         let state = build(&runtime)?;

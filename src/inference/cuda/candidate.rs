@@ -121,7 +121,7 @@ pub(crate) use conv::Oxide as ConvOxide;
 pub(crate) use fbank::Oxide as FbankOxide;
 pub(crate) use lstm::Oxide as LstmOxide;
 // the routing port selects these plans
-pub(crate) use segdense::{Area as SegdenseArea, SegdensePin};
+pub(crate) use segdense::{Area as SegdenseArea, Entry as SegdenseEntry, SegdensePin};
 pub(crate) use segdense::{DenseOxide, SegConvOxide};
 // the root's routing for builds without libraries consumes this export
 pub(crate) use lstmproj::Oxide as LstmProjOxide;
@@ -129,12 +129,14 @@ pub(crate) use sinc::Oxide as SincOxide;
 // the GPU development checks force selections made for other devices
 #[cfg(all(test, feature = "_cuda-libraries"))]
 pub(crate) use lstmproj::RecurrencePlan;
-#[cfg(test)]
-pub(crate) use wideconv::{Algorithm as WideconvAlgorithm, WinogradProducts as WideconvProducts};
+pub(crate) use wideconv::{
+    Algorithm as WideconvAlgorithm, TensorKernel as WideconvTensorKernel,
+    WinogradProducts as WideconvProducts,
+};
 #[cfg(all(test, feature = "_cuda-libraries"))]
 pub(crate) use wideconv::{
     Config as WideconvConfig, Device as WideconvDevice, Partition as WideconvPartition,
-    SplitCells as WideconvSplitCells, TensorKernel as WideconvTensorKernel,
+    SplitCells as WideconvSplitCells,
 };
 pub(crate) use wideconv::{Oxide as WideconvOxide, Pin as WideconvPin};
 
@@ -292,7 +294,7 @@ pub(crate) trait FbankCandidate: Sized {
     fn coverage(_tier: PtxTier) -> Coverage {
         Self::COVERAGE
     }
-    /// The complete configuration used by qualification
+    /// The complete configuration used by development checks
     fn implemented_pin(spec: FbankSpec) -> Result<Self::Pin, PlanError>;
     /// Build one validated batch plan from `pin` outside measured intervals, with the
     /// module the selection token already loaded
@@ -620,7 +622,7 @@ pub(crate) trait ConvCandidate: Sized {
         Self::COVERAGE
     }
 
-    /// The configuration qualification plans for this layer
+    /// The configuration development checks plan for this layer
     fn implemented_pin(layer: &ConvLayerSpec<'_>) -> Result<Self::Pin, PlanError>;
 
     /// Prepares one layer for one batch size from `pin`; runs once per batch class,
@@ -695,7 +697,7 @@ pub(crate) trait SincCandidate: Sized {
     /// The tensor [`Self::enqueue`] writes
     const OUTPUT: SincOutput;
 
-    /// The configuration qualification plans for this batch size
+    /// The configuration development checks plan for this batch size
     fn implemented_pin(spec: &SincSpec<'_>) -> Result<SincPin, PlanError>;
 
     /// Prepares one batch size from `pin`; runs once per batch class, untimed
@@ -756,7 +758,7 @@ pub(crate) trait LstmCandidate: Sized {
         Self::COVERAGE
     }
 
-    /// The configuration qualification plans for this batch size
+    /// The configuration development checks plan for this batch size
     fn implemented_pin(spec: &LstmSpec<'_>) -> Result<LstmPin, PlanError>;
 
     /// The configuration to run on `device` with the loaded `tier` when no accepted
@@ -1488,6 +1490,19 @@ pub(crate) trait DriverCandidate {
             evidence.summary()
         })
     }
+    /// A conservative FP32 algorithm with a pin valid for the requested math mode
+    ///
+    /// This is tuner-only enumeration, not a change to normal driver selection
+    fn tuning_fp32_pin(
+        _boundary: super::implementation::BoundaryId,
+        _batch: usize,
+        _math: CudaMath,
+        _device: &DeviceAttributes,
+        _tier: PtxTier,
+    ) -> Result<Option<ConfigPin>, PlanError> {
+        Ok(None)
+    }
+
     /// One complete pin, selected from cached device facts without GPU allocation
     fn driver_pin(
         boundary: super::implementation::BoundaryId,

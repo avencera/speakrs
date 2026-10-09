@@ -264,11 +264,67 @@
 //! The FP32 fbank FFT/mel producer is a broad winner on cc 8.0 and newer; segdense is a broad
 //! winner on cc 8.0 and newer with the sm80 tier. These fused kernels won by at least
 //! 1.05x in every measured case on at least two architectures. Full `cuda` embeds all
-//! target kernels alongside cuDNN and cuBLAS. LSTM and the ResNet trunk use kernels only
-//! where their speed was measured faster; other devices use Library. TF32 fbank uses
-//! the kernel only on cc 8.9, where it was measured faster.
+//! target kernels alongside cuDNN and cuBLAS. Selection uses this order:
+//! **matching user tune file > measured recipe > device-class default > Library**.
+//! Library is available only in a `cuda` build. The RTX 4060 Ti recipe (cc 8.9, 34 SMs, exact device name) uses the
+//! fused SincNet conv0 kernel in FP32 at batches 1 and 32. The existing cc 12.0 SincNet
+//! binding and the RTX 5060 Ti ResNet binding (cc 12.0, 36 SMs) remain in use.
+//!
+//! The A100 PCIe-40GB and SXM4-40GB recipes (cc 8.0, 108 SMs, exact device names) use
+//! the complete driver plan with FP32 segmentation and TF32 embedding. Their measured
+//! whole-pipeline gains do not imply that each layer is faster. These recipes do not
+//! apply to other cc 8.0 devices, to FP32 embedding, or with the `sm75` tier limit.
+//!
+//! On Ampere and newer GPUs without a measured recipe, TF32 early-trunk C32/C64
+//! convolutions use the tensor-core class default. Other boundaries use existing
+//! measured choices and broad-winner defaults, or Library when no such evidence applies.
+//! Turing and FP32 keep their current choices. Target-only builds always use kernels.
+//! TF32 fbank uses the kernel only on cc 8.9, where it was measured faster.
 //! `SPEAKRS_CUDA_FORCE_LIBRARY=1` makes a `cuda` build use Library at each replaceable
-//! boundary. The choice is logged when the model loads.
+//! boundary, even when a tune file exists. The model-load log gives the source for
+//! each boundary: tune file, recipe, default, or library.
+//!
+//! ### CUDA tuning
+//!
+//! Build the opt-in command on Linux:
+//!
+//! ```sh
+//! cargo build --release --no-default-features --features cuda --bin speakrs
+//! ./target/release/speakrs cuda tune --models-dir /path/to/models --dry-run
+//! ./target/release/speakrs cuda tune --models-dir /path/to/models
+//! ```
+//!
+//! The command uses real model weights and shapes. It measures approved kernel
+//! configurations and Library, if compiled in, at the pipeline batch sizes. It uses
+//! warm-up passes, alternating candidate order, and median CUDA-event times. The
+//! summary table shows each candidate and marks the selected choice. Tuning does not
+//! change accuracy rules or precision. The defaults are FP32 segmentation, FP32
+//! filterbank, and TF32 embedding. Use `--segmentation-math fp32|tf32` and
+//! `--embedding-math fp32|tf32` to match another pipeline configuration. Use
+//! `--device N` to select a device. Run tuning when other GPU work is stopped.
+//!
+//! A target-only build, such as `--features cuda-rtx40`, measures kernels only.
+//! Only fixed pins with reviewed end-to-end accuracy are eligible. FP32 mode
+//! accepts direct FP32 algorithms. TF32 mode also accepts direct TF32 algorithms,
+//! staged one-product Winograd, and the C64 FFMA Winograd algorithm. This policy
+//! does not require a measured device identity. Timing and edited JSON cannot
+//! approve other algorithms. Built-in recipes keep their separate measured pins.
+//! A target-only tuner returns an error when a complete model boundary has no
+//! approved choice.
+//! A device without approved custom candidates can use Library in a hybrid build.
+//!
+//! The file is saved under `$XDG_CONFIG_HOME/speakrs/`, or
+//! `$HOME/.config/speakrs/`, with a per-device name. Use `--output PATH` to change
+//! that location, then set `SPEAKRS_CUDA_TUNE_FILE=PATH` when loading a model.
+//! The same environment variable can set the tuning output path. `--dry-run`
+//! measures and prints the table without writing or changing a file.
+//!
+//! A file is used only when the device name, compute capability, SM count, NVIDIA
+//! driver version, cuDNN and cuBLAS versions (or driver-only mode), speakrs
+//! version, embedded artifact digest, and accuracy-policy version all match. A bad key or row rejects the complete file; selection then
+//! uses recipes and defaults.
+//! Missing rows use the normal fallback. There is no automatic tuning at startup.
+//! The library API is `speakrs::inference::cuda::{tune_cuda, CudaTuneOptions}`.
 //!
 //! The ONNX Runtime dependency behind `cpu` and `migraphx` (`ort` 2.0.0-rc.13) is still
 //! pre-release.

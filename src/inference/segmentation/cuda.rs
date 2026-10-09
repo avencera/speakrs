@@ -10,6 +10,7 @@ use crate::inference::{ExecutionMode, InferenceError, ModelLoadError};
 use crate::pipeline::RuntimeConfig;
 
 use super::SegmentationError;
+use crate::inference::cuda::implementation::policy::RecipeMode;
 
 /// Native CUDA segmentation plus private input staging for one model handle
 pub(super) struct CudaSegmentationBackend {
@@ -19,6 +20,8 @@ pub(super) struct CudaSegmentationBackend {
     weights: PathBuf,
     #[cfg_attr(feature = "coreml", allow(dead_code))]
     options: SegmentationOptions,
+    #[cfg_attr(feature = "coreml", allow(dead_code))]
+    recipe_mode: RecipeMode,
     window_samples: usize,
     /// `[batch, window_samples]` zero-padded windows for the next upload
     staging: Vec<f32>,
@@ -60,12 +63,15 @@ impl CudaSegmentationBackend {
             lstm_algo: config.cuda_lstm_algorithm,
             cuda_graph: config.cuda_graphs.enabled(),
         };
-        let (session, options) = open_session(&weights, options, window_samples)?;
+        let recipe_mode =
+            RecipeMode::new(config.cuda_segmentation_math, config.cuda_embedding_math);
+        let (session, options) = open_session(&weights, options, window_samples, recipe_mode)?;
 
         Ok(Self {
             session,
             weights,
             options,
+            recipe_mode,
             window_samples,
             staging: Vec::new(),
         })
@@ -74,11 +80,17 @@ impl CudaSegmentationBackend {
     /// A handle with its own runtime, stream and device copy of the same weights
     #[cfg(not(feature = "coreml"))]
     pub(super) fn reload(&self) -> Result<Self, InferenceError> {
-        let (session, options) = open_session(&self.weights, self.options, self.window_samples)?;
+        let (session, options) = open_session(
+            &self.weights,
+            self.options,
+            self.window_samples,
+            self.recipe_mode,
+        )?;
         Ok(Self {
             session,
             weights: self.weights.clone(),
             options,
+            recipe_mode: self.recipe_mode,
             window_samples: self.window_samples,
             staging: Vec::new(),
         })
@@ -133,16 +145,20 @@ fn open_session(
     weights: &Path,
     options: SegmentationOptions,
     window_samples: usize,
+    recipe_mode: RecipeMode,
 ) -> Result<(CudaSession<SegmentationState>, SegmentationOptions), CudaError> {
     let file = SafetensorsFile::open(weights)?;
-    let session = CudaSession::new(CudaRuntime::new(0)?, |runtime| {
-        let mut model = CudaSegmentation::new(runtime, &file, options)?;
-        // construct production classes before load returns, outside graph capture
-        for batch in [1, 32] {
-            model.workspace(runtime, batch, window_samples)?;
-        }
-        debug!(capability = %runtime.compute_capability(), ptx_tier = %model.kernel_tier(), ?options, "Loaded CUDA segmentation");
-        Ok(SegmentationState(model))
-    })?;
+    let session = CudaSession::new(
+        CudaRuntime::new(0)?.with_recipe_mode(recipe_mode),
+        |runtime| {
+            let mut model = CudaSegmentation::new(runtime, &file, options)?;
+            // construct production classes before load returns, outside graph capture
+            for batch in [1, 32] {
+                model.workspace(runtime, batch, window_samples)?;
+            }
+            debug!(capability = %runtime.compute_capability(), ptx_tier = %model.kernel_tier(), ?options, "Loaded CUDA segmentation");
+            Ok(SegmentationState(model))
+        },
+    )?;
     Ok((session, options))
 }

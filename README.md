@@ -263,11 +263,80 @@ speed for device-sensitive kernels and explicit all-device evidence for broad wi
 The FP32 fbank FFT/mel producer is a broad winner on cc 8.0 and newer; segdense is a broad
 winner on cc 8.0 and newer with the sm80 tier. These fused kernels won by at least
 1.05x in every measured case on at least two architectures. Full `cuda` embeds all
-target kernels alongside cuDNN and cuBLAS. LSTM and the ResNet trunk use kernels only
-where their speed was measured faster; other devices use Library. TF32 fbank uses
-the kernel only on cc 8.9, where it was measured faster.
+target kernels alongside cuDNN and cuBLAS. Selection uses this order:
+**matching user tune file > measured recipe > device-class default > Library**.
+Library is available only in a `cuda` build. The RTX 4060 Ti (cc 8.9,
+34 SMs) and RTX 5060 Ti (cc 12.0, 36 SMs) recipes require exact device
+names. With FP32 segmentation and TF32 embedding, they use the measured
+kernel plan at embedding batches 1, 4, 8, 16, and 32. The 4060 Ti uses
+scalar C32 kernels for 14 measured second-convolution tuples. The other
+trunk tuples use the measured driver pins, including staged one-product
+C128/C256 Winograd. The 4060 Ti FP32 SincNet recipe remains available
+outside the whole-pipeline precision mode.
+
+The Tesla T4 recipe (cc 7.5, 40 SMs, exact device name) uses the same
+pipeline precision mode and embedding batches 1, 4, 8, 16, and 32. It
+selects kernels at 173 measured tuples and Library at 55, including large
+C128/C256 batches where Library wins. Segmentation keeps Library for
+the two batch-1 dense layers; SincNet, convolutions, LSTM and classifier
+use the measured kernels.
+
+The A100 PCIe-40GB and SXM4-40GB recipes (cc 8.0, 108 SMs, exact device
+names) keep their measured FP32 segmentation and TF32 embedding choices
+at batches 1 and 32. C128 keeps unstaged one-product Winograd. C256 uses
+three-product Winograd at batch 1 and the direct tensor kernel at batch 32.
+These recipes do not apply to other cc 8.0 devices, FP32 embedding,
+intermediate embedding batches, or the `sm75` tier limit.
+
+On Ampere and newer GPUs without a measured recipe, TF32 early-trunk C32/C64
+convolutions use the tensor-core class default. Other boundaries use existing
+measured choices and broad-winner defaults, or Library when no such evidence applies.
+Other Turing devices and FP32 embedding keep their current choices.
+Target-only builds always use kernels.
+TF32 fbank uses the kernel only on cc 8.9, where it was measured faster.
 `SPEAKRS_CUDA_FORCE_LIBRARY=1` makes a `cuda` build use Library at each replaceable
-boundary. The choice is logged when the model loads.
+boundary, even when a tune file exists. The model-load log gives the source for
+each boundary: tune file, recipe, default, or library.
+
+### CUDA tuning
+
+Build the opt-in command on Linux:
+
+```sh
+cargo build --release --no-default-features --features cuda --bin speakrs
+./target/release/speakrs cuda tune --models-dir /path/to/models --dry-run
+./target/release/speakrs cuda tune --models-dir /path/to/models
+```
+
+The command uses real model weights and shapes. It measures approved kernel
+configurations and Library, if compiled in, at the pipeline batch sizes. It uses
+warm-up passes, alternating candidate order, and median CUDA-event times. The
+summary table shows each candidate and marks the selected choice. Tuning does not
+change accuracy rules or precision. The defaults are FP32 segmentation, FP32
+filterbank, and TF32 embedding. Use `--segmentation-math fp32|tf32` and
+`--embedding-math fp32|tf32` to match another pipeline configuration. Use
+`--device N` to select a device. Run tuning when other GPU work is stopped.
+
+A target-only build, such as `--features cuda-rtx40`, measures kernels only.
+Only fixed configurations from the production routing code are eligible.
+The tuner measures embedding trunk batches 1, 4, 8, 16, and 32. Segmentation
+and embedding-head choices use batches 1 and 32. Filterbank uses batches 1
+through 32. The exact device and build key rejects stale artifact bytes.
+Arbitrary configuration pins cannot be selected by editing JSON. Tuning does
+not approve new kernels or change the configured precision.
+
+The file is saved under `$XDG_CONFIG_HOME/speakrs/`, or
+`$HOME/.config/speakrs/`, with a per-device name. Use `--output PATH` to change
+that location, then set `SPEAKRS_CUDA_TUNE_FILE=PATH` when loading a model.
+The same environment variable can set the tuning output path. `--dry-run`
+measures and prints the table without writing or changing a file.
+
+A file is used only when the device name, compute capability, SM count, NVIDIA
+driver version, cuDNN and cuBLAS versions (or driver-only mode), speakrs version,
+embedded artifact digest, and accuracy-policy version all match. A bad key or
+row rejects the complete file; selection then uses recipes and defaults.
+Missing rows use the normal fallback. There is no automatic tuning at startup.
+The library API is `speakrs::inference::cuda::{tune_cuda, CudaTuneOptions}`.
 
 The ONNX Runtime dependency behind `cpu` and `migraphx` (`ort` 2.0.0-rc.13) is still
 pre-release.
