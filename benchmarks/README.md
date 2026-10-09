@@ -87,45 +87,54 @@ Hardware: Apple M4 Pro, macOS 26.3
 
 ## Linux (CUDA)
 
-The speakrs rows use one NVIDIA RTX 4090, with 16 CPU cores and 8 GiB of
-RAM. The cloud host doesn't report its CPU model.
-Average CPU use over the complete benchmark processes was 0.95–1.18 cores;
-this is measured CPU use, not a thread limit.
+The speakrs CUDA rows and paired VoxConverse pyannote rows use one NVIDIA
+RTX 4090, with 16 CPU cores and 8 GiB of RAM. The cloud host doesn't report
+its CPU model. For each VoxConverse dataset,
+speakrs CUDA, speakrs CUDA Fast, and pyannote CUDA ran sequentially in the same
+container. They shared the GPU, CPU, driver, RAM, image, local disk, and data copy.
+Average CPU use for the earlier speakrs runs on the other datasets was
+0.95–1.18 cores; this is measured CPU use, not a thread limit.
 
 Audio and models were copied to the container's local disk before each dataset
 run. Time and RTFx use the unchanged `speakrs-bm` timer: WAV loading, inference,
-clustering and RTTM output are included; downloads, data copy, model and
-pipeline construction, and DER scoring are excluded.
+clustering and RTTM output are included; downloads, data copy and DER scoring
+are excluded. Native speakrs timing excludes model and pipeline construction.
+Pyannote timing includes the complete Python subprocess, including pipeline
+construction. Pyannote uses batch size 32.
 
-The pyannote rows are from earlier runs on the hardware listed for each table.
-They were not rerun with the new speakrs rows, so their times are not a
-same-hardware comparison.
+Only the AMI IHM and Earnings-21 pyannote CUDA rows are from earlier runs on
+the hardware listed for those tables. Their times are not a same-hardware
+comparison.
 
 | Name | Description |
 |------|-------------|
-| pyannote CUDA (earlier run) | [`pyannote/speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1) on the NVIDIA GPU listed in its row |
+| pyannote CUDA | [`pyannote/speaker-diarization-community-1`](https://huggingface.co/pyannote/speaker-diarization-community-1) on the NVIDIA GPU listed in its row |
 | speakrs CUDA | Native CUDA with speakrs kernels, 1s step |
 | speakrs CUDA Fast | Native CUDA with speakrs kernels, 2s step |
 
 ### VoxConverse Dev (216 files, 1217.8 min)
 
-Earlier pyannote hardware: NVIDIA RTX 4090, AMD EPYC 7B13.
+Shared hardware: NVIDIA RTX 4090, 16 CPU cores (model not reported), 8 GiB RAM;
+driver 580.126.18, nvidia-smi CUDA 13.0.
+All three ran sequentially in the same container.
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
-| **speakrs CUDA** | **7.0%** | 2.3% | 2.3% | 2.4% | 74.7s | 978x |
-| speakrs CUDA Fast | 7.4% | 2.3% | 2.3% | 2.8% | 44.9s | **1627x** |
-| pyannote CUDA (RTX 4090, earlier run) | 7.2% | 2.3% | 2.3% | 2.6% | 2312.1s | 32x |
+| **speakrs CUDA** | **7.0%** | 2.3% | 2.3% | 2.4% | 63.4s | 1153x |
+| speakrs CUDA Fast | 7.4% | 2.3% | 2.3% | 2.8% | 36.8s | **1985x** |
+| pyannote CUDA | 7.2% | 2.3% | 2.3% | 2.6% | 2301.3s | 32x |
 
 ### VoxConverse Test (232 files, 2612.2 min)
 
-Earlier pyannote hardware: NVIDIA L40S, AMD EPYC 9354.
+Shared hardware: NVIDIA RTX 4090, 16 CPU cores (model not reported), 8 GiB RAM;
+driver 580.126.18, nvidia-smi CUDA 13.0.
+All three ran sequentially in the same container.
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
-| **speakrs CUDA** | **11.1%** | 3.4% | 4.1% | 3.7% | 162.9s | 962x |
-| speakrs CUDA Fast | 11.2% | 3.3% | 4.1% | 3.8% | 100.4s | **1562x** |
-| **pyannote CUDA (L40S, earlier run)** | **11.1%** | 3.4% | 4.1% | 3.7% | 8677.9s | 18x |
+| **speakrs CUDA** | **11.1%** | 3.4% | 4.1% | 3.7% | 150.5s | 1041x |
+| speakrs CUDA Fast | 11.2% | 3.3% | 4.1% | 3.8% | 84.2s | **1862x** |
+| **pyannote CUDA** | **11.1%** | 3.4% | 4.1% | 3.7% | 6341.3s | 25x |
 
 ### AMI IHM (34 files, 1123.8 min)
 

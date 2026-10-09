@@ -8,13 +8,14 @@ speakrs CoreML            11.1%       3.4%          4.1%         3.6%   248.5s  
 speakrs CoreML Fast       11.2%       3.1%          4.2%         3.9%   181.1s    865x
 SpeakerKit                11.2%       3.3%          4.6%         3.3%   211.3s    742x
 
-Linux — speakrs: NVIDIA RTX 4090; 16 CPU cores (model not reported by the host)
-Earlier pyannote hardware: NVIDIA L40S, AMD EPYC 9354
+Linux — NVIDIA RTX 4090; 16 CPU cores (model not reported by the host); 8 GiB RAM
+Driver 580.126.18; nvidia-smi CUDA 13.0
 VoxConverse Test DER (232 files, 2612.2 min, collar=0ms)
+All three ran sequentially in the same container: speakrs CUDA, CUDA Fast, pyannote CUDA.
 Native speakrs CUDA: 1s step; CUDA Fast: 2s step. Audio and models use local disk.
 
-Implementation                                 DER%   Missed%   FalseAlarm%   Confusion%      Time    RTFx
-──────────────────────────────────────────────────────────────────────────────────────────────────────────
-speakrs CUDA                                  11.1%      3.4%          4.1%         3.7%    162.9s    962x
-speakrs CUDA Fast                             11.2%      3.3%          4.1%         3.8%    100.4s   1562x
-pyannote CUDA (L40S, earlier run)             11.1%      3.4%          4.1%         3.7%   8677.9s     18x
+Implementation             DER%    Missed%   FalseAlarm%   Confusion%      Time    RTFx
+──────────────────────────────────────────────────────────────────────────────────────────
+speakrs CUDA              11.1%       3.4%           4.1%          3.7%     150.5s    1041x
+speakrs CUDA Fast         11.2%       3.3%           4.1%          3.8%      84.2s    1862x
+pyannote CUDA             11.1%       3.4%           4.1%          3.7%    6341.3s      25x
