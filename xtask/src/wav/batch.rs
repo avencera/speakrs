@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,18 +15,31 @@ use super::read_wav_samples;
 
 const LOOKAHEAD: usize = 3;
 
-#[cfg(unix)]
-mod retained;
-#[cfg(unix)]
-use retained::{RetainedInput, set_nonblocking};
-
 // only this owner can create a speculative input from an opened regular file
 struct RegularInput(File);
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct InputChangedDuringLookahead(PathBuf);
+
+#[cfg(unix)]
+impl std::fmt::Display for InputChangedDuringLookahead {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "input changed from a regular file to a non-regular file during lookahead: {}",
+            self.0.display()
+        )
+    }
+}
+
+#[cfg(unix)]
+impl std::error::Error for InputChangedDuringLookahead {}
 
 enum ProbedInput {
     Regular(RegularInput),
     #[cfg(unix)]
-    Retained(RetainedInput),
+    Changed(InputChangedDuringLookahead),
 }
 
 impl ProbedInput {
@@ -43,6 +56,7 @@ impl ProbedInput {
     #[cfg(unix)]
     fn open_candidate(path: &Path) -> std::io::Result<Self> {
         use std::fs::OpenOptions;
+        use std::os::fd::AsRawFd;
         use std::os::unix::fs::OpenOptionsExt;
 
         // a path can change after stat, so this open must not wait for a writer
@@ -51,15 +65,24 @@ impl ProbedInput {
             .custom_flags(libc::O_NONBLOCK)
             .open(path)?;
 
-        let file_type = file.metadata()?.file_type();
-        set_nonblocking(&file, false)?;
+        // only the opened handle can prove that a speculative read is safe for a worker
+        if !file.metadata()?.is_file() {
+            return Ok(Self::Changed(InputChangedDuringLookahead(path.to_owned())));
+        }
 
-        // keep a raced non-regular handle connected instead of closing and reopening it
-        Ok(if file_type.is_file() {
-            Self::Regular(RegularInput(file))
-        } else {
-            Self::Retained(RetainedInput::new(file, file_type))
-        })
+        let descriptor = file.as_raw_fd();
+        // safety: the owned file keeps this descriptor valid throughout both fcntl calls
+        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+        if flags == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        // safety: F_SETFL takes integer flags and the descriptor remains owned
+        if unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags & !libc::O_NONBLOCK) } == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        Ok(Self::Regular(RegularInput(file)))
     }
 
     #[cfg(not(unix))]
@@ -79,7 +102,7 @@ enum PendingDecode {
     Worker(Receiver<Result<OwnedBatchInput>>),
     InOrder(PathBuf),
     #[cfg(unix)]
-    Retained(PathBuf, RetainedInput),
+    Changed(InputChangedDuringLookahead),
 }
 
 /// A small decode pool with at most three files ahead of the consumer
@@ -141,12 +164,21 @@ impl WavBatchDecoder {
             return Ok(());
         };
 
+        let probe = ProbedInput::open(&path);
+        self.schedule_probed(path, probe)
+    }
+
+    fn schedule_probed(
+        &mut self,
+        path: PathBuf,
+        probe: std::io::Result<Option<ProbedInput>>,
+    ) -> Result<()> {
         // known non-regular inputs and failed probes keep their original in-order open behavior
-        let input = match ProbedInput::open(&path) {
+        let input = match probe {
             Ok(Some(ProbedInput::Regular(input))) => input,
             #[cfg(unix)]
-            Ok(Some(ProbedInput::Retained(input))) => {
-                self.pending.push_back(PendingDecode::Retained(path, input));
+            Ok(Some(ProbedInput::Changed(error))) => {
+                self.pending.push_back(PendingDecode::Changed(error));
                 return Ok(());
             }
             Ok(None) | Err(_) => {
@@ -169,11 +201,7 @@ impl WavBatchDecoder {
         Ok(())
     }
 
-    fn decode(
-        path: PathBuf,
-        file: impl Read + Seek,
-        cancelled: &AtomicBool,
-    ) -> Result<OwnedBatchInput> {
+    fn decode(path: PathBuf, file: File, cancelled: &AtomicBool) -> Result<OwnedBatchInput> {
         let file_id = path
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
@@ -204,10 +232,7 @@ impl Iterator for WavBatchDecoder {
                 .map_err(Into::into)
                 .and_then(|file| Self::decode(path, file, &self.cancelled)),
             #[cfg(unix)]
-            PendingDecode::Retained(path, input) => input
-                .into_reader(&self.cancelled)
-                .map_err(Into::into)
-                .and_then(|reader| Self::decode(path, reader, &self.cancelled)),
+            PendingDecode::Changed(error) => Err(error.into()),
         };
         if result.is_err() {
             self.cancelled.store(true, Ordering::Relaxed);
@@ -493,80 +518,90 @@ mod tests {
         }
 
         #[test]
-        fn stat_open_race_retains_fifo_handle_for_in_order_decode() {
-            use super::super::{PendingDecode, ProbedInput};
+        fn stat_open_race_returns_an_ordered_typed_error_without_waiting() {
+            use std::sync::atomic::Ordering;
+
+            use super::super::{InputChangedDuringLookahead, ProbedInput};
 
             let directory = tempfile::tempdir().unwrap();
             let first = directory.path().join("first.wav");
-            let source = directory.path().join("source.wav");
             let path = directory.path().join("raced.wav");
+            let later = directory.path().join("later.wav");
             write_wav(&first, 1000, 16_000);
-            write_wav(&source, -2000, 16_000);
             write_wav(&path, 3000, 16_000);
-            let bytes = std::fs::read(source).unwrap();
+            write_wav(&later, -2000, 16_000);
             // exercise the open phase after the candidate changes between stat and open
             assert!(std::fs::metadata(&path).unwrap().is_file());
             std::fs::remove_file(&path).unwrap();
             create_fifo(&path);
-            let (opened_tx, opened_rx) = mpsc::channel();
-            let (write_tx, write_rx) = mpsc::channel();
-            let writer_path = path.clone();
-            let producer = thread::spawn(move || {
-                let mut writer = OpenOptions::new().write(true).open(writer_path).unwrap();
-                opened_tx.send(()).unwrap();
-                write_rx.recv().unwrap();
-                writer.write_all(&bytes)
+            let (finished_tx, finished_rx) = mpsc::channel();
+            let expected_path = path.clone();
+            let consumer = thread::spawn(move || {
+                let probe = ProbedInput::open_candidate(&path).map(Some);
+                let mut decoder = WavBatchDecoder::new(vec![first]).unwrap();
+                decoder.schedule_probed(path, probe).unwrap();
+                decoder
+                    .schedule_probed(later.clone(), ProbedInput::open(&later))
+                    .unwrap();
+                let first = decoder.next().unwrap().unwrap();
+                let error = decoder.next().unwrap().err().unwrap();
+                assert!(decoder.cancelled.load(Ordering::Relaxed));
+                assert!(decoder.next().is_none());
+                drop(decoder);
+                // an input error must not affect the next decoder's output
+                let mut next = WavBatchDecoder::new(vec![later]).unwrap();
+                let next = next.next().unwrap().unwrap();
+                finished_tx.send((first, error, next)).unwrap();
             });
-            let ProbedInput::Retained(input) = ProbedInput::open_candidate(&path).unwrap() else {
-                panic!("the opened FIFO must be retained, not sent to a worker");
-            };
+            let (first, error, next) = finished_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("a raced FIFO without a writer must return an error, not wait");
+            consumer.join().unwrap();
 
-            opened_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-            std::fs::remove_file(&path).unwrap();
-            write_wav(&path, 3000, 16_000);
-            let mut decoder = WavBatchDecoder::new(vec![first]).unwrap();
-            decoder
-                .pending
-                .push_back(PendingDecode::Retained(path, input));
-            let first = decoder.next().unwrap().unwrap();
-            write_tx.send(()).unwrap();
-            let second = decoder.next().unwrap().unwrap();
-            assert!(decoder.next().is_none());
-            drop(decoder);
-            producer.join().unwrap().unwrap();
             assert_eq!(first.file_id, "first");
             assert_eq!(first.audio, vec![1000.0 / 32768.0]);
-            assert_eq!(second.file_id, "raced");
-            assert_eq!(second.audio, vec![-2000.0 / 32768.0]);
+            let changed = error.downcast_ref::<InputChangedDuringLookahead>().unwrap();
+            assert_eq!(changed.0, expected_path);
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "input changed from a regular file to a non-regular file during lookahead: {}",
+                    expected_path.display()
+                )
+            );
+            assert_eq!(next.file_id, "later");
+            assert_eq!(next.audio, vec![-2000.0 / 32768.0]);
         }
 
         #[test]
-        fn earlier_error_discards_retained_fifo_without_waiting_for_a_writer() {
+        fn dropping_a_decoder_with_a_raced_fifo_does_not_wait_for_a_writer() {
             use super::super::{PendingDecode, ProbedInput};
 
             let directory = tempfile::tempdir().unwrap();
-            let wrong_rate = directory.path().join("wrong-rate.wav");
+            let first = directory.path().join("first.wav");
             let path = directory.path().join("raced.wav");
-            write_wav(&wrong_rate, 1, 8000);
+            write_wav(&first, 1234, 16_000);
             create_fifo(&path);
-            let ProbedInput::Retained(input) = ProbedInput::open_candidate(&path).unwrap() else {
-                panic!("expected a retained FIFO");
-            };
-
             let (finished_tx, finished_rx) = mpsc::channel();
             let consumer = thread::spawn(move || {
-                let mut decoder = WavBatchDecoder::new(vec![wrong_rate]).unwrap();
-                decoder
-                    .pending
-                    .push_back(PendingDecode::Retained(path, input));
-                let error = decoder.next().unwrap().err().unwrap();
-                assert!(decoder.next().is_none());
+                let probe = ProbedInput::open_candidate(&path).map(Some);
+                let mut decoder = WavBatchDecoder::new(vec![first]).unwrap();
+                decoder.schedule_probed(path, probe).unwrap();
+                assert!(matches!(
+                    decoder.pending.back(),
+                    Some(PendingDecode::Changed(_))
+                ));
+                let first = decoder.next().unwrap().unwrap();
+                // leave the ordered error unconsumed and join all workers before signalling
                 drop(decoder);
-                finished_tx.send(error.to_string()).unwrap();
+                finished_tx.send(first).unwrap();
             });
-            let result = finished_rx.recv_timeout(Duration::from_secs(1));
+            let first = finished_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("dropping a raced FIFO must not wait for a writer");
             consumer.join().unwrap();
-            assert_eq!(result.unwrap(), "expected 16kHz WAV, got 8000Hz");
+            assert_eq!(first.file_id, "first");
+            assert_eq!(first.audio, vec![1234.0 / 32768.0]);
         }
     }
 }
