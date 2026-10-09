@@ -1333,14 +1333,14 @@ fn excluded_fp16_takes_each_source_choice_without_fp16_tiles() {
 
         // an FP16 tune choice gives way to the selection made without it
         let boundary = BoundaryId::named("resnet.layer2.1.conv2");
-        let tuned = crate::inference::cuda::tuning::tests::approved_choice(
+        let tuned = crate::inference::cuda::tuning::tests::approved_fp16_choice(
             &fixture.device,
             boundary,
             32,
             CudaMath::Tf32,
             fixture.limit,
         );
-        assert!(tuned.is_fp16(), "{name}: the approved default is FP16");
+        assert!(tuned.is_fp16(), "{name}: the approved choice is FP16");
         fixture.tuned = Some(tuned);
         fixture.fp16 = Fp16Policy::Allowed;
         let Selected::Oxide(token) = PlanRequest::Hybrid

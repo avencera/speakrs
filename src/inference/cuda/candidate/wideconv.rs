@@ -2095,6 +2095,30 @@ impl super::DriverCandidate for Oxide {
         TRUNK_SPEED_SUMMARY
     }
 
+    fn tuning_fp16_pin(
+        boundary: super::super::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        device: &DeviceAttributes,
+        tier: PtxTier,
+    ) -> Result<Option<super::ConfigPin>, PlanError> {
+        // fp16 entries are shipped in every tier for Turing and newer devices
+        if device.capability() < TURING {
+            return Ok(None);
+        }
+        let Some(wide) = Pin::fp16_wide(boundary.name(), batch, math) else {
+            return Ok(None);
+        };
+        // retain the startup tile size where measured, without limiting discovery
+        if let Ok(startup) =
+            Self::driver_pin(boundary, batch, math, device, tier, Fp16Policy::Allowed)
+            && startup.is_fp16()
+        {
+            return Ok(Some(startup));
+        }
+        Ok(Some(super::ConfigPin::Wideconv(wide)))
+    }
+
     fn driver_pin(
         boundary: super::super::implementation::BoundaryId,
         batch: usize,

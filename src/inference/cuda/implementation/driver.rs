@@ -9,14 +9,9 @@ use crate::inference::cuda::candidate::{
 use crate::inference::cuda::device::DeviceAttributes;
 use crate::inference::cuda::{CudaError, CudaMath, KernelModule, PtxTier};
 
-/// Candidate-owned scalar pin construction for the requested pipeline tuple
-type TuningFp32Pin = fn(
-    BoundaryId,
-    usize,
-    CudaMath,
-    &DeviceAttributes,
-    PtxTier,
-) -> Result<Option<ConfigPin>, PlanError>;
+/// Candidate-owned distinct tuning choices, independent of startup routing
+type TuningPins =
+    fn(BoundaryId, usize, CudaMath, &DeviceAttributes, PtxTier) -> Vec<(ConfigPin, &'static str)>;
 
 /// Candidate-owned pin construction under a selection's FP16 policy
 type DriverPin = fn(
@@ -36,7 +31,7 @@ pub(super) struct Area {
     scope: fn(BoundaryId, usize, CudaMath, &DeviceAttributes, PtxTier) -> Option<super::SpeedScope>,
     summary: fn(CudaMath) -> &'static str,
     pin: DriverPin,
-    tuning_fp32_pin: TuningFp32Pin,
+    tuning_pins: TuningPins,
 }
 
 /// A port either owns speed selection or retains the frozen qualified table
@@ -56,7 +51,7 @@ impl Area {
             scope: C::speed_scope,
             summary: C::speed_summary,
             pin: C::driver_pin,
-            tuning_fp32_pin: C::tuning_fp32_pin,
+            tuning_pins: C::tuning_pins,
         }
     }
 
@@ -103,31 +98,12 @@ pub(super) fn tuning_configurations(
                     if area.area == KernelModule::Sincnet && math == CudaMath::Tf32 {
                         continue;
                     }
-                    if !(area.coverage)(module.tier(), device, Fp16Policy::Allowed).covers(
-                        boundary.name(),
-                        batch,
-                        math,
-                    ) {
-                        continue;
-                    }
-                    let Ok(pin) = (area.pin)(
-                        boundary,
-                        batch,
-                        math,
-                        device,
-                        module.tier(),
-                        Fp16Policy::Allowed,
-                    ) else {
-                        continue;
-                    };
-                    configurations.push((boundary, batch, math, module, pin, "default"));
-                    // only the candidate owner can construct a pin for this math mode;
-                    // the independent policy still has to approve its arithmetic
-                    if let Ok(Some(fp32)) =
-                        (area.tuning_fp32_pin)(boundary, batch, math, device, module.tier())
-                        && fp32 != pin
+                    // implementation support belongs to the candidate; accuracy
+                    // approval remains an independent catalogue step
+                    for (pin, family) in
+                        (area.tuning_pins)(boundary, batch, math, device, module.tier())
                     {
-                        configurations.push((boundary, batch, math, module, fp32, "fp32"));
+                        configurations.push((boundary, batch, math, module, pin, family));
                     }
                 }
             }

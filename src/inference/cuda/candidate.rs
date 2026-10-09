@@ -1563,6 +1563,48 @@ pub(crate) trait DriverCandidate {
         Ok(None)
     }
 
+    /// An implemented FP16 pin, independent of startup speed recipes
+    ///
+    /// The accuracy policy must approve this pin before the tuner can measure it
+    fn tuning_fp16_pin(
+        _boundary: super::implementation::BoundaryId,
+        _batch: usize,
+        _math: CudaMath,
+        _device: &DeviceAttributes,
+        _tier: PtxTier,
+    ) -> Result<Option<ConfigPin>, PlanError> {
+        Ok(None)
+    }
+
+    /// Distinct implemented choices, without substituting FP16 for FP32 operands
+    fn tuning_pins(
+        boundary: super::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        device: &DeviceAttributes,
+        tier: PtxTier,
+    ) -> Vec<(ConfigPin, &'static str)> {
+        let mut pins = Vec::new();
+        if Self::driver_coverage(tier, device, Fp16Policy::Excluded).covers(
+            boundary.name(),
+            batch,
+            math,
+        ) && let Ok(pin) =
+            Self::driver_pin(boundary, batch, math, device, tier, Fp16Policy::Excluded)
+        {
+            pins.push((pin, "default"));
+            if let Ok(Some(fp32)) = Self::tuning_fp32_pin(boundary, batch, math, device, tier)
+                && fp32 != pin
+            {
+                pins.push((fp32, "fp32"));
+            }
+        }
+        if let Ok(Some(fp16)) = Self::tuning_fp16_pin(boundary, batch, math, device, tier) {
+            pins.push((fp16, "fp16"));
+        }
+        pins
+    }
+
     /// One complete pin, selected from cached device facts without GPU allocation;
     /// `fp16` excludes FP16 tiles from the choice
     fn driver_pin(
