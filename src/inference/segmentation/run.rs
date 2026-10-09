@@ -159,12 +159,10 @@ impl SegmentationModel {
         windows: &SegmentationWindows<'_>,
         next: usize,
         plan: BatchPlan,
-        #[cfg_attr(
-            not(any(feature = "cpu", feature = "migraphx", feature = "coreml")),
-            allow(unused_variables)
-        )]
         zeros: &[f32],
     ) -> Result<Vec<Array2<f32>>, SegmentationError> {
+        #[cfg(feature = "_cuda")]
+        let window_samples = self.window_samples();
         match &mut self.backend {
             #[cfg(feature = "cpu")]
             SegmentationBackend::Cpu(backend) => {
@@ -183,6 +181,10 @@ impl SegmentationModel {
             #[cfg(feature = "_cuda")]
             SegmentationBackend::Cuda(backend) => {
                 let (span, starts) = windows.span(next, plan.useful(), plan.model());
+                // a step longer than the window leaves gaps that the span would upload
+                if span.len() > plan.useful() * window_samples {
+                    return backend.run_batch(&window_batch(windows, next, plan, zeros)?);
+                }
                 backend.run_span(span, &starts)
             }
         }
@@ -190,7 +192,6 @@ impl SegmentationModel {
 }
 
 /// The planned windows from `next`, zero padded to the model batch
-#[cfg(any(feature = "cpu", feature = "migraphx", feature = "coreml"))]
 fn window_batch<'a>(
     windows: &'a SegmentationWindows<'_>,
     next: usize,
