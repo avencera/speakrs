@@ -1355,3 +1355,6 @@ impl super::DriverCandidate for Area {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) mod test_support;
