@@ -149,7 +149,7 @@ VoxConverse dev, collar=0ms:
 
 | Platform | Implementation | DER | Time | RTFx |
 |----------|----------------|-----|------|------|
-| Apple M4 Pro | `speakrs` `coreml` | **7.1%** | 138s | 529x |
+| Apple M4 Pro | `speakrs` `coreml` | **7.1%** | 138s | **529x** |
 | Apple M4 Pro | `speakrs` `coreml-fast` | 7.4% | 169s | 434x |
 | Apple M4 Pro | pyannote community-1 (MPS) | 7.2% | 2999s | 24x |
 | RTX 4090 | `speakrs` `cuda` | **7.0%** | 75s | 978x |

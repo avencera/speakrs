@@ -18,7 +18,7 @@ Hardware: Apple M4 Pro, macOS 26.3
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
 | pyannote community-1 (MPS) | 7.2% | 2.3% | 2.3% | 2.6% | 2998.8s | 24x |
-| **speakrs CoreML** | **7.1%** | 2.3% | 2.3% | 2.6% | 138.2s | 529x |
+| **speakrs CoreML** | **7.1%** | 2.3% | 2.3% | 2.6% | 138.2s | **529x** |
 | speakrs CoreML Fast | 7.4% | 2.3% | 2.3% | 2.8% | 168.5s | 434x |
 | SpeakerKit | 7.8% | 2.3% | 2.8% | 2.7% | 234.1s | 312x |
 
@@ -26,7 +26,7 @@ Hardware: Apple M4 Pro, macOS 26.3
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
-| pyannote community-1 (MPS) | 11.1% | 3.4% | 4.1% | 3.7% | 6705.3s | 23x |
+| **pyannote community-1 (MPS)** | **11.1%** | 3.4% | 4.1% | 3.7% | 6705.3s | 23x |
 | **speakrs CoreML** | **11.1%** | 3.4% | 4.1% | 3.6% | 248.5s | 631x |
 | speakrs CoreML Fast | 11.2% | 3.1% | 4.2% | 3.9% | 181.1s | **865x** |
 | SpeakerKit | 11.2% | 3.3% | 4.6% | 3.3% | 211.3s | 742x |
@@ -35,7 +35,7 @@ Hardware: Apple M4 Pro, macOS 26.3
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
-| pyannote community-1 (MPS) | 17.0% | 8.1% | 4.3% | 4.5% | 3326.2s | 20x |
+| **pyannote community-1 (MPS)** | **17.0%** | 8.1% | 4.3% | 4.5% | 3326.2s | 20x |
 | **speakrs CoreML** | **17.0%** | 8.1% | 4.3% | 4.6% | 149.8s | 450x |
 | speakrs CoreML Fast | 17.6% | 7.8% | 4.7% | 5.1% | 73.9s | **912x** |
 | SpeakerKit | 18.0% | 8.5% | 5.2% | 4.3% | 82.8s | 814x |
@@ -83,7 +83,7 @@ Hardware: Apple M4 Pro, macOS 26.3
 | **pyannote community-1 (MPS)** | **45.1%** | 16.1% | 10.8% | 18.2% | 650.0s | 25x |
 | speakrs CoreML | 46.7% | 16.0% | 11.0% | 19.7% | 30.0s | 532x |
 | speakrs CoreML Fast | 50.7% | 16.4% | 11.0% | 23.3% | 24.6s | **650x** |
-| SpeakerKit | 48.3% | 15.5% | 12.9% | 19.8% | 24.6s | 650x |
+| SpeakerKit | 48.3% | 15.5% | 12.9% | 19.8% | 24.6s | **650x** |
 
 ## Linux (CUDA)
 
