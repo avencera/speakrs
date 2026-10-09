@@ -2121,6 +2121,24 @@ pub(super) fn trunk_speed_scope(
 impl super::DriverCandidate for Oxide {
     const AREA: super::KernelModule = super::KernelModule::Wideconv;
 
+    fn hybrid_fp16(
+        device: &DeviceAttributes,
+        tier: PtxTier,
+        recipe: Option<super::super::implementation::policy::Recipe>,
+        fp16: Fp16Policy,
+    ) -> Fp16Policy {
+        use crate::inference::cuda::implementation::policy::Recipe;
+        // the 4060 Ti FP16 measurements belong to its whole-pipeline recipe, not
+        // the non-FP16 trunk totals used as this port's speed evidence
+        if Recipe::fp16_device(device, tier) == Some(Recipe::Rtx4060Ti)
+            && recipe != Some(Recipe::Rtx4060Ti)
+        {
+            return Fp16Policy::Excluded;
+        }
+
+        fp16
+    }
+
     fn driver_coverage(tier: PtxTier, device: &DeviceAttributes, fp16: Fp16Policy) -> Coverage {
         use crate::inference::cuda::implementation::policy::Recipe;
         if fp16.allows() && Recipe::fp16_device(device, tier) == Some(Recipe::Rtx4060Ti) {

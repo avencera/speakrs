@@ -23,11 +23,15 @@ type DriverPin = fn(
     Fp16Policy,
 ) -> Result<ConfigPin, PlanError>;
 
+/// Candidate-owned operand policy shared by hybrid coverage and pin selection
+type HybridFp16 = fn(&DeviceAttributes, PtxTier, Option<Recipe>, Fp16Policy) -> Fp16Policy;
+
 /// One area's library-free candidate interface, independent of artifact loading
 pub(super) struct Area {
     area: KernelModule,
     hybrid: HybridPolicy,
     coverage: fn(PtxTier, &DeviceAttributes, Fp16Policy) -> Coverage,
+    hybrid_fp16: HybridFp16,
     scope: fn(BoundaryId, usize, CudaMath, &DeviceAttributes, PtxTier) -> Option<super::SpeedScope>,
     summary: fn(CudaMath) -> &'static str,
     pin: DriverPin,
@@ -48,6 +52,7 @@ impl Area {
             area: C::AREA,
             hybrid: HybridPolicy::Scoped,
             coverage: C::driver_coverage,
+            hybrid_fp16: C::hybrid_fp16,
             scope: C::speed_scope,
             summary: C::speed_summary,
             pin: C::driver_pin,
@@ -202,6 +207,11 @@ pub(super) fn select_from(
         };
         let selected_request = request;
         let request = modules.effective_request(request)?;
+        let fp16 = if selection == Selection::Production {
+            (candidate.hybrid_fp16)(modules.device(), request.tier(), recipe, fp16)
+        } else {
+            fp16
+        };
         if !(candidate.coverage)(request.tier(), modules.device(), fp16).covers(
             boundary.name(),
             batch,

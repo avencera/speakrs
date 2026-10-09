@@ -1141,6 +1141,84 @@ fn tuner_plan_refusal_after_loading_cannot_be_a_library_timing() {
 
 #[test]
 #[cfg(feature = "_cuda-libraries")]
+fn disabled_4060_recipe_uses_non_fp16_coverage_and_pins() {
+    use crate::inference::cuda::candidate::WideconvOxide;
+
+    let mut fixture = Fixture::new();
+    fixture.device = Builder::new(ComputeCapability::new(8, 9))
+        .multiprocessors(34)
+        .name("NVIDIA GeForce RTX 4060 Ti")
+        .build();
+    fixture.limit = PtxTier::Sm80;
+    for name in [
+        "resnet.layer1.0.conv1",
+        "resnet.layer2.1.conv2",
+        "resnet.layer3.1.conv1",
+        "resnet.layer4.2.conv2",
+    ] {
+        let boundary = BoundaryId::named(name);
+        for batch in [1, 32] {
+            fixture.fp16 = Fp16Policy::Excluded;
+            let expected = PlanRequest::Hybrid
+                .resolve(boundary, batch, CudaMath::Tf32, &mut fixture)
+                .unwrap();
+            fixture.fp16 = Fp16Policy::Allowed;
+            let Selected::Oxide(actual) = PlanRequest::Hybrid
+                .resolve(boundary, batch, CudaMath::Tf32, &mut fixture)
+                .unwrap()
+            else {
+                panic!("{boundary} b{batch}: non-FP16 route")
+            };
+            let Selected::Oxide(expected) = expected else {
+                panic!("{boundary} b{batch}: excluded reference route")
+            };
+            assert_eq!(actual.pin, expected.pin, "{boundary} b{batch}");
+            assert_eq!(actual.evidence, expected.evidence, "{boundary} b{batch}");
+            assert!(
+                !is_fp16(Some((actual.area(), actual.pin))),
+                "{boundary} b{batch}"
+            );
+
+            if name.starts_with("resnet.layer1.") || name.starts_with("resnet.layer2.") {
+                // no wideconv coverage means no FP16 port token or speed claim;
+                // the measured non-FP16 ResNet route owns these boundaries instead
+                assert_eq!(actual.area(), KernelModule::Resnet);
+                assert!(
+                    select_from(
+                        &[Area::candidate::<WideconvOxide>()],
+                        boundary,
+                        batch,
+                        CudaMath::Tf32,
+                        &mut &mut fixture,
+                        super::Selection::Production,
+                    )
+                    .unwrap()
+                    .is_none(),
+                    "{boundary} b{batch}: no FP16 port speed claim"
+                );
+            }
+
+            let Selected::Oxide(driver) = PlanRequest::DriverOnly
+                .resolve(boundary, batch, CudaMath::Tf32, &mut fixture)
+                .unwrap()
+            else {
+                panic!("driver route")
+            };
+            if batch == 32
+                || name.starts_with("resnet.layer1.")
+                || name.starts_with("resnet.layer2.")
+            {
+                assert!(
+                    is_fp16(Some((driver.area(), driver.pin))),
+                    "{boundary} b{batch}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "_cuda-libraries")]
 fn measured_rtx_recipes_use_fp16_only_at_the_4060_ti_point() {
     use super::super::policy::RecipeMode;
     use crate::inference::cuda::candidate::{

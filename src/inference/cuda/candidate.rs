@@ -1484,6 +1484,18 @@ pub(crate) trait DriverCandidate {
     /// Only tuples whose complete operation needs no numerical library on `device`;
     /// `fp16` drops tuples that only FP16 tiles implement
     fn driver_coverage(tier: PtxTier, device: &DeviceAttributes, fp16: Fp16Policy) -> Coverage;
+    /// Operand policy for hybrid startup coverage and pins, given its selected recipe
+    ///
+    /// Driver-only selection and tuner enumeration retain their implemented FP16 choices
+    fn hybrid_fp16(
+        _device: &DeviceAttributes,
+        _tier: PtxTier,
+        _recipe: Option<super::implementation::policy::Recipe>,
+        fp16: Fp16Policy,
+    ) -> Fp16Policy {
+        fp16
+    }
+
     /// Structural speed evidence, if this complete port is accepted on all devices
     fn broad_evidence() -> Option<&'static super::implementation::BroadEvidence> {
         None
