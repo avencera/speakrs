@@ -2,7 +2,7 @@
 
 Fast Rust speaker diarization (who spoke when) with pyannote-level accuracy.
 
-On VoxConverse dev, `speakrs` CoreML gets **7.1% DER at 529x realtime** versus pyannote's 7.2% at 24x. Full results are in [benchmarks/](https://github.com/avencera/speakrs/tree/master/benchmarks).
+On VoxConverse dev, `speakrs` gets **7.0% DER at 978x realtime** on an RTX 4090, so an hour of audio takes under 4 seconds. On an Apple M4 Pro with CoreML it gets 7.1% DER at 529x. pyannote gets 7.2% at 32x and 24x on the same machines. Full results are in [benchmarks/](https://github.com/avencera/speakrs/tree/master/benchmarks).
 
 If you want a small end-to-end app using it, see [avencera/smrze](https://github.com/avencera/smrze).
 
@@ -145,27 +145,45 @@ meetings, lectures, podcasts, or bulk archives.
 
 ## Benchmarks
 
+speakrs is about as accurate as pyannote and runs 20 to 50 times faster. On an
+RTX 4090, an hour of audio takes about 3.7 seconds with `cuda` and 2.2 seconds
+with `cuda-fast`. On an Apple M4 Pro with CoreML it takes about 7 seconds.
+
 VoxConverse dev, collar=0ms:
 
 | Platform | Implementation | DER | Time | RTFx |
 |----------|----------------|-----|------|------|
-| Apple M4 Pro | `speakrs` `coreml` | **7.1%** | 138s | **529x** |
-| Apple M4 Pro | `speakrs` `coreml-fast` | 7.4% | 169s | 434x |
-| Apple M4 Pro | pyannote community-1 (MPS) | 7.2% | 2999s | 24x |
 | RTX 4090 | `speakrs` `cuda` | **7.0%** | 75s | 978x |
 | RTX 4090 | `speakrs` `cuda-fast` | 7.4% | 45s | **1627x** |
 | RTX 4090 (earlier run) | pyannote community-1 (CUDA) | 7.2% | 2312s | 32x |
+| Apple M4 Pro | `speakrs` `coreml` | **7.1%** | 138s | **529x** |
+| Apple M4 Pro | `speakrs` `coreml-fast` | 7.4% | 169s | 434x |
+| Apple M4 Pro | pyannote community-1 (MPS) | 7.2% | 2999s | 24x |
 
 The speakrs CUDA rows use the native CUDA backend on an RTX 4090 with 16 CPU
 cores (the cloud host doesn't report its CPU model). The pyannote CUDA row is
 from an earlier RTX 4090 run with an AMD EPYC 7B13 CPU.
 
-On VoxConverse test, `coreml` matches pyannote at 11.1% DER and runs at
-631x realtime versus pyannote's 23x. Native `cuda` matches the earlier pyannote
-result at 11.1% DER and runs at 962x realtime on RTX 4090. That pyannote
-CUDA run used an L40S with an AMD EPYC 9354 CPU and reached 18x realtime. See
+### All datasets on an RTX 4090
+
+| Dataset | Audio | `cuda` DER | `cuda` RTFx | `cuda-fast` DER | `cuda-fast` RTFx |
+|---|---:|---:|---:|---:|---:|
+| VoxConverse dev | 20.3 h | 7.0% | 978x | 7.4% | 1627x |
+| VoxConverse test | 43.5 h | 11.1% | 962x | 11.2% | 1562x |
+| AMI IHM | 18.7 h | 17.0% | 914x | 17.4% | 1589x |
+| AMI SDM | 18.7 h | 19.7% | 899x | 20.6% | 1489x |
+| AISHELL-4 | 12.7 h | 11.1% | 1046x | 11.4% | 1929x |
+| Earnings-21 | 39.3 h | 9.7% | 915x | 9.2% | 1567x |
+| ICSI | 71.7 h | 33.3% | 1037x | 33.7% | 1917x |
+| AVA-AVD | 4.4 h | 45.4% | 1047x | 48.9% | 1942x |
+
+That's about 229 hours of audio in 14 minutes with `cuda`, or 8 minutes with
+`cuda-fast`. Where earlier pyannote CUDA runs exist, `cuda` matches their DER:
+11.1% on VoxConverse test, 17.0% on AMI IHM and 9.7% on Earnings-21, where
+pyannote ran at 18x, 15x and 18x. On macOS, `coreml` runs these datasets at
+450x to 644x, with DER within 1.6 points of pyannote's. See
 [benchmarks/](https://github.com/avencera/speakrs/tree/master/benchmarks) for
-the full tables across all datasets and the timing method.
+every table, the hardware used and the timing method.
 
 CoreML, CUDA and ONNX Runtime can differ slightly even in FP32, because
 floating-point reduction order changes rounding.
