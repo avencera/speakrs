@@ -17,7 +17,7 @@ use serde_json::json;
 
 use super::super::candidate::{
     LstmCandidate, LstmLayerWeights, LstmPhases, LstmPin, LstmProjOxide, LstmProjection, LstmSpec,
-    Projection,
+    Projection, RecurrencePlan,
 };
 use super::super::test_support::select_lstm;
 use super::super::{
@@ -281,8 +281,20 @@ fn candidate(
     pin: LstmPin,
     input: &[f32],
 ) -> DevResult<Run> {
+    let recurrence = RecurrencePlan::select(runtime, kernels, spec.batch)?;
+    candidate_with(runtime, kernels, spec, pin, recurrence, input)
+}
+
+fn candidate_with(
+    runtime: &CudaRuntime,
+    kernels: &LoadedKernels,
+    spec: LstmSpec<'_>,
+    pin: LstmPin,
+    recurrence: RecurrencePlan,
+    input: &[f32],
+) -> DevResult<Run> {
     let (batch, math) = (spec.batch, spec.math);
-    let plan = LstmProjOxide::plan(runtime, kernels, spec, pin)?;
+    let plan = LstmProjOxide::with_recurrence(runtime, kernels, spec, pin, recurrence)?;
     let stream = runtime.stream();
     let input = stream.clone_htod(input)?;
     let mut output = stream.alloc_zeros::<f32>(batch * STEPS * OUTPUT)?;
@@ -426,6 +438,92 @@ fn dev(runtime: &CudaRuntime, dir: &std::path::Path) -> DevResult<()> {
                 "{math:?} b{batch}: gross mismatch against f64"
             );
         }
+    }
+    Ok(())
+}
+
+/// Both recurrence kernels on the same batch: bitwise agreement, repeatability and a
+/// rough eager timing of the whole stack, whose projections are the same in both
+///
+/// Ignored by default; run like `lstmproj_dev`. `SPEAKRS_LSTMPROJ_BATCHES` (default
+/// `1,2,4,7,8,16,31,32,33,64`) narrows the run. Each case prints one `LSTMREC_CASE`
+/// JSON line
+#[test]
+#[ignore = "GPU development check; hold /workspace/gpu-bench.lock"]
+fn lstmproj_recurrence_dev() {
+    let Some(runtime) = runtime("lstmproj_recurrence_dev") else {
+        return;
+    };
+    let Some(dir) = reference_dir("lstmproj_recurrence_dev", "segmentation-3.0") else {
+        return;
+    };
+    if let Err(error) = recurrence_dev(&runtime, &dir) {
+        eprintln!("FAILED: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn recurrence_dev(runtime: &CudaRuntime, dir: &std::path::Path) -> DevResult<()> {
+    let weights = SafetensorsFile::open(dir.join("segmentation-3.0/segmentation-3.0.safetensors"))?;
+    let layers = host_layers(&weights)?;
+    let kernels = runtime.load_module(runtime.embedded_exact_request(KernelModule::LstmProj)?)?;
+    let device = runtime.device();
+    let budget = RecurrencePlan::tiled_budget(runtime, &kernels)?;
+    println!(
+        "device={} cc={} sms={} lstmproj tier={} tiled budget={budget:?}",
+        device.name(),
+        device.capability(),
+        device.multiprocessors(),
+        kernels.tier(),
+    );
+
+    let batches: Vec<usize> = env_list("SPEAKRS_LSTMPROJ_BATCHES", "1,2,4,7,8,16,31,32,33,64")
+        .iter()
+        .map(|batch| batch.parse().expect("batch"))
+        .collect();
+    for batch in batches {
+        let input = fixture_input(dir, batch)?;
+        let spec = spec(&layers, batch, CudaMath::Fp32);
+        let pin = LstmProjOxide::device_pin(device, kernels.tier(), &spec)?;
+        let chosen = RecurrencePlan::select(runtime, &kernels, batch)?;
+        let wide_plan = RecurrencePlan::wide(runtime, &kernels, batch)?;
+        let wide = candidate_with(runtime, &kernels, spec, pin, wide_plan, &input)?;
+        let tiled = match RecurrencePlan::tiled_fit(batch, budget) {
+            Some(plan) => Some(candidate_with(runtime, &kernels, spec, pin, plan, &input)?),
+            None => None,
+        };
+
+        let identical = tiled
+            .as_ref()
+            .map(|run| bits_equal(&run.output, &wide.output));
+        let case = json!({
+            "device": device.name(),
+            "cc": device.capability().to_string(),
+            "tier": kernels.tier().to_string(),
+            "batch": batch,
+            "chosen": format!("{chosen:?}"),
+            "wide": {"ms": wide.time.0, "spread": wide.time.1, "bitwise": wide.bitwise},
+            "tiled": tiled.as_ref().map(|run| json!({"ms": run.time.0, "spread": run.time.1, "bitwise": run.bitwise})),
+            "tiled_matches_wide": identical,
+        });
+        println!("LSTMREC_CASE {case}");
+        println!(
+            "b{batch} chosen {chosen:?}: wide {:.3} ms, tiled {} | identical {identical:?}",
+            wide.time.0,
+            tiled
+                .as_ref()
+                .map_or("n/a".to_owned(), |run| format!("{:.3} ms", run.time.0)),
+        );
+
+        assert!(wide.bitwise, "b{batch}: repeated wide passes differ");
+        if let Some(run) = &tiled {
+            assert!(run.bitwise, "b{batch}: repeated tiled passes differ");
+        }
+        assert_ne!(
+            identical,
+            Some(false),
+            "b{batch}: tiled output differs from wide"
+        );
     }
     Ok(())
 }

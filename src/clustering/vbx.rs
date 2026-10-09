@@ -2,8 +2,6 @@ use std::num::NonZeroUsize;
 
 use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
 
-use crate::utils::logsumexp_f64;
-
 /// How AHC labels initialize Gaussian VBx responsibilities.
 ///
 /// Negative smoothing maps to [`Self::Hard`], zero to [`Self::Uniform`], and a positive
@@ -199,6 +197,7 @@ pub fn vbx(
 
     let mut prev_elbo = f64::NEG_INFINITY;
     let mut scratch = Array1::<f64>::zeros(n_speakers);
+    let mut log_probability_workspace = LogProbabilityWorkspace(Array1::zeros(n_speakers));
 
     for iter in 0..config.max_iters() {
         // m-step: compute speaker models
@@ -251,7 +250,7 @@ pub fn vbx(
         {
             scratch.assign(&log_p_row);
             scratch += &lpi;
-            let log_probability = logsumexp_f64(&scratch.view());
+            let log_probability = log_probability_workspace.calculate(&scratch.view());
             *log_p_x = log_probability;
             gamma_row.zip_mut_with(&scratch, |gamma, &value| {
                 *gamma = (value - log_probability).exp();
@@ -325,8 +324,50 @@ fn build_gamma_init(labels: &[usize], initialization: ResponsibilityInitializati
     gamma
 }
 
+// reuse the exponential array while keeping ndarray's original summation order
+struct LogProbabilityWorkspace(Array1<f64>);
+
+impl LogProbabilityWorkspace {
+    fn calculate(&mut self, values: &ArrayView1<'_, f64>) -> f64 {
+        let max = values.fold(f64::NEG_INFINITY, |acc, &value| acc.max(value));
+        if max.is_infinite() {
+            return max;
+        }
+
+        self.0
+            .zip_mut_with(values, |output, &value| *output = (value - max).exp());
+        max + self.0.sum().ln()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reused_log_probability_preserves_reduction_bits() {
+        for size in [1, 2, 3, 8, 17, 32, 257] {
+            let mut workspace = super::LogProbabilityWorkspace(ndarray::Array1::zeros(size));
+            for offset in [-1e3, 0.0, 7.0, 1e3] {
+                let values = ndarray::Array1::from_shape_fn(size, |index| {
+                    offset + (index as f64 * 1.7).sin()
+                });
+                let expected = crate::utils::test_support::logsumexp_f64(&values.view());
+                assert_eq!(
+                    workspace.calculate(&values.view()).to_bits(),
+                    expected.to_bits()
+                );
+            }
+            for value in [f64::NEG_INFINITY, f64::INFINITY] {
+                let values = ndarray::Array1::from_elem(size, value);
+                assert_eq!(workspace.calculate(&values.view()), value);
+            }
+        }
+        let mut workspace = super::LogProbabilityWorkspace(ndarray::Array1::zeros(2));
+        assert_eq!(
+            workspace.calculate(&ndarray::array![0.0, 0.0].view()),
+            2.0_f64.ln()
+        );
+    }
+
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::{Array1, Array2, array};

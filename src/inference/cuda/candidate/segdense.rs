@@ -182,6 +182,26 @@ impl From<SegConvSite> for Site {
 }
 
 impl Site {
+    /// Resolve the model boundary without duplicating the site's ownership table
+    fn from_boundary(
+        boundary: crate::inference::cuda::implementation::BoundaryId,
+    ) -> Result<Self, PlanError> {
+        Ok(match boundary.name() {
+            "sincnet.conv1" => Site::Conv1,
+            "sincnet.conv2" => Site::Conv2,
+            "linear0" => Site::Linear0,
+            "linear1" => Site::Linear1,
+            "linear2" => Site::Linear2,
+            "resnet.seg_1" => Site::Embedding,
+            _ => {
+                return Err(PlanError::Geometry(GeometryError::Unimplemented {
+                    context: CONTEXT,
+                    reason: format!("unknown boundary {boundary}"),
+                }));
+            }
+        })
+    }
+
     /// `(rows per batch item, columns, reduction, NCW input length)`; convolution
     /// rows are output positions
     pub(crate) const fn dimensions(self) -> (usize, usize, usize, usize) {
@@ -214,6 +234,11 @@ impl Site {
             return Some(choice);
         }
 
+        self.scalar_choice(batch, math, hardware)
+    }
+
+    /// The non-tensor algorithm, with the same fixed-order reduction as normal routing
+    fn scalar_choice(self, batch: usize, math: CudaMath, hardware: Hardware) -> Option<Choice> {
         let entry = match (self, batch) {
             (Self::Conv1, 1) => Entry::Conv1B1,
             (Self::Conv1, 32) => Entry::Conv1B32,
@@ -633,6 +658,31 @@ impl SegdensePin {
             })?;
 
         Ok(Self { choice, math, tier })
+    }
+
+    /// A scalar FP32 algorithm with the requested pipeline mode retained in its pin
+    fn select_fp32(
+        site: Site,
+        batch: usize,
+        math: CudaMath,
+        tier: PtxTier,
+        device: &DeviceAttributes,
+    ) -> Result<Self, PlanError> {
+        let choice = site
+            .scalar_choice(batch, CudaMath::Fp32, Hardware::of(device))
+            .ok_or_else(|| {
+                PlanError::Geometry(GeometryError::Unimplemented {
+                    context: CONTEXT,
+                    reason: format!("{site:?} batch {batch}; the kernels compile batches 1 and 32"),
+                })
+            })?;
+
+        Ok(Self { choice, math, tier })
+    }
+
+    /// The arithmetic algorithm, independent of the launch tile and split count
+    pub(crate) const fn entry(self) -> Entry {
+        self.choice.entry
     }
 
     /// The kernel configuration
@@ -1241,7 +1291,11 @@ impl SegConvCandidate for SegConvOxide {
 pub(crate) struct Area;
 impl super::DriverCandidate for Area {
     const AREA: KernelModule = KernelModule::Segdense;
-    fn driver_coverage(_tier: PtxTier) -> Coverage {
+    fn driver_coverage(
+        _tier: PtxTier,
+        _device: &DeviceAttributes,
+        _fp16: super::Fp16Policy,
+    ) -> Coverage {
         Coverage(&[CoverageEntry {
             layers: &[
                 "sincnet.conv1",
@@ -1274,27 +1328,30 @@ impl super::DriverCandidate for Area {
         );
         Some(&EVIDENCE)
     }
+    fn tuning_fp32_pin(
+        boundary: crate::inference::cuda::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        device: &DeviceAttributes,
+        tier: PtxTier,
+    ) -> Result<Option<super::ConfigPin>, PlanError> {
+        SegdensePin::select_fp32(Site::from_boundary(boundary)?, batch, math, tier, device)
+            .map(super::ConfigPin::Segdense)
+            .map(Some)
+    }
+
     fn driver_pin(
         boundary: crate::inference::cuda::implementation::BoundaryId,
         batch: usize,
         math: CudaMath,
         device: &DeviceAttributes,
         tier: PtxTier,
+        _fp16: super::Fp16Policy,
     ) -> Result<super::ConfigPin, PlanError> {
-        let site = match boundary.name() {
-            "sincnet.conv1" => Site::Conv1,
-            "sincnet.conv2" => Site::Conv2,
-            "linear0" => Site::Linear0,
-            "linear1" => Site::Linear1,
-            "linear2" => Site::Linear2,
-            "resnet.seg_1" => Site::Embedding,
-            _ => {
-                return Err(PlanError::Geometry(GeometryError::Unimplemented {
-                    context: CONTEXT,
-                    reason: format!("unknown boundary {boundary}"),
-                }));
-            }
-        };
+        let site = Site::from_boundary(boundary)?;
         SegdensePin::select(site, batch, math, tier, device).map(super::ConfigPin::Segdense)
     }
 }
+
+#[cfg(test)]
+mod tests;

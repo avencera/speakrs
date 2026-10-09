@@ -39,6 +39,7 @@ impl AhcConfig {
     }
 }
 
+#[tracing::instrument(level = "trace", target = "speakrs::timing", skip_all)]
 pub fn cluster(embeddings: &ArrayView2<f32>, config: AhcConfig) -> Vec<usize> {
     let observations = embeddings.nrows();
     if observations == 0 {
@@ -58,6 +59,7 @@ pub fn cluster(embeddings: &ArrayView2<f32>, config: AhcConfig) -> Vec<usize> {
     let flat_start = std::time::Instant::now();
     let labels = flat_clusters(observations, dendrogram.steps(), config.threshold());
     tracing::debug!(
+        target: "speakrs::timing",
         observations,
         distance_ms,
         linkage_ms,

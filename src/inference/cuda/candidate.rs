@@ -50,49 +50,7 @@ pub(super) use kernel_inventory::conv_kernel_inventory;
 
 #[cfg(test)]
 mod kernel_inventory {
-    pub(crate) const WIDECONV_KERNELS: [&str; 41] = [
-        "spk_wideconv_c128",
-        "spk_wideconv_c128s2",
-        "spk_wideconv_c256",
-        "spk_wideconv_c64s2",
-        "spk_wideconv_gemm",
-        "spk_wideconv_pack_tc",
-        "spk_wideconv_pack_tc3",
-        "spk_wideconv_pack_wbf",
-        "spk_wideconv_pack_weights",
-        "spk_wideconv_pack_winograd",
-        "spk_wideconv_pack_wtc",
-        "spk_wideconv_reduce",
-        "spk_wideconv_shortcut_c128",
-        "spk_wideconv_shortcut_c128_wide",
-        "spk_wideconv_shortcut_c32",
-        "spk_wideconv_shortcut_c64",
-        "spk_wideconv_shortcut_c64_wide",
-        "spk_wideconv_stem",
-        "spk_wideconv_stem_wide",
-        "spk_wideconv_tc3_c128s2",
-        "spk_wideconv_tc3_c128s2_wide",
-        "spk_wideconv_tc3_c64s2",
-        "spk_wideconv_tc3_c64s2_wide",
-        "spk_wideconv_tc_c128",
-        "spk_wideconv_tc_c128s2",
-        "spk_wideconv_tc_c128s2_narrow",
-        "spk_wideconv_tc_c128s2_slim",
-        "spk_wideconv_tc_c256",
-        "spk_wideconv_tc_c64s2",
-        "spk_wideconv_tc_c64s2_narrow",
-        "spk_wideconv_tc_c64s2_slim",
-        "spk_wideconv_wbf_c128",
-        "spk_wideconv_wbf_c256",
-        "spk_wideconv_wino_c128",
-        "spk_wideconv_wino_c128_sweep2",
-        "spk_wideconv_wino_c256",
-        "spk_wideconv_wino_fixup",
-        "spk_wideconv_wtc2_c128",
-        "spk_wideconv_wtc2_c256",
-        "spk_wideconv_wtc3_c128",
-        "spk_wideconv_wtc3_c256",
-    ];
+    pub(crate) const WIDECONV_KERNELS: &[&str] = super::wideconv::entries::ALL;
 
     /// Every kernel entry a plan can launch, for the PTX inventory check
     pub(crate) const SEGDENSE_KERNELS: [&str; 32] = [
@@ -163,14 +121,25 @@ pub(crate) use conv::Oxide as ConvOxide;
 pub(crate) use fbank::Oxide as FbankOxide;
 pub(crate) use lstm::Oxide as LstmOxide;
 // the routing port selects these plans
-pub(crate) use segdense::{Area as SegdenseArea, SegdensePin};
+pub(crate) use segdense::{Area as SegdenseArea, Entry as SegdenseEntry, SegdensePin};
 pub(crate) use segdense::{DenseOxide, SegConvOxide};
 // the root's routing for builds without libraries consumes this export
 pub(crate) use lstmproj::Oxide as LstmProjOxide;
 pub(crate) use sinc::Oxide as SincOxide;
 // the GPU development checks force selections made for other devices
 #[cfg(all(test, feature = "_cuda-libraries"))]
-pub(crate) use wideconv::{Config as WideconvConfig, Device as WideconvDevice};
+pub(crate) use lstmproj::RecurrencePlan;
+#[cfg(test)]
+pub(crate) use wideconv::Fp16Tiles as WideconvFp16Tiles;
+pub(crate) use wideconv::{
+    Algorithm as WideconvAlgorithm, FP16_OPERAND_LIMIT, Fp16Policy,
+    TensorKernel as WideconvTensorKernel, WinogradProducts as WideconvProducts,
+};
+#[cfg(all(test, feature = "_cuda-libraries"))]
+pub(crate) use wideconv::{
+    Config as WideconvConfig, Device as WideconvDevice, Partition as WideconvPartition,
+    SplitCells as WideconvSplitCells,
+};
 pub(crate) use wideconv::{Oxide as WideconvOxide, Pin as WideconvPin};
 
 /// A planning refusal that is distinct from a CUDA or model error
@@ -256,6 +225,17 @@ impl ConfigPin {
                 | Self::Lstm(LstmPin::LegacyCooperative)
         )
     }
+
+    /// Whether the pin runs FP16 tiles, which [`Fp16Policy::Excluded`] removes
+    pub(crate) const fn is_fp16(self) -> bool {
+        matches!(
+            self,
+            Self::Wideconv(WideconvPin::Configured(wideconv::Config {
+                algorithm: WideconvAlgorithm::Fp16(_),
+                ..
+            }))
+        )
+    }
 }
 
 /// A complete filterbank producer configuration
@@ -327,7 +307,7 @@ pub(crate) trait FbankCandidate: Sized {
     fn coverage(_tier: PtxTier) -> Coverage {
         Self::COVERAGE
     }
-    /// The complete configuration used by qualification
+    /// The complete configuration used by development checks
     fn implemented_pin(spec: FbankSpec) -> Result<Self::Pin, PlanError>;
     /// Build one validated batch plan from `pin` outside measured intervals, with the
     /// module the selection token already loaded
@@ -655,7 +635,7 @@ pub(crate) trait ConvCandidate: Sized {
         Self::COVERAGE
     }
 
-    /// The configuration qualification plans for this layer
+    /// The configuration development checks plan for this layer
     fn implemented_pin(layer: &ConvLayerSpec<'_>) -> Result<Self::Pin, PlanError>;
 
     /// Prepares one layer for one batch size from `pin`; runs once per batch class,
@@ -730,7 +710,7 @@ pub(crate) trait SincCandidate: Sized {
     /// The tensor [`Self::enqueue`] writes
     const OUTPUT: SincOutput;
 
-    /// The configuration qualification plans for this batch size
+    /// The configuration development checks plan for this batch size
     fn implemented_pin(spec: &SincSpec<'_>) -> Result<SincPin, PlanError>;
 
     /// Prepares one batch size from `pin`; runs once per batch class, untimed
@@ -791,7 +771,7 @@ pub(crate) trait LstmCandidate: Sized {
         Self::COVERAGE
     }
 
-    /// The configuration qualification plans for this batch size
+    /// The configuration development checks plan for this batch size
     fn implemented_pin(spec: &LstmSpec<'_>) -> Result<LstmPin, PlanError>;
 
     /// The configuration to run on `device` with the loaded `tier` when no accepted
@@ -1501,13 +1481,29 @@ fn validate_fixed_batch(
 pub(crate) trait DriverCandidate {
     /// The kernel module that owns this candidate
     const AREA: KernelModule;
-    /// Only tuples whose complete operation needs no numerical library
-    fn driver_coverage(tier: PtxTier) -> Coverage;
+    /// Only tuples whose complete operation needs no numerical library on `device`;
+    /// `fp16` drops tuples that only FP16 tiles implement
+    fn driver_coverage(tier: PtxTier, device: &DeviceAttributes, fp16: Fp16Policy) -> Coverage;
+    /// Operand policy for hybrid startup coverage and pins, given its selected recipe
+    ///
+    /// Driver-only selection and tuner enumeration retain their implemented FP16 choices
+    fn hybrid_fp16(
+        _device: &DeviceAttributes,
+        _tier: PtxTier,
+        _recipe: Option<super::implementation::policy::Recipe>,
+        fp16: Fp16Policy,
+    ) -> Fp16Policy {
+        fp16
+    }
+
     /// Structural speed evidence, if this complete port is accepted on all devices
     fn broad_evidence() -> Option<&'static super::implementation::BroadEvidence> {
         None
     }
-    /// Speed policy of the complete port, separate from implemented coverage
+    /// Non-FP16 speed policy of the complete port, separate from implemented coverage
+    ///
+    /// The evidence owner must match this scope to the selected pin; FP16
+    /// measurements belong to separate recipe or tuned evidence
     fn speed_scope(
         _boundary: super::implementation::BoundaryId,
         _batch: usize,
@@ -1523,12 +1519,69 @@ pub(crate) trait DriverCandidate {
             evidence.summary()
         })
     }
-    /// One complete pin, selected from cached device facts without GPU allocation
+    /// A conservative FP32 algorithm with a pin valid for the requested math mode
+    ///
+    /// This is tuner-only enumeration, not a change to normal driver selection
+    fn tuning_fp32_pin(
+        _boundary: super::implementation::BoundaryId,
+        _batch: usize,
+        _math: CudaMath,
+        _device: &DeviceAttributes,
+        _tier: PtxTier,
+    ) -> Result<Option<ConfigPin>, PlanError> {
+        Ok(None)
+    }
+
+    /// An implemented FP16 pin, independent of startup speed recipes
+    ///
+    /// The accuracy policy must approve this pin before the tuner can measure it
+    fn tuning_fp16_pin(
+        _boundary: super::implementation::BoundaryId,
+        _batch: usize,
+        _math: CudaMath,
+        _device: &DeviceAttributes,
+        _tier: PtxTier,
+    ) -> Result<Option<ConfigPin>, PlanError> {
+        Ok(None)
+    }
+
+    /// Distinct implemented choices, without substituting FP16 for FP32 operands
+    fn tuning_pins(
+        boundary: super::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        device: &DeviceAttributes,
+        tier: PtxTier,
+    ) -> Vec<(ConfigPin, &'static str)> {
+        let mut pins = Vec::new();
+        if Self::driver_coverage(tier, device, Fp16Policy::Excluded).covers(
+            boundary.name(),
+            batch,
+            math,
+        ) && let Ok(pin) =
+            Self::driver_pin(boundary, batch, math, device, tier, Fp16Policy::Excluded)
+        {
+            pins.push((pin, "default"));
+            if let Ok(Some(fp32)) = Self::tuning_fp32_pin(boundary, batch, math, device, tier)
+                && fp32 != pin
+            {
+                pins.push((fp32, "fp32"));
+            }
+        }
+        if let Ok(Some(fp16)) = Self::tuning_fp16_pin(boundary, batch, math, device, tier) {
+            pins.push((fp16, "fp16"));
+        }
+        pins
+    }
+
+    /// One complete pin, selected from cached device facts without GPU allocation;
+    /// `fp16` excludes FP16 tiles from the choice
     fn driver_pin(
         boundary: super::implementation::BoundaryId,
         batch: usize,
         math: CudaMath,
         device: &super::device::DeviceAttributes,
         tier: PtxTier,
+        fp16: Fp16Policy,
     ) -> Result<ConfigPin, PlanError>;
 }

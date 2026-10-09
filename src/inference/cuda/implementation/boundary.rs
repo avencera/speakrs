@@ -2,7 +2,7 @@
 //! them
 //!
 //! A boundary is a model operation such as `resnet.layer1.0.conv1`. Its name is the
-//! stable string that records and the harness use. Which candidate module implements
+//! stable string that logs and tune files use. Which candidate module implements
 //! it, if any, comes only from a production binding, never from the name
 
 use std::fmt;
@@ -14,6 +14,8 @@ use crate::inference::cuda::KernelModule;
 pub(crate) enum ProductionBatches {
     /// The model batch classes 1 and 32; stress batches never grant production
     Model,
+    /// Exact embedding trunk classes, independent of segmentation and dense heads
+    Embedding,
     /// Every filterbank batch from 1 to 32
     Fbank,
 }
@@ -22,12 +24,28 @@ impl ProductionBatches {
     /// The model batch classes
     pub(crate) const MODEL: [usize; 2] = [1, 32];
 
+    /// Enumerate only batches supported by this model boundary
+    pub(crate) fn iter(self) -> impl Iterator<Item = usize> {
+        (1..=32).filter(move |batch| self.contains(*batch))
+    }
+
     pub(crate) const fn contains(self, batch: usize) -> bool {
         match self {
             Self::Model => {
                 let mut index = 0;
                 while index < Self::MODEL.len() {
                     if Self::MODEL[index] == batch {
+                        return true;
+                    }
+                    index += 1;
+                }
+                false
+            }
+            Self::Embedding => {
+                let classes = super::super::embedding::EmbeddingBatchClass::ALL;
+                let mut index = 0;
+                while index < classes.len() {
+                    if classes[index].chunks() == batch {
                         return true;
                     }
                     index += 1;
@@ -57,7 +75,11 @@ const fn model(name: &'static str, area: KernelModule) -> Boundary {
 }
 
 const fn resnet(name: &'static str) -> Boundary {
-    model(name, KernelModule::Resnet)
+    Boundary {
+        name,
+        area: KernelModule::Resnet,
+        batches: ProductionBatches::Embedding,
+    }
 }
 
 /// Every model boundary that selection or a Library requirement can name
@@ -160,7 +182,7 @@ impl BoundaryId {
         }
     }
 
-    /// Resolve a name from outside the table, such as a harness argument
+    /// Resolve a name from outside the table, such as a tune-file row
     pub(crate) fn parse(name: &str) -> Result<Self, UnknownBoundary> {
         Self::find(name).ok_or_else(|| UnknownBoundary(name.to_owned()))
     }
@@ -185,7 +207,7 @@ impl BoundaryId {
         &BOUNDARIES[self.0 as usize]
     }
 
-    /// The stable record and harness name
+    /// The stable boundary name
     pub(crate) const fn name(self) -> &'static str {
         self.row().name
     }
@@ -207,7 +229,6 @@ impl BoundaryId {
     }
 
     /// Every boundary, in table order
-    #[cfg(test)]
     pub(crate) fn all() -> impl Iterator<Item = Self> {
         (0..BOUNDARIES.len()).map(|index| Self(index as u8))
     }
@@ -258,11 +279,18 @@ mod tests {
     fn batch_sets_are_per_boundary() {
         let lstm = BoundaryId::named("lstm.stack");
         let fbank = BoundaryId::named("fbank.dft");
+        let trunk = BoundaryId::named("resnet.conv1");
+        let head = BoundaryId::named("resnet.seg_1");
         assert_eq!(lstm.batches(), ProductionBatches::Model);
         assert_eq!(fbank.batches(), ProductionBatches::Fbank);
         for batch in 0..=64 {
             assert_eq!(lstm.batches().contains(batch), [1, 32].contains(&batch));
             assert_eq!(fbank.batches().contains(batch), (1..=32).contains(&batch));
+            assert_eq!(
+                trunk.batches().contains(batch),
+                [1, 4, 8, 16, 32].contains(&batch)
+            );
+            assert_eq!(head.batches().contains(batch), [1, 32].contains(&batch));
         }
     }
 

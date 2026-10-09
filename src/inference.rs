@@ -3,7 +3,7 @@ pub(crate) mod cpu;
 #[cfg(feature = "cpu")]
 pub use cpu::{CpuError, CpuModelFamily};
 #[cfg(feature = "_cuda")]
-pub(crate) mod cuda;
+pub mod cuda;
 pub(crate) mod embedding;
 mod error;
 pub(crate) mod geometry;

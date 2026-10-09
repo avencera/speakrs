@@ -30,12 +30,7 @@ pub fn l2_normalize_rows_f64(embeddings: &ArrayView2<f64>) -> Array2<f64> {
     normalized
 }
 
-pub fn cosine_similarity(lhs: &ArrayView1<f32>, rhs: &ArrayView1<f32>) -> f32 {
-    let lhs_norm = l2_normalize(lhs);
-    let rhs_norm = l2_normalize(rhs);
-    lhs_norm.dot(&rhs_norm)
-}
-
+#[cfg(feature = "_metrics")]
 pub fn logsumexp_f64(values: &ArrayView1<f64>) -> f64 {
     let max = values.fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
     if max.is_infinite() {
@@ -47,33 +42,31 @@ pub fn logsumexp_f64(values: &ArrayView1<f64>) -> f64 {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use super::l2_normalize;
+    use ndarray::ArrayView1;
+
+    pub fn cosine_similarity(lhs: &ArrayView1<f32>, rhs: &ArrayView1<f32>) -> f32 {
+        let lhs_norm = l2_normalize(lhs);
+        let rhs_norm = l2_normalize(rhs);
+        lhs_norm.dot(&rhs_norm)
+    }
+
+    pub(crate) fn logsumexp_f64(values: &ArrayView1<'_, f64>) -> f64 {
+        let max = values.fold(f64::NEG_INFINITY, |acc, &value| acc.max(value));
+        if max.is_infinite() {
+            return max;
+        }
+        let sum_exp = values.mapv(|value| (value - max).exp()).sum();
+        max + sum_exp.ln()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use approx::assert_abs_diff_eq;
     use ndarray::array;
-
-    #[test]
-    fn cosine_similarity_identical_vectors() {
-        let v = array![1.0, 2.0, 3.0];
-        let sim = cosine_similarity(&v.view(), &v.view());
-        assert_abs_diff_eq!(sim, 1.0, epsilon = 1e-6);
-    }
-
-    #[test]
-    fn cosine_similarity_orthogonal_vectors() {
-        let a = array![1.0, 0.0];
-        let b = array![0.0, 1.0];
-        let sim = cosine_similarity(&a.view(), &b.view());
-        assert_abs_diff_eq!(sim, 0.0, epsilon = 1e-6);
-    }
-
-    #[test]
-    fn cosine_similarity_opposite_vectors() {
-        let a = array![1.0, 2.0, 3.0];
-        let b = array![-1.0, -2.0, -3.0];
-        let sim = cosine_similarity(&a.view(), &b.view());
-        assert_abs_diff_eq!(sim, -1.0, epsilon = 1e-6);
-    }
 
     #[test]
     fn l2_normalize_has_unit_norm() {

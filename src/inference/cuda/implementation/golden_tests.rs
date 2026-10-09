@@ -89,7 +89,7 @@ fn model_boundaries() -> Vec<String> {
     boundaries
 }
 
-/// Model and workspace batch sizes, including every harness stress batch
+/// Model and workspace batch sizes, including every development stress batch
 fn batches() -> impl Iterator<Item = usize> {
     (1..=66).chain([96, 128, 1024])
 }

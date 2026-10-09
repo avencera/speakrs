@@ -8,8 +8,15 @@
 //! `TRUNK_FORWARD` JSON line. Environment filters: `TRUNK_BATCHES` (default
 //! `1,7,32,33`), `TRUNK_MATHS`, `TRUNK_LAYERS`, `TRUNK_TIMING=1` for graph-timed
 //! library and kernel medians at batches 1 and 32, and `TRUNK_DEVICE=a100` to plan the
-//! wideconv layers with the A100 selection on any sm80-capable GPU, `TRUNK_RESNET=legacy`
+//! wideconv layers with the A100 selection on any sm80-capable GPU, `TRUNK_DEVICE=t4`
+//! with the Turing coverage and selection on any GPU, `TRUNK_RESNET=legacy`
 //! or `tensor` to force the ResNet FP32 or TF32 tensor-core kernels.
+//! `TRUNK_CONFIG=<kernel>[:<partition>[:<first split cell>]]` forces one wideconv
+//! configuration on every selected layer, with kernels `tc`, `fp32`, `sweep2`, `wtc1`,
+//! `wtp1`, `wtc2`, `wtc3`, `bf16x3`, `h16` or `h16n` (narrow FP16 tiles) and partitions
+//! `whole`, `two`, `four` or `eight`.
+//! `TRUNK_B1_ONLY=1` builds every batch from the batch-1 reference and skips the
+//! batch-32 embedding case.
 //! `TRUNK_RESNET=sm80` uses the sm80 tier in both modes, with tensor kernels only
 //! in TF32 mode, for a direct comparison with the legacy artifact. `TRUNK_WEIGHTS`
 //! names the model weights when they are not beside the references
@@ -25,7 +32,9 @@ use serde_json::json;
 
 use super::super::candidate::{
     ConfigPin, ConvCandidate, ConvInputs, ConvKernel, ConvLayerSpec, ConvOxide, ConvPin,
-    DriverCandidate, Epilogue, Phases, PlanError, WideconvConfig, WideconvDevice, WideconvOxide,
+    DriverCandidate, Epilogue, Fp16Policy, Phases, PlanError, WideconvAlgorithm, WideconvConfig,
+    WideconvDevice, WideconvFp16Tiles, WideconvOxide, WideconvPartition, WideconvProducts,
+    WideconvSplitCells, WideconvTensorKernel,
 };
 use super::super::dnn::ConvPlanner;
 use super::super::geometry::{Conv2d, Residual};
@@ -203,6 +212,12 @@ fn weights_path(root: &Path) -> std::path::PathBuf {
     )
 }
 
+/// Whether `TRUNK_B1_ONLY` asks every batch to cycle the batch-1 reference item, for
+/// boxes without the multi-gigabyte batch-32 reference; shapes and timing are unchanged
+fn b1_only() -> bool {
+    std::env::var("TRUNK_B1_ONLY").as_deref() == Ok("1")
+}
+
 fn selected<T: ToString>(key: &str, value: T) -> bool {
     std::env::var(key)
         .ok()
@@ -355,6 +370,39 @@ fn bits(values: &[f32]) -> Vec<u32> {
     values.iter().map(|v| v.to_bits()).collect()
 }
 
+/// The wideconv configuration `TRUNK_CONFIG` names
+fn forced_config(text: &str) -> WideconvConfig {
+    let mut parts = text.split(':');
+    let algorithm = match parts.next().expect("TRUNK_CONFIG kernel") {
+        "tc" => WideconvAlgorithm::TensorCore(WideconvTensorKernel::Tf32),
+        "fp32" => WideconvAlgorithm::Winograd(WideconvProducts::Fp32),
+        "sweep2" => WideconvAlgorithm::Winograd(WideconvProducts::Fp32Sweep2),
+        "wtc1" => WideconvAlgorithm::Winograd(WideconvProducts::Tf32x1),
+        "wtp1" => WideconvAlgorithm::Winograd(WideconvProducts::Tf32x1Staged),
+        "wtc2" => WideconvAlgorithm::Winograd(WideconvProducts::Tf32x2),
+        "wtc3" => WideconvAlgorithm::Winograd(WideconvProducts::Tf32x3),
+        "bf16x3" => WideconvAlgorithm::Winograd(WideconvProducts::Bf16x3),
+        "h16" => WideconvAlgorithm::Fp16(WideconvFp16Tiles::Wide),
+        "h16n" => WideconvAlgorithm::Fp16(WideconvFp16Tiles::Narrow),
+        other => panic!("unknown TRUNK_CONFIG kernel {other}"),
+    };
+    let partition = match parts.next().unwrap_or("whole") {
+        "whole" => WideconvPartition::Whole,
+        "two" => WideconvPartition::Two,
+        "four" => WideconvPartition::Four,
+        "eight" => WideconvPartition::Eight,
+        other => panic!("unknown TRUNK_CONFIG partition {other}"),
+    };
+    let split_cells = parts.next().map_or(WideconvSplitCells::All, |cell| {
+        WideconvSplitCells::From(cell.parse().expect("TRUNK_CONFIG first split cell"))
+    });
+    WideconvConfig {
+        algorithm,
+        partition,
+        split_cells,
+    }
+}
+
 #[test]
 fn trunk_resnet_override_obeys_forced_ptx_jit() -> Result<(), CudaError> {
     use super::super::kernels::{ArtifactHash, LoadedArtifact};
@@ -411,16 +459,41 @@ impl Candidate {
         let tier = |area| -> Result<_, CudaError> {
             runtime.load_module(runtime.embedded_exact_request(area)?)
         };
-        if WideconvOxide::COVERAGE.covers(spec.name, spec.conv.batch, spec.conv.math) {
-            let kernels = tier(KernelModule::Wideconv)?;
+        let kernels = tier(KernelModule::Wideconv)?;
+        // device-aware coverage, so Turing plans its 32- and 64-channel layers here as
+        // routing does
+        let turing = std::env::var("TRUNK_DEVICE").is_ok_and(|device| device == "t4");
+        let capability = if turing {
+            ComputeCapability::new(7, 5)
+        } else {
+            runtime.device().capability()
+        };
+        let coverage = WideconvOxide::coverage_on(kernels.tier(), capability, Fp16Policy::Allowed);
+        if coverage.covers(spec.name, spec.conv.batch, spec.conv.math) {
+            let forced = std::env::var("TRUNK_CONFIG")
+                .ok()
+                .map(|text| forced_config(&text));
             let plan = match std::env::var("TRUNK_DEVICE").ok().as_deref() {
+                _ if forced.is_some() => {
+                    let config = forced.expect("checked above");
+                    WideconvOxide::with_config(runtime, &kernels, spec, config)?
+                }
+                Some("t4") => {
+                    let device = WideconvDevice {
+                        capability,
+                        sms: 40,
+                        tier: kernels.tier(),
+                    };
+                    let config = WideconvConfig::select(device, spec.conv, Fp16Policy::Allowed)?;
+                    WideconvOxide::with_config(runtime, &kernels, spec, config)?
+                }
                 Some("a100") => {
                     let device = WideconvDevice {
                         capability: ComputeCapability::new(8, 0),
                         sms: 108,
                         tier: kernels.tier(),
                     };
-                    let config = WideconvConfig::select(device, spec.conv)?;
+                    let config = WideconvConfig::select(device, spec.conv, Fp16Policy::Allowed)?;
                     WideconvOxide::with_config(runtime, &kernels, spec, config)?
                 }
                 _ => {
@@ -497,6 +570,7 @@ impl Candidate {
                     conv.math,
                     runtime.device(),
                     tier,
+                    Fp16Policy::Allowed,
                 )? {
                     ConfigPin::Conv(pin) => Ok(pin),
                     other => Err(PlanError::DeviceUnsupported {
@@ -507,15 +581,17 @@ impl Candidate {
         }
     }
 
+    /// Enqueues the plan; FP16 tiles set `range` nonzero when an activation saturates
     fn enqueue(
         &self,
         inputs: ConvInputs<'_, '_>,
         y: &mut cudarc::driver::CudaViewMut<'_, f32>,
+        range: &mut cudarc::driver::CudaViewMut<'_, f32>,
         stream: &CudaStream,
     ) -> Result<(), CudaError> {
         match self {
             Self::Resnet(plan, _) => plan.enqueue(inputs, y, &Phases::new(), stream),
-            Self::Wide(plan) => plan.enqueue(inputs, y, &Phases::new(), stream),
+            Self::Wide(plan) => plan.enqueue_checked(inputs, y, range, &Phases::new(), stream),
         }
     }
 
@@ -631,7 +707,7 @@ fn driver_trunk_layers_match_library() -> Result<(), CudaError> {
     let mut failures = Vec::new();
     for batch in batches() {
         // stress batches cycle the items of the b32 reference
-        let (model, case, items_in) = if batch == 1 {
+        let (model, case, items_in) = if batch == 1 || b1_only() {
             (B1_MODEL, B1_CASE, 1)
         } else {
             (B32_MODEL, B32_CASE, 32)
@@ -692,8 +768,11 @@ fn driver_trunk_layers_match_library() -> Result<(), CudaError> {
                 enqueue_library()?;
                 let lib_graph = capture(stream, &mut enqueue_library)?;
                 let lib_values = stream.clone_dtoh(&lib_out)?;
+                // cuMemcpyDtoHAsync into pageable memory has no completion guarantee
+                stream.synchronize()?;
 
                 let mut out = stream.alloc_zeros::<f32>(output_len)?;
+                let mut range = stream.alloc_zeros::<f32>(1)?;
                 let residual = rd.as_ref().map(|value| value.as_view());
                 let mut enqueue = || {
                     candidate.enqueue(
@@ -704,15 +783,25 @@ fn driver_trunk_layers_match_library() -> Result<(), CudaError> {
                             bias: &bd.as_view(),
                         },
                         &mut out.as_view_mut(),
+                        &mut range.as_view_mut(),
                         stream,
                     )
                 };
                 enqueue()?;
                 let graph = capture(stream, &mut enqueue)?;
                 let eager = stream.clone_dtoh(&out)?;
+                // cuMemcpyDtoHAsync into pageable memory has no completion guarantee
+                stream.synchronize()?;
                 graph.launch()?;
                 let replay = stream.clone_dtoh(&out)?;
+                // cuMemcpyDtoHAsync into pageable memory has no completion guarantee
+                stream.synchronize()?;
                 let bitwise = bits(&eager) == bits(&replay);
+                // the reference activations stay inside the FP16 operand range
+                let range_words = stream.clone_dtoh(&range)?;
+                // cuMemcpyDtoHAsync into pageable memory has no completion guarantee
+                stream.synchronize()?;
+                let saturated = range_words[0].to_bits() != 0;
 
                 let truth = truth(conv, &xh, &wh, &bh, rh.as_deref());
                 let lib_error = error(&lib_values, &truth);
@@ -727,7 +816,7 @@ fn driver_trunk_layers_match_library() -> Result<(), CudaError> {
                 } else {
                     1e-6
                 };
-                let pass = bitwise && kernel_error.1 <= 10.0 * lib_error.1 + floor;
+                let pass = bitwise && !saturated && kernel_error.1 <= 10.0 * lib_error.1 + floor;
                 let (library_ms, kernel_ms) = if timing && [1, 32].contains(&batch) {
                     (
                         Some(timed(&lib_graph, stream)?),
@@ -742,7 +831,8 @@ fn driver_trunk_layers_match_library() -> Result<(), CudaError> {
                         "layer": layer.name, "batch": batch, "math": format!("{math:?}"),
                         "tier": runtime.ptx_tier().to_string(), "plan": candidate.describe(),
                         "kernel_error": kernel_error, "library_error": lib_error,
-                        "versus_library": versus_library, "bitwise": bitwise, "pass": pass,
+                        "versus_library": versus_library, "bitwise": bitwise, "saturated": saturated,
+                        "pass": pass,
                         "library_ms": library_ms, "kernel_ms": kernel_ms,
                     })
                 );
@@ -840,6 +930,9 @@ fn driver_trunk_embedding_matches_library() -> Result<(), CudaError> {
     let stream = runtime.stream().clone();
     let timing = std::env::var_os("TRUNK_TIMING").is_some();
     for (model, case) in [(B1_MODEL, B1_CASE), (B32_MODEL, B32_CASE)] {
+        if model == B32_MODEL && b1_only() {
+            continue;
+        }
         let mut reference = References::open(&root.join(model).join(format!("{case}.safetensors")));
         let (fbank, fbank_shape) = reference.read("input/fbank");
         let (masks, _) = reference.read("input/masks");

@@ -32,6 +32,73 @@ use crate::inference::cuda::{
     ComputeCapability, CudaError, CudaMath, CudaRuntime, LoadedKernels, PtxTier,
 };
 
+// keep launch names and the shipped-entry inventory in the same definition
+macro_rules! kernel_entries {
+    ($($name:ident => $entry:literal),+ $(,)?) => {
+        pub(super) mod entries {
+            $(pub(super) const $name: &str = $entry;)+
+            #[cfg(test)]
+            pub(crate) const ALL: &[&str] = &[$($name),+];
+        }
+    };
+}
+
+kernel_entries! {
+    C128 => "spk_wideconv_c128",
+    C128S2 => "spk_wideconv_c128s2",
+    C256 => "spk_wideconv_c256",
+    C64S2 => "spk_wideconv_c64s2",
+    GEMM => "spk_wideconv_gemm",
+    PACK_TC => "spk_wideconv_pack_tc",
+    PACK_TC3 => "spk_wideconv_pack_tc3",
+    PACK_WBF => "spk_wideconv_pack_wbf",
+    PACK_WEIGHTS => "spk_wideconv_pack_weights",
+    PACK_WINOGRAD => "spk_wideconv_pack_winograd",
+    PACK_WTC => "spk_wideconv_pack_wtc",
+    REDUCE => "spk_wideconv_reduce",
+    SHORTCUT_C128 => "spk_wideconv_shortcut_c128",
+    SHORTCUT_C128_WIDE => "spk_wideconv_shortcut_c128_wide",
+    SHORTCUT_C32 => "spk_wideconv_shortcut_c32",
+    SHORTCUT_C64 => "spk_wideconv_shortcut_c64",
+    SHORTCUT_C64_WIDE => "spk_wideconv_shortcut_c64_wide",
+    STEM => "spk_wideconv_stem",
+    STEM_WIDE => "spk_wideconv_stem_wide",
+    TC3_C128S2 => "spk_wideconv_tc3_c128s2",
+    TC3_C128S2_WIDE => "spk_wideconv_tc3_c128s2_wide",
+    TC3_C64S2 => "spk_wideconv_tc3_c64s2",
+    TC3_C64S2_WIDE => "spk_wideconv_tc3_c64s2_wide",
+    TC_C128 => "spk_wideconv_tc_c128",
+    TC_C128S2 => "spk_wideconv_tc_c128s2",
+    TC_C128S2_NARROW => "spk_wideconv_tc_c128s2_narrow",
+    TC_C128S2_SLIM => "spk_wideconv_tc_c128s2_slim",
+    TC_C256 => "spk_wideconv_tc_c256",
+    TC_C64S2 => "spk_wideconv_tc_c64s2",
+    TC_C64S2_NARROW => "spk_wideconv_tc_c64s2_narrow",
+    TC_C64S2_SLIM => "spk_wideconv_tc_c64s2_slim",
+    WBF_C128 => "spk_wideconv_wbf_c128",
+    WBF_C256 => "spk_wideconv_wbf_c256",
+    WINO_C128 => "spk_wideconv_wino_c128",
+    WINO_C128_SWEEP2 => "spk_wideconv_wino_c128_sweep2",
+    WINO_C256 => "spk_wideconv_wino_c256",
+    WINO_C64 => "spk_wideconv_wino_c64",
+    WINO_FIXUP => "spk_wideconv_wino_fixup",
+    WTC1_C128 => "spk_wideconv_wtc1_c128",
+    WTC1_C256 => "spk_wideconv_wtc1_c256",
+    WTC2_C128 => "spk_wideconv_wtc2_c128",
+    WTC2_C256 => "spk_wideconv_wtc2_c256",
+    WTC3_C128 => "spk_wideconv_wtc3_c128",
+    WTC3_C256 => "spk_wideconv_wtc3_c256",
+    WTP1_C128 => "spk_wideconv_wtp1_c128",
+    WTP1_C256 => "spk_wideconv_wtp1_c256",
+    H16_C128 => "spk_wideconv_h16_c128",
+    H16_C128_NARROW => "spk_wideconv_h16_c128_narrow",
+    H16_C256 => "spk_wideconv_h16_c256",
+    H16_C256_NARROW => "spk_wideconv_h16_c256_narrow",
+    H16_C32 => "spk_wideconv_h16_c32",
+    H16_C64 => "spk_wideconv_h16_c64",
+    PACK_H16 => "spk_wideconv_pack_h16",
+}
+
 /// The 22 trunk convolutions with a wideconv kernel, in trunk order
 const LAYERS: [&str; 22] = [
     "resnet.conv1",
@@ -57,6 +124,38 @@ const LAYERS: [&str; 22] = [
     "resnet.layer4.2.conv1",
     "resnet.layer4.2.conv2",
 ];
+
+/// The 64-channel same-shape trunk convolutions on Turing or a measured FP16 recipe
+///
+/// On a T4 at batch 32 the direct ResNet kernel ran these at 0.85-0.89x of cuDNN,
+/// which picks its non-fused Winograd there; FFMA Winograd F(2x2, 3x3) cuts their
+/// multiplies 2.25x, so Turing runs them here in FP32 mode too. TF32 mode takes the
+/// FP16 tiles. Other parts keep the direct kernel, so their routes do not move
+const C64_LAYERS: [&str; 7] = [
+    "resnet.layer2.0.conv2",
+    "resnet.layer2.1.conv1",
+    "resnet.layer2.1.conv2",
+    "resnet.layer2.2.conv1",
+    "resnet.layer2.2.conv2",
+    "resnet.layer2.3.conv1",
+    "resnet.layer2.3.conv2",
+];
+
+/// The 32-channel same-shape trunk convolutions, which wideconv runs in TF32 mode only,
+/// with direct FP16 tensor-core tiles on Turing or a measured FP16 recipe
+///
+/// FP32 mode keeps the direct ResNet kernel
+const C32_LAYERS: [&str; 6] = [
+    "resnet.layer1.0.conv1",
+    "resnet.layer1.0.conv2",
+    "resnet.layer1.1.conv1",
+    "resnet.layer1.1.conv2",
+    "resnet.layer1.2.conv1",
+    "resnet.layer1.2.conv2",
+];
+
+/// The capability whose FP32 mode runs `C64_LAYERS` here, in FFMA Winograd
+const TURING: ComputeCapability = ComputeCapability::new(7, 5);
 
 /// Fixed input-channel partitions, reduced without atomics
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +203,57 @@ pub(crate) enum Algorithm {
     /// Fused Winograd F(2x2, 3x3) for the same-channel stride-1 3x3 convolutions, with
     /// the element-wise products of `WinogradProducts`
     Winograd(WinogradProducts),
+    /// Direct `mma.sync` implicit GEMM for the same-channel stride-1 3x3 convolutions
+    /// with FP16 operands scaled by 2^10 and FP32 accumulation, in the output-channel
+    /// tiles of `Fp16Tiles`; TF32 mode only, every tier
+    Fp16(Fp16Tiles),
+}
+
+/// Output channels per CTA of a direct FP16 kernel
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Fp16Tiles {
+    /// Every channel of the 32- and 64-channel shapes, 128 of the wider ones
+    Wide,
+    /// 64 channels of the 128- and 256-channel shapes, which doubles the CTAs of a batch
+    Narrow,
+}
+
+/// Largest operand magnitude the FP16 tiles convert without saturating: the largest
+/// finite FP16 value, 65504, over the 2^10 operand scale
+pub(crate) const FP16_OPERAND_LIMIT: f32 = 65504.0 / 1024.0;
+
+/// Whether selection may choose FP16 tiles for a boundary
+///
+/// FP16 tiles saturate any operand above [`FP16_OPERAND_LIMIT`], which would silently
+/// change the convolution, so a boundary whose weights exceed it, and the recomputation
+/// of a batch whose activations did, select as if FP16 tiles did not exist
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Fp16Policy {
+    /// Recipes, defaults and tune files may choose FP16 tiles
+    #[default]
+    Allowed,
+    /// Every source takes the choice it makes without FP16 tiles
+    Excluded,
+}
+
+impl Fp16Policy {
+    /// Excluded when any weight is above [`FP16_OPERAND_LIMIT`] in magnitude or is NaN
+    ///
+    /// The FP16 kernels pack the raw folded weights, so these are the values they convert
+    pub(crate) fn of_weights(weights: &[f32]) -> Self {
+        if weights
+            .iter()
+            .all(|weight| weight.abs() <= FP16_OPERAND_LIMIT)
+        {
+            Self::Allowed
+        } else {
+            Self::Excluded
+        }
+    }
+
+    pub(crate) const fn allows(self) -> bool {
+        matches!(self, Self::Allowed)
+    }
 }
 
 /// Products and stride-2 tiles of a direct tensor-core kernel
@@ -145,8 +295,12 @@ pub(crate) enum WinogradProducts {
     /// rounded; sm80 tier, TF32 mode only
     Tf32x2,
     /// One TF32 tensor-core product per term, both operands rounded; sm80 tier, TF32
-    /// mode only, 128 channels only
+    /// mode only. Not selected: `Tf32x1Staged` ran faster on every measured part;
+    /// forced runs keep it as the unstaged baseline
     Tf32x1,
+    /// As `Tf32x1` with three raw stages and the warps in two phases, so the input
+    /// transform overlaps the products and a chunk takes one barrier
+    Tf32x1Staged,
     /// Three BF16 tensor-core products per term, both operands split into high and low
     /// BF16 parts; sm80 tier, TF32 mode only. Not selected yet: it awaits an A100
     /// timing; forced runs test it
@@ -158,11 +312,13 @@ impl WinogradProducts {
         !matches!(self, Self::Fp32 | Self::Fp32Sweep2)
     }
 
-    /// Dynamic shared bytes of a launch, as `WINO_SHARED_BYTES` and `WTC_SHARED_BYTES`
+    /// Dynamic shared bytes of a launch, as `WINO_SHARED_BYTES`, `WTC_SHARED_BYTES` and
+    /// `WTP_SHARED_BYTES`
     fn shared_bytes(self) -> u32 {
         match self {
             Self::Fp32 | Self::Fp32Sweep2 => 62_464,
             Self::Tf32x3 | Self::Tf32x2 | Self::Tf32x1 => 66_560,
+            Self::Tf32x1Staged => 71_168,
             Self::Bf16x3 => 88_064,
         }
     }
@@ -173,7 +329,7 @@ impl WinogradProducts {
         match self {
             Self::Fp32 => 4,
             Self::Fp32Sweep2 => 8,
-            Self::Tf32x3 | Self::Tf32x2 | Self::Tf32x1 => 8,
+            Self::Tf32x3 | Self::Tf32x2 | Self::Tf32x1 | Self::Tf32x1Staged => 8,
             Self::Bf16x3 => 16,
         }
     }
@@ -228,6 +384,11 @@ const WIDE_STEM_PIXELS: u32 = 8;
 /// the SMs latency-bound, 0.032 against 0.013 ms; four times as many narrow CTAs hide
 /// the latency. The crossover between them is not measured
 const WIDE_STEM_WAVES: u32 = 8;
+/// Output columns per direct FP16 CTA, as `8 * n_tiles` in the device crate
+const FP16_COLUMNS: u32 = 64;
+/// Waves of wide FP16 CTAs below which the 128- and 256-channel shapes use narrow ones
+const FP16_WIDE_WAVES: u32 = 2;
+
 /// Largest dynamic shared allocation a launch may request without opting in
 const DEFAULT_SHARED_LIMIT: u32 = 48 * 1024;
 
@@ -259,7 +420,8 @@ impl Device {
     /// more of their FP32 rate, so 3xTF32 Winograd beats FFMA Winograd there. GeForce
     /// and workstation Ampere and Ada (8.6, 8.9) and consumer Blackwell (12.x) run TF32
     /// at one or two times their FP32 rate, where three products lose; they keep the
-    /// FP32 kernels. Unknown capabilities fall back to FP32, which is never wrong
+    /// FP32 kernels in FP32 mode and run one product in TF32 mode. Unknown
+    /// capabilities fall back to FP32, which is never wrong
     fn tensor_rich(self) -> bool {
         self.tier >= PtxTier::Sm80
             && matches!(
@@ -279,14 +441,76 @@ pub(crate) struct Config {
 
 /// The execution choice of a wide convolution
 ///
-/// Only the device rule is a pin; development checks force an exact [`Config`]
-/// through [`Oxide::with_config`]
+/// Production routes fix an exact configuration before loading; development
+/// checks can also force an exact [`Config`] through [`Oxide::with_config`]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Pin {
     /// [`Config::select`] for the plan's device and loaded tier
     DeviceRule,
     /// Fixed configuration selected from cached attributes before loading
     Configured(Config),
+}
+
+impl Pin {
+    /// Wide FP16 tiles for a compiled same-channel stride-1 boundary in TF32 mode
+    pub(crate) fn fp16_wide(name: &str, batch: usize, math: CudaMath) -> Option<Self> {
+        let conv = model_conv(name, batch, math).ok()?;
+        let shape = Shape::of(conv).ok()?;
+        if math != CudaMath::Tf32 || shape.fp16_entry(Fp16Tiles::Wide).is_none() {
+            return None;
+        }
+
+        Some(Self::Configured(Config {
+            algorithm: Algorithm::Fp16(Fp16Tiles::Wide),
+            partition: Partition::Whole,
+            split_cells: SplitCells::All,
+        }))
+    }
+
+    /// The T4 recipe uses the same tile rule as the cc 7.5 default, at its 40 SM point
+    pub(crate) fn measured_t4_fp16(name: &str, batch: usize, math: CudaMath) -> Option<Self> {
+        Self::fp16_wide(name, batch, math)?;
+        let conv = model_conv(name, batch, math).ok()?;
+        Config::select(
+            Device {
+                capability: TURING,
+                sms: 40,
+                tier: PtxTier::Sm75,
+            },
+            conv,
+            Fp16Policy::Allowed,
+        )
+        .ok()
+        .map(Self::Configured)
+    }
+
+    /// The retained A100 TF32 recipe pins at the measured batch classes
+    pub(crate) fn measured_a100(name: &str, batch: usize) -> Option<Self> {
+        if !matches!(batch, 1 | 32) || !LAYERS.contains(&name) {
+            return None;
+        }
+        let (algorithm, partition) = match name {
+            "resnet.layer3.0.conv1" | "resnet.layer4.0.conv1" => return None,
+            _ if name.ends_with("shortcut.0") => return None,
+            _ if name.starts_with("resnet.layer3.") => (
+                Algorithm::Winograd(WinogradProducts::Tf32x1),
+                Partition::Whole,
+            ),
+            _ if name.starts_with("resnet.layer4.") && batch == 1 => (
+                Algorithm::Winograd(WinogradProducts::Tf32x3),
+                Partition::Two,
+            ),
+            _ if name.starts_with("resnet.layer4.") => {
+                (Algorithm::TensorCore(TensorKernel::Tf32), Partition::Whole)
+            }
+            _ => return None,
+        };
+        Some(Self::Configured(Config {
+            algorithm,
+            partition,
+            split_cells: SplitCells::All,
+        }))
+    }
 }
 
 /// Most whole waves of Winograd CTAs before which a launch splits its last, partial wave
@@ -305,8 +529,8 @@ const WINOGRAD_WAVES: u32 = 3;
 /// the partial wave
 ///
 /// The partition count also bounds the length of the FP32 accumulation chains, and the
-/// harness compares error per layer over its batches. On a 4060 Ti the 256-channel
-/// batch-1 layers (40 CTAs on 34 SMs) ran 1.56x cuDNN with four partitions on the
+/// development check compares error per layer over its batches. On a 4060 Ti the
+/// 256-channel batch-1 layers (40 CTAs on 34 SMs) ran 1.56x cuDNN with four partitions on the
 /// partial wave only, at cuDNN's maximum error, and 1.30x with every cell in four
 /// partitions at 0.4-0.6x of it. The 128-channel layers (80 CTAs) take two whole waves,
 /// where splitting every cell in two ran no faster than cuDNN
@@ -319,8 +543,13 @@ impl Config {
     /// The configuration that measured fastest for `conv` on parts like `device`
     ///
     /// A deterministic function of the device attributes and the convolution contract;
-    /// no runtime timing
-    pub(crate) fn select(device: Device, conv: Conv2d) -> Result<Self, CudaError> {
+    /// no runtime timing. `fp16` excludes the FP16 tiles, leaving the choice made
+    /// without them
+    pub(crate) fn select(
+        device: Device,
+        conv: Conv2d,
+        fp16: Fp16Policy,
+    ) -> Result<Self, CudaError> {
         let shape = Shape::of(conv)?;
         let tf32 = conv.math == CudaMath::Tf32;
         let tensor_tier = device.tier >= PtxTier::Sm80;
@@ -329,6 +558,11 @@ impl Config {
             partition: Partition::Whole,
             split_cells: SplitCells::All,
         };
+        if fp16.allows()
+            && let Some(tiles) = Self::fp16(device, shape, conv)
+        {
+            return Ok(whole(Algorithm::Fp16(tiles)));
+        }
         Ok(match shape {
             Shape::Stem => whole(Self::stem(device, conv)),
             Shape::Shortcut => whole(Algorithm::Spatial),
@@ -353,6 +587,26 @@ impl Config {
                 split_cells: SplitCells::All,
             },
             Shape::C64Stride2 | Shape::C128Stride2 => whole(Algorithm::Spatial),
+            Shape::C32 => {
+                return Err(unsupported(
+                    "32-channel layers run here only with FP16 tiles in TF32 mode",
+                ));
+            }
+            // only FFMA Winograd covers this shape in FP32 mode, and only Turing routes it here
+            Shape::C64 if device.capability != TURING => {
+                return Err(unsupported(
+                    "64-channel Winograd is selected only on Turing",
+                ));
+            }
+            Shape::C64 => {
+                let products = WinogradProducts::Fp32;
+                let (partition, split_cells) = Self::winograd_split(device, conv, products)?;
+                Self {
+                    algorithm: Algorithm::Winograd(products),
+                    partition,
+                    split_cells,
+                }
+            }
             Shape::C128 | Shape::C256 => {
                 let products = Self::winograd_products(device, shape, conv);
                 let Some(products) = products else {
@@ -366,6 +620,33 @@ impl Config {
                     split_cells,
                 }
             }
+        })
+    }
+
+    /// Turing has no TF32 hardware; its TF32 mode uses FP16 tensor cores instead
+    fn fp16(device: Device, shape: Shape, conv: Conv2d) -> Option<Fp16Tiles> {
+        if conv.math != CudaMath::Tf32
+            || device.capability != TURING
+            || !matches!(shape, Shape::C32 | Shape::C64 | Shape::C128 | Shape::C256)
+        {
+            return None;
+        }
+
+        Self::fp16_turing_tiles(device, shape, conv)
+    }
+
+    /// Turing's FP16 tiles: the 128- and 256-channel shapes take narrow tiles when wide
+    /// ones would give fewer than `FP16_WIDE_WAVES` CTAs per SM
+    fn fp16_turing_tiles(device: Device, shape: Shape, conv: Conv2d) -> Option<Fp16Tiles> {
+        let [oh, ow] = conv.output().map(|size| size as u32);
+        let (grid, _) = shape.fp16_launch(Fp16Tiles::Wide, conv.batch as u32, oh, ow)?;
+        let ctas = grid.0 * grid.1 * grid.2;
+        let narrow =
+            matches!(shape, Shape::C128 | Shape::C256) && ctas < FP16_WIDE_WAVES * device.sms;
+        Some(if narrow {
+            Fp16Tiles::Narrow
+        } else {
+            Fp16Tiles::Wide
         })
     }
 
@@ -423,11 +704,16 @@ impl Config {
         if device.tensor_rich() {
             return Some(match (tf32, shape) {
                 (false, _) => WinogradProducts::Tf32x3,
-                // on the A100 one product is the measured choice: the second only held
-                // per-layer error to that of a direct TF32 convolution, which DER does
-                // not need
-                (true, Shape::C128) if device.capability == ComputeCapability::new(8, 0) => {
-                    WinogradProducts::Tf32x1
+                // on the A100 one staged product is the measured choice at both widths
+                // and batches: a second product only held per-layer error to that of a
+                // direct TF32 convolution, which DER does not need. The 128-channel
+                // layers ran 2-4% faster than unstaged; the 256-channel layers ran
+                // 0.031 ms at batch 1 against 0.051 ms for 3xTF32 in two partitions, and
+                // 0.50-0.52 ms at batch 32 against 0.54-0.60 ms direct
+                (true, Shape::C128 | Shape::C256)
+                    if device.capability == ComputeCapability::new(8, 0) =>
+                {
+                    WinogradProducts::Tf32x1Staged
                 }
                 // two products keep TF32-mode error at that of a direct TF32
                 // convolution on the 128-channel layers only
@@ -436,10 +722,14 @@ impl Config {
                 (true, _) => return None,
             });
         }
-        // on parts with TF32 at the FP32 rate, the direct tensor-core kernel beats FFMA
-        // Winograd at batch 32 in TF32 mode; batch 1 has too few CTAs for its tiles
-        if tf32 && device.tier >= PtxTier::Sm80 && conv.batch >= WINOGRAD_TENSOR_BATCH {
-            return None;
+        // on parts with TF32 at the FP32 rate one staged product still beats both FFMA
+        // Winograd and the direct tensor-core kernel at both batches: on a 5060 Ti the
+        // 128-channel layers ran 1.73-1.75 ms at batch 32 against 2.46-2.49 ms direct,
+        // and 0.064 ms at batch 1 against 0.101 ms FFMA; the 256-channel layers 1.57 ms
+        // against 2.41-2.42 ms and 0.059 ms against 0.121-0.123 ms. A 4060 Ti gained
+        // the same. The unstaged kernel ran 2-5% slower at every point
+        if tf32 && device.tier >= PtxTier::Sm80 {
+            return Some(WinogradProducts::Tf32x1Staged);
         }
         Some(WinogradProducts::Fp32)
     }
@@ -513,7 +803,11 @@ impl Config {
             let partition = partition.or(floor).unwrap_or(Partition::Whole);
             return Ok((partition, SplitCells::All));
         }
-        if tiles < WINOGRAD_FULL_SPLIT_WAVES * sms {
+        // one tensor-core wave and a partial one keep the tail split below: on a 5060 Ti
+        // the 256-channel batch-1 layers (40 one-product CTAs on 36 SMs) ran 0.059 ms
+        // with eight partitions on the partial wave, against 0.082-0.084 ms with every
+        // cell in four
+        if tiles < WINOGRAD_FULL_SPLIT_WAVES * sms && !products.tensor() {
             let target = WINOGRAD_WAVES * sms;
             let mut partition = Partition::Whole;
             for next in splits {
@@ -543,8 +837,8 @@ impl Config {
 }
 
 /// Batch from which the direct tensor-core kernel replaces Winograd in TF32 mode on the
-/// 256-channel layers of TF32-rich parts and on every same-channel layer elsewhere;
-/// production runs batches 1 and 32, and the crossover between them is not measured
+/// 256-channel layers of TF32-rich parts other than the A100; production runs batches 1
+/// and 32, and the crossover between them is not measured
 const WINOGRAD_TENSOR_BATCH: usize = 8;
 
 /// The convolution contract and immutable folded weights used to create a plan
@@ -573,6 +867,8 @@ struct Operands<'a, 'b> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Shape {
     Stem,
+    C32,
+    C64,
     C128,
     C256,
     C64Stride2,
@@ -600,6 +896,8 @@ impl Shape {
         }
         match (conv.in_channels, conv.out_channels, conv.stride) {
             (1, 32, [1, 1]) => Ok(Self::Stem),
+            (32, 32, [1, 1]) => Ok(Self::C32),
+            (64, 64, [1, 1]) => Ok(Self::C64),
             (128, 128, [1, 1]) => Ok(Self::C128),
             (256, 256, [1, 1]) => Ok(Self::C256),
             (64, 128, [2, 2]) => Ok(Self::C64Stride2),
@@ -608,21 +906,26 @@ impl Shape {
         }
     }
 
-    fn entry(self, in_channels: u32, batch: u32) -> &'static str {
-        match self {
-            Self::Stem => "spk_wideconv_stem",
-            Self::C128 => "spk_wideconv_c128",
-            Self::C256 => "spk_wideconv_c256",
-            Self::C64Stride2 => "spk_wideconv_c64s2",
-            Self::C128Stride2 => "spk_wideconv_c128s2",
+    /// Spatial-tile entry; the 32- and 64-channel shapes have only FP16 and Winograd
+    /// kernels
+    fn entry(self, in_channels: u32, batch: u32) -> Option<&'static str> {
+        Some(match self {
+            Self::Stem => entries::STEM,
+            Self::C32 | Self::C64 => return None,
+            Self::C128 => entries::C128,
+            Self::C256 => entries::C256,
+            Self::C64Stride2 => entries::C64S2,
+            Self::C128Stride2 => entries::C128S2,
             Self::Shortcut => shortcut_tile(in_channels, batch).0,
-        }
+        })
     }
 
     /// Input size compiled into the tensor-core and shortcut-tile kernels
     fn compiled_input(self, in_channels: usize) -> Option<[usize; 2]> {
         match (self, in_channels) {
             (Self::C128 | Self::C128Stride2, _) | (Self::Shortcut, 128) => Some([20, 250]),
+            (Self::C32, _) => Some([80, 998]),
+            (Self::C64, _) => Some([40, 499]),
             (Self::C256, _) => Some([10, 125]),
             (Self::C64Stride2, _) | (Self::Shortcut, 64) => Some([40, 499]),
             (Self::Shortcut, 32) => Some([80, 998]),
@@ -633,19 +936,19 @@ impl Shape {
     /// Tensor-core entry for the 3x3 wide shapes
     fn tensor_entry(self, kernel: TensorKernel, batch: u32) -> Option<&'static str> {
         match (kernel, self) {
-            (TensorKernel::Tf32x3, Self::C64Stride2) => return Some("spk_wideconv_tc3_c64s2"),
-            (TensorKernel::Tf32x3, Self::C128Stride2) => return Some("spk_wideconv_tc3_c128s2"),
+            (TensorKernel::Tf32x3, Self::C64Stride2) => return Some(entries::TC3_C64S2),
+            (TensorKernel::Tf32x3, Self::C128Stride2) => return Some(entries::TC3_C128S2),
             (TensorKernel::Tf32x3Wide, Self::C64Stride2) => {
-                return Some("spk_wideconv_tc3_c64s2_wide");
+                return Some(entries::TC3_C64S2_WIDE);
             }
             (TensorKernel::Tf32x3Wide, Self::C128Stride2) => {
-                return Some("spk_wideconv_tc3_c128s2_wide");
+                return Some(entries::TC3_C128S2_WIDE);
             }
             (TensorKernel::Tf32Slim, Self::C64Stride2) => {
-                return Some("spk_wideconv_tc_c64s2_slim");
+                return Some(entries::TC_C64S2_SLIM);
             }
             (TensorKernel::Tf32Slim, Self::C128Stride2) => {
-                return Some("spk_wideconv_tc_c128s2_slim");
+                return Some(entries::TC_C128S2_SLIM);
             }
             (TensorKernel::Tf32x3 | TensorKernel::Tf32x3Wide | TensorKernel::Tf32Slim, _) => {
                 return None;
@@ -653,31 +956,75 @@ impl Shape {
             (TensorKernel::Tf32, _) => {}
         }
         match self {
-            Self::C128 => Some("spk_wideconv_tc_c128"),
-            Self::C256 => Some("spk_wideconv_tc_c256"),
-            Self::C64Stride2 if batch < TC_WIDE_BATCH => Some("spk_wideconv_tc_c64s2_narrow"),
-            Self::C64Stride2 => Some("spk_wideconv_tc_c64s2"),
-            Self::C128Stride2 if batch < TC_WIDE_BATCH => Some("spk_wideconv_tc_c128s2_narrow"),
-            Self::C128Stride2 => Some("spk_wideconv_tc_c128s2"),
-            Self::Stem | Self::Shortcut => None,
+            Self::C128 => Some(entries::TC_C128),
+            Self::C256 => Some(entries::TC_C256),
+            Self::C64Stride2 if batch < TC_WIDE_BATCH => Some(entries::TC_C64S2_NARROW),
+            Self::C64Stride2 => Some(entries::TC_C64S2),
+            Self::C128Stride2 if batch < TC_WIDE_BATCH => Some(entries::TC_C128S2_NARROW),
+            Self::C128Stride2 => Some(entries::TC_C128S2),
+            Self::Stem | Self::C32 | Self::C64 | Self::Shortcut => None,
         }
+    }
+
+    /// Direct FP16 entry for the same-channel stride-1 shapes
+    fn fp16_entry(self, tiles: Fp16Tiles) -> Option<&'static str> {
+        match (self, tiles) {
+            (Self::C32, Fp16Tiles::Wide) => Some(entries::H16_C32),
+            (Self::C64, Fp16Tiles::Wide) => Some(entries::H16_C64),
+            (Self::C128, Fp16Tiles::Wide) => Some(entries::H16_C128),
+            (Self::C128, Fp16Tiles::Narrow) => Some(entries::H16_C128_NARROW),
+            (Self::C256, Fp16Tiles::Wide) => Some(entries::H16_C256),
+            (Self::C256, Fp16Tiles::Narrow) => Some(entries::H16_C256_NARROW),
+            _ => None,
+        }
+    }
+
+    /// Direct FP16 grid and dynamic shared bytes, mirroring the device instances: output
+    /// rows and channels per CTA, `FP16_COLUMNS` columns, and two stages of the CTA's
+    /// input rows and columns with their halo at 16 bytes per pixel
+    fn fp16_launch(
+        self,
+        tiles: Fp16Tiles,
+        batch: u32,
+        oh: u32,
+        ow: u32,
+    ) -> Option<((u32, u32, u32), u32)> {
+        let (rows, cta_channels, channels) = match (self, tiles) {
+            (Self::C32, Fp16Tiles::Wide) => (4, 32, 32),
+            (Self::C64, Fp16Tiles::Wide) => (4, 64, 64),
+            (Self::C128, Fp16Tiles::Wide) => (2, 128, 128),
+            (Self::C128, Fp16Tiles::Narrow) => (2, 64, 128),
+            (Self::C256, Fp16Tiles::Wide) => (2, 128, 256),
+            (Self::C256, Fp16Tiles::Narrow) => (2, 64, 256),
+            _ => return None,
+        };
+        let grid = (
+            ow.div_ceil(FP16_COLUMNS),
+            oh.div_ceil(rows),
+            batch * (channels / cta_channels),
+        );
+        Some((grid, 2 * (rows + 2) * (FP16_COLUMNS + 2) * 16))
     }
 
     /// Fused Winograd entry for the same-channel stride-1 shapes
     fn winograd_entry(self, products: WinogradProducts) -> Option<&'static str> {
-        use WinogradProducts::{Bf16x3, Fp32, Fp32Sweep2, Tf32x1, Tf32x2, Tf32x3};
+        use WinogradProducts::{Bf16x3, Fp32, Fp32Sweep2, Tf32x1, Tf32x1Staged, Tf32x2, Tf32x3};
 
         match (self, products) {
-            (Self::C128, Bf16x3) => Some("spk_wideconv_wbf_c128"),
-            (Self::C256, Bf16x3) => Some("spk_wideconv_wbf_c256"),
-            (Self::C128, Fp32) => Some("spk_wideconv_wino_c128"),
-            (Self::C256, Fp32) => Some("spk_wideconv_wino_c256"),
-            (Self::C128, Fp32Sweep2) => Some("spk_wideconv_wino_c128_sweep2"),
-            (Self::C128, Tf32x3) => Some("spk_wideconv_wtc3_c128"),
-            (Self::C256, Tf32x3) => Some("spk_wideconv_wtc3_c256"),
-            (Self::C128, Tf32x2) => Some("spk_wideconv_wtc2_c128"),
-            (Self::C256, Tf32x2) => Some("spk_wideconv_wtc2_c256"),
-            (Self::C128, Tf32x1) => Some("spk_wideconv_wtc1_c128"),
+            (Self::C128, Bf16x3) => Some(entries::WBF_C128),
+            (Self::C256, Bf16x3) => Some(entries::WBF_C256),
+            (Self::C64, Fp32) => Some(entries::WINO_C64),
+            (Self::C128, Fp32) => Some(entries::WINO_C128),
+            (Self::C256, Fp32) => Some(entries::WINO_C256),
+            (Self::C128, Fp32Sweep2) => Some(entries::WINO_C128_SWEEP2),
+            (Self::C128, Tf32x3) => Some(entries::WTC3_C128),
+            (Self::C256, Tf32x3) => Some(entries::WTC3_C256),
+            (Self::C128, Tf32x2) => Some(entries::WTC2_C128),
+            (Self::C256, Tf32x2) => Some(entries::WTC2_C256),
+            (Self::C128, Tf32x1) => Some(entries::WTC1_C128),
+            (Self::C256, Tf32x1) => Some(entries::WTC1_C256),
+            (Self::C128, Tf32x1Staged) => Some(entries::WTP1_C128),
+            (Self::C256, Tf32x1Staged) => Some(entries::WTP1_C256),
             _ => None,
         }
     }
@@ -785,14 +1132,41 @@ impl Layout {
         if shape == Shape::Stem && algorithm == Algorithm::ImplicitGemm {
             return Err(unsupported("the stem uses spatial tiles"));
         }
-        let compiled = matches!(algorithm, Algorithm::TensorCore(_) | Algorithm::Winograd(_))
-            || (algorithm == Algorithm::Spatial && shape == Shape::Shortcut);
+        let compiled = matches!(
+            algorithm,
+            Algorithm::TensorCore(_) | Algorithm::Winograd(_) | Algorithm::Fp16(_)
+        ) || (algorithm == Algorithm::Spatial && shape == Shape::Shortcut);
         if compiled
             && shape
                 .compiled_input(conv.in_channels)
                 .is_some_and(|input| input != conv.input)
         {
             return Err(unsupported("the kernel is compiled for another input size"));
+        }
+        if algorithm == Algorithm::Spatial
+            && shape
+                .entry(conv.in_channels as u32, conv.batch as u32)
+                .is_none()
+        {
+            return Err(unsupported("no spatial tiles for this shape"));
+        }
+        if algorithm == Algorithm::ImplicitGemm && matches!(shape, Shape::C32 | Shape::C64) {
+            return Err(unsupported(
+                "the 32- and 64-channel shapes have only FP16 and Winograd tiles",
+            ));
+        }
+        if let Algorithm::Fp16(tiles) = algorithm {
+            if shape.fp16_entry(tiles).is_none() {
+                return Err(unsupported(
+                    "FP16 tiles cover only the same-channel stride-1 shapes, narrow ones only the 128- and 256-channel shapes",
+                ));
+            }
+            if conv.math != CudaMath::Tf32 {
+                return Err(unsupported("FP16 tiles round both operands to FP16"));
+            }
+            if partition.count() != 1 {
+                return Err(unsupported("FP16 tiles reduce the whole input"));
+            }
         }
         if let Algorithm::TensorCore(products) = algorithm {
             if shape.tensor_entry(products, conv.batch as u32).is_none() {
@@ -815,7 +1189,10 @@ impl Layout {
             }
             if matches!(
                 products,
-                WinogradProducts::Tf32x2 | WinogradProducts::Tf32x1 | WinogradProducts::Bf16x3
+                WinogradProducts::Tf32x2
+                    | WinogradProducts::Tf32x1
+                    | WinogradProducts::Tf32x1Staged
+                    | WinogradProducts::Bf16x3
             ) && conv.math != CudaMath::Tf32
             {
                 return Err(unsupported(
@@ -865,6 +1242,13 @@ impl Layout {
         } else if let Algorithm::TensorCore(products) = algorithm {
             let (grid, shared) =
                 shape.tensor_launch(products, batch, conv.input[1] as u32, oh, ow, channels);
+            shared_mem_bytes = shared;
+            grid
+        } else if let Algorithm::Fp16(tiles) = algorithm {
+            // checked above
+            let (grid, shared) = shape
+                .fp16_launch(tiles, batch, oh, ow)
+                .ok_or_else(|| unsupported("no FP16 tiles for this shape"))?;
             shared_mem_bytes = shared;
             grid
         } else if let Algorithm::Winograd(products) = algorithm {
@@ -937,14 +1321,17 @@ impl Oxide {
         let layout = Layout::new(conv, partition, split_cells, algorithm)?;
         let shape = layout.shape;
         let entry = match algorithm {
-            Algorithm::ImplicitGemm => "spk_wideconv_gemm",
-            Algorithm::Spatial => shape.entry(conv.in_channels as u32, conv.batch as u32),
-            Algorithm::WideStem => "spk_wideconv_stem_wide",
-            // checked by `Layout::new`
+            Algorithm::ImplicitGemm => entries::GEMM,
+            // checked by `Layout::new`, as are the tensor-core and Winograd entries
+            Algorithm::Spatial => shape
+                .entry(conv.in_channels as u32, conv.batch as u32)
+                .unwrap_or_default(),
+            Algorithm::WideStem => entries::STEM_WIDE,
             Algorithm::TensorCore(products) => shape
                 .tensor_entry(products, conv.batch as u32)
                 .unwrap_or_default(),
             Algorithm::Winograd(products) => shape.winograd_entry(products).unwrap_or_default(),
+            Algorithm::Fp16(tiles) => shape.fp16_entry(tiles).unwrap_or_default(),
         };
         let weight_len = element_count("wideconv weights", &conv.filter_shape())?;
         check_len("wideconv weights", weight_len, spec.weight.len())?;
@@ -961,20 +1348,19 @@ impl Oxide {
             return Err(unsupported("tensor-core Winograd needs the sm80 PTX tier"));
         }
         let pack = kernels.function(match algorithm {
-            Algorithm::TensorCore(TensorKernel::Tf32 | TensorKernel::Tf32Slim) => {
-                "spk_wideconv_pack_tc"
-            }
+            Algorithm::TensorCore(TensorKernel::Tf32 | TensorKernel::Tf32Slim) => entries::PACK_TC,
             Algorithm::TensorCore(TensorKernel::Tf32x3 | TensorKernel::Tf32x3Wide) => {
-                "spk_wideconv_pack_tc3"
+                entries::PACK_TC3
             }
             Algorithm::Winograd(WinogradProducts::Fp32 | WinogradProducts::Fp32Sweep2) => {
-                "spk_wideconv_pack_winograd"
+                entries::PACK_WINOGRAD
             }
-            Algorithm::Winograd(WinogradProducts::Bf16x3) => "spk_wideconv_pack_wbf",
-            Algorithm::Winograd(_) => "spk_wideconv_pack_wtc",
+            Algorithm::Winograd(WinogradProducts::Bf16x3) => entries::PACK_WBF,
+            Algorithm::Winograd(_) => entries::PACK_WTC,
+            Algorithm::Fp16(_) => entries::PACK_H16,
             // the stem's weights are copied, not packed
             Algorithm::Spatial | Algorithm::WideStem | Algorithm::ImplicitGemm => {
-                "spk_wideconv_pack_weights"
+                entries::PACK_WEIGHTS
             }
         })?;
         // Winograd weights hold a 4x4 transform per 3x3 filter, tensor-core ones a high
@@ -987,6 +1373,8 @@ impl Oxide {
             Algorithm::TensorCore(TensorKernel::Tf32x3 | TensorKernel::Tf32x3Wide) => {
                 weight_len * 2
             }
+            // two FP16 weights per word
+            Algorithm::Fp16(_) => weight_len / 2,
             _ => weight_len,
         };
         let mut packed = runtime.stream().alloc_zeros::<f32>(packed_len)?;
@@ -1006,7 +1394,7 @@ impl Oxide {
             // safety: the packed buffer holds the kernel's 16 or 32 words per filter and the
             // ABI matches
             unsafe { launch.launch(linear_config(to_u32(packed_len)?)) }?;
-        } else if matches!(algorithm, Algorithm::TensorCore(_)) {
+        } else if matches!(algorithm, Algorithm::TensorCore(_) | Algorithm::Fp16(_)) {
             let ci = to_u32(conv.in_channels)?;
             let co = to_u32(conv.out_channels)?;
             let len = weight_len as u64;
@@ -1019,8 +1407,8 @@ impl Oxide {
                 .arg(&co)
                 .arg(&mut packed)
                 .arg(&out_len);
-            // safety: the packed buffer holds the kernel's one or two words per weight and
-            // the ABI matches
+            // safety: the packed buffer holds the kernel's half, one or two words per
+            // weight, one thread per word, and the ABI matches
             unsafe { launch.launch(linear_config(to_u32(packed_len)?)) }?;
         } else if shape == Shape::Stem {
             runtime.stream().memcpy_dtod(spec.weight, &mut packed)?;
@@ -1059,8 +1447,8 @@ impl Oxide {
             partition,
             epilogue,
             function,
-            reduce: kernels.function("spk_wideconv_reduce")?,
-            fixup: kernels.function("spk_wideconv_wino_fixup")?,
+            reduce: kernels.function(entries::REDUCE)?,
+            fixup: kernels.function(entries::WINO_FIXUP)?,
             packed,
             // CUDA cannot allocate zero bytes
             workspace: Scratch::zeros(runtime, layout.workspace_len.max(1))?,
@@ -1104,7 +1492,8 @@ impl Oxide {
             )?)
     }
 
-    /// Enqueues convolution and, for partitioned plans, the deterministic epilogue
+    /// Enqueues convolution and, for partitioned plans, the deterministic epilogue;
+    /// FP16 tiles also set `range` nonzero when an activation saturates
     ///
     /// All allocations and packing occur in `plan`, so this method is capturable
     fn launch<'a>(
@@ -1112,6 +1501,7 @@ impl Oxide {
         inputs: Inputs<'_, '_>,
         output: &mut CudaViewMut<'a, f32>,
         workspace: &mut CudaViewMut<'a, f32>,
+        range: Option<&mut CudaViewMut<'_, f32>>,
         stream: &CudaStream,
     ) -> Result<(), CudaError> {
         check_len("wideconv input", self.layout.input_len, inputs.x.len())?;
@@ -1206,15 +1596,29 @@ impl Oxide {
             };
             return self.enqueue_winograd(&operands, output, workspace, stream);
         }
-        if matches!(self.algorithm, Algorithm::TensorCore(_)) {
-            // stride-1 epilogues move even pixel pairs with 8-byte accesses
-            let aligned = |pointer: u64| pointer.is_multiple_of(8);
-            let (out_ptr, _out) = output.device_ptr(stream);
-            let (res_ptr, _res) = residual.device_ptr(stream);
-            if !aligned(out_ptr) || !aligned(res_ptr) {
-                return Err(unsupported("tensor-core outputs need 8-byte alignment"));
+        if matches!(
+            self.algorithm,
+            Algorithm::TensorCore(_) | Algorithm::Fp16(_)
+        ) {
+            // stride-1 TF32 epilogues move even pixel pairs with 8-byte accesses; the FP16
+            // ones store single words
+            if matches!(self.algorithm, Algorithm::TensorCore(_)) {
+                let aligned = |pointer: u64| pointer.is_multiple_of(8);
+                let (out_ptr, _out) = output.device_ptr(stream);
+                let (res_ptr, _res) = residual.device_ptr(stream);
+                if !aligned(out_ptr) || !aligned(res_ptr) {
+                    return Err(unsupported("tensor-core outputs need 8-byte alignment"));
+                }
+                drop((_out, _res));
             }
-            drop((_out, _res));
+            let range = match (self.algorithm, range) {
+                (Algorithm::Fp16(_), Some(range)) => Some(range),
+                (Algorithm::Fp16(_), None) => {
+                    return Err(unsupported("FP16 tiles need an out-of-range word"));
+                }
+                _ => None,
+            };
+            let range_len = range.as_ref().map_or(0, |range| range.len() as u64);
             let mut launch = stream.launch_builder(&self.function);
             launch
                 .arg(inputs.x)
@@ -1229,8 +1633,12 @@ impl Oxide {
                 .arg(&batch)
                 .arg(output)
                 .arg(&lengths[4]);
+            if let Some(range) = range {
+                launch.arg(range).arg(&range_len);
+            }
             // safety: lengths and alignment are checked, the dynamic shared size is the
-            // kernel's, and each output element has one writer
+            // kernel's, each output element has one writer, and FP16 launches get their
+            // range word
             unsafe { launch.launch(self.layout.config) }?;
             return Ok(());
         }
@@ -1459,10 +1867,12 @@ impl ConvCandidate for Oxide {
         pin: Pin,
     ) -> Result<Self, PlanError> {
         let config = match pin {
-            Pin::DeviceRule => {
-                Config::select(Device::new(runtime.device(), kernels.tier()), layer.conv)
-                    .map_err(refusal)?
-            }
+            Pin::DeviceRule => Config::select(
+                Device::new(runtime.device(), kernels.tier()),
+                layer.conv,
+                Fp16Policy::Allowed,
+            )
+            .map_err(refusal)?,
             Pin::Configured(config)
                 if model_conv(layer.name, layer.conv.batch, layer.conv.math)? == layer.conv =>
             {
@@ -1478,10 +1888,45 @@ impl ConvCandidate for Oxide {
         Self::with_config(runtime, kernels, layer, config)
     }
 
+    /// Refuses FP16 plans, which need the out-of-range word of [`Oxide::enqueue_checked`]
     fn enqueue(
         &self,
         inputs: ConvInputs<'_, '_>,
         y: &mut CudaViewMut<'_, f32>,
+        phases: &Phases,
+        stream: &CudaStream,
+    ) -> Result<(), CudaError> {
+        self.enqueue_with(inputs, y, None, phases, stream)
+    }
+}
+
+impl Oxide {
+    /// Whether this plan runs FP16 tiles, whose launches report saturating activations
+    pub(crate) fn is_fp16(&self) -> bool {
+        matches!(self.algorithm, Algorithm::Fp16(_))
+    }
+
+    /// Enqueues the layer as [`ConvCandidate::enqueue`] does; FP16 tiles also set
+    /// `range[0]` nonzero when an activation saturates, and other plans never write it
+    ///
+    /// The caller clears the word and reads it after the stream reaches this launch
+    pub(crate) fn enqueue_checked(
+        &self,
+        inputs: ConvInputs<'_, '_>,
+        y: &mut CudaViewMut<'_, f32>,
+        range: &mut CudaViewMut<'_, f32>,
+        phases: &Phases,
+        stream: &CudaStream,
+    ) -> Result<(), CudaError> {
+        check_len("wideconv out-of-range word", 1, range.len())?;
+        self.enqueue_with(inputs, y, Some(range), phases, stream)
+    }
+
+    fn enqueue_with(
+        &self,
+        inputs: ConvInputs<'_, '_>,
+        y: &mut CudaViewMut<'_, f32>,
+        range: Option<&mut CudaViewMut<'_, f32>>,
         phases: &Phases,
         stream: &CudaStream,
     ) -> Result<(), CudaError> {
@@ -1508,7 +1953,7 @@ impl ConvCandidate for Oxide {
             residual: inputs.residual,
         };
         phases.op(Op::Main, || {
-            self.launch(inputs, &mut output, &mut workspace, stream)
+            self.launch(inputs, &mut output, &mut workspace, range, stream)
         })
     }
 }
@@ -1541,6 +1986,52 @@ impl Oxide {
             config,
         };
         Self::build(runtime, kernels, spec, layer.epilogue).map_err(refusal)
+    }
+}
+
+impl Oxide {
+    /// Driver-only coverage on a part of `capability`; development checks also plan the
+    /// Turing coverage on other parts
+    pub(crate) fn coverage_on(
+        tier: PtxTier,
+        capability: ComputeCapability,
+        fp16: Fp16Policy,
+    ) -> Coverage {
+        // only FP16 tiles cover the 32-channel layers
+        const TURING_FP32_OPERANDS: Coverage = Coverage(&[
+            CoverageEntry {
+                layers: &LAYERS,
+                batches: Batches::All,
+                maths: Maths::All,
+            },
+            CoverageEntry {
+                layers: &C64_LAYERS,
+                batches: Batches::All,
+                maths: Maths::All,
+            },
+        ]);
+        const TURING_COVERAGE: Coverage = Coverage(&[
+            CoverageEntry {
+                layers: &LAYERS,
+                batches: Batches::All,
+                maths: Maths::All,
+            },
+            CoverageEntry {
+                layers: &C64_LAYERS,
+                batches: Batches::All,
+                maths: Maths::All,
+            },
+            CoverageEntry {
+                layers: &C32_LAYERS,
+                batches: Batches::All,
+                maths: Maths::Only(&[CudaMath::Tf32]),
+            },
+        ]);
+        match (capability == TURING, fp16) {
+            (true, Fp16Policy::Allowed) => TURING_COVERAGE,
+            (true, Fp16Policy::Excluded) => TURING_FP32_OPERANDS,
+            (false, _) => <Self as ConvCandidate>::coverage(tier),
+        }
     }
 }
 
@@ -1580,11 +2071,11 @@ fn refusal(error: CudaError) -> PlanError {
 /// Shortcut-tile entry and its output channels per CTA
 fn shortcut_tile(in_channels: u32, batch: u32) -> (&'static str, u32) {
     match (in_channels, batch >= SHORTCUT_WIDE_BATCH) {
-        (32, _) => ("spk_wideconv_shortcut_c32", 64),
-        (64, false) => ("spk_wideconv_shortcut_c64", 64),
-        (64, true) => ("spk_wideconv_shortcut_c64_wide", 128),
-        (128, false) => ("spk_wideconv_shortcut_c128", 64),
-        _ => ("spk_wideconv_shortcut_c128_wide", 128),
+        (32, _) => (entries::SHORTCUT_C32, 64),
+        (64, false) => (entries::SHORTCUT_C64, 64),
+        (64, true) => (entries::SHORTCUT_C64_WIDE, 128),
+        (128, false) => (entries::SHORTCUT_C128, 64),
+        _ => (entries::SHORTCUT_C128_WIDE, 128),
     }
 }
 
@@ -1630,8 +2121,47 @@ pub(super) fn trunk_speed_scope(
 impl super::DriverCandidate for Oxide {
     const AREA: super::KernelModule = super::KernelModule::Wideconv;
 
-    fn driver_coverage(tier: PtxTier) -> Coverage {
-        <Self as ConvCandidate>::coverage(tier)
+    fn hybrid_fp16(
+        device: &DeviceAttributes,
+        tier: PtxTier,
+        recipe: Option<super::super::implementation::policy::Recipe>,
+        fp16: Fp16Policy,
+    ) -> Fp16Policy {
+        use crate::inference::cuda::implementation::policy::Recipe;
+        // the 4060 Ti FP16 measurements belong to its whole-pipeline recipe, not
+        // the non-FP16 trunk totals used as this port's speed evidence
+        if Recipe::fp16_device(device, tier) == Some(Recipe::Rtx4060Ti)
+            && recipe != Some(Recipe::Rtx4060Ti)
+        {
+            return Fp16Policy::Excluded;
+        }
+
+        fp16
+    }
+
+    fn driver_coverage(tier: PtxTier, device: &DeviceAttributes, fp16: Fp16Policy) -> Coverage {
+        use crate::inference::cuda::implementation::policy::Recipe;
+        if fp16.allows() && Recipe::fp16_device(device, tier) == Some(Recipe::Rtx4060Ti) {
+            return Coverage(&[
+                CoverageEntry {
+                    layers: &LAYERS,
+                    batches: Batches::All,
+                    maths: Maths::All,
+                },
+                CoverageEntry {
+                    layers: &C64_LAYERS,
+                    batches: Batches::All,
+                    maths: Maths::Only(&[CudaMath::Tf32]),
+                },
+                CoverageEntry {
+                    layers: &C32_LAYERS,
+                    batches: Batches::All,
+                    maths: Maths::Only(&[CudaMath::Tf32]),
+                },
+            ]);
+        }
+
+        Self::coverage_on(tier, device.capability(), fp16)
     }
 
     fn speed_scope(
@@ -1648,22 +2178,56 @@ impl super::DriverCandidate for Oxide {
         TRUNK_SPEED_SUMMARY
     }
 
+    fn tuning_fp16_pin(
+        boundary: super::super::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        device: &DeviceAttributes,
+        tier: PtxTier,
+    ) -> Result<Option<super::ConfigPin>, PlanError> {
+        // fp16 entries are shipped in every tier for Turing and newer devices
+        if device.capability() < TURING {
+            return Ok(None);
+        }
+        let Some(wide) = Pin::fp16_wide(boundary.name(), batch, math) else {
+            return Ok(None);
+        };
+        // retain the startup tile size where measured, without limiting discovery
+        if let Ok(startup) =
+            Self::driver_pin(boundary, batch, math, device, tier, Fp16Policy::Allowed)
+            && startup.is_fp16()
+        {
+            return Ok(Some(startup));
+        }
+        Ok(Some(super::ConfigPin::Wideconv(wide)))
+    }
+
     fn driver_pin(
         boundary: super::super::implementation::BoundaryId,
         batch: usize,
         math: CudaMath,
         device: &DeviceAttributes,
         tier: PtxTier,
+        fp16: Fp16Policy,
     ) -> Result<super::ConfigPin, PlanError> {
+        use crate::inference::cuda::implementation::policy::Recipe;
+        if let Some(pin) = Recipe::fp16_device(device, tier)
+            .filter(|_| fp16.allows())
+            .and_then(|recipe| recipe.fp16_pin(boundary, batch, math))
+        {
+            return Ok(pin);
+        }
+
         let conv = model_conv(boundary.name(), batch, math)?;
-        let config = Config::select(Device::new(device, tier), conv).map_err(refusal)?;
+        let config = Config::select(Device::new(device, tier), conv, fp16).map_err(refusal)?;
         Ok(super::ConfigPin::Wideconv(Pin::Configured(config)))
     }
 }
 
-/// Geometry compiled into the model's 22 wide convolution boundaries
+/// Geometry compiled into the model's 22 wide convolution boundaries and the 32- and
+/// 64-channel ones of the FP16 routes
 fn model_conv(name: &str, batch: usize, math: CudaMath) -> Result<Conv2d, PlanError> {
-    if !LAYERS.contains(&name) {
+    if !LAYERS.contains(&name) && !C64_LAYERS.contains(&name) && !C32_LAYERS.contains(&name) {
         return Err(PlanError::Geometry(GeometryError::Unimplemented {
             context: "wideconv boundary",
             reason: name.into(),
@@ -1676,6 +2240,8 @@ fn model_conv(name: &str, batch: usize, math: CudaMath) -> Result<Conv2d, PlanEr
         "resnet.layer4.0.shortcut.0" => (128, 256, [20, 250], 1, 2),
         "resnet.layer3.0.conv1" => (64, 128, [40, 499], 3, 2),
         "resnet.layer4.0.conv1" => (128, 256, [20, 250], 3, 2),
+        _ if C32_LAYERS.contains(&name) => (32, 32, [80, 998], 3, 1),
+        _ if C64_LAYERS.contains(&name) => (64, 64, [40, 499], 3, 1),
         _ if name.starts_with("resnet.layer3.") => (128, 128, [20, 250], 3, 1),
         _ => (256, 256, [10, 125], 3, 1),
     };

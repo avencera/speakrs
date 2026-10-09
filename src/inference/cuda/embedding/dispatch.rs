@@ -6,12 +6,12 @@ use std::rc::Rc;
 use cudarc::driver::{CudaView, CudaViewMut};
 
 use super::super::candidate::{
-    ConvCandidate, ConvInputs, ConvLayerSpec, ConvOxide, Phases, WideconvOxide,
+    ConvCandidate, ConvInputs, ConvLayerSpec, ConvOxide, Fp16Policy, Phases, WideconvOxide,
 };
 #[cfg(feature = "_cuda-libraries")]
 use super::super::dnn::{ConvPlan, ConvPlanner};
 use super::super::geometry::Residual;
-use super::super::implementation::{AreaTarget, LibraryNeed, Selected, plan_selection};
+use super::super::implementation::{AreaTarget, LibraryNeed, Selected, plan_selection_with};
 use super::super::{CudaLibrary, CudaMath, CudaRuntime, KernelModule};
 use super::trunk::{ConvLayer, Trunk};
 use super::{Convs, CudaError};
@@ -68,6 +68,19 @@ impl Convs<'_> {
         residual: Residual<'_, '_>,
         y: &mut CudaViewMut<'_, f32>,
     ) -> Result<(), CudaError> {
+        let runtime = self.runtime;
+        runtime.record_boundary(layer.boundary(), self.chunks, self.math, || {
+            self.conv_bias_relu_inner(layer, x, residual, y)
+        })
+    }
+
+    fn conv_bias_relu_inner(
+        &mut self,
+        layer: &ConvLayer,
+        x: &CudaView<'_, f32>,
+        residual: Residual<'_, '_>,
+        y: &mut CudaViewMut<'_, f32>,
+    ) -> Result<(), CudaError> {
         match self.plan(layer)? {
             #[cfg(feature = "_cuda-libraries")]
             Plan::Library(plan) => {
@@ -83,7 +96,7 @@ impl Convs<'_> {
                 Ok(())
             }
             Plan::Oxide(plan) => self.candidate(plan, layer, x, residual, y),
-            Plan::Wideconv(plan) => self.candidate(plan, layer, x, residual, y),
+            Plan::Wideconv(plan) => self.wideconv(plan, layer, x, residual, y),
         }
     }
 }
@@ -97,19 +110,61 @@ impl Convs<'_> {
         x: &CudaView<'_, f32>,
         y: &mut CudaViewMut<'_, f32>,
     ) -> Result<(), CudaError> {
+        let runtime = self.runtime;
+        runtime.record_boundary(layer.boundary(), self.chunks, self.math, || {
+            self.shortcut_inner(layer, x, y)
+        })
+    }
+
+    fn shortcut_inner(
+        &mut self,
+        layer: &ConvLayer,
+        x: &CudaView<'_, f32>,
+        y: &mut CudaViewMut<'_, f32>,
+    ) -> Result<(), CudaError> {
         match self.plan(layer)? {
             Plan::Wideconv(plan) => {
                 let none = Residual::None {
                     #[cfg(feature = "_cuda-libraries")]
                     scratch: x,
                 };
-                self.candidate(plan, layer, x, none, y)
+                self.wideconv(plan, layer, x, none, y)
             }
             _ => {
                 self.conv(layer, x, y)?;
                 self.bias(layer, y)
             }
         }
+    }
+
+    /// Enqueue a wideconv plan with the layer's weights; FP16 tiles also report
+    /// saturating activations in the batch's out-of-range word
+    fn wideconv(
+        &mut self,
+        plan: &WideconvOxide,
+        layer: &ConvLayer,
+        x: &CudaView<'_, f32>,
+        residual: Residual<'_, '_>,
+        y: &mut CudaViewMut<'_, f32>,
+    ) -> Result<(), CudaError> {
+        let residual = match residual {
+            Residual::Add(value) => Some(value),
+            Residual::None { .. } => None,
+        };
+        let stream = self.runtime.stream();
+
+        plan.enqueue_checked(
+            ConvInputs {
+                x,
+                residual,
+                weight: &layer.weight().data().as_view(),
+                bias: &layer.bias().data().as_view(),
+            },
+            y,
+            &mut self.range,
+            &Phases::new(),
+            stream,
+        )
     }
 
     /// Enqueue a candidate plan with the layer's weights; a candidate never reads the
@@ -142,12 +197,24 @@ impl Convs<'_> {
     }
 }
 
+/// Bytes of the cuDNN workspace `plans` share, sized for the largest
+pub(super) fn workspace_bytes(plans: &[(String, Plan)]) -> usize {
+    plans
+        .iter()
+        .map(|(_, plan)| plan.workspace_bytes())
+        .max()
+        .unwrap_or(0)
+}
+
 /// Select each layer first; deduplicate only the Library shapes that were selected
+///
+/// `fp16` excludes FP16 tiles from every layer; otherwise each layer's weights decide
 pub(super) fn plan_layers(
     runtime: &CudaRuntime,
     trunk: &Trunk,
     batch: usize,
     math: CudaMath,
+    fp16: Fp16Policy,
 ) -> Result<Vec<(String, Plan)>, CudaError> {
     #[cfg(feature = "_cuda-libraries")]
     let mut library_plans: Vec<Rc<ConvPlan>> = Vec::new();
@@ -155,11 +222,16 @@ pub(super) fn plan_layers(
     let mut planner = None;
     let mut plans = Vec::new();
     for (layer, residual) in trunk.layers() {
-        let selected = plan_selection(
+        let layer_fp16 = match fp16 {
+            Fp16Policy::Allowed => layer.fp16(),
+            Fp16Policy::Excluded => Fp16Policy::Excluded,
+        };
+        let selected = plan_selection_with(
             runtime,
             layer.boundary(),
             batch,
             math,
+            layer_fp16,
             #[cfg(all(test, feature = "_cuda-libraries"))]
             layer.override_choice(),
         )?;

@@ -9,6 +9,7 @@
 use cuda_device::shared::cvta_generic_to_shared_u32;
 use cuda_device::{DisjointSlice, SharedArray, kernel, launch_bounds, ptx_asm, thread};
 
+pub mod h16;
 pub mod shortcut;
 pub mod tc3;
 pub mod tensor;

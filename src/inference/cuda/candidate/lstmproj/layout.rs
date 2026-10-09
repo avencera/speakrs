@@ -15,6 +15,10 @@ pub(crate) mod exchange;
 
 pub(crate) use exchange::{PAD as STATE_PAD, TILE as STATE_TILE};
 
+/// Physical words of the eight-window recurrence, shared with the kernel crate's
+/// `lstmproj` area
+pub(crate) mod tiled_exchange;
+
 // check both physical maps in host builds, not only when the device crate compiles
 const _: () = assert!(exchange::bulk_word(TILE_ROWS * HIDDEN - 1) < exchange::SLOT);
 const _: () = assert!(
@@ -25,12 +29,26 @@ const _: () = assert!(
     ) < exchange::SLOT
 );
 
+// every producer's line and the last unit of the last row stay inside one parity slot
+const _: () = assert!(tiled_exchange::LINE == HIDDEN / TILED_GROUPS);
+const _: () = assert!(tiled_exchange::word(TILED_ROWS - 1, HIDDEN - 1) < tiled_exchange::SLOT);
+
 /// Hidden units per block, `UNITS` in the kernel crate's `lstmproj` area
 const UNITS: usize = 8;
 /// Threads per block, `THREADS` in the kernel crate's `lstmproj` area
 pub(crate) const THREADS: u32 = 32 * UNITS as u32;
 /// Blocks per batch tile, `GROUPS` in the kernel crate's `lstmproj` area
 pub(crate) const GROUPS: usize = HIDDEN / UNITS;
+
+/// The batched recurrence entry, `spk_lstm_recurrence_tiled` in the kernel crate's
+/// `lstmproj` area
+pub(crate) const TILED_KERNEL: &str = "spk_lstm_recurrence_tiled";
+/// Blocks per eight-window tile of the batched recurrence, `tiled::GROUPS`
+pub(crate) const TILED_GROUPS: usize = 8;
+/// Threads per block of the batched recurrence, `tiled::THREADS`
+pub(crate) const TILED_THREADS: u32 = 256;
+/// Windows per tile of the batched recurrence, `tiled::TILE_ROWS`
+pub(crate) const TILED_ROWS: usize = tiled_exchange::ROWS;
 
 /// Dynamic shared bytes of the TF32 projection tile
 pub(crate) const TENSOR_SHARED_BYTES: u32 = 61_440;
@@ -67,9 +85,10 @@ impl<T> AlignedSpan<T> {
 pub(crate) struct ExchangeLayout(usize);
 
 impl ExchangeLayout {
-    /// Direction stride including one cache-line gap after its padded tiles
-    pub(crate) const fn new(tiles: usize) -> Self {
-        Self(tiles * STATE_TILE + STATE_PAD)
+    /// Direction stride including one cache-line gap after `tiles` padded tiles of
+    /// `tile_words` words each
+    pub(crate) const fn new(tiles: usize, tile_words: usize) -> Self {
+        Self(tiles * tile_words + STATE_PAD)
     }
 
     /// Words to clear, including padding but excluding allocation alignment slack

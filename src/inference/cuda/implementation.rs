@@ -12,6 +12,7 @@ pub(crate) mod overrides;
 mod boundary;
 mod driver;
 mod evidence;
+pub(crate) mod policy;
 
 /// Accepted production bindings, one file per candidate area
 mod production {
@@ -69,16 +70,34 @@ pub(crate) use evidence::{
 use super::candidate::{Batches, Coverage, CoverageEntry, Maths};
 use super::candidate::{
     ConfigPin, ConvCandidate, ConvLayerSpec, ConvOxide, DenseCandidate, DenseOxide, DenseSpec,
-    FbankCandidate, FbankOxide, FbankSpec, LstmCandidate, LstmOxide, LstmProjOxide, LstmSpec,
-    PlanError, SegConvCandidate, SegConvOxide, SegConvSpec, SincCandidate, SincOxide, SincSpec,
-    WideconvOxide,
+    FbankCandidate, FbankOxide, FbankSpec, Fp16Policy, LstmCandidate, LstmOxide, LstmProjOxide,
+    LstmSpec, PlanError, SegConvCandidate, SegConvOxide, SegConvSpec, SincCandidate, SincOxide,
+    SincSpec, WideconvOxide,
 };
 use super::device::DeviceAttributes;
 use super::error::GeometryError;
-use super::kernels::{AreaPtx, ArtifactHash, LoadedArtifact, ModuleRequest};
+use super::kernels::{AreaPtx, LoadedArtifact, ModuleRequest};
+use super::tuning::ApprovedChoice;
 use super::{
     ComputeCapability, CudaError, CudaLibrary, CudaMath, CudaRuntime, KernelModule, PtxTier,
 };
+
+/// An implemented fixed configuration awaiting separate accuracy acceptance
+pub(crate) type TuningConfiguration = (
+    BoundaryId,
+    usize,
+    CudaMath,
+    ModuleRequest,
+    ConfigPin,
+    &'static str,
+);
+
+pub(crate) fn tuning_configurations(
+    device: &DeviceAttributes,
+    limit: PtxTier,
+) -> Result<Vec<TuningConfiguration>, CudaError> {
+    driver::tuning_configurations(device, limit)
+}
 
 /// A loaded module and the exact device that executes it
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,14 +130,16 @@ impl AreaTarget {
 pub(crate) enum Selection {
     /// An accepted production-table entry
     Production,
+    /// A benchmark must run the named implementation or return its refusal
+    Tuning,
     /// Complete implemented coverage; speed is not a selection gate
     DriverOnly,
-    /// An explicit or qualification request
+    /// An explicit development request
     #[cfg(all(test, feature = "_cuda-libraries"))]
     Explicit,
 }
 
-/// Implementation requests used only by the qualification controls
+/// Implementation requests used only by development checks
 #[cfg(all(test, feature = "_cuda-libraries"))]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Choice {
@@ -165,7 +186,7 @@ const _: () = {
     evidence::validate_modules(MEASURED_MODULES, PRODUCTION, ALWAYS_ON, ROUTE_PRECEDENCE);
 };
 
-/// Production model batch classes, excluding the harness stress classes
+/// Production model batch classes, excluding development stress classes
 pub(crate) const MODEL_BATCHES: [usize; 2] = ProductionBatches::MODEL;
 
 /// The single artifact every use of an area loads on this device
@@ -205,7 +226,7 @@ fn qualified_module(
         area,
         tier,
         LoadedArtifact::PtxJit {
-            sha256: ArtifactHash::of(ptx.text.as_bytes()),
+            sha256: ptx.sha256(),
         },
     )))
 }
@@ -298,7 +319,7 @@ fn production_route(
 enum PlanPin {
     /// The pin an accepted proof names
     Pinned(ConfigPin),
-    /// The candidate's own implemented configuration, for qualification only
+    /// The candidate's own implemented configuration, for development checks only
     #[cfg(all(test, feature = "_cuda-libraries"))]
     Implemented,
 }
@@ -313,17 +334,36 @@ pub(crate) enum TokenEvidence {
     },
     /// Implemented library-free coverage, without a speed claim
     Implemented,
+    /// A measured device recipe, with no independent per-layer speed claim
+    Recipe(policy::Recipe),
+    /// A device-class choice, separate from measured device recipes
+    DeviceDefault(policy::DeviceDefault),
+    /// A file or explicit tuner chose an accuracy-approved exact configuration
+    Tuned { acceptance: &'static str },
     /// A complete broad-winner port, carrying its structural speed evidence
     Port {
         scope: SpeedScope,
         summary: &'static str,
     },
-    /// An explicit qualification control, which grants no production evidence
+    /// An explicit development control, which grants no production evidence
     #[cfg(all(test, feature = "_cuda-libraries"))]
     Qualification,
 }
 
-/// A boundary accepted by a pinned record, or an explicit qualification control
+impl TokenEvidence {
+    /// Match non-FP16 port measurements to the selected configuration
+    fn non_fp16_port(scope: SpeedScope, summary: &'static str, pin: ConfigPin) -> Self {
+        // recipe and tuned evidence own FP16 measurements separately; a device
+        // speed scope alone does not extend these port measurements to FP16 tiles
+        if pin.is_fp16() {
+            return Self::Implemented;
+        }
+
+        Self::Port { scope, summary }
+    }
+}
+
+/// A boundary accepted by a pinned record, or an explicit development control
 #[derive(Debug)]
 pub(crate) struct Qualified {
     boundary: BoundaryId,
@@ -336,6 +376,22 @@ pub(crate) struct Qualified {
 }
 
 impl Qualified {
+    fn source(&self) -> policy::Source {
+        match self.evidence {
+            TokenEvidence::Tuned { .. } => policy::Source::TuneFile,
+            TokenEvidence::Recipe(_) | TokenEvidence::Production { .. } => policy::Source::Recipe,
+            TokenEvidence::Port {
+                scope: SpeedScope::AllDevices(_),
+                ..
+            }
+            | TokenEvidence::DeviceDefault(_)
+            | TokenEvidence::Implemented => policy::Source::Default,
+            TokenEvidence::Port { .. } => policy::Source::Recipe,
+            #[cfg(all(test, feature = "_cuda-libraries"))]
+            TokenEvidence::Qualification => policy::Source::Default,
+        }
+    }
+
     /// The area that owns this selected plan
     pub(crate) fn area(&self) -> KernelModule {
         self.target.module.area()
@@ -347,6 +403,8 @@ impl Qualified {
                 speed.scope.measured_on_device(self.target.device)
             }
             TokenEvidence::Port { scope, .. } => scope.measured_on_device(self.target.device),
+            TokenEvidence::Recipe(_) => true,
+            TokenEvidence::Tuned { .. } => true,
             _ => false,
         }
     }
@@ -426,6 +484,16 @@ impl Qualified {
                 }
             }
             TokenEvidence::Implemented => {}
+            TokenEvidence::Tuned { acceptance } => {
+                tracing::debug!(acceptance, "CUDA tuned configuration accuracy acceptance")
+            }
+            TokenEvidence::Recipe(recipe) => {
+                tracing::debug!(summary = recipe.summary(), "CUDA measured recipe evidence")
+            }
+            TokenEvidence::DeviceDefault(default) => tracing::debug!(
+                summary = default.summary(),
+                "CUDA device-class default evidence"
+            ),
             #[cfg(all(test, feature = "_cuda-libraries"))]
             TokenEvidence::Qualification => {}
         }
@@ -448,7 +516,7 @@ impl Qualified {
             Ok(plan) => {
                 let measured = self.speed_measured();
                 tracing::info!(boundary = self.boundary.name(), batch = self.batch,
-                    math = ?self.math, area = area.name(), speed_measured = measured,
+                    math = ?self.math, area = area.name(), source = self.source().name(), speed_measured = measured,
                     evidence = ?self.evidence, "CUDA route implementation=Oxide");
                 Ok(Some(plan))
             }
@@ -460,6 +528,7 @@ impl Qualified {
                 tracing::warn!(
                     boundary = self.boundary.name(),
                     batch = self.batch,
+                    source = policy::Source::Library.name(),
                     "CUDA candidate unavailable reason={refusal}; using Library"
                 );
                 Ok(None)
@@ -581,7 +650,7 @@ impl Qualified {
         self.finish(area, super::driver_only(), plan)
     }
 
-    /// Build the accepted stack; qualification forbids nested library calls
+    /// Build the accepted stack; the library-free stack forbids nested library calls
     pub(crate) fn lstm(
         self,
         runtime: &CudaRuntime,
@@ -742,12 +811,37 @@ pub(crate) trait Modules {
     /// The runtime's cached device attributes
     fn device(&self) -> &DeviceAttributes;
 
+    /// A validated user measurement, or a choice in an explicitly requested tune run
+    fn tune_choice(
+        &self,
+        _boundary: BoundaryId,
+        _batch: usize,
+        _math: CudaMath,
+    ) -> Result<Option<ApprovedChoice>, CudaError> {
+        Ok(None)
+    }
+
+    /// Whether a benchmark must fail rather than time a fallback under another label
+    fn is_tuning(&self) -> bool {
+        false
+    }
+
+    /// Whole-pipeline precision required by end-to-end recipes
+    fn recipe_mode(&self) -> policy::RecipeMode {
+        policy::RecipeMode::Disabled
+    }
+
     /// The runtime's PTX tier limit
     fn tier_limit(&self) -> PtxTier;
 
     /// Whether model-load policy forces every replaceable boundary to Library
     fn force_library(&self) -> bool {
         false
+    }
+
+    /// Whether this selection may choose FP16 tiles
+    fn fp16(&self) -> Fp16Policy {
+        Fp16Policy::Allowed
     }
 
     /// Resolve diagnostic policy before the selected identity is fixed
@@ -758,36 +852,69 @@ pub(crate) trait Modules {
     /// Load exactly `request` and return the identity the driver accepted
     fn load(&mut self, request: ModuleRequest) -> Result<ModuleRequest, CudaError>;
 
-    /// The best embedded artifact an explicit qualification request asks for,
+    /// The best embedded artifact an explicit development request asks for,
     /// resolved without loading
     #[cfg(all(test, feature = "_cuda-libraries"))]
     fn embedded_exact(&self, area: KernelModule) -> Result<ModuleRequest, CudaError>;
 }
 
-impl Modules for &CudaRuntime {
+/// A runtime's modules for one selection, with that selection's FP16 policy
+struct RuntimeModules<'a> {
+    runtime: &'a CudaRuntime,
+    fp16: Fp16Policy,
+}
+
+impl Modules for RuntimeModules<'_> {
+    fn is_tuning(&self) -> bool {
+        self.runtime.is_tuning()
+    }
+
+    fn tune_choice(
+        &self,
+        boundary: BoundaryId,
+        batch: usize,
+        math: CudaMath,
+    ) -> Result<Option<ApprovedChoice>, CudaError> {
+        let choice = self.runtime.tuned_choice(boundary, batch, math);
+        if self.is_tuning() && choice.is_none() {
+            return Err(super::tuning::invalid(
+                "no accuracy-approved choice for this tuning tuple",
+            ));
+        }
+        Ok(choice)
+    }
+
+    fn recipe_mode(&self) -> policy::RecipeMode {
+        self.runtime.recipe_mode()
+    }
+
     fn effective_request(&self, request: ModuleRequest) -> Result<ModuleRequest, CudaError> {
-        CudaRuntime::effective_request(self, request)
+        self.runtime.effective_request(request)
     }
 
     fn force_library(&self) -> bool {
-        CudaRuntime::force_library(self)
+        self.runtime.force_library()
+    }
+
+    fn fp16(&self) -> Fp16Policy {
+        self.fp16
     }
 
     fn device(&self) -> &DeviceAttributes {
-        CudaRuntime::device(self)
+        self.runtime.device()
     }
 
     fn tier_limit(&self) -> PtxTier {
-        self.ptx_tier()
+        self.runtime.ptx_tier()
     }
 
     fn load(&mut self, request: ModuleRequest) -> Result<ModuleRequest, CudaError> {
-        Ok(self.load_module(request)?.request())
+        Ok(self.runtime.load_module(request)?.request())
     }
 
     #[cfg(all(test, feature = "_cuda-libraries"))]
     fn embedded_exact(&self, area: KernelModule) -> Result<ModuleRequest, CudaError> {
-        self.embedded_exact_request(area)
+        self.runtime.embedded_exact_request(area)
     }
 }
 
@@ -799,19 +926,49 @@ pub(crate) fn plan_selection(
     math: CudaMath,
     #[cfg(all(test, feature = "_cuda-libraries"))] override_choice: Option<Choice>,
 ) -> Result<Selected, CudaError> {
+    plan_selection_with(
+        runtime,
+        boundary,
+        batch,
+        math,
+        Fp16Policy::Allowed,
+        #[cfg(all(test, feature = "_cuda-libraries"))]
+        override_choice,
+    )
+}
+
+/// [`plan_selection`] for a boundary that may run FP16 tiles, under `fp16`
+pub(crate) fn plan_selection_with(
+    runtime: &CudaRuntime,
+    boundary: BoundaryId,
+    batch: usize,
+    math: CudaMath,
+    fp16: Fp16Policy,
+    #[cfg(all(test, feature = "_cuda-libraries"))] override_choice: Option<Choice>,
+) -> Result<Selected, CudaError> {
     let request = PlanRequest::Hybrid;
     #[cfg(all(test, feature = "_cuda-libraries"))]
     let request = override_choice.map_or(request, PlanRequest::Qualification);
-    let selected = request.resolve(boundary, batch, math, runtime)?;
+    let modules = RuntimeModules { runtime, fp16 };
+    let selected = request.resolve(boundary, batch, math, modules)?;
     match &selected {
         Selected::Oxide(token) => {
-            tracing::info!(boundary = boundary.name(), batch, ?math, area = token.area().name(), speed_measured = token.speed_measured(), evidence = ?token.evidence, "CUDA route selected implementation=Oxide")
+            tracing::info!(boundary = boundary.name(), batch, ?math, area = token.area().name(), source = token.source().name(), speed_measured = token.speed_measured(), evidence = ?token.evidence, "CUDA route selected implementation=Oxide")
         }
         Selected::Library => tracing::info!(
             boundary = boundary.name(),
             batch,
             ?math,
             speed_measured = false,
+            source = if matches!(
+                runtime.tuned_choice(boundary, batch, math),
+                Some(ApprovedChoice::Library)
+            ) && !runtime.force_library()
+            {
+                policy::Source::TuneFile.name()
+            } else {
+                policy::Source::Library.name()
+            },
             "CUDA route selected implementation=Library"
         ),
     }
@@ -859,11 +1016,26 @@ impl PlanRequest {
         let driver = super::driver_only();
         #[cfg(test)]
         let driver = driver || matches!(self, Self::DriverOnly);
-        if driver {
-            return driver::select(boundary, batch, math, modules);
-        }
         if modules.force_library() && matches!(self, Self::Production | Self::Hybrid) {
             return Ok(Selected::Library);
+        }
+
+        // an excluded FP16 measurement leaves the selection made without the tune file
+        if matches!(self, Self::Hybrid)
+            && let Some(choice) = modules.tune_choice(boundary, batch, math)?
+        {
+            if !modules.fp16().allows() && choice.is_fp16() {
+                if modules.is_tuning() {
+                    return Err(super::tuning::invalid(
+                        "FP16 tuning candidate is excluded by the layer weights",
+                    ));
+                }
+            } else {
+                return tuned_selection(choice, boundary, batch, math, &mut modules, !driver);
+            }
+        }
+        if driver {
+            return driver::select(boundary, batch, math, modules);
         }
 
         if matches!(self, Self::Hybrid)
@@ -925,6 +1097,72 @@ impl PlanRequest {
         }
         Ok(Selected::Oxide(Box::new(token)))
     }
+}
+
+/// The same token and plan validation as production, without granting new accuracy
+fn tuned_selection(
+    choice: ApprovedChoice,
+    boundary: BoundaryId,
+    batch: usize,
+    math: CudaMath,
+    modules: &mut impl Modules,
+    library_allowed: bool,
+) -> Result<Selected, CudaError> {
+    let ApprovedChoice::Kernel(config) = choice else {
+        return if library_allowed {
+            Ok(Selected::Library)
+        } else {
+            Err(super::tuning::invalid(
+                "a driver-only build cannot select Library from a tune file",
+            ))
+        };
+    };
+    if !config.matches(boundary, batch, math) || config.module().tier() > modules.tier_limit() {
+        return Err(super::tuning::invalid(
+            "tuned configuration does not match this execution tuple",
+        ));
+    }
+    let fallback_allowed = library_allowed && !modules.is_tuning();
+    // a forced PTX JIT load must reach tuned boundaries too, or the area cache
+    // would hold the cubin and refuse the PTX request of a later boundary
+    let request = modules.effective_request(config.module())?;
+    let loaded = match modules.load(request) {
+        Ok(loaded) => loaded,
+        Err(error) => return artifact_refusal(error, fallback_allowed),
+    };
+    if loaded != request {
+        return artifact_refusal(
+            CudaError::ArtifactUnavailable {
+                module: request.area().name(),
+                artifact: request.artifact(),
+            },
+            fallback_allowed,
+        );
+    }
+    // the tune file timed the saved artifact, not a diagnostic PTX load of it
+    let evidence = if request == config.module() {
+        TokenEvidence::Tuned {
+            acceptance: config.acceptance(),
+        }
+    } else {
+        TokenEvidence::Implemented
+    };
+    Ok(Selected::Oxide(Box::new(Qualified {
+        boundary,
+        batch,
+        math,
+        target: Target {
+            module: loaded,
+            device: modules.device().capability(),
+        },
+        pin: PlanPin::Pinned(config.pin()),
+        evidence,
+        selection: if modules.is_tuning() {
+            Selection::Tuning
+        } else {
+            Selection::Production
+        },
+    })))
 }
 
 /// Only production may use the established Library policy after an artifact refusal
@@ -1038,7 +1276,7 @@ pub(crate) fn legacy_fixture_coverage(
             variants.embedded(binding.module.tier()).is_some_and(|ptx| {
                 binding.module.artifact()
                     == LoadedArtifact::PtxJit {
-                        sha256: ArtifactHash::of(ptx.text.as_bytes()),
+                        sha256: ptx.sha256(),
                     }
             })
         })

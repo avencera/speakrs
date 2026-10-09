@@ -227,7 +227,11 @@ fn to_u32(value: usize) -> Result<u32, CudaError> {
 impl super::DriverCandidate for Oxide {
     const AREA: super::KernelModule = super::KernelModule::Sincnet;
 
-    fn driver_coverage(_tier: super::PtxTier) -> Coverage {
+    fn driver_coverage(
+        _tier: super::PtxTier,
+        _device: &super::super::device::DeviceAttributes,
+        _fp16: super::Fp16Policy,
+    ) -> Coverage {
         IMPLEMENTED
     }
 
@@ -237,6 +241,7 @@ impl super::DriverCandidate for Oxide {
         _math: CudaMath,
         _device: &super::super::device::DeviceAttributes,
         _tier: super::PtxTier,
+        _fp16: super::Fp16Policy,
     ) -> Result<super::ConfigPin, PlanError> {
         Ok(super::ConfigPin::Sinc(SincPin::ConvAbsPool))
     }

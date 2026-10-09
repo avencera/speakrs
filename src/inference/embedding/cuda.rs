@@ -10,12 +10,14 @@ use std::path::{Path, PathBuf};
 
 use cudarc::driver::CudaView;
 use ndarray::{Array1, Array2, ArrayView2, Axis};
-use tracing::debug;
+use tracing::{debug, trace};
 
+use crate::inference::cuda::implementation::policy::RecipeMode;
 use crate::inference::cuda::{
     CudaError, CudaFbank, CudaGraphs, CudaMath, CudaRuntime, CudaSession, DeviceTensor,
-    EMBEDDING_DIM, EmbeddingBatch, FBANK_FRAMES, FBANK_MEL_BINS, FBANK_WINDOW_SAMPLES,
-    FbankBuffers, ResNetEmbedding, SPEAKERS_PER_CHUNK, SafetensorsFile,
+    EMBEDDING_DIM, EmbeddingBatch, EmbeddingBatchClass, FBANK_FRAMES, FBANK_MEL_BINS,
+    FBANK_WINDOW_SAMPLES, FbankBuffers, ResNetEmbedding, SPEAKERS_PER_CHUNK, SafetensorsFile,
+    SharedEmbeddingActivations,
 };
 use crate::inference::{ExecutionMode, InferenceError, ModelLoadError, TensorShapeError};
 use crate::pipeline::RuntimeConfig;
@@ -46,6 +48,8 @@ pub(super) struct CudaEmbedding {
     math: CudaMath,
     #[cfg_attr(feature = "coreml", allow(dead_code))]
     graphs: CudaGraphs,
+    #[cfg_attr(feature = "coreml", allow(dead_code))]
+    recipe_mode: RecipeMode,
     /// `[chunks * 3, 589]` speaker masks for the next batch
     masks: Vec<f32>,
     /// `[chunks, 998, 80]` host filterbanks for the next batch
@@ -71,12 +75,12 @@ struct EmbeddingState {
 // the runtime's context current on the thread that uses or frees them
 unsafe impl Send for CudaSession<EmbeddingState> {}
 
-/// The multi-mask model and its two batch classes, each allocated on first use
+/// The multi-mask model and its exact batch classes, each allocated on first use
 struct Batches {
     model: ResNetEmbedding,
     graphs: bool,
-    single: Option<EmbeddingBatch>,
-    full: Option<EmbeddingBatch>,
+    plans: [Option<EmbeddingBatch>; 5],
+    activations: Option<SharedEmbeddingActivations>,
 }
 
 impl CudaEmbedding {
@@ -95,8 +99,15 @@ impl CudaEmbedding {
 
         let math = config.cuda_embedding_math;
         let graphs = config.cuda_graphs;
-        let session = open_session(&weights, math, graphs)?;
-        Ok(Self::with_session(session, weights, math, graphs))
+        let recipe_mode = RecipeMode::new(config.cuda_segmentation_math, math);
+        let session = open_session(&weights, math, graphs, recipe_mode)?;
+        Ok(Self::with_session(
+            session,
+            weights,
+            math,
+            graphs,
+            recipe_mode,
+        ))
     }
 
     fn with_session(
@@ -104,12 +115,14 @@ impl CudaEmbedding {
         weights: PathBuf,
         math: CudaMath,
         graphs: CudaGraphs,
+        recipe_mode: RecipeMode,
     ) -> Self {
         Self {
             session,
             weights,
             math,
             graphs,
+            recipe_mode,
             masks: Vec::new(),
             fbanks: Vec::new(),
         }
@@ -118,12 +131,13 @@ impl CudaEmbedding {
     /// A handle with its own runtime, stream and device copy of the same weights
     #[cfg(not(feature = "coreml"))]
     pub(super) fn reload(&self) -> Result<Self, InferenceError> {
-        let session = open_session(&self.weights, self.math, self.graphs)?;
+        let session = open_session(&self.weights, self.math, self.graphs, self.recipe_mode)?;
         Ok(Self::with_session(
             session,
             self.weights.clone(),
             self.math,
             self.graphs,
+            self.recipe_mode,
         ))
     }
 
@@ -338,8 +352,7 @@ impl Batches {
     /// Runs `chunks` chunks whose masks are in `masks`; `fill` writes the filterbanks
     /// of a range of chunks into a batch's input
     ///
-    /// A full [`MULTI_MASK_BATCH_SIZE`] batch runs at once and anything smaller runs
-    /// one chunk at a time, the batch classes the ONNX CUDA path used
+    /// Partial batches use the largest exact class that fits each remaining range
     fn embed(
         &mut self,
         runtime: &CudaRuntime,
@@ -347,23 +360,35 @@ impl Batches {
         masks: &[f32],
         mut fill: impl FnMut(&CudaRuntime, Range<usize>, &mut DeviceTensor) -> Result<(), CudaError>,
     ) -> Result<Vec<f32>, CudaError> {
-        let class = if chunks == MULTI_MASK_BATCH_SIZE {
-            MULTI_MASK_BATCH_SIZE
-        } else {
-            1
-        };
-
         let mut embeddings = Vec::with_capacity(chunks * SPEAKERS_PER_CHUNK * EMBEDDING_DIM);
-        for start in (0..chunks).step_by(class) {
-            let rows = start..start + class;
+        let mut start = 0;
+        while let Some(class) = EmbeddingBatchClass::fitting(chunks - start) {
+            let rows = start..start + class.chunks();
+            let plan_start = std::time::Instant::now();
             let batch = self.batch(runtime, class)?;
+            let plan_us = plan_start.elapsed().as_micros();
+            let stage_start = std::time::Instant::now();
             fill(runtime, rows.clone(), batch.fbank_mut())?;
             let chunk_masks = &masks[rows.start * CHUNK_MASKS_LEN..rows.end * CHUNK_MASKS_LEN];
             batch
                 .masks_mut()
                 .copy_from_host(runtime.stream(), chunk_masks)?;
+            let stage_us = stage_start.elapsed().as_micros();
+            let launch_start = std::time::Instant::now();
             batch.forward(runtime)?;
+            let launch_us = launch_start.elapsed().as_micros();
+            let output_start = std::time::Instant::now();
             embeddings.extend(batch.download_output(runtime)?);
+            trace!(
+                target: "speakrs::timing",
+                class = class.chunks(),
+                plan_us,
+                stage_us,
+                launch_us,
+                output_wait_us = output_start.elapsed().as_micros(),
+                "CUDA embedding batch timing"
+            );
+            start = rows.end;
         }
 
         Ok(embeddings)
@@ -373,18 +398,28 @@ impl Batches {
     fn batch(
         &mut self,
         runtime: &CudaRuntime,
-        chunks: usize,
+        class: EmbeddingBatchClass,
     ) -> Result<&mut EmbeddingBatch, CudaError> {
-        let slot = if chunks == 1 {
-            &mut self.single
-        } else {
-            &mut self.full
+        let activations = match &self.activations {
+            Some(activations) => {
+                self.model
+                    .grow_activations(runtime, activations, class.chunks())?;
+                activations.clone()
+            }
+            None => {
+                let activations = self.model.activations(runtime, class.chunks())?;
+                self.activations = Some(activations.clone());
+                activations
+            }
         };
+        let slot = &mut self.plans[class.slot()];
         if let Some(batch) = slot {
             return Ok(batch);
         }
 
-        let mut batch = self.model.batch(runtime, chunks)?;
+        let mut batch = self
+            .model
+            .batch_with_activations(runtime, class.chunks(), activations)?;
         if self.graphs {
             batch.capture_graph(runtime)?;
         }
@@ -396,34 +431,38 @@ fn open_session(
     weights: &Path,
     math: CudaMath,
     graphs: CudaGraphs,
+    recipe_mode: RecipeMode,
 ) -> Result<CudaSession<EmbeddingState>, CudaError> {
     let file = SafetensorsFile::open(weights)?;
-    CudaSession::new(CudaRuntime::new(0)?, |runtime| {
-        // the filterbank stays FP32 whatever the embedding precision: TF32 moves
-        // low-energy log-mel bins by up to 2.7 for a 0.16 ms gain
-        let fbank = CudaFbank::new(runtime, CudaMath::Fp32)?;
-        let model = ResNetEmbedding::load(runtime, &file, math)?;
-        debug!(
-            capability = %runtime.compute_capability(),
-            ptx_limit = %runtime.ptx_tier(),
-            fbank_tier = %fbank.tier(),
-            embedding_tier = %model.kernel_tier(),
-            ?math,
-            ?graphs,
-            "Loaded CUDA embedding"
-        );
+    CudaSession::new(
+        CudaRuntime::new(0)?.with_recipe_mode(recipe_mode),
+        |runtime| {
+            // the filterbank stays FP32 whatever the embedding precision: TF32 moves
+            // low-energy log-mel bins by up to 2.7 for a 0.16 ms gain
+            let fbank = CudaFbank::new(runtime, CudaMath::Fp32)?;
+            let model = ResNetEmbedding::load(runtime, &file, math)?;
+            debug!(
+                capability = %runtime.compute_capability(),
+                ptx_limit = %runtime.ptx_tier(),
+                fbank_tier = %fbank.tier(),
+                embedding_tier = %model.kernel_tier(),
+                ?math,
+                ?graphs,
+                "Loaded CUDA embedding"
+            );
 
-        Ok(EmbeddingState {
-            fbank_buffers: fbank.buffers(runtime, MULTI_MASK_BATCH_SIZE)?,
-            fbank,
-            batches: Batches {
-                model,
-                graphs: graphs.enabled(),
-                single: None,
-                full: None,
-            },
-        })
-    })
+            Ok(EmbeddingState {
+                fbank_buffers: fbank.buffers(runtime, MULTI_MASK_BATCH_SIZE)?,
+                fbank,
+                batches: Batches {
+                    model,
+                    graphs: graphs.enabled(),
+                    plans: std::array::from_fn(|_| None),
+                    activations: None,
+                },
+            })
+        },
+    )
 }
 
 /// Copies device filterbank values into a batch's input, which must have their length
@@ -538,3 +577,6 @@ fn first_row(rows: Array2<f32>) -> Result<Array1<f32>, InferenceError> {
 
     Ok(rows.row(0).to_owned())
 }
+
+#[cfg(test)]
+mod tests;

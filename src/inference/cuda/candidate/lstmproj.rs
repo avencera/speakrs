@@ -1,5 +1,5 @@
-//! The four bidirectional LSTM layers on cuda-oxide input projections and the
-//! eight-unit persistent recurrence, with no library call
+//! The four bidirectional LSTM layers on cuda-oxide input projections and a
+//! persistent recurrence, with no library call
 //!
 //! Per layer, a tiled projection computes `x · Wᵀ` for every step of each direction,
 //! with the gate columns reordered so each hidden unit's four gates are adjacent.
@@ -8,6 +8,11 @@
 //! the work split and the hidden-state exchange. The reverse direction runs on a side
 //! stream, so both directions share the GPU instead of running one after the other;
 //! the next layer waits for both
+//!
+//! [`RecurrencePlan`] picks one of two recurrence kernels with bitwise identical
+//! results: the wide kernel's sixteen eight-unit blocks per tile for up to eight
+//! windows, and eight-window tiles of sixteen-unit blocks for larger batches whose
+//! grids fit the GPU together
 //!
 //! The exchange owns an allocation with a 2 MiB-aligned active subview. Producer
 //! lines, step parities, batch tiles and directions have disjoint padded regions.
@@ -27,8 +32,9 @@ use cudarc::driver::{
 };
 
 use self::layout::{
-    AlignedSpan, ExchangeLayout, GATE_COLUMNS, GROUPS, HIDDEN, KERNEL, ProjectionLayout, Schedule,
-    TENSOR_SHARED_BYTES, THREADS, pack_bias, pack_directions, pack_input_directions, padded_input,
+    AlignedSpan, ExchangeLayout, GATE_COLUMNS, GROUPS, HIDDEN, KERNEL, ProjectionLayout,
+    STATE_TILE, Schedule, TENSOR_SHARED_BYTES, THREADS, TILED_GROUPS, TILED_KERNEL, TILED_ROWS,
+    TILED_THREADS, pack_bias, pack_directions, pack_input_directions, padded_input, tiled_exchange,
 };
 use super::{
     Batches, Coverage, CoverageEntry, DeviceAttributes, Direction, FiniteContract, GeometryError,
@@ -45,8 +51,9 @@ const SPK_LSTM_PROJECTION_SMALL: &str = "spk_lstm_projection_small";
 const SPK_LSTM_PROJECTION_TF32: &str = "spk_lstm_projection_tf32";
 
 /// Kernel entries this host plan may load, in every tier
-pub(crate) const REQUIRED_KERNELS: [&str; 5] = [
+pub(crate) const REQUIRED_KERNELS: [&str; 6] = [
     KERNEL,
+    TILED_KERNEL,
     SPK_LSTM_CLEAR,
     SPK_LSTM_PROJECTION,
     SPK_LSTM_PROJECTION_SMALL,
@@ -59,6 +66,10 @@ const DIRECTIONS: [Direction; 2] = [Direction::Forward, Direction::Reverse];
 /// Projection rows below which the FP32 64 by 64 tile wins: smaller grids do not
 /// amortize the larger tiles' register footprint
 const SMALL_PROJECTION_ROWS: usize = 2048;
+/// Fewest windows for which the eight-window recurrence ran faster than the wide one
+/// on the RTX 5060 Ti and RTX 4060 Ti. It needs two tiles: one tile occupies only 16
+/// SMs, and up to eight windows ran as fast or faster on the wide kernel
+const TILED_MIN_BATCH: usize = 9;
 
 /// One layer's weights in the packed gate order, both directions stacked
 #[derive(Debug)]
@@ -84,7 +95,7 @@ pub(crate) struct Oxide {
     layers: [PackedLayer; 4],
     batch: usize,
     steps: usize,
-    schedule: Schedule,
+    plan: RecurrencePlan,
     /// `[2, batch * steps, 512]`: each direction's input projection
     gates: AlignedScratch<f32>,
     /// Aligned, padded flag and value words, cleared before each pass
@@ -141,49 +152,8 @@ impl LstmCandidate for Oxide {
         spec: LstmSpec<'_>,
         pin: LstmPin,
     ) -> Result<Self, PlanError> {
-        let LstmPin::Projected(projection) = pin else {
-            return Err(PlanError::Geometry(GeometryError::Invalid {
-                context: "lstmproj plan",
-                reason: format!("pin {pin:?} belongs to the lstm area"),
-            }));
-        };
-        let projection = InputProjection::new(runtime.device(), kernels, projection)?;
-        let recurrence = kernels.function(KERNEL)?;
-        let clear = kernels.function(SPK_LSTM_CLEAR)?;
-        let capacity = runtime.cooperative_capacity(&recurrence, THREADS, 0)?;
-        let concurrent_capacity =
-            runtime.concurrent_cooperative_capacity(&recurrence, THREADS, 0)?;
-        let schedule = Schedule::for_groups(GROUPS, spec.batch, capacity, concurrent_capacity)?;
-
-        let stream = runtime.stream();
-        let layout = projection.layout();
-        let pack = |index: usize| -> Result<PackedLayer, CudaError> {
-            let layer = spec.layers[index];
-            let input = if index == 0 { FEATURES } else { 2 * HIDDEN };
-            check_len("lstmproj input width", input, layer.input)?;
-            check_len("lstmproj W", 2 * GATE_COLUMNS * input, layer.w.len())?;
-            check_len("lstmproj R", 2 * GATE_COLUMNS * HIDDEN, layer.r.len())?;
-            check_len("lstmproj B", 4 * GATE_COLUMNS, layer.b.len())?;
-            Ok(PackedLayer {
-                input,
-                w: stream.clone_htod(&pack_input_directions(layer.w, input, layout))?,
-                r: AlignedScratch::from_host(runtime, &pack_directions(layer.r, HIDDEN))?,
-                bias: stream.clone_htod(&pack_bias(layer.b))?,
-            })
-        };
-
-        Ok(Self {
-            projection,
-            recurrence,
-            clear,
-            layers: [pack(0)?, pack(1)?, pack(2)?, pack(3)?],
-            batch: spec.batch,
-            steps: spec.frames,
-            schedule,
-            gates: AlignedScratch::zeros(runtime, 2 * spec.batch * spec.frames * GATE_COLUMNS)?,
-            state: Exchange::new(runtime, schedule.tiles)?,
-            side: SideStream::new(runtime)?,
-        })
+        let recurrence = RecurrencePlan::select(runtime, kernels, spec.batch)?;
+        Self::with_recurrence(runtime, kernels, spec, pin, recurrence)
     }
 
     fn enqueue(
@@ -278,6 +248,56 @@ fn tf32_projection_accurate(capability: ComputeCapability, batch: usize) -> bool
 }
 
 impl Oxide {
+    /// [`LstmCandidate::plan`] with an explicit recurrence plan, so both kernels can run
+    /// the same batch
+    pub(crate) fn with_recurrence(
+        runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
+        spec: LstmSpec<'_>,
+        pin: LstmPin,
+        plan: RecurrencePlan,
+    ) -> Result<Self, PlanError> {
+        let LstmPin::Projected(projection) = pin else {
+            return Err(PlanError::Geometry(GeometryError::Invalid {
+                context: "lstmproj plan",
+                reason: format!("pin {pin:?} belongs to the lstm area"),
+            }));
+        };
+        let projection = InputProjection::new(runtime.device(), kernels, projection)?;
+        let clear = kernels.function(SPK_LSTM_CLEAR)?;
+        let recurrence = plan.function(kernels)?;
+
+        let stream = runtime.stream();
+        let layout = projection.layout();
+        let pack = |index: usize| -> Result<PackedLayer, CudaError> {
+            let layer = spec.layers[index];
+            let input = if index == 0 { FEATURES } else { 2 * HIDDEN };
+            check_len("lstmproj input width", input, layer.input)?;
+            check_len("lstmproj W", 2 * GATE_COLUMNS * input, layer.w.len())?;
+            check_len("lstmproj R", 2 * GATE_COLUMNS * HIDDEN, layer.r.len())?;
+            check_len("lstmproj B", 4 * GATE_COLUMNS, layer.b.len())?;
+            Ok(PackedLayer {
+                input,
+                w: stream.clone_htod(&pack_input_directions(layer.w, input, layout))?,
+                r: AlignedScratch::from_host(runtime, &pack_directions(layer.r, HIDDEN))?,
+                bias: stream.clone_htod(&pack_bias(layer.b))?,
+            })
+        };
+
+        Ok(Self {
+            projection,
+            recurrence,
+            clear,
+            layers: [pack(0)?, pack(1)?, pack(2)?, pack(3)?],
+            batch: spec.batch,
+            steps: spec.frames,
+            plan,
+            gates: AlignedScratch::zeros(runtime, 2 * spec.batch * spec.frames * GATE_COLUMNS)?,
+            state: Exchange::new(runtime, plan.exchange_layout())?,
+            side: SideStream::new(runtime)?,
+        })
+    }
+
     /// Zeroes the exchange state, so no word from an earlier pass carries a flag this
     /// pass expects
     fn clear_state(&self, stream: &CudaStream) -> Result<(), CudaError> {
@@ -315,7 +335,7 @@ impl Oxide {
         // recorded there after the merge
         let (output, _output_record) = output.device_ptr_mut(stream);
         let (state, _state_record) = state.device_ptr_mut(stream);
-        let concurrent = self.schedule.concurrent;
+        let concurrent = self.plan.concurrent();
         if concurrent {
             self.side.split(stream)?;
         }
@@ -372,9 +392,43 @@ impl Oxide {
         let batch = to_u32(context, self.batch)?;
         let steps = to_u32(context, self.steps)?;
         let direction = to_u32(context, direction)?;
-        let tile_rows = to_u32(context, self.schedule.tile_rows)?;
+        let schedule = match self.plan {
+            RecurrencePlan::Wide(schedule) => schedule,
+            RecurrencePlan::Tiled { tiles } => {
+                let first = 0u32;
+                let mut builder = stream.launch_builder(&self.recurrence);
+                builder
+                    .arg(&gates)
+                    .arg(&lens[0])
+                    .arg(&r)
+                    .arg(&lens[1])
+                    .arg(&bias)
+                    .arg(&lens[2])
+                    .arg(&output)
+                    .arg(&state)
+                    .arg(&batch)
+                    .arg(&steps)
+                    .arg(&direction)
+                    .arg(&first)
+                    .arg(&flag_base);
+                let config = LaunchConfig {
+                    grid_dim: (TILED_GROUPS as u32, to_u32(context, tiles)?, 1),
+                    block_dim: (TILED_THREADS, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                // SAFETY: the arguments follow the PTX signature of
+                // `spk_lstm_recurrence_tiled`, which is `spk_lstm_recurrence`'s without
+                // `tile_rows`. Views, alignment and flags are as for the wide launch
+                // below; the state holds `tiled_exchange::TILE` words per tile. The plan
+                // chose this kernel only where both directions' grids fit the context's
+                // joint cooperative budget
+                unsafe { builder.launch_cooperative(config) }?;
+                return Ok(());
+            }
+        };
+        let tile_rows = to_u32(context, schedule.tile_rows)?;
 
-        for (first, tiles) in self.schedule.launches() {
+        for (first, tiles) in schedule.launches() {
             let first = to_u32(context, first)?;
             let mut builder = stream.launch_builder(&self.recurrence);
             builder
@@ -452,10 +506,99 @@ struct Exchange {
 }
 
 impl Exchange {
-    fn new(runtime: &CudaRuntime, tiles: usize) -> Result<Self, CudaError> {
-        let layout = ExchangeLayout::new(tiles);
+    fn new(runtime: &CudaRuntime, layout: ExchangeLayout) -> Result<Self, CudaError> {
         let buffer = AlignedScratch::zeros(runtime, layout.words())?;
         Ok(Self { buffer, layout })
+    }
+}
+
+/// The recurrence kernel a plan runs and how its batch tiles launch
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecurrencePlan {
+    /// Sixteen eight-unit blocks per tile of 8, 16 or 32 windows; the faster kernel for
+    /// a lone window, and the fallback when the tiled grids do not fit together
+    Wide(Schedule),
+    /// Eight sixteen-unit blocks per eight-window tile, both directions resident at once
+    Tiled { tiles: usize },
+}
+
+impl RecurrencePlan {
+    /// The measured choice for `batch` windows on this context
+    pub(crate) fn select(
+        runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
+        batch: usize,
+    ) -> Result<Self, PlanError> {
+        if let Some(plan) = Self::tiled(batch, Self::tiled_budget(runtime, kernels)?) {
+            return Ok(plan);
+        }
+
+        Self::wide(runtime, kernels, batch)
+    }
+
+    /// Blocks of the tiled kernel that both directions' cooperative grids can keep
+    /// resident together, or `None` when the context's budget is unknown
+    pub(crate) fn tiled_budget(
+        runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
+    ) -> Result<Option<usize>, PlanError> {
+        let tiled = kernels.function(TILED_KERNEL)?;
+        let capacity = runtime.cooperative_capacity(&tiled, TILED_THREADS, 0)?;
+        Ok(runtime
+            .concurrent_cooperative_capacity(&tiled, TILED_THREADS, 0)?
+            .map(|joint| joint.min(capacity)))
+    }
+
+    /// The wide kernel's tile schedule for `batch` windows on this context
+    pub(crate) fn wide(
+        runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
+        batch: usize,
+    ) -> Result<Self, PlanError> {
+        let wide = kernels.function(KERNEL)?;
+        let capacity = runtime.cooperative_capacity(&wide, THREADS, 0)?;
+        let concurrent_capacity = runtime.concurrent_cooperative_capacity(&wide, THREADS, 0)?;
+        let schedule = Schedule::for_groups(GROUPS, batch, capacity, concurrent_capacity)?;
+        Ok(Self::Wide(schedule))
+    }
+
+    fn function(self, kernels: &LoadedKernels) -> Result<CudaFunction, PlanError> {
+        let name = match self {
+            Self::Wide(_) => KERNEL,
+            Self::Tiled { .. } => TILED_KERNEL,
+        };
+        Ok(kernels.function(name)?)
+    }
+
+    /// The tiled plan when `batch` is large enough and both directions' grids fit
+    /// `budget` resident blocks together; an unknown budget keeps the wide kernel
+    pub(crate) fn tiled(batch: usize, budget: Option<usize>) -> Option<Self> {
+        if batch < TILED_MIN_BATCH {
+            return None;
+        }
+
+        Self::tiled_fit(batch, budget)
+    }
+
+    /// The tiled plan for any batch whose grids fit `budget` together
+    pub(crate) fn tiled_fit(batch: usize, budget: Option<usize>) -> Option<Self> {
+        let tiles = batch.div_ceil(TILED_ROWS);
+        let fits = budget.is_some_and(|budget| 2 * TILED_GROUPS * tiles <= budget);
+        fits.then_some(Self::Tiled { tiles })
+    }
+
+    fn concurrent(self) -> bool {
+        match self {
+            Self::Wide(schedule) => schedule.concurrent,
+            Self::Tiled { .. } => true,
+        }
+    }
+
+    fn exchange_layout(self) -> ExchangeLayout {
+        match self {
+            Self::Wide(schedule) => ExchangeLayout::new(schedule.tiles, STATE_TILE),
+            Self::Tiled { tiles } => ExchangeLayout::new(tiles, tiled_exchange::TILE),
+        }
     }
 }
 
@@ -607,7 +750,11 @@ fn to_u32(context: &'static str, value: usize) -> Result<u32, CudaError> {
 
 impl super::DriverCandidate for Oxide {
     const AREA: KernelModule = KernelModule::LstmProj;
-    fn driver_coverage(tier: PtxTier) -> Coverage {
+    fn driver_coverage(
+        tier: PtxTier,
+        _device: &DeviceAttributes,
+        _fp16: super::Fp16Policy,
+    ) -> Coverage {
         Self::coverage(tier)
     }
     fn speed_scope(
@@ -633,6 +780,7 @@ impl super::DriverCandidate for Oxide {
         math: CudaMath,
         device: &DeviceAttributes,
         tier: PtxTier,
+        _fp16: super::Fp16Policy,
     ) -> Result<super::ConfigPin, PlanError> {
         Ok(super::ConfigPin::Lstm(LstmPin::Projected(projection_rule(
             ProjectionTarget {

@@ -87,6 +87,26 @@ impl Libraries {
         }
     }
 
+    /// Query the same loaded libraries and handle that execute Library plans
+    pub(super) fn versions(
+        &self,
+        stream: &Arc<CudaStream>,
+    ) -> Result<super::tuning::LibraryVersions, CudaError> {
+        self.prepare(CudaLibrary::Cublas, stream)?;
+        self.prepare(CudaLibrary::Cudnn, stream)?;
+        let mut cublas = 0;
+        // safety: the prepared handle is live and the version output is writable
+        unsafe { cudarc::cublas::sys::cublasGetVersion_v2(*self.blas()?.handle(), &mut cublas) }
+            .result()?;
+        let cudnn = cudarc::cudnn::result::get_version();
+        if cublas <= 0 || cudnn == 0 {
+            return Err(super::tuning::invalid(
+                "numerical-library versions must be positive",
+            ));
+        }
+        Ok(super::tuning::LibraryVersions::Hybrid { cudnn, cublas })
+    }
+
     /// Access an already prepared handle without loading during forward or capture
     pub(super) fn blas(&self) -> Result<&CudaBlas, CudaError> {
         let value = self
@@ -137,7 +157,7 @@ fn set_math(blas: &CudaBlas, math: CudaMath) -> Result<(), CublasError> {
 }
 
 // these are the functions reached by speakrs and its cudarc wrappers, including
-// handle/descriptors' destructors and the qualification version queries
+// handle/descriptors' destructors and development version queries
 const CUBLAS_SYMBOLS: &[&CStr] = &[
     c"cublasCreate_v2",
     c"cublasDestroy_v2",

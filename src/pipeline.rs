@@ -364,6 +364,7 @@ impl<'a> PipelineRunner<'a> {
         let total_ms = run_start.elapsed().as_millis();
         let audio_secs = audio.len() as f64 / 16_000.0;
         trace!(
+            target: "speakrs::timing",
             %file_id,
             inference_ms,
             post_ms,
@@ -574,6 +575,7 @@ impl<'a> PipelineRunner<'a> {
         let num_chunks = concurrent_result.num_chunks;
         let layout = layout.with_num_chunks(num_chunks);
         debug!(
+            target: "speakrs::timing",
             chunks = concurrent_result.segmentations.shape()[0],
             speakers = concurrent_result.segmentations.shape()[2],
             inference_ms = inference_elapsed.as_millis(),

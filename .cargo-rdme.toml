@@ -1,1 +1,4 @@
 heading-base-level = 1
+
+[intralinks]
+features = ["cpu", "cuda", "migraphx", "load-dynamic", "_metrics"]

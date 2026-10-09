@@ -310,7 +310,11 @@ impl FbankCandidate for Oxide {
 
 impl super::DriverCandidate for Oxide {
     const AREA: KernelModule = KernelModule::FbankDft;
-    fn driver_coverage(tier: PtxTier) -> Coverage {
+    fn driver_coverage(
+        tier: PtxTier,
+        _device: &crate::inference::cuda::device::DeviceAttributes,
+        _fp16: super::Fp16Policy,
+    ) -> Coverage {
         Self::coverage(tier)
     }
     fn broad_evidence() -> Option<&'static crate::inference::cuda::implementation::BroadEvidence> {
@@ -367,6 +371,7 @@ impl super::DriverCandidate for Oxide {
         math: CudaMath,
         _device: &crate::inference::cuda::device::DeviceAttributes,
         _tier: PtxTier,
+        _fp16: super::Fp16Policy,
     ) -> Result<super::ConfigPin, PlanError> {
         Self::implemented_pin(FbankSpec::new(batch, math)?).map(super::ConfigPin::Fbank)
     }
