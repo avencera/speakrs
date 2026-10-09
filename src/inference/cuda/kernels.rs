@@ -180,6 +180,22 @@ impl ModuleRequest {
         Ok(())
     }
 
+    /// Resolve a forced JIT diagnostic without changing the selected tier
+    pub(crate) fn diagnostic_request(self, force_jit: bool) -> Result<Self, CudaError> {
+        if !force_jit {
+            return Ok(self);
+        }
+        let embedded =
+            self.area
+                .variants()
+                .embedded(self.tier)
+                .ok_or(CudaError::ArtifactUnavailable {
+                    module: self.area.name(),
+                    artifact: self.artifact,
+                })?;
+        Ok(self.ptx_jit(ArtifactHash::of(embedded.text.as_bytes())))
+    }
+
     /// The same area and tier, loaded through driver JIT of the tier's embedded PTX
     pub(crate) const fn ptx_jit(self, sha256: ArtifactHash) -> Self {
         Self::new(self.area, self.tier, LoadedArtifact::PtxJit { sha256 })

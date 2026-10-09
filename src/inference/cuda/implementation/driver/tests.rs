@@ -15,6 +15,7 @@ struct Fixture {
     device: DeviceAttributes,
     loads: Vec<ModuleRequest>,
     limit: PtxTier,
+    force_jit: bool,
 }
 
 impl Fixture {
@@ -27,11 +28,16 @@ impl Fixture {
                 .build(),
             loads: vec![],
             limit: PtxTier::Sm120,
+            force_jit: false,
         }
     }
 }
 
 impl Modules for &mut Fixture {
+    fn effective_request(&self, request: ModuleRequest) -> Result<ModuleRequest, CudaError> {
+        request.diagnostic_request(self.force_jit)
+    }
+
     fn device(&self) -> &DeviceAttributes {
         &self.device
     }
@@ -636,5 +642,51 @@ fn tensor_core_trunk_kernels_are_selected_only_for_tf32_on_measured_capabilities
                 "{major}.{minor} {name}: {selected:?}"
             );
         }
+    }
+}
+
+#[test]
+fn forced_jit_fixes_driver_and_hybrid_identity_without_cubin_speed_evidence() {
+    use crate::inference::cuda::kernels::LoadedArtifact;
+
+    for selection in [super::Selection::DriverOnly, super::Selection::Production] {
+        let mut fixture = Fixture::new();
+        fixture.force_jit = true;
+        fixture.device = Builder::new(ComputeCapability::new(8, 9)).build();
+        let selected_request = super::super::production_module(
+            KernelModule::Sincnet,
+            &fixture.device,
+            fixture.limit,
+            KernelModule::Sincnet.variants(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            selected_request.artifact(),
+            LoadedArtifact::Cubin { .. }
+        ));
+        let selected = select_from(
+            &[Area::candidate::<BroadStub>()],
+            BoundaryId::named("sincnet.conv0.abs_pool"),
+            1,
+            CudaMath::Fp32,
+            &mut &mut fixture,
+            selection,
+        )
+        .unwrap();
+        let Some(Selected::Oxide(token)) = selected else {
+            panic!("forced JIT must select the port")
+        };
+        assert_eq!(
+            token.target.module,
+            selected_request.diagnostic_request(true).unwrap()
+        );
+        assert!(matches!(
+            token.target.module.artifact(),
+            LoadedArtifact::PtxJit { .. }
+        ));
+        assert_eq!(fixture.loads, [token.target.module]);
+        assert_eq!(token.evidence, TokenEvidence::Implemented);
+        assert!(!token.speed_measured());
     }
 }

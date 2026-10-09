@@ -127,6 +127,8 @@ pub(super) fn select_from(
         else {
             continue;
         };
+        let selected_request = request;
+        let request = modules.effective_request(request)?;
         if !(candidate.coverage)(request.tier()).covers(boundary.name(), batch, math) {
             continue;
         }
@@ -196,10 +198,15 @@ pub(super) fn select_from(
                 device: modules.device().capability(),
             },
             pin: PlanPin::Pinned(pin),
-            evidence: scope.map_or(TokenEvidence::Implemented, |scope| TokenEvidence::Port {
-                scope,
-                summary: (candidate.summary)(math),
-            }),
+            evidence: if request != selected_request {
+                // the port speed scope describes the selected artifact, not forced JIT
+                TokenEvidence::Implemented
+            } else {
+                scope.map_or(TokenEvidence::Implemented, |scope| TokenEvidence::Port {
+                    scope,
+                    summary: (candidate.summary)(math),
+                })
+            },
             selection,
         }))));
     }
