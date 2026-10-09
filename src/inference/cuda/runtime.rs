@@ -117,7 +117,7 @@ impl CudaRuntime {
             tuning: None,
         };
         if read_tune_file {
-            runtime.tuning = TuneControl::load(&runtime.device, ptx_tier);
+            runtime.tuning = TuneControl::load(&runtime);
         }
         debug!(
             device_name = runtime.device.name(),
@@ -155,6 +155,20 @@ impl CudaRuntime {
         self.tuning
             .as_ref()
             .and_then(|tuning| tuning.plan_choice(boundary, batch, math))
+    }
+
+    pub(crate) fn tuning_library_versions(
+        &self,
+    ) -> Result<super::tuning::LibraryVersions, CudaError> {
+        #[cfg(feature = "_cuda-libraries")]
+        {
+            self.context.bind_to_thread()?;
+            self.libraries.versions(&self.stream)
+        }
+        #[cfg(not(feature = "_cuda-libraries"))]
+        {
+            Ok(super::tuning::LibraryVersions::DriverOnly)
+        }
     }
 
     pub(crate) fn is_tuning(&self) -> bool {

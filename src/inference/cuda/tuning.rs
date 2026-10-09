@@ -120,7 +120,7 @@ impl From<file::FileError> for CudaTuneError {
 pub fn tune_cuda(options: &CudaTuneOptions) -> Result<CudaTuneReport, CudaTuneError> {
     let runtime = CudaRuntime::for_tuning(options.device, BenchKind::CatalogueSlot(0))?;
     let catalogue = Catalogue::new(runtime.device(), runtime.ptx_tier())?;
-    let key = device_key(runtime.device(), Some(&catalogue))?;
+    let key = device_key(&runtime, Some(&catalogue))?;
     let path = file::path(runtime.device(), options.output_path.as_deref())?;
     let measurements = bench::run(options, runtime, &catalogue)?;
     let (rows, entries) = select_winners(measurements)?;
@@ -136,6 +136,14 @@ pub fn tune_cuda(options: &CudaTuneOptions) -> Result<CudaTuneReport, CudaTuneEr
         written: !options.dry_run,
         rows,
     })
+}
+
+/// Numerical implementations compared during tuning, separate from driver-only runs
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum LibraryVersions {
+    DriverOnly,
+    Hybrid { cudnn: usize, cublas: i32 },
 }
 
 /// A validated tuple; boundary-specific batch restrictions cannot be omitted
@@ -321,7 +329,9 @@ impl TuneControl {
         })
     }
 
-    pub(crate) fn load(device: &DeviceAttributes, tier: PtxTier) -> Option<Self> {
+    pub(crate) fn load(runtime: &CudaRuntime) -> Option<Self> {
+        let device = runtime.device();
+        let tier = runtime.ptx_tier();
         let load = || -> Result<Option<Self>, CudaTuneError> {
             // computing only the path does not hash artifacts or load candidate modules
             let path = file::path(device, None)?;
@@ -329,7 +339,7 @@ impl TuneControl {
                 return Ok(None);
             };
             let catalogue = Catalogue::new(device, tier)?;
-            let expected = device_key(device, Some(&catalogue))?;
+            let expected = device_key(runtime, Some(&catalogue))?;
             let selection = TuneSelection::File(file.validate(&expected, &catalogue)?);
             tracing::info!(path = %path.display(), "Loaded CUDA tune file");
             Ok(Some(Self {
@@ -537,15 +547,17 @@ fn select_winners(
 }
 
 fn device_key(
-    device: &DeviceAttributes,
+    runtime: &CudaRuntime,
     catalogue: Option<&Catalogue>,
 ) -> Result<file::DeviceKey, CudaTuneError> {
+    let device = runtime.device();
     let cc = device.capability();
     let mut key = file::DeviceKey {
         device_name: device.name().into(),
         capability: [cc.major, cc.minor],
         sm_count: device.multiprocessors().get(),
         driver_version: driver_version::DriverVersion::read()?,
+        libraries: runtime.tuning_library_versions()?,
         speakrs_version: env!("CARGO_PKG_VERSION").into(),
         artifact_version: String::new(),
         accuracy_policy: accuracy::Policy::IDENTITY.into(),

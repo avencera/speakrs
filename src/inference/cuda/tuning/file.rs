@@ -7,11 +7,11 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::driver_version::DriverVersion;
-use super::{ApprovedChoice, Catalogue, Tuple};
+use super::{ApprovedChoice, Catalogue, LibraryVersions, Tuple};
 use crate::inference::cuda::CudaMath;
 use crate::inference::cuda::device::DeviceAttributes;
 
-const FORMAT_VERSION: u32 = 2;
+const FORMAT_VERSION: u32 = 3;
 const MAX_FILE_BYTES: u64 = 4 << 20;
 
 /// Every identity component must match before any row is used
@@ -22,6 +22,7 @@ pub(super) struct DeviceKey {
     pub(super) capability: [u32; 2],
     pub(super) sm_count: u32,
     pub(super) driver_version: DriverVersion,
+    pub(super) libraries: LibraryVersions,
     pub(super) speakrs_version: String,
     pub(super) artifact_version: String,
     pub(super) accuracy_policy: String,
@@ -199,7 +200,9 @@ impl ValidatedFile {
 
 #[derive(Debug, thiserror::Error)]
 pub(super) enum FileError {
-    #[error("tune-file device, driver, speakrs, artifact or accuracy-policy key does not match")]
+    #[error(
+        "tune-file device, driver, numerical-library, speakrs, artifact or accuracy-policy key does not match"
+    )]
     KeyMismatch,
     #[error("invalid CUDA tune file: {0}")]
     Invalid(String),

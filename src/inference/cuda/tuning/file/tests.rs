@@ -15,6 +15,7 @@ fn key() -> DeviceKey {
         capability: [8, 9],
         sm_count: 34,
         driver_version: DriverVersion::Nvml("595.91.07".into()),
+        libraries: crate::inference::cuda::tuning::LibraryVersions::DriverOnly,
         speakrs_version: "0.6.0".into(),
         artifact_version: "exact-artifact-and-catalogue-digest".into(),
         accuracy_policy: crate::inference::cuda::tuning::accuracy::Policy::IDENTITY.into(),
@@ -235,4 +236,40 @@ fn the_old_string_key_is_rejected_before_key_decoding() {
         Err(FileError::Invalid(reason)) if reason == "unsupported tune-file format"
     ));
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn numerical_library_versions_are_required_even_for_a_kernel_winner() {
+    use crate::inference::cuda::tuning::LibraryVersions;
+    let (catalogue, mut file) = fixture();
+    file.key.libraries = LibraryVersions::Hybrid {
+        cudnn: 91000,
+        cublas: 120604,
+    };
+    assert!(file.clone().validate(&file.key, &catalogue).is_ok());
+    for libraries in [
+        LibraryVersions::Hybrid {
+            cudnn: 91001,
+            cublas: 120604,
+        },
+        LibraryVersions::Hybrid {
+            cudnn: 91000,
+            cublas: 120605,
+        },
+        LibraryVersions::DriverOnly,
+    ] {
+        let mut expected = file.key.clone();
+        expected.libraries = libraries;
+        assert!(matches!(
+            file.clone().validate(&expected, &catalogue),
+            Err(FileError::KeyMismatch)
+        ));
+    }
+    let (catalogue, driver_file) = fixture();
+    assert!(
+        driver_file
+            .clone()
+            .validate(&driver_file.key, &catalogue)
+            .is_ok()
+    );
 }
