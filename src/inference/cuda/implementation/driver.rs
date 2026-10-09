@@ -269,11 +269,19 @@ pub(super) fn select_from(
         let mut pin = pin.map_err(pin_error)?;
 
         if selection == Selection::Production
-            && !Recipe::measured_device(modules.device(), modules.tier_limit())
+            && Recipe::accuracy_exception(
+                boundary,
+                batch,
+                math,
+                pin,
+                modules.device(),
+                modules.tier_limit(),
+            )
+            .is_none()
             && crate::inference::cuda::tuning::accuracy::Policy::approve(boundary, math, pin)
                 .is_none()
         {
-            // class defaults cannot inherit accuracy from implementation coverage
+            // unlisted recipe tuples and class defaults need independent approval
             let alternate = (candidate.tuning_fp32_pin)(
                 boundary,
                 batch,

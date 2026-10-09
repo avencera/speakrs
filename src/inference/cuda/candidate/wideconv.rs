@@ -464,6 +464,46 @@ pub(crate) enum Pin {
 }
 
 impl Pin {
+    /// Exact T4 FP32 fallback pins measured by ambitious/fp16 and PR 40 range-guard
+    /// checks, independent of the current device selection rule
+    pub(crate) fn measured_t4_fallback(name: &str, batch: usize, math: CudaMath) -> Option<Self> {
+        if math != CudaMath::Tf32 || !matches!(batch, 1 | 4 | 8 | 16 | 32) {
+            return None;
+        }
+
+        let partition = match name {
+            "resnet.layer3.0.conv2"
+            | "resnet.layer3.1.conv1"
+            | "resnet.layer3.1.conv2"
+            | "resnet.layer3.2.conv1"
+            | "resnet.layer3.2.conv2"
+            | "resnet.layer3.3.conv1"
+            | "resnet.layer3.3.conv2"
+            | "resnet.layer3.4.conv1"
+            | "resnet.layer3.4.conv2"
+            | "resnet.layer3.5.conv1"
+            | "resnet.layer3.5.conv2" => Partition::Whole,
+            "resnet.layer4.0.conv2"
+            | "resnet.layer4.1.conv1"
+            | "resnet.layer4.1.conv2"
+            | "resnet.layer4.2.conv1"
+            | "resnet.layer4.2.conv2" => {
+                if batch == 1 {
+                    Partition::Four
+                } else {
+                    Partition::Whole
+                }
+            }
+            _ => return None,
+        };
+
+        Some(Self::Configured(Config {
+            algorithm: Algorithm::Winograd(WinogradProducts::Fp32),
+            partition,
+            split_cells: SplitCells::All,
+        }))
+    }
+
     /// Wide FP16 tiles for a compiled same-channel stride-1 boundary in TF32 mode, the
     /// FP16 shapes measured outside Turing
     pub(crate) fn fp16_wide(name: &str, batch: usize, math: CudaMath) -> Option<Self> {
@@ -519,6 +559,36 @@ impl Pin {
             Shape::C128Stride2 if batch < 8 => return None,
             Shape::C128 | Shape::C256 if batch < 32 => Fp16Tiles::Narrow,
             Shape::C128 | Shape::C256 | Shape::C64Stride2 | Shape::C128Stride2 => Fp16Tiles::Wide,
+            _ => return None,
+        };
+        shape.fp16_entry(tiles)?;
+        Some(Self::Configured(Config {
+            algorithm: Algorithm::Fp16(tiles),
+            partition: Partition::Whole,
+            split_cells: SplitCells::All,
+        }))
+    }
+
+    /// FP16 tiles on every 3x3 trunk boundary but the stem in TF32 mode, at the RTX 4090
+    /// points where they beat both the TF32 rule and cuDNN
+    ///
+    /// The 32- and 64-channel layers, stride 2 included, take wide tiles at every batch,
+    /// and the 64->128 stride-2 layer from batch 4. The 128-channel layers take narrow
+    /// tiles from batch 4 and the 256-channel ones from batch 8: at batch 4 the TF32
+    /// rule runs them at 0.059 ms against 0.073 ms for narrow tiles. The 128->256
+    /// stride-2 layer takes narrow tiles from batch 4 and wide ones at batch 32. At
+    /// batch 1 the TF32 kernels win every layer of 64 or more input channels
+    pub(crate) fn measured_rtx4090_fp16(name: &str, batch: usize, math: CudaMath) -> Option<Self> {
+        if math != CudaMath::Tf32 {
+            return None;
+        }
+
+        let shape = Shape::of(model_conv(name, batch, math).ok()?).ok()?;
+        let tiles = match (shape, batch) {
+            (Shape::C32 | Shape::C32Stride2 | Shape::C64, _) => Fp16Tiles::Wide,
+            (_, 1) | (Shape::C256, 4) => return None,
+            (Shape::C64Stride2, _) | (Shape::C128Stride2, 32) => Fp16Tiles::Wide,
+            (Shape::C128 | Shape::C256 | Shape::C128Stride2, _) => Fp16Tiles::Narrow,
             _ => return None,
         };
         shape.fp16_entry(tiles)?;
@@ -2157,6 +2227,37 @@ pub(super) fn trunk_speed_scope(
     measured.then_some(super::super::implementation::SpeedScope::MeasuredCapability { capability })
 }
 
+/// The 4060 Ti FP16 recipe adds the same-channel 32- and 64-channel layers in TF32 mode
+const RTX4060TI_FP16_COVERAGE: [CoverageEntry; 3] = [
+    CoverageEntry {
+        layers: &LAYERS,
+        batches: Batches::All,
+        maths: Maths::All,
+    },
+    CoverageEntry {
+        layers: &C64_LAYERS,
+        batches: Batches::All,
+        maths: Maths::Only(&[CudaMath::Tf32]),
+    },
+    CoverageEntry {
+        layers: &C32_LAYERS,
+        batches: Batches::All,
+        maths: Maths::Only(&[CudaMath::Tf32]),
+    },
+];
+
+/// The 4090 FP16 recipe also runs the 32->64 stride-2 layer on FP16 tiles
+const RTX4090_FP16_COVERAGE: [CoverageEntry; 4] = [
+    RTX4060TI_FP16_COVERAGE[0],
+    RTX4060TI_FP16_COVERAGE[1],
+    RTX4060TI_FP16_COVERAGE[2],
+    CoverageEntry {
+        layers: &C32_STRIDE2_LAYERS,
+        batches: Batches::All,
+        maths: Maths::Only(&[CudaMath::Tf32]),
+    },
+];
+
 impl super::DriverCandidate for Oxide {
     const AREA: super::KernelModule = super::KernelModule::Wideconv;
 
@@ -2180,27 +2281,11 @@ impl super::DriverCandidate for Oxide {
 
     fn driver_coverage(tier: PtxTier, device: &DeviceAttributes, fp16: Fp16Policy) -> Coverage {
         use crate::inference::cuda::implementation::policy::Recipe;
-        if fp16.allows() && Recipe::fp16_device(device, tier) == Some(Recipe::Rtx4060Ti) {
-            return Coverage(&[
-                CoverageEntry {
-                    layers: &LAYERS,
-                    batches: Batches::All,
-                    maths: Maths::All,
-                },
-                CoverageEntry {
-                    layers: &C64_LAYERS,
-                    batches: Batches::All,
-                    maths: Maths::Only(&[CudaMath::Tf32]),
-                },
-                CoverageEntry {
-                    layers: &C32_LAYERS,
-                    batches: Batches::All,
-                    maths: Maths::Only(&[CudaMath::Tf32]),
-                },
-            ]);
+        match Recipe::fp16_device(device, tier).filter(|_| fp16.allows()) {
+            Some(Recipe::Rtx4060Ti) => Coverage(&RTX4060TI_FP16_COVERAGE),
+            Some(Recipe::Rtx4090) => Coverage(&RTX4090_FP16_COVERAGE),
+            _ => Self::coverage_on(tier, device.capability(), fp16),
         }
-
-        Self::coverage_on(tier, device.capability(), fp16)
     }
 
     fn speed_scope(

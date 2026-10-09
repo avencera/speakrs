@@ -655,6 +655,24 @@ pub(crate) struct SegdensePin {
 }
 
 impl SegdensePin {
+    /// The exact FP16 dense-head pin validated on the 34-SM RTX 4060 Ti
+    pub(crate) const fn measured_rtx4060ti_embedding() -> Self {
+        Self {
+            choice: Choice::split(Entry::EmbedB32F16, 17),
+            math: CudaMath::Tf32,
+            tier: PtxTier::Sm80,
+        }
+    }
+
+    /// The exact FP16 dense-head pin validated on the 36-SM RTX 5060 Ti
+    pub(crate) const fn measured_rtx5060ti_embedding() -> Self {
+        Self {
+            choice: Choice::split(Entry::EmbedB32F16, 18),
+            math: CudaMath::Tf32,
+            tier: PtxTier::Sm80,
+        }
+    }
+
     /// The configuration the device rule picks for this boundary on the module
     /// `tier` and `device`
     pub(crate) fn select(

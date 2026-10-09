@@ -1352,6 +1352,84 @@ fn measured_rtx_recipes_use_fp16_only_at_the_4060_ti_point() {
     }
 }
 
+/// The 4090 recipe reaches the 32->64 stride-2 layer through its own coverage, keeps the
+/// TF32 rule below each crossover batch, and resolves alike with and without libraries
+#[test]
+#[cfg(feature = "_cuda-libraries")]
+fn measured_rtx4090_recipe_routes_fp16_from_each_crossover_batch() {
+    use super::super::policy::{Recipe, RecipeMode};
+    use crate::inference::cuda::candidate::{WideconvAlgorithm, WideconvFp16Tiles, WideconvPin};
+    let rtx4090 = |sms| {
+        Builder::new(ComputeCapability::new(8, 9))
+            .multiprocessors(sms)
+            .shared_optin_bytes(101376)
+            .name("NVIDIA GeForce RTX 4090")
+            .build()
+    };
+    let mut fixture = Fixture::new();
+    fixture.device = rtx4090(128);
+    fixture.recipe_mode = RecipeMode::Fp32SegmentationTf32Embedding;
+    let fp16 = |name: &str, batch, fixture: &mut Fixture| {
+        let boundary = BoundaryId::named(name);
+        let Selected::Oxide(hybrid) = PlanRequest::Hybrid
+            .resolve(boundary, batch, CudaMath::Tf32, &mut *fixture)
+            .unwrap()
+        else {
+            panic!("{name} b{batch}: measured trunk")
+        };
+        let Selected::Oxide(driver) = PlanRequest::DriverOnly
+            .resolve(boundary, batch, CudaMath::Tf32, fixture)
+            .unwrap()
+        else {
+            panic!("{name} b{batch}: driver trunk")
+        };
+        assert_eq!(hybrid.pin, driver.pin, "{name} b{batch}");
+        match hybrid.pin {
+            PlanPin::Pinned(ConfigPin::Wideconv(WideconvPin::Configured(config))) => {
+                match config.algorithm {
+                    WideconvAlgorithm::Fp16(tiles) => Some(tiles),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    };
+
+    for batch in [1, 4, 8, 16, 32] {
+        for name in [
+            "resnet.layer1.0.conv1",
+            "resnet.layer2.0.conv1",
+            "resnet.layer2.1.conv2",
+        ] {
+            assert_eq!(
+                fp16(name, batch, &mut fixture),
+                Some(WideconvFp16Tiles::Wide),
+                "{name} b{batch}"
+            );
+        }
+    }
+    assert_eq!(fp16("resnet.layer3.1.conv1", 1, &mut fixture), None);
+    assert_eq!(
+        fp16("resnet.layer3.1.conv1", 4, &mut fixture),
+        Some(WideconvFp16Tiles::Narrow)
+    );
+    assert_eq!(fp16("resnet.layer4.1.conv1", 4, &mut fixture), None);
+    assert_eq!(
+        fp16("resnet.layer4.1.conv1", 8, &mut fixture),
+        Some(WideconvFp16Tiles::Narrow)
+    );
+    assert_eq!(
+        fp16("resnet.layer4.0.conv1", 32, &mut fixture),
+        Some(WideconvFp16Tiles::Wide)
+    );
+    assert_eq!(fp16("resnet.conv1", 32, &mut fixture), None);
+
+    // another SM count is not the measured point
+    fixture.device = rtx4090(126);
+    assert_eq!(Recipe::fp16_device(&fixture.device, fixture.limit), None);
+    assert_eq!(fp16("resnet.layer2.0.conv1", 32, &mut fixture), None);
+}
+
 #[test]
 #[cfg(all(feature = "_cuda-libraries", feature = "cuda-sm75"))]
 fn measured_t4_recipe_contains_only_driver_kernel_choices() {
@@ -1672,6 +1750,12 @@ fn measured_hybrid_and_driver_select_the_same_kernel_for_every_covered_tuple() {
             PtxTier::Sm80,
         ),
         (
+            ComputeCapability::new(8, 9),
+            128,
+            "NVIDIA GeForce RTX 4090",
+            PtxTier::Sm80,
+        ),
+        (
             ComputeCapability::new(12, 0),
             36,
             "NVIDIA GeForce RTX 5060 Ti",
@@ -1709,16 +1793,14 @@ fn measured_hybrid_and_driver_select_the_same_kernel_for_every_covered_tuple() {
                 for boundary in BoundaryId::all() {
                     for batch in boundary.batches().iter() {
                         for math in [CudaMath::Fp32, CudaMath::Tf32] {
-                            let driver = match PlanRequest::DriverOnly.resolve(
-                                boundary,
-                                batch,
-                                math,
-                                &mut fixture,
-                            ) {
-                                Ok(Selected::Oxide(driver)) => driver,
-                                Err(CudaError::MissingKernel { .. }) => continue,
-                                result => panic!("{name} {boundary} b{batch} {math:?}: {result:?}"),
-                            };
+                            let driver =
+                                match super::select_default(boundary, batch, math, &mut fixture) {
+                                    Ok(Selected::Oxide(driver)) => driver,
+                                    Err(CudaError::MissingKernel { .. }) => continue,
+                                    result => {
+                                        panic!("{name} {boundary} b{batch} {math:?}: {result:?}")
+                                    }
+                                };
                             compared += 1;
                             let Selected::Oxide(hybrid) = PlanRequest::Hybrid
                                 .resolve(boundary, batch, math, &mut fixture)
@@ -1890,4 +1972,271 @@ fn forced_jit_fixes_driver_and_hybrid_identity_without_cubin_speed_evidence() {
         assert_eq!(token.evidence, TokenEvidence::Implemented);
         assert!(!token.speed_measured());
     }
+}
+
+#[test]
+#[cfg(feature = "cuda-sm80")]
+fn production_rtx4090_dense_head_uses_the_approved_fp32_pin() {
+    use super::super::policy::RecipeMode;
+    use crate::inference::cuda::candidate::SegdenseEntry;
+    use crate::inference::cuda::tuning::accuracy::Policy;
+
+    let mut fixture = Fixture::new();
+    fixture.device = Builder::new(ComputeCapability::new(8, 9))
+        .multiprocessors(128)
+        .shared_optin_bytes(101376)
+        .name("NVIDIA GeForce RTX 4090")
+        .build();
+    fixture.limit = PtxTier::Sm80;
+    fixture.recipe_mode = RecipeMode::Fp32SegmentationTf32Embedding;
+    let boundary = BoundaryId::named("resnet.seg_1");
+    let Selected::Oxide(selected) =
+        super::select_default(boundary, 32, CudaMath::Tf32, &mut fixture)
+            .expect("the 4090 dense head has an approved production kernel")
+    else {
+        panic!("the 4090 dense head must use a kernel")
+    };
+    let PlanPin::Pinned(ConfigPin::Segdense(pin)) = selected.pin else {
+        panic!("the production dense head must have a fixed segdense pin")
+    };
+    assert_eq!(pin.entry(), SegdenseEntry::EmbedB32);
+    assert_eq!(pin.splits(), Some(128));
+    assert!(Policy::approve(boundary, CudaMath::Tf32, ConfigPin::Segdense(pin)).is_some());
+    assert_eq!(fixture.loads, [selected.target.module]);
+}
+
+#[test]
+fn unlisted_measured_device_boundary_cannot_bypass_production_accuracy() {
+    use super::super::policy::{Recipe, RecipeMode};
+    use crate::inference::cuda::tuning::accuracy::Policy;
+
+    for (cc, sms, name) in [
+        (
+            ComputeCapability::new(8, 9),
+            34,
+            "NVIDIA GeForce RTX 4060 Ti",
+        ),
+        (ComputeCapability::new(8, 9), 128, "NVIDIA GeForce RTX 4090"),
+        (
+            ComputeCapability::new(12, 0),
+            36,
+            "NVIDIA GeForce RTX 5060 Ti",
+        ),
+        (ComputeCapability::new(7, 5), 40, "Tesla T4"),
+        (ComputeCapability::new(8, 0), 108, "NVIDIA A100-PCIE-40GB"),
+        (ComputeCapability::new(8, 0), 108, "NVIDIA A100-SXM4-40GB"),
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.device = Builder::new(cc).multiprocessors(sms).name(name).build();
+        fixture.recipe_mode = RecipeMode::Fp32SegmentationTf32Embedding;
+        let boundary = BoundaryId::named("sincnet.conv0.abs_pool");
+        let pin = ConfigPin::Sinc(SincPin::ConvAbsPool);
+        assert_eq!(Policy::approve(boundary, CudaMath::Tf32, pin), None);
+        assert_eq!(
+            Recipe::accuracy_exception(
+                boundary,
+                32,
+                CudaMath::Tf32,
+                pin,
+                &fixture.device,
+                fixture.limit
+            ),
+            None
+        );
+        let result = super::select_default(boundary, 32, CudaMath::Tf32, &mut fixture);
+        assert!(
+            matches!(
+                result,
+                Err(CudaError::MissingKernel {
+                    batch: 32,
+                    math: CudaMath::Tf32,
+                    ..
+                })
+            ),
+            "{name}: {result:?}"
+        );
+        assert!(
+            fixture.loads.is_empty(),
+            "{name}: an unapproved pin must not load"
+        );
+    }
+}
+
+#[test]
+#[cfg(feature = "cuda-sm80")]
+fn production_measured_dense_heads_keep_only_their_exact_exceptions() {
+    use super::super::policy::{Recipe, RecipeMode};
+    use crate::inference::cuda::candidate::SegdensePin;
+    use crate::inference::cuda::tuning::accuracy::Policy;
+
+    for (cc, sms, name, expected, recipe) in [
+        (
+            ComputeCapability::new(8, 9),
+            34,
+            "NVIDIA GeForce RTX 4060 Ti",
+            SegdensePin::measured_rtx4060ti_embedding(),
+            Recipe::Rtx4060Ti,
+        ),
+        (
+            ComputeCapability::new(12, 0),
+            36,
+            "NVIDIA GeForce RTX 5060 Ti",
+            SegdensePin::measured_rtx5060ti_embedding(),
+            Recipe::Rtx5060Ti,
+        ),
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.device = Builder::new(cc)
+            .multiprocessors(sms)
+            .shared_optin_bytes(101376)
+            .name(name)
+            .build();
+        fixture.limit = PtxTier::Sm80;
+        fixture.recipe_mode = RecipeMode::Fp32SegmentationTf32Embedding;
+        let boundary = BoundaryId::named("resnet.seg_1");
+        let expected = ConfigPin::Segdense(expected);
+        let Selected::Oxide(selected) =
+            super::select_default(boundary, 32, CudaMath::Tf32, &mut fixture).unwrap()
+        else {
+            panic!("the measured dense head must use a kernel")
+        };
+        assert_eq!(selected.pin, PlanPin::Pinned(expected));
+        assert_eq!(Policy::approve(boundary, CudaMath::Tf32, expected), None);
+        assert_eq!(
+            Recipe::accuracy_exception(
+                boundary,
+                32,
+                CudaMath::Tf32,
+                expected,
+                &fixture.device,
+                fixture.limit
+            ),
+            Some(recipe)
+        );
+        let different = Builder::new(ComputeCapability::new(8, 9))
+            .multiprocessors(64)
+            .shared_optin_bytes(101376)
+            .build();
+        let different_pin = ConfigPin::Segdense(
+            SegdensePin::forced_embed_b32("EmbedB32F16", CudaMath::Tf32, PtxTier::Sm80, &different)
+                .unwrap(),
+        );
+        assert_ne!(expected, different_pin);
+        for (boundary, batch, math, pin) in [
+            (boundary, 32, CudaMath::Tf32, different_pin),
+            (boundary, 1, CudaMath::Tf32, expected),
+            (boundary, 32, CudaMath::Fp32, expected),
+            (BoundaryId::named("linear0"), 32, CudaMath::Tf32, expected),
+        ] {
+            assert_eq!(
+                Recipe::accuracy_exception(
+                    boundary,
+                    batch,
+                    math,
+                    pin,
+                    &fixture.device,
+                    fixture.limit
+                ),
+                None
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "_cuda-libraries")]
+fn measured_pipeline_pins_change_only_the_unmeasured_4090_dense_head() {
+    use super::super::policy::RecipeMode;
+    use crate::inference::cuda::candidate::SegdenseEntry;
+
+    let mut changes = 0;
+    for (cc, sms, name, tier) in [
+        (
+            ComputeCapability::new(8, 9),
+            34,
+            "NVIDIA GeForce RTX 4060 Ti",
+            PtxTier::Sm80,
+        ),
+        (
+            ComputeCapability::new(8, 9),
+            128,
+            "NVIDIA GeForce RTX 4090",
+            PtxTier::Sm80,
+        ),
+        (
+            ComputeCapability::new(12, 0),
+            36,
+            "NVIDIA GeForce RTX 5060 Ti",
+            PtxTier::Sm120,
+        ),
+        (ComputeCapability::new(7, 5), 40, "Tesla T4", PtxTier::Sm75),
+        (
+            ComputeCapability::new(8, 0),
+            108,
+            "NVIDIA A100-PCIE-40GB",
+            PtxTier::Sm80,
+        ),
+        (
+            ComputeCapability::new(8, 0),
+            108,
+            "NVIDIA A100-SXM4-40GB",
+            PtxTier::Sm80,
+        ),
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.device = Builder::new(cc)
+            .multiprocessors(sms)
+            .shared_optin_bytes(99 << 10)
+            .name(name)
+            .build();
+        fixture.limit = tier;
+        fixture.recipe_mode = RecipeMode::Fp32SegmentationTf32Embedding;
+        for fp16 in [Fp16Policy::Allowed, Fp16Policy::Excluded] {
+            fixture.fp16 = fp16;
+            for boundary in BoundaryId::all().filter(|id| id.name() != "lstm.stack.input_proj") {
+                let math = match boundary.area() {
+                    KernelModule::Resnet | KernelModule::Embedding => CudaMath::Tf32,
+                    _ => CudaMath::Fp32,
+                };
+                for batch in boundary.batches().iter() {
+                    let Selected::Oxide(previous) = PlanRequest::DriverOnly
+                        .resolve(boundary, batch, math, &mut fixture)
+                        .unwrap()
+                    else {
+                        panic!("the previous measured route must use a kernel")
+                    };
+                    let Selected::Oxide(current) =
+                        super::select_default(boundary, batch, math, &mut fixture).unwrap()
+                    else {
+                        panic!("the measured production route must use a kernel")
+                    };
+                    assert_eq!(previous.target, current.target);
+                    if name == "NVIDIA GeForce RTX 4090"
+                        && boundary == BoundaryId::named("resnet.seg_1")
+                        && batch == 32
+                    {
+                        let PlanPin::Pinned(ConfigPin::Segdense(before)) = previous.pin else {
+                            panic!("previous dense head")
+                        };
+                        let PlanPin::Pinned(ConfigPin::Segdense(after)) = current.pin else {
+                            panic!("current dense head")
+                        };
+                        assert_eq!(before.entry(), SegdenseEntry::EmbedB32F16);
+                        assert_eq!(after.entry(), SegdenseEntry::EmbedB32);
+                        assert_eq!(after.splits(), Some(128));
+                        changes += 1;
+                    } else {
+                        assert_eq!(
+                            previous.pin, current.pin,
+                            "{name} {boundary} b{batch} {math:?} {fp16:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        changes, 2,
+        "the 4090 head changes with either trunk FP16 guard state"
+    );
 }
