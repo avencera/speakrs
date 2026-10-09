@@ -308,7 +308,19 @@ fn embedding_layers_match_reference() -> Result<(), CudaError> {
         batch.masks_mut().copy_from_host(&stream, &case.masks)?;
 
         let mut shortcuts = 0;
+        let mut output_taps = 0;
         let mut rows = Vec::new();
+        let mut compare = |tensor: String, actual: &[f32]| {
+            let key = format!("tensor/{tensor}");
+            assert!(reference.has(&key), "reference has no {key}");
+            let (expected, _) = reference.read(&key);
+            let scale = expected
+                .iter()
+                .map(|value| f64::from(value.abs()))
+                .fold(0.0, f64::max);
+            let error = max_abs_diff(actual, &expected);
+            rows.push((tensor, error, scale));
+        };
         batch.forward_with_taps(&runtime, &mut |tap, view| {
             let tensor = match tap {
                 EmbeddingTap::Stem => "relu".to_string(),
@@ -319,20 +331,20 @@ fn embedding_layers_match_reference() -> Result<(), CudaError> {
                     SHORTCUT_TENSORS[shortcuts - 1].to_string()
                 }
                 EmbeddingTap::Pooled => "where_1".to_string(),
-                EmbeddingTap::Output => "output".to_string(),
+                EmbeddingTap::Output => {
+                    output_taps += 1;
+                    return Ok(());
+                }
             };
-            let key = format!("tensor/{tensor}");
-            assert!(reference.has(&key), "reference has no {key}");
             let actual = stream.clone_dtoh(view)?;
-            let (expected, _) = reference.read(&key);
-            let scale = expected
-                .iter()
-                .map(|value| f64::from(value.abs()))
-                .fold(0.0, f64::max);
-            let error = max_abs_diff(&actual, &expected);
-            rows.push((tensor, error, scale));
+            compare(tensor, &actual);
             Ok(())
         })?;
+
+        // downloading applies the FP16 range fallback before comparing the final output
+        let output = batch.download_output(&runtime)?;
+        compare("output".to_string(), &output);
+        assert_eq!(output_taps, 1, "the raw output tap must fire once");
 
         eprintln!("layer errors {name} {math:?} (max abs, max |ref|, relative):");
         let mut previous = 0.0;
