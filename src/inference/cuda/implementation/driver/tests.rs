@@ -944,6 +944,47 @@ fn validated_tune_pin_wins_and_cannot_be_reused_for_another_batch() {
 }
 
 #[test]
+fn forced_jit_loads_ptx_for_a_tuned_cubin_without_its_speed_evidence() {
+    use crate::inference::cuda::kernels::LoadedArtifact;
+
+    let mut fixture = Fixture::new();
+    fixture.device = Builder::new(ComputeCapability::new(8, 9))
+        .multiprocessors(34)
+        .name("NVIDIA GeForce RTX 4060 Ti")
+        .build();
+    let boundary = BoundaryId::named("resnet.layer1.0.conv1");
+    let approved = crate::inference::cuda::tuning::tests::approved_choice(
+        &fixture.device,
+        boundary,
+        32,
+        CudaMath::Tf32,
+        fixture.limit,
+    );
+    let crate::inference::cuda::tuning::ApprovedChoice::Kernel(config) = &approved else {
+        panic!("approved kernel")
+    };
+    let saved = config.module();
+    let pin = config.pin();
+    assert!(matches!(saved.artifact(), LoadedArtifact::Cubin { .. }));
+    fixture.tuned = Some(approved);
+    fixture.force_jit = true;
+
+    let Selected::Oxide(token) = PlanRequest::Hybrid
+        .resolve(boundary, 32, CudaMath::Tf32, &mut fixture)
+        .unwrap()
+    else {
+        panic!("tuned kernel")
+    };
+    let jit = saved.diagnostic_request(true).unwrap();
+    assert!(matches!(jit.artifact(), LoadedArtifact::PtxJit { .. }));
+    assert_eq!(token.target.module, jit);
+    assert_eq!(fixture.loads, [jit]);
+    // the tuned configuration stays, but the cubin timing no longer backs it
+    assert_eq!(token.pin, PlanPin::Pinned(pin));
+    assert_eq!(token.evidence, TokenEvidence::Implemented);
+}
+
+#[test]
 #[cfg(feature = "_cuda-libraries")]
 fn tuner_cannot_time_an_artifact_fallback_as_the_selected_kernel() {
     use crate::inference::cuda::tuning::tests::approved_choice;
