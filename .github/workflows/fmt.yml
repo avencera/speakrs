@@ -29,6 +29,23 @@ jobs:
       - name: Run rustfmt
         run: cargo fmt --all -- --check
 
+  readme:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-rdme
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-rdme@2.2.2
+
+      # README.md between the cargo-rdme markers must match the crate docs in src/lib.rs
+      - name: Check README matches the crate docs
+        run: cargo rdme --check
+
   ruff:
     runs-on: ubuntu-latest
     steps:

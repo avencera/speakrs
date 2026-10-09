@@ -2,8 +2,17 @@
 backend_features := if os() == "macos" { "coreml cpu" } else { "cpu" }
 
 fmt:
+    #!/usr/bin/env bash
+    set -euo pipefail
     cargo fmt --all
     uv run --group dev ruff format scripts fixtures
+    # the README section between the cargo-rdme markers is generated from the crate docs in
+    # src/lib.rs, so edit the docs there; CI fails when the two drift apart
+    if command -v cargo-rdme >/dev/null; then
+        cargo rdme
+    else
+        echo "cargo-rdme not found: README not regenerated (cargo install cargo-rdme)" >&2
+    fi
 
 clippy:
     #!/usr/bin/env bash
