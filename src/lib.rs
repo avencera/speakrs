@@ -292,8 +292,10 @@
 //! These end-to-end results use a 10-file VoxConverse subset (about 1.9 hours of
 //! audio), FP32 segmentation and TF32 embedding. RTFx is audio duration divided by
 //! wall time, so higher is faster. Each figure is the median of three alternating
-//! rounds. The RTX 4090 host had 16 CPU cores and the others had 2. These are
-//! measured results, not guarantees for other hosts.
+//! rounds. The T4 and RTX 4090 were measured on the final code, and the A100, L4
+//! and A10 on an earlier revision of it. The RTX 4090 runs requested 16 CPU cores
+//! on Beam; the other rows used a two-core CPU limit on Modal. These are measured
+//! results, not guarantees for other hosts.
 //!
 //! | GPU | `cuda` RTFx | Driver-only RTFx |
 //! |---|---:|---:|
