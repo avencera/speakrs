@@ -129,16 +129,17 @@ pub(crate) use sinc::Oxide as SincOxide;
 // the GPU development checks force selections made for other devices
 #[cfg(all(test, feature = "_cuda-libraries"))]
 pub(crate) use lstmproj::RecurrencePlan;
+#[cfg(all(test, feature = "_cuda-libraries"))]
+pub(crate) use wideconv::Device as WideconvDevice;
 #[cfg(test)]
 pub(crate) use wideconv::Fp16Tiles as WideconvFp16Tiles;
 pub(crate) use wideconv::{
     Algorithm as WideconvAlgorithm, FP16_OPERAND_LIMIT, Fp16Policy,
     TensorKernel as WideconvTensorKernel, WinogradProducts as WideconvProducts,
 };
-#[cfg(all(test, feature = "_cuda-libraries"))]
+#[cfg(all(test, any(feature = "_cuda-libraries", feature = "cuda-sm80")))]
 pub(crate) use wideconv::{
-    Config as WideconvConfig, Device as WideconvDevice, Partition as WideconvPartition,
-    SplitCells as WideconvSplitCells,
+    Config as WideconvConfig, Partition as WideconvPartition, SplitCells as WideconvSplitCells,
 };
 pub(crate) use wideconv::{Oxide as WideconvOxide, Pin as WideconvPin};
 
@@ -357,6 +358,9 @@ pub(crate) enum ConvKernel {
     /// `spk_resnet_tc_c64`: TF32 tensor cores, 128 threads, 4 rows by 56 columns;
     /// sm80 tier and TF32 mode only
     C64Tensor,
+    /// `spk_resnet_tc_c64_slim`: as [`Self::C64Tensor`] in 4 rows by 32 columns, with
+    /// identical outputs; sm80 tier and TF32 mode only
+    C64TensorSlim,
     /// `spk_resnet_tc_c32s2`: TF32 tensor cores, 128 threads, 4 rows by 32 columns;
     /// sm80 tier and TF32 mode only
     C32Stride2Tensor,
@@ -367,7 +371,7 @@ impl ConvKernel {
     pub(crate) const fn shape(self) -> ConvShape {
         match self {
             Self::C32 | Self::C32Tensor => ConvShape::C32,
-            Self::C64 | Self::C64Small | Self::C64Tensor => ConvShape::C64,
+            Self::C64 | Self::C64Small | Self::C64Tensor | Self::C64TensorSlim => ConvShape::C64,
             Self::C32Stride2 | Self::C32Stride2Small | Self::C32Stride2Tensor => {
                 ConvShape::C32Stride2
             }
@@ -1519,9 +1523,55 @@ pub(crate) trait DriverCandidate {
             evidence.summary()
         })
     }
+    /// Speed evidence for the final non-FP16 pin, not an unmeasured alternative
+    fn speed_evidence(
+        boundary: super::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        device: &DeviceAttributes,
+        tier: PtxTier,
+        pin: ConfigPin,
+    ) -> Option<(super::implementation::SpeedScope, &'static str)> {
+        if pin.is_fp16()
+            || Self::driver_pin(boundary, batch, math, device, tier, Fp16Policy::Excluded).ok()?
+                != pin
+        {
+            return None;
+        }
+
+        Self::speed_scope(boundary, batch, math, device, tier)
+            .map(|scope| (scope, Self::speed_summary(math)))
+    }
+
+    /// A runtime FP32 alternative without adding choices to the tuning catalogue
+    fn runtime_fp32_pin(
+        boundary: super::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        device: &DeviceAttributes,
+        tier: PtxTier,
+        accuracy: super::tuning::accuracy::RuntimePolicy,
+    ) -> Result<Option<ConfigPin>, PlanError> {
+        let conservative = Self::tuning_fp32_pin(boundary, batch, math, device, tier)?;
+        if conservative.is_some() || math != CudaMath::Tf32 || !accuracy.allows_exact_fp32() {
+            return Ok(conservative);
+        }
+
+        Self::driver_pin(
+            boundary,
+            batch,
+            CudaMath::Fp32,
+            device,
+            tier,
+            Fp16Policy::Excluded,
+        )
+        .map(Some)
+    }
+
     /// A conservative FP32 algorithm with a pin valid for the requested math mode
     ///
-    /// This is tuner-only enumeration, not a change to normal driver selection
+    /// Tuning enumerates this pin; unmeasured defaults use it when the normal
+    /// pin has no accuracy approval
     fn tuning_fp32_pin(
         _boundary: super::implementation::BoundaryId,
         _batch: usize,
@@ -1562,6 +1612,11 @@ pub(crate) trait DriverCandidate {
             Self::driver_pin(boundary, batch, math, device, tier, Fp16Policy::Excluded)
         {
             pins.push((pin, "default"));
+            if let Ok(Some(tf32)) = Self::tuning_tf32_pin(boundary, batch, math, device, tier)
+                && tf32 != pin
+            {
+                pins.push((tf32, "tf32"));
+            }
             if let Ok(Some(fp32)) = Self::tuning_fp32_pin(boundary, batch, math, device, tier)
                 && fp32 != pin
             {
@@ -1572,6 +1627,20 @@ pub(crate) trait DriverCandidate {
             pins.push((fp16, "fp16"));
         }
         pins
+    }
+
+    /// A TF32 algorithm for a tuple whose default runs FP16 products, which have
+    /// device-measured evidence but no tuner approval
+    ///
+    /// This is tuner-only enumeration, not a change to normal driver selection
+    fn tuning_tf32_pin(
+        _boundary: super::implementation::BoundaryId,
+        _batch: usize,
+        _math: CudaMath,
+        _device: &DeviceAttributes,
+        _tier: PtxTier,
+    ) -> Result<Option<ConfigPin>, PlanError> {
+        Ok(None)
     }
 
     /// One complete pin, selected from cached device facts without GPU allocation;

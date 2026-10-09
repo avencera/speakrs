@@ -232,10 +232,11 @@ fn golden_legacy_selection_is_unchanged() {
                     }
                     selected.push((device.multiprocessors, boundary.clone(), batch, math));
 
-                    // production keeps today's Library fallback when the pinned load fails
-                    let (refused, loads) =
-                        observe(device, &boundary, batch, math, Loader::Refuses).unwrap();
-                    assert_eq!((refused, loads), (Outcome::Library, 1));
+                    // an artifact error does not imply a kernel capability refusal
+                    assert!(matches!(
+                        observe(device, &boundary, batch, math, Loader::Refuses),
+                        Err(CudaError::ArtifactUnavailable { .. })
+                    ));
                 }
             }
             for math in [CudaMath::Fp32, CudaMath::Tf32] {

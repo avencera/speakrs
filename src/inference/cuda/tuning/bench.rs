@@ -294,8 +294,12 @@ pub(super) fn run(
             .join("wespeaker-multimask-tail.safetensors"),
     )?;
     let mut runtimes = vec![first_runtime];
-    for kind in catalogue.benchmark_kinds().skip(1) {
-        runtimes.push(CudaRuntime::for_tuning(options.device, kind)?);
+    for kind in catalogue.benchmark_kinds(options.include_library).skip(1) {
+        runtimes.push(CudaRuntime::for_tuning(
+            options.device,
+            kind,
+            options.include_library,
+        )?);
     }
 
     let mut measurements = Vec::new();

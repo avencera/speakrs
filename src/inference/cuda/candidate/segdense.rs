@@ -294,14 +294,7 @@ impl Site {
             (Self::Embedding, 32, CudaMath::Tf32) if hardware.half_split_fits() => {
                 return Some(Choice::split(Entry::EmbedB32F16, hardware.splits(2, 1)));
             }
-            // one resident block per SM
-            (Self::Embedding, 32, CudaMath::Tf32) if hardware.consumer_blackwell() => {
-                return Some(Choice::split(Entry::EmbedB32Tf32K2, hardware.splits(2, 1)));
-            }
-            // two resident blocks per SM
-            (Self::Embedding, 32, CudaMath::Tf32) => {
-                return Some(Choice::split(Entry::EmbedB32Tf32, hardware.splits(2, 2)));
-            }
+            (Self::Embedding, 32, CudaMath::Tf32) => return Some(Self::tf32_embedding(hardware)),
             // four 96 x 64 tiles, two resident blocks per SM
             (Self::Embedding, 32, CudaMath::Fp32) if heavy => {
                 return Some(Choice::split(Entry::EmbedB32X3, hardware.splits(4, 2)));
@@ -310,6 +303,29 @@ impl Site {
         };
 
         Some(Choice::fixed(entry))
+    }
+
+    /// The batch-32 TF32 embedding kernel where TF32 runs at about the FP32 rate
+    fn tf32_embedding(hardware: Hardware) -> Choice {
+        if hardware.consumer_blackwell() {
+            // one resident block per SM
+            return Choice::split(Entry::EmbedB32Tf32K2, hardware.splits(2, 1));
+        }
+
+        // two resident blocks per SM
+        Choice::split(Entry::EmbedB32Tf32, hardware.splits(2, 2))
+    }
+
+    /// The TF32 kernel that FP16 products replace, so the tuner can time an approved
+    /// kernel of ours where the device rule picks the FP16 one
+    fn tuning_tf32_choice(
+        self,
+        batch: usize,
+        math: CudaMath,
+        hardware: Hardware,
+    ) -> Option<Choice> {
+        let default = self.tensor_choice(batch, math, hardware)?;
+        (default.entry == Entry::EmbedB32F16).then(|| Self::tf32_embedding(hardware))
     }
 }
 
@@ -639,6 +655,24 @@ pub(crate) struct SegdensePin {
 }
 
 impl SegdensePin {
+    /// The exact FP16 dense-head pin validated on the 34-SM RTX 4060 Ti
+    pub(crate) const fn measured_rtx4060ti_embedding() -> Self {
+        Self {
+            choice: Choice::split(Entry::EmbedB32F16, 17),
+            math: CudaMath::Tf32,
+            tier: PtxTier::Sm80,
+        }
+    }
+
+    /// The exact FP16 dense-head pin validated on the 36-SM RTX 5060 Ti
+    pub(crate) const fn measured_rtx5060ti_embedding() -> Self {
+        Self {
+            choice: Choice::split(Entry::EmbedB32F16, 18),
+            math: CudaMath::Tf32,
+            tier: PtxTier::Sm80,
+        }
+    }
+
     /// The configuration the device rule picks for this boundary on the module
     /// `tier` and `device`
     pub(crate) fn select(
@@ -658,6 +692,22 @@ impl SegdensePin {
             })?;
 
         Ok(Self { choice, math, tier })
+    }
+
+    /// The TF32 algorithm that FP16 products replace on this device, if they do
+    fn select_tuning_tf32(
+        site: Site,
+        batch: usize,
+        math: CudaMath,
+        tier: PtxTier,
+        device: &DeviceAttributes,
+    ) -> Option<Self> {
+        if tier < PtxTier::Sm80 {
+            return None;
+        }
+
+        let choice = site.tuning_tf32_choice(batch, math, Hardware::of(device))?;
+        Some(Self { choice, math, tier })
     }
 
     /// A scalar FP32 algorithm with the requested pipeline mode retained in its pin
@@ -1340,6 +1390,20 @@ impl super::DriverCandidate for Area {
             .map(Some)
     }
 
+    fn tuning_tf32_pin(
+        boundary: crate::inference::cuda::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        device: &DeviceAttributes,
+        tier: PtxTier,
+    ) -> Result<Option<super::ConfigPin>, PlanError> {
+        let site = Site::from_boundary(boundary)?;
+        Ok(
+            SegdensePin::select_tuning_tf32(site, batch, math, tier, device)
+                .map(super::ConfigPin::Segdense),
+        )
+    }
+
     fn driver_pin(
         boundary: crate::inference::cuda::implementation::BoundaryId,
         batch: usize,
@@ -1355,3 +1419,6 @@ impl super::DriverCandidate for Area {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) mod test_support;

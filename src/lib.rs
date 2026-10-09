@@ -233,8 +233,8 @@
 //!
 //! - `coreml`: native CoreML backend on macOS, without ONNX Runtime
 //! - `cpu`: CPU backend via ONNX Runtime
-//! - `cuda`: Linux-only native NVIDIA backend with all target kernels plus cuDNN and cuBLAS,
-//!   without ONNX Runtime. Libraries load only when a selected plan needs them
+//! - `cuda`: Linux-only native NVIDIA backend with speakrs kernels on every GPU,
+//!   without ONNX Runtime. cuDNN and cuBLAS load only for a fallback or an explicit choice
 //! - `migraphx`: AMD GPU backend via ONNX Runtime MIGraphX
 //!
 //! Other features:
@@ -259,51 +259,30 @@
 //! and cuBLAS when a selected plan uses them, and NVRTC for `PersistDynamic` LSTM.
 //! CUDA modes use `segmentation-3.0.safetensors` and
 //! `wespeaker-multimask-tail.safetensors`. `RuntimeConfig` selects precision and graphs.
-//! `SPEAKRS_CUDA_PTX_TIER=sm75` limits the kernel tier. Hybrid selection uses measured
-//! speed for device-sensitive kernels and explicit all-device evidence for broad winners.
-//! The FP32 fbank FFT/mel producer is a broad winner on cc 8.0 and newer; segdense is a broad
-//! winner on cc 8.0 and newer with the sm80 tier. These fused kernels won by at least
-//! 1.05x in every measured case on at least two architectures. Full `cuda` embeds all
-//! target kernels alongside cuDNN and cuBLAS. Selection uses this order:
-//! **matching user tune file > measured recipe > device-class default > Library**.
-//! Library is available only in a `cuda` build. The RTX 4060 Ti (cc 8.9,
-//! 34 SMs) and RTX 5060 Ti (cc 12.0, 36 SMs) recipes require exact device
-//! names. With FP32 segmentation and TF32 embedding, they use the measured
-//! kernel plan at embedding batches 1, 4, 8, 16, and 32. The 4060 Ti uses
-//! FP16 tiles for same-channel, stride-1 C32/C64 trunk layers at all five
-//! batches, and C128/C256 layers at batches 8, 16, and 32. Other trunk tuples
-//! keep their measured pins, including staged one-product C128/C256 Winograd
-//! at batches 1 and 4. The 5060 Ti keeps its measured pins without FP16.
-//! The 4060 Ti FP32 SincNet recipe remains available
-//! outside the whole-pipeline precision mode.
+//! `SPEAKRS_CUDA_PTX_TIER=sm75` limits the kernel tier. The `cuda` build uses
+//! speakrs kernels on every GPU, including devices with no measured recipe. It embeds
+//! all target kernels and keeps cuDNN and cuBLAS for fallback. Selection uses this order:
+//! **matching user tune file > built-in kernel recipe > device-class or portable kernel default > Library fallback**.
+//! Library is used only when a kernel refuses a layer because of a capability limit,
+//! its weight contract, or an unimplemented geometry, or when no kernel covers the
+//! layer's arithmetic mode. Invalid geometry, CUDA errors, and artifact load errors
+//! are returned to the caller. A tune file can explicitly select Library.
 //!
-//! The Tesla T4 recipe (cc 7.5, 40 SMs, exact device name) uses the same
-//! pipeline precision mode and embedding batches 1, 4, 8, 16, and 32. It
-//! selects kernels at 207 measured tuples and Library at 21. Same-channel,
-//! stride-1 trunk layers use FP16 tiles at all five batches. Segmentation keeps
-//! Library for the two batch-1 dense layers; SincNet, convolutions, LSTM and classifier
-//! use the measured kernels.
+//! Built-in recipes contain kernel settings only. The RTX 4060 Ti (cc 8.9, 34 SMs)
+//! and RTX 5060 Ti (cc 12.0, 36 SMs) recipes use exact device names. With FP32
+//! segmentation and TF32 embedding, they use the driver-only kernel settings at
+//! embedding batches 1, 4, 8, 16, and 32. The 4060 Ti uses FP16 same-channel trunk
+//! kernels for C32/C64 at every batch and for C128/C256 from batch 8. Its FP32
+//! SincNet recipe also applies outside this whole-pipeline precision mode.
 //!
-//! The A100 PCIe-40GB and SXM4-40GB recipes (cc 8.0, 108 SMs, exact device
-//! names) keep their measured FP32 segmentation and TF32 embedding choices
-//! at batches 1 and 32. C128 keeps unstaged one-product Winograd. C256 uses
-//! three-product Winograd at batch 1 and the direct tensor kernel at batch 32.
-//! These recipes do not apply to other cc 8.0 devices, FP32 embedding,
-//! intermediate embedding batches, or the `sm75` tier limit.
-//!
-//! On Ampere and newer GPUs without a measured recipe, TF32 early-trunk C32/C64
-//! convolutions use the tensor-core class default. Other boundaries use existing
-//! measured choices and broad-winner defaults, or Library when no such evidence applies.
-//! Other cc 7.5 Turing devices use the FP16 class default for same-channel,
-//! stride-1 trunk layers in TF32 mode. FP32 embedding keeps its existing choices
-//! and never uses FP16. Target-only builds always use kernels.
-//!
-//! TF32 mode keeps FP32 storage and accumulation but may use scaled FP16
-//! operands for these trunk layers. Layers with non-finite weights or weight
-//! magnitudes above 65504 / 1024 exclude FP16. If an activation exceeds this
-//! range, the complete embedding batch is recomputed without FP16 tiles.
-//!
-//! TF32 fbank uses the kernel only on cc 8.9, where it was measured faster.
+//! The Tesla T4 recipe (cc 7.5, 40 SMs, exact device name) uses kernel settings
+//! at all pipeline batch classes, including FP16 same-channel trunk kernels in
+//! TF32 embedding mode. It does not select Library for small per-layer timing wins.
+//! The A100 PCIe-40GB and SXM4-40GB recipes (cc 8.0, 108 SMs, exact device names)
+//! use FP32 segmentation and TF32 embedding. Other devices use their kernel defaults.
+//! Measured speed evidence is reported but is not required to select a kernel.
+//! Target-only builds remain driver-only and return typed errors instead of Library
+//! fallbacks.
 //! `SPEAKRS_CUDA_FORCE_LIBRARY=1` makes a `cuda` build use Library at each replaceable
 //! boundary, even when a tune file exists. The model-load log gives the source for
 //! each boundary: tune file, recipe, default, or library.
@@ -319,7 +298,9 @@
 //! ```
 //!
 //! The command uses real model weights and shapes. It measures approved kernel
-//! configurations and Library, if compiled in, at the pipeline batch sizes. It uses
+//! configurations at the pipeline batch sizes. Use `--include-library` to also time
+//! Library in a `cuda` build. Per-layer times do not include library load or handle
+//! initialization costs. It uses
 //! warm-up passes, alternating candidate order, and median CUDA-event times. The
 //! summary table shows each candidate and marks the selected choice. Tuning does not
 //! change accuracy rules or precision. The defaults are FP32 segmentation, FP32
@@ -336,7 +317,8 @@
 //! FP32 mode accepts direct FP32 algorithms. TF32 mode also accepts direct TF32
 //! algorithms, staged one-product Winograd, C64 FFMA Winograd, and FP16 trunk
 //! algorithms. A target-only tuner returns an error when a complete model boundary
-//! has no approved choice. A hybrid build can use Library for such a boundary.
+//! has no approved choice. A hybrid build can use Library for such a boundary only with
+//! `--include-library`.
 //! The tuner measures embedding trunk batches 1, 4, 8, 16, and 32. Segmentation
 //! and embedding-head choices use batches 1 and 32. Filterbank uses batches 1
 //! through 32. The exact device and build key rejects stale artifact bytes.

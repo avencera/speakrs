@@ -14,6 +14,15 @@ pub(super) enum DensePlan {
 }
 
 impl DensePlan {
+    /// Library plans must finish lazy setup before graph capture
+    pub(super) fn requires_warmup(&self) -> bool {
+        match self {
+            #[cfg(feature = "_cuda-libraries")]
+            Self::Library => true,
+            Self::Oxide(_) => false,
+        }
+    }
+
     pub(super) fn new(
         runtime: &CudaRuntime,
         spec: DenseSpec,

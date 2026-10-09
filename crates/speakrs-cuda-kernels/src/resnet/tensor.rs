@@ -468,6 +468,21 @@ tc_conv3x3! {
 }
 
 tc_conv3x3! {
+    /// TF32 `y = relu(conv3x3(x, weight) + bias [+ residual])` for 64 -> 64 channels,
+    /// stride 1, padding 1, in 32-column tiles: where the 56-column grid gives fewer
+    /// CTAs than SMs, these give 1.8x as many with the same products per output
+    ///
+    /// `x`, `y` and `residual` are `[b, 64, h, w]`; `weight` comes from
+    /// [`spk_resnet_pack_tc`]. Launch 128 threads with
+    /// `grid = (ceil(w / 32), ceil(h / 4), b)` and 14848 dynamic shared bytes
+    spk_resnet_tc_c64_slim,
+    cin = 64,
+    cout = 64,
+    stride = 1,
+    tiles = 4,
+}
+
+tc_conv3x3! {
     /// TF32 `y = relu(conv3x3(x, weight) + bias [+ residual])` for 32 -> 64 channels,
     /// stride 2, padding 1
     ///

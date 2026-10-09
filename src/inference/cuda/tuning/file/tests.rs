@@ -15,7 +15,7 @@ fn key() -> DeviceKey {
         capability: [8, 9],
         sm_count: 34,
         driver_version: DriverRelease::Nvml("595.91.07".into()),
-        libraries: crate::inference::cuda::tuning::LibraryVersions::DriverOnly,
+        libraries: crate::inference::cuda::tuning::LibraryVersions::KernelOnly,
         speakrs_version: "0.6.0".into(),
         artifact_version: "exact-artifact-and-catalogue-digest".into(),
         accuracy_policy: crate::inference::cuda::tuning::accuracy::Policy::IDENTITY.into(),
@@ -183,7 +183,7 @@ fn an_implemented_unapproved_algorithm_rejects_a_tune_file() {
 fn a_changed_accuracy_policy_rejects_the_old_file() {
     let (catalogue, file) = fixture();
     let mut next_policy = key();
-    next_policy.accuracy_policy = "end-to-end-algorithms-v3".into();
+    next_policy.accuracy_policy = format!("{}-changed", next_policy.accuracy_policy);
     let old_file: TuneFile = serde_json::from_slice(&serde_json::to_vec(&file).unwrap()).unwrap();
     assert!(matches!(
         old_file.validate(&next_policy, &catalogue),
@@ -256,7 +256,7 @@ fn numerical_library_versions_are_required_even_for_a_kernel_winner() {
             cudnn: 91000,
             cublas: 120605,
         },
-        LibraryVersions::DriverOnly,
+        LibraryVersions::KernelOnly,
     ] {
         let mut expected = file.key.clone();
         expected.libraries = libraries;
@@ -300,15 +300,15 @@ fn api_only_identity_cannot_key_writes_or_loads() {
     assert!(!path.exists());
 
     let (catalogue, file) = fixture();
-    let mut old = serde_json::to_value(file).unwrap();
-    old["key"]["driver_version"] = serde_json::json!({"source": "cuda_api", "version": 13000});
-    std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
-    let load = TuneControl::load_file(&path, || Ok((make_key()?, catalogue)));
+    file.write(&path).unwrap();
+    let load = TuneControl::load_file(&path, |_| Ok((make_key()?, catalogue)));
     assert!(matches!(
         load,
         Err(CudaTuneError::DriverReleaseUnreadable { cuda_api: 13000 })
     ));
-    // even a readable release cannot accept an old API-level key
+    let mut old = serde_json::to_value(file).unwrap();
+    old["key"]["driver_version"] = serde_json::json!({"source": "cuda_api", "version": 13000});
+    std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
     assert!(matches!(read(&path), Err(FileError::Json(_))));
     std::fs::remove_dir_all(directory).unwrap();
 }
@@ -322,8 +322,74 @@ fn a_missing_tune_file_does_not_query_the_driver_or_libraries() {
     ));
     assert!(!path.exists());
     assert!(
-        TuneControl::load_file(&path, || panic!("absent files must not query identity"))
+        TuneControl::load_file(&path, |_| panic!("absent files must not query identity"))
             .unwrap()
             .is_none()
     );
+}
+
+#[test]
+fn kernel_only_key_and_file_loading_do_not_request_libraries() {
+    use crate::inference::cuda::tuning::{LibraryVersions, TuneControl, device_key};
+    let device = Builder::new(ComputeCapability::new(8, 9))
+        .multiprocessors(34)
+        .name("NVIDIA GeForce RTX 4060 Ti")
+        .build();
+    let catalogue = Catalogue::new(&device, PtxTier::Sm80).unwrap();
+    let requests = AtomicUsize::new(0);
+    let libraries = || {
+        requests.fetch_add(1, Ordering::SeqCst);
+        Ok(LibraryVersions::Hybrid {
+            cudnn: 91000,
+            cublas: 120604,
+        })
+    };
+    let make_key = |include_library| {
+        device_key(
+            &device,
+            Some(&catalogue),
+            DriverRelease::Nvml("595.91.07".into()),
+            LibraryVersions::for_tuning(include_library, libraries).unwrap(),
+        )
+        .unwrap()
+    };
+    let kernel_key = make_key(false);
+    assert_eq!(kernel_key.libraries, LibraryVersions::KernelOnly);
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+    let (_, mut file) = fixture();
+    file.key = kernel_key;
+    let path = std::env::temp_dir().join(format!(
+        "speakrs-kernel-only-load-{}.json",
+        std::process::id()
+    ));
+    file.write(&path).unwrap();
+    let loaded = TuneControl::load_file(&path, |stored| {
+        Ok((
+            make_key(stored.includes_library()),
+            Catalogue::new(&device, PtxTier::Sm80)?,
+        ))
+    })
+    .unwrap()
+    .unwrap();
+    let tuple = Tuple::parse(&file.entries[0].boundary, 32, CudaMath::Tf32).unwrap();
+    assert_eq!(loaded.choice(tuple).unwrap().key(), file.entries[0].choice);
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+    let library_key = make_key(true);
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        file.validate(&library_key, &catalogue),
+        Err(FileError::KeyMismatch)
+    ));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn kernel_only_file_cannot_claim_a_library_comparison() {
+    let (catalogue, mut file) = fixture();
+    file.entries[0].choice = ChoiceKey::Library;
+    assert!(matches!(
+        file.validate(&key(), &catalogue),
+        Err(FileError::Invalid(reason))
+            if reason == "kernel-only tuning cannot contain Library choices"
+    ));
 }

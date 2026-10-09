@@ -544,9 +544,9 @@ impl EmbeddingBatch {
     /// then replays instead of issuing each launch
     ///
     /// The graph records the current storage generation and model weights. When
-    /// storage grows, forward must recapture before replay. Library builds run one
-    /// eager pass so cuDNN and cuBLAS finish lazy setup outside capture. Driver-only
-    /// plans are prepared by batch construction and do not need this extra pass
+    /// storage grows, forward must recapture before replay. Batches with a Library
+    /// plan run one eager pass to finish lazy setup outside capture. Kernel-only
+    /// batches are prepared by construction and need no extra pass
     pub fn capture_graph(&mut self, runtime: &CudaRuntime) -> Result<(), CudaError> {
         let activations = self.activations.clone();
         let mut storage = activations.lock()?;
@@ -559,7 +559,9 @@ impl EmbeddingBatch {
         storage: &mut ActivationStorage<EmbeddingActivations>,
     ) -> Result<(), CudaError> {
         self.graph = None;
-        if !super::driver_only() {
+        if self.head.plan.requires_warmup()
+            || self.plans.iter().any(|(_, plan)| plan.requires_warmup())
+        {
             self.run_with_activations(
                 runtime,
                 PlanSet::Selected,

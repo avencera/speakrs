@@ -1,7 +1,7 @@
 //! Measured whole-plan recipes and device-class defaults are distinct speed claims
 
 use super::{BoundaryId, SpeedScope};
-use crate::inference::cuda::candidate::{ConfigPin, Fp16Policy, WideconvPin};
+use crate::inference::cuda::candidate::{ConfigPin, Fp16Policy, SegdensePin, WideconvPin};
 use crate::inference::cuda::device::DeviceAttributes;
 use crate::inference::cuda::{ComputeCapability, CudaMath, KernelModule, PtxTier};
 
@@ -47,21 +47,87 @@ impl RecipeMode {
 pub(crate) enum Recipe {
     Rtx4060TiSinc,
     Rtx4060Ti,
+    Rtx4090,
     Rtx5060Ti,
     TeslaT4,
     A100Pcie,
     A100Sxm4,
 }
 
-/// A measured recipe can keep Library, follow the driver rule, or fix a pin
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RecipeChoice {
-    Library,
-    DriverPin,
-    FixedPin(ConfigPin),
-}
-
 impl Recipe {
+    /// Whether this device has a built-in recipe at the compiled tier
+    pub(crate) fn measured_device(device: &DeviceAttributes, tier: PtxTier) -> bool {
+        [
+            Self::Rtx4060TiSinc,
+            Self::Rtx4060Ti,
+            Self::Rtx4090,
+            Self::Rtx5060Ti,
+            Self::TeslaT4,
+            Self::A100Pcie,
+            Self::A100Sxm4,
+        ]
+        .into_iter()
+        .any(|recipe| recipe.scope().contains(device) && recipe.allows_tier_limit(tier))
+    }
+
+    /// Match only the complete accuracy exceptions listed by the measured recipe
+    pub(crate) fn accuracy_exception(
+        boundary: BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        pin: ConfigPin,
+        device: &DeviceAttributes,
+        tier: PtxTier,
+    ) -> Option<Self> {
+        [Self::Rtx4060Ti, Self::Rtx5060Ti, Self::TeslaT4]
+            .into_iter()
+            .find(|recipe| {
+                recipe.scope().contains(device)
+                    && recipe.allows_tier_limit(tier)
+                    && recipe.exception_pin(boundary, batch, math) == Some(pin)
+            })
+    }
+
+    /// A fixed tuple pin, never the candidate's current device default
+    fn exception_pin(
+        self,
+        boundary: BoundaryId,
+        batch: usize,
+        math: CudaMath,
+    ) -> Option<ConfigPin> {
+        if math != CudaMath::Tf32 || !boundary.batches().contains(batch) {
+            return None;
+        }
+
+        match self {
+            // PR 40 pr5/evidence/4060ti/e2e: byte-identical RTTMs on 30 + 6 files
+            // the measured dense head has exactly 17 slices, not the Ada class rule
+            Self::Rtx4060Ti if boundary == BoundaryId::named("resnet.seg_1") && batch == 32 => {
+                Some(ConfigPin::Segdense(
+                    SegdensePin::measured_rtx4060ti_embedding(),
+                ))
+            }
+            // pr3/REPORT.md and autotune/REPORT.md: #38/#39 acceptance on 30 + 6
+            // files with unchanged per-file DER; only the known diysk label swap
+            // versus Library; pr5/evidence/5060ti/e2e-r2 keeps matching-mode RTTMs
+            // byte-identical on 30 files; layerwins/bw-e1 confirms subset, hard and
+            // test30 with identical RTTMs and passing DER gates on this dense head
+            Self::Rtx5060Ti if boundary == BoundaryId::named("resnet.seg_1") && batch == 32 => {
+                Some(ConfigPin::Segdense(
+                    SegdensePin::measured_rtx5060ti_embedding(),
+                ))
+            }
+            // ambitious/fp16: T4 FP32 baseline dev216 DER 7.0125, with this FFMA trunk
+            // pr5/range-guard/evidence/t4-tests: excluded FP16 recomputes identically
+            // to that FP32 path; only these TF32-mode fallback tuples inherit it
+            Self::TeslaT4 => WideconvPin::measured_t4_fallback(boundary.name(), batch, math)
+                .map(ConfigPin::Wideconv),
+            // all other recipe entries, including both A100 dense heads, use the
+            // portable policy; trunk FP16 evidence is named at fp16_pin below
+            _ => None,
+        }
+    }
+
     pub(crate) const fn scope(self) -> SpeedScope {
         let (capability, multiprocessors, name) = match self {
             Self::Rtx4060TiSinc | Self::Rtx4060Ti => (
@@ -69,6 +135,7 @@ impl Recipe {
                 34,
                 "NVIDIA GeForce RTX 4060 Ti",
             ),
+            Self::Rtx4090 => (ComputeCapability::new(8, 9), 128, "NVIDIA GeForce RTX 4090"),
             Self::Rtx5060Ti => (
                 ComputeCapability::new(12, 0),
                 36,
@@ -93,6 +160,9 @@ impl Recipe {
             Self::Rtx4060Ti => {
                 "FP16 stride-1 C32/C64 at every batch and C128/C256 from batch 8; 30-file median 52.30 to 48.35 s with identical RTTMs; FP32 segmentation and TF32 embedding"
             }
+            Self::Rtx4090 => {
+                "v4090b per-layer TF32-mode trunk check at 8576c70: FP16 C32/C64 at every batch, C128 from batch 4 and C256 from batch 8, each faster than the TF32 rule and cuDNN; FP32 segmentation and TF32 embedding"
+            }
             Self::Rtx5060Ti => {
                 "fc55d67 boundary measurements: fixed driver pins at embedding b1/b4/b8/b16/b32, staged one-product C128/C256 and 8-window LSTM tiles; FP32 segmentation and TF32 embedding"
             }
@@ -100,10 +170,10 @@ impl Recipe {
                 "FP16 stride-1 trunk at every batch; 216-file dev DER 7.0125 to 7.0118; 10-file driver 154.5x versus FP32 driver 92.2x; FP32 segmentation and TF32 embedding"
             }
             Self::A100Pcie => {
-                "hybrid-profile cea1cbe: complete FP32 segmentation/TF32 embedding driver recipe; 10-file driver 648.06x versus hybrid 547.35x; identical RTTMs; short-file Library startup wins; not a per-layer speed claim"
+                "108-SM A100 class defaults with measured FP16 wide trunk; pcie-e1 C128/C256 from batch 4: 30-file driver 23.64 to 21.98 s with identical RTTMs; FP32 segmentation and TF32 embedding"
             }
             Self::A100Sxm4 => {
-                "do-a100 de89ae2: complete FP32 segmentation/TF32 embedding driver recipe; 10-file median 9.82 s versus Library 11.32 s; identical RTTMs; not a per-layer speed claim"
+                "108-SM A100 class defaults with measured FP16 wide trunk; a100-e4 C128/C256 from batch 4: 10-file driver loop 8370 to 7731 ms with identical RTTMs; FP32 segmentation and TF32 embedding"
             }
         }
     }
@@ -117,47 +187,6 @@ impl Recipe {
         }
     }
 
-    /// Choose execution from the measured boundary, batch and arithmetic mode; an
-    /// excluded FP16 pin leaves the recipe's choice without it
-    pub(crate) fn choice(
-        self,
-        boundary: BoundaryId,
-        batch: usize,
-        math: CudaMath,
-        fp16: Fp16Policy,
-    ) -> RecipeChoice {
-        if let Some(pin) = self
-            .fp16_pin(boundary, batch, math)
-            .filter(|_| fp16.allows())
-        {
-            return RecipeChoice::FixedPin(pin);
-        }
-
-        if self == Self::TeslaT4 {
-            let library = match math {
-                CudaMath::Tf32 => matches!(
-                    (boundary.name(), batch),
-                    ("resnet.conv1", 16 | 32)
-                        | (
-                            "resnet.layer2.0.conv1"
-                                | "resnet.layer3.0.conv1"
-                                | "resnet.layer4.0.conv1",
-                            1 | 4 | 8 | 16 | 32
-                        )
-                        | ("resnet.layer3.0.shortcut.0", 1)
-                        | ("resnet.layer4.0.shortcut.0", 4)
-                ),
-                CudaMath::Fp32 => matches!((boundary.name(), batch), ("linear0" | "linear1", 1)),
-            };
-            if library {
-                return RecipeChoice::Library;
-            }
-        }
-
-        self.fixed_pin(boundary, batch, math, fp16)
-            .map_or(RecipeChoice::DriverPin, RecipeChoice::FixedPin)
-    }
-
     /// Fixed measured exceptions to the current device configuration rule
     pub(crate) fn fixed_pin(
         self,
@@ -166,39 +195,50 @@ impl Recipe {
         math: CudaMath,
         fp16: Fp16Policy,
     ) -> Option<ConfigPin> {
-        if let Some(pin) = self
-            .fp16_pin(boundary, batch, math)
+        self.fp16_pin(boundary, batch, math)
             .filter(|_| fp16.allows())
-        {
-            return Some(pin);
-        }
-
-        if !matches!(self, Self::A100Pcie | Self::A100Sxm4)
-            || !matches!(batch, 1 | 32)
-            || math != CudaMath::Tf32
-        {
-            return None;
-        }
-        WideconvPin::measured_a100(boundary.name(), batch).map(ConfigPin::Wideconv)
+            .or_else(|| match self {
+                Self::TeslaT4 => WideconvPin::measured_t4_stem(boundary.name(), batch, math)
+                    .map(ConfigPin::Wideconv),
+                _ => None,
+            })
     }
 
     /// Exact measured FP16 points, also used by builds without CUDA libraries
     pub(crate) fn fp16_device(device: &DeviceAttributes, tier: PtxTier) -> Option<Self> {
-        [Self::TeslaT4, Self::Rtx4060Ti].into_iter().find(|recipe| {
+        [
+            Self::TeslaT4,
+            Self::Rtx4060Ti,
+            Self::Rtx4090,
+            Self::A100Pcie,
+            Self::A100Sxm4,
+        ]
+        .into_iter()
+        .find(|recipe| {
             recipe.scope().contains(device) && (*recipe == Self::TeslaT4 || tier >= PtxTier::Sm80)
         })
     }
 
-    /// FP16 changes only same-channel stride-1 trunk layers in TF32 mode
+    /// FP16 changes only 3x3 trunk layers in TF32 mode: every one but the stem on the
+    /// T4, the same-channel stride-1 layers on the 4060 Ti, every one but the stem from
+    /// its measured crossover batch on the 4090, and the 128- and 256-channel layers from
+    /// batch 4 on both A100s (batch 8 for the 128->256 stride-2 layer)
     pub(crate) fn fp16_pin(
         self,
         boundary: BoundaryId,
         batch: usize,
         math: CudaMath,
     ) -> Option<ConfigPin> {
+        if !boundary.batches().contains(batch) {
+            return None;
+        }
+
         let pin = match self {
+            // PR 40 pr5/evidence/t4/e2e and layerwins evidence/e1/gate-*.txt:
+            // subset/hard/test30/dev216 DER gates pass for the T4 trunk
             Self::TeslaT4 => WideconvPin::measured_t4_fp16(boundary.name(), batch, math),
             Self::Rtx4060Ti => {
+                // PR 40 pr5/evidence/4060ti/e2e: 30 + 6 files, identical RTTMs
                 // C128/C256 lose at small batches; the measured crossover starts at eight
                 if (boundary.name().starts_with("resnet.layer3.")
                     || boundary.name().starts_with("resnet.layer4."))
@@ -208,6 +248,14 @@ impl Recipe {
                 }
 
                 WideconvPin::fp16_wide(boundary.name(), batch, math)
+            }
+            // layerwins v4090b: per-layer trunk timing only; these pins still use
+            // the portable trunk accuracy policy, with no dense-head exception
+            Self::Rtx4090 => WideconvPin::measured_rtx4090_fp16(boundary.name(), batch, math),
+            Self::A100Pcie | Self::A100Sxm4 => {
+                // layerwins a100-e4 and pcie-e1: subset/hard/test30 identical RTTMs
+                // and passing DER gates; these pins use the portable trunk policy
+                WideconvPin::measured_a100_fp16(boundary.name(), batch, math)
             }
             _ => None,
         }?;
@@ -242,6 +290,7 @@ impl Recipe {
         }
         [
             Self::Rtx4060Ti,
+            Self::Rtx4090,
             Self::Rtx5060Ti,
             Self::TeslaT4,
             Self::A100Pcie,
@@ -279,7 +328,7 @@ impl DeviceDefault {
             && fp16.allows()
             && math == CudaMath::Tf32
             && device.capability() == ComputeCapability::new(7, 5)
-            && WideconvPin::fp16_wide(boundary.name(), batch, math).is_some()
+            && WideconvPin::measured_t4_fp16(boundary.name(), batch, math).is_some()
         {
             return Some(Self::TuringFp16Trunk);
         }
