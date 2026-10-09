@@ -354,7 +354,7 @@ pub fn run_speakrs_gpu(
         report(&file_id);
     }
 
-    let total_seconds = start.elapsed().as_secs_f64();
+    // RTTM formatting stays inside the timer, as it was per file before
     let per_file_rttm = outputs
         .into_iter()
         .map(|output| {
@@ -362,6 +362,7 @@ pub fn run_speakrs_gpu(
             (output.file_id, rttm)
         })
         .collect();
+    let total_seconds = start.elapsed().as_secs_f64();
 
     Ok(BatchRunOutput {
         total_seconds,
