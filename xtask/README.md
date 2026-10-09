@@ -17,12 +17,16 @@ Development CLI for speakrs. Two binaries:
 | `dstack` | Remote GPU benchmarks via dstack |
 | `dataset` | Download/upload benchmark datasets |
 | `diarize` | Run speaker diarization on WAV files |
-| `profile-ort-embedding` | Profile ORT embedding inference strategies (`cpu` feature) |
 | `profile-stages` | Profile pipeline stages on the CPU (`cpu` feature) |
 
-The default `cpu` feature builds speakrs with ONNX Runtime. Add `--features coreml` for CoreML
-modes on macOS, or build with `--no-default-features --features coreml` for a CoreML-only xtask
-without ONNX Runtime.
+The default `cpu` feature selects the native CPU backend through `speakrs/cpu`.
+The CPU tools have no direct ONNX Runtime dependency. Add `--features coreml` for
+CoreML modes on macOS, or use `--no-default-features --features coreml` for a
+CoreML-only xtask.
+
+For the AMD ONNX Runtime backend, use
+`--no-default-features --features "migraphx load-dynamic"`. The `migraphx` feature
+selects that backend, and `load-dynamic` loads ONNX Runtime at run time.
 
 ## Local benchmarks
 

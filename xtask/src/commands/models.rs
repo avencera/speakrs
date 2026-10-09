@@ -7,7 +7,7 @@ use crate::python::{uv_run, uv_run_project};
 
 pub fn export() -> Result<()> {
     uv_run(&["scripts/export_models.py", "fixtures/models"])?;
-    // the CUDA modes' safetensors weights come from the ONNX models just exported
+    // native CPU and CUDA weights come from the ONNX models just exported
     uv_run(&[
         "--no-project",
         "scripts/cuda/export_weights.py",

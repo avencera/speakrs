@@ -75,6 +75,7 @@ fn read(file: &SafetensorsFile, name: &str) -> Result<Vec<f32>, CudaError> {
 /// The four layers in export order: generated `onnx::LSTM_*` names, numbered B, W, R
 fn host_layers(file: &SafetensorsFile) -> Result<Vec<HostLayer>, CudaError> {
     let mut names: Vec<(u64, String)> = file
+        .host()
         .names()
         .into_iter()
         .filter_map(|name| {

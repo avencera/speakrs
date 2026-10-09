@@ -1,24 +1,42 @@
 //! ONNX Runtime process setup, execution providers, and shared sessions
 
-#[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "migraphx",
+    feature = "load-dynamic",
+    not(target_arch = "wasm32")
+))]
 use std::ffi::CStr;
-#[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "migraphx",
+    feature = "load-dynamic",
+    not(target_arch = "wasm32")
+))]
 use std::path::Path;
 use std::path::PathBuf;
-#[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "migraphx",
+    feature = "load-dynamic",
+    not(target_arch = "wasm32")
+))]
 use std::sync::OnceLock;
+#[cfg(feature = "migraphx")]
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use ort::ep;
+#[cfg(feature = "migraphx")]
 use ort::session::Session;
 use ort::session::builder::SessionBuilder;
 
-use super::{ExecutionMode, InferenceBackend, InferenceError, ModelLoadError};
+#[cfg(feature = "migraphx")]
+use super::InferenceError;
+use super::{ExecutionMode, ModelLoadError};
 
 /// Shared ownership of one ONNX Runtime session
+#[cfg(feature = "migraphx")]
 #[derive(Clone)]
 pub(crate) struct SharedSession(Arc<Mutex<Session>>);
 
+#[cfg(feature = "migraphx")]
 impl SharedSession {
     pub(crate) fn new(session: Session) -> Self {
         Self(Arc::new(Mutex::new(session)))
@@ -60,36 +78,37 @@ impl OrtProvider {
 
 /// Map an execution mode to ORT execution providers
 ///
-/// speakrs never builds ONNX Runtime sessions for CoreML or CUDA modes. When the `coreml` or
-/// `cuda` feature is enabled, this helper maps those modes to the ORT CPU provider for callers
-/// that build their own sessions
-#[cfg_attr(
-    docsrs,
-    doc(cfg(any(feature = "cpu", feature = "migraphx", feature = "load-dynamic")))
-)]
+/// Native CPU, CoreML and CUDA model execution does not use this helper. For callers
+/// that build their own ORT sessions, native modes select the ORT CPU provider and
+/// MIGraphX selects its GPU provider. The mode's Cargo feature must be enabled
+#[cfg_attr(docsrs, doc(cfg(any(feature = "migraphx", feature = "load-dynamic"))))]
 pub fn with_execution_mode(
     builder: SessionBuilder,
     mode: ExecutionMode,
 ) -> Result<SessionBuilder, ModelLoadError> {
-    Ok(session_provider(mode.backend()?).apply(builder)?)
+    mode.validate()?;
+    let provider = match mode {
+        #[cfg(feature = "migraphx")]
+        ExecutionMode::MiGraphX => OrtProvider::MiGraphX,
+        _ => OrtProvider::Cpu,
+    };
+    Ok(provider.apply(builder)?)
 }
 
-/// Provider for a caller-built session, with native-backend modes mapped to the CPU provider
-fn session_provider(backend: InferenceBackend) -> OrtProvider {
-    match backend {
-        InferenceBackend::Ort(provider) => provider,
-        #[cfg(feature = "coreml")]
-        InferenceBackend::CoreMl => OrtProvider::Cpu,
-        #[cfg(feature = "_cuda")]
-        InferenceBackend::Cuda => OrtProvider::Cpu,
-    }
-}
-
-#[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "migraphx",
+    feature = "load-dynamic",
+    not(target_arch = "wasm32")
+))]
 static ORT_RUNTIME_INIT: OnceLock<Result<(), OrtRuntimeError>> = OnceLock::new();
 
+#[cfg(feature = "migraphx")]
 pub(crate) fn ensure_ort_ready() -> Result<(), ModelLoadError> {
-    #[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
+    #[cfg(all(
+        feature = "migraphx",
+        feature = "load-dynamic",
+        not(target_arch = "wasm32")
+    ))]
     {
         let init_result = ORT_RUNTIME_INIT.get_or_init(|| OrtRuntimeLoader::new().initialize());
         init_result.clone()?;
@@ -99,10 +118,7 @@ pub(crate) fn ensure_ort_ready() -> Result<(), ModelLoadError> {
 }
 
 /// Errors that can occur while preparing the process-wide ONNX Runtime environment
-#[cfg_attr(
-    docsrs,
-    doc(cfg(any(feature = "cpu", feature = "migraphx", feature = "load-dynamic")))
-)]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "migraphx", feature = "load-dynamic"))))]
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum OrtRuntimeError {
@@ -118,10 +134,7 @@ pub enum OrtRuntimeError {
 }
 
 /// Errors from locating or validating the dynamic ONNX Runtime library
-#[cfg_attr(
-    docsrs,
-    doc(cfg(any(feature = "cpu", feature = "migraphx", feature = "load-dynamic")))
-)]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "migraphx", feature = "load-dynamic"))))]
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum DynamicRuntimeError {
@@ -169,12 +182,20 @@ pub enum DynamicRuntimeError {
     },
 }
 
-#[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "migraphx",
+    feature = "load-dynamic",
+    not(target_arch = "wasm32")
+))]
 struct OrtRuntimeLoader {
     library_name: &'static str,
 }
 
-#[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "migraphx",
+    feature = "load-dynamic",
+    not(target_arch = "wasm32")
+))]
 impl OrtRuntimeLoader {
     fn new() -> Self {
         Self {
@@ -314,7 +335,11 @@ impl OrtRuntimeLoader {
     }
 }
 
-#[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
+#[cfg(all(
+    feature = "migraphx",
+    feature = "load-dynamic",
+    not(target_arch = "wasm32")
+))]
 fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut unique = Vec::with_capacity(paths.len());
     for path in paths {
@@ -325,7 +350,12 @@ fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     unique
 }
 
-#[cfg(all(test, feature = "load-dynamic", not(target_arch = "wasm32")))]
+#[cfg(all(
+    test,
+    feature = "migraphx",
+    feature = "load-dynamic",
+    not(target_arch = "wasm32")
+))]
 mod tests {
     use super::{DynamicRuntimeError, OrtRuntimeError, ensure_ort_ready};
     use crate::inference::ModelLoadError;

@@ -1,16 +1,16 @@
 //! Native CUDA backend for [`ExecutionMode::Cuda`](super::ExecutionMode::Cuda) and
 //! [`ExecutionMode::CudaFast`](super::ExecutionMode::CudaFast), without ONNX Runtime
 //!
-//! - [`CudaRuntime`] owns the device context, one stream, and the cuBLAS and cuDNN
-//!   handles lazily bound to that stream; [`CudaSession`] keeps a runtime together with the
+//! - `CudaRuntime` owns the device context, one stream, and the cuBLAS and cuDNN
+//!   handles lazily bound to that stream; `CudaSession` keeps a runtime together with the
 //!   models built on it so they can move between threads
-//! - [`KernelModule`] embeds the committed cuda-oxide PTX, one module per area, as the
+//! - `KernelModule` embeds the committed cuda-oxide PTX, one module per area, as the
 //!   best shipped variant for each enabled GPU target feature
-//! - [`DeviceTensor`] is a shaped device buffer and [`SafetensorsFile`] uploads named
+//! - `DeviceTensor` is a shaped device buffer and `SafetensorsFile` uploads named
 //!   weights with shape checks
-//! - [`Sgemm`] describes a row-major matrix product; optional library plans use
+//! - `Sgemm` describes a row-major matrix product; optional library plans use
 //!   [`CudaMath`] defaults to FP32 with TF32 disabled
-//! - [`CudaFbank`], [`ResNetEmbedding`] and [`CudaSegmentation`] are the three models
+//! - `CudaFbank`, `ResNetEmbedding` and `CudaSegmentation` are the three models
 //!
 //! Public options and errors describe inference policy; [`tune_cuda`] measures
 //! approved boundary choices on an explicitly requested device

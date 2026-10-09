@@ -219,12 +219,16 @@ impl OwnedDiarizationPipeline {
 
     /// Create an independent pipeline handle that can run on another thread
     ///
-    /// The new handle has private scratch buffers. In ONNX Runtime modes it shares the
+    /// The new handle has private scratch buffers. Native CPU handles share immutable
+    /// weights. In ONNX Runtime modes the handle shares the
     /// loaded sessions, and calls that use the same shared session are serialized
     /// through inference, output validation, and output copying. In CUDA modes it loads
     /// its own copy of the models on a new CUDA stream, because CUDA state is used by
     /// one thread at a time
-    #[cfg(all(any(feature = "_ort", feature = "_cuda"), not(feature = "coreml")))]
+    #[cfg(all(
+        any(feature = "cpu", feature = "migraphx", feature = "_cuda"),
+        not(feature = "coreml")
+    ))]
     #[cfg_attr(
         docsrs,
         doc(cfg(all(

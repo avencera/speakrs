@@ -1,10 +1,14 @@
+#[cfg(feature = "cpu")]
+mod cpu;
 use std::path::Path;
 
-use ndarray::{Array1, Array2, ArrayView2, ArrayViewMut2, s};
+use ndarray::{Array1, Array2, ArrayView2};
+#[cfg(any(feature = "migraphx", feature = "coreml", feature = "_cuda"))]
+use ndarray::{ArrayViewMut2, s};
 
 use crate::inference::{ExecutionMode, InferenceError, ModelLoadError};
 
-#[cfg(any(feature = "_ort", feature = "coreml"))]
+#[cfg(any(feature = "migraphx", feature = "coreml"))]
 mod buffers;
 #[cfg(feature = "coreml")]
 mod chunk;
@@ -13,36 +17,42 @@ mod cuda;
 mod load;
 #[cfg(feature = "coreml")]
 mod native;
-#[cfg(feature = "_ort")]
+#[cfg(feature = "migraphx")]
 mod onnx;
 mod paths;
-#[cfg(any(feature = "_ort", feature = "coreml"))]
+#[cfg(any(feature = "migraphx", feature = "coreml"))]
 mod tensor;
 
 #[cfg(feature = "coreml")]
 use chunk::ChunkSessionSpec;
 #[cfg(feature = "coreml")]
 pub(crate) use chunk::{ChunkEmbeddingSession, ChunkResourceBundle, ChunkSessionInfo};
+#[cfg(feature = "cpu")]
+use cpu::CpuEmbedding;
 #[cfg(feature = "_cuda")]
 use cuda::CudaEmbedding;
 #[cfg(feature = "coreml")]
 use native::CoreMlEmbedding;
-#[cfg(feature = "_ort")]
+#[cfg(feature = "migraphx")]
 use onnx::OrtEmbedding;
 pub(crate) use paths::read_min_num_samples;
 use paths::select_mask;
 
 const PRIMARY_BATCH_SIZE: usize = 64;
 pub(crate) const EMBEDDING_WIDTH: usize = 256;
+#[cfg(any(feature = "migraphx", feature = "coreml", feature = "_cuda"))]
 const MULTI_MASK_BATCH_SIZE: usize = 32;
-#[cfg(any(feature = "_ort", feature = "coreml"))]
+#[cfg(any(feature = "migraphx", feature = "coreml"))]
 const FBANK_BATCH_SIZE: usize = 32;
 const CHUNK_SPEAKER_BATCH_SIZE: usize = 3;
+#[cfg(any(feature = "migraphx", feature = "coreml", feature = "_cuda"))]
 const NUM_SPEAKERS: usize = 3;
+#[cfg(any(feature = "migraphx", feature = "coreml"))]
 pub(crate) const FBANK_FRAMES: usize = 998;
 /// Hop between consecutive fbank frames, in samples (10ms at 16kHz)
 #[cfg(feature = "coreml")]
 pub(crate) const FBANK_HOP_SAMPLES: usize = 160;
+#[cfg(any(feature = "migraphx", feature = "coreml", feature = "_cuda"))]
 pub(crate) const FBANK_FEATURES: usize = 80;
 const MASK_FRAMES: usize = 589;
 
@@ -78,12 +88,13 @@ pub struct EmbeddingModel {
 
 /// Sessions for the one runtime chosen from the execution mode at load time
 ///
-/// A CoreML- or CUDA-mode model holds no ONNX Runtime sessions even when an ORT feature
-/// is also enabled, and an ORT-mode model holds no native handles
+/// Native CPU, CoreML and CUDA models hold no ORT sessions, including mixed builds
 ///
 /// The variants are boxed because the backends carry large inline staging state
 enum EmbeddingBackend {
-    #[cfg(feature = "_ort")]
+    #[cfg(feature = "cpu")]
+    Cpu(Box<CpuEmbedding>),
+    #[cfg(feature = "migraphx")]
     Ort(Box<OrtEmbedding>),
     #[cfg(feature = "coreml")]
     CoreMl(Box<CoreMlEmbedding>),
@@ -95,7 +106,9 @@ enum EmbeddingBackend {
 macro_rules! with_backend {
     ($backend:expr, $name:ident => $body:expr) => {
         match $backend {
-            #[cfg(feature = "_ort")]
+            #[cfg(feature = "cpu")]
+            EmbeddingBackend::Cpu($name) => $body,
+            #[cfg(feature = "migraphx")]
             EmbeddingBackend::Ort($name) => $body,
             #[cfg(feature = "coreml")]
             EmbeddingBackend::CoreMl($name) => $body,
@@ -116,8 +129,9 @@ impl EmbeddingModel {
     /// Load the WeSpeaker embedding model with the requested execution mode
     ///
     /// `model_path` names the base `wespeaker-voxceleb-resnet34.onnx` file. CoreML modes load
-    /// the compiled bundles next to it, and CUDA modes load
-    /// `wespeaker-multimask-tail.safetensors` next to it; neither reads any ONNX file
+    /// the compiled bundles next to it. CPU and CUDA modes load
+    /// `wespeaker-multimask-tail.safetensors`; they do not read ONNX files. CPU also
+    /// accepts that native filename directly and rejects other model families
     pub fn with_mode(
         model_path: impl AsRef<Path>,
         mode: ExecutionMode,
@@ -130,10 +144,15 @@ impl EmbeddingModel {
     /// ORT session weights and arenas are shared; staging buffers and preallocated output
     /// state remain private to the new handle. A CUDA handle gets its own stream and
     /// device copy of the weights, because CUDA state is used by one thread at a time
-    #[cfg(all(any(feature = "_ort", feature = "_cuda"), not(feature = "coreml")))]
+    #[cfg(all(
+        any(feature = "cpu", feature = "migraphx", feature = "_cuda"),
+        not(feature = "coreml")
+    ))]
     pub(crate) fn clone_shared(&self) -> Result<Self, InferenceError> {
         let backend = match &self.backend {
-            #[cfg(feature = "_ort")]
+            #[cfg(feature = "cpu")]
+            EmbeddingBackend::Cpu(backend) => EmbeddingBackend::Cpu(backend.clone()),
+            #[cfg(feature = "migraphx")]
             EmbeddingBackend::Ort(backend) => {
                 EmbeddingBackend::Ort(Box::new(backend.clone_shared()?))
             }
@@ -235,7 +254,9 @@ impl EmbeddingModel {
         inputs: &[MaskedEmbeddingInput<'_>],
     ) -> Result<Array2<f32>, InferenceError> {
         let primary_batch = match &mut self.backend {
-            #[cfg(feature = "_ort")]
+            #[cfg(feature = "cpu")]
+            EmbeddingBackend::Cpu(_) => None,
+            #[cfg(feature = "migraphx")]
             EmbeddingBackend::Ort(backend) => {
                 backend.try_embed_primary_batch(&self.meta, inputs)?
             }
@@ -373,7 +394,9 @@ impl EmbeddingModel {
     fn coreml_backend(&mut self) -> Option<&mut CoreMlEmbedding> {
         match &mut self.backend {
             EmbeddingBackend::CoreMl(backend) => Some(backend),
-            #[cfg(feature = "_ort")]
+            #[cfg(feature = "cpu")]
+            EmbeddingBackend::Cpu(_) => None,
+            #[cfg(feature = "migraphx")]
             EmbeddingBackend::Ort(_) => None,
             #[cfg(feature = "_cuda")]
             EmbeddingBackend::Cuda(_) => None,
@@ -392,7 +415,9 @@ impl EmbeddingModel {
     pub(crate) fn chunk_window_capacity(&self) -> Option<usize> {
         match &self.backend {
             EmbeddingBackend::CoreMl(backend) => backend.chunk_window_capacity(),
-            #[cfg(feature = "_ort")]
+            #[cfg(feature = "cpu")]
+            EmbeddingBackend::Cpu(_) => None,
+            #[cfg(feature = "migraphx")]
             EmbeddingBackend::Ort(_) => None,
             #[cfg(feature = "_cuda")]
             EmbeddingBackend::Cuda(_) => None,
@@ -439,6 +464,7 @@ fn array1_slice<'a>(
 }
 
 /// Copy one weight row, truncating or zero-padding to `mask_frames`
+#[cfg(any(feature = "migraphx", feature = "coreml", feature = "_cuda"))]
 fn prepare_weights(
     batch_idx: usize,
     weights: &[f32],

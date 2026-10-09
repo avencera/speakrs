@@ -30,7 +30,7 @@ jobs:
         with:
           command: check
           rust-version: "1.89.0"
-          arguments: --no-default-features --features online,cuda,migraphx,load-dynamic,_metrics
+          arguments: --no-default-features --features online,cpu,cuda,migraphx,load-dynamic,_metrics
 
   msrv:
     name: MSRV Rust 1.89
@@ -58,13 +58,13 @@ jobs:
         include:
           - name: Linux x86_64
             os: ubuntu-24.04
-            features: cuda migraphx load-dynamic _metrics
+            features: cpu cuda migraphx load-dynamic _metrics
           - name: Linux arm64
             os: ubuntu-24.04-arm
-            features: cuda migraphx load-dynamic _metrics
+            features: cpu cuda migraphx load-dynamic _metrics
           - name: macOS arm64
             os: macos-15
-            features: coreml cuda migraphx load-dynamic _metrics
+            features: cpu coreml cuda migraphx load-dynamic _metrics
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -100,6 +100,9 @@ jobs:
 
       - name: Check the CPU backend alone
         run: cargo check -p speakrs --no-default-features --features "online cpu"
+
+      - name: Keep ONNX Runtime out of CPU dependency trees
+        run: bash scripts/check_cpu_dependencies.sh
 
       - name: Require a backend feature
         shell: bash
@@ -261,6 +264,7 @@ jobs:
         run: cargo clippy -p speakrs --all-targets --no-default-features --features "online coreml" -- -D warnings
 
   test:
+    timeout-minutes: 30
     name: Test (${{ matrix.name }})
     strategy:
       fail-fast: false
@@ -304,11 +308,9 @@ jobs:
             plda_mu.npy
             plda_psi.npy
             plda_tr.npy
-            segmentation-3.0.onnx
-            wespeaker-fbank.onnx
+            segmentation-3.0.safetensors
+            wespeaker-multimask-tail.safetensors
             wespeaker-voxceleb-resnet34.min_num_samples.txt
-            wespeaker-voxceleb-resnet34.onnx
-            wespeaker-voxceleb-resnet34.onnx.data
           )
 
           mkdir -p fixtures/models
@@ -332,6 +334,7 @@ jobs:
         run: cargo xtask cuda-kernels check
 
   no-default-features:
+    timeout-minutes: 30
     name: Test no-default features (Linux x86_64)
     runs-on: ubuntu-24.04
     steps:
@@ -365,11 +368,9 @@ jobs:
             plda_mu.npy
             plda_psi.npy
             plda_tr.npy
-            segmentation-3.0.onnx
-            wespeaker-fbank.onnx
+            segmentation-3.0.safetensors
+            wespeaker-multimask-tail.safetensors
             wespeaker-voxceleb-resnet34.min_num_samples.txt
-            wespeaker-voxceleb-resnet34.onnx
-            wespeaker-voxceleb-resnet34.onnx.data
           )
 
           mkdir -p fixtures/models

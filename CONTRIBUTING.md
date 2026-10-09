@@ -6,7 +6,7 @@ Set up the Python tool environment once:
 uv sync --group dev
 ```
 
-Download ONNX models and PLDA parameters (requires a [HuggingFace token](https://huggingface.co/settings/tokens) with access to the gated repos):
+Export model assets and PLDA parameters (requires a [HuggingFace token](https://huggingface.co/settings/tokens) with access to the gated repos):
 
 ```sh
 # accept terms at:
@@ -17,6 +17,14 @@ HF_TOKEN=your_token just export-models
 
 Models are saved to `fixtures/models/` (gitignored).
 
+CPU and CUDA inference use `segmentation-3.0.safetensors` and
+`wespeaker-multimask-tail.safetensors`, plus PLDA parameters and
+`wespeaker-voxceleb-resnet34.min_num_samples.txt`. The export also produces ONNX
+graphs for MIGraphX and reference checks. Native CPU inference does not use them.
+
+To use another model directory for integration tests, set
+`SPEAKRS_MODEL_FIXTURE_DIR`. Missing or invalid model assets fail the tests.
+
 Regenerate golden test fixtures from Python (requires `HF_TOKEN`):
 
 ```sh
@@ -25,7 +33,8 @@ just generate-fixtures
 
 ```sh
 just check    # fmt + lint + test
-just test     # run tests (e2e tests require ONNX models)
+just test     # run tests (e2e tests require model assets)
+just check-cpu-dependencies  # keep ORT out of CPU dependency trees
 just fmt      # cargo fmt + Python formatting
 just lint     # cargo clippy + Python ty checks
 just clippy   # cargo clippy -- -D warnings

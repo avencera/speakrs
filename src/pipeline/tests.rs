@@ -185,7 +185,7 @@ impl PipelineTestHarness {
     fn load() -> Self {
         Self {
             #[cfg(feature = "cpu")]
-            cpu_models_dir: fixture_path("models"),
+            cpu_models_dir: crate::test_support::model_fixture_dir(),
             #[cfg(feature = "coreml")]
             coreml_models_dir: coreml_models_dir(),
             audio: TestAudio::load(),

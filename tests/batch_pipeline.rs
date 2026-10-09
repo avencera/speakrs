@@ -9,15 +9,14 @@ use speakrs::{
 
 mod support;
 
-use support::{build_pipeline_or_skip, fixture_path, load_wav_samples};
+#[path = "../src/test_support.rs"]
+mod model_fixtures;
 
-/// Skips only a `load-dynamic` build without ORT_DYLIB_PATH; linked builds such as
-/// CI's always run real CPU inference here
-fn pipeline() -> Option<OwnedDiarizationPipeline> {
-    build_pipeline_or_skip(OwnedDiarizationPipeline::from_dir(
-        fixture_path("models"),
-        ExecutionMode::Cpu,
-    ))
+use model_fixtures::model_fixture_dir;
+use support::{fixture_path, load_wav_samples};
+
+fn pipeline() -> OwnedDiarizationPipeline {
+    OwnedDiarizationPipeline::from_dir(model_fixture_dir(), ExecutionMode::Cpu).unwrap()
 }
 
 #[test]
@@ -29,9 +28,7 @@ fn cpu_batches_match_sequential_bytes_and_input_order() {
         ("first", audio[160_000..400_003].to_vec()),
         ("second", audio[..400_007].to_vec()),
     ];
-    let Some(mut sequential) = pipeline() else {
-        return;
-    };
+    let mut sequential = pipeline();
     let expected: Vec<_> = files
         .iter()
         .map(|(file_id, audio)| {
@@ -47,9 +44,7 @@ fn cpu_batches_match_sequential_bytes_and_input_order() {
         .iter()
         .map(|(file_id, audio)| BatchInput { file_id, audio })
         .collect();
-    let Some(mut batch) = pipeline() else {
-        return;
-    };
+    let mut batch = pipeline();
 
     for _ in 0..2 {
         let outputs = batch.run_batch(&inputs).unwrap();
@@ -81,9 +76,7 @@ fn cpu_batches_match_sequential_bytes_and_input_order() {
 fn stream_failure_returns_no_partial_batch_and_pipeline_is_reusable() {
     let (audio, _) = load_wav_samples(&fixture_path("test.wav"));
     let audio = audio[..320_001].to_vec();
-    let Some(mut pipeline) = pipeline() else {
-        return;
-    };
+    let mut pipeline = pipeline();
     let expected = pipeline.run(&audio).unwrap().rttm("file1");
     let mut consumed = 0;
     let source = [

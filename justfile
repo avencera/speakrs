@@ -49,6 +49,9 @@ test *args:
     cargo test -p speakrs --no-default-features --features "online cuda" {{args}}
     cargo test -p speakrs --no-default-features --features "online cuda-rtx50" {{args}}
 
+check-cpu-dependencies:
+    bash scripts/check_cpu_dependencies.sh
+
 test-gpuq-workload:
     tests/gpuq-workload.sh
 

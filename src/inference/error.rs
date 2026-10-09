@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 #[cfg(feature = "coreml")]
 use super::CoreMlError;
+#[cfg(feature = "cpu")]
+use super::CpuError;
 #[cfg(feature = "_cuda")]
 use super::CudaError;
 use super::ExecutionMode;
@@ -13,12 +15,14 @@ use super::ort_runtime::OrtRuntimeError;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum InferenceError {
+    /// The native CPU backend returned an error
+    #[cfg(feature = "cpu")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "cpu")))]
+    #[error(transparent)]
+    Cpu(#[from] CpuError),
     /// ONNX Runtime returned an error
     #[cfg(feature = "_ort")]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(any(feature = "cpu", feature = "migraphx", feature = "load-dynamic")))
-    )]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "migraphx", feature = "load-dynamic"))))]
     #[error(transparent)]
     Ort(#[from] ort::Error),
     /// Native CoreML returned an error
@@ -101,6 +105,11 @@ pub enum InferenceError {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ModelLoadError {
+    /// The native CPU backend failed while loading a model
+    #[cfg(feature = "cpu")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "cpu")))]
+    #[error(transparent)]
+    Cpu(#[from] CpuError),
     /// Hugging Face Hub could not resolve a required model asset
     #[cfg(feature = "online")]
     #[error(transparent)]
@@ -110,18 +119,12 @@ pub enum ModelLoadError {
     UnsupportedExecutionMode(#[from] ExecutionModeError),
     /// ONNX Runtime could not be prepared for this process
     #[cfg(feature = "_ort")]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(any(feature = "cpu", feature = "migraphx", feature = "load-dynamic")))
-    )]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "migraphx", feature = "load-dynamic"))))]
     #[error(transparent)]
     Runtime(#[from] OrtRuntimeError),
     /// ONNX Runtime returned an error after initialization completed
     #[cfg(feature = "_ort")]
-    #[cfg_attr(
-        docsrs,
-        doc(cfg(any(feature = "cpu", feature = "migraphx", feature = "load-dynamic")))
-    )]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "migraphx", feature = "load-dynamic"))))]
     #[error(transparent)]
     Ort(#[from] ort::Error),
     /// The native CUDA backend failed while loading a model
@@ -134,7 +137,7 @@ pub enum ModelLoadError {
     MissingNativeAsset {
         /// The execution mode that requires the asset
         mode: ExecutionMode,
-        /// The missing compiled CoreML bundle path
+        /// The missing native weights or compiled model bundle path
         path: PathBuf,
     },
     /// The safetensors weights that the CUDA modes load are missing

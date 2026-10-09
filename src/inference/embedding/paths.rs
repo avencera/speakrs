@@ -1,31 +1,31 @@
 use std::fs;
 use std::num::NonZeroUsize;
 use std::path::Path;
-#[cfg(any(feature = "_ort", feature = "coreml"))]
+#[cfg(any(feature = "migraphx", feature = "coreml"))]
 use std::path::PathBuf;
 
 use crate::inference::ModelLoadError;
 #[cfg(feature = "coreml")]
 use crate::inference::coreml::coreml_model_path;
 
-#[cfg(feature = "_ort")]
+#[cfg(feature = "migraphx")]
 pub(super) fn batched_model_path(model_path: &Path, batch_size: usize) -> Option<PathBuf> {
     let file_name = model_path.file_name()?.to_str()?;
     let stem = file_name.strip_suffix(".onnx")?;
     Some(model_path.with_file_name(format!("{stem}-b{batch_size}.onnx")))
 }
 
-#[cfg(any(feature = "_ort", feature = "coreml"))]
+#[cfg(any(feature = "migraphx", feature = "coreml"))]
 pub(super) fn split_fbank_model_path(model_path: &Path) -> PathBuf {
     model_path.with_file_name("wespeaker-fbank.onnx")
 }
 
-#[cfg(any(feature = "_ort", feature = "coreml"))]
+#[cfg(any(feature = "migraphx", feature = "coreml"))]
 pub(super) fn split_fbank_batched_model_path(model_path: &Path) -> PathBuf {
     model_path.with_file_name("wespeaker-fbank-b32.onnx")
 }
 
-#[cfg(any(feature = "_ort", feature = "coreml"))]
+#[cfg(any(feature = "migraphx", feature = "coreml"))]
 pub(super) fn split_tail_model_path(model_path: &Path, batch_size: usize) -> PathBuf {
     if batch_size == 1 {
         model_path.with_file_name("wespeaker-voxceleb-resnet34-tail.onnx")
@@ -36,7 +36,7 @@ pub(super) fn split_tail_model_path(model_path: &Path, batch_size: usize) -> Pat
     }
 }
 
-#[cfg(feature = "_ort")]
+#[cfg(feature = "migraphx")]
 pub(super) fn multi_mask_model_path(model_path: &Path, batch_size: usize) -> PathBuf {
     if batch_size == 1 {
         model_path.with_file_name("wespeaker-multimask-tail.onnx")

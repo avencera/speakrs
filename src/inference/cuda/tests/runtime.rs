@@ -375,7 +375,7 @@ fn safetensors_upload_checks_shape_and_dtype() -> Result<(), CudaError> {
     let weight = values(6, 8);
     let path = write_safetensors("upload", &weight);
     let file = SafetensorsFile::open(&path)?;
-    assert_eq!(file.names(), ["conv.weight", "steps"]);
+    assert_eq!(file.host().names(), ["conv.weight", "steps"]);
     assert_eq!(file.shape("conv.weight"), Some(&[2, 3][..]));
 
     let tensor = file.upload(&runtime, "conv.weight", &[2, 3])?;

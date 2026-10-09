@@ -6,8 +6,8 @@
 //! pipeline in Rust: segmentation, powerset decode, overlap-add aggregation,
 //! binarization, embedding, PLDA, and VBx clustering.
 //!
-//! There is no Python runtime in the library path. Inference runs on native CUDA
-//! (NVIDIA), native CoreML (macOS), or ONNX Runtime (CPU, AMD), and the rest of the
+//! There is no Python runtime in the library path. Inference runs on native CPU, native CUDA
+//! (NVIDIA), native CoreML (macOS), or ONNX Runtime (AMD), and the rest of the
 //! pipeline stays in Rust.
 //!
 //! # Usage
@@ -28,7 +28,7 @@
 //! speakrs = { version = "0.6", features = ["migraphx"] }
 //! ```
 //!
-//! The `coreml` and `cuda` features run native backends, so a build with only those
+//! The `cpu`, `coreml` and `cuda` features run native backends, so a build with only those
 //! features does not compile, link, or download ONNX Runtime.
 //!
 //! ## Quick start
@@ -124,7 +124,7 @@
 //!
 //! | Mode | Backend | Step | Use it for |
 //! |------|---------|------|------------|
-//! | `cpu` | ONNX Runtime CPU | 1s | CPU runs and widest compatibility |
+//! | `cpu` | Native Rust CPU | 1s | CPU inference without ONNX Runtime |
 //! | `coreml` | Native CoreML | 1s | macOS with CoreML acceleration |
 //! | `coreml-fast` | Native CoreML | 2s | macOS with CoreML acceleration and higher throughput |
 //! | `cuda` | Native CUDA | 1s | NVIDIA GPU |
@@ -227,12 +227,23 @@
 //! [avencera/speakrs-models](https://huggingface.co/avencera/speakrs-models).
 //! Set `SPEAKRS_MODELS_DIR` if you want to force a local bundle instead.
 //!
+//! Native CPU inference loads `segmentation-3.0.safetensors` and
+//! `wespeaker-multimask-tail.safetensors`, plus the PLDA files and
+//! `wespeaker-voxceleb-resnet34.min_num_samples.txt`. The online model manager downloads
+//! these files for CPU mode, not ONNX graphs.
+//!
+//! The CPU model constructors accept the canonical `segmentation-3.0.onnx` and
+//! `wespeaker-voxceleb-resnet34.onnx` paths as family selectors. Those files do not
+//! need to exist; the native weights must be in the same directory. The known native
+//! safetensors paths are also accepted. Arbitrary ONNX models are not supported by
+//! native CPU inference. MIGraphX continues to load ONNX graphs.
+//!
 //! # Features and build notes
 //!
 //! Enable at least one inference backend; the build fails with a clear error otherwise:
 //!
 //! - `coreml`: native CoreML backend on macOS, without ONNX Runtime
-//! - `cpu`: CPU backend via ONNX Runtime
+//! - `cpu`: native Rust CPU backend, without ONNX Runtime
 //! - `cuda`: Linux-only native NVIDIA backend with speakrs kernels on every GPU,
 //!   without ONNX Runtime. cuDNN and cuBLAS load only for a fallback or an explicit choice
 //! - `migraphx`: AMD GPU backend via ONNX Runtime MIGraphX
@@ -240,8 +251,8 @@
 //! Other features:
 //!
 //! - `online` (default): model download via `ModelManager`
-//! - `load-dynamic`: load the ONNX Runtime library at startup instead of static linking; use it
-//!   with `cpu` or `migraphx`
+//! - `load-dynamic`: load ONNX Runtime dynamically for MIGraphX or the external ONNX session
+//!   helper; use it with `migraphx` or `cpu`. Native CPU inference does not load this library
 //! - `cuda-sm75`, `cuda-sm80`, `cuda-sm90`, `cuda-sm120`: driver-only targets for
 //!   Turing, Ampere/Ada, Hopper, and consumer Blackwell. Each embeds every area's best
 //!   shipped kernel variant. These features do not include cuDNN or cuBLAS
@@ -376,8 +387,8 @@
 //! Missing rows use the normal fallback. There is no automatic tuning at startup.
 //! The library API is `speakrs::inference::cuda::{tune_cuda, CudaTuneOptions}`.
 //!
-//! The ONNX Runtime dependency behind `cpu` and `migraphx` (`ort` 2.0.0-rc.13) is still
-//! pre-release.
+//! The ONNX Runtime dependency for `migraphx` and the optional external session helper
+//! (`ort` 2.0.0-rc.13) is still pre-release.
 //!
 //! # Public API
 //!
@@ -413,7 +424,7 @@ compile_error!(
      - macOS (Apple Silicon): `coreml`\n\
      - NVIDIA GPU: `cuda`, or a `cuda-sm75`/`cuda-sm80`/`cuda-sm90`/`cuda-sm120` target (native, no ONNX Runtime)\n\
      - AMD GPU: `migraphx`\n\
-     - CPU (ONNX Runtime): `cpu`\n\
+     - CPU (native Rust): `cpu`\n\
      for example: speakrs = { version = \"0.6\", features = [\"coreml\"] }"
 );
 
@@ -484,3 +495,6 @@ pub use segment::Segment;
 #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
 #[cfg(feature = "_backend")]
 pub use powerset::{PowersetDecodeError, PowersetMapping};
+
+#[cfg(test)]
+mod test_support;

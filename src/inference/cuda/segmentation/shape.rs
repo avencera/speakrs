@@ -1,28 +1,11 @@
 use super::super::CudaError;
 
-/// Samples in one 10 s window at 16 kHz, the input length speakrs always uses
-pub(super) const WINDOW_SAMPLES: usize = 160_000;
-/// Powerset classes per frame (3 speakers, at most 2 active)
-pub(super) const CLASSES: usize = 7;
-
-/// SincNet filters: 40 sine and 40 cosine band-pass filters
-pub(super) const SINC_CHANNELS: usize = 80;
-pub(super) const SINC_KERNEL: usize = 251;
-pub(super) const SINC_STRIDE: usize = 10;
-/// Kernel and stride of every max pool
-pub(super) const POOL: usize = 3;
-/// Channels of the two learned convolutions and the LSTM input
-pub(super) const FEATURES: usize = 60;
-pub(super) const CONV_KERNEL: usize = 5;
-/// LSTM hidden size per direction
-pub(super) const HIDDEN: usize = 128;
-pub(super) const LSTM_LAYERS: usize = 4;
-/// `[in, out]` of the three linear layers
-pub(super) const LINEAR: [[usize; 2]; 3] = [[2 * HIDDEN, 128], [128, 128], [128, CLASSES]];
-/// LeakyReLU slope of every activation, `0.01` as stored in the ONNX graph
-pub(super) const LEAKY_SLOPE: f32 = 0.01;
-/// Instance normalization epsilon, `1e-5` as stored in the ONNX graph
-pub(super) const NORM_EPSILON: f32 = 1e-5;
+#[cfg(feature = "_cuda-libraries")]
+pub(super) use crate::inference::native_model::segmentation::LSTM_LAYERS;
+pub(super) use crate::inference::native_model::segmentation::{
+    CLASSES, CONV_KERNEL, FEATURES, HIDDEN, LEAKY_SLOPE, LINEAR, NORM_EPSILON, POOL, SINC_CHANNELS,
+    SINC_KERNEL, SINC_STRIDE, WINDOW_SAMPLES,
+};
 
 /// Activation lengths of one forward pass for a batch of equal-length windows
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -98,6 +98,7 @@ fn load(reference: &std::path::Path, site: Site, batch: usize) -> Result<Data, C
     };
 
     let mut matmuls: Vec<_> = weights
+        .host()
         .names()
         .into_iter()
         .filter(|name| name.starts_with("onnx::MatMul_"))

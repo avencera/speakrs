@@ -14,8 +14,8 @@ If you want a small end-to-end app using it, see [avencera/smrze](https://github
 pipeline in Rust: segmentation, powerset decode, overlap-add aggregation,
 binarization, embedding, PLDA, and VBx clustering.
 
-There is no Python runtime in the library path. Inference runs on native CUDA
-(NVIDIA), native CoreML (macOS), or ONNX Runtime (CPU, AMD), and the rest of the
+There is no Python runtime in the library path. Inference runs on native CPU, native CUDA
+(NVIDIA), native CoreML (macOS), or ONNX Runtime (AMD), and the rest of the
 pipeline stays in Rust.
 
 ## Usage
@@ -36,7 +36,7 @@ speakrs = { version = "0.6", features = ["cpu"] }
 speakrs = { version = "0.6", features = ["migraphx"] }
 ```
 
-The `coreml` and `cuda` features run native backends, so a build with only those
+The `cpu`, `coreml` and `cuda` features run native backends, so a build with only those
 features does not compile, link, or download ONNX Runtime.
 
 ### Quick start
@@ -123,7 +123,7 @@ let result = pipeline.run(&audio)?;
 
 | Mode | Backend | Step | Use it for |
 |------|---------|------|------------|
-| `cpu` | ONNX Runtime CPU | 1s | CPU runs and widest compatibility |
+| `cpu` | Native Rust CPU | 1s | CPU inference without ONNX Runtime |
 | `coreml` | Native CoreML | 1s | macOS with CoreML acceleration |
 | `coreml-fast` | Native CoreML | 2s | macOS with CoreML acceleration and higher throughput |
 | `cuda` | Native CUDA | 1s | NVIDIA GPU |
@@ -226,21 +226,32 @@ With the default `online` feature, models download on first use from
 [avencera/speakrs-models](https://huggingface.co/avencera/speakrs-models).
 Set `SPEAKRS_MODELS_DIR` if you want to force a local bundle instead.
 
+Native CPU inference loads `segmentation-3.0.safetensors` and
+`wespeaker-multimask-tail.safetensors`, plus the PLDA files and
+`wespeaker-voxceleb-resnet34.min_num_samples.txt`. The online model manager downloads
+these files for CPU mode, not ONNX graphs.
+
+The CPU model constructors accept the canonical `segmentation-3.0.onnx` and
+`wespeaker-voxceleb-resnet34.onnx` paths as family selectors. Those files do not
+need to exist; the native weights must be in the same directory. The known native
+safetensors paths are also accepted. Arbitrary ONNX models are not supported by
+native CPU inference. MIGraphX continues to load ONNX graphs.
+
 ## Features and build notes
 
 Enable at least one inference backend; the build fails with a clear error otherwise:
 
 - `coreml`: native CoreML backend on macOS, without ONNX Runtime
-- `cpu`: CPU backend via ONNX Runtime
+- `cpu`: native Rust CPU backend, without ONNX Runtime
 - `cuda`: Linux-only native NVIDIA backend with speakrs kernels on every GPU,
   without ONNX Runtime. cuDNN and cuBLAS load only for a fallback or an explicit choice
 - `migraphx`: AMD GPU backend via ONNX Runtime MIGraphX
 
 Other features:
 
-- `online` (default): model download via [`ModelManager`](https://docs.rs/speakrs/latest/speakrs/models/struct.ModelManager.html)
-- `load-dynamic`: load the ONNX Runtime library at startup instead of static linking; use it
-  with `cpu` or `migraphx`
+- `online` (default): model download via `ModelManager`
+- `load-dynamic`: load ONNX Runtime dynamically for MIGraphX or the external ONNX session
+  helper; use it with `migraphx` or `cpu`. Native CPU inference does not load this library
 - `cuda-sm75`, `cuda-sm80`, `cuda-sm90`, `cuda-sm120`: driver-only targets for
   Turing, Ampere/Ada, Hopper, and consumer Blackwell. Each embeds every area's best
   shipped kernel variant. These features do not include cuDNN or cuBLAS
@@ -286,7 +297,7 @@ fallbacks.
 boundary, even when a tune file exists. The model-load log gives the source for
 each boundary: tune file, recipe, default, or library.
 
-### Tested NVIDIA GPUs
+#### Tested NVIDIA GPUs
 
 These end-to-end results use a 10-file VoxConverse subset (about 1.9 hours of
 audio), FP32 segmentation and TF32 embedding. RTFx is audio duration divided by
@@ -324,7 +335,7 @@ end-to-end speed.
 | A100 | `layer4.0.conv1` | 4 | 59 µs | 57 µs |
 | L4, A10, RTX 4090 | `seg_1` | 32 | 31 / 42 / 15 µs | 28 / 37 / 13 µs |
 
-### CUDA tuning
+#### CUDA tuning
 
 Build the opt-in command on Linux:
 
@@ -354,7 +365,8 @@ on the tuning choices. Timing and edited JSON cannot approve other algorithms.
 FP32 mode accepts direct FP32 algorithms. TF32 mode also accepts direct TF32
 algorithms, staged one-product Winograd, C64 FFMA Winograd, and FP16 trunk
 algorithms. A target-only tuner returns an error when a complete model boundary
-has no approved choice. A hybrid build can use Library for such a boundary.
+has no approved choice. A hybrid build can use Library for such a boundary only with
+`--include-library`.
 The tuner measures embedding trunk batches 1, 4, 8, 16, and 32. Segmentation
 and embedding-head choices use batches 1 and 32. Filterbank uses batches 1
 through 32. The exact device and build key rejects stale artifact bytes.
@@ -374,8 +386,8 @@ row rejects the complete file; selection then uses recipes and defaults.
 Missing rows use the normal fallback. There is no automatic tuning at startup.
 The library API is `speakrs::inference::cuda::{tune_cuda, CudaTuneOptions}`.
 
-The ONNX Runtime dependency behind `cpu` and `migraphx` (`ort` 2.0.0-rc.13) is still
-pre-release.
+The ONNX Runtime dependency for `migraphx` and the optional external session helper
+(`ort` 2.0.0-rc.13) is still pre-release.
 
 ## Public API
 
@@ -386,7 +398,7 @@ Start here:
 - [`QueueConfig`](https://docs.rs/speakrs/latest/speakrs/pipeline/queued/struct.QueueConfig.html): in-process queue capacity
 - [`DiarizationResult`](https://docs.rs/speakrs/latest/speakrs/pipeline/types/data/struct.DiarizationResult.html): frame-level activations, segments, clusters, embeddings, RTTM
 - [`PipelineConfig`](https://docs.rs/speakrs/latest/speakrs/pipeline/config/struct.PipelineConfig.html) and [`RuntimeConfig`](https://docs.rs/speakrs/latest/speakrs/pipeline/config/struct.RuntimeConfig.html): tuning knobs
-- [`ModelManager`](https://docs.rs/speakrs/latest/speakrs/models/struct.ModelManager.html): model download when `online` is enabled
+- `ModelManager`: model download when `online` is enabled
 - [`Segment`](https://docs.rs/speakrs/latest/speakrs/segment/struct.Segment.html): a single speaker turn
 
 <!-- cargo-rdme end -->
