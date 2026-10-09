@@ -283,17 +283,19 @@ GPU from the RTX 20 series and T4 onward, and you don't need the CUDA toolkit to
 build or run it.
 
 **Not sure which GPU you'll run on? Use `cuda`.** It includes kernels for every
-supported GPU generation, and keeps cuDNN 9 and cuBLAS 12 as a fallback, so
-those libraries need to be installed (about 2 GB).
+supported GPU generation. It can also fall back to cuDNN 9 and cuBLAS 12 for a
+layer without a speakrs kernel, and loads them only then. On the GPUs listed
+below every layer has a kernel, so the libraries aren't loaded.
 
 ```toml
 speakrs = { version = "0.6", features = ["cuda"] }
 ```
 
 **Know your GPU? Use its feature for fewer dependencies and a smaller install.**
-A GPU-specific build needs only the NVIDIA driver: no cuDNN, no cuBLAS and no
-CUDA toolkit. That saves about 2 GB of libraries on every machine or container
-image (cuDNN 9 is about 1.2 GB and cuBLAS 12 about 0.8 GB as NVIDIA ships them).
+A GPU-specific build needs only the NVIDIA driver and never loads cuDNN or
+cuBLAS, so you can leave about 2 GB of libraries out of every machine or
+container image (cuDNN 9 is about 1.2 GB and cuBLAS 12 about 0.8 GB
+as NVIDIA ships them).
 On the GPUs we tested, these builds run within a few percent of `cuda`, and
 often faster.
 
@@ -334,10 +336,12 @@ for full results across all datasets.
 
 GPUs without a built-in profile use good defaults. To get the best speed on
 yours, run the tuner once. It measures the kernels on your GPU and saves the
-fastest choices, which later runs load automatically:
+fastest choices, which later runs load automatically. Build the tuner with the
+same CUDA feature as your application, because a tune file only applies to the
+build that wrote it:
 
 ```sh
-cargo build --release --no-default-features --features cuda --bin speakrs
+cargo build --release --no-default-features --features cuda-rtx40 --bin speakrs
 ./target/release/speakrs cuda tune --models-dir /path/to/models
 ```
 
