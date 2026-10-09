@@ -1566,6 +1566,11 @@ pub(crate) trait DriverCandidate {
             Self::driver_pin(boundary, batch, math, device, tier, Fp16Policy::Excluded)
         {
             pins.push((pin, "default"));
+            if let Ok(Some(tf32)) = Self::tuning_tf32_pin(boundary, batch, math, device, tier)
+                && tf32 != pin
+            {
+                pins.push((tf32, "tf32"));
+            }
             if let Ok(Some(fp32)) = Self::tuning_fp32_pin(boundary, batch, math, device, tier)
                 && fp32 != pin
             {
@@ -1576,6 +1581,20 @@ pub(crate) trait DriverCandidate {
             pins.push((fp16, "fp16"));
         }
         pins
+    }
+
+    /// A TF32 algorithm for a tuple whose default runs FP16 products, which have
+    /// device-measured evidence but no tuner approval
+    ///
+    /// This is tuner-only enumeration, not a change to normal driver selection
+    fn tuning_tf32_pin(
+        _boundary: super::implementation::BoundaryId,
+        _batch: usize,
+        _math: CudaMath,
+        _device: &DeviceAttributes,
+        _tier: PtxTier,
+    ) -> Result<Option<ConfigPin>, PlanError> {
+        Ok(None)
     }
 
     /// One complete pin, selected from cached device facts without GPU allocation;

@@ -800,3 +800,54 @@ fn measured_fp16_trunk_extensions_are_approved_only_in_tf32() {
         }
     }
 }
+
+/// Where the batch-32 `seg_1` default runs FP16 products, which the tuner does not
+/// approve, the catalogue still offers our TF32 kernel against the library
+#[cfg(feature = "cuda-sm80")]
+#[test]
+fn fp16_embedding_default_leaves_an_approved_tf32_alternative() {
+    use crate::inference::cuda::candidate::{ConfigPin, SegdenseEntry};
+    let device = Builder::new(ComputeCapability::new(8, 9))
+        .multiprocessors(128)
+        .shared_optin_bytes(101376)
+        .name("NVIDIA GeForce RTX 4090")
+        .build();
+    let catalogue = Catalogue::new(&device, PtxTier::Sm80).unwrap();
+    let boundary = BoundaryId::named("resnet.seg_1");
+    let entries = |math| {
+        let tuple = Tuple::new(boundary, 32, math).unwrap();
+        catalogue
+            .choices(tuple)
+            .iter()
+            .filter_map(|choice| match choice {
+                ApprovedChoice::Kernel(config) => match config.pin {
+                    ConfigPin::Segdense(pin) => Some((config.family, pin.entry())),
+                    _ => None,
+                },
+                ApprovedChoice::Library => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let tf32 = entries(CudaMath::Tf32);
+    // the kernel bench times the first choice and the scalar bench the "fp32" one
+    assert_eq!(
+        tf32.first(),
+        Some(&("tf32", SegdenseEntry::EmbedB32Tf32)),
+        "{tf32:?}"
+    );
+    assert!(
+        tf32.contains(&("fp32", SegdenseEntry::EmbedB32)),
+        "{tf32:?}"
+    );
+    assert!(
+        tf32.iter()
+            .all(|(_, entry)| *entry != SegdenseEntry::EmbedB32F16),
+        "{tf32:?}"
+    );
+    assert!(
+        entries(CudaMath::Fp32)
+            .iter()
+            .all(|(family, _)| *family != "tf32")
+    );
+}
