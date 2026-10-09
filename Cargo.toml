@@ -32,9 +32,9 @@ coreml = [
 # cuda includes all target kernels plus cuDNN and cuBLAS for hybrid selection
 cuda = ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120", "_cuda-libraries"]
 # internal: optional numerical libraries, added only by cuda
-_cuda-libraries = ["_cuda", "cudarc/cublas", "cudarc/cudnn", "dep:libloading"]
+_cuda-libraries = ["_cuda", "cudarc/cublas", "cudarc/cudnn"]
 # internal: driver and committed PTX, without optional numerical libraries
-_cuda = ["dep:cudarc", "dep:safetensors", "dep:sha2", "dep:serde", "dep:serde_json", "dep:getrandom", "_backend"]
+_cuda = ["dep:cudarc", "dep:libloading", "dep:safetensors", "dep:sha2", "dep:serde", "dep:serde_json", "dep:getrandom", "_backend"]
 # each target embeds every area's best shipped variant for that target
 # default-features = false with cuda-rtx50 alone is a driver-only build
 cuda-sm75 = ["_cuda"]

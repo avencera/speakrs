@@ -16,6 +16,7 @@ use super::{CudaError, CudaMath, CudaRuntime, KernelModule, PtxTier};
 
 mod accuracy;
 mod bench;
+mod driver_version;
 mod file;
 
 /// Inputs to the opt-in tuner; precision must match the pipeline that will use it
@@ -120,7 +121,7 @@ pub fn tune_cuda(options: &CudaTuneOptions) -> Result<CudaTuneReport, CudaTuneEr
     let runtime = CudaRuntime::for_tuning(options.device, BenchKind::Kernel)?;
     let catalogue = Catalogue::new(runtime.device(), runtime.ptx_tier())?;
     let key = device_key(runtime.device(), Some(&catalogue))?;
-    let path = file::path(&key, options.output_path.as_deref())?;
+    let path = file::path(runtime.device(), options.output_path.as_deref())?;
     let measurements = bench::run(options, runtime)?;
     let (rows, entries) = select_winners(measurements)?;
     let tuned = file::TuneFile::new(key.clone(), entries);
@@ -315,8 +316,7 @@ impl TuneControl {
     pub(crate) fn load(device: &DeviceAttributes, tier: PtxTier) -> Option<Self> {
         let load = || -> Result<Option<Self>, CudaTuneError> {
             // computing only the path does not hash artifacts or load candidate modules
-            let location_key = device_key_without_artifacts(device);
-            let path = file::path(&location_key, None)?;
+            let path = file::path(device, None)?;
             let Some(file) = file::read(&path)? else {
                 return Ok(None);
             };
@@ -514,33 +514,20 @@ fn select_winners(
     Ok((rows, entries))
 }
 
-fn device_key_without_artifacts(device: &DeviceAttributes) -> file::DeviceKey {
-    let cc = device.capability();
-    file::DeviceKey {
-        device_name: device.name().into(),
-        capability: [cc.major, cc.minor],
-        sm_count: device.multiprocessors().get(),
-        driver_version: String::new(),
-        speakrs_version: env!("CARGO_PKG_VERSION").into(),
-        artifact_version: String::new(),
-        accuracy_policy: accuracy::Policy::IDENTITY.into(),
-    }
-}
-
 fn device_key(
     device: &DeviceAttributes,
     catalogue: Option<&Catalogue>,
 ) -> Result<file::DeviceKey, CudaTuneError> {
-    let mut key = device_key_without_artifacts(device);
-    // the CUDA API version omits NVIDIA driver patch releases; use the actual module
-    key.driver_version = std::fs::read_to_string("/sys/module/nvidia/version")
-        .or_else(|_| std::fs::read_to_string("/proc/driver/nvidia/version"))?
-        .lines()
-        .next()
-        .filter(|line| !line.trim().is_empty())
-        .ok_or_else(|| CudaTuneError::Invalid("NVIDIA driver version is empty".into()))?
-        .trim()
-        .into();
+    let cc = device.capability();
+    let mut key = file::DeviceKey {
+        device_name: device.name().into(),
+        capability: [cc.major, cc.minor],
+        sm_count: device.multiprocessors().get(),
+        driver_version: driver_version::DriverVersion::read()?,
+        speakrs_version: env!("CARGO_PKG_VERSION").into(),
+        artifact_version: String::new(),
+        accuracy_policy: accuracy::Policy::IDENTITY.into(),
+    };
     let mut digest = Sha256::new();
     digest.update(b"speakrs-cuda-tuning-catalogue-v3");
     digest.update([u8::from(cfg!(feature = "_cuda-libraries"))]);

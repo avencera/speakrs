@@ -6,10 +6,12 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use super::driver_version::DriverVersion;
 use super::{ApprovedChoice, Catalogue, Tuple};
 use crate::inference::cuda::CudaMath;
+use crate::inference::cuda::device::DeviceAttributes;
 
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const MAX_FILE_BYTES: u64 = 4 << 20;
 
 /// Every identity component must match before any row is used
@@ -19,7 +21,7 @@ pub(super) struct DeviceKey {
     pub(super) device_name: String,
     pub(super) capability: [u32; 2],
     pub(super) sm_count: u32,
-    pub(super) driver_version: String,
+    pub(super) driver_version: DriverVersion,
     pub(super) speakrs_version: String,
     pub(super) artifact_version: String,
     pub(super) accuracy_policy: String,
@@ -218,11 +220,22 @@ pub(super) fn read(path: &Path) -> Result<Option<TuneFile>, FileError> {
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Err(FileError::Invalid("file exceeds 4 MiB".into()));
     }
-    Ok(Some(serde_json::from_slice(&bytes)?))
+    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    if value
+        .get("format_version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(u64::from(FORMAT_VERSION))
+    {
+        return Err(FileError::Invalid("unsupported tune-file format".into()));
+    }
+    Ok(Some(serde_json::from_value(value)?))
 }
 
 /// The path is stable across upgrades, while the key invalidates old measurements
-pub(super) fn path(key: &DeviceKey, override_path: Option<&Path>) -> Result<PathBuf, FileError> {
+pub(super) fn path(
+    device: &DeviceAttributes,
+    override_path: Option<&Path>,
+) -> Result<PathBuf, FileError> {
     if let Some(path) = override_path {
         return Ok(path.to_owned());
     }
@@ -235,7 +248,13 @@ pub(super) fn path(key: &DeviceKey, override_path: Option<&Path>) -> Result<Path
         .ok_or_else(|| {
             FileError::Invalid("set SPEAKRS_CUDA_TUNE_FILE or XDG_CONFIG_HOME".into())
         })?;
-    let identity = format!("{}:{:?}:{}", key.device_name, key.capability, key.sm_count);
+    let cc = device.capability();
+    let identity = format!(
+        "{}:{:?}:{}",
+        device.name(),
+        [cc.major, cc.minor],
+        device.multiprocessors().get()
+    );
     let hash = super::super::kernels::ArtifactHash::of(identity.as_bytes());
     Ok(root.join("speakrs").join(format!("cuda-tune-{hash}.json")))
 }
