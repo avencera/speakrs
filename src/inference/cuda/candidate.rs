@@ -1522,6 +1522,26 @@ pub(crate) trait DriverCandidate {
             evidence.summary()
         })
     }
+    /// Speed evidence for the final non-FP16 pin, not an unmeasured alternative
+    fn speed_evidence(
+        boundary: super::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        device: &DeviceAttributes,
+        tier: PtxTier,
+        pin: ConfigPin,
+    ) -> Option<(super::implementation::SpeedScope, &'static str)> {
+        if pin.is_fp16()
+            || Self::driver_pin(boundary, batch, math, device, tier, Fp16Policy::Excluded).ok()?
+                != pin
+        {
+            return None;
+        }
+
+        Self::speed_scope(boundary, batch, math, device, tier)
+            .map(|scope| (scope, Self::speed_summary(math)))
+    }
+
     /// A conservative FP32 algorithm with a pin valid for the requested math mode
     ///
     /// Tuning enumerates this pin; unmeasured defaults use it when the normal

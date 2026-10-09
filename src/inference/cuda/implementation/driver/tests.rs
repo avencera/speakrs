@@ -2281,3 +2281,39 @@ fn measured_pipeline_pins_change_only_the_4090_head_and_t4_large_stem() {
         "the 4090 head and T4 b16/b32 stem change with either trunk FP16 guard state"
     );
 }
+
+#[test]
+#[cfg(feature = "cuda-sm80")]
+fn accuracy_replacement_does_not_inherit_the_old_pins_speed_evidence() {
+    use crate::inference::cuda::candidate::{
+        WideconvAlgorithm, WideconvConfig, WideconvPartition, WideconvPin, WideconvSplitCells,
+    };
+    let mut fixture = Fixture::new();
+    fixture.device = Builder::new(ComputeCapability::new(8, 9))
+        .multiprocessors(34)
+        .name("NVIDIA GeForce RTX 4060 Ti")
+        .build();
+    fixture.limit = PtxTier::Sm80;
+    let selected = super::select_default(
+        BoundaryId::named("resnet.layer3.1.conv1"),
+        32,
+        CudaMath::Fp32,
+        &mut fixture,
+    )
+    .unwrap();
+    let Selected::Oxide(token) = selected else {
+        panic!("approved spatial replacement")
+    };
+    assert_eq!(
+        token.pin,
+        PlanPin::Pinned(ConfigPin::Wideconv(WideconvPin::Configured(
+            WideconvConfig {
+                algorithm: WideconvAlgorithm::Spatial,
+                partition: WideconvPartition::Whole,
+                split_cells: WideconvSplitCells::All,
+            }
+        )))
+    );
+    assert_eq!(token.evidence, TokenEvidence::Implemented);
+    assert!(!token.speed_measured());
+}

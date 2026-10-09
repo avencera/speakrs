@@ -35,13 +35,22 @@ type DriverPin = fn(
 /// Candidate-owned operand policy shared by hybrid coverage and pin selection
 type HybridFp16 = fn(&DeviceAttributes, PtxTier, Option<Recipe>, Fp16Policy) -> Fp16Policy;
 
+/// Candidate-owned speed evidence for an exact final pin
+type SpeedEvidence = fn(
+    BoundaryId,
+    usize,
+    CudaMath,
+    &DeviceAttributes,
+    PtxTier,
+    ConfigPin,
+) -> Option<(super::SpeedScope, &'static str)>;
+
 /// One area's library-free candidate interface, independent of artifact loading
 pub(super) struct Area {
     area: KernelModule,
     coverage: fn(PtxTier, &DeviceAttributes, Fp16Policy) -> Coverage,
     hybrid_fp16: HybridFp16,
-    scope: fn(BoundaryId, usize, CudaMath, &DeviceAttributes, PtxTier) -> Option<super::SpeedScope>,
-    summary: fn(CudaMath) -> &'static str,
+    speed_evidence: SpeedEvidence,
     pin: DriverPin,
     tuning_pins: TuningPins,
     tuning_fp32_pin: TuningFp32Pin,
@@ -54,8 +63,7 @@ impl Area {
             area: C::AREA,
             coverage: C::driver_coverage,
             hybrid_fp16: C::hybrid_fp16,
-            scope: C::speed_scope,
-            summary: C::speed_summary,
+            speed_evidence: C::speed_evidence,
             pin: C::driver_pin,
             tuning_pins: C::tuning_pins,
             tuning_fp32_pin: C::tuning_fp32_pin,
@@ -205,8 +213,6 @@ pub(super) fn select_from(
         ) {
             continue;
         }
-        let scope = (candidate.scope)(boundary, batch, math, modules.device(), request.tier())
-            .filter(|scope| scope.contains(modules.device()) && scope.allows_tier(request.tier()));
         let default = (selection == Selection::Production)
             .then(|| {
                 DeviceDefault::select(
@@ -267,6 +273,7 @@ pub(super) fn select_from(
             },
         };
         let mut pin = pin.map_err(pin_error)?;
+        let initial_pin = pin;
 
         if selection == Selection::Production
             && Recipe::accuracy_exception(
@@ -307,6 +314,15 @@ pub(super) fn select_from(
                 reason: "candidate returned a foreign area pin".to_owned(),
             });
         }
+        let speed_evidence = (candidate.speed_evidence)(
+            boundary,
+            batch,
+            math,
+            modules.device(),
+            request.tier(),
+            pin,
+        )
+        .filter(|(scope, _)| scope.contains(modules.device()) && scope.allows_tier(request.tier()));
         let loaded = modules.load(request)?;
         if loaded != request {
             return Err(CudaError::Unsupported {
@@ -327,12 +343,12 @@ pub(super) fn select_from(
                 // measured evidence describes the selected artifact, not forced JIT
                 TokenEvidence::Implemented
             } else if selection == Selection::Production
-                && let Some(recipe) = recipe
+                && let Some(recipe) = recipe.filter(|_| initial_pin == pin)
             {
                 TokenEvidence::Recipe(recipe)
-            } else if let Some(scope) = scope {
-                TokenEvidence::non_fp16_port(scope, (candidate.summary)(math), pin)
-            } else if let Some(default) = default {
+            } else if let Some((scope, summary)) = speed_evidence {
+                TokenEvidence::Port { scope, summary }
+            } else if let Some(default) = default.filter(|_| initial_pin == pin) {
                 TokenEvidence::DeviceDefault(default)
             } else {
                 TokenEvidence::Implemented
