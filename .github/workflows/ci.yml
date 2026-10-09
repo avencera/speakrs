@@ -161,6 +161,9 @@ jobs:
             exit 1
           fi
 
+      - name: Build the driver-only GPU benchmark binary
+        run: cargo build -p xtask --bin speakrs-bm --no-default-features --features cuda-rtx50
+
       # the host-only PLDA tests read these
       - name: Cache PLDA fixtures
         uses: actions/cache@v4
