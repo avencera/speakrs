@@ -139,10 +139,18 @@ pub(crate) struct Parity {
 
 pub(crate) fn parity(actual: &[f32], expected: &[f32], dim: usize) -> Parity {
     assert_eq!(actual.len(), expected.len());
+    assert!(
+        dim > 0 && !actual.is_empty() && actual.len().is_multiple_of(dim),
+        "parity requires nonempty complete rows"
+    );
     let min_cosine = actual
         .chunks(dim)
         .zip(expected.chunks(dim))
         .map(|(a, e)| {
+            assert!(
+                a.iter().chain(e).all(|value| value.is_finite()),
+                "parity requires finite row values"
+            );
             let dot: f64 = a
                 .iter()
                 .zip(e)
@@ -150,7 +158,15 @@ pub(crate) fn parity(actual: &[f32], expected: &[f32], dim: usize) -> Parity {
                 .sum();
             let na: f64 = a.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>().sqrt();
             let ne: f64 = e.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>().sqrt();
-            dot / (na * ne)
+            // a zero reference matches only a zero actual row; it has no cosine direction
+            if ne == 0.0 {
+                assert_eq!(na, 0.0, "nonzero output for a zero reference row");
+                return 1.0;
+            }
+            assert!(na > 0.0, "zero output for a nonzero reference row");
+            let cosine = dot / (na * ne);
+            assert!(cosine.is_finite(), "non-finite row cosine");
+            cosine
         })
         .fold(f64::INFINITY, f64::min);
     let max_abs = max_abs_diff(actual, expected);
@@ -158,6 +174,39 @@ pub(crate) fn parity(actual: &[f32], expected: &[f32], dim: usize) -> Parity {
         min_cosine,
         max_abs,
     }
+}
+
+#[test]
+#[should_panic(expected = "zero output for a nonzero reference row")]
+fn parity_rejects_all_zero_output() {
+    parity(&[0.0; 512], &[1.0; 512], 256);
+}
+
+#[test]
+#[should_panic(expected = "zero output for a nonzero reference row")]
+fn parity_rejects_one_zero_row() {
+    let mut actual = [1.0; 512];
+    actual[256..].fill(0.0);
+    parity(&actual, &[1.0; 512], 256);
+}
+
+#[test]
+fn parity_defines_zero_reference_rows() {
+    let result = parity(&[0.0, 0.0, 1.0, 2.0], &[0.0, 0.0, 1.0, 2.0], 2);
+    assert!((result.min_cosine - 1.0).abs() < 1e-12);
+    assert_eq!(result.max_abs, 0.0);
+    assert!(std::panic::catch_unwind(|| parity(&[1.0, 0.0], &[0.0, 0.0], 2)).is_err());
+}
+
+#[test]
+fn parity_rejects_nonfinite_and_incomplete_rows() {
+    for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        assert!(std::panic::catch_unwind(|| parity(&[invalid, 1.0], &[1.0, 1.0], 2)).is_err());
+        assert!(std::panic::catch_unwind(|| parity(&[1.0, 1.0], &[invalid, 1.0], 2)).is_err());
+    }
+    assert!(std::panic::catch_unwind(|| parity(&[], &[], 2)).is_err());
+    assert!(std::panic::catch_unwind(|| parity(&[1.0], &[1.0], 2)).is_err());
+    assert!(std::panic::catch_unwind(|| parity(&[1.0], &[1.0], 0)).is_err());
 }
 
 fn max_abs_diff(actual: &[f32], expected: &[f32]) -> f64 {

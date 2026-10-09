@@ -19,6 +19,7 @@ struct Fixture {
     limit: PtxTier,
     recipe_mode: super::super::policy::RecipeMode,
     tuned: Option<crate::inference::cuda::tuning::ApprovedChoice>,
+    force_jit: bool,
 }
 
 impl Fixture {
@@ -35,6 +36,7 @@ impl Fixture {
             limit: PtxTier::Sm120,
             recipe_mode: super::super::policy::RecipeMode::Disabled,
             tuned: None,
+            force_jit: false,
         }
     }
 }
@@ -52,8 +54,13 @@ impl Modules for &mut Fixture {
     ) -> Result<Option<crate::inference::cuda::tuning::ApprovedChoice>, CudaError> {
         Ok(self.tuned.clone())
     }
+
     fn recipe_mode(&self) -> super::super::policy::RecipeMode {
         self.recipe_mode
+    }
+
+    fn effective_request(&self, request: ModuleRequest) -> Result<ModuleRequest, CudaError> {
+        request.diagnostic_request(self.force_jit)
     }
 
     fn device(&self) -> &DeviceAttributes {
@@ -1153,4 +1160,50 @@ fn measured_t4_recipe_routes_mixed_choices_without_changing_driver_only() {
         panic!("tune file overrides Library recipe")
     };
     assert_eq!(tuned.source(), super::super::policy::Source::TuneFile);
+}
+
+#[test]
+fn forced_jit_fixes_driver_and_hybrid_identity_without_cubin_speed_evidence() {
+    use crate::inference::cuda::kernels::LoadedArtifact;
+
+    for selection in [super::Selection::DriverOnly, super::Selection::Production] {
+        let mut fixture = Fixture::new();
+        fixture.force_jit = true;
+        fixture.device = Builder::new(ComputeCapability::new(8, 9)).build();
+        let selected_request = super::super::production_module(
+            KernelModule::Sincnet,
+            &fixture.device,
+            fixture.limit,
+            KernelModule::Sincnet.variants(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(matches!(
+            selected_request.artifact(),
+            LoadedArtifact::Cubin { .. }
+        ));
+        let selected = select_from(
+            &[Area::candidate::<BroadStub>()],
+            BoundaryId::named("sincnet.conv0.abs_pool"),
+            1,
+            CudaMath::Fp32,
+            &mut &mut fixture,
+            selection,
+        )
+        .unwrap();
+        let Some(Selected::Oxide(token)) = selected else {
+            panic!("forced JIT must select the port")
+        };
+        assert_eq!(
+            token.target.module,
+            selected_request.diagnostic_request(true).unwrap()
+        );
+        assert!(matches!(
+            token.target.module.artifact(),
+            LoadedArtifact::PtxJit { .. }
+        ));
+        assert_eq!(fixture.loads, [token.target.module]);
+        assert_eq!(token.evidence, TokenEvidence::Implemented);
+        assert!(!token.speed_measured());
+    }
 }

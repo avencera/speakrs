@@ -204,6 +204,8 @@ pub(super) fn select_from(
         else {
             continue;
         };
+        let selected_request = request;
+        let request = modules.effective_request(request)?;
         if !(candidate.coverage)(request.tier(), modules.device()).covers(
             boundary.name(),
             batch,
@@ -287,7 +289,10 @@ pub(super) fn select_from(
                 device: modules.device().capability(),
             },
             pin: PlanPin::Pinned(pin),
-            evidence: if selection == Selection::Production
+            evidence: if request != selected_request {
+                // measured evidence describes the selected artifact, not forced JIT
+                TokenEvidence::Implemented
+            } else if selection == Selection::Production
                 && let Some(recipe) = recipe
             {
                 TokenEvidence::Recipe(recipe)

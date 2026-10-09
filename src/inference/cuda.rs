@@ -67,6 +67,7 @@ pub(crate) use buffer::DeviceTensor;
 use dnn::ConvPlanner;
 pub(crate) use embedding::{
     EMBEDDING_DIM, EmbeddingBatch, EmbeddingBatchClass, ResNetEmbedding, SPEAKERS_PER_CHUNK,
+    SharedEmbeddingActivations,
 };
 pub use error::{CudaError, CudaLibrary, GeometryError, WeightFault};
 pub(crate) use fbank::{

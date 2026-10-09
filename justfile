@@ -14,10 +14,23 @@ clippy:
     for features in cuda-sm75 cuda-sm80 cuda-sm90 cuda-sm120 cuda-rtx20 cuda-rtx30 cuda-rtx40 cuda-a100 cuda-rtx50; do
         cargo clippy -p speakrs --all-targets --no-default-features --features "$features" -- -D warnings
     done
+    # the benchmark binary must compile its runners without the numerical libraries
+    cargo clippy -p xtask --all-targets --no-default-features --features cuda-rtx50 -- -D warnings
     cargo clippy -p speakrs --all-targets --features "cpu load-dynamic" -- -D warnings
     if [[ "$(uname)" == "Darwin" ]]; then
         # the CoreML-only build has no ONNX Runtime, so check it for dead code separately
         cargo clippy -p speakrs --all-targets --no-default-features --features "online coreml" -- -D warnings
+        # Linux-only CUDA tests never compile for a macOS host, so lint them for the Linux target
+        # zig cross-compiles the C dependencies; `online` is left out because it needs Linux OpenSSL
+        if command -v zig >/dev/null; then
+            for features in cuda cuda-sm75 cuda-rtx50; do
+                CC_x86_64_unknown_linux_gnu="zig cc -target x86_64-linux-gnu" AR_x86_64_unknown_linux_gnu="zig ar" \
+                    cargo clippy -p speakrs --all-targets --no-default-features --features "$features" \
+                    --target x86_64-unknown-linux-gnu -- -D warnings
+            done
+        else
+            echo "zig not found: skipping the Linux-target CUDA clippy checks" >&2
+        fi
     fi
 
 python-lint:
