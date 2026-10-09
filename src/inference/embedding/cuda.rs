@@ -24,7 +24,8 @@ use crate::pipeline::RuntimeConfig;
 
 use super::{
     AudioWindows, EMBEDDING_WIDTH, EmbeddingMeta, FBANK_FEATURES, MASK_FRAMES,
-    MULTI_MASK_BATCH_SIZE, NUM_SPEAKERS, SplitTailInput, prepare_weights, should_use_clean_mask,
+    MULTI_MASK_BATCH_SIZE, MultiMaskStart, NUM_SPEAKERS, SplitTailInput, prepare_weights,
+    should_use_clean_mask,
 };
 
 /// The weights file CUDA modes load, next to the base embedding ONNX path
@@ -54,6 +55,9 @@ pub(super) struct CudaEmbedding {
     masks: Vec<f32>,
     /// `[chunks, 998, 80]` host filterbanks for the next batch
     fbanks: Vec<f32>,
+    /// The multi-mask batch [`Self::wait_multi_mask_audio_windows`] finishes: the
+    /// embeddings of its batch classes before the last, and the last, still running
+    running: Option<(Vec<f32>, Launch)>,
 }
 
 /// The device models and buffers; a session keeps them with the runtime they were
@@ -81,6 +85,14 @@ struct Batches {
     graphs: bool,
     plans: [Option<EmbeddingBatch>; 5],
     activations: Option<SharedEmbeddingActivations>,
+}
+
+/// A batch class launched on the device whose embeddings are not yet downloaded
+struct Launch {
+    class: EmbeddingBatchClass,
+    plan_us: u128,
+    stage_us: u128,
+    launch_us: u128,
 }
 
 impl CudaEmbedding {
@@ -125,6 +137,7 @@ impl CudaEmbedding {
             recipe_mode,
             masks: Vec::new(),
             fbanks: Vec::new(),
+            running: None,
         }
     }
 
@@ -194,42 +207,77 @@ impl CudaEmbedding {
         Ok(rows.slice_axis(Axis(0), (..masks.len()).into()).to_owned())
     }
 
-    /// [`Self::embed_multi_mask_audio_batch`] for windows of one recording, uploading
-    /// the audio they cover once instead of every window on its own
-    pub(in crate::inference::embedding) fn embed_multi_mask_audio_windows(
+    /// Starts [`Self::embed_multi_mask_audio_batch`] for windows of one recording,
+    /// uploading the audio they cover once instead of every window on its own, and
+    /// returns while the batch runs; [`Self::wait_multi_mask_audio_windows`] returns its
+    /// embeddings
+    ///
+    /// Windows the span upload does not suit embed at once instead. No other embedding
+    /// may run on this handle while a batch runs, since it would reuse the batch's
+    /// output
+    pub(in crate::inference::embedding) fn start_multi_mask_audio_windows(
         &mut self,
         meta: &EmbeddingMeta,
         windows: &AudioWindows<'_>,
         masks: &[&[f32]],
-    ) -> Result<Array2<f32>, InferenceError> {
+    ) -> Result<MultiMaskStart, InferenceError> {
+        debug_assert!(
+            self.running.is_none(),
+            "a multi-mask batch is still running"
+        );
         // the span is cut on the GPU filterbank's own fixed window
         if meta.window_samples != FBANK_WINDOW_SAMPLES {
-            return self.embed_multi_mask_audio_batch(meta, &windows.slices(), masks);
+            let rows = self.embed_multi_mask_audio_batch(meta, &windows.slices(), masks)?;
+            return Ok(MultiMaskStart::Done(rows));
         }
         check_multi_mask_counts(windows.len(), masks.len())?;
         let (span, starts) = windows.span();
         // windows spread over long inactive stretches cover more audio than the
         // per-window upload would copy
         if span.len() > windows.len() * FBANK_WINDOW_SAMPLES {
-            return self.embed_multi_mask_audio_batch(meta, &windows.slices(), masks);
+            let rows = self.embed_multi_mask_audio_batch(meta, &windows.slices(), masks)?;
+            return Ok(MultiMaskStart::Done(rows));
         }
         let starts: Vec<usize> = starts.collect();
         stage_masks(&mut self.masks, masks.iter().copied(), meta.mask_frames);
         let staged = &self.masks;
-        let values = self.session.run(|runtime, state| {
+        let (values, running) = self.session.run(|runtime, state| {
             let EmbeddingState {
                 fbank,
                 fbank_buffers,
                 batches,
             } = state;
             let features = fbank.compute_span(runtime, span, &starts, fbank_buffers)?;
-            batches.embed(runtime, starts.len(), staged, |runtime, rows, target| {
+            batches.launch(runtime, starts.len(), staged, |runtime, rows, target| {
                 let source = features.slice(rows.start * FBANK_LEN..rows.end * FBANK_LEN);
                 copy_device(runtime, &source, target)
             })
         })?;
-        let rows = embedding_rows(values)?;
-        Ok(rows.slice_axis(Axis(0), (..masks.len()).into()).to_owned())
+        // every window has its three masks, so the batch's rows are exactly the masks
+        match running {
+            Some(running) => {
+                self.running = Some((values, running));
+                Ok(MultiMaskStart::Running)
+            }
+            None => Ok(MultiMaskStart::Done(embedding_rows(values)?)),
+        }
+    }
+
+    /// Waits for the batch [`Self::start_multi_mask_audio_windows`] started and returns
+    /// one embedding row per mask
+    pub(in crate::inference::embedding) fn wait_multi_mask_audio_windows(
+        &mut self,
+    ) -> Result<Array2<f32>, InferenceError> {
+        let Some((mut values, running)) = self.running.take() else {
+            return Err(InferenceError::MissingOutput {
+                context: "cuda multi-mask batch is not running",
+            });
+        };
+        let last = self
+            .session
+            .run(|runtime, state| state.batches.download(runtime, running))?;
+        values.extend(last);
+        embedding_rows(values)
     }
 
     pub(in crate::inference::embedding) fn embed_multi_mask_batch(
@@ -352,6 +400,10 @@ impl CudaEmbedding {
 
     /// Embeds the staged masks for `audios`, computing their filterbanks on the device
     fn embed_audio(&mut self, audios: &[&[f32]]) -> Result<Array2<f32>, InferenceError> {
+        debug_assert!(
+            self.running.is_none(),
+            "a multi-mask batch is still running"
+        );
         let masks = &self.masks;
         let values = self.session.run(|runtime, state| {
             let EmbeddingState {
@@ -371,6 +423,10 @@ impl CudaEmbedding {
 
     /// Embeds the staged masks for the staged host filterbanks
     fn embed_fbanks(&mut self) -> Result<Array2<f32>, InferenceError> {
+        debug_assert!(
+            self.running.is_none(),
+            "a multi-mask batch is still running"
+        );
         let (fbanks, masks) = (&self.fbanks, &self.masks);
         let chunks = fbanks.len() / FBANK_LEN;
         let values = self.session.run(|runtime, state| {
@@ -389,18 +445,43 @@ impl CudaEmbedding {
 impl Batches {
     /// Runs `chunks` chunks whose masks are in `masks`; `fill` writes the filterbanks
     /// of a range of chunks into a batch's input
-    ///
-    /// Partial batches use the largest exact class that fits each remaining range
     fn embed(
         &mut self,
         runtime: &CudaRuntime,
         chunks: usize,
         masks: &[f32],
-        mut fill: impl FnMut(&CudaRuntime, Range<usize>, &mut DeviceTensor) -> Result<(), CudaError>,
+        fill: impl FnMut(&CudaRuntime, Range<usize>, &mut DeviceTensor) -> Result<(), CudaError>,
     ) -> Result<Vec<f32>, CudaError> {
+        let (mut embeddings, last) = self.launch(runtime, chunks, masks, fill)?;
+        if let Some(last) = last {
+            embeddings.extend(self.download(runtime, last)?);
+        }
+
+        Ok(embeddings)
+    }
+
+    /// Launches `chunks` chunks as [`Self::embed`] runs them, but leaves the last batch
+    /// class running: returns the embeddings of the classes before it and the launch
+    /// that [`Self::download`] finishes
+    ///
+    /// Partial batches use the largest exact class that fits each remaining range. A
+    /// class is downloaded before the next one launches, since the classes share
+    /// activation storage and planning a class for the first time may synchronize
+    fn launch(
+        &mut self,
+        runtime: &CudaRuntime,
+        chunks: usize,
+        masks: &[f32],
+        mut fill: impl FnMut(&CudaRuntime, Range<usize>, &mut DeviceTensor) -> Result<(), CudaError>,
+    ) -> Result<(Vec<f32>, Option<Launch>), CudaError> {
         let mut embeddings = Vec::with_capacity(chunks * SPEAKERS_PER_CHUNK * EMBEDDING_DIM);
+        let mut running = None;
         let mut start = 0;
         while let Some(class) = EmbeddingBatchClass::fitting(chunks - start) {
+            if let Some(previous) = running.take() {
+                embeddings.extend(self.download(runtime, previous)?);
+            }
+
             let rows = start..start + class.chunks();
             let plan_start = std::time::Instant::now();
             let batch = self.batch(runtime, class)?;
@@ -414,21 +495,37 @@ impl Batches {
             let stage_us = stage_start.elapsed().as_micros();
             let launch_start = std::time::Instant::now();
             batch.forward(runtime)?;
-            let launch_us = launch_start.elapsed().as_micros();
-            let output_start = std::time::Instant::now();
-            embeddings.extend(batch.download_output(runtime)?);
-            trace!(
-                target: "speakrs::timing",
-                class = class.chunks(),
+            running = Some(Launch {
+                class,
                 plan_us,
                 stage_us,
-                launch_us,
-                output_wait_us = output_start.elapsed().as_micros(),
-                "CUDA embedding batch timing"
-            );
+                launch_us: launch_start.elapsed().as_micros(),
+            });
             start = rows.end;
         }
 
+        Ok((embeddings, running))
+    }
+
+    /// Waits for a launched batch class and downloads its embeddings
+    fn download(&mut self, runtime: &CudaRuntime, launch: Launch) -> Result<Vec<f32>, CudaError> {
+        let Some(batch) = &mut self.plans[launch.class.slot()] else {
+            return Err(CudaError::Unsupported {
+                context: "cuda embedding download",
+                reason: format!("batch class {} was never launched", launch.class.chunks()),
+            });
+        };
+        let output_start = std::time::Instant::now();
+        let embeddings = batch.download_output(runtime)?;
+        trace!(
+            target: "speakrs::timing",
+            class = launch.class.chunks(),
+            plan_us = launch.plan_us,
+            stage_us = launch.stage_us,
+            launch_us = launch.launch_us,
+            output_wait_us = output_start.elapsed().as_micros(),
+            "CUDA embedding batch timing"
+        );
         Ok(embeddings)
     }
 
