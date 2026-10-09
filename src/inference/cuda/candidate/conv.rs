@@ -136,6 +136,7 @@ impl ConvKernel {
             Self::C32Stride2Small => Tiling::new("spk_resnet_conv3x3_c32s2_small", 128, 2),
             Self::C32Tensor => Tiling::tensor("spk_resnet_tc_c32", 112, 45_568),
             Self::C64Tensor => Tiling::tensor("spk_resnet_tc_c64", 56, 23_040),
+            Self::C64TensorSlim => Tiling::tensor("spk_resnet_tc_c64_slim", 32, 14_848),
             Self::C32Stride2Tensor => Tiling::tensor("spk_resnet_tc_c32s2", 32, 39_424),
         }
     }
@@ -144,7 +145,7 @@ impl ConvKernel {
     fn tensor(self) -> bool {
         matches!(
             self,
-            Self::C32Tensor | Self::C64Tensor | Self::C32Stride2Tensor
+            Self::C32Tensor | Self::C64Tensor | Self::C64TensorSlim | Self::C32Stride2Tensor
         )
     }
 }
@@ -602,15 +603,15 @@ impl super::DriverCandidate for Oxide {
                 reason: name.to_owned(),
             }));
         };
-        if let Some(kernel) = tensor_kernel(shape, math, device, tier) {
-            return Ok(super::ConfigPin::Conv(ConvPin::Kernel(kernel)));
-        }
         // these are the fixed model outputs, not a shape supplied by the caller
         let output = if shape == ConvShape::C32 {
             [80, 998]
         } else {
             [40, 499]
         };
+        if let Some(kernel) = tensor_kernel(shape, math, device, tier, batch, output) {
+            return Ok(super::ConfigPin::Conv(ConvPin::Kernel(kernel)));
+        }
         let (large, small) = shape.tilings();
         let tiling = select_tiling(
             large,
@@ -634,11 +635,17 @@ impl super::DriverCandidate for Oxide {
 ///
 /// FP32 and sm75 keep their current pins; whole-trunk group measurements on
 /// A100, Ada and Blackwell support this default, not a per-layer speed claim
+///
+/// On the A100 (8.0, 108 SMs) the 64-channel layers at batch 1 give 90 CTAs of 56
+/// columns; the 32-column tiles give 160 and fill every SM. Other parts keep the wide
+/// tiles until measured
 fn tensor_kernel(
     shape: ConvShape,
     math: CudaMath,
     device: &super::super::device::DeviceAttributes,
     tier: PtxTier,
+    batch: usize,
+    output: [usize; 2],
 ) -> Option<ConvKernel> {
     if math != CudaMath::Tf32
         || tier < PtxTier::Sm80
@@ -647,5 +654,14 @@ fn tensor_kernel(
         return None;
     }
 
-    Some(shape.tensor_kernel())
+    let kernel = shape.tensor_kernel();
+    let idle_sms = kernel.tiling().blocks(batch, output) < device.multiprocessors().get() as usize;
+    if kernel == ConvKernel::C64Tensor
+        && idle_sms
+        && device.capability() == ComputeCapability::new(8, 0)
+    {
+        return Some(ConvKernel::C64TensorSlim);
+    }
+
+    Some(kernel)
 }

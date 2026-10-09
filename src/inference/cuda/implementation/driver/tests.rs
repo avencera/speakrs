@@ -428,7 +428,7 @@ fn resnet_point_binding_shares_one_artifact_across_routes_and_modes() {
         LoadedArtifact::Cubin {
             arch: ComputeCapability::new(12, 0),
             sha256: ArtifactHash::from_hex(
-                "0950b0d84cd9fa3d9053cd30399fce14a6aa6c3ff8777485598dd8deeba89078"
+                "f9cada62aab90b3a641ee5fb6232fa951bd6a14d4c38926d550fdded7b2a00c3"
             ),
         }
     );
@@ -627,7 +627,13 @@ fn tensor_core_trunk_kernels_are_selected_only_for_tf32_on_ampere_and_newer() {
         .unwrap()
     };
     let kernel = |kernel| ConfigPin::Conv(ConvPin::Kernel(kernel));
-    for (device, batch) in [(&a100, 1), (&a100, 32), (&ada, 1), (&ada, 32)] {
+    // the A100's 64-channel batch-1 grid would leave SMs idle in 56-column tiles
+    for (device, batch, c64) in [
+        (&a100, 1, ConvKernel::C64TensorSlim),
+        (&a100, 32, ConvKernel::C64Tensor),
+        (&ada, 1, ConvKernel::C64Tensor),
+        (&ada, 32, ConvKernel::C64Tensor),
+    ] {
         assert_eq!(
             pin(
                 "resnet.layer1.0.conv1",
@@ -646,7 +652,7 @@ fn tensor_core_trunk_kernels_are_selected_only_for_tf32_on_ampere_and_newer() {
                 device,
                 PtxTier::Sm80
             ),
-            kernel(ConvKernel::C64Tensor)
+            kernel(c64)
         );
     }
     for (device, batch) in [(&a100, 1), (&a100, 32), (&ada, 1), (&ada, 32)] {

@@ -530,7 +530,7 @@ impl Candidate {
         device: ComputeCapability,
         effective_request: impl FnOnce(ModuleRequest) -> Result<ModuleRequest, CudaError>,
     ) -> Result<Option<ModuleRequest>, CudaError> {
-        if !matches!(override_name, Some("tensor" | "sm80")) {
+        if !matches!(override_name, Some("tensor" | "sm80" | "slim")) {
             return Ok(None);
         }
 
@@ -549,7 +549,8 @@ impl Candidate {
     }
 
     /// The driver-only pin on this device, or the one `TRUNK_RESNET` forces: `legacy`
-    /// for the PR #36 rule, `tensor` for the layer's TF32 tensor-core entry
+    /// for the PR #36 rule, `tensor` for the layer's TF32 tensor-core entry, `slim` for
+    /// the 64-channel 32-column tensor-core entry
     fn resnet_pin(
         runtime: &CudaRuntime,
         spec: &ConvLayerSpec<'_>,
@@ -564,6 +565,9 @@ impl Candidate {
                     (64, _) => ConvKernel::C64Tensor,
                     _ => ConvKernel::C32Stride2Tensor,
                 }))
+            }
+            Some("slim") if conv.math == CudaMath::Tf32 && conv.in_channels == 64 => {
+                Ok(ConvPin::Kernel(ConvKernel::C64TensorSlim))
             }
             _ => {
                 let boundary = super::super::implementation::BoundaryId::named(spec.name);

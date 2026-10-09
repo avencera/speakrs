@@ -40,7 +40,7 @@ pub(crate) struct Policy;
 
 impl Policy {
     // bump when the reviewed algorithm set or its math-mode limits change
-    pub(crate) const IDENTITY: &'static str = "end-to-end-algorithms-v4";
+    pub(crate) const IDENTITY: &'static str = "end-to-end-algorithms-v5";
 
     /// PR 3 and the C128/T4 branch reports establish unchanged per-file DER or
     /// byte-identical RTTMs for these algorithms; device support is checked separately
@@ -56,9 +56,10 @@ impl Policy {
                 | ConvKernel::C64Small
                 | ConvKernel::C32Stride2
                 | ConvKernel::C32Stride2Small => Approval::DirectFp32,
-                ConvKernel::C32Tensor | ConvKernel::C64Tensor | ConvKernel::C32Stride2Tensor => {
-                    Approval::DirectTf32
-                }
+                ConvKernel::C32Tensor
+                | ConvKernel::C64Tensor
+                | ConvKernel::C64TensorSlim
+                | ConvKernel::C32Stride2Tensor => Approval::DirectTf32,
             },
             ConfigPin::Wideconv(WideconvPin::Configured(config)) => match config.algorithm {
                 // layerwins evidence/e1: T4 stride-2, subset/hard/test30/dev216

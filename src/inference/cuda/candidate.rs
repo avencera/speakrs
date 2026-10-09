@@ -357,6 +357,9 @@ pub(crate) enum ConvKernel {
     /// `spk_resnet_tc_c64`: TF32 tensor cores, 128 threads, 4 rows by 56 columns;
     /// sm80 tier and TF32 mode only
     C64Tensor,
+    /// `spk_resnet_tc_c64_slim`: as [`Self::C64Tensor`] in 4 rows by 32 columns, with
+    /// identical outputs; sm80 tier and TF32 mode only
+    C64TensorSlim,
     /// `spk_resnet_tc_c32s2`: TF32 tensor cores, 128 threads, 4 rows by 32 columns;
     /// sm80 tier and TF32 mode only
     C32Stride2Tensor,
@@ -367,7 +370,7 @@ impl ConvKernel {
     pub(crate) const fn shape(self) -> ConvShape {
         match self {
             Self::C32 | Self::C32Tensor => ConvShape::C32,
-            Self::C64 | Self::C64Small | Self::C64Tensor => ConvShape::C64,
+            Self::C64 | Self::C64Small | Self::C64Tensor | Self::C64TensorSlim => ConvShape::C64,
             Self::C32Stride2 | Self::C32Stride2Small | Self::C32Stride2Tensor => {
                 ConvShape::C32Stride2
             }
