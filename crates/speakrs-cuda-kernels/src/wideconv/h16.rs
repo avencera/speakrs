@@ -157,6 +157,18 @@ unsafe fn fragment(pointer: *const f32) -> [u32; 2] {
     [a, b]
 }
 
+/// Asks L2 for the line holding `pointer`; it never faults and never blocks
+#[inline(always)]
+unsafe fn prefetch(pointer: *const f32) {
+    // safety: the caller passes an address inside a live allocation
+    unsafe {
+        ptx_asm!(
+            "{ .reg .u64 g; cvta.to.global.u64 g, %0; prefetch.global.L2 [g]; }",
+            in("l") pointer as u64,
+        );
+    }
+}
+
 /// Stores four words at a 16-byte aligned shared address
 #[inline(always)]
 unsafe fn sts4(address: u32, value: [u32; 4]) {
@@ -292,8 +304,16 @@ macro_rules! h16_conv3x3 {
             const STAGE_BYTES: u32 = PIXELS * 16;
             const CHUNKS: u32 = C / 8;
             const STEPS: u32 = CHUNKS * 9;
+            // residual lines of a warp's output row: 64 columns of each of its channels
+            // span at most three 128-byte lines
+            const RESIDUAL_PREFETCHES: usize = MT * 16 * 3 / 32;
             const _: () = assert!(
-                THREADS == 32 * WM * ROWS && C % CTA_CHANNELS == 0 && NT % 4 == 0 && C % 16 == 0
+                THREADS == 32 * WM * ROWS
+                    && C % CTA_CHANNELS == 0
+                    && NT % 4 == 0
+                    && C % 16 == 0
+                    && COLS == 64
+                    && MT % 2 == 0
             );
 
             let item = thread::blockIdx_z() / BLOCKS;
@@ -379,6 +399,25 @@ macro_rules! h16_conv3x3 {
                 }
                 if i_stage > 0 {
                     let chunk = i_stage - 1;
+                    if add_residual != 0 && chunk + 2 == CHUNKS && oy0 + warp_r < H {
+                        // pulls this warp's residual row into L2 while the last chunks
+                        // compute, so the epilogue does not wait on DRAM: lane `l` of
+                        // pass `k` takes channel `(32k + l) / 3` at its first, middle or
+                        // last column
+                        let residual_ptr = residual.as_ptr();
+                        let row = base + (oy0 + warp_r) * W;
+                        let mut k = 0;
+                        #[unroll]
+                        while k < RESIDUAL_PREFETCHES {
+                            let line = lane + 32 * k as u32;
+                            let channel = tile0 * 16 + line / 3;
+                            let column = ox0 + (line % 3) * (COLS - 1) / 2;
+                            let column = if column >= W { W - 1 } else { column };
+                            // safety: inside the checked residual
+                            unsafe { prefetch(residual_ptr.add((row + channel * HW + column) as usize)) };
+                            k += 1;
+                        }
+                    }
                     let stage = smem + chunk % 2 * STAGE_BYTES + lane_row;
                     let mut tap = 0;
                     #[unroll]
