@@ -8,7 +8,7 @@ use crate::inference::{ExecutionMode, InferenceError, ModelLoadError};
 mod buffers;
 #[cfg(feature = "coreml")]
 mod chunk;
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda")]
 mod cuda;
 mod load;
 #[cfg(feature = "coreml")]
@@ -23,7 +23,7 @@ mod tensor;
 use chunk::ChunkSessionSpec;
 #[cfg(feature = "coreml")]
 pub(crate) use chunk::{ChunkEmbeddingSession, ChunkResourceBundle, ChunkSessionInfo};
-#[cfg(feature = "cuda")]
+#[cfg(feature = "_cuda")]
 use cuda::CudaEmbedding;
 #[cfg(feature = "coreml")]
 use native::CoreMlEmbedding;
@@ -87,7 +87,7 @@ enum EmbeddingBackend {
     Ort(Box<OrtEmbedding>),
     #[cfg(feature = "coreml")]
     CoreMl(Box<CoreMlEmbedding>),
-    #[cfg(feature = "cuda")]
+    #[cfg(feature = "_cuda")]
     Cuda(Box<CudaEmbedding>),
 }
 
@@ -99,7 +99,7 @@ macro_rules! with_backend {
             EmbeddingBackend::Ort($name) => $body,
             #[cfg(feature = "coreml")]
             EmbeddingBackend::CoreMl($name) => $body,
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda")]
             EmbeddingBackend::Cuda($name) => $body,
         }
     };
@@ -130,14 +130,14 @@ impl EmbeddingModel {
     /// ORT session weights and arenas are shared; staging buffers and preallocated output
     /// state remain private to the new handle. A CUDA handle gets its own stream and
     /// device copy of the weights, because CUDA state is used by one thread at a time
-    #[cfg(all(any(feature = "_ort", feature = "cuda"), not(feature = "coreml")))]
+    #[cfg(all(any(feature = "_ort", feature = "_cuda"), not(feature = "coreml")))]
     pub(crate) fn clone_shared(&self) -> Result<Self, InferenceError> {
         let backend = match &self.backend {
             #[cfg(feature = "_ort")]
             EmbeddingBackend::Ort(backend) => {
                 EmbeddingBackend::Ort(Box::new(backend.clone_shared()?))
             }
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda")]
             EmbeddingBackend::Cuda(backend) => EmbeddingBackend::Cuda(Box::new(backend.reload()?)),
         };
 
@@ -241,7 +241,7 @@ impl EmbeddingModel {
             }
             #[cfg(feature = "coreml")]
             EmbeddingBackend::CoreMl(_) => None,
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda")]
             EmbeddingBackend::Cuda(_) => None,
         };
         if let Some(batch) = primary_batch {
@@ -375,7 +375,7 @@ impl EmbeddingModel {
             EmbeddingBackend::CoreMl(backend) => Some(backend),
             #[cfg(feature = "_ort")]
             EmbeddingBackend::Ort(_) => None,
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda")]
             EmbeddingBackend::Cuda(_) => None,
         }
     }
@@ -394,7 +394,7 @@ impl EmbeddingModel {
             EmbeddingBackend::CoreMl(backend) => backend.chunk_window_capacity(),
             #[cfg(feature = "_ort")]
             EmbeddingBackend::Ort(_) => None,
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "_cuda")]
             EmbeddingBackend::Cuda(_) => None,
         }
     }

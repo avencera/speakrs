@@ -9,21 +9,38 @@
 //! device; packing them on every call measurably slowed the b1 calls. When a batch is too small for the 256-thread grid to fill the GPU, as a
 //! single item is, the plan picks the shape's small-block kernel instead
 //!
-//! Every PTX tier computes the full operator in FP32 FMA whatever the boundary's
+//! These kernels compute the full operator in FP32 FMA whatever the boundary's
 //! `CudaMath`. The accumulation order and the residual-then-bias epilogue match
 //! cuDNN's implicit GEMM, which gives the same bits wherever cuDNN picks that
 //! algorithm and fewer rounding errors where it picks Winograd or TF32
+//!
+//! The sm80 tier adds single-product TF32 tensor-core kernels for the three shapes,
+//! with weights packed in `mma.sync` fragment order. Driver-only routing selects them
+//! only in TF32 mode on the capabilities in `TENSOR_TRUNK`: on the A100 the FP32
+//! kernels left these layers at 4.3 s of a 4.4 s gap to cuDNN over ten VoxConverse
+//! files
 
 use cudarc::driver::{
     CudaFunction, CudaSlice, CudaStream, CudaViewMut, LaunchConfig, PushKernelArg,
 };
 
 use super::{
-    Batches, ConvCandidate, ConvInputs, ConvLayerSpec, Coverage, CoverageEntry, Maths, Op, Phases,
-    PlanError,
+    Batches, ConvCandidate, ConvInputs, ConvKernel, ConvLayerSpec, ConvPin, ConvShape, Coverage,
+    CoverageEntry, FiniteContract, GeometryError, InfinityContract, Maths, NanContract, Op, Phases,
+    PlanError, SignedZeroContract, SpecialValues,
 };
-use crate::inference::cuda::dnn::Conv2d;
-use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, KernelModule};
+use crate::inference::cuda::geometry::Conv2d;
+use crate::inference::cuda::implementation::SpeedScope;
+use crate::inference::cuda::{
+    ComputeCapability, CudaError, CudaMath, CudaRuntime, LoadedKernels, PtxTier,
+};
+
+const SPK_RESNET_PACK_WEIGHTS: &str = "spk_resnet_pack_weights";
+/// Packs TF32 A fragments for the tensor-core entries; sm80 tier only
+const SPK_RESNET_PACK_TC: &str = "spk_resnet_pack_tc";
+
+/// Kernel entries loaded by this host plan
+pub(crate) const REQUIRED_KERNELS: [&str; 1] = [SPK_RESNET_PACK_WEIGHTS];
 
 /// The 32 -> 32 convolutions of `layer1` and the strided 32 -> 64 one of `layer2`
 const C32_AND_STRIDED: [&str; 7] = [
@@ -47,6 +64,20 @@ const C64: [&str; 7] = [
     "resnet.layer2.3.conv2",
 ];
 
+/// Every layer, batch and mode the three fused shapes implement
+const IMPLEMENTED: Coverage = Coverage(&[
+    CoverageEntry {
+        layers: &C32_AND_STRIDED,
+        batches: Batches::All,
+        maths: Maths::All,
+    },
+    CoverageEntry {
+        layers: &C64,
+        batches: Batches::All,
+        maths: Maths::All,
+    },
+]);
+
 /// Output columns per block; must equal `CONV_TILE_COLS` in the kernel crate
 const TILE_COLS: usize = 64;
 
@@ -54,20 +85,9 @@ const TILE_COLS: usize = 64;
 const PACK_THREADS: u32 = 256;
 
 /// Below this many 256-thread blocks per SM, a shape with small blocks uses them
-const SMALL_BATCH_WAVES: usize = 2;
+pub(super) const SMALL_BATCH_WAVES: usize = 2;
 
-/// The convolution shapes that have a fused kernel: 3x3, padding 1, no dilation
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Shape {
-    /// 32 -> 32 channels, stride 1
-    C32,
-    /// 64 -> 64 channels, stride 1
-    C64,
-    /// 32 -> 64 channels, stride 2
-    C32Stride2,
-}
-
-impl Shape {
+impl ConvShape {
     /// The fused shape of `conv`, if it has one
     fn of(conv: &Conv2d) -> Option<Self> {
         if conv.kernel != [3, 3] || conv.padding != [1, 1] || conv.dilation != [1, 1] {
@@ -90,36 +110,77 @@ impl Shape {
     }
 
     /// The 256-thread kernel, and the small-block one where it exists
-    fn tilings(self) -> (Tiling, Option<Tiling>) {
+    pub(super) fn tilings(self) -> (Tiling, Option<Tiling>) {
         match self {
-            Self::C32 => (Tiling::new("spk_resnet_conv3x3_c32", 256, 8), None),
+            Self::C32 => (ConvKernel::C32.tiling(), None),
             Self::C64 => (
-                Tiling::new("spk_resnet_conv3x3_c64", 256, 4),
-                Some(Tiling::new("spk_resnet_conv3x3_c64_small", 128, 1)),
+                ConvKernel::C64.tiling(),
+                Some(ConvKernel::C64Small.tiling()),
             ),
             Self::C32Stride2 => (
-                Tiling::new("spk_resnet_conv3x3_c32s2", 256, 4),
-                Some(Tiling::new("spk_resnet_conv3x3_c32s2_small", 128, 2)),
+                ConvKernel::C32Stride2.tiling(),
+                Some(ConvKernel::C32Stride2Small.tiling()),
             ),
         }
     }
 }
 
-/// One kernel entry with its fixed block: `threads` per block covering 64 output
-/// columns of `rows` output rows; both must match the kernel crate
+impl ConvKernel {
+    /// The entry's fixed block and tile
+    fn tiling(self) -> Tiling {
+        match self {
+            Self::C32 => Tiling::new("spk_resnet_conv3x3_c32", 256, 8),
+            Self::C64 => Tiling::new("spk_resnet_conv3x3_c64", 256, 4),
+            Self::C64Small => Tiling::new("spk_resnet_conv3x3_c64_small", 128, 1),
+            Self::C32Stride2 => Tiling::new("spk_resnet_conv3x3_c32s2", 256, 4),
+            Self::C32Stride2Small => Tiling::new("spk_resnet_conv3x3_c32s2_small", 128, 2),
+            Self::C32Tensor => Tiling::tensor("spk_resnet_tc_c32", 112, 45_568),
+            Self::C64Tensor => Tiling::tensor("spk_resnet_tc_c64", 56, 23_040),
+            Self::C32Stride2Tensor => Tiling::tensor("spk_resnet_tc_c32s2", 32, 39_424),
+        }
+    }
+
+    /// Whether the entry runs TF32 `mma.sync`, which only the sm80 tier exports
+    fn tensor(self) -> bool {
+        matches!(
+            self,
+            Self::C32Tensor | Self::C64Tensor | Self::C32Stride2Tensor
+        )
+    }
+}
+
+/// One kernel entry with its fixed block: `threads` per block covering `cols` output
+/// columns of `rows` output rows, with `shared` dynamic shared bytes; all must match
+/// the kernel crate
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Tiling {
-    entry: &'static str,
+pub(super) struct Tiling {
+    pub(super) entry: &'static str,
     threads: u32,
     rows: usize,
+    cols: usize,
+    shared: u32,
 }
 
 impl Tiling {
+    /// An FP32 entry: 64 columns and static shared memory only
     const fn new(entry: &'static str, threads: u32, rows: usize) -> Self {
         Self {
             entry,
             threads,
             rows,
+            cols: TILE_COLS,
+            shared: 0,
+        }
+    }
+
+    /// A tensor-core entry: four warps over four rows, `TC_ROWS` in the kernel crate
+    const fn tensor(entry: &'static str, cols: usize, shared: u32) -> Self {
+        Self {
+            entry,
+            threads: 128,
+            rows: 4,
+            cols,
+            shared,
         }
     }
 
@@ -127,15 +188,28 @@ impl Tiling {
     fn grid(self, batch: usize, output: [usize; 2]) -> Result<(u32, u32, u32), CudaError> {
         let [h, w] = output;
         Ok((
-            to_u32(w.div_ceil(TILE_COLS))?,
+            to_u32(w.div_ceil(self.cols))?,
             to_u32(h.div_ceil(self.rows))?,
             to_u32(batch)?,
         ))
     }
 
-    fn blocks(self, batch: usize, output: [usize; 2]) -> usize {
+    pub(super) fn blocks(self, batch: usize, output: [usize; 2]) -> usize {
         let [h, w] = output;
-        w.div_ceil(TILE_COLS) * h.div_ceil(self.rows) * batch
+        w.div_ceil(self.cols) * h.div_ceil(self.rows) * batch
+    }
+}
+
+pub(super) fn select_tiling(
+    large: Tiling,
+    small: Option<Tiling>,
+    batch: usize,
+    output: [usize; 2],
+    multiprocessors: usize,
+) -> Tiling {
+    match small {
+        Some(small) if large.blocks(batch, output) < SMALL_BATCH_WAVES * multiprocessors => small,
+        _ => large,
     }
 }
 
@@ -152,11 +226,21 @@ pub(crate) struct Oxide {
     input: [usize; 2],
     /// output height and width of one item
     output: [usize; 2],
-    /// `[cin][ky][kx][cout]`, written once in `plan`
+    /// `[cin][ky][kx][cout]`, or TF32 fragments for a tensor-core entry, written once in
+    /// `plan`
     packed: CudaSlice<f32>,
+    epilogue: super::Epilogue,
+    math: CudaMath,
 }
 
 impl Oxide {
+    /// The measured card class for the sm80 ResNet artifact and speed selection
+    pub(crate) const RTX50_SCOPE: SpeedScope = SpeedScope::Point {
+        capability: ComputeCapability::new(12, 0),
+        multiprocessors: 36,
+        device_name: "NVIDIA GeForce RTX 5060 Ti",
+    };
+
     fn input_len(&self) -> usize {
         self.batch * self.in_channels * self.input[0] * self.input[1]
     }
@@ -167,6 +251,7 @@ impl Oxide {
 }
 
 impl ConvCandidate for Oxide {
+    type Pin = ConvPin;
     // cuDNN runs the 64-channel layers on TF32 tensor cores at b1 in TF32 mode, where
     // this FP32 kernel is only 1-3% faster, inside the timing noise bound
     const COVERAGE: Coverage = Coverage(&[
@@ -187,35 +272,97 @@ impl ConvCandidate for Oxide {
         },
     ]);
 
-    fn plan(runtime: &CudaRuntime, layer: ConvLayerSpec<'_>) -> Result<Self, PlanError> {
+    // the C64 exclusions above are speed, not implementation: a driver-only build has
+    // no cuDNN to defer to, so there every kernel covers every batch and mode
+
+    // the ReLU is `if value < 0.0 { 0.0 } else { value }` after FP32 FMA sums, so NaN
+    // and negative zero pass through it
+    const SPECIAL_VALUES: SpecialValues = SpecialValues {
+        finite: FiniteContract::AbsoluteSum { headroom: 2 },
+        nan: NanContract::Propagates,
+        infinity: InfinityContract::Ieee,
+        signed_zero: SignedZeroContract::ReluKeepsNegative,
+    };
+
+    fn implemented_pin(layer: &ConvLayerSpec<'_>) -> Result<ConvPin, PlanError> {
+        if layer.epilogue == super::Epilogue::Bias {
+            return Err(PlanError::Geometry(GeometryError::Unimplemented {
+                context: "fused conv3x3 plan",
+                reason: "the fused kernel requires ReLU".into(),
+            }));
+        }
+
+        ConvShape::of(&layer.conv)
+            .map(ConvPin::LegacyWaves)
+            .ok_or_else(|| {
+                PlanError::Geometry(GeometryError::Unimplemented {
+                    context: "fused conv3x3 plan",
+                    reason: unfused(layer),
+                })
+            })
+    }
+
+    fn plan(
+        runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
+        layer: ConvLayerSpec<'_>,
+        pin: ConvPin,
+    ) -> Result<Self, PlanError> {
+        if layer.epilogue == super::Epilogue::Bias {
+            return Err(PlanError::Geometry(GeometryError::Unimplemented {
+                context: "fused conv3x3 plan",
+                reason: "the fused kernel requires ReLU".into(),
+            }));
+        }
+
         let conv = layer.conv;
-        let shape = Shape::of(&conv).ok_or_else(|| CudaError::Unsupported {
-            context: "fused conv3x3 plan",
-            reason: format!(
-                "{} has no fused kernel for {} -> {} channels, kernel {:?}, stride {:?}",
-                layer.name, conv.in_channels, conv.out_channels, conv.kernel, conv.stride
-            ),
+        let shape = ConvShape::of(&conv).ok_or_else(|| {
+            PlanError::Geometry(GeometryError::Invalid {
+                context: "fused conv3x3 plan",
+                reason: unfused(&layer),
+            })
         })?;
+        if shape != pin.shape() {
+            return Err(PlanError::Geometry(GeometryError::Invalid {
+                context: "fused conv3x3 plan",
+                reason: format!("{} is {shape:?}, but its pin is {pin:?}", layer.name),
+            }));
+        }
         let output = conv
             .input
             .map(|size| size.saturating_sub(1) / shape.stride() + 1);
 
-        // a batch whose 256-thread grid would leave SMs idle or doubly loaded uses
-        // the small blocks, which spread the same work evenly
-        let (large, small) = shape.tilings();
-        let tiling = match small {
-            Some(small)
-                if large.blocks(conv.batch, output)
-                    < SMALL_BATCH_WAVES * runtime.multiprocessor_count()? =>
-            {
-                small
+        let tiling = match pin {
+            ConvPin::Kernel(kernel) => kernel.tiling(),
+            ConvPin::LegacyWaves(_) => {
+                // a batch whose 256-thread grid would leave SMs idle or doubly loaded
+                // uses the small blocks, which spread the same work evenly
+                let (large, small) = shape.tilings();
+                let multiprocessors = if small.is_some() {
+                    runtime.multiprocessor_count()?
+                } else {
+                    0
+                };
+                select_tiling(large, small, conv.batch, output, multiprocessors)
             }
-            _ => large,
         };
+        let tensor = matches!(pin, ConvPin::Kernel(kernel) if kernel.tensor());
+        if tensor && (conv.math != CudaMath::Tf32 || kernels.tier() < PtxTier::Sm80) {
+            return Err(PlanError::DeviceUnsupported {
+                reason: format!(
+                    "{pin:?} needs TF32 mode and the sm80 tier, not {:?} on {}",
+                    conv.math,
+                    kernels.tier()
+                ),
+            });
+        }
         let weight_len = conv.out_channels * conv.in_channels * 9;
         check_len("fused conv3x3 weights", weight_len, layer.weight.len())?;
-        let kernels = runtime.load_kernels(KernelModule::Resnet)?;
-        let pack = kernels.function("spk_resnet_pack_weights")?;
+        let pack = kernels.function(if tensor {
+            SPK_RESNET_PACK_TC
+        } else {
+            SPK_RESNET_PACK_WEIGHTS
+        })?;
         let mut packed = runtime.stream().alloc_zeros::<f32>(weight_len)?;
         pack_weights(
             runtime.stream(),
@@ -234,6 +381,8 @@ impl ConvCandidate for Oxide {
             input: conv.input,
             output,
             packed,
+            epilogue: layer.epilogue,
+            math: conv.math,
         };
         // every index in the kernels is 32-bit
         to_u32(plan.input_len().max(plan.output_len()))?;
@@ -247,6 +396,19 @@ impl ConvCandidate for Oxide {
         phases: &Phases,
         stream: &CudaStream,
     ) -> Result<(), CudaError> {
+        if inputs.residual.is_some() != (self.epilogue == super::Epilogue::BiasReluResidual) {
+            return Err(CudaError::CandidateGeometry {
+                area: "resnet",
+                boundary: "fused conv3x3 residual".into(),
+                batch: self.batch,
+                math: self.math,
+                error: GeometryError::Invalid {
+                    context: "fused conv3x3 residual",
+                    reason: "residual input does not match the planned epilogue".into(),
+                },
+            });
+        }
+
         let output_len = self.output_len();
         check_len("fused conv3x3 input", self.input_len(), inputs.x.len())?;
         check_len("fused conv3x3 bias", self.out_channels, inputs.bias.len())?;
@@ -263,7 +425,7 @@ impl ConvCandidate for Oxide {
         let config = LaunchConfig {
             grid_dim: self.tiling.grid(self.batch, self.output)?,
             block_dim: (self.tiling.threads, 1, 1),
-            shared_mem_bytes: 0,
+            shared_mem_bytes: self.tiling.shared,
         };
         let h_in = to_u32(self.input[0])?;
         let w_in = to_u32(self.input[1])?;
@@ -302,8 +464,17 @@ impl ConvCandidate for Oxide {
     }
 }
 
-/// Packs `weight` `[cout][cin][3][3]` into `packed` `[cin][3][3][cout]`, both
-/// holding `cout * cin * 9` elements
+fn unfused(layer: &ConvLayerSpec<'_>) -> String {
+    let conv = layer.conv;
+    format!(
+        "{} has no fused kernel for {} -> {} channels, kernel {:?}, stride {:?}",
+        layer.name, conv.in_channels, conv.out_channels, conv.kernel, conv.stride
+    )
+}
+
+/// Packs `weight` `[cout][cin][3][3]` into `packed`, both holding `cout * cin * 9`
+/// elements: `[cin][3][3][cout]` for the FP32 entries, TF32 fragments for the
+/// tensor-core ones, which share the packing ABI
 fn pack_weights(
     stream: &CudaStream,
     pack: &CudaFunction,
@@ -322,8 +493,8 @@ fn pack_weights(
         .arg(&cout)
         .arg(packed)
         .arg(&len);
-    // SAFETY: the arguments match `spk_resnet_pack_weights(weight: &[f32], cin: u32,
-    // cout: u32, packed: DisjointSlice<f32>)`, the caller sized both buffers to
+    // SAFETY: the arguments match `spk_resnet_pack_weights` and `spk_resnet_pack_tc`
+    // `(weight: &[f32], cin: u32, cout: u32, packed: DisjointSlice<f32>)`, the caller sized both buffers to
     // `cout * cin * 9` elements, and there is one thread per packed element
     unsafe {
         launch.launch(LaunchConfig {
@@ -352,4 +523,110 @@ fn to_u32(value: usize) -> Result<u32, CudaError> {
         context: "fused conv3x3 launch",
         value,
     })
+}
+
+impl super::DriverCandidate for Oxide {
+    const AREA: super::KernelModule = super::KernelModule::Resnet;
+
+    fn driver_coverage(_tier: super::PtxTier) -> Coverage {
+        IMPLEMENTED
+    }
+
+    fn speed_scope(
+        boundary: super::super::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        device: &super::super::device::DeviceAttributes,
+        tier: super::PtxTier,
+    ) -> Option<super::super::implementation::SpeedScope> {
+        if device.capability() == ComputeCapability::new(12, 0) {
+            let scope = Self::RTX50_SCOPE;
+            return (matches!(batch, 1 | 32) && tier >= PtxTier::Sm80 && scope.contains(device))
+                .then_some(scope);
+        }
+
+        super::wideconv::trunk_speed_scope(boundary, batch, math, device)
+    }
+
+    fn speed_summary(_math: CudaMath) -> &'static str {
+        concat!(
+            "RTX 4060 Ti: TF32 b1/b32 trunk >=1.39x; FP32 b32 1.29x; ",
+            "RTX 5060 Ti (12.0, 36 SMs), sm80: TF32 b1/b32 trunk >=1.61x; FP32 >=1.34x; 144/144 accuracy checks"
+        )
+    }
+
+    fn driver_pin(
+        boundary: super::super::implementation::BoundaryId,
+        batch: usize,
+        math: CudaMath,
+        device: &super::super::device::DeviceAttributes,
+        tier: super::PtxTier,
+    ) -> Result<super::ConfigPin, PlanError> {
+        let name = boundary.name();
+        let shape = if name == "resnet.layer2.0.conv1" {
+            ConvShape::C32Stride2
+        } else if C32_AND_STRIDED.contains(&name) {
+            ConvShape::C32
+        } else if C64.contains(&name) {
+            ConvShape::C64
+        } else {
+            return Err(PlanError::Geometry(GeometryError::Unimplemented {
+                context: "driver convolution pin",
+                reason: name.to_owned(),
+            }));
+        };
+        if let Some(kernel) = tensor_kernel(shape, math, device, tier) {
+            return Ok(super::ConfigPin::Conv(ConvPin::Kernel(kernel)));
+        }
+        // these are the fixed model outputs, not a shape supplied by the caller
+        let output = if shape == ConvShape::C32 {
+            [80, 998]
+        } else {
+            [40, 499]
+        };
+        let (large, small) = shape.tilings();
+        let tiling = select_tiling(
+            large,
+            small,
+            batch,
+            output,
+            device.multiprocessors().get() as usize,
+        );
+        let kernel = match (shape, tiling.threads) {
+            (ConvShape::C32, _) => ConvKernel::C32,
+            (ConvShape::C64, 128) => ConvKernel::C64Small,
+            (ConvShape::C64, _) => ConvKernel::C64,
+            (ConvShape::C32Stride2, 128) => ConvKernel::C32Stride2Small,
+            (ConvShape::C32Stride2, _) => ConvKernel::C32Stride2,
+        };
+        Ok(super::ConfigPin::Conv(ConvPin::Kernel(kernel)))
+    }
+}
+
+/// Capabilities whose TF32 tensor-core trunk kernels were measured faster than both the
+/// FP32 kernels and cuDNN over the 14 early layers at b1 and b32
+///
+/// The A100 (8.0) runs TF32 at eight times its FP32 rate. An RTX 4060 Ti (8.9) measured
+/// 2.18x and 1.90x of cuDNN against 1.76x and 1.47x for the FP32 kernels. The
+/// measured 36-SM RTX 5060 Ti uses the same entries through its point binding
+const TENSOR_TRUNK: [ComputeCapability; 2] =
+    [ComputeCapability::new(8, 0), ComputeCapability::new(8, 9)];
+
+/// The TF32 tensor-core entry of a shape where it is the measured choice
+///
+/// Other sm80-tier parts keep the FP32 kernels until they are measured
+fn tensor_kernel(
+    shape: ConvShape,
+    math: CudaMath,
+    device: &super::super::device::DeviceAttributes,
+    tier: PtxTier,
+) -> Option<ConvKernel> {
+    if math != CudaMath::Tf32
+        || tier < PtxTier::Sm80
+        || !(TENSOR_TRUNK.contains(&device.capability()) || Oxide::RTX50_SCOPE.contains(device))
+    {
+        return None;
+    }
+
+    Some(shape.tensor_kernel())
 }

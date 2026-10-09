@@ -3,6 +3,11 @@ use cudarc::driver::{CudaFunction, CudaSlice, LaunchConfig, PushKernelArg};
 use super::error::check_len;
 use super::{CudaError, CudaRuntime, KernelModule, PtxTier};
 
+const PROBE_SCALE_ADD: &str = "probe_scale_add";
+
+/// Kernel entries loaded by the probe host plan
+pub(super) const REQUIRED_KERNELS: [&str; 1] = [PROBE_SCALE_ADD];
+
 /// Host launcher for the toolchain probe kernel; also the template for area launchers
 ///
 /// cuda-oxide passes each `&[T]` or `DisjointSlice<T>` parameter as two PTX
@@ -17,10 +22,12 @@ pub struct ProbeKernels {
 impl ProbeKernels {
     /// Loads the probe module and looks up its kernels
     pub fn load(runtime: &CudaRuntime) -> Result<Self, CudaError> {
-        let kernels = runtime.load_kernels(KernelModule::Probe)?;
+        // the toolchain probe is an explicit test request, never a production owner
+        let request = runtime.embedded_exact_request(KernelModule::Probe)?;
+        let kernels = runtime.load_module(request)?;
         Ok(Self {
             tier: kernels.tier(),
-            scale_add: kernels.function("probe_scale_add")?,
+            scale_add: kernels.function(REQUIRED_KERNELS[0])?,
         })
     }
 

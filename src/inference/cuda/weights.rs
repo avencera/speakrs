@@ -94,8 +94,5 @@ impl SafetensorsFile {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "_cuda-libraries"))]
 mod test_support;
-
-#[cfg(test)]
-pub(crate) use test_support::uniform;

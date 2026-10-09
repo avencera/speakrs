@@ -1,0 +1,61 @@
+.entry path0() {
+ cvta.shared.u64 %base, smem;
+ @%p mad.lo.u64 %out, %base, 2, 1;
+ next:
+ cvt.u32.u64 %narrow, %out;
+}
+.entry path1() {
+ cvta.shared.u64 %base, smem;
+ @%p mul.lo.u64 %out, 2, %base;
+ next:
+ cvt.u32.u64 %narrow, %out;
+}
+.entry path2() {
+ cvta.shared.u64 %base, smem;
+ @%p shl.b64 %out, %base, 1;
+ next:
+ cvt.u32.u64 %narrow, %out;
+}
+.entry path3() {
+ cvta.shared.u64 %base, smem;
+ @%p selp.b64 %out, 0, %base, %p;
+ next:
+ cvt.u32.u64 %narrow, %out;
+}
+.entry path4() {
+ cvta.shared.u64 %base, smem;
+ @%p or.b64 %out, 1, %base;
+ next:
+ cvt.u32.u64 %narrow, %out;
+}
+.entry path5() {
+ cvta.shared.u64 %base, smem;
+ @%p and.b64 %out, %base, 255;
+ next:
+ cvt.u32.u64 %narrow, %out;
+}
+.entry path6() {
+ cvta.shared.u64 %base, smem;
+ @%p cvt.u64.u32 %out, %base;
+ next:
+ cvt.u32.u64 %narrow, %out;
+}
+.entry path7() {
+ cvta.shared.u64 %base, smem;
+ @%p mov.b64 %out, %base;
+ next:
+ cvt.u32.u64 %narrow, %out;
+}
+.entry shared32() { cvta.shared.u32 %base, smem; }
+.entry signed() { cvta.shared.u64 %base, smem; cvt.rn.u32.s64 %out, %base; }
+.entry bits() { cvta.shared.u64 %base, smem; cvt.u32.b64 %out, %base; }
+.entry move32() { cvta.shared.u64 %base, smem; mov.b32 %out, %base; }
+.entry vector() { cvta.shared.u64 %base, smem; mov.b64 {%lo, %hi}, %base; cvt.u64.u32 %wide, %hi; cvt.u32.u64 %out, %wide; }
+.entry backwards() { cvt.u32.u64 %out, %copy; later: mov.b64 %copy, %base; cvta.shared.u64 %base, smem; }
+.entry shared32_widened() { cvta.shared.u32 %base, smem; cvt.u64.u32 %wide, %base; cvt.u32.u64 %out, %wide; }
+.entry named() { .reg .b64 g; cvta.shared.u64 g, smem; mov.b64 %copy, g; cvt.u32.u64 %out, %copy; }
+.entry signed_mad() { cvta.shared.u64 %base, smem; mad.lo.s64 %out, 2, 1, %base; cvt.u32.u64 %narrow, %out; }
+.entry signed_mul() { cvta.shared.u64 %base, smem; mul.lo.s64 %out, %base, 2; cvt.u32.u64 %narrow, %out; }
+.entry rzi() { cvta.shared.u64 %base, smem; cvt.rzi.u32.u64 %out, %base; }
+.entry call_return() { cvta.shared.u64 %base, smem; call (%out), external, (%base); cvt.u32.u64 %narrow, %out; }
+.entry call_returns() { cvta.shared.u64 %base, smem; @%p call.uni (%first, %second), external, (1, %base); cvt.u32.u64 %a, %first; cvt.u32.u64 %b, %second; }

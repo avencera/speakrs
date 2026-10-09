@@ -1,58 +1,1609 @@
-//! Pin production to the triples accepted for integration, independent of declarations
+//! Production bindings, module requests and token policy, independent of declarations
 
-use super::{Choice, PRODUCTION, Selection, production};
-use crate::inference::cuda::CudaMath;
+use super::{
+    Binding, BoundaryId, Choice, LibraryNeed, Modules, PRODUCTION, PlanRequest, RecordHash,
+    Selected, Selection, SpeedEvidence, SpeedScope, SpeedStatus, TokenEvidence, TupleProof, select,
+};
+use crate::inference::cuda::candidate::{
+    ConfigPin, ConvKernel, ConvPin, ConvShape, LstmPin, PlanError, SincPin,
+};
+use crate::inference::cuda::device::DeviceAttributes;
+use crate::inference::cuda::device::test_support::Builder;
+use crate::inference::cuda::kernels::{AreaPtx, ArtifactHash, LoadedArtifact, ModuleRequest};
+
+use crate::inference::cuda::{
+    ComputeCapability, CudaError, CudaLibrary, CudaMath, GeometryError, KernelModule, PtxTier,
+    WeightFault,
+};
+
+const BLACKWELL: ComputeCapability = ComputeCapability::new(12, 0);
+const ADA: ComputeCapability = ComputeCapability::new(8, 9);
+
+fn device(capability: ComputeCapability) -> DeviceAttributes {
+    Builder::new(capability)
+        .multiprocessors(36)
+        .name("NVIDIA GeForce RTX 5060 Ti")
+        .build()
+}
+
+fn legacy_ptx(area: KernelModule) -> &'static str {
+    match area {
+        KernelModule::Lstm => include_str!("../ptx/lstm.sm75.ptx"),
+        KernelModule::Sincnet => include_str!("../ptx/sincnet.sm75.ptx"),
+        _ => include_str!("../ptx/resnet.sm75.ptx"),
+    }
+}
+
+fn legacy_module(area: KernelModule) -> ModuleRequest {
+    ModuleRequest::new(
+        area,
+        PtxTier::Sm75,
+        LoadedArtifact::PtxJit {
+            sha256: ArtifactHash::of(legacy_ptx(area).as_bytes()),
+        },
+    )
+}
+
+/// How the scripted loader answers a request
+#[derive(Debug, Clone, Copy)]
+enum Loader {
+    /// Accept exactly the request
+    Exact,
+    /// Accept, but report this artifact instead, as a diagnostic override would
+    Other(LoadedArtifact),
+    /// Refuse with the driver's rejection
+    Refuses,
+}
+
+/// A host-only runtime with cached attributes and a scripted loader
+struct Fixture {
+    device: DeviceAttributes,
+    limit: PtxTier,
+    loader: Loader,
+    loads: Vec<ModuleRequest>,
+    explicit_artifact: Option<LoadedArtifact>,
+    force_library: bool,
+}
+
+impl Fixture {
+    fn new(capability: ComputeCapability) -> Self {
+        Self {
+            device: device(capability),
+            limit: PtxTier::Sm120,
+            loader: Loader::Exact,
+            loads: Vec::new(),
+            explicit_artifact: None,
+            force_library: false,
+        }
+    }
+
+    fn loader(mut self, loader: Loader) -> Self {
+        self.loader = loader;
+        self
+    }
+
+    fn resolve(
+        &mut self,
+        request: PlanRequest,
+        boundary: &str,
+        batch: usize,
+        math: CudaMath,
+    ) -> Result<Selected, CudaError> {
+        request.resolve(BoundaryId::named(boundary), batch, math, self)
+    }
+}
+
+impl Modules for &mut Fixture {
+    fn force_library(&self) -> bool {
+        self.force_library
+    }
+
+    fn device(&self) -> &DeviceAttributes {
+        &self.device
+    }
+
+    fn tier_limit(&self) -> PtxTier {
+        self.limit
+    }
+
+    fn load(&mut self, request: ModuleRequest) -> Result<ModuleRequest, CudaError> {
+        self.loads.push(request);
+        match self.loader {
+            Loader::Exact => Ok(request),
+            Loader::Other(artifact) => {
+                Ok(ModuleRequest::new(request.area(), request.tier(), artifact))
+            }
+            Loader::Refuses => Err(CudaError::ArtifactLoad {
+                module: request.area().name(),
+                artifact: request.artifact(),
+                source: cudarc::driver::DriverError(
+                    cudarc::driver::sys::CUresult::CUDA_ERROR_INVALID_IMAGE,
+                ),
+            }),
+        }
+    }
+
+    fn embedded_exact(&self, area: KernelModule) -> Result<ModuleRequest, CudaError> {
+        let request = legacy_module(area);
+        Ok(self.explicit_artifact.map_or(request, |artifact| {
+            ModuleRequest::new(area, request.tier(), artifact)
+        }))
+    }
+}
+
+fn token(selected: Selected) -> super::Qualified {
+    let Selected::Oxide(token) = selected else {
+        panic!("expected a candidate token, got {selected:?}")
+    };
+    *token
+}
 
 #[test]
-fn production_selects_exactly_the_qualified_triples() {
-    let c32 = [
+fn library_requests_do_not_load_candidate_artifacts() {
+    for boundary in [
         "resnet.layer1.0.conv1",
-        "resnet.layer1.0.conv2",
-        "resnet.layer1.1.conv1",
-        "resnet.layer1.1.conv2",
-        "resnet.layer1.2.conv1",
-        "resnet.layer1.2.conv2",
-        "resnet.layer2.0.conv1",
-    ];
-    let c64 = [
-        "resnet.layer2.0.conv2",
-        "resnet.layer2.1.conv1",
-        "resnet.layer2.1.conv2",
-        "resnet.layer2.2.conv1",
-        "resnet.layer2.2.conv2",
-        "resnet.layer2.3.conv1",
-        "resnet.layer2.3.conv2",
-    ];
-    assert_eq!(
-        crate::inference::cuda::candidate::QUALIFIED_BATCHES,
-        [1, 7, 32, 33, 64]
-    );
-    let declared = PRODUCTION
-        .iter()
-        .flat_map(|coverage| coverage.entries())
-        .flat_map(|entry| entry.layers.iter().copied());
-    let layers = c32.into_iter().chain(c64).chain(declared).chain([
         "lstm.stack",
         "sincnet.conv0.abs_pool",
-        "resnet.layer3.0.conv1",
-        "resnet.conv1",
-        "unknown",
-    ]);
-    for layer in layers {
-        for batch in (0..=66).chain([128, usize::MAX]) {
-            for math in [CudaMath::Fp32, CudaMath::Tf32] {
-                let qualified_batch = [1, 7, 32, 33, 64].contains(&batch);
-                let expected = qualified_batch
-                    && (c32.contains(&layer)
-                        || c64.contains(&layer) && (batch != 1 || math == CudaMath::Fp32)
-                        || ["lstm.stack", "sincnet.conv0.abs_pool"].contains(&layer)
-                            && math == CudaMath::Fp32);
+    ] {
+        let mut fixture = Fixture::new(BLACKWELL);
+        let selected = fixture
+            .resolve(
+                PlanRequest::Qualification(Choice::Library),
+                boundary,
+                1,
+                CudaMath::Fp32,
+            )
+            .unwrap();
+        assert!(matches!(selected, Selected::Library));
+        assert!(fixture.loads.is_empty());
+        assert!(
+            fixture
+                .resolve(
+                    PlanRequest::Qualification(Choice::Library),
+                    boundary,
+                    0,
+                    CudaMath::Fp32,
+                )
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn uncovered_requests_do_not_load_artifacts() {
+    {
+        let choice = Choice::Oxide(Selection::Explicit);
+        let mut fixture = Fixture::new(BLACKWELL);
+        let selected = fixture
+            .resolve(
+                PlanRequest::Qualification(choice),
+                "lstm.stack",
+                1,
+                CudaMath::Tf32,
+            )
+            .unwrap();
+        assert!(matches!(selected, Selected::Library));
+        assert!(fixture.loads.is_empty());
+    }
+    for (batch, math, capability) in [
+        (7, CudaMath::Fp32, BLACKWELL),
+        (1, CudaMath::Tf32, BLACKWELL),
+        (1, CudaMath::Fp32, ADA),
+    ] {
+        let mut fixture = Fixture::new(capability);
+        let selected = fixture
+            .resolve(PlanRequest::Production, "lstm.stack", batch, math)
+            .unwrap();
+        assert!(matches!(selected, Selected::Library));
+        assert!(fixture.loads.is_empty());
+    }
+    // a forced tier limit below the binding's tier leaves the tuple on Library
+    let mut fixture = Fixture::new(BLACKWELL);
+    let bound = super::bound_module(
+        PRODUCTION,
+        KernelModule::Lstm,
+        &fixture.device,
+        PtxTier::Sm75,
+    );
+    assert_eq!(bound, Some(legacy_module(KernelModule::Lstm)));
+    fixture.limit = PtxTier::Sm75;
+    assert!(matches!(
+        fixture
+            .resolve(PlanRequest::Production, "lstm.stack", 1, CudaMath::Fp32)
+            .unwrap(),
+        Selected::Oxide(_)
+    ));
+}
+
+#[test]
+fn production_token_requires_the_bound_module_identity() {
+    // a diagnostic override that loads other bytes cannot obtain the production token
+    let other = LoadedArtifact::Cubin {
+        arch: BLACKWELL,
+        sha256: ArtifactHash::from_hex(
+            "089961e8e8e2f97fae86947e1c5cd14ef422c4de6141b03ce729ad9949009f6e",
+        ),
+    };
+    for (loader, selected) in [(Loader::Exact, true), (Loader::Other(other), false)] {
+        let mut fixture = Fixture::new(BLACKWELL).loader(loader);
+        let result = fixture
+            .resolve(PlanRequest::Production, "lstm.stack", 1, CudaMath::Fp32)
+            .unwrap();
+        assert_eq!(fixture.loads, [legacy_module(KernelModule::Lstm)]);
+        assert_eq!(matches!(result, Selected::Oxide(_)), selected);
+    }
+    // production keeps today's Library fallback after a refusal; the explicit request errors
+    let mut fixture = Fixture::new(BLACKWELL).loader(Loader::Refuses);
+    assert!(matches!(
+        fixture
+            .resolve(
+                PlanRequest::Production,
+                "sincnet.conv0.abs_pool",
+                1,
+                CudaMath::Fp32
+            )
+            .unwrap(),
+        Selected::Library
+    ));
+    assert!(matches!(
+        fixture.resolve(
+            PlanRequest::Qualification(Choice::Oxide(Selection::Explicit)),
+            "sincnet.conv0.abs_pool",
+            1,
+            CudaMath::Fp32
+        ),
+        Err(CudaError::ArtifactLoad { .. })
+    ));
+    assert!(matches!(
+        super::artifact_refusal(
+            CudaError::ArtifactUnavailable {
+                module: "sincnet",
+                artifact: legacy_module(KernelModule::Sincnet).artifact(),
+            },
+            false
+        ),
+        Err(CudaError::ArtifactUnavailable { .. })
+    ));
+}
+
+#[test]
+fn explicit_plan_keeps_the_loaded_module_instead_of_resolving_production_again() {
+    for capability in [ADA, BLACKWELL] {
+        let mut fixture = Fixture::new(capability);
+        if capability == BLACKWELL {
+            fixture.explicit_artifact = Some(LoadedArtifact::Cubin {
+                arch: capability,
+                sha256: ArtifactHash::of(b"explicit exact-architecture cubin"),
+            });
+        }
+        let token = token(
+            fixture
+                .resolve(
+                    PlanRequest::Qualification(Choice::Oxide(Selection::Explicit)),
+                    "lstm.stack",
+                    1,
+                    CudaMath::Fp32,
+                )
+                .unwrap(),
+        );
+        let request = token.plan_module();
+        let loaded_for_plan = (&mut fixture).load(request).unwrap();
+        assert_eq!(loaded_for_plan, request);
+        assert_eq!(fixture.loads.last(), Some(&request));
+        let production = super::qualified_module(
+            KernelModule::Lstm,
+            &fixture.device,
+            fixture.limit,
+            KernelModule::Lstm.variants(),
+        )
+        .unwrap();
+        if capability == ADA {
+            assert!(production.is_none());
+        } else {
+            assert_ne!(production, Some(request));
+        }
+    }
+}
+
+#[test]
+fn explicit_candidate_plans_its_implemented_pin_and_library_needs_no_artifact() {
+    let mut fixture = Fixture::new(ADA);
+    let token = token(
+        fixture
+            .resolve(
+                PlanRequest::Qualification(Choice::Oxide(Selection::Explicit)),
+                "lstm.stack",
+                1,
+                CudaMath::Fp32,
+            )
+            .unwrap(),
+    );
+    assert_eq!(fixture.loads, [legacy_module(KernelModule::Lstm)]);
+    assert_eq!(token.target.module, legacy_module(KernelModule::Lstm));
+    assert_eq!(token.selection, Selection::Explicit);
+    assert_eq!(token.pin, super::PlanPin::Implemented);
+    assert_eq!(token.evidence, TokenEvidence::Qualification);
+
+    let target = super::AreaTarget {
+        tier: PtxTier::Sm75,
+        device: ADA,
+    };
+    let error = LibraryNeed::new(
+        BoundaryId::named("lstm.stack.input_proj"),
+        1,
+        CudaMath::Fp32,
+        target,
+        CudaLibrary::Cublas,
+    )
+    .error();
+    let CudaError::NotDriverOnly {
+        area,
+        boundary,
+        batch,
+        math,
+        tier,
+        device,
+        library,
+    } = error
+    else {
+        panic!("typed Library refusal")
+    };
+    assert_eq!(
+        (area, boundary.as_str(), batch, math, tier, device, library),
+        (
+            "lstm",
+            "lstm.stack.input_proj",
+            1,
+            CudaMath::Fp32,
+            PtxTier::Sm75,
+            ADA,
+            CudaLibrary::Cublas
+        )
+    );
+}
+
+#[test]
+fn explicit_fbank_dft_plans_the_record_owned_area_and_production_stays_library() {
+    for math in [CudaMath::Fp32, CudaMath::Tf32] {
+        for batch in 1..=32 {
+            let mut fixture = Fixture::new(ADA);
+            let token = token(
+                fixture
+                    .resolve(
+                        PlanRequest::Qualification(Choice::Oxide(Selection::Explicit)),
+                        "fbank.dft",
+                        batch,
+                        math,
+                    )
+                    .unwrap(),
+            );
+            // the route is the record-owned area, never the always-on Fbank module
+            assert_eq!(fixture.loads, [legacy_module(KernelModule::FbankDft)]);
+            assert_eq!(token.target.module.area(), KernelModule::FbankDft);
+            assert_eq!(token.pin, super::PlanPin::Implemented);
+            assert_eq!(token.evidence, TokenEvidence::Qualification);
+
+            // no binding exists, so production needs no artifact
+            let mut fixture = Fixture::new(ADA);
+            let selected = fixture
+                .resolve(PlanRequest::Production, "fbank.dft", batch, math)
+                .unwrap();
+            assert!(matches!(selected, Selected::Library));
+            assert!(fixture.loads.is_empty());
+        }
+        let mut fixture = Fixture::new(ADA);
+        let selected = fixture
+            .resolve(
+                PlanRequest::Qualification(Choice::Oxide(Selection::Explicit)),
+                "fbank.dft",
+                33,
+                math,
+            )
+            .unwrap();
+        assert!(matches!(selected, Selected::Library));
+        assert!(fixture.loads.is_empty());
+    }
+}
+
+#[test]
+fn production_tokens_require_tier_device_and_artifact_of_the_binding() {
+    let device = device(BLACKWELL);
+    let boundary = BoundaryId::named("lstm.stack");
+    let bound = legacy_module(KernelModule::Lstm);
+    let token = token(select(boundary, 1, CudaMath::Fp32, &device, bound).unwrap());
+    let TokenEvidence::Production { accuracy, speed } = token.evidence else {
+        panic!("production evidence")
+    };
+    assert_eq!(accuracy, super::production::lstm::RECORD);
+    assert_eq!(speed.record, super::production::lstm::RECORD);
+    assert_eq!(speed.integrated, super::production::INTEGRATED_DER);
+    assert_eq!(speed.scope, super::production::LEGACY_SCOPE);
+    assert_eq!(
+        token.pin,
+        super::PlanPin::Pinned(ConfigPin::Lstm(LstmPin::LegacyCooperative))
+    );
+    let sha256 = ArtifactHash::of(legacy_ptx(KernelModule::Lstm).as_bytes());
+    for loaded in [
+        ModuleRequest::new(KernelModule::Lstm, PtxTier::Sm80, bound.artifact()),
+        ModuleRequest::new(
+            KernelModule::Lstm,
+            PtxTier::Sm75,
+            LoadedArtifact::Cubin {
+                arch: BLACKWELL,
+                sha256,
+            },
+        ),
+        ModuleRequest::new(
+            KernelModule::Lstm,
+            PtxTier::Sm75,
+            LoadedArtifact::PtxJit {
+                sha256: ArtifactHash::of(b"other PTX"),
+            },
+        ),
+        legacy_module(KernelModule::Sincnet),
+    ] {
+        assert!(matches!(
+            select(boundary, 1, CudaMath::Fp32, &device, loaded).unwrap(),
+            Selected::Library
+        ));
+    }
+    for other in [ComputeCapability::new(12, 1), ADA] {
+        assert!(matches!(
+            select(
+                boundary,
+                1,
+                CudaMath::Fp32,
+                &Builder::new(other).build(),
+                bound
+            )
+            .unwrap(),
+            Selected::Library
+        ));
+    }
+    assert!(select(boundary, 0, CudaMath::Fp32, &device, bound).is_err());
+}
+
+#[test]
+fn replaced_resnet_record_grants_no_qualified_tuple() {
+    let device = device(BLACKWELL);
+    for batch in [1, 32] {
+        for math in [CudaMath::Fp32, CudaMath::Tf32] {
+            assert!(matches!(
+                select(
+                    BoundaryId::named("resnet.layer2.0.conv1"),
+                    batch,
+                    math,
+                    &device,
+                    legacy_module(KernelModule::Resnet)
+                )
+                .unwrap(),
+                Selected::Library
+            ));
+        }
+    }
+}
+
+#[test]
+fn legacy_coverage_is_pinned_not_candidate_declared() {
+    let device = device(BLACKWELL);
+    for area in [KernelModule::Sincnet] {
+        let embedded = AreaPtx::fixture(&[(PtxTier::Sm75, legacy_ptx(area))]);
+        let stale = AreaPtx::fixture(&[(PtxTier::Sm75, "stale PTX")]);
+        assert!(super::legacy_fixture_coverage(area, &device, stale).is_empty());
+        let coverage = super::legacy_fixture_coverage(area, &device, embedded);
+        assert!(!coverage.is_empty());
+        let coverage = crate::inference::cuda::candidate::Coverage(coverage.leak());
+        for layer in coverage.entries().iter().flat_map(|entry| entry.layers) {
+            let boundary = BoundaryId::named(layer);
+            for batch in [1, 32] {
                 assert_eq!(
-                    production(layer, batch, math) == Choice::Oxide(Selection::Production),
-                    expected,
-                    "{layer} b{batch} {math:?}"
+                    coverage.covers(layer, batch, CudaMath::Fp32),
+                    matches!(
+                        select(
+                            boundary,
+                            batch,
+                            CudaMath::Fp32,
+                            &device,
+                            legacy_module(area)
+                        )
+                        .unwrap(),
+                        Selected::Oxide(_)
+                    )
                 );
             }
+            for batch in [7, 33, 64] {
+                assert!(!coverage.covers(layer, batch, CudaMath::Fp32));
+            }
         }
+        assert!(
+            super::legacy_fixture_coverage(area, &Builder::new(ADA).build(), embedded).is_empty()
+        );
+    }
+}
+
+#[test]
+fn records_and_integrated_evidence_are_pinned() {
+    let pins = [
+        (
+            KernelModule::Lstm,
+            "3badc1aec939b0e8f7312786d695bec6445de1dacb1f85e44124bf3ac20356f8",
+        ),
+        (
+            KernelModule::Sincnet,
+            "a4d1a2692b78a814cd2da16f084801c3641bfd11c6d095d610f3a8182ad6f675",
+        ),
+    ];
+    assert_eq!(PRODUCTION.len(), pins.len());
+    for (binding, (area, pin)) in PRODUCTION.iter().zip(pins) {
+        assert_eq!(binding.area(), area);
+        assert_eq!(binding.module, legacy_module(area));
+        // legacy approval stays capability-wide and is never copied into point evidence
+        assert_eq!(binding.scope, super::production::LEGACY_SCOPE);
+        for proof in binding.proofs {
+            assert_eq!(proof.accuracy.to_string(), pin);
+            let SpeedStatus::Measured(speed) = proof.speed else {
+                panic!("legacy proofs are measured")
+            };
+            assert_eq!(speed.record.to_string(), pin);
+            assert_eq!(
+                speed.integrated.to_string(),
+                "8066268031afba058d93e305206d5b8225e40c6ab2ebb1052874d607e055646f"
+            );
+            assert_eq!(speed.scope, binding.scope);
+        }
+    }
+}
+
+#[test]
+fn planning_refusals_follow_the_d7_policy() {
+    let device = device(BLACKWELL);
+    let mut token = token(
+        select(
+            BoundaryId::named("lstm.stack"),
+            1,
+            CudaMath::Fp32,
+            &device,
+            legacy_module(KernelModule::Lstm),
+        )
+        .unwrap(),
+    );
+    let refusals = || {
+        [
+            PlanError::DeviceUnsupported {
+                reason: "grid exceeds device capacity".to_owned(),
+            },
+            PlanError::WeightsOutOfContract {
+                layer: "lstm.layer0.w",
+                fault: WeightFault::NonFinite { index: 3 },
+            },
+            PlanError::Geometry(GeometryError::Unimplemented {
+                context: "test plan",
+                reason: "valid but unimplemented".to_owned(),
+            }),
+        ]
+    };
+    for selection in [Selection::Production, Selection::Explicit] {
+        token.selection = selection;
+        for driver_only in [false, true] {
+            assert_eq!(
+                token
+                    .finish(KernelModule::Lstm, driver_only, Ok(42))
+                    .unwrap(),
+                Some(42)
+            );
+            let fallback = selection == Selection::Production && !driver_only;
+            for refusal in refusals() {
+                let result = token.finish::<()>(KernelModule::Lstm, driver_only, Err(refusal));
+                if fallback {
+                    assert!(result.unwrap().is_none());
+                    continue;
+                }
+                match result.unwrap_err() {
+                    CudaError::CandidateDeviceUnsupported {
+                        area: "lstm",
+                        boundary,
+                        batch: 1,
+                        math: CudaMath::Fp32,
+                        tier: PtxTier::Sm75,
+                        device,
+                        reason,
+                    } => {
+                        assert_eq!(boundary, "lstm.stack");
+                        assert_eq!(device, BLACKWELL);
+                        assert_eq!(reason, "grid exceeds device capacity");
+                    }
+                    CudaError::CandidateWeightsOutOfContract {
+                        area: "lstm",
+                        layer: "lstm.layer0.w",
+                        fault: WeightFault::NonFinite { index: 3 },
+                        tier: PtxTier::Sm75,
+                        ..
+                    }
+                    | CudaError::CandidateGeometry {
+                        area: "lstm",
+                        error: GeometryError::Unimplemented { .. },
+                        ..
+                    } => {}
+                    other => panic!("wrong typed refusal: {other:?}"),
+                }
+            }
+            // an invalid geometry and a real CUDA error are hard errors in every mode
+            assert!(matches!(
+                token.finish::<()>(
+                    KernelModule::Lstm,
+                    driver_only,
+                    Err(PlanError::Geometry(GeometryError::Invalid {
+                        context: "test plan",
+                        reason: "violated invariant".to_owned(),
+                    }))
+                ),
+                Err(CudaError::CandidateGeometry {
+                    error: GeometryError::Invalid { .. },
+                    ..
+                })
+            ));
+            assert!(matches!(
+                token.finish::<()>(
+                    KernelModule::Lstm,
+                    driver_only,
+                    Err(PlanError::Cuda(CudaError::Unsupported {
+                        context: "invalid shape",
+                        reason: "not a device limit".to_owned(),
+                    }))
+                ),
+                Err(CudaError::Unsupported {
+                    context: "invalid shape",
+                    ..
+                })
+            ));
+        }
+    }
+}
+
+#[test]
+fn every_production_tuple_requests_its_bound_ptx_jit() {
+    let mut selected = 0;
+    for binding in PRODUCTION {
+        assert!(matches!(
+            binding.module.artifact(),
+            LoadedArtifact::PtxJit { .. }
+        ));
+        for proof in binding.proofs {
+            let mut fixture = Fixture::new(BLACKWELL);
+            let token = token(
+                PlanRequest::Production
+                    .resolve(proof.boundary, proof.batch, proof.math, &mut fixture)
+                    .unwrap(),
+            );
+            assert_eq!(fixture.loads, [binding.module]);
+            assert_eq!(token.target.module, binding.module);
+            assert_eq!(token.pin, super::PlanPin::Pinned(proof.pin));
+            selected += 1;
+        }
+    }
+    assert_eq!(selected, 4);
+}
+
+/// Accuracy-accepted tuples must be implemented by the candidate at the bound tier;
+/// speed acceptance lives inside each proof, so it can never exceed accuracy
+#[test]
+fn coverage_layers_nest() {
+    for binding in PRODUCTION {
+        let implemented = super::candidate_coverage(binding.area(), binding.module.tier());
+        for proof in binding.proofs {
+            assert!(
+                implemented.covers(proof.boundary.name(), proof.batch, proof.math),
+                "{proof:?} is accepted but not implemented"
+            );
+            assert_eq!(proof.pin.area(), binding.area());
+        }
+    }
+}
+
+#[test]
+fn legacy_bindings_ignore_a_newly_embedded_higher_tier() {
+    // the old loader picked the highest embedded variant at or below the limit
+    for area in [KernelModule::Lstm, KernelModule::Sincnet] {
+        let embedded = AreaPtx::fixture(&[
+            (PtxTier::Sm75, legacy_ptx(area)),
+            (PtxTier::Sm80, "// a newly shipped sm80 variant"),
+        ]);
+        assert_eq!(embedded.select(PtxTier::Sm120).unwrap().0, PtxTier::Sm80);
+        let device = device(BLACKWELL);
+        let request = super::production_module(area, &device, PtxTier::Sm120, embedded).unwrap();
+        assert_eq!(request, Some(legacy_module(area)));
+        assert!(!super::legacy_fixture_coverage(area, &device, embedded).is_empty());
+    }
+    let mut selected = 0;
+    for binding in PRODUCTION {
+        for proof in binding.proofs {
+            let mut fixture = Fixture::new(BLACKWELL);
+            let token = token(
+                PlanRequest::Production
+                    .resolve(proof.boundary, proof.batch, proof.math, &mut fixture)
+                    .unwrap(),
+            );
+            assert_eq!(token.target.module.tier(), PtxTier::Sm75);
+            selected += 1;
+        }
+    }
+    assert_eq!(selected, 4);
+}
+
+#[test]
+fn always_on_areas_request_embedded_baseline_ptx_jit_on_every_device() {
+    for capability in [BLACKWELL, ADA, ComputeCapability::new(7, 5)] {
+        let device = device(capability);
+        for area in super::ALWAYS_ON {
+            let text = area.variants().embedded(PtxTier::Sm75).unwrap().text;
+            assert_eq!(
+                super::production_module(*area, &device, PtxTier::Sm120, area.variants()).unwrap(),
+                Some(ModuleRequest::new(
+                    *area,
+                    PtxTier::Sm75,
+                    LoadedArtifact::PtxJit {
+                        sha256: ArtifactHash::of(text.as_bytes())
+                    }
+                ))
+            );
+            // a newly embedded higher tier does not move an always-on area either
+            let embedded = AreaPtx::fixture(&[(PtxTier::Sm75, text), (PtxTier::Sm80, "sm80")]);
+            assert_eq!(
+                super::production_module(*area, &device, PtxTier::Sm120, embedded)
+                    .unwrap()
+                    .map(ModuleRequest::tier),
+                Some(PtxTier::Sm75)
+            );
+        }
+        assert_eq!(
+            super::qualified_module(
+                KernelModule::Probe,
+                &device,
+                PtxTier::Sm120,
+                KernelModule::Probe.variants()
+            )
+            .unwrap(),
+            None
+        );
+    }
+}
+
+const POINT: SpeedScope = SpeedScope::Point {
+    capability: BLACKWELL,
+    multiprocessors: 36,
+    device_name: "NVIDIA GeForce RTX 5060 Ti",
+};
+const RECORD: RecordHash =
+    RecordHash::from_hex("1111111111111111111111111111111111111111111111111111111111111111");
+const C64_PIN: ConfigPin = ConfigPin::Conv(ConvPin::Kernel(ConvKernel::C64));
+
+const fn fixture_proof(name: &str, batch: usize, pin: ConfigPin, speed: SpeedStatus) -> TupleProof {
+    TupleProof {
+        boundary: BoundaryId::named(name),
+        batch,
+        math: CudaMath::Fp32,
+        pin,
+        accuracy: RECORD,
+        speed,
+    }
+}
+
+const fn measured(scope: SpeedScope) -> SpeedStatus {
+    SpeedStatus::Measured(SpeedEvidence {
+        scope,
+        record: RECORD,
+        integrated: RECORD,
+    })
+}
+
+fn cubin(area: KernelModule, tier: PtxTier) -> ModuleRequest {
+    ModuleRequest::new(
+        area,
+        tier,
+        LoadedArtifact::Cubin {
+            arch: BLACKWELL,
+            sha256: ArtifactHash::of(b"cubin"),
+        },
+    )
+}
+
+fn validate(bindings: &[Binding]) -> bool {
+    let bindings = bindings.to_vec();
+    std::panic::catch_unwind(move || {
+        super::evidence::validate(&bindings, super::ALWAYS_ON, super::ROUTE_PRECEDENCE)
+    })
+    .is_ok()
+}
+
+#[test]
+fn measured_module_bindings_reject_cache_conflicts_with_qualified_bindings() {
+    use super::ModuleBinding;
+    let module = cubin(KernelModule::Resnet, PtxTier::Sm80);
+    let binding = ModuleBinding::new(POINT, module);
+    let validate = |modules: &[ModuleBinding], qualified: &[Binding]| {
+        std::panic::catch_unwind(|| {
+            super::evidence::validate_modules(
+                modules,
+                qualified,
+                super::ALWAYS_ON,
+                super::ROUTE_PRECEDENCE,
+            );
+        })
+        .is_ok()
+    };
+    static PROOF: [TupleProof; 1] = [fixture_proof(
+        "resnet.layer2.1.conv1",
+        32,
+        C64_PIN,
+        measured(POINT),
+    )];
+    let qualified = Binding {
+        scope: POINT,
+        module,
+        proofs: &PROOF,
+    };
+    assert!(validate(&[binding], &[qualified]));
+    assert!(!validate(
+        &[binding],
+        &[Binding {
+            module: cubin(KernelModule::Resnet, PtxTier::Sm75),
+            ..qualified
+        }]
+    ));
+    assert!(!validate(
+        &[
+            binding,
+            ModuleBinding::new(POINT, cubin(KernelModule::Resnet, PtxTier::Sm75))
+        ],
+        &[]
+    ));
+    let other = SpeedScope::Point {
+        capability: BLACKWELL,
+        multiprocessors: 70,
+        device_name: "NVIDIA GeForce RTX 5070 Ti",
+    };
+    assert!(validate(
+        &[
+            binding,
+            ModuleBinding::new(other, cubin(KernelModule::Resnet, PtxTier::Sm75))
+        ],
+        &[]
+    ));
+}
+
+#[test]
+fn validator_rejects_conflicting_bindings_and_allows_many_proofs() {
+    static ONE: [TupleProof; 1] = [fixture_proof(
+        "resnet.layer2.1.conv1",
+        32,
+        C64_PIN,
+        measured(POINT),
+    )];
+    static OTHER: [TupleProof; 1] = [fixture_proof(
+        "resnet.layer2.1.conv2",
+        32,
+        C64_PIN,
+        measured(POINT),
+    )];
+    let point = Binding {
+        scope: POINT,
+        module: cubin(KernelModule::Resnet, PtxTier::Sm80),
+        proofs: &ONE,
+    };
+    assert!(validate(&[point]));
+    // several records for one binding are allowed, but not two proofs of one tuple
+    assert!(validate(&[
+        point,
+        Binding {
+            proofs: &OTHER,
+            ..point
+        }
+    ]));
+    assert!(!validate(&[point, point]));
+    // a second module for one area on an overlapping device scope cannot load
+    assert!(!validate(&[
+        point,
+        Binding {
+            module: cubin(KernelModule::Resnet, PtxTier::Sm75),
+            proofs: &OTHER,
+            ..point
+        }
+    ]));
+    assert!(!validate(&[
+        Binding {
+            scope: super::production::LEGACY_SCOPE,
+            module: legacy_module(KernelModule::Resnet),
+            proofs: &ONE,
+        },
+        Binding {
+            proofs: &OTHER,
+            ..point
+        }
+    ]));
+    // another card of the same capability is a separate point scope
+    static OTHER_CARD: [TupleProof; 1] = [fixture_proof(
+        "resnet.layer2.1.conv1",
+        32,
+        C64_PIN,
+        measured(SpeedScope::Point {
+            capability: BLACKWELL,
+            multiprocessors: 70,
+            device_name: "NVIDIA GeForce RTX 5070 Ti",
+        }),
+    )];
+    assert!(validate(&[
+        point,
+        Binding {
+            scope: SpeedScope::Point {
+                capability: BLACKWELL,
+                multiprocessors: 70,
+                device_name: "NVIDIA GeForce RTX 5070 Ti",
+            },
+            module: cubin(KernelModule::Resnet, PtxTier::Sm75),
+            proofs: &OTHER_CARD,
+        }
+    ]));
+}
+
+#[test]
+fn validator_rejects_misstated_evidence() {
+    let point = |proofs: &'static [TupleProof]| Binding {
+        scope: POINT,
+        module: cubin(KernelModule::Resnet, PtxTier::Sm80),
+        proofs,
+    };
+    static RULE: [TupleProof; 1] = [fixture_proof(
+        "resnet.layer2.1.conv1",
+        32,
+        ConfigPin::Conv(ConvPin::LegacyWaves(ConvShape::C64)),
+        measured(POINT),
+    )];
+    static LEGACY_EVIDENCE: [TupleProof; 1] = [fixture_proof(
+        "resnet.layer2.1.conv1",
+        32,
+        C64_PIN,
+        measured(SpeedScope::LegacyCapability {
+            capability: BLACKWELL,
+        }),
+    )];
+    static STRESS: [TupleProof; 1] = [fixture_proof(
+        "resnet.layer2.1.conv1",
+        7,
+        C64_PIN,
+        measured(POINT),
+    )];
+    static FOREIGN: [TupleProof; 1] = [fixture_proof(
+        "resnet.layer2.1.conv1",
+        32,
+        ConfigPin::Sinc(SincPin::ConvAbsPool),
+        measured(POINT),
+    )];
+    static UNMEASURED: [TupleProof; 1] = [fixture_proof(
+        "resnet.layer2.1.conv1",
+        32,
+        C64_PIN,
+        SpeedStatus::Unmeasured,
+    )];
+    // a selection rule is not a pin; legacy approval is not point evidence
+    assert!(!validate(&[point(&RULE)]));
+    assert!(!validate(&[point(&LEGACY_EVIDENCE)]));
+    assert!(!validate(&[point(&STRESS)]));
+    assert!(!validate(&[point(&FOREIGN)]));
+    assert!(!validate(&[point(&[])]));
+    assert!(validate(&[point(&UNMEASURED)]));
+    // a cubin binding must target its exact device, and always-on areas have no bindings
+    assert!(!validate(&[Binding {
+        module: ModuleRequest::new(
+            KernelModule::Resnet,
+            PtxTier::Sm80,
+            LoadedArtifact::Cubin {
+                arch: ADA,
+                sha256: ArtifactHash::of(b"cubin"),
+            },
+        ),
+        ..point(&UNMEASURED)
+    }]));
+    assert!(!validate(&[Binding {
+        module: cubin(KernelModule::Fbank, PtxTier::Sm75),
+        ..point(&UNMEASURED)
+    }]));
+}
+
+#[test]
+fn point_scope_needs_the_exact_card() {
+    let card = device(BLACKWELL);
+    assert!(POINT.contains(&card));
+    for other in [
+        Builder::new(BLACKWELL)
+            .multiprocessors(70)
+            .name("NVIDIA GeForce RTX 5060 Ti")
+            .build(),
+        Builder::new(BLACKWELL)
+            .multiprocessors(36)
+            .name("NVIDIA GeForce RTX 5070")
+            .build(),
+        Builder::new(ADA)
+            .multiprocessors(36)
+            .name("NVIDIA GeForce RTX 5060 Ti")
+            .build(),
+    ] {
+        assert!(!POINT.contains(&other));
+        assert_eq!(
+            super::production::LEGACY_SCOPE.contains(&other),
+            other.capability() == BLACKWELL
+        );
+    }
+}
+
+#[test]
+fn route_precedence_and_unmeasured_speed_decide_explicitly() {
+    // two routes for one boundary: a fixed ResNet kernel and a hypothetical LSTM-area one
+    static MEASURED: [TupleProof; 1] = [fixture_proof(
+        "resnet.layer2.1.conv1",
+        32,
+        C64_PIN,
+        measured(POINT),
+    )];
+    static UNMEASURED: [TupleProof; 1] = [fixture_proof(
+        "resnet.layer2.1.conv1",
+        32,
+        C64_PIN,
+        SpeedStatus::Unmeasured,
+    )];
+    static SECOND: [TupleProof; 1] = [fixture_proof(
+        "resnet.layer2.1.conv1",
+        32,
+        ConfigPin::Lstm(LstmPin::LegacyCooperative),
+        SpeedStatus::Measured(SpeedEvidence {
+            scope: SpeedScope::LegacyCapability {
+                capability: BLACKWELL,
+            },
+            record: RECORD,
+            integrated: RECORD,
+        }),
+    )];
+    const RESNET_ROUTE: Binding = Binding {
+        scope: POINT,
+        module: ModuleRequest::new(
+            KernelModule::Resnet,
+            PtxTier::Sm80,
+            LoadedArtifact::Cubin {
+                arch: BLACKWELL,
+                sha256: ArtifactHash::from_hex(
+                    "2222222222222222222222222222222222222222222222222222222222222222",
+                ),
+            },
+        ),
+        proofs: &MEASURED,
+    };
+    const LSTM_ROUTE: Binding = Binding {
+        scope: SpeedScope::LegacyCapability {
+            capability: BLACKWELL,
+        },
+        module: ModuleRequest::new(
+            KernelModule::Lstm,
+            PtxTier::Sm75,
+            LoadedArtifact::PtxJit {
+                sha256: ArtifactHash::from_hex(
+                    "3333333333333333333333333333333333333333333333333333333333333333",
+                ),
+            },
+        ),
+        proofs: &SECOND,
+    };
+    static TABLE: [Binding; 2] = [RESNET_ROUTE, LSTM_ROUTE];
+    static UNMEASURED_TABLE: [Binding; 2] = [
+        Binding {
+            proofs: &UNMEASURED,
+            ..RESNET_ROUTE
+        },
+        LSTM_ROUTE,
+    ];
+    assert!(validate(&TABLE));
+    let device = device(BLACKWELL);
+    let route = |table: &'static [Binding], precedence: &[KernelModule]| {
+        super::production_route(
+            table,
+            precedence,
+            BoundaryId::named("resnet.layer2.1.conv1"),
+            32,
+            CudaMath::Fp32,
+            &device,
+        )
+        .map(|route| route.module.area())
+    };
+    // routing fixtures do not represent accepted evidence or candidate configurations
+    static WIDE_TABLE: [Binding; 2] = [
+        Binding {
+            module: ModuleRequest::new(
+                KernelModule::Wideconv,
+                PtxTier::Sm80,
+                RESNET_ROUTE.module.artifact(),
+            ),
+            ..RESNET_ROUTE
+        },
+        RESNET_ROUTE,
+    ];
+    static DENSE_TABLE: [Binding; 2] = [
+        Binding {
+            module: ModuleRequest::new(
+                KernelModule::Segdense,
+                PtxTier::Sm80,
+                RESNET_ROUTE.module.artifact(),
+            ),
+            ..RESNET_ROUTE
+        },
+        RESNET_ROUTE,
+    ];
+    assert_eq!(
+        route(&WIDE_TABLE, super::ROUTE_PRECEDENCE),
+        Some(KernelModule::Wideconv)
+    );
+    assert_eq!(
+        route(&DENSE_TABLE, super::ROUTE_PRECEDENCE),
+        Some(KernelModule::Resnet)
+    );
+    let resnet_first = [KernelModule::Resnet, KernelModule::Lstm];
+    let lstm_first = [KernelModule::Lstm, KernelModule::Resnet];
+    assert_eq!(route(&TABLE, &resnet_first), Some(KernelModule::Resnet));
+    assert_eq!(route(&TABLE, &lstm_first), Some(KernelModule::Lstm));
+    // the highest route decides: unmeasured speed means Library, not the next route
+    assert_eq!(route(&UNMEASURED_TABLE, &resnet_first), None);
+    assert_eq!(
+        route(&UNMEASURED_TABLE, &lstm_first),
+        Some(KernelModule::Lstm)
+    );
+    // a card outside the point scope never sees the point route
+    let other = Builder::new(BLACKWELL).multiprocessors(70).build();
+    assert_eq!(
+        super::production_route(
+            &TABLE,
+            &resnet_first,
+            BoundaryId::named("resnet.layer2.1.conv1"),
+            32,
+            CudaMath::Fp32,
+            &other,
+        )
+        .map(|route| route.module.area()),
+        Some(KernelModule::Lstm)
+    );
+}
+
+#[test]
+#[ignore = "short GPU proof; run under the shared GPU flock without diagnostic overrides"]
+fn default_production_loads_record_pinned_jit() -> Result<(), CudaError> {
+    use crate::inference::cuda::CudaRuntime;
+    use std::fs::{OpenOptions, TryLockError};
+    for name in [
+        crate::inference::cuda::kernels::FORCE_PTX_JIT_ENV,
+        crate::inference::cuda::tier::PTX_TIER_ENV,
+    ] {
+        assert!(
+            std::env::var_os(name).is_none(),
+            "default production proof forbids {name}"
+        );
+    }
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/workspace/gpu-bench.lock")
+        .expect("shared GPU lock exists");
+    assert!(matches!(lock.try_lock(), Err(TryLockError::WouldBlock)));
+    let runtime = CudaRuntime::new(0)?;
+    assert_eq!(runtime.compute_capability(), BLACKWELL);
+    let device = runtime.device();
+    println!(
+        "device_attributes {}",
+        serde_json::json!({
+            "name": device.name(), "capability": device.capability().to_string(),
+            "sm_count": device.multiprocessors().get(), "l2_bytes": device.l2_bytes(),
+            "shared_optin_bytes": device.shared_optin_bytes(),
+        })
+    );
+    let mut selected = 0;
+    for binding in PRODUCTION {
+        for proof in binding.proofs {
+            let token = token(super::plan_selection(
+                &runtime,
+                proof.boundary,
+                proof.batch,
+                proof.math,
+                None,
+            )?);
+            assert_eq!(token.target.module, binding.module);
+            assert_eq!(token.pin, super::PlanPin::Pinned(proof.pin));
+            assert!(
+                plan_from_pin(&runtime, proof, token)?,
+                "{proof:?} fell back to Library at plan time"
+            );
+            selected += 1;
+        }
+        let loaded = runtime.load_kernels(binding.area())?;
+        assert_eq!(loaded.request(), binding.module);
+        let ptx = binding
+            .area()
+            .variants()
+            .embedded(binding.module.tier())
+            .unwrap()
+            .text;
+        for line in ptx
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(".visible .entry "))
+        {
+            loaded.function(line.split(['(', ' ', '\t']).next().unwrap())?;
+        }
+    }
+    assert_eq!(selected, 4);
+    println!(
+        "planned_from_pins {}",
+        serde_json::json!({ "tuples": selected })
+    );
+    for area in super::ALWAYS_ON {
+        let expected = runtime.production_module(*area)?.expect("always-on module");
+        let loaded = runtime.load_kernels(*area)?;
+        assert_eq!(loaded.request(), expected);
+        assert_eq!(
+            loaded.artifact(),
+            LoadedArtifact::PtxJit {
+                sha256: loaded.ptx_sha256()
+            }
+        );
+        let ptx = area.variants().embedded(expected.tier()).unwrap().text;
+        for line in ptx
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(".visible .entry "))
+        {
+            loaded.function(line.split(['(', ' ', '\t']).next().unwrap())?;
+        }
+    }
+    runtime.synchronize()
+}
+
+/// Build one accepted tuple's plan from its pin on the live device, with zero weights
+/// at the model's shapes; `false` means production fell back to Library
+fn plan_from_pin(
+    runtime: &crate::inference::cuda::CudaRuntime,
+    proof: &TupleProof,
+    token: super::Qualified,
+) -> Result<bool, CudaError> {
+    use crate::inference::cuda::candidate::{ConvLayerSpec, LstmLayerWeights, LstmSpec, SincSpec};
+    use crate::inference::cuda::geometry::Conv2d;
+    use crate::inference::cuda::{FBANK_FRAMES, FBANK_MEL_BINS};
+
+    let stream = runtime.stream();
+    let (batch, math) = (proof.batch, proof.math);
+    match proof.pin {
+        ConfigPin::Fbank(_) => {
+            let spec = crate::inference::cuda::candidate::FbankSpec::new(batch, math).map_err(
+                |error| CudaError::Unsupported {
+                    context: "fbank.dft production proof",
+                    reason: error.to_string(),
+                },
+            )?;
+            Ok(token.fbank(runtime, spec)?.is_some())
+        }
+        ConfigPin::Segdense(_) => Err(CudaError::Unsupported {
+            context: "segdense production proof",
+            reason: "no production entry exists before the routing port".to_owned(),
+        }),
+        ConfigPin::Wideconv(_) => Err(CudaError::Unsupported {
+            context: "wideconv production proof",
+            reason: "no production entry exists for the driver-only port".to_owned(),
+        }),
+        ConfigPin::Conv(pin) => {
+            let trunk = [FBANK_MEL_BINS, FBANK_FRAMES];
+            let ([in_channels, out_channels], stride, input) = match pin.shape() {
+                ConvShape::C32 => ([32, 32], 1, trunk),
+                ConvShape::C32Stride2 => ([32, 64], 2, trunk),
+                ConvShape::C64 => ([64, 64], 1, trunk.map(|size| size.div_ceil(2))),
+            };
+            let weight = stream.alloc_zeros::<f32>(out_channels * in_channels * 9)?;
+            let bias = stream.alloc_zeros::<f32>(out_channels)?;
+            let conv = Conv2d {
+                batch,
+                in_channels,
+                out_channels,
+                input,
+                kernel: [3, 3],
+                padding: [1, 1],
+                stride: [stride; 2],
+                dilation: [1, 1],
+                math,
+            };
+            let spec = ConvLayerSpec {
+                name: proof.boundary.name(),
+                conv,
+                epilogue: if proof.boundary.name().ends_with("conv2") {
+                    super::super::candidate::Epilogue::BiasReluResidual
+                } else {
+                    super::super::candidate::Epilogue::BiasRelu
+                },
+                weight: &weight,
+                bias: &bias,
+            };
+            Ok(token.conv(runtime, spec)?.is_some())
+        }
+        ConfigPin::Lstm(_) => {
+            let first = (vec![0.0; 2 * 512 * 60], vec![0.0; 2 * 512 * 128]);
+            let upper = (vec![0.0; 2 * 512 * 256], vec![0.0; 2 * 512 * 128]);
+            let bias = vec![0.0; 2 * 1024];
+            let (w0, r0) = (first.0.as_slice(), first.1.as_slice());
+            let (w1, r1) = (upper.0.as_slice(), upper.1.as_slice());
+            let weights = |input, w, r| LstmLayerWeights {
+                input,
+                w,
+                r,
+                b: bias.as_slice(),
+            };
+            let spec = LstmSpec {
+                batch,
+                frames: 589,
+                math,
+                layers: [
+                    weights(60, w0, r0),
+                    weights(256, w1, r1),
+                    weights(256, w1, r1),
+                    weights(256, w1, r1),
+                ],
+            };
+            Ok(token.lstm(runtime, spec)?.is_some())
+        }
+        ConfigPin::Sinc(_) => {
+            let filters = stream.alloc_zeros::<f32>(80 * 251)?;
+            let spec = SincSpec {
+                batch,
+                samples: 160_000,
+                sinc: 15_975,
+                pooled: 5_325,
+                math,
+                filters: &filters,
+            };
+            Ok(token.sinc(runtime, spec)?.is_some())
+        }
+    }
+}
+
+#[test]
+fn fixed_producer_specs_preserve_shapes_and_reject_overflow() {
+    use super::super::candidate::{
+        DenseEpilogue, DenseSite, DenseSpec, SegConvSite, SegConvSpec, TEST_BATCHES,
+    };
+
+    for batch in TEST_BATCHES {
+        for (site, dimensions, epilogue) in [
+            (
+                DenseSite::Linear0,
+                (589, 128, 256),
+                DenseEpilogue::BiasLeakyRelu,
+            ),
+            (
+                DenseSite::Linear1,
+                (589, 128, 128),
+                DenseEpilogue::BiasLeakyRelu,
+            ),
+            (
+                DenseSite::Classifier,
+                (589, 7, 128),
+                DenseEpilogue::BiasLogSoftmax,
+            ),
+            (DenseSite::Embedding, (3, 256, 5120), DenseEpilogue::Bias),
+        ] {
+            let spec = DenseSpec::new(site, batch, CudaMath::Fp32).unwrap();
+            let (m, n, k) = dimensions;
+            assert_eq!(spec.dimensions(), dimensions);
+            assert_eq!(spec.epilogue(), epilogue);
+            assert_eq!(spec.input_len(), batch * m * k);
+            assert_eq!(spec.output_len(), batch * m * n);
+            assert_eq!(spec.weight_len(), n * k);
+            assert_eq!(spec.bias_len(), n);
+            assert_eq!(spec.transposed_weights(), site == DenseSite::Embedding);
+            assert_eq!(
+                spec.beta(),
+                if site == DenseSite::Embedding {
+                    1.0
+                } else {
+                    0.0
+                }
+            );
+            assert!(DenseSpec::new(site, 0, CudaMath::Fp32).is_err());
+            assert!(DenseSpec::new(site, usize::MAX, CudaMath::Fp32).is_err());
+        }
+        for (site, channels, input, output) in [
+            (SegConvSite::Conv1, 80, 5325, 5321),
+            (SegConvSite::Conv2, 60, 1773, 1769),
+        ] {
+            let spec = SegConvSpec::new(site, batch, CudaMath::Fp32).unwrap();
+            assert_eq!(spec.input_len(), batch * channels * input);
+            assert_eq!(spec.output_len(), batch * 60 * output);
+            assert_eq!(spec.weight_len(), 60 * channels * 5);
+            assert!(SegConvSpec::new(site, 0, CudaMath::Fp32).is_err());
+            assert!(SegConvSpec::new(site, usize::MAX, CudaMath::Fp32).is_err());
+        }
+    }
+}
+
+#[test]
+fn explicit_wideconv_route_wins_only_for_its_implemented_tuple() {
+    use crate::inference::cuda::candidate::{Batches, Coverage, CoverageEntry, Maths};
+    const ENTRY: CoverageEntry = CoverageEntry {
+        layers: &["resnet.layer2.1.conv1"],
+        batches: Batches::Only(&[32]),
+        maths: Maths::All,
+    };
+    const COVERAGE: Coverage = Coverage(&[ENTRY]);
+    let boundary = BoundaryId::named("resnet.layer2.1.conv1");
+    let request = |area| {
+        ModuleRequest::new(
+            area,
+            PtxTier::Sm75,
+            legacy_module(KernelModule::Resnet).artifact(),
+        )
+    };
+    let route = |wide: Coverage| {
+        super::explicit_route(boundary, 32, CudaMath::Fp32, |area| {
+            Ok(match area {
+                KernelModule::Wideconv => Some((request(area), wide)),
+                KernelModule::Resnet => Some((request(area), COVERAGE)),
+                _ => None,
+            })
+        })
+        .unwrap()
+        .unwrap()
+        .area()
+    };
+    const OTHER_BATCH: Coverage = Coverage(&[CoverageEntry {
+        layers: &["resnet.layer2.1.conv1"],
+        batches: Batches::Only(&[1]),
+        maths: Maths::All,
+    }]);
+    assert_eq!(route(COVERAGE), KernelModule::Wideconv);
+    assert_eq!(route(OTHER_BATCH), KernelModule::Resnet);
+    assert_eq!(route(Coverage::NONE), KernelModule::Resnet);
+}
+
+#[test]
+fn broad_winner_selects_on_an_unmeasured_gpu() {
+    use super::evidence::{ArchitectureSpeed, BroadEvidence};
+    static SUMMARY: BroadEvidence = BroadEvidence::with_minimum(
+        &[
+            ArchitectureSpeed {
+                capability: ComputeCapability::new(8, 0),
+                minimum_speedup_milli: 1300,
+            },
+            ArchitectureSpeed {
+                capability: ComputeCapability::new(8, 9),
+                minimum_speedup_milli: 1700,
+            },
+        ],
+        "fixture: fused fbank producer avoids materialized DFT matrices on Ampere and Ada",
+        crate::inference::cuda::ComputeCapability::new(7, 5),
+    );
+    const SCOPE: SpeedScope = SpeedScope::AllDevices(&SUMMARY);
+    static PROOFS: [TupleProof; 1] = [fixture_proof(
+        "fbank.dft",
+        1,
+        ConfigPin::Fbank(crate::inference::cuda::candidate::FbankPin::FftMelAccurate),
+        measured(SCOPE),
+    )];
+    static BINDINGS: [Binding; 1] = [Binding {
+        scope: SCOPE,
+        module: ModuleRequest::new(
+            KernelModule::FbankDft,
+            PtxTier::Sm75,
+            LoadedArtifact::PtxJit {
+                sha256: ArtifactHash::from_hex(
+                    "1111111111111111111111111111111111111111111111111111111111111111",
+                ),
+            },
+        ),
+        proofs: &PROOFS,
+    }];
+    assert!(validate(&BINDINGS));
+    let device = device(ComputeCapability::new(9, 0));
+    let route = super::production_route(
+        &BINDINGS,
+        super::ROUTE_PRECEDENCE,
+        BoundaryId::named("fbank.dft"),
+        1,
+        CudaMath::Fp32,
+        &device,
+    )
+    .unwrap();
+    assert_eq!(route.module.area(), KernelModule::FbankDft);
+    assert!(route.speed.scope.contains(&device));
+    assert!(!route.speed.scope.measured_on_device(device.capability()));
+    assert!(!validate(&[Binding {
+        module: cubin(KernelModule::FbankDft, PtxTier::Sm75),
+        ..BINDINGS[0]
+    }]));
+}
+
+#[test]
+fn device_sensitive_tuple_uses_library_on_unmeasured_gpu() {
+    let mut fixture = Fixture::new(ComputeCapability::new(9, 0));
+    let selected = fixture
+        .resolve(
+            PlanRequest::Production,
+            "resnet.layer1.0.conv1",
+            1,
+            CudaMath::Fp32,
+        )
+        .unwrap();
+    assert!(matches!(selected, Selected::Library));
+    assert!(fixture.loads.is_empty());
+}
+
+#[test]
+fn force_library_environment_disables_production_candidates() {
+    const CHILD: &str = "SPEAKRS_FORCE_LIBRARY_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "inference::cuda::implementation::tests::force_library_environment_disables_production_candidates", "--nocapture"])
+            .env(CHILD, "1").env("SPEAKRS_CUDA_FORCE_LIBRARY", "1").output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        return;
+    }
+    let mut fixture = Fixture::new(BLACKWELL);
+    fixture.force_library = crate::inference::cuda::runtime::force_library_from_env();
+    assert!(fixture.force_library);
+    for boundary in [
+        "resnet.layer1.0.conv1",
+        "lstm.stack",
+        "sincnet.conv0.abs_pool",
+        "linear0",
+        "fbank.dft",
+    ] {
+        assert!(matches!(
+            fixture
+                .resolve(PlanRequest::Hybrid, boundary, 1, CudaMath::Fp32)
+                .unwrap(),
+            Selected::Library
+        ));
+    }
+    assert!(fixture.loads.is_empty());
+}
+
+#[test]
+fn broad_evidence_rejects_weak_or_single_architecture_claims() {
+    use super::evidence::{ArchitectureSpeed, BroadEvidence};
+    for measurements in [
+        &[ArchitectureSpeed {
+            capability: ADA,
+            minimum_speedup_milli: 1500,
+        }][..],
+        &[
+            ArchitectureSpeed {
+                capability: ADA,
+                minimum_speedup_milli: 1049,
+            },
+            ArchitectureSpeed {
+                capability: BLACKWELL,
+                minimum_speedup_milli: 1500,
+            },
+        ][..],
+        &[
+            ArchitectureSpeed {
+                capability: ADA,
+                minimum_speedup_milli: 1500,
+            },
+            ArchitectureSpeed {
+                capability: ADA,
+                minimum_speedup_milli: 1500,
+            },
+        ][..],
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| BroadEvidence::with_minimum(
+                measurements,
+                "fixture",
+                crate::inference::cuda::ComputeCapability::new(7, 5)
+            ))
+            .is_err()
+        );
     }
 }

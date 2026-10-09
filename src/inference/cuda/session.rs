@@ -24,6 +24,11 @@ impl<S> CudaSession<S> {
         build: impl FnOnce(&CudaRuntime) -> Result<S, CudaError>,
     ) -> Result<Self, CudaError> {
         runtime.context().bind_to_thread()?;
+        tracing::info!(
+            driver_only = super::driver_only(),
+            force_library = runtime.force_library(),
+            "CUDA model-load routing policy"
+        );
         let state = build(&runtime)?;
         Ok(Self { state, runtime })
     }

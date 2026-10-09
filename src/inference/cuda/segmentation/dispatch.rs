@@ -1,7 +1,6 @@
-//! Locked dispatch for the Sinc producer and the LSTM stack
+//! Dispatch for the Sinc producer and the LSTM stack
 //!
-//! The harness traces, times and sanitizes exactly what this file runs. A candidate
-//! enqueues only its own boundary: for Sinc, the producer, after which this file runs
+//! A candidate enqueues only its own boundary: for Sinc, the producer, after which this file runs
 //! the unchanged shared `segmentation_pool_norm` consumer with the parameters that
 //! match the candidate's declared output. Undeclared batch and math pairs run the
 //! Library path
@@ -9,16 +8,21 @@
 use cudarc::driver::{CudaSlice, CudaViewMut};
 
 use super::super::candidate::{
-    Coverage, LstmCandidate, LstmLayerWeights, LstmOxide, LstmPhases, LstmSpec, Phases, Projection,
-    SincCandidate, SincInputs, SincOutput, SincOxide, SincSpec,
+    LstmCandidate, LstmLayerWeights, LstmPhases, LstmSpec, Phases, Projection, SincCandidate,
+    SincInputs, SincOutput, SincOxide, SincSpec,
 };
-use super::super::implementation::Choice;
+use super::super::implementation::{AreaTarget, BoundaryId, LibraryNeed, Selected};
+use super::super::{CudaLibrary, KernelModule};
+#[cfg(feature = "_cuda-libraries")]
+use super::super::{CudaLstmAlgorithm, dnn::ConvPlanner};
 use super::shape::{LEAKY_SLOPE, NORM_EPSILON, POOL, SINC_CHANNELS, SegmentationShape};
 use super::{CudaError, CudaRuntime, LstmStage, Network, PoolNorm, RowLayout, SincPlan};
 
-/// The boundary names the harness, the coverage and the production table use
+/// The boundary names the coverage and the production table use
 pub(super) const SINC_LAYER: &str = "sincnet.conv0.abs_pool";
 pub(super) const LSTM_LAYER: &str = "lstm.stack";
+pub(super) const SINC: BoundaryId = BoundaryId::named(SINC_LAYER);
+pub(super) const LSTM: BoundaryId = BoundaryId::named(LSTM_LAYER);
 
 /// The buffers of one Sinc call: the normalized waveform in, the stage-0 activation out
 pub(super) struct SincIo<'a> {
@@ -41,46 +45,31 @@ impl Network {
         workspace: &mut CudaViewMut<'_, u8>,
         io: SincIo<'_>,
     ) -> Result<(), CudaError> {
-        match plan.choice {
-            Choice::Library => self.sinc_library(runtime, shape, plan, workspace, io),
-            Choice::Oxide(_) => self.sinc_oxide(runtime, shape, plan, workspace, io),
-            #[cfg(test)]
-            Choice::Mutant(mutant) => {
-                super::super::test_support::poison(runtime)?;
-                {
-                    let _scope =
-                        super::super::test_support::candidate(runtime.stream(), SINC_LAYER);
-                    if !mutant.skips() {
-                        super::test_support::mutant_sinc(
-                            self, runtime, shape, plan, workspace, io.input, io.raw, mutant,
-                        )?;
-                    }
-                }
-                super::super::test_support::unscoped(runtime, mutant)?;
-                self.sinc_consumer(runtime, shape, false, io.raw, io.stage0)
-            }
+        #[cfg(not(feature = "_cuda-libraries"))]
+        let _ = workspace;
+        match plan {
+            #[cfg(feature = "_cuda-libraries")]
+            SincPlan::Library(library) => self.sinc_library(runtime, shape, library, workspace, io),
+            SincPlan::Oxide(candidate) => self.sinc_oxide(runtime, shape, candidate, io),
         }
     }
 
     /// The cuDNN convolution, then `abs`, pool by 3 and normalize in one kernel
+    #[cfg(feature = "_cuda-libraries")]
     fn sinc_library(
         &self,
         runtime: &CudaRuntime,
         shape: SegmentationShape,
-        plan: &SincPlan,
+        plan: &super::ConvPlan,
         workspace: &mut CudaViewMut<'_, u8>,
         io: SincIo<'_>,
     ) -> Result<(), CudaError> {
-        #[cfg(test)]
-        let _scope = super::super::test_support::library(runtime.stream(), SINC_LAYER);
-        plan.library.forward(
+        plan.forward(
             workspace,
             &io.input.as_view(),
             &self.sinc_filters.as_view(),
             &mut io.raw.as_view_mut(),
         )?;
-        #[cfg(test)]
-        super::super::test_support::perturb(runtime, SINC_LAYER, io.raw)?;
         self.sinc_consumer(runtime, shape, false, io.raw, io.stage0)
     }
 
@@ -118,15 +107,9 @@ impl Network {
         &self,
         runtime: &CudaRuntime,
         shape: SegmentationShape,
-        plan: &SincPlan,
-        workspace: &mut CudaViewMut<'_, u8>,
+        candidate: &SincOxide,
         io: SincIo<'_>,
     ) -> Result<(), CudaError> {
-        // an undeclared pair runs the Library path
-        let Some(candidate) = &plan.candidate else {
-            return self.sinc_library(runtime, shape, plan, workspace, io);
-        };
-
         let pooled = SincOxide::OUTPUT == SincOutput::Pooled;
         let SincIo {
             input,
@@ -144,54 +127,73 @@ impl Network {
                 });
             }
         };
-        let stream = runtime.stream();
-        #[cfg(test)]
-        super::super::test_support::poison(runtime)?;
-        {
-            #[cfg(test)]
-            let _scope = super::super::test_support::candidate(stream, SINC_LAYER);
-            candidate.enqueue(
-                SincInputs {
-                    waveform: &input.as_view(),
-                    filters: &self.sinc_filters.as_view(),
-                },
-                &mut output.as_view_mut(),
-                &Phases::new(),
-                stream,
-            )?;
-        }
-
+        candidate.enqueue(
+            SincInputs {
+                waveform: &input.as_view(),
+                filters: &self.sinc_filters.as_view(),
+            },
+            &mut output.as_view_mut(),
+            &Phases::new(),
+            runtime.stream(),
+        )?;
         self.sinc_consumer(runtime, shape, pooled, output, stage0)
     }
 
-    /// Plans the Sinc candidate when `choice` is `Oxide` and its coverage declares this
-    /// batch and mode
+    /// Build one Sinc owner from the selected token
     pub(super) fn plan_sinc(
         &self,
         runtime: &CudaRuntime,
         shape: SegmentationShape,
-        choice: Choice,
-    ) -> Result<Option<SincOxide>, CudaError> {
-        if !declared(choice, SincOxide::COVERAGE, SINC_LAYER, shape.batch, self) {
-            return Ok(None);
-        }
-
-        let spec = SincSpec {
-            batch: shape.batch,
-            samples: shape.samples,
-            sinc: shape.sinc,
-            pooled: shape.pool0,
-            math: self.options.math,
-            filters: &self.sinc_filters,
+        selected: Selected,
+    ) -> Result<SincPlan, CudaError> {
+        let _selected = match selected {
+            Selected::Oxide(token) => {
+                let spec = SincSpec {
+                    batch: shape.batch,
+                    samples: shape.samples,
+                    sinc: shape.sinc,
+                    pooled: shape.pool0,
+                    math: self.options.math,
+                    filters: &self.sinc_filters,
+                };
+                if let Some(candidate) = token.sinc(runtime, spec)? {
+                    return Ok(SincPlan::Oxide(candidate));
+                }
+                Selected::Library
+            }
+            other => other,
         };
-        #[cfg(test)]
-        let _scope = super::super::test_support::plan(SINC_LAYER);
-        super::super::dispatch::candidate_plan(
-            choice,
-            SINC_LAYER,
+        LibraryNeed::new(
+            SINC,
             shape.batch,
-            SincOxide::plan(runtime, spec),
+            self.options.math,
+            AreaTarget::for_area(runtime, KernelModule::Sincnet)?,
+            CudaLibrary::Cudnn,
         )
+        .prepare(runtime)?;
+        #[cfg(feature = "_cuda-libraries")]
+        {
+            let spec = super::Conv2d {
+                batch: shape.batch,
+                in_channels: 1,
+                out_channels: SINC_CHANNELS,
+                input: [1, shape.samples],
+                kernel: [1, super::SINC_KERNEL],
+                padding: [0, 0],
+                stride: [1, super::SINC_STRIDE],
+                dilation: [1, 1],
+                math: self.options.math,
+            };
+            let library = ConvPlanner::new(runtime)?.plan(spec)?;
+            Ok(SincPlan::Library(library))
+        }
+        #[cfg(not(feature = "_cuda-libraries"))]
+        {
+            let _ = _selected;
+            Err(CudaError::LibraryUnavailable {
+                library: CudaLibrary::Cudnn,
+            })
+        }
     }
 
     /// The stack through its choice
@@ -202,105 +204,130 @@ impl Network {
         input: &CudaSlice<f32>,
         output: &mut CudaSlice<f32>,
     ) -> Result<(), CudaError> {
-        match stage.choice {
-            Choice::Library => self.lstm_library(runtime, stage, input, output),
-            Choice::Oxide(_) => {
-                // an undeclared pair runs the Library path
-                let Some(candidate) = &stage.candidate else {
-                    return self.lstm_library(runtime, stage, input, output);
-                };
-
-                let stream = runtime.stream();
-                let rows = stage.library.batch() * stage.library.seq_len();
-                let phases = LstmPhases::new(Projection::new(runtime, rows, self.options.math));
-                #[cfg(test)]
-                super::super::test_support::poison(runtime)?;
-                #[cfg(test)]
-                let _scope = super::super::test_support::candidate(stream, LSTM_LAYER);
-                candidate.enqueue(&input.as_view(), &mut output.as_view_mut(), &phases, stream)
+        match stage {
+            #[cfg(feature = "_cuda-libraries")]
+            LstmStage::Library(plan) => self.lstm_library(runtime, plan, input, output),
+            LstmStage::Projected { candidate, rows } => {
+                let phases = LstmPhases::new(Projection::new(runtime, *rows, self.options.math));
+                candidate.enqueue(
+                    &input.as_view(),
+                    &mut output.as_view_mut(),
+                    &phases,
+                    runtime.stream(),
+                )
             }
-            #[cfg(test)]
-            Choice::Mutant(mutant) => {
-                super::super::test_support::poison(runtime)?;
-                {
-                    let _scope =
-                        super::super::test_support::candidate(runtime.stream(), LSTM_LAYER);
-                    if !mutant.skips() {
-                        super::test_support::mutant_lstm(
-                            self,
-                            runtime,
-                            &mut stage.library,
-                            input,
-                            output,
-                            mutant,
-                        )?;
-                    }
-                }
-                super::super::test_support::unscoped(runtime, mutant)
+            LstmStage::Oxide { candidate, rows } => {
+                let stream = runtime.stream();
+                let phases = LstmPhases::new(Projection::new(runtime, *rows, self.options.math));
+                candidate.enqueue(&input.as_view(), &mut output.as_view_mut(), &phases, stream)
             }
         }
     }
 
+    #[cfg(feature = "_cuda-libraries")]
     fn lstm_library(
         &self,
         runtime: &CudaRuntime,
-        stage: &mut LstmStage,
+        plan: &mut super::LstmPlan,
         input: &CudaSlice<f32>,
         output: &mut CudaSlice<f32>,
     ) -> Result<(), CudaError> {
-        #[cfg(test)]
-        let _scope = super::super::test_support::library(runtime.stream(), LSTM_LAYER);
         self.lstm
-            .forward(runtime, &mut stage.library, input, output)?;
-        #[cfg(test)]
-        super::super::test_support::perturb(runtime, LSTM_LAYER, output)?;
+            .as_ref()
+            .expect("Library LSTM initialized by planning")
+            .forward(runtime, plan, input, output)?;
         Ok(())
     }
 
-    /// Plans the stack candidate when `choice` is `Oxide` and its coverage declares this
-    /// batch and mode
+    /// Build one stack owner; Library descriptors and weight packing are deferred
     pub(super) fn plan_lstm(
-        &self,
+        &mut self,
         runtime: &CudaRuntime,
         shape: SegmentationShape,
-        choice: Choice,
-    ) -> Result<Option<LstmOxide>, CudaError> {
-        if !declared(choice, LstmOxide::COVERAGE, LSTM_LAYER, shape.batch, self) {
-            return Ok(None);
-        }
-
-        let layer = |index: usize| {
-            let layer = &self.lstm_weights[index];
-            LstmLayerWeights {
-                input: layer.input,
-                w: &layer.w,
-                r: &layer.r,
-                b: &layer.b,
+        selected: Selected,
+    ) -> Result<LstmStage, CudaError> {
+        let _selected = match selected {
+            Selected::Oxide(token) => {
+                let layer = |index: usize| {
+                    let layer = &self.lstm_weights[index];
+                    LstmLayerWeights {
+                        input: layer.input,
+                        w: &layer.w,
+                        r: &layer.r,
+                        b: &layer.b,
+                    }
+                };
+                let spec = LstmSpec {
+                    batch: shape.batch,
+                    frames: shape.frames,
+                    math: self.options.math,
+                    layers: [layer(0), layer(1), layer(2), layer(3)],
+                };
+                if token.area() == KernelModule::LstmProj {
+                    if let Some(candidate) = token.projected_lstm(runtime, spec)? {
+                        return Ok(LstmStage::Projected {
+                            candidate: Box::new(candidate),
+                            rows: shape.batch * shape.frames,
+                        });
+                    }
+                } else if let Some(candidate) = token.lstm(runtime, spec)? {
+                    return Ok(LstmStage::Oxide {
+                        candidate: Box::new(candidate),
+                        rows: shape.batch * shape.frames,
+                    });
+                }
+                Selected::Library
             }
+            other => other,
         };
-        let spec = LstmSpec {
-            batch: shape.batch,
-            frames: shape.frames,
-            math: self.options.math,
-            layers: [layer(0), layer(1), layer(2), layer(3)],
-        };
-        #[cfg(test)]
-        let _scope = super::super::test_support::plan(LSTM_LAYER);
-        super::super::dispatch::candidate_plan(
-            choice,
-            LSTM_LAYER,
+        LibraryNeed::new(
+            LSTM,
             shape.batch,
-            LstmOxide::plan(runtime, spec),
+            self.options.math,
+            AreaTarget::for_area(runtime, KernelModule::Lstm)?,
+            CudaLibrary::Cudnn,
         )
+        .prepare(runtime)?;
+        #[cfg(feature = "_cuda-libraries")]
+        {
+            // the NVRTC library is a dependency of the selected dynamic Library plan only
+            if self.options.lstm_algo == CudaLstmAlgorithm::PersistDynamic {
+                LibraryNeed::new(
+                    LSTM,
+                    shape.batch,
+                    self.options.math,
+                    AreaTarget::for_area(runtime, KernelModule::Lstm)?,
+                    CudaLibrary::Nvrtc,
+                )
+                .prepare(runtime)?;
+            }
+            if self.lstm.is_none() {
+                let layers = self.lstm_weights.as_slice().try_into().map_err(|_| {
+                    CudaError::Unsupported {
+                        context: "LSTM weights",
+                        reason: "expected four bidirectional layers".to_owned(),
+                    }
+                })?;
+                self.lstm = Some(super::CudnnLstm::new(
+                    runtime,
+                    layers,
+                    self.options.math,
+                    self.options.lstm_algo,
+                )?);
+            }
+            let library = self.lstm.as_ref().expect("Library LSTM initialized").plan(
+                runtime,
+                shape.batch,
+                shape.frames,
+            )?;
+            Ok(LstmStage::Library(library))
+        }
+        #[cfg(not(feature = "_cuda-libraries"))]
+        {
+            let _ = _selected;
+            Err(CudaError::LibraryUnavailable {
+                library: CudaLibrary::Cudnn,
+            })
+        }
     }
-}
-
-fn declared(
-    choice: Choice,
-    coverage: Coverage,
-    layer: &str,
-    batch: usize,
-    network: &Network,
-) -> bool {
-    choice.is_candidate() && coverage.covers(layer, batch, network.options.math)
 }

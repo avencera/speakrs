@@ -24,10 +24,16 @@ use self::layout::{
     GATE_COLUMNS, GROUPS, HIDDEN, KERNEL, STATE_TILE, Schedule, pack_bias, pack_directions,
 };
 use super::{
-    Batches, Coverage, CoverageEntry, Direction, LstmCandidate, LstmPhases, LstmSpec, Maths, Op,
-    PlanError, ProjectionGemm, Scratch, SideStream,
+    Batches, Coverage, CoverageEntry, DeviceAttributes, Direction, FiniteContract, GeometryError,
+    InfinityContract, LstmCandidate, LstmPhases, LstmPin, LstmSpec, Maths, NanContract, Op,
+    PlanError, ProjectionGemm, Scratch, SideStream, SignedZeroContract, SpecialValues,
 };
-use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, KernelModule};
+use crate::inference::cuda::{CudaError, CudaMath, CudaRuntime, LoadedKernels, PtxTier};
+
+const SPK_LSTM_CLEAR: &str = "spk_lstm_clear";
+
+/// Kernel entries loaded by this host plan
+pub(crate) const REQUIRED_KERNELS: [&str; 2] = [KERNEL, SPK_LSTM_CLEAR];
 
 /// Threads per block, `THREADS` in the kernel crate's `lstm` area
 const THREADS: u32 = 128;
@@ -79,10 +85,41 @@ impl LstmCandidate for Oxide {
         maths: Maths::Only(&[CudaMath::Fp32]),
     }]);
 
-    fn plan(runtime: &CudaRuntime, spec: LstmSpec<'_>) -> Result<Self, PlanError> {
-        let kernels = runtime.load_kernels(KernelModule::Lstm)?;
+    // the gates saturate, but `exp_f32` clamps its argument before the exponent, so how
+    // NaN and infinite pre-activations surface has not been established
+    const SPECIAL_VALUES: SpecialValues = SpecialValues {
+        finite: FiniteContract::BoundedActivation { headroom: 2 },
+        nan: NanContract::Unspecified,
+        infinity: InfinityContract::Unspecified,
+        signed_zero: SignedZeroContract::Unspecified,
+    };
+
+    fn implemented_pin(_spec: &LstmSpec<'_>) -> Result<LstmPin, PlanError> {
+        Ok(LstmPin::LegacyCooperative)
+    }
+
+    fn device_pin(
+        _device: &DeviceAttributes,
+        _tier: PtxTier,
+        _spec: &LstmSpec<'_>,
+    ) -> Result<LstmPin, PlanError> {
+        Ok(LstmPin::LegacyCooperative)
+    }
+
+    fn plan(
+        runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
+        spec: LstmSpec<'_>,
+        pin: LstmPin,
+    ) -> Result<Self, PlanError> {
+        let LstmPin::LegacyCooperative = pin else {
+            return Err(PlanError::Geometry(GeometryError::Invalid {
+                context: "oxide LSTM plan",
+                reason: format!("pin {pin:?} belongs to the lstmproj area"),
+            }));
+        };
         let recurrence = kernels.function(KERNEL)?;
-        let clear = kernels.function("spk_lstm_clear")?;
+        let clear = kernels.function(SPK_LSTM_CLEAR)?;
         let capacity = runtime.cooperative_capacity(&recurrence, THREADS, 0)?;
         let concurrent_capacity =
             runtime.concurrent_cooperative_capacity(&recurrence, THREADS, 0)?;

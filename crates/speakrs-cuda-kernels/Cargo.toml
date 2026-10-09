@@ -23,7 +23,13 @@ segmentation = []
 # candidate areas, one per qualified boundary
 resnet = []
 lstm = []
+# the LSTM stack with its own input projections, so it needs no library
+lstmproj = []
 sincnet = []
+segdense = []
+fbankdft = []
+# record-owned wide convolution operators
+wideconv = []
 
 # PTX tiers above the sm_75 baseline. The xtask builds each variant an area declares
 # with the matching feature on, and the sm75 baseline with none. They are cumulative,

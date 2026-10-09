@@ -232,8 +232,8 @@ Enable at least one inference backend; the build fails with a clear error otherw
 
 - `coreml`: native CoreML backend on macOS, without ONNX Runtime
 - `cpu`: CPU backend via ONNX Runtime
-- `cuda`: native NVIDIA backend (cuBLAS, cuDNN and speakrs kernels), without ONNX
-  Runtime
+- `cuda`: Linux-only native NVIDIA backend with all target kernels plus cuDNN and cuBLAS,
+  without ONNX Runtime. Libraries load only when a selected plan needs them
 - `migraphx`: AMD GPU backend via ONNX Runtime MIGraphX
 
 Other features:
@@ -241,18 +241,33 @@ Other features:
 - `online` (default): model download via [`ModelManager`](https://docs.rs/speakrs/latest/speakrs/models/struct.ModelManager.html)
 - `load-dynamic`: load the ONNX Runtime library at startup instead of static linking; use it
   with `cpu` or `migraphx`
-- `cuda-sm80`, `cuda-sm90`, `cuda-sm120`: also embed native CUDA kernels built for newer
-  NVIDIA GPUs (Ampere, Hopper, consumer Blackwell); each implies `cuda`. Without them the
-  native kernels target Turing (`sm_75`), and the driver compiles them for newer GPUs when
-  they load. At run time speakrs uses the highest compiled-in tier the GPU supports, and
-  `SPEAKRS_CUDA_PTX_TIER=sm75` forces a lower one
+- `cuda-sm75`, `cuda-sm80`, `cuda-sm90`, `cuda-sm120`: driver-only targets for
+  Turing, Ampere/Ada, Hopper, and consumer Blackwell. Each embeds every area's best
+  shipped kernel variant. These features do not include cuDNN or cuBLAS
+- `cuda-rtx20`: RTX 20 (Turing); `cuda-rtx30`: RTX 30 (Ampere);
+  `cuda-rtx40`: RTX 40 (Ada); `cuda-a100`: A100 (Ampere);
+  `cuda-rtx50`: RTX 50 (consumer Blackwell)
 
-The `cuda` feature compiles without a CUDA toolkit: it loads the NVIDIA driver, cuBLAS,
-cuDNN 9 and (only for the `PersistDynamic` LSTM algorithm) NVRTC at run time, and needs
-a Turing (compute capability 7.5) or newer GPU. CUDA modes load
-`segmentation-3.0.safetensors` and `wespeaker-multimask-tail.safetensors` instead of
-ONNX models. [`RuntimeConfig`](https://docs.rs/speakrs/latest/speakrs/pipeline/config/struct.RuntimeConfig.html) selects their precision (FP32 by default for segmentation,
-TF32 for embedding, always FP32 for the filterbank), the segmentation LSTM algorithm, and CUDA graphs.
+CUDA is not in `default`, because the backend runs only on Linux. For a driver-only
+build, use `speakrs = { default-features = false, features = ["cuda-rtx50"] }`.
+Features are additive: adding `cuda` also adds cuDNN and cuBLAS. A target-only model
+load returns a typed error with the boundary, batch and math if a kernel is missing.
+
+The CUDA backend builds without a CUDA toolkit. It needs an NVIDIA driver and a
+Turing (compute capability 7.5) or newer GPU. The `cuda` feature also needs cuDNN 9
+and cuBLAS when a selected plan uses them, and NVRTC for `PersistDynamic` LSTM.
+CUDA modes use `segmentation-3.0.safetensors` and
+`wespeaker-multimask-tail.safetensors`. `RuntimeConfig` selects precision and graphs.
+`SPEAKRS_CUDA_PTX_TIER=sm75` limits the kernel tier. Hybrid selection uses measured
+speed for device-sensitive kernels and explicit all-device evidence for broad winners.
+The FP32 fbank FFT/mel producer is a broad winner on cc 8.0 and newer; segdense is a broad
+winner on cc 8.0 and newer with the sm80 tier. These fused kernels won by at least
+1.05x in every measured case on at least two architectures. Full `cuda` embeds all
+target kernels alongside cuDNN and cuBLAS. LSTM and the ResNet trunk use kernels only
+where their speed was measured faster; other devices use Library. TF32 fbank uses
+the kernel only on cc 8.9, where it was measured faster.
+`SPEAKRS_CUDA_FORCE_LIBRARY=1` makes a `cuda` build use Library at each replaceable
+boundary. The choice is logged when the model loads.
 
 The ONNX Runtime dependency behind `cpu` and `migraphx` (`ort` 2.0.0-rc.13) is still
 pre-release.
@@ -280,3 +295,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, model downloads, fixture
 - [pyannote-audio](https://github.com/pyannote/pyannote-audio) - Python reference implementation
 - [pyannote community-1](https://huggingface.co/pyannote/speaker-diarization-community-1) - VBx + PLDA pipeline
 - [SpeakerKit](https://github.com/argmaxinc/WhisperKit) - Swift reference (same VBx architecture)
+
+On a Linux GPU host, run `scripts/cuda/prove-driver-only.sh MODELS_DIR SHORT_WAV
+cuda-rtx50` to check the binary links and library opens during model load and a
+short diarization. Exit 0 means the full run passed. Exit 3 means a kernel is
+missing, with no cuDNN or cuBLAS link or open.
