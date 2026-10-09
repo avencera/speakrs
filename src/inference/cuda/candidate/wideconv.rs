@@ -32,6 +32,66 @@ use crate::inference::cuda::{
     ComputeCapability, CudaError, CudaMath, CudaRuntime, LoadedKernels, PtxTier,
 };
 
+// keep launch names and the shipped-entry inventory in the same definition
+macro_rules! kernel_entries {
+    ($($name:ident => $entry:literal),+ $(,)?) => {
+        pub(super) mod entries {
+            $(pub(super) const $name: &str = $entry;)+
+            #[cfg(test)]
+            pub(crate) const ALL: &[&str] = &[$($name),+];
+        }
+    };
+}
+
+kernel_entries! {
+    C128 => "spk_wideconv_c128",
+    C128S2 => "spk_wideconv_c128s2",
+    C256 => "spk_wideconv_c256",
+    C64S2 => "spk_wideconv_c64s2",
+    GEMM => "spk_wideconv_gemm",
+    PACK_TC => "spk_wideconv_pack_tc",
+    PACK_TC3 => "spk_wideconv_pack_tc3",
+    PACK_WBF => "spk_wideconv_pack_wbf",
+    PACK_WEIGHTS => "spk_wideconv_pack_weights",
+    PACK_WINOGRAD => "spk_wideconv_pack_winograd",
+    PACK_WTC => "spk_wideconv_pack_wtc",
+    REDUCE => "spk_wideconv_reduce",
+    SHORTCUT_C128 => "spk_wideconv_shortcut_c128",
+    SHORTCUT_C128_WIDE => "spk_wideconv_shortcut_c128_wide",
+    SHORTCUT_C32 => "spk_wideconv_shortcut_c32",
+    SHORTCUT_C64 => "spk_wideconv_shortcut_c64",
+    SHORTCUT_C64_WIDE => "spk_wideconv_shortcut_c64_wide",
+    STEM => "spk_wideconv_stem",
+    STEM_WIDE => "spk_wideconv_stem_wide",
+    TC3_C128S2 => "spk_wideconv_tc3_c128s2",
+    TC3_C128S2_WIDE => "spk_wideconv_tc3_c128s2_wide",
+    TC3_C64S2 => "spk_wideconv_tc3_c64s2",
+    TC3_C64S2_WIDE => "spk_wideconv_tc3_c64s2_wide",
+    TC_C128 => "spk_wideconv_tc_c128",
+    TC_C128S2 => "spk_wideconv_tc_c128s2",
+    TC_C128S2_NARROW => "spk_wideconv_tc_c128s2_narrow",
+    TC_C128S2_SLIM => "spk_wideconv_tc_c128s2_slim",
+    TC_C256 => "spk_wideconv_tc_c256",
+    TC_C64S2 => "spk_wideconv_tc_c64s2",
+    TC_C64S2_NARROW => "spk_wideconv_tc_c64s2_narrow",
+    TC_C64S2_SLIM => "spk_wideconv_tc_c64s2_slim",
+    WBF_C128 => "spk_wideconv_wbf_c128",
+    WBF_C256 => "spk_wideconv_wbf_c256",
+    WINO_C128 => "spk_wideconv_wino_c128",
+    WINO_C128_SWEEP2 => "spk_wideconv_wino_c128_sweep2",
+    WINO_C256 => "spk_wideconv_wino_c256",
+    WINO_C64 => "spk_wideconv_wino_c64",
+    WINO_FIXUP => "spk_wideconv_wino_fixup",
+    WTC1_C128 => "spk_wideconv_wtc1_c128",
+    WTC1_C256 => "spk_wideconv_wtc1_c256",
+    WTC2_C128 => "spk_wideconv_wtc2_c128",
+    WTC2_C256 => "spk_wideconv_wtc2_c256",
+    WTC3_C128 => "spk_wideconv_wtc3_c128",
+    WTC3_C256 => "spk_wideconv_wtc3_c256",
+    WTP1_C128 => "spk_wideconv_wtp1_c128",
+    WTP1_C256 => "spk_wideconv_wtp1_c256",
+}
+
 /// The 22 trunk convolutions with a wideconv kernel, in trunk order
 const LAYERS: [&str; 22] = [
     "resnet.conv1",
@@ -666,12 +726,12 @@ impl Shape {
     /// Spatial-tile entry; the 64-channel shape has only its Winograd kernel
     fn entry(self, in_channels: u32, batch: u32) -> Option<&'static str> {
         Some(match self {
-            Self::Stem => "spk_wideconv_stem",
+            Self::Stem => entries::STEM,
             Self::C64 => return None,
-            Self::C128 => "spk_wideconv_c128",
-            Self::C256 => "spk_wideconv_c256",
-            Self::C64Stride2 => "spk_wideconv_c64s2",
-            Self::C128Stride2 => "spk_wideconv_c128s2",
+            Self::C128 => entries::C128,
+            Self::C256 => entries::C256,
+            Self::C64Stride2 => entries::C64S2,
+            Self::C128Stride2 => entries::C128S2,
             Self::Shortcut => shortcut_tile(in_channels, batch).0,
         })
     }
@@ -691,19 +751,19 @@ impl Shape {
     /// Tensor-core entry for the 3x3 wide shapes
     fn tensor_entry(self, kernel: TensorKernel, batch: u32) -> Option<&'static str> {
         match (kernel, self) {
-            (TensorKernel::Tf32x3, Self::C64Stride2) => return Some("spk_wideconv_tc3_c64s2"),
-            (TensorKernel::Tf32x3, Self::C128Stride2) => return Some("spk_wideconv_tc3_c128s2"),
+            (TensorKernel::Tf32x3, Self::C64Stride2) => return Some(entries::TC3_C64S2),
+            (TensorKernel::Tf32x3, Self::C128Stride2) => return Some(entries::TC3_C128S2),
             (TensorKernel::Tf32x3Wide, Self::C64Stride2) => {
-                return Some("spk_wideconv_tc3_c64s2_wide");
+                return Some(entries::TC3_C64S2_WIDE);
             }
             (TensorKernel::Tf32x3Wide, Self::C128Stride2) => {
-                return Some("spk_wideconv_tc3_c128s2_wide");
+                return Some(entries::TC3_C128S2_WIDE);
             }
             (TensorKernel::Tf32Slim, Self::C64Stride2) => {
-                return Some("spk_wideconv_tc_c64s2_slim");
+                return Some(entries::TC_C64S2_SLIM);
             }
             (TensorKernel::Tf32Slim, Self::C128Stride2) => {
-                return Some("spk_wideconv_tc_c128s2_slim");
+                return Some(entries::TC_C128S2_SLIM);
             }
             (TensorKernel::Tf32x3 | TensorKernel::Tf32x3Wide | TensorKernel::Tf32Slim, _) => {
                 return None;
@@ -711,12 +771,12 @@ impl Shape {
             (TensorKernel::Tf32, _) => {}
         }
         match self {
-            Self::C128 => Some("spk_wideconv_tc_c128"),
-            Self::C256 => Some("spk_wideconv_tc_c256"),
-            Self::C64Stride2 if batch < TC_WIDE_BATCH => Some("spk_wideconv_tc_c64s2_narrow"),
-            Self::C64Stride2 => Some("spk_wideconv_tc_c64s2"),
-            Self::C128Stride2 if batch < TC_WIDE_BATCH => Some("spk_wideconv_tc_c128s2_narrow"),
-            Self::C128Stride2 => Some("spk_wideconv_tc_c128s2"),
+            Self::C128 => Some(entries::TC_C128),
+            Self::C256 => Some(entries::TC_C256),
+            Self::C64Stride2 if batch < TC_WIDE_BATCH => Some(entries::TC_C64S2_NARROW),
+            Self::C64Stride2 => Some(entries::TC_C64S2),
+            Self::C128Stride2 if batch < TC_WIDE_BATCH => Some(entries::TC_C128S2_NARROW),
+            Self::C128Stride2 => Some(entries::TC_C128S2),
             Self::Stem | Self::C64 | Self::Shortcut => None,
         }
     }
@@ -726,20 +786,20 @@ impl Shape {
         use WinogradProducts::{Bf16x3, Fp32, Fp32Sweep2, Tf32x1, Tf32x1Staged, Tf32x2, Tf32x3};
 
         match (self, products) {
-            (Self::C128, Bf16x3) => Some("spk_wideconv_wbf_c128"),
-            (Self::C256, Bf16x3) => Some("spk_wideconv_wbf_c256"),
-            (Self::C64, Fp32) => Some("spk_wideconv_wino_c64"),
-            (Self::C128, Fp32) => Some("spk_wideconv_wino_c128"),
-            (Self::C256, Fp32) => Some("spk_wideconv_wino_c256"),
-            (Self::C128, Fp32Sweep2) => Some("spk_wideconv_wino_c128_sweep2"),
-            (Self::C128, Tf32x3) => Some("spk_wideconv_wtc3_c128"),
-            (Self::C256, Tf32x3) => Some("spk_wideconv_wtc3_c256"),
-            (Self::C128, Tf32x2) => Some("spk_wideconv_wtc2_c128"),
-            (Self::C256, Tf32x2) => Some("spk_wideconv_wtc2_c256"),
-            (Self::C128, Tf32x1) => Some("spk_wideconv_wtc1_c128"),
-            (Self::C256, Tf32x1) => Some("spk_wideconv_wtc1_c256"),
-            (Self::C128, Tf32x1Staged) => Some("spk_wideconv_wtp1_c128"),
-            (Self::C256, Tf32x1Staged) => Some("spk_wideconv_wtp1_c256"),
+            (Self::C128, Bf16x3) => Some(entries::WBF_C128),
+            (Self::C256, Bf16x3) => Some(entries::WBF_C256),
+            (Self::C64, Fp32) => Some(entries::WINO_C64),
+            (Self::C128, Fp32) => Some(entries::WINO_C128),
+            (Self::C256, Fp32) => Some(entries::WINO_C256),
+            (Self::C128, Fp32Sweep2) => Some(entries::WINO_C128_SWEEP2),
+            (Self::C128, Tf32x3) => Some(entries::WTC3_C128),
+            (Self::C256, Tf32x3) => Some(entries::WTC3_C256),
+            (Self::C128, Tf32x2) => Some(entries::WTC2_C128),
+            (Self::C256, Tf32x2) => Some(entries::WTC2_C256),
+            (Self::C128, Tf32x1) => Some(entries::WTC1_C128),
+            (Self::C256, Tf32x1) => Some(entries::WTC1_C256),
+            (Self::C128, Tf32x1Staged) => Some(entries::WTP1_C128),
+            (Self::C256, Tf32x1Staged) => Some(entries::WTP1_C256),
             _ => None,
         }
     }
@@ -1012,12 +1072,12 @@ impl Oxide {
         let layout = Layout::new(conv, partition, split_cells, algorithm)?;
         let shape = layout.shape;
         let entry = match algorithm {
-            Algorithm::ImplicitGemm => "spk_wideconv_gemm",
+            Algorithm::ImplicitGemm => entries::GEMM,
             // checked by `Layout::new`, as are the tensor-core and Winograd entries
             Algorithm::Spatial => shape
                 .entry(conv.in_channels as u32, conv.batch as u32)
                 .unwrap_or_default(),
-            Algorithm::WideStem => "spk_wideconv_stem_wide",
+            Algorithm::WideStem => entries::STEM_WIDE,
             Algorithm::TensorCore(products) => shape
                 .tensor_entry(products, conv.batch as u32)
                 .unwrap_or_default(),
@@ -1038,20 +1098,18 @@ impl Oxide {
             return Err(unsupported("tensor-core Winograd needs the sm80 PTX tier"));
         }
         let pack = kernels.function(match algorithm {
-            Algorithm::TensorCore(TensorKernel::Tf32 | TensorKernel::Tf32Slim) => {
-                "spk_wideconv_pack_tc"
-            }
+            Algorithm::TensorCore(TensorKernel::Tf32 | TensorKernel::Tf32Slim) => entries::PACK_TC,
             Algorithm::TensorCore(TensorKernel::Tf32x3 | TensorKernel::Tf32x3Wide) => {
-                "spk_wideconv_pack_tc3"
+                entries::PACK_TC3
             }
             Algorithm::Winograd(WinogradProducts::Fp32 | WinogradProducts::Fp32Sweep2) => {
-                "spk_wideconv_pack_winograd"
+                entries::PACK_WINOGRAD
             }
-            Algorithm::Winograd(WinogradProducts::Bf16x3) => "spk_wideconv_pack_wbf",
-            Algorithm::Winograd(_) => "spk_wideconv_pack_wtc",
+            Algorithm::Winograd(WinogradProducts::Bf16x3) => entries::PACK_WBF,
+            Algorithm::Winograd(_) => entries::PACK_WTC,
             // the stem's weights are copied, not packed
             Algorithm::Spatial | Algorithm::WideStem | Algorithm::ImplicitGemm => {
-                "spk_wideconv_pack_weights"
+                entries::PACK_WEIGHTS
             }
         })?;
         // Winograd weights hold a 4x4 transform per 3x3 filter, tensor-core ones a high
@@ -1136,8 +1194,8 @@ impl Oxide {
             partition,
             epilogue,
             function,
-            reduce: kernels.function("spk_wideconv_reduce")?,
-            fixup: kernels.function("spk_wideconv_wino_fixup")?,
+            reduce: kernels.function(entries::REDUCE)?,
+            fixup: kernels.function(entries::WINO_FIXUP)?,
             packed,
             // CUDA cannot allocate zero bytes
             workspace: Scratch::zeros(runtime, layout.workspace_len.max(1))?,
@@ -1657,11 +1715,11 @@ fn refusal(error: CudaError) -> PlanError {
 /// Shortcut-tile entry and its output channels per CTA
 fn shortcut_tile(in_channels: u32, batch: u32) -> (&'static str, u32) {
     match (in_channels, batch >= SHORTCUT_WIDE_BATCH) {
-        (32, _) => ("spk_wideconv_shortcut_c32", 64),
-        (64, false) => ("spk_wideconv_shortcut_c64", 64),
-        (64, true) => ("spk_wideconv_shortcut_c64_wide", 128),
-        (128, false) => ("spk_wideconv_shortcut_c128", 64),
-        _ => ("spk_wideconv_shortcut_c128_wide", 128),
+        (32, _) => (entries::SHORTCUT_C32, 64),
+        (64, false) => (entries::SHORTCUT_C64, 64),
+        (64, true) => (entries::SHORTCUT_C64_WIDE, 128),
+        (128, false) => (entries::SHORTCUT_C128, 64),
+        _ => (entries::SHORTCUT_C128_WIDE, 128),
     }
 }
 
