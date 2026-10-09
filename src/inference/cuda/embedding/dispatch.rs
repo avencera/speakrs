@@ -69,22 +69,14 @@ impl Plan {
 }
 
 impl Convs<'_> {
-    /// Whether both of a block's convolutions run plans with [`HalfIo`] launches, so
-    /// the hidden activation between them can be half
-    pub(super) fn half_pair(
-        &self,
-        conv1: &ConvLayer,
-        conv2: &ConvLayer,
-    ) -> Result<bool, CudaError> {
-        let half = |layer| {
-            self.plan(layer)
-                .map(|plan| matches!(plan, Plan::Wideconv(plan) if plan.has_half_io()))
-        };
-        Ok(half(conv1)? && half(conv2)?)
+    /// Whether a layer runs a plan with [`HalfIo`] launches
+    pub(super) fn has_half_io(&self, layer: &ConvLayer) -> Result<bool, CudaError> {
+        self.plan(layer)
+            .map(|plan| matches!(plan, Plan::Wideconv(plan) if plan.has_half_io()))
     }
 
-    /// Run only the owner built for this layer and batch class, with the input or
-    /// output in the half form of `io`, which only [`Self::half_pair`] plans accept
+    /// Run only the owner built for this layer and batch class, with the operands `io`
+    /// names as half tensors, which only [`Self::has_half_io`] plans accept
     pub(super) fn conv_bias_relu(
         &mut self,
         layer: &ConvLayer,
@@ -108,7 +100,7 @@ impl Convs<'_> {
         io: HalfIo,
     ) -> Result<(), CudaError> {
         let plan = self.plan(layer)?;
-        if io != HalfIo::Fp32 && !matches!(plan, Plan::Wideconv(_)) {
+        if io != HalfIo::FP32 && !matches!(plan, Plan::Wideconv(_)) {
             return Err(CudaError::Unsupported {
                 context: "embedding half activation",
                 reason: format!("{} has no half input or output", layer.name()),
@@ -162,7 +154,7 @@ impl Convs<'_> {
                     #[cfg(feature = "_cuda-libraries")]
                     scratch: x,
                 };
-                self.wideconv(plan, layer, x, none, y, HalfIo::Fp32)
+                self.wideconv(plan, layer, x, none, y, HalfIo::FP32)
             }
             _ => {
                 self.conv(layer, x, y)?;

@@ -100,6 +100,12 @@ kernel_entries! {
     H16_C32_HALF_IN => "spk_wideconv_h16_c32_half_in",
     H16_C64_HALF_OUT => "spk_wideconv_h16_c64_half_out",
     H16_C64_HALF_IN => "spk_wideconv_h16_c64_half_in",
+    H16_C32_HALF_IN_OUT => "spk_wideconv_h16_c32_half_in_out",
+    H16_C32_HALF_ALL => "spk_wideconv_h16_c32_half_all",
+    H16_C32_HALF_IN_RES => "spk_wideconv_h16_c32_half_in_res",
+    H16_C64_HALF_IN_OUT => "spk_wideconv_h16_c64_half_in_out",
+    H16_C64_HALF_ALL => "spk_wideconv_h16_c64_half_all",
+    H16_C64_HALF_IN_RES => "spk_wideconv_h16_c64_half_in_res",
     H16_C32S2 => "spk_wideconv_h16_c32s2",
     H16_C64S2 => "spk_wideconv_h16_c64s2",
     H16_C64S2_NARROW => "spk_wideconv_h16_c64s2_narrow",
@@ -235,23 +241,32 @@ pub(crate) enum Fp16Tiles {
     Narrow,
 }
 
-/// The form of the activation a wide FP16 32- or 64-channel launch passes to the
-/// next convolution
+/// The operands of a wide FP16 32- or 64-channel launch that are half tensors
 ///
-/// A residual block's hidden activation is only read by the block's second
-/// convolution, whose staging converts it to FP16 scaled by 2^10. `HalfOut` makes the
-/// first convolution store it already converted, as `[batch, channels / 8, h, w, 8]`
-/// halves, and flag saturation as the second's staging would; `HalfIn` makes the
-/// second read that form. The pair computes exactly what the FP32 pair does while
-/// moving half the hidden bytes
+/// A half tensor is what the convolutions' staging makes of an activation: FP16
+/// scaled by 2^10, saturated and range-checked, as `[batch, channels / 8, h, w, 8]`
+/// halves. A residual block's hidden activation is only read by the block's second
+/// convolution, so a first convolution that stores it this way and flags saturation as
+/// the staging would gives exactly the FP32 result while moving half the bytes. A block
+/// output passed this way to the next block of its layer is also what that block adds
+/// back as its residual, rounded to FP16, which changes the result
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HalfIo {
-    /// FP32 input and output
-    Fp32,
-    /// FP32 input, half output
-    HalfOut,
-    /// Half input, FP32 output
-    HalfIn,
+pub(crate) struct HalfIo {
+    /// `x` is a half tensor
+    pub(crate) input: bool,
+    /// The residual operand is a half tensor
+    pub(crate) residual: bool,
+    /// `y` is a half tensor
+    pub(crate) output: bool,
+}
+
+impl HalfIo {
+    /// Every operand FP32
+    pub(crate) const FP32: Self = Self {
+        input: false,
+        residual: false,
+        output: false,
+    };
 }
 
 /// Largest operand magnitude the FP16 tiles convert without saturating: the largest
@@ -1129,15 +1144,24 @@ impl Shape {
         matches!(self, Self::C32 | Self::C64 | Self::C128 | Self::C256)
     }
 
-    /// The `HalfOut` and `HalfIn` entries of the shapes whose wide FP16 tiles have them
-    fn fp16_half_entries(self, tiles: Fp16Tiles) -> Option<[&'static str; 2]> {
+    /// The [`HalfIo`] entries of the shapes whose wide FP16 tiles have them, in
+    /// [`HalfLaunches`] order
+    fn fp16_half_entries(self, tiles: Fp16Tiles) -> Option<[&'static str; 5]> {
         match (self, tiles) {
-            (Self::C32, Fp16Tiles::Wide) => {
-                Some([entries::H16_C32_HALF_OUT, entries::H16_C32_HALF_IN])
-            }
-            (Self::C64, Fp16Tiles::Wide) => {
-                Some([entries::H16_C64_HALF_OUT, entries::H16_C64_HALF_IN])
-            }
+            (Self::C32, Fp16Tiles::Wide) => Some([
+                entries::H16_C32_HALF_OUT,
+                entries::H16_C32_HALF_IN,
+                entries::H16_C32_HALF_IN_OUT,
+                entries::H16_C32_HALF_ALL,
+                entries::H16_C32_HALF_IN_RES,
+            ]),
+            (Self::C64, Fp16Tiles::Wide) => Some([
+                entries::H16_C64_HALF_OUT,
+                entries::H16_C64_HALF_IN,
+                entries::H16_C64_HALF_IN_OUT,
+                entries::H16_C64_HALF_ALL,
+                entries::H16_C64_HALF_IN_RES,
+            ]),
             _ => None,
         }
     }
@@ -1471,8 +1495,8 @@ pub(crate) struct Oxide {
     partition: Partition,
     epilogue: Epilogue,
     function: CudaFunction,
-    /// The `HalfOut` and `HalfIn` variants of `function`, for the shapes that have them
-    half: Option<Box<[CudaFunction; 2]>>,
+    /// The [`HalfIo`] variants of `function`, for the shapes that have them
+    half: Option<Box<HalfLaunches>>,
     reduce: CudaFunction,
     fixup: CudaFunction,
     packed: CudaSlice<f32>,
@@ -1480,6 +1504,35 @@ pub(crate) struct Oxide {
     workspace: Scratch<f32>,
     layout: Layout,
     tier: PtxTier,
+}
+
+/// The [`HalfIo`] launches of a plan, by which operands are half tensors
+#[derive(Debug)]
+struct HalfLaunches {
+    /// `y` only
+    output: CudaFunction,
+    /// `x` only
+    input: CudaFunction,
+    /// `x` and `y`, with an FP32 residual if any
+    input_output: CudaFunction,
+    /// `x`, the residual and `y`
+    all: CudaFunction,
+    /// `x` and the residual
+    input_residual: CudaFunction,
+}
+
+impl HalfLaunches {
+    fn select(&self, io: HalfIo) -> Result<&CudaFunction, CudaError> {
+        match (io.input, io.residual, io.output) {
+            (false, false, true) => Ok(&self.output),
+            (true, false, false) => Ok(&self.input),
+            (true, false, true) => Ok(&self.input_output),
+            (true, true, true) => Ok(&self.all),
+            (true, true, false) => Ok(&self.input_residual),
+            // a half residual is the previous block's output, which is also the input
+            _ => Err(unsupported("a half residual needs a half input")),
+        }
+    }
 }
 
 impl Oxide {
@@ -1624,7 +1677,15 @@ impl Oxide {
         let half = match algorithm {
             Algorithm::Fp16(tiles) => shape
                 .fp16_half_entries(tiles)
-                .map(|[out, input]| Ok::<_, CudaError>(Box::new([load(out)?, load(input)?])))
+                .map(|[output, input, input_output, all, input_residual]| {
+                    Ok::<_, CudaError>(Box::new(HalfLaunches {
+                        output: load(output)?,
+                        input: load(input)?,
+                        input_output: load(input_output)?,
+                        all: load(all)?,
+                        input_residual: load(input_residual)?,
+                    }))
+                })
                 .transpose()?,
             _ => None,
         };
@@ -1696,20 +1757,17 @@ impl Oxide {
         stream: &CudaStream,
     ) -> Result<(), CudaError> {
         let function = match (io, self.half.as_deref()) {
-            (HalfIo::Fp32, _) => &self.function,
-            (HalfIo::HalfOut, Some([out, _])) => out,
-            (HalfIo::HalfIn, Some([_, input])) => input,
-            (_, None) => return Err(unsupported("no half input or output for this plan")),
+            (HalfIo::FP32, _) => &self.function,
+            (_, Some(half)) => half.select(io)?,
+            (_, None) => return Err(unsupported("no half operands for this plan")),
         };
+        if io.residual && inputs.residual.is_none() {
+            return Err(unsupported("a half residual needs a residual operand"));
+        }
         // a half tensor holds two values per word
-        let input_len = match io {
-            HalfIo::HalfIn => self.layout.input_len / 2,
-            _ => self.layout.input_len,
-        };
-        let output_len = match io {
-            HalfIo::HalfOut => self.layout.output_len / 2,
-            _ => self.layout.output_len,
-        };
+        let half_len = |half: bool, len: usize| if half { len / 2 } else { len };
+        let input_len = half_len(io.input, self.layout.input_len);
+        let output_len = half_len(io.output, self.layout.output_len);
         check_len("wideconv input", input_len, inputs.x.len())?;
         check_len("wideconv bias", self.conv.out_channels, inputs.bias.len())?;
         check_len("wideconv output", output_len, output.len())?;
@@ -1722,7 +1780,11 @@ impl Oxide {
             return Err(unsupported("stem and shortcuts have no residual operand"));
         }
         if let Some(residual) = inputs.residual {
-            check_len("wideconv residual", self.layout.output_len, residual.len())?;
+            check_len(
+                "wideconv residual",
+                half_len(io.residual, self.layout.output_len),
+                residual.len(),
+            )?;
         }
 
         // the inactive residual descriptor aliases read-only input, not uninitialized scratch
@@ -1824,7 +1886,7 @@ impl Oxide {
                 }
                 _ => None,
             };
-            if io == HalfIo::HalfIn {
+            if io.input {
                 // a half input stages each pixel's eight channels with one 16-byte load
                 let (x_ptr, _x) = inputs.x.device_ptr(stream);
                 if !x_ptr.is_multiple_of(16) {
@@ -2110,7 +2172,7 @@ impl ConvCandidate for Oxide {
         phases: &Phases,
         stream: &CudaStream,
     ) -> Result<(), CudaError> {
-        self.enqueue_with(inputs, y, None, HalfIo::Fp32, phases, stream)
+        self.enqueue_with(inputs, y, None, HalfIo::FP32, phases, stream)
     }
 }
 
@@ -2132,7 +2194,7 @@ impl Oxide {
         phases: &Phases,
         stream: &CudaStream,
     ) -> Result<(), CudaError> {
-        self.enqueue_half(inputs, y, range, HalfIo::Fp32, phases, stream)
+        self.enqueue_half(inputs, y, range, HalfIo::FP32, phases, stream)
     }
 
     /// Whether this plan has the [`HalfIo`] launches, which wide FP16 tiles of the 32-
@@ -2141,8 +2203,8 @@ impl Oxide {
         self.half.is_some()
     }
 
-    /// Enqueues the layer as [`Self::enqueue_checked`] does, with the input or output in
-    /// the half form of `io`, which holds half the FP32 tensor's words; plans without
+    /// Enqueues the layer as [`Self::enqueue_checked`] does, with the operands `io`
+    /// names as half tensors, which hold half the FP32 tensor's words; plans without
     /// [`Self::has_half_io`] refuse every form but FP32
     pub(crate) fn enqueue_half(
         &self,

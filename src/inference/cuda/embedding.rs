@@ -398,13 +398,15 @@ enum PlanSet {
     Fallback,
 }
 
-/// The form a residual block's hidden activation takes between its convolutions
+/// The form of the trunk activations between residual blocks' convolutions
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HiddenForm {
-    /// FP32 everywhere, which [`EmbeddingTap::Hidden`] reports
+enum ActivationForm {
+    /// FP32 everywhere, which the [`EmbeddingTap`]s report
     #[cfg(all(test, feature = "_cuda-libraries"))]
     Fp32,
-    /// Half where both of the block's plans have [`HalfIo`] launches, FP32 elsewhere
+    /// Half where the plans on both sides have [`HalfIo`] launches: a block's hidden
+    /// activation when both its convolutions do, and its output when its second
+    /// convolution and both of the next block's do, unless that block has a shortcut
     Half,
 }
 
@@ -545,7 +547,7 @@ impl EmbeddingBatch {
         self.run_with_activations(
             runtime,
             PlanSet::Selected,
-            HiddenForm::Half,
+            ActivationForm::Half,
             &mut |_, _| Ok(()),
             storage.buffers_mut(),
         )
@@ -576,7 +578,7 @@ impl EmbeddingBatch {
             self.run_with_activations(
                 runtime,
                 PlanSet::Selected,
-                HiddenForm::Half,
+                ActivationForm::Half,
                 &mut |_, _| Ok(()),
                 storage.buffers_mut(),
             )?;
@@ -601,7 +603,7 @@ impl EmbeddingBatch {
                 let run = self.run_with_activations(
                     runtime,
                     PlanSet::Selected,
-                    HiddenForm::Half,
+                    ActivationForm::Half,
                     &mut |_, _| Ok(()),
                     storage.buffers_mut(),
                 );
@@ -630,7 +632,7 @@ impl EmbeddingBatch {
         &mut self,
         runtime: &CudaRuntime,
         set: PlanSet,
-        hidden_form: HiddenForm,
+        form: ActivationForm,
         tap: &mut EmbeddingTapFn<'_>,
         activations: &mut EmbeddingActivations,
     ) -> Result<(), CudaError> {
@@ -712,28 +714,46 @@ impl EmbeddingBatch {
                 scratch: &scratch,
             },
             &mut stem_out,
-            HalfIo::Fp32,
+            HalfIo::FP32,
         )?;
         tap(EmbeddingTap::Stem, &stem_out.as_view())?;
 
-        for (index, block) in model.trunk.blocks.iter().enumerate() {
+        let blocks = &model.trunk.blocks;
+        // whether each block's hidden activation is half
+        let mut hidden_half = Vec::with_capacity(blocks.len());
+        for block in blocks {
+            hidden_half.push(
+                form == ActivationForm::Half
+                    && convs.has_half_io(&block.conv1)?
+                    && convs.has_half_io(&block.conv2)?,
+            );
+        }
+        // whether the current block's input, the previous block's output, is half
+        let mut input_half = false;
+        for (index, block) in blocks.iter().enumerate() {
             let input_len = element_count(
                 "embedding block input",
                 &block.conv1.conv(chunks, math).input_shape(),
             )?;
             let output_len = chunks * block.conv2.output_len();
-            let (input_buffer, output_buffer) = read_write(trunk, block.input_slot);
-            let input = input_buffer.slice(..input_len);
-            let mut block_out = output_buffer.slice_mut(..output_len);
 
-            // a half hidden activation holds two values per word
-            let half =
-                hidden_form == HiddenForm::Half && convs.half_pair(&block.conv1, &block.conv2)?;
-            let (hidden_len, out_io, in_io) = if half {
-                (output_len / 2, HalfIo::HalfOut, HalfIo::HalfIn)
-            } else {
-                (output_len, HalfIo::Fp32, HalfIo::Fp32)
+            // the next block stages this output and adds it back as its residual, so
+            // both of its convolutions must take halves, and a shortcut reads FP32
+            let output_half = match blocks.get(index + 1) {
+                Some(next) => {
+                    hidden_half[index + 1]
+                        && next.shortcut.is_none()
+                        && convs.has_half_io(&block.conv2)?
+                }
+                None => false,
             };
+            let half = hidden_half[index];
+            // a half tensor holds two values per word
+            let half_len = |half: bool, len: usize| if half { len / 2 } else { len };
+            let (input_buffer, output_buffer) = read_write(trunk, block.input_slot);
+            let input = input_buffer.slice(..half_len(input_half, input_len));
+            let mut block_out = output_buffer.slice_mut(..half_len(output_half, output_len));
+            let hidden_len = half_len(half, output_len);
 
             // the block output buffer is free until the second convolution, so it
             // stands in as the first convolution's unused residual operand
@@ -748,7 +768,11 @@ impl EmbeddingBatch {
                     scratch: &scratch,
                 },
                 &mut hidden_out,
-                out_io,
+                HalfIo {
+                    input: input_half,
+                    residual: false,
+                    output: half,
+                },
             )?;
             if !half {
                 tap(EmbeddingTap::Hidden { block: index }, &hidden_out.as_view())?;
@@ -766,16 +790,24 @@ impl EmbeddingBatch {
                     )?;
                     shortcut_out.as_view()
                 }
-                None => input.slice(..output_len),
+                None => input.slice(..half_len(input_half, output_len)),
             };
             convs.conv_bias_relu(
                 &block.conv2,
                 &hidden_out.as_view(),
                 Residual::Add(&residual),
                 &mut block_out,
-                in_io,
+                HalfIo {
+                    input: half,
+                    // without a shortcut the residual is the block input
+                    residual: input_half,
+                    output: output_half,
+                },
             )?;
-            tap(EmbeddingTap::Block { block: index }, &block_out.as_view())?;
+            if !output_half {
+                tap(EmbeddingTap::Block { block: index }, &block_out.as_view())?;
+            }
+            input_half = output_half;
         }
 
         let columns = pool_columns(&model.trunk);
@@ -877,7 +909,7 @@ impl EmbeddingBatch {
             self.run_with_activations(
                 runtime,
                 PlanSet::Fallback,
-                HiddenForm::Half,
+                ActivationForm::Half,
                 &mut |_, _| Ok(()),
                 storage.buffers_mut(),
             )?;

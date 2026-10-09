@@ -274,13 +274,20 @@ fn embedding_b32_matches_reference() -> Result<(), CudaError> {
             again, eager,
             "b32 {math:?}: eager forward is not deterministic"
         );
-        // the taps keep every hidden activation FP32, which must give the forward
-        // pass's result bit for bit where it passes them as halves
+        // the taps keep every activation FP32, while the forward pass rounds the
+        // residual stream between blocks of a layer to FP16; both must meet the bound
         batch.forward_with_taps(&runtime, &mut |_, _| Ok(()))?;
-        let fp32_hidden = batch.download_output(&runtime)?;
-        assert_eq!(
-            fp32_hidden, eager,
-            "b32 {math:?}: half hidden activations change the result"
+        let fp32_form = batch.download_output(&runtime)?;
+        let fp32_result = parity(&fp32_form, &case.expected, EMBEDDING_DIM);
+        let half_shift = parity(&eager, &fp32_form, EMBEDDING_DIM);
+        eprintln!(
+            "b32 {B32_CASE} {math:?} FP32 activations: min cosine {:.12}; half vs FP32 activations: min cosine {:.12}, max abs {:.3e}",
+            fp32_result.min_cosine, half_shift.min_cosine, half_shift.max_abs
+        );
+        assert!(
+            fp32_result.min_cosine >= min_cosine_bound(math),
+            "b32 {math:?}: FP32-activation cosine {} below bound",
+            fp32_result.min_cosine
         );
         batch.capture_graph(&runtime)?;
         assert!(batch.has_graph());

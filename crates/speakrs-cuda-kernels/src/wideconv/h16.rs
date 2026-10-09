@@ -41,6 +41,13 @@
 //! `_half_out` epilogue converts with the same instructions and sets the range word for
 //! the same values, and a `_half_in` stage copies the 16-byte pixels as they are, so the
 //! pair computes bit for bit what the FP32 pair does while moving half the bytes
+//!
+//! The `_half_in_out`, `_half_all` and `_half_in_res` instances also keep the residual
+//! stream between blocks of one layer in that form: a block's second convolution writes
+//! its output as halves for the next block's first convolution to stage and its second
+//! to add back as the residual. That residual is the FP16-rounded block output scaled
+//! back by 2^-10 instead of the FP32 one, so unlike the hidden activation it changes
+//! the result
 
 use cuda_device::shared::cvta_generic_to_shared_u32;
 use cuda_device::{DisjointSlice, DynamicSharedArray, kernel, launch_bounds, ptx_asm, thread};
@@ -113,6 +120,23 @@ unsafe fn sth(pointer: *mut f32, half_offset: usize, bits: u32) {
             clobber("memory"),
         );
     }
+}
+
+/// The FP16 value at half-word `half_offset` of a global buffer, widened to FP32 and
+/// still scaled by 2^10
+#[inline(always)]
+unsafe fn ldh(pointer: *const f32, half_offset: usize) -> f32 {
+    let value: f32;
+    // safety: the caller passes a readable half-word; a plain load, since the residual
+    // may alias the output
+    unsafe {
+        ptx_asm!(
+            "{ .reg .u64 g; .reg .b16 h; cvta.to.global.u64 g, %1; ld.global.b16 h, [g]; cvt.f32.f16 %0, h; }",
+            out("=f") value,
+            in("l") (pointer as *const u16).add(half_offset) as u64,
+        );
+    }
+    value
 }
 
 /// Four words at a 16-byte aligned address of a global buffer no kernel writes during
@@ -330,6 +354,7 @@ macro_rules! h16_conv3x3 {
         threads = $threads:literal,
         min_blocks = $min_blocks:literal,
         half_input = $half_input:literal,
+        half_residual = $half_residual:literal,
         half_output = $half_output:literal $(,)?
     ) => {
         $(#[$doc])*
@@ -346,6 +371,7 @@ macro_rules! h16_conv3x3 {
             mut range: DisjointSlice<f32>,
         ) {
             const HALF_IN: bool = $half_input;
+            const HALF_RES: bool = $half_residual;
             const HALF_OUT: bool = $half_output;
             const C: u32 = $channels;
             const H: u32 = $h;
@@ -371,6 +397,12 @@ macro_rules! h16_conv3x3 {
             // residual lines of a warp's output row: 64 columns of each of its channels
             // span at most three 128-byte lines
             const RESIDUAL_PREFETCHES: usize = MT * 16 * 3 / 32;
+            // a half residual row has 16 bytes per pixel for each of the warp's channel
+            // groups, so 64 columns of a group span at most nine 128-byte lines
+            const HALF_RESIDUAL_LINES: u32 = MT as u32 * 2 * 9;
+            const HALF_RESIDUAL_PREFETCHES: usize = HALF_RESIDUAL_LINES.div_ceil(32) as usize;
+            // removes the 2^10 operand scale of a half residual; exact, as a power of two
+            const RESIDUAL_UNSCALE: f32 = 1.0 / 1024.0;
             const _: () = assert!(
                 THREADS == 32 * WM * ROWS
                     && C % CTA_CHANNELS == 0
@@ -388,9 +420,10 @@ macro_rules! h16_conv3x3 {
             // a half tensor holds two values per word
             let x_words = if HALF_IN { batch * C * HW / 2 } else { batch * C * HW };
             let y_words = if HALF_OUT { batch * C * HW / 2 } else { batch * C * HW };
+            let residual_words = if HALF_RES { batch * C * HW / 2 } else { batch * C * HW };
             if x_words as usize > x.len()
                 || y_words as usize > y.len()
-                || (add_residual != 0 && (batch * C * HW) as usize > residual.len())
+                || (add_residual != 0 && residual_words as usize > residual.len())
                 || (C * C * 9 / 2) as usize > weight.len()
                 || C as usize > bias.len()
                 || range.len() == 0
@@ -485,16 +518,35 @@ macro_rules! h16_conv3x3 {
                         // last column
                         let residual_ptr = residual.as_ptr();
                         let row = base + (oy0 + warp_r) * W;
-                        let mut k = 0;
-                        #[unroll]
-                        while k < RESIDUAL_PREFETCHES {
-                            let line = lane + 32 * k as u32;
-                            let channel = tile0 * 16 + line / 3;
-                            let column = ox0 + (line % 3) * (COLS - 1) / 2;
-                            let column = if column >= W { W - 1 } else { column };
-                            // safety: inside the checked residual
-                            unsafe { prefetch(residual_ptr.add((row + channel * HW + column) as usize)) };
-                            k += 1;
+                        if HALF_RES {
+                            // lane `l` of pass `k` takes line `(32k + l) % 9` of channel
+                            // group `(32k + l) / 9`, eight pixels per line
+                            let mut k = 0;
+                            #[unroll]
+                            while k < HALF_RESIDUAL_PREFETCHES {
+                                let line = lane + 32 * k as u32;
+                                if line < HALF_RESIDUAL_LINES {
+                                    let group = item * CHUNKS + tile0 * 2 + line / 9;
+                                    let column = ox0 + line % 9 * 8;
+                                    let column = if column >= W { W - 1 } else { column };
+                                    let word = (group * HW + (oy0 + warp_r) * W + column) * 4;
+                                    // safety: inside the checked half residual
+                                    unsafe { prefetch(residual_ptr.add(word as usize)) };
+                                }
+                                k += 1;
+                            }
+                        } else {
+                            let mut k = 0;
+                            #[unroll]
+                            while k < RESIDUAL_PREFETCHES {
+                                let line = lane + 32 * k as u32;
+                                let channel = tile0 * 16 + line / 3;
+                                let column = ox0 + (line % 3) * (COLS - 1) / 2;
+                                let column = if column >= W { W - 1 } else { column };
+                                // safety: inside the checked residual
+                                unsafe { prefetch(residual_ptr.add((row + channel * HW + column) as usize)) };
+                                k += 1;
+                            }
                         }
                     }
                     let stage = smem + chunk % 2 * STAGE_BYTES + lane_row;
@@ -610,13 +662,20 @@ macro_rules! h16_conv3x3 {
                     while slot < 4 {
                         let channel = (tile0 + i as u32) * 16 + g + slot as u32 / 2 * 8;
                         let channel_row = row + channel * HW;
+                        // the half residual's half-word of this channel at column 0 of the row
+                        let half_row = base + channel / 8 * 8 * HW + oy * W * 8 + channel % 8;
                         let mut j = 0;
                         #[unroll]
                         while j < NT {
                             let ox = ox0 + j as u32 * 8 + 2 * t + slot as u32 % 2;
                             if ox < W {
-                                // safety: inside the checked residual
-                                acc[i][j][slot] += unsafe { *residual_ptr.add((channel_row + ox) as usize) };
+                                acc[i][j][slot] += if HALF_RES {
+                                    // safety: inside the checked half residual
+                                    (unsafe { ldh(residual_ptr, (half_row + ox * 8) as usize) }) * RESIDUAL_UNSCALE
+                                } else {
+                                    // safety: inside the checked residual
+                                    unsafe { *residual_ptr.add((channel_row + ox) as usize) }
+                                };
                             }
                             j += 1;
                         }
@@ -688,6 +747,7 @@ h16_conv3x3! {
     threads = 128,
     min_blocks = 3,
     half_input = false,
+    half_residual = false,
     half_output = false,
 }
 
@@ -710,6 +770,7 @@ h16_conv3x3! {
     threads = 128,
     min_blocks = 2,
     half_input = false,
+    half_residual = false,
     half_output = false,
 }
 
@@ -727,6 +788,7 @@ h16_conv3x3! {
     threads = 128,
     min_blocks = 3,
     half_input = false,
+    half_residual = false,
     half_output = true,
 }
 
@@ -744,6 +806,7 @@ h16_conv3x3! {
     threads = 128,
     min_blocks = 3,
     half_input = true,
+    half_residual = false,
     half_output = false,
 }
 
@@ -761,6 +824,7 @@ h16_conv3x3! {
     threads = 128,
     min_blocks = 2,
     half_input = false,
+    half_residual = false,
     half_output = true,
 }
 
@@ -778,6 +842,117 @@ h16_conv3x3! {
     threads = 128,
     min_blocks = 2,
     half_input = true,
+    half_residual = false,
+    half_output = false,
+}
+
+h16_conv3x3! {
+    /// As `spk_wideconv_h16_c32`, reading `x` and writing `y` as half tensors, for a block's first
+    /// convolution on a half block input, or the second convolution of a layer's first
+    /// block, whose FP32 residual is the layer input
+    spk_wideconv_h16_c32_half_in_out,
+    channels = 32,
+    h = 80,
+    w = 998,
+    m_tiles = 2,
+    channel_warps = 1,
+    rows = 4,
+    n_tiles = 8,
+    threads = 128,
+    min_blocks = 3,
+    half_input = true,
+    half_residual = false,
+    half_output = true,
+}
+
+h16_conv3x3! {
+    /// As `spk_wideconv_h16_c32`, with `x`, `residual` and `y` all half tensors, for the second
+    /// convolution of a block between a layer's first and last
+    spk_wideconv_h16_c32_half_all,
+    channels = 32,
+    h = 80,
+    w = 998,
+    m_tiles = 2,
+    channel_warps = 1,
+    rows = 4,
+    n_tiles = 8,
+    threads = 128,
+    min_blocks = 3,
+    half_input = true,
+    half_residual = true,
+    half_output = true,
+}
+
+h16_conv3x3! {
+    /// As `spk_wideconv_h16_c32`, reading `x` and `residual` as half tensors and writing `y` as FP32,
+    /// for the second convolution of a layer's last block
+    spk_wideconv_h16_c32_half_in_res,
+    channels = 32,
+    h = 80,
+    w = 998,
+    m_tiles = 2,
+    channel_warps = 1,
+    rows = 4,
+    n_tiles = 8,
+    threads = 128,
+    min_blocks = 3,
+    half_input = true,
+    half_residual = true,
+    half_output = false,
+}
+
+h16_conv3x3! {
+    /// As `spk_wideconv_h16_c64`, reading `x` and writing `y` as half tensors, for a block's first
+    /// convolution on a half block input, or the second convolution of a layer's first
+    /// block, whose FP32 residual is the layer input
+    spk_wideconv_h16_c64_half_in_out,
+    channels = 64,
+    h = 40,
+    w = 499,
+    m_tiles = 4,
+    channel_warps = 1,
+    rows = 4,
+    n_tiles = 8,
+    threads = 128,
+    min_blocks = 2,
+    half_input = true,
+    half_residual = false,
+    half_output = true,
+}
+
+h16_conv3x3! {
+    /// As `spk_wideconv_h16_c64`, with `x`, `residual` and `y` all half tensors, for the second
+    /// convolution of a block between a layer's first and last
+    spk_wideconv_h16_c64_half_all,
+    channels = 64,
+    h = 40,
+    w = 499,
+    m_tiles = 4,
+    channel_warps = 1,
+    rows = 4,
+    n_tiles = 8,
+    threads = 128,
+    min_blocks = 2,
+    half_input = true,
+    half_residual = true,
+    half_output = true,
+}
+
+h16_conv3x3! {
+    /// As `spk_wideconv_h16_c64`, reading `x` and `residual` as half tensors and writing `y` as FP32,
+    /// for the second convolution of a layer's last block
+    spk_wideconv_h16_c64_half_in_res,
+    channels = 64,
+    h = 40,
+    w = 499,
+    m_tiles = 4,
+    channel_warps = 1,
+    rows = 4,
+    n_tiles = 8,
+    threads = 128,
+    min_blocks = 2,
+    half_input = true,
+    half_residual = true,
     half_output = false,
 }
 
@@ -800,6 +975,7 @@ h16_conv3x3! {
     threads = 128,
     min_blocks = 2,
     half_input = false,
+    half_residual = false,
     half_output = false,
 }
 
@@ -817,6 +993,7 @@ h16_conv3x3! {
     threads = 128,
     min_blocks = 3,
     half_input = false,
+    half_residual = false,
     half_output = false,
 }
 
@@ -839,6 +1016,7 @@ h16_conv3x3! {
     threads = 128,
     min_blocks = 2,
     half_input = false,
+    half_residual = false,
     half_output = false,
 }
 
@@ -856,6 +1034,7 @@ h16_conv3x3! {
     threads = 128,
     min_blocks = 3,
     half_input = false,
+    half_residual = false,
     half_output = false,
 }
 
