@@ -139,7 +139,8 @@ impl Recipe {
         })
     }
 
-    /// FP16 changes only same-channel stride-1 trunk layers in TF32 mode
+    /// FP16 changes only 3x3 trunk layers in TF32 mode: every one but the stem on the
+    /// T4, the same-channel stride-1 layers on the 4060 Ti
     pub(crate) fn fp16_pin(
         self,
         boundary: BoundaryId,
@@ -229,7 +230,7 @@ impl DeviceDefault {
             && fp16.allows()
             && math == CudaMath::Tf32
             && device.capability() == ComputeCapability::new(7, 5)
-            && WideconvPin::fp16_wide(boundary.name(), batch, math).is_some()
+            && WideconvPin::measured_t4_fp16(boundary.name(), batch, math).is_some()
         {
             return Some(Self::TuringFp16Trunk);
         }

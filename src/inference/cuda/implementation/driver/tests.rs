@@ -750,8 +750,9 @@ fn fp16_routes_send_the_early_trunk_layers_to_wideconv() {
     let narrow = Some(WideconvAlgorithm::Fp16(WideconvFp16Tiles::Narrow));
     let winograd = Some(WideconvAlgorithm::Winograd(WideconvProducts::Fp32));
     // per layer, batch and math: the Turing and Ada wideconv algorithms; `None` keeps the
-    // direct ResNet kernel for the 32- and 64-channel layers and any non-FP16 wideconv
-    // kernel for the wider ones. FP32 mode never takes FP16 tiles
+    // direct ResNet kernel for the 32- and 64-channel input layers and any non-FP16
+    // wideconv kernel for the wider ones. FP32 mode never takes FP16 tiles, and only
+    // Turing takes them on the stride-2 layers
     let cases = [
         ("resnet.layer1.0.conv1", 1, CudaMath::Tf32, wide, wide),
         ("resnet.layer1.2.conv2", 32, CudaMath::Tf32, wide, wide),
@@ -764,6 +765,14 @@ fn fp16_routes_send_the_early_trunk_layers_to_wideconv() {
         ("resnet.layer4.2.conv2", 7, CudaMath::Tf32, wide, None),
         ("resnet.layer4.2.conv2", 8, CudaMath::Tf32, wide, wide),
         ("resnet.layer4.2.conv2", 32, CudaMath::Fp32, None, None),
+        ("resnet.layer2.0.conv1", 1, CudaMath::Tf32, wide, None),
+        ("resnet.layer2.0.conv1", 32, CudaMath::Tf32, wide, None),
+        ("resnet.layer2.0.conv1", 32, CudaMath::Fp32, None, None),
+        ("resnet.layer3.0.conv1", 1, CudaMath::Tf32, narrow, None),
+        ("resnet.layer3.0.conv1", 32, CudaMath::Tf32, wide, None),
+        ("resnet.layer4.0.conv1", 1, CudaMath::Tf32, narrow, None),
+        ("resnet.layer4.0.conv1", 4, CudaMath::Tf32, wide, None),
+        ("resnet.layer4.0.conv1", 32, CudaMath::Fp32, None, None),
     ];
     for (capability, sms, limit, route) in devices {
         let mut fixture = Fixture::new();
@@ -809,20 +818,6 @@ fn fp16_routes_send_the_early_trunk_layers_to_wideconv() {
                 ),
             }
         }
-
-        // the stride-2 entry of the stage keeps its ResNet kernel everywhere
-        let Selected::Oxide(token) = PlanRequest::DriverOnly
-            .resolve(
-                BoundaryId::named("resnet.layer2.0.conv1"),
-                32,
-                CudaMath::Tf32,
-                &mut fixture,
-            )
-            .unwrap()
-        else {
-            panic!("{capability:?}: no driver route for the stride-2 layer")
-        };
-        assert_eq!(token.area(), KernelModule::Resnet);
     }
 }
 

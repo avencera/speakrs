@@ -40,7 +40,7 @@ pub(crate) struct Policy;
 
 impl Policy {
     // bump when the reviewed algorithm set or its math-mode limits change
-    pub(crate) const IDENTITY: &'static str = "end-to-end-algorithms-v3";
+    pub(crate) const IDENTITY: &'static str = "end-to-end-algorithms-v4";
 
     /// PR 3 and the C128/T4 branch reports establish unchanged per-file DER or
     /// byte-identical RTTMs for these algorithms; device support is checked separately
@@ -61,6 +61,8 @@ impl Policy {
                 }
             },
             ConfigPin::Wideconv(WideconvPin::Configured(config)) => match config.algorithm {
+                // layerwins evidence/e1: T4 stride-2, subset/hard/test30/dev216
+                // DER gates pass; dev216 7.0118 unchanged, jynhe +0.0026
                 WideconvAlgorithm::Fp16(_) => Approval::Fp16Trunk,
                 WideconvAlgorithm::Spatial | WideconvAlgorithm::WideStem => Approval::DirectFp32,
                 WideconvAlgorithm::TensorCore(

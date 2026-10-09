@@ -334,15 +334,38 @@ fn fp16_recipes_exclude_fp32_strided_layers_and_unmeasured_devices() {
                     None
                 );
             }
-            for name in [
-                "resnet.conv1",
-                "resnet.layer2.0.conv1",
-                "resnet.layer3.0.conv1",
-                "resnet.layer4.0.shortcut.0",
-            ] {
+            for name in ["resnet.conv1", "resnet.layer4.0.shortcut.0"] {
                 assert_eq!(
                     recipe.fp16_pin(BoundaryId::named(name), batch, CudaMath::Tf32),
                     None
+                );
+            }
+            // only the Turing recipe runs the stride-2 layers on FP16 tiles
+            for name in [
+                "resnet.layer2.0.conv1",
+                "resnet.layer3.0.conv1",
+                "resnet.layer4.0.conv1",
+            ] {
+                let boundary = BoundaryId::named(name);
+                assert_eq!(recipe.fp16_pin(boundary, batch, CudaMath::Fp32), None);
+                let pin = recipe.fp16_pin(boundary, batch, CudaMath::Tf32);
+                if recipe == Recipe::Rtx4060Ti {
+                    assert_eq!(pin, None, "{name} b{batch}");
+                    continue;
+                }
+                let Some(ConfigPin::Wideconv(WideconvPin::Configured(config))) = pin else {
+                    panic!("{name} b{batch}: {pin:?}")
+                };
+                // narrow tiles where wide ones give fewer than two waves on 40 SMs
+                let narrow = batch == 1 && name != "resnet.layer2.0.conv1";
+                assert_eq!(
+                    config.algorithm,
+                    WideconvAlgorithm::Fp16(if narrow {
+                        WideconvFp16Tiles::Narrow
+                    } else {
+                        WideconvFp16Tiles::Wide
+                    }),
+                    "{name} b{batch}"
                 );
             }
         }
@@ -408,14 +431,17 @@ fn t4_recipe_requires_its_exact_point_precision_and_batch_classes() {
 }
 
 #[test]
-fn turing_default_changes_only_tf32_same_channel_trunk_layers() {
+fn turing_default_changes_only_tf32_3x3_trunk_layers_after_the_stem() {
     let device = Builder::new(ComputeCapability::new(7, 5))
         .name("unmeasured Turing GPU")
         .build();
     for name in [
         "resnet.layer1.0.conv1",
+        "resnet.layer2.0.conv1",
         "resnet.layer2.0.conv2",
+        "resnet.layer3.0.conv1",
         "resnet.layer3.1.conv1",
+        "resnet.layer4.0.conv1",
         "resnet.layer4.2.conv2",
     ] {
         for batch in [1, 4, 8, 16, 32] {
@@ -437,8 +463,7 @@ fn turing_default_changes_only_tf32_same_channel_trunk_layers() {
     }
     for name in [
         "resnet.conv1",
-        "resnet.layer2.0.conv1",
-        "resnet.layer3.0.conv1",
+        "resnet.layer2.0.shortcut.0",
         "resnet.layer4.0.shortcut.0",
     ] {
         assert_eq!(
