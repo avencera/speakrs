@@ -221,8 +221,10 @@ impl Recipe {
 
     /// FP16 changes only 3x3 trunk layers in TF32 mode: every one but the stem on the
     /// T4, the same-channel stride-1 layers on the 4060 Ti, every one but the stem from
-    /// its measured crossover batch on the 4090, and the 128- and 256-channel layers from
-    /// batch 4 on both A100s (batch 8 for the 128->256 stride-2 layer)
+    /// its measured crossover batch on the 4090, and on both A100s the 128- and
+    /// 256-channel layers from batch 4 (batch 8 for the 128->256 stride-2 layer), the
+    /// same-channel 32-channel layers at every batch and the same-channel 64-channel
+    /// layers from batch 16
     pub(crate) fn fp16_pin(
         self,
         boundary: BoundaryId,

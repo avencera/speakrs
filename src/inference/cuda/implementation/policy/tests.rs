@@ -380,7 +380,7 @@ fn fp16_recipes_exclude_fp32_strided_layers_and_unmeasured_devices() {
 }
 
 #[test]
-fn a100_fp16_covers_only_wide_tf32_trunk_from_batch_4() {
+fn a100_fp16_covers_the_measured_tf32_trunk_points() {
     let sxm4 = Builder::new(ComputeCapability::new(8, 0))
         .multiprocessors(108)
         .name("NVIDIA A100-SXM4-40GB")
@@ -455,19 +455,47 @@ fn a100_fp16_pins(recipe: Recipe) {
             pin
         );
     }
+    // the early trunk: 32-channel layers at every batch, 64-channel ones from batch 16
+    let wide = Some(ConfigPin::Wideconv(WideconvPin::Configured(
+        crate::inference::cuda::candidate::WideconvConfig {
+            algorithm: WideconvAlgorithm::Fp16(WideconvFp16Tiles::Wide),
+            partition: crate::inference::cuda::candidate::WideconvPartition::Whole,
+            split_cells: crate::inference::cuda::candidate::WideconvSplitCells::All,
+        },
+    )));
+    for batch in [1, 4, 8, 16, 32] {
+        for name in ["resnet.layer1.0.conv1", "resnet.layer1.2.conv2"] {
+            let boundary = BoundaryId::named(name);
+            assert_eq!(
+                recipe.fp16_pin(boundary, batch, CudaMath::Tf32),
+                wide,
+                "{name} b{batch}"
+            );
+            assert_eq!(
+                recipe.fp16_pin(boundary, batch, CudaMath::Fp32),
+                None,
+                "{name} b{batch}"
+            );
+        }
+        for name in ["resnet.layer2.0.conv2", "resnet.layer2.3.conv1"] {
+            let expected = if batch >= 16 { wide } else { None };
+            let pin = recipe.fp16_pin(BoundaryId::named(name), batch, CudaMath::Tf32);
+            assert_eq!(pin, expected, "{name} b{batch}");
+        }
+    }
     for name in [
         "resnet.conv1",
-        "resnet.layer1.0.conv1",
         "resnet.layer2.0.conv1",
-        "resnet.layer2.1.conv2",
         "resnet.layer3.0.shortcut.0",
         "resnet.layer4.0.shortcut.0",
     ] {
-        assert_eq!(
-            recipe.fp16_pin(BoundaryId::named(name), 32, CudaMath::Tf32),
-            None,
-            "{name}"
-        );
+        for batch in [1, 4, 8, 16, 32] {
+            assert_eq!(
+                recipe.fp16_pin(BoundaryId::named(name), batch, CudaMath::Tf32),
+                None,
+                "{name} b{batch}"
+            );
+        }
     }
 }
 

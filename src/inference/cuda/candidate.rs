@@ -137,7 +137,7 @@ pub(crate) use wideconv::{
     Algorithm as WideconvAlgorithm, FP16_OPERAND_LIMIT, Fp16Policy,
     TensorKernel as WideconvTensorKernel, WinogradProducts as WideconvProducts,
 };
-#[cfg(all(test, any(feature = "_cuda-libraries", feature = "cuda-sm80")))]
+#[cfg(test)]
 pub(crate) use wideconv::{
     Config as WideconvConfig, Partition as WideconvPartition, SplitCells as WideconvSplitCells,
 };
