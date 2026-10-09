@@ -6,8 +6,6 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "_cuda")]
 use std::time::Duration;
 
-#[cfg(feature = "_cuda")]
-use color_eyre::eyre::ensure;
 use color_eyre::eyre::{Result, bail};
 
 use super::super::BenchmarkMetadata;
@@ -25,8 +23,6 @@ use crate::catalog::ImplementationId;
 use crate::commands::benchmark::run_store::DatasetIdentity;
 use crate::commands::benchmark::run_store::{BenchmarkRun, RunIdentity};
 use crate::commands::benchmark::runner::BatchRunOutput;
-#[cfg(feature = "_cuda")]
-use crate::path::file_stem_string;
 
 pub fn run_gpu_benchmark_suite(config: &GpuBenchmarkSuiteConfig) -> Result<()> {
     let datasets_list: Vec<crate::datasets::Dataset> = if config.dataset == "all" {
@@ -285,7 +281,8 @@ pub fn run_speakrs_gpu(
 ) -> Result<BatchRunOutput> {
     use speakrs::inference::{EmbeddingModel, ExecutionMode, SegmentationModel};
     use speakrs::pipeline::{
-        CUDA_SEGMENTATION_STEP_SECONDS, DiarizationPipeline, FAST_SEGMENTATION_STEP_SECONDS,
+        BatchStreamError, CUDA_SEGMENTATION_STEP_SECONDS, DiarizationPipeline,
+        FAST_SEGMENTATION_STEP_SECONDS,
     };
 
     use crate::wav;
@@ -309,60 +306,65 @@ pub fn run_speakrs_gpu(
     )?;
     let mut pipeline = DiarizationPipeline::new(&mut seg_model, &mut emb_model, models_dir)?;
 
-    let mut per_file_rttm = HashMap::new();
     let total_files = files.len();
     let start = std::time::Instant::now();
-    for (index, (wav_path, _)) in files.iter().enumerate() {
-        let file_id = file_stem_string(wav_path).unwrap_or_else(|_| "file1".to_owned());
-
-        let file_start = std::time::Instant::now();
-        let load_start = std::time::Instant::now();
-        let (samples, sample_rate) = wav::load_wav_samples(&wav_path.to_string_lossy())?;
-        let load_elapsed = load_start.elapsed();
-        ensure!(
-            sample_rate == 16000,
-            "expected 16kHz WAV, got {sample_rate}Hz"
-        );
-
-        let pipeline_start = std::time::Instant::now();
-        let result = pipeline.run_with_file_id(&samples, &file_id)?;
-        let file_elapsed = pipeline_start.elapsed().as_secs_f64();
-        let total_elapsed_ms = file_start.elapsed().as_millis();
-
-        per_file_rttm.insert(file_id.clone(), result.rttm(&file_id));
-
+    // the batch stream decodes the next files on worker threads and clusters each file
+    // while the GPU runs the next one, as `xtask diarize` and the library batch API do
+    let decoder = wav::WavBatchDecoder::new(files.iter().map(|(wav, _)| wav.clone()).collect())?;
+    let mut finished = 0;
+    let mut file_start = start;
+    let mut report = |file_id: &str| {
+        let file_elapsed = file_start.elapsed().as_secs_f64();
+        file_start = std::time::Instant::now();
         let cumulative = start.elapsed().as_secs_f64();
-        let average = cumulative / (index + 1) as f64;
-        let remaining = (total_files - index - 1) as f64 * average;
-        let eta = format_eta(remaining);
-        let total_elapsed = format_eta(cumulative);
+        finished += 1;
+        let remaining = (total_files - finished) as f64 * cumulative / finished as f64;
         eprintln!(
-            "  [{}/{}] {file_id}: {file_elapsed:.1}s (elapsed {total_elapsed}, ETA {eta}) [{}]",
-            index + 1,
-            total_files,
+            "  [{finished}/{total_files}] {file_id}: {file_elapsed:.1}s (elapsed {}, ETA {}) [{}]",
+            format_eta(cumulative),
+            format_eta(remaining),
             now_stamp()
         );
-        tracing::trace!(
-            %file_id,
-            load_ms = load_elapsed.as_millis(),
-            pipeline_ms = (file_elapsed * 1000.0).round() as u64,
-            total_ms = total_elapsed_ms,
-            "File timing",
-        );
-
         if let Some(callback) = progress_cb {
             callback(&ProgressUpdate {
                 impl_name: format!("speakrs {mode}"),
-                file_index: index as u32,
+                file_index: (finished - 1) as u32,
                 total_files: total_files as u32,
-                file_id,
+                file_id: file_id.to_owned(),
                 elapsed_secs: file_elapsed,
             });
         }
+    };
+
+    // the stream asks for the next file once the previous file's inference is done
+    let mut previous: Option<String> = None;
+    let inputs = decoder.inspect(|input| {
+        if let Some(file_id) = previous.take() {
+            report(&file_id);
+        }
+        previous = input.as_ref().ok().map(|input| input.file_id.clone());
+    });
+    let outputs = pipeline
+        .run_batch_stream(inputs)
+        .map_err(|error| match error {
+            BatchStreamError::Input(error) => error,
+            BatchStreamError::Pipeline(error) => error.into(),
+        })?;
+    if let Some(file_id) = previous.take() {
+        report(&file_id);
     }
 
+    let total_seconds = start.elapsed().as_secs_f64();
+    let per_file_rttm = outputs
+        .into_iter()
+        .map(|output| {
+            let rttm = output.result.rttm(&output.file_id);
+            (output.file_id, rttm)
+        })
+        .collect();
+
     Ok(BatchRunOutput {
-        total_seconds: start.elapsed().as_secs_f64(),
+        total_seconds,
         per_file_rttm,
     })
 }
