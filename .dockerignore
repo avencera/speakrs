@@ -29,7 +29,6 @@ uv.lock
 notes/
 adr/
 benchmarks/
-examples/
 tests/
 
 scripts/native_coreml/

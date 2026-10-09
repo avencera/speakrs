@@ -9,7 +9,8 @@ fmt:
     # the README section between the cargo-rdme markers is generated from the crate docs in
     # src/lib.rs, so edit the docs there; CI fails when the two drift apart
     if command -v cargo-rdme >/dev/null; then
-        cargo rdme
+        # --force: fmt rewrites files, and the README is usually being edited at the same time
+        cargo rdme --force
     else
         echo "cargo-rdme not found: README not regenerated (see CONTRIBUTING.md: cargo install cargo-rdme --version 2.2.2 --locked)" >&2
     fi
