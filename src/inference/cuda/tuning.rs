@@ -140,7 +140,14 @@ pub fn tune_cuda(options: &CudaTuneOptions) -> Result<CudaTuneReport, CudaTuneEr
     )?;
     let driver = driver_version::DriverIdentity::read()?.require_release()?;
     let catalogue = Catalogue::new(runtime.device(), runtime.ptx_tier())?;
-    let key = device_key(&runtime, Some(&catalogue), driver)?;
+    let key = device_key(
+        runtime.device(),
+        Some(&catalogue),
+        driver,
+        LibraryVersions::for_tuning(options.include_library, || {
+            runtime.tuning_library_versions()
+        })?,
+    )?;
     let path = file::path(runtime.device(), options.output_path.as_deref())?;
     let measurements = bench::run(options, runtime, &catalogue)?;
     let (rows, entries) = select_winners(measurements)?;
@@ -162,8 +169,26 @@ pub fn tune_cuda(options: &CudaTuneOptions) -> Result<CudaTuneReport, CudaTuneEr
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum LibraryVersions {
-    DriverOnly,
+    KernelOnly,
     Hybrid { cudnn: usize, cublas: i32 },
+}
+
+impl LibraryVersions {
+    /// Query numerical libraries only when they are part of the comparison
+    fn for_tuning(
+        include_library: bool,
+        request: impl FnOnce() -> Result<Self, CudaError>,
+    ) -> Result<Self, CudaError> {
+        if include_library {
+            request()
+        } else {
+            Ok(Self::KernelOnly)
+        }
+    }
+
+    fn includes_library(&self) -> bool {
+        matches!(self, Self::Hybrid { .. })
+    }
 }
 
 /// A validated tuple; boundary-specific batch restrictions cannot be omitted
@@ -374,10 +399,13 @@ impl TuneControl {
         let load = || -> Result<Option<Self>, CudaTuneError> {
             // computing only the path does not hash artifacts or load candidate modules
             let path = file::path(device, None)?;
-            let Some(file) = Self::load_file(&path, || {
+            let Some(file) = Self::load_file(&path, |libraries| {
                 let driver = driver_version::DriverIdentity::read()?.require_release()?;
                 let catalogue = Catalogue::new(device, tier)?;
-                let expected = device_key(runtime, Some(&catalogue), driver)?;
+                let libraries = LibraryVersions::for_tuning(libraries.includes_library(), || {
+                    runtime.tuning_library_versions()
+                })?;
+                let expected = device_key(device, Some(&catalogue), driver, libraries)?;
                 Ok((expected, catalogue))
             })?
             else {
@@ -408,19 +436,13 @@ impl TuneControl {
 
     fn load_file(
         path: &std::path::Path,
-        prepare: impl FnOnce() -> Result<(file::DeviceKey, Catalogue), CudaTuneError>,
+        prepare: impl FnOnce(&LibraryVersions) -> Result<(file::DeviceKey, Catalogue), CudaTuneError>,
     ) -> Result<Option<file::ValidatedFile>, CudaTuneError> {
-        if !path.try_exists()? {
+        let Some(file) = file::read(path)? else {
             return Ok(None);
-        }
-        // check release availability before decoding even an old API-only file
-        let (expected, catalogue) = prepare()?;
-        file::read(path)?
-            .map(|file| {
-                file.validate(&expected, &catalogue)
-                    .map_err(CudaTuneError::from)
-            })
-            .transpose()
+        };
+        let (expected, catalogue) = prepare(&file.key.libraries)?;
+        Ok(Some(file.validate(&expected, &catalogue)?))
     }
 
     pub(crate) fn choice(
@@ -639,18 +661,18 @@ fn select_winners(
 }
 
 fn device_key(
-    runtime: &CudaRuntime,
+    device: &DeviceAttributes,
     catalogue: Option<&Catalogue>,
     driver: driver_version::DriverRelease,
+    libraries: LibraryVersions,
 ) -> Result<file::DeviceKey, CudaTuneError> {
-    let device = runtime.device();
     let cc = device.capability();
     let mut key = file::DeviceKey {
         device_name: device.name().into(),
         capability: [cc.major, cc.minor],
         sm_count: device.multiprocessors().get(),
         driver_version: driver,
-        libraries: runtime.tuning_library_versions()?,
+        libraries,
         speakrs_version: env!("CARGO_PKG_VERSION").into(),
         artifact_version: String::new(),
         accuracy_policy: accuracy::Policy::IDENTITY.into(),

@@ -182,7 +182,9 @@ impl CudaRuntime {
         }
         #[cfg(not(feature = "_cuda-libraries"))]
         {
-            Ok(super::tuning::LibraryVersions::DriverOnly)
+            Err(super::tuning::invalid(
+                "Library tuning requires the cuda feature",
+            ))
         }
     }
 
