@@ -140,6 +140,20 @@ pub(crate) enum Selection {
     Explicit,
 }
 
+impl Selection {
+    /// Keep hybrid production and tuning strict; only library-free routes substitute
+    pub(super) const fn accuracy(self) -> super::tuning::accuracy::RuntimePolicy {
+        use super::tuning::accuracy::RuntimePolicy;
+
+        match self {
+            Self::Production if super::driver_only() => RuntimePolicy::ExactFp32,
+            #[cfg(test)]
+            Self::DriverOnly => RuntimePolicy::ExactFp32,
+            _ => RuntimePolicy::Strict,
+        }
+    }
+}
+
 /// Implementation requests used only by development checks
 #[cfg(all(test, feature = "_cuda-libraries"))]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

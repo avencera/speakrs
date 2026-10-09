@@ -7,6 +7,7 @@ use crate::inference::cuda::candidate::{
     PlanError, SegdenseArea, SincOxide, WideconvOxide,
 };
 use crate::inference::cuda::device::DeviceAttributes;
+use crate::inference::cuda::tuning::accuracy::RuntimePolicy;
 use crate::inference::cuda::{CudaError, CudaMath, KernelModule, PtxTier};
 
 /// Candidate-owned distinct tuning choices, independent of startup routing
@@ -20,6 +21,7 @@ type RuntimeFp32Pin = fn(
     CudaMath,
     &DeviceAttributes,
     PtxTier,
+    RuntimePolicy,
 ) -> Result<Option<ConfigPin>, PlanError>;
 
 /// Candidate-owned pin construction under a selection's FP16 policy
@@ -285,10 +287,7 @@ pub(super) fn select_from(
                 modules.tier_limit(),
             )
             .is_none()
-            && crate::inference::cuda::tuning::accuracy::Policy::approve_runtime(
-                boundary, math, pin,
-            )
-            .is_none()
+            && selection.accuracy().approve(boundary, math, pin).is_none()
         {
             // unlisted recipe tuples and class defaults need independent approval
             let alternate = (candidate.runtime_fp32_pin)(
@@ -297,15 +296,16 @@ pub(super) fn select_from(
                 math,
                 modules.device(),
                 request.tier(),
+                selection.accuracy(),
             )
             .map_err(pin_error)?;
             let Some(approved) = alternate else {
                 continue;
             };
-            if crate::inference::cuda::tuning::accuracy::Policy::approve_runtime(
-                boundary, math, approved,
-            )
-            .is_none()
+            if selection
+                .accuracy()
+                .approve(boundary, math, approved)
+                .is_none()
             {
                 continue;
             }

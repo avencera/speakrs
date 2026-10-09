@@ -940,17 +940,40 @@ fn catalogue_contains_every_measured_stride2_fp16_startup_pin() {
 
 #[test]
 fn runtime_exact_fp32_fallback_does_not_widen_tuner_approval() {
-    use super::accuracy::{Approval, Policy};
+    use super::accuracy::{Approval, Policy, RuntimePolicy};
     use crate::inference::cuda::candidate::{ConfigPin, SincPin};
+    use crate::inference::cuda::implementation::Selection;
     let boundary = BoundaryId::named("sincnet.conv0.abs_pool");
     let pin = ConfigPin::Sinc(SincPin::ConvAbsPool);
     assert_eq!(Policy::approve(boundary, CudaMath::Tf32, pin), None);
     assert_eq!(
-        Policy::approve_runtime(boundary, CudaMath::Tf32, pin),
+        RuntimePolicy::Strict.approve(boundary, CudaMath::Tf32, pin),
+        None
+    );
+    assert_eq!(
+        Selection::Tuning
+            .accuracy()
+            .approve(boundary, CudaMath::Tf32, pin),
+        None
+    );
+    assert_eq!(
+        Selection::Production
+            .accuracy()
+            .approve(boundary, CudaMath::Tf32, pin),
+        super::super::driver_only().then_some(Approval::DirectFp32)
+    );
+    assert_eq!(
+        Selection::DriverOnly
+            .accuracy()
+            .approve(boundary, CudaMath::Tf32, pin),
         Some(Approval::DirectFp32)
     );
     assert_eq!(
-        Policy::approve_runtime(boundary, CudaMath::Fp32, pin),
+        RuntimePolicy::ExactFp32.approve(boundary, CudaMath::Tf32, pin),
+        Some(Approval::DirectFp32)
+    );
+    assert_eq!(
+        RuntimePolicy::ExactFp32.approve(boundary, CudaMath::Fp32, pin),
         Policy::approve(boundary, CudaMath::Fp32, pin)
     );
 }

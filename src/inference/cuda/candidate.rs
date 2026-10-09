@@ -1550,9 +1550,10 @@ pub(crate) trait DriverCandidate {
         math: CudaMath,
         device: &DeviceAttributes,
         tier: PtxTier,
+        accuracy: super::tuning::accuracy::RuntimePolicy,
     ) -> Result<Option<ConfigPin>, PlanError> {
         let conservative = Self::tuning_fp32_pin(boundary, batch, math, device, tier)?;
-        if conservative.is_some() || math != CudaMath::Tf32 {
+        if conservative.is_some() || math != CudaMath::Tf32 || !accuracy.allows_exact_fp32() {
             return Ok(conservative);
         }
 

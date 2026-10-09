@@ -35,30 +35,45 @@ impl Approval {
     }
 }
 
+/// Runtime accuracy rules depend on whether a selection can fall back to Library
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimePolicy {
+    /// Keep the reviewed pipeline math limits when Library can serve a refusal
+    Strict,
+    /// Without Library, an independently approved exact FP32 kernel may serve TF32
+    ExactFp32,
+}
+
+impl RuntimePolicy {
+    /// Whether runtime may substitute an exact FP32 kernel for a TF32 request
+    pub(crate) const fn allows_exact_fp32(self) -> bool {
+        matches!(self, Self::ExactFp32)
+    }
+
+    /// Approve a runtime choice without changing the tuner's reviewed algorithm set
+    pub(crate) fn approve(
+        self,
+        boundary: BoundaryId,
+        math: CudaMath,
+        pin: ConfigPin,
+    ) -> Option<Approval> {
+        Policy::approve(boundary, math, pin).or_else(|| {
+            if !self.allows_exact_fp32() || math != CudaMath::Tf32 {
+                return None;
+            }
+
+            Policy::approve(boundary, CudaMath::Fp32, pin)
+                .filter(|approval| *approval == Approval::DirectFp32)
+        })
+    }
+}
+
 /// The tuner cannot promote implementation coverage or a recipe into approval
 pub(crate) struct Policy;
 
 impl Policy {
     // bump when the reviewed algorithm set or its math-mode limits change
     pub(crate) const IDENTITY: &'static str = "end-to-end-algorithms-v6";
-
-    /// Runtime TF32 requests may use an independently approved exact FP32 kernel
-    ///
-    /// This fallback does not grant tuner permission for unreviewed pipeline modes
-    pub(crate) fn approve_runtime(
-        boundary: BoundaryId,
-        math: CudaMath,
-        pin: ConfigPin,
-    ) -> Option<Approval> {
-        Self::approve(boundary, math, pin).or_else(|| {
-            if math != CudaMath::Tf32 {
-                return None;
-            }
-
-            Self::approve(boundary, CudaMath::Fp32, pin)
-                .filter(|approval| *approval == Approval::DirectFp32)
-        })
-    }
 
     /// PR 3 and the C128/T4 branch reports establish unchanged per-file DER or
     /// byte-identical RTTMs for these algorithms; device support is checked separately

@@ -1842,7 +1842,6 @@ fn measured_hybrid_and_driver_select_the_same_kernel_for_every_covered_tuple() {
 #[test]
 fn unmeasured_defaults_obey_accuracy_policy() {
     use super::super::policy::{Recipe, RecipeMode};
-    use crate::inference::cuda::tuning::accuracy::Policy;
 
     let mut violations = Vec::new();
     for (cc, sms, name) in [
@@ -1923,7 +1922,11 @@ fn unmeasured_defaults_obey_accuracy_policy() {
                                 #[cfg(not(feature = "_cuda-libraries"))]
                                 let PlanPin::Pinned(pin) = selected.pin;
                                 checked += 1;
-                                if Policy::approve_runtime(boundary, math, pin).is_none() {
+                                if super::Selection::Production
+                                    .accuracy()
+                                    .approve(boundary, math, pin)
+                                    .is_none()
+                                {
                                     violations.push(format!("{context}: {pin:?}"));
                                 }
                             }
@@ -2022,8 +2025,9 @@ fn production_rtx4090_dense_head_uses_the_approved_fp32_pin() {
     assert_eq!(fixture.loads, [selected.target.module]);
 }
 
+#[cfg(feature = "_cuda-libraries")]
 #[test]
-fn unlisted_measured_device_uses_independent_runtime_accuracy() {
+fn unlisted_measured_device_boundary_cannot_bypass_production_accuracy() {
     use super::super::policy::{Recipe, RecipeMode};
     use crate::inference::cuda::tuning::accuracy::Policy;
 
@@ -2050,10 +2054,6 @@ fn unlisted_measured_device_uses_independent_runtime_accuracy() {
         let pin = ConfigPin::Sinc(SincPin::ConvAbsPool);
         assert_eq!(Policy::approve(boundary, CudaMath::Tf32, pin), None);
         assert_eq!(
-            Policy::approve_runtime(boundary, CudaMath::Tf32, pin),
-            Some(crate::inference::cuda::tuning::accuracy::Approval::DirectFp32)
-        );
-        assert_eq!(
             Recipe::accuracy_exception(
                 boundary,
                 32,
@@ -2064,17 +2064,22 @@ fn unlisted_measured_device_uses_independent_runtime_accuracy() {
             ),
             None
         );
-        let Selected::Oxide(token) =
-            super::select_default(boundary, 32, CudaMath::Tf32, &mut fixture)
-                .unwrap_or_else(|error| panic!("{name}: {error}"))
-        else {
-            panic!("{name}: exact FP32 kernel must serve TF32")
-        };
-        assert_eq!(token.pin, PlanPin::Pinned(pin));
-        assert_eq!(token.math, CudaMath::Tf32);
-        assert_eq!(token.evidence, TokenEvidence::Implemented);
-        assert!(!token.speed_measured());
-        assert_eq!(fixture.loads, [token.target.module]);
+        let result = super::select_default(boundary, 32, CudaMath::Tf32, &mut fixture);
+        assert!(
+            matches!(
+                result,
+                Err(CudaError::MissingKernel {
+                    batch: 32,
+                    math: CudaMath::Tf32,
+                    ..
+                })
+            ),
+            "{name}: {result:?}"
+        );
+        assert!(
+            fixture.loads.is_empty(),
+            "{name}: an unapproved pin must not load"
+        );
     }
 }
 
@@ -2367,7 +2372,12 @@ fn target_only_tf32_segmentation_selects_every_stage_boundary() {
                 let PlanPin::Pinned(pin) = token.pin;
                 assert_eq!(pin.area(), area, "{cc:?} {name} b{batch}");
                 assert_eq!(token.math, CudaMath::Tf32);
-                assert!(Policy::approve_runtime(boundary, CudaMath::Tf32, pin).is_some());
+                assert!(
+                    super::Selection::Production
+                        .accuracy()
+                        .approve(boundary, CudaMath::Tf32, pin)
+                        .is_some()
+                );
                 if name == "sincnet.conv0.abs_pool" {
                     assert_eq!(pin, ConfigPin::Sinc(SincPin::ConvAbsPool));
                     assert_eq!(Policy::approve(boundary, CudaMath::Tf32, pin), None);
