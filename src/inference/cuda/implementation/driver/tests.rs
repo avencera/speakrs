@@ -1466,7 +1466,24 @@ fn measured_t4_recipe_contains_only_driver_kernel_choices() {
                 Selected::Library => counts.1 += 1,
                 Selected::Oxide(hybrid) => {
                     counts.0 += 1;
-                    assert_eq!(hybrid.pin, driver.pin, "{boundary} b{batch}");
+                    if boundary == BoundaryId::named("resnet.conv1") && matches!(batch, 16 | 32) {
+                        use crate::inference::cuda::candidate::{
+                            WideconvAlgorithm, WideconvConfig, WideconvPartition, WideconvPin,
+                            WideconvSplitCells,
+                        };
+                        assert_eq!(
+                            hybrid.pin,
+                            PlanPin::Pinned(ConfigPin::Wideconv(WideconvPin::Configured(
+                                WideconvConfig {
+                                    algorithm: WideconvAlgorithm::Spatial,
+                                    partition: WideconvPartition::Whole,
+                                    split_cells: WideconvSplitCells::All,
+                                }
+                            )))
+                        );
+                    } else {
+                        assert_eq!(hybrid.pin, driver.pin, "{boundary} b{batch}");
+                    }
                     assert_eq!(hybrid.target, driver.target);
                     assert_eq!(hybrid.evidence, TokenEvidence::Recipe(Recipe::TeslaT4));
                 }
@@ -2145,7 +2162,7 @@ fn production_measured_dense_heads_keep_only_their_exact_exceptions() {
 
 #[test]
 #[cfg(feature = "_cuda-libraries")]
-fn measured_pipeline_pins_change_only_the_unmeasured_4090_dense_head() {
+fn measured_pipeline_pins_change_only_the_4090_head_and_t4_large_stem() {
     use super::super::policy::RecipeMode;
     use crate::inference::cuda::candidate::SegdenseEntry;
 
@@ -2225,6 +2242,30 @@ fn measured_pipeline_pins_change_only_the_unmeasured_4090_dense_head() {
                         assert_eq!(after.entry(), SegdenseEntry::EmbedB32);
                         assert_eq!(after.splits(), Some(128));
                         changes += 1;
+                    } else if name == "Tesla T4"
+                        && boundary == BoundaryId::named("resnet.conv1")
+                        && matches!(batch, 16 | 32)
+                    {
+                        use crate::inference::cuda::candidate::{
+                            WideconvAlgorithm, WideconvConfig, WideconvPartition, WideconvPin,
+                            WideconvSplitCells,
+                        };
+                        for (pin, algorithm) in [
+                            (previous.pin, WideconvAlgorithm::WideStem),
+                            (current.pin, WideconvAlgorithm::Spatial),
+                        ] {
+                            assert_eq!(
+                                pin,
+                                PlanPin::Pinned(ConfigPin::Wideconv(WideconvPin::Configured(
+                                    WideconvConfig {
+                                        algorithm,
+                                        partition: WideconvPartition::Whole,
+                                        split_cells: WideconvSplitCells::All,
+                                    }
+                                )))
+                            );
+                        }
+                        changes += 1;
                     } else {
                         assert_eq!(
                             previous.pin, current.pin,
@@ -2236,7 +2277,7 @@ fn measured_pipeline_pins_change_only_the_unmeasured_4090_dense_head() {
         }
     }
     assert_eq!(
-        changes, 2,
-        "the 4090 head changes with either trunk FP16 guard state"
+        changes, 6,
+        "the 4090 head and T4 b16/b32 stem change with either trunk FP16 guard state"
     );
 }

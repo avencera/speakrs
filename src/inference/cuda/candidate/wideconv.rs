@@ -464,6 +464,22 @@ pub(crate) enum Pin {
 }
 
 impl Pin {
+    /// Exact T4 stem pins from the Library-inclusive PR 41 tune
+    pub(crate) fn measured_t4_stem(name: &str, batch: usize, math: CudaMath) -> Option<Self> {
+        // final41/evidence/tune-library/t4/head/tune.txt, Tesla T4, TF32 math:
+        // b16 default/fp32/Library 1.404/0.890/0.937 ms; b32 2.807/1.767/1.877 ms
+        // the approved FP32 spatial kernel is more exact and beats both alternatives
+        if math == CudaMath::Tf32 && name == "resnet.conv1" && matches!(batch, 16 | 32) {
+            return Some(Self::Configured(Config {
+                algorithm: Algorithm::Spatial,
+                partition: Partition::Whole,
+                split_cells: SplitCells::All,
+            }));
+        }
+
+        None
+    }
+
     /// Exact T4 FP32 fallback pins measured by ambitious/fp16 and PR 40 range-guard
     /// checks, independent of the current device selection rule
     pub(crate) fn measured_t4_fallback(name: &str, batch: usize, math: CudaMath) -> Option<Self> {

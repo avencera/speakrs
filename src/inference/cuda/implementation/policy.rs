@@ -197,6 +197,11 @@ impl Recipe {
     ) -> Option<ConfigPin> {
         self.fp16_pin(boundary, batch, math)
             .filter(|_| fp16.allows())
+            .or_else(|| match self {
+                Self::TeslaT4 => WideconvPin::measured_t4_stem(boundary.name(), batch, math)
+                    .map(ConfigPin::Wideconv),
+                _ => None,
+            })
     }
 
     /// Exact measured FP16 points, also used by builds without CUDA libraries

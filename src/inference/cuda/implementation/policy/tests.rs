@@ -472,6 +472,31 @@ fn a100_fp16_pins(recipe: Recipe) {
 }
 
 #[test]
+fn t4_stem_recipe_pins_the_measured_fp32_kernel_at_large_batches() {
+    use crate::inference::cuda::candidate::{ConfigPin, WideconvAlgorithm, WideconvPin};
+
+    let boundary = BoundaryId::named("resnet.conv1");
+    for batch in [1, 4, 8, 16, 32] {
+        for fp16 in [Fp16Policy::Allowed, Fp16Policy::Excluded] {
+            let pin = Recipe::TeslaT4.fixed_pin(boundary, batch, CudaMath::Tf32, fp16);
+            if matches!(batch, 16 | 32) {
+                let Some(ConfigPin::Wideconv(WideconvPin::Configured(config))) = pin else {
+                    panic!("stem b{batch}: {pin:?}")
+                };
+                assert_eq!(config.algorithm, WideconvAlgorithm::Spatial);
+                assert_eq!(config.partition.count(), 1);
+            } else {
+                assert_eq!(pin, None);
+            }
+        }
+        assert_eq!(
+            Recipe::TeslaT4.fixed_pin(boundary, batch, CudaMath::Fp32, Fp16Policy::Allowed),
+            None
+        );
+    }
+}
+
+#[test]
 fn t4_recipe_requires_its_exact_point_precision_and_batch_classes() {
     let device = Builder::new(ComputeCapability::new(7, 5))
         .multiprocessors(40)
