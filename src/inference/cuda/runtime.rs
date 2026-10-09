@@ -136,11 +136,6 @@ impl CudaRuntime {
                 "unset SPEAKRS_CUDA_FORCE_PTX_JIT before tuning",
             ));
         }
-        if matches!(kind, BenchKind::Library) && super::driver_only() {
-            return Err(super::tuning::invalid(
-                "this build has no Library candidate",
-            ));
-        }
         let mut runtime = Self::open(ordinal, PtxTier::from_env()?, false)?;
         runtime.force_library = false;
         runtime.tuning = Some(TuneControl::benchmark(

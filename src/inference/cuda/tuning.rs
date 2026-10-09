@@ -118,11 +118,11 @@ impl From<file::FileError> for CudaTuneError {
 /// The caller must serialize GPU benchmarking against other workloads.
 /// Set `dry_run` to keep the existing file unchanged.
 pub fn tune_cuda(options: &CudaTuneOptions) -> Result<CudaTuneReport, CudaTuneError> {
-    let runtime = CudaRuntime::for_tuning(options.device, BenchKind::Kernel)?;
+    let runtime = CudaRuntime::for_tuning(options.device, BenchKind::CatalogueSlot(0))?;
     let catalogue = Catalogue::new(runtime.device(), runtime.ptx_tier())?;
     let key = device_key(runtime.device(), Some(&catalogue))?;
     let path = file::path(runtime.device(), options.output_path.as_deref())?;
-    let measurements = bench::run(options, runtime)?;
+    let measurements = bench::run(options, runtime, &catalogue)?;
     let (rows, entries) = select_winners(measurements)?;
     let tuned = file::TuneFile::new(key.clone(), entries);
     // a writer and a reader share validation, so no emitted choice can bypass it
@@ -204,7 +204,12 @@ impl ApprovedChoice {
     pub(crate) fn label(&self) -> String {
         match self {
             Self::Library => "Library".into(),
-            Self::Kernel(config) => format!("{}/{}", config.module.area().name(), config.family),
+            Self::Kernel(config) => format!(
+                "{}/{} [{:?}]",
+                config.module.area().name(),
+                config.family,
+                config.pin
+            ),
         }
     }
 
@@ -268,17 +273,20 @@ impl Catalogue {
         Ok(Self(choices))
     }
 
+    fn benchmark_kinds(&self) -> impl Iterator<Item = BenchKind> {
+        let count = self.0.values().map(Vec::len).max().unwrap_or(0);
+        (0..count).map(BenchKind::CatalogueSlot)
+    }
+
     fn choices(&self, tuple: Tuple) -> &[ApprovedChoice] {
         self.0.get(&tuple).map_or(&[], Vec::as_slice)
     }
 }
 
-/// Benchmark families contain only catalogue choices, not arbitrary configurations
+/// Each pass selects one exact catalogue slot for every tuple
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum BenchKind {
-    Kernel,
-    Fp32,
-    Library,
+    CatalogueSlot(usize),
 }
 
 #[derive(Debug)]
@@ -350,11 +358,8 @@ impl TuneControl {
             TuneSelection::File(file) => file.choice(tuple),
             TuneSelection::Bench { kind, catalogue } => {
                 let choices = catalogue.choices(tuple);
-                match kind {
-                    BenchKind::Library => choices.iter().find(|choice| matches!(choice, ApprovedChoice::Library)),
-                    BenchKind::Kernel => choices.first(),
-                    BenchKind::Fp32 => choices.iter().find(|choice| matches!(choice, ApprovedChoice::Kernel(config) if config.family == "fp32")).or_else(|| choices.first()),
-                }.cloned()
+                let BenchKind::CatalogueSlot(index) = kind;
+                choices.get(*index).cloned()
             }
         }
     }
@@ -398,9 +403,10 @@ impl TuneControl {
         if !self.collecting.load(Ordering::Relaxed) {
             return run();
         }
-        let choice = self
-            .choice(boundary, batch, math)
-            .ok_or_else(|| invalid("no production-policy choice for boundary capture"))?;
+        let Some(choice) = self.choice(boundary, batch, math) else {
+            // shorter catalogues still execute the full model but add no duplicate timing
+            return run();
+        };
         runtime.synchronize()?;
         let context = runtime.context();
         let tracking = context.is_event_tracking();

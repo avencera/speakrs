@@ -3,7 +3,7 @@
 use cudarc::driver::sys::CUevent_flags;
 use tracing::info;
 
-use super::{BenchKind, BenchmarkMeasurement, BoundaryGraph, CudaTuneError, CudaTuneOptions};
+use super::{BenchmarkMeasurement, BoundaryGraph, Catalogue, CudaTuneError, CudaTuneOptions};
 use crate::inference::cuda::embedding::{
     EmbeddingBatch, MASK_FRAMES, ResNetEmbedding, SPEAKERS_PER_CHUNK,
 };
@@ -280,6 +280,7 @@ fn measure(models: &[CapturedModel<'_>]) -> Result<Vec<BenchmarkMeasurement>, Cu
 pub(super) fn run(
     options: &CudaTuneOptions,
     first_runtime: CudaRuntime,
+    catalogue: &Catalogue,
 ) -> Result<Vec<BenchmarkMeasurement>, CudaTuneError> {
     let segmentation_weights =
         SafetensorsFile::open(options.model_dir.join("segmentation-3.0.safetensors"))?;
@@ -289,10 +290,7 @@ pub(super) fn run(
             .join("wespeaker-multimask-tail.safetensors"),
     )?;
     let mut runtimes = vec![first_runtime];
-    for kind in [BenchKind::Fp32, BenchKind::Library] {
-        if matches!(kind, BenchKind::Library) && super::super::driver_only() {
-            continue;
-        }
+    for kind in catalogue.benchmark_kinds().skip(1) {
         runtimes.push(CudaRuntime::for_tuning(options.device, kind)?);
     }
 
