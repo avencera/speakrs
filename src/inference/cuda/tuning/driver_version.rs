@@ -1,4 +1,4 @@
-//! Driver identity from the driver, with file and CUDA API fallbacks
+//! Driver releases for tune keys, with API-only identities kept outside saved state
 
 use std::ffi::{CStr, c_char, c_uint};
 
@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::CudaTuneError;
 use crate::inference::cuda::CudaError;
 
-/// Source tags prevent a CUDA API level from aliasing a driver release
+/// Only a full driver release can identify saved measurements
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "source",
@@ -16,14 +16,27 @@ use crate::inference::cuda::CudaError;
     rename_all = "snake_case",
     deny_unknown_fields
 )]
-pub(super) enum DriverVersion {
+pub(super) enum DriverRelease {
     Nvml(String),
     Sysfs(String),
     Procfs(String),
-    CudaApi(i32),
 }
 
-impl DriverVersion {
+/// A working CUDA API does not imply that the driver release is readable
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum DriverIdentity {
+    Release(DriverRelease),
+    ApiOnly(i32),
+}
+
+impl DriverIdentity {
+    pub(super) fn require_release(self) -> Result<DriverRelease, CudaTuneError> {
+        match self {
+            Self::Release(release) => Ok(release),
+            Self::ApiOnly(cuda_api) => Err(CudaTuneError::DriverReleaseUnreadable { cuda_api }),
+        }
+    }
+
     pub(super) fn read() -> Result<Self, CudaTuneError> {
         Self::select(
             nvml_version,
@@ -38,19 +51,19 @@ impl DriverVersion {
         cuda: impl FnOnce() -> Result<i32, CudaTuneError>,
     ) -> Result<Self, CudaTuneError> {
         if let Some(version) = nvml().and_then(|text| first_line(&text)) {
-            return Ok(Self::Nvml(version));
+            return Ok(Self::Release(DriverRelease::Nvml(version)));
         }
         if let Some(version) = file("/sys/module/nvidia/version")
             .ok()
             .and_then(|text| first_line(&text))
         {
-            return Ok(Self::Sysfs(version));
+            return Ok(Self::Release(DriverRelease::Sysfs(version)));
         }
         if let Some(version) = file("/proc/driver/nvidia/version")
             .ok()
             .and_then(|text| first_line(&text))
         {
-            return Ok(Self::Procfs(version));
+            return Ok(Self::Release(DriverRelease::Procfs(version)));
         }
 
         let version = cuda()?;
@@ -60,7 +73,7 @@ impl DriverVersion {
             ));
         }
 
-        Ok(Self::CudaApi(version))
+        Ok(Self::ApiOnly(version))
     }
 }
 

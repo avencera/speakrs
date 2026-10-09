@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::driver_version::DriverVersion;
+use super::driver_version::DriverRelease;
 use super::{ApprovedChoice, Catalogue, LibraryVersions, Tuple};
 use crate::inference::cuda::CudaMath;
 use crate::inference::cuda::device::DeviceAttributes;
@@ -21,7 +21,7 @@ pub(super) struct DeviceKey {
     pub(super) device_name: String,
     pub(super) capability: [u32; 2],
     pub(super) sm_count: u32,
-    pub(super) driver_version: DriverVersion,
+    pub(super) driver_version: DriverRelease,
     pub(super) libraries: LibraryVersions,
     pub(super) speakrs_version: String,
     pub(super) artifact_version: String,

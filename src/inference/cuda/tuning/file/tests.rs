@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::{ChoiceKey, DeviceKey, Entry, FileError, MathKey, TuneFile, read};
 use crate::inference::cuda::device::test_support::Builder;
 use crate::inference::cuda::implementation::BoundaryId;
-use crate::inference::cuda::tuning::driver_version::DriverVersion;
+use crate::inference::cuda::tuning::driver_version::DriverRelease;
 use crate::inference::cuda::tuning::{Catalogue, Tuple};
 use crate::inference::cuda::{ComputeCapability, CudaMath, PtxTier};
 
@@ -14,7 +14,7 @@ fn key() -> DeviceKey {
         device_name: "NVIDIA GeForce RTX 4060 Ti".into(),
         capability: [8, 9],
         sm_count: 34,
-        driver_version: DriverVersion::Nvml("595.91.07".into()),
+        driver_version: DriverRelease::Nvml("595.91.07".into()),
         libraries: crate::inference::cuda::tuning::LibraryVersions::DriverOnly,
         speakrs_version: "0.6.0".into(),
         artifact_version: "exact-artifact-and-catalogue-digest".into(),
@@ -74,11 +74,11 @@ fn exact_key_and_execution_pin_are_required() {
             0 => wrong.device_name.push_str(" other"),
             1 => wrong.capability = [8, 6],
             2 => wrong.sm_count = 35,
-            3 => wrong.driver_version = DriverVersion::Nvml("595.91.08".into()),
+            3 => wrong.driver_version = DriverRelease::Nvml("595.91.08".into()),
             4 => wrong.speakrs_version = "0.7.0".into(),
             5 => wrong.artifact_version.push_str(" changed"),
             6 => wrong.accuracy_policy.push_str(" changed"),
-            7 => wrong.driver_version = DriverVersion::Sysfs("595.91.07".into()),
+            7 => wrong.driver_version = DriverRelease::Sysfs("595.91.07".into()),
             _ => unreachable!(),
         }
         assert!(matches!(
@@ -271,5 +271,59 @@ fn numerical_library_versions_are_required_even_for_a_kernel_winner() {
             .clone()
             .validate(&driver_file.key, &catalogue)
             .is_ok()
+    );
+}
+
+#[test]
+fn api_only_identity_cannot_key_writes_or_loads() {
+    use crate::inference::cuda::tuning::driver_version::DriverIdentity;
+    use crate::inference::cuda::tuning::{CudaTuneError, TuneControl};
+
+    let directory =
+        std::env::temp_dir().join(format!("speakrs-api-only-tune-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("device.json");
+    let make_key = || -> Result<DeviceKey, CudaTuneError> {
+        Ok(DeviceKey {
+            driver_version: DriverIdentity::ApiOnly(13000).require_release()?,
+            ..key()
+        })
+    };
+    let write = || -> Result<(), CudaTuneError> {
+        TuneFile::new(make_key()?, Vec::new()).write(&path)?;
+        Ok(())
+    };
+    assert!(matches!(
+        write(),
+        Err(CudaTuneError::DriverReleaseUnreadable { cuda_api: 13000 })
+    ));
+    assert!(!path.exists());
+
+    let (catalogue, file) = fixture();
+    let mut old = serde_json::to_value(file).unwrap();
+    old["key"]["driver_version"] = serde_json::json!({"source": "cuda_api", "version": 13000});
+    std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+    let load = TuneControl::load_file(&path, || Ok((make_key()?, catalogue)));
+    assert!(matches!(
+        load,
+        Err(CudaTuneError::DriverReleaseUnreadable { cuda_api: 13000 })
+    ));
+    // even a readable release cannot accept an old API-level key
+    assert!(matches!(read(&path), Err(FileError::Json(_))));
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn a_missing_tune_file_does_not_query_the_driver_or_libraries() {
+    use crate::inference::cuda::tuning::TuneControl;
+    let path = std::env::temp_dir().join(format!(
+        "speakrs-missing-driver-key-{}.json",
+        std::process::id()
+    ));
+    assert!(!path.exists());
+    assert!(
+        TuneControl::load_file(&path, || panic!("absent files must not query identity"))
+            .unwrap()
+            .is_none()
     );
 }
