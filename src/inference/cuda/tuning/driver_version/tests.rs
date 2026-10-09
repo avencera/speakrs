@@ -1,6 +1,6 @@
 //! Host-only checks of driver-source selection and identity
 
-use super::{CudaTuneError, DriverVersion};
+use super::{CudaTuneError, DriverIdentity, DriverRelease};
 
 fn missing() -> std::io::Result<String> {
     Err(std::io::ErrorKind::NotFound.into())
@@ -8,15 +8,18 @@ fn missing() -> std::io::Result<String> {
 
 #[test]
 fn nvml_release_wins_without_reading_files_or_cuda() {
-    let version = DriverVersion::select(
+    let version = DriverIdentity::select(
         || Some("580.95.05".into()),
         |_| panic!("NVML must avoid file reads"),
         || panic!("NVML must avoid the CUDA fallback"),
     )
     .unwrap();
-    assert_eq!(version, DriverVersion::Nvml("580.95.05".into()));
     assert_eq!(
-        serde_json::to_value(&version).unwrap(),
+        version.clone().require_release().unwrap(),
+        DriverRelease::Nvml("580.95.05".into())
+    );
+    assert_eq!(
+        serde_json::to_value(version.require_release().unwrap()).unwrap(),
         serde_json::json!({"source": "nvml", "version": "580.95.05"})
     );
 }
@@ -24,7 +27,7 @@ fn nvml_release_wins_without_reading_files_or_cuda() {
 #[test]
 fn missing_nvml_uses_sysfs_before_procfs() {
     let mut paths = Vec::new();
-    let version = DriverVersion::select(
+    let version = DriverIdentity::select(
         || None,
         |path| {
             paths.push(path.to_owned());
@@ -33,7 +36,10 @@ fn missing_nvml_uses_sysfs_before_procfs() {
         || panic!("a module release must avoid the CUDA fallback"),
     )
     .unwrap();
-    assert_eq!(version, DriverVersion::Sysfs("580.95.05".into()));
+    assert_eq!(
+        version.require_release().unwrap(),
+        DriverRelease::Sysfs("580.95.05".into())
+    );
     assert_eq!(paths, ["/sys/module/nvidia/version"]);
 }
 
@@ -42,7 +48,7 @@ fn unavailable_sysfs_uses_the_procfs_first_line() {
     let first_line = "NVRM version: NVIDIA UNIX x86_64 Kernel Module 580.95.05";
     for sysfs in [None, Some(" \n")] {
         let mut paths = Vec::new();
-        let version = DriverVersion::select(
+        let version = DriverIdentity::select(
             || None,
             |path| {
                 paths.push(path.to_owned());
@@ -59,7 +65,10 @@ fn unavailable_sysfs_uses_the_procfs_first_line() {
             || panic!("procfs must avoid the CUDA fallback"),
         )
         .unwrap();
-        assert_eq!(version, DriverVersion::Procfs(first_line.into()));
+        assert_eq!(
+            version.require_release().unwrap(),
+            DriverRelease::Procfs(first_line.into())
+        );
         assert_eq!(
             paths,
             ["/sys/module/nvidia/version", "/proc/driver/nvidia/version"]
@@ -71,17 +80,17 @@ fn unavailable_sysfs_uses_the_procfs_first_line() {
 fn missing_or_empty_sources_use_the_cuda_api_level() {
     for nvml in [None, Some(" \n")] {
         for file in [None, Some("\n")] {
-            let version = DriverVersion::select(
+            let version = DriverIdentity::select(
                 || nvml.map(str::to_owned),
                 |_| file.map(str::to_owned).map_or_else(missing, Ok),
                 || Ok(13000),
             )
             .unwrap();
-            assert_eq!(version, DriverVersion::CudaApi(13000));
-            assert_eq!(
-                serde_json::to_value(version).unwrap(),
-                serde_json::json!({"source": "cuda_api", "version": 13000})
-            );
+            assert_eq!(version, DriverIdentity::ApiOnly(13000));
+            assert!(matches!(
+                version.require_release(),
+                Err(CudaTuneError::DriverReleaseUnreadable { cuda_api: 13000 })
+            ));
         }
     }
 }
@@ -89,15 +98,14 @@ fn missing_or_empty_sources_use_the_cuda_api_level() {
 #[test]
 fn equal_text_from_different_sources_never_matches() {
     let versions = [
-        DriverVersion::Nvml("13000".into()),
-        DriverVersion::Sysfs("13000".into()),
-        DriverVersion::Procfs("13000".into()),
-        DriverVersion::CudaApi(13000),
+        DriverRelease::Nvml("13000".into()),
+        DriverRelease::Sysfs("13000".into()),
+        DriverRelease::Procfs("13000".into()),
     ];
     for (index, version) in versions.iter().enumerate() {
         let json = serde_json::to_vec(version).unwrap();
         assert_eq!(
-            serde_json::from_slice::<DriverVersion>(&json).unwrap(),
+            serde_json::from_slice::<DriverRelease>(&json).unwrap(),
             *version
         );
         for other in &versions[index + 1..] {
@@ -108,7 +116,7 @@ fn equal_text_from_different_sources_never_matches() {
 
 #[test]
 fn an_unavailable_or_invalid_cuda_api_version_returns_the_error() {
-    let result = DriverVersion::select(
+    let result = DriverIdentity::select(
         || None,
         |_| missing(),
         || Err(CudaTuneError::Invalid("driver query failed".into())),
@@ -117,7 +125,7 @@ fn an_unavailable_or_invalid_cuda_api_version_returns_the_error() {
         matches!(result, Err(CudaTuneError::Invalid(reason)) if reason == "driver query failed")
     );
     for version in [0, -1] {
-        let result = DriverVersion::select(|| None, |_| missing(), || Ok(version));
+        let result = DriverIdentity::select(|| None, |_| missing(), || Ok(version));
         assert!(
             matches!(result, Err(CudaTuneError::Invalid(reason)) if reason == "CUDA driver API version is not positive")
         );

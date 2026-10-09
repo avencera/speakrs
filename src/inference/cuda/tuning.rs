@@ -96,6 +96,14 @@ pub enum CudaTuneError {
     /// File-system failure
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// A CUDA API level cannot identify driver patch releases for saved measurements
+    #[error(
+        "CUDA tuning: NVIDIA driver release is unreadable; CUDA API level {cuda_api} cannot identify driver patch releases"
+    )]
+    DriverReleaseUnreadable {
+        /// Available CUDA API level, not a driver release
+        cuda_api: i32,
+    },
     /// Invalid configuration, timing or tuning-file data
     #[error("CUDA tuning: {0}")]
     Invalid(String),
@@ -119,8 +127,9 @@ impl From<file::FileError> for CudaTuneError {
 /// Set `dry_run` to keep the existing file unchanged.
 pub fn tune_cuda(options: &CudaTuneOptions) -> Result<CudaTuneReport, CudaTuneError> {
     let runtime = CudaRuntime::for_tuning(options.device, BenchKind::CatalogueSlot(0))?;
+    let driver = driver_version::DriverIdentity::read()?.require_release()?;
     let catalogue = Catalogue::new(runtime.device(), runtime.ptx_tier())?;
-    let key = device_key(&runtime, Some(&catalogue))?;
+    let key = device_key(&runtime, Some(&catalogue), driver)?;
     let path = file::path(runtime.device(), options.output_path.as_deref())?;
     let measurements = bench::run(options, runtime, &catalogue)?;
     let (rows, entries) = select_winners(measurements)?;
@@ -335,12 +344,16 @@ impl TuneControl {
         let load = || -> Result<Option<Self>, CudaTuneError> {
             // computing only the path does not hash artifacts or load candidate modules
             let path = file::path(device, None)?;
-            let Some(file) = file::read(&path)? else {
+            let Some(file) = Self::load_file(&path, || {
+                let driver = driver_version::DriverIdentity::read()?.require_release()?;
+                let catalogue = Catalogue::new(device, tier)?;
+                let expected = device_key(runtime, Some(&catalogue), driver)?;
+                Ok((expected, catalogue))
+            })?
+            else {
                 return Ok(None);
             };
-            let catalogue = Catalogue::new(device, tier)?;
-            let expected = device_key(runtime, Some(&catalogue))?;
-            let selection = TuneSelection::File(file.validate(&expected, &catalogue)?);
+            let selection = TuneSelection::File(file);
             tracing::info!(path = %path.display(), "Loaded CUDA tune file");
             Ok(Some(Self {
                 selection,
@@ -350,11 +363,34 @@ impl TuneControl {
         };
         match load() {
             Ok(tuning) => tuning,
+            Err(error @ CudaTuneError::DriverReleaseUnreadable { .. }) => {
+                tracing::info!(
+                    "Ignoring CUDA tune file: {error}; using recipes and class defaults"
+                );
+                None
+            }
             Err(error) => {
                 tracing::warn!("Ignoring CUDA tune file: {error}");
                 None
             }
         }
+    }
+
+    fn load_file(
+        path: &std::path::Path,
+        prepare: impl FnOnce() -> Result<(file::DeviceKey, Catalogue), CudaTuneError>,
+    ) -> Result<Option<file::ValidatedFile>, CudaTuneError> {
+        if !path.try_exists()? {
+            return Ok(None);
+        }
+        // check release availability before decoding even an old API-only file
+        let (expected, catalogue) = prepare()?;
+        file::read(path)?
+            .map(|file| {
+                file.validate(&expected, &catalogue)
+                    .map_err(CudaTuneError::from)
+            })
+            .transpose()
     }
 
     pub(crate) fn choice(
@@ -558,6 +594,7 @@ fn select_winners(
 fn device_key(
     runtime: &CudaRuntime,
     catalogue: Option<&Catalogue>,
+    driver: driver_version::DriverRelease,
 ) -> Result<file::DeviceKey, CudaTuneError> {
     let device = runtime.device();
     let cc = device.capability();
@@ -565,7 +602,7 @@ fn device_key(
         device_name: device.name().into(),
         capability: [cc.major, cc.minor],
         sm_count: device.multiprocessors().get(),
-        driver_version: driver_version::DriverVersion::read()?,
+        driver_version: driver,
         libraries: runtime.tuning_library_versions()?,
         speakrs_version: env!("CARGO_PKG_VERSION").into(),
         artifact_version: String::new(),
