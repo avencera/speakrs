@@ -244,155 +244,88 @@
 //!
 //! # Features and build notes
 //!
-//! Enable at least one inference backend; the build fails with a clear error otherwise:
+//! Enable the backend feature for your platform. The build fails with a clear error
+//! if none is enabled.
 //!
-//! - `coreml`: native CoreML backend on macOS, without ONNX Runtime
-//! - `cpu`: native Rust CPU backend, without ONNX Runtime
-//! - `cuda`: Linux-only native NVIDIA backend with speakrs kernels on every GPU,
-//!   without ONNX Runtime. cuDNN and cuBLAS load only for a fallback or an explicit choice
-//! - `migraphx`: AMD GPU backend via ONNX Runtime MIGraphX
+//! | Platform | Feature | Notes |
+//! |---|---|---|
+//! | macOS | `coreml` | Native CoreML, no ONNX Runtime |
+//! | Any CPU | `cpu` | Native Rust, no ONNX Runtime |
+//! | Linux with an NVIDIA GPU | `cuda`, or a GPU-specific feature below | Native CUDA, no ONNX Runtime or CUDA toolkit |
+//! | Linux with an AMD GPU | `migraphx` | ONNX Runtime MIGraphX; add `load-dynamic` |
 //!
-//! Other features:
+//! The default `online` feature downloads models with `ModelManager`.
+//! `load-dynamic` loads ONNX Runtime at run time for `migraphx` or the external ONNX
+//! session helper. The native CPU backend doesn't need it. The ONNX Runtime
+//! dependency (`ort` 2.0.0-rc.13) is still a pre-release.
 //!
-//! - `online` (default): model download via `ModelManager`
-//! - `load-dynamic`: load ONNX Runtime dynamically for MIGraphX or the external ONNX session
-//!   helper; use it with `migraphx` or `cpu`. Native CPU inference does not load this library
-//! - `cuda-sm75`, `cuda-sm80`, `cuda-sm90`, `cuda-sm120`: driver-only targets for
-//!   Turing, Ampere/Ada, Hopper, and consumer Blackwell. Each embeds every area's best
-//!   shipped kernel variant. These features do not include cuDNN or cuBLAS
-//! - `cuda-rtx20`: RTX 20 (Turing); `cuda-rtx30`: RTX 30 (Ampere);
-//!   `cuda-rtx40`: RTX 40 (Ada); `cuda-a100`: A100 (Ampere);
-//!   `cuda-rtx50`: RTX 50 (consumer Blackwell)
+//! ## NVIDIA GPUs
 //!
-//! CUDA is not in `default`, because the backend runs only on Linux. For a driver-only
-//! build, use `speakrs = { default-features = false, features = ["cuda-rtx50"] }`.
-//! Features are additive: adding `cuda` also adds cuDNN and cuBLAS. A target-only model
-//! load returns a typed error with the boundary, batch and math if a kernel is missing.
+//! The CUDA backend runs speakrs's own GPU kernels on Linux. It works on any NVIDIA
+//! GPU from the RTX 20 series and T4 onward, and you don't need the CUDA toolkit to
+//! build or run it.
 //!
-//! The CUDA backend builds without a CUDA toolkit. It needs an NVIDIA driver and a
-//! Turing (compute capability 7.5) or newer GPU. The `cuda` feature also needs cuDNN 9
-//! and cuBLAS when a selected plan uses them, and NVRTC for `PersistDynamic` LSTM.
-//! CUDA modes use `segmentation-3.0.safetensors` and
-//! `wespeaker-multimask-tail.safetensors`. `RuntimeConfig` selects precision and graphs.
-//! `SPEAKRS_CUDA_PTX_TIER=sm75` limits the kernel tier. The `cuda` build uses
-//! speakrs kernels on every GPU, including devices with no measured recipe. It embeds
-//! all target kernels and keeps cuDNN and cuBLAS for fallback. Selection uses this order:
-//! **matching user tune file > built-in kernel recipe > device-class or portable kernel default > Library fallback**.
-//! Library is used only when a kernel refuses a layer because of a capability limit,
-//! its weight contract, or an unimplemented geometry, or when no kernel covers the
-//! layer's arithmetic mode. Invalid geometry, CUDA errors, and artifact load errors
-//! are returned to the caller. A tune file can explicitly select Library.
+//! **Not sure which GPU you'll run on? Use `cuda`.** It includes kernels for every
+//! supported GPU generation, and keeps cuDNN 9 and cuBLAS 12 as a fallback, so
+//! those libraries need to be installed (about 2 GB).
 //!
-//! Built-in recipes contain kernel settings only. The RTX 4060 Ti (cc 8.9, 34 SMs)
-//! and RTX 5060 Ti (cc 12.0, 36 SMs) recipes use exact device names. With FP32
-//! segmentation and TF32 embedding, they use the driver-only kernel settings at
-//! embedding batches 1, 4, 8, 16, and 32. The 4060 Ti uses FP16 same-channel trunk
-//! kernels for C32/C64 at every batch and for C128/C256 from batch 8. Its FP32
-//! SincNet recipe also applies outside this whole-pipeline precision mode.
+//! ```toml
+//! speakrs = { version = "0.6", features = ["cuda"] }
+//! ```
 //!
-//! The Tesla T4 recipe (cc 7.5, 40 SMs, exact device name) uses kernel settings
-//! at all pipeline batch classes, including FP16 same-channel trunk kernels in
-//! TF32 embedding mode. It does not select Library for small per-layer timing wins.
-//! The A100 PCIe-40GB and SXM4-40GB recipes (cc 8.0, 108 SMs, exact device names)
-//! use FP32 segmentation and TF32 embedding. Other devices use their kernel defaults.
-//! Measured speed evidence is reported but is not required to select a kernel.
-//! Target-only builds remain driver-only and return typed errors instead of Library
-//! fallbacks.
-//! `SPEAKRS_CUDA_FORCE_LIBRARY=1` makes a `cuda` build use Library at each replaceable
-//! boundary, even when a tune file exists. The model-load log gives the source for
-//! each boundary: tune file, recipe, default, or library.
+//! **Know your GPU? Use its feature for fewer dependencies and a smaller install.**
+//! A GPU-specific build needs only the NVIDIA driver: no cuDNN, no cuBLAS and no
+//! CUDA toolkit. That saves about 2 GB of libraries on every machine or container
+//! image (cuDNN 9 is about 1.2 GB and cuBLAS 12 about 0.8 GB as NVIDIA ships them).
+//! On the GPUs we tested, these builds run within a few percent of `cuda`, and
+//! often faster.
+//!
+//! | Your GPU | Feature |
+//! |---|---|
+//! | RTX 20 series, T4 | `cuda-rtx20` |
+//! | RTX 30 series, A10, other Ampere | `cuda-rtx30` |
+//! | RTX 40 series, L4, L40S, other Ada | `cuda-rtx40` |
+//! | A100 | `cuda-a100` |
+//! | H100 | `cuda-sm90` |
+//! | RTX 50 series | `cuda-rtx50` |
+//!
+//! ```toml
+//! speakrs = { version = "0.6", features = ["cuda-rtx40"] }
+//! ```
 //!
 //! ### Tested NVIDIA GPUs
 //!
-//! These end-to-end results use a 10-file VoxConverse subset (about 1.9 hours of
-//! audio), FP32 segmentation and TF32 embedding. RTFx is audio duration divided by
-//! wall time, so higher is faster. Each figure is the median of three alternating
-//! rounds. The T4 and RTX 4090 were measured on the final code, and the A100, L4
-//! and A10 on an earlier revision of it. The RTX 4090 runs requested 16 CPU cores
-//! on Beam; the other rows used a two-core CPU limit on Modal. These are measured
-//! results, not guarantees for other hosts.
+//! Real-time factor (RTFx) is audio length divided by processing time, so 965x
+//! means an hour of audio takes about 4 seconds. These runs used a 10-file
+//! VoxConverse subset:
 //!
-//! | GPU | `cuda` RTFx | Driver-only RTFx |
+//! | GPU | `cuda` | GPU-specific build |
 //! |---|---:|---:|
-//! | T4 | 197× | 198× |
-//! | A100 40 GB | 752× | 733× |
-//! | L4 | 285× | 286× |
-//! | A10 | 404× | 405× |
-//! | RTX 4090 | 965× | 1002× |
+//! | T4 | 197x | 198x |
+//! | A10 | 404x | 405x |
+//! | L4 | 285x | 286x |
+//! | A100 40 GB | 752x | 733x |
+//! | RTX 4090 | 965x | 1002x |
 //!
-//! The RTX 4060 Ti and RTX 5060 Ti also have measured kernel recipes. On the same
-//! subset, driver-only builds were 1.6× faster than cuDNN and cuBLAS on the RTX 4090
-//! and L4, 2.0× on the A10, and 1.4× on the H100 PCIe. The H100 has no tuned
-//! recipe: it is faster than the libraries end to end, but some individual layers
-//! are slower.
+//! The RTX 4090 runs had 16 CPU cores and the others had 2. The RTX 4060 Ti and
+//! RTX 5060 Ti also have tuned kernel profiles. On the same subset, speakrs's own
+//! kernels were 1.4x to 2.0x faster than cuDNN and cuBLAS on the RTX 4090, L4, A10
+//! and H100. See [benchmarks/](https://github.com/avencera/speakrs/tree/master/benchmarks)
+//! for full results across all datasets.
 //!
-//! Other Turing or newer GPUs use device-class defaults. `speakrs cuda tune`
-//! measures and saves the fastest kernels for the current device; add
-//! `--include-library` to also compare with cuDNN and cuBLAS.
+//! ### Getting the most out of other GPUs
 //!
-//! The libraries still win the layers below, each by 2–8 µs. This doesn't change
-//! end-to-end speed.
-//!
-//! | GPU | Layer | Batch | speakrs | cuDNN/cuBLAS |
-//! |---|---|---:|---:|---:|
-//! | T4 | `layer4.0.shortcut` | 4 | 149 µs | 141 µs |
-//! | T4 | `linear0` / `linear1` (FP32) | 1 | 18 / 13 µs | 15 / 11 µs |
-//! | A100 | `layer4.0.conv1` | 4 | 59 µs | 57 µs |
-//! | L4, A10, RTX 4090 | `seg_1` | 32 | 31 / 42 / 15 µs | 28 / 37 / 13 µs |
-//!
-//! ### CUDA tuning
-//!
-//! Build the opt-in command on Linux:
+//! GPUs without a built-in profile use good defaults. To get the best speed on
+//! yours, run the tuner once. It measures the kernels on your GPU and saves the
+//! fastest choices, which later runs load automatically:
 //!
 //! ```sh
 //! cargo build --release --no-default-features --features cuda --bin speakrs
-//! ./target/release/speakrs cuda tune --models-dir /path/to/models --dry-run
 //! ./target/release/speakrs cuda tune --models-dir /path/to/models
 //! ```
 //!
-//! The command uses real model weights and shapes. It measures approved kernel
-//! configurations at the pipeline batch sizes. Use `--include-library` to also time
-//! Library in a `cuda` build. Per-layer times do not include library load or handle
-//! initialization costs. It uses
-//! warm-up passes, alternating candidate order, and median CUDA-event times. The
-//! summary table shows each candidate and marks the selected choice. Tuning does not
-//! change accuracy rules or precision. The defaults are FP32 segmentation, FP32
-//! filterbank, and TF32 embedding. Use `--segmentation-math fp32|tf32` and
-//! `--embedding-math fp32|tf32` to match another pipeline configuration. Use
-//! `--device N` to select a device. Run tuning when other GPU work is stopped.
-//!
-//! A target-only build, such as `--features cuda-rtx40`, measures kernels only.
-//! Only fixed pins with reviewed end-to-end accuracy are eligible. The tuner
-//! lists FP16 and non-FP16 pins as separate choices and measures each approved
-//! choice. FP16 is eligible only in TF32 mode, including on supported devices
-//! without an FP16 startup recipe. Recipes remain startup defaults, not limits
-//! on the tuning choices. Timing and edited JSON cannot approve other algorithms.
-//! FP32 mode accepts direct FP32 algorithms. TF32 mode also accepts direct TF32
-//! algorithms, staged one-product Winograd, C64 FFMA Winograd, and FP16 trunk
-//! algorithms. A target-only tuner returns an error when a complete model boundary
-//! has no approved choice. A hybrid build can use Library for such a boundary only with
-//! `--include-library`.
-//! The tuner measures embedding trunk batches 1, 4, 8, 16, and 32. Segmentation
-//! and embedding-head choices use batches 1 and 32. Filterbank uses batches 1
-//! through 32. The exact device and build key rejects stale artifact bytes.
-//! Arbitrary configuration pins cannot be selected by editing JSON. Tuning does
-//! not approve new kernels or change the configured precision.
-//!
-//! The file is saved under `$XDG_CONFIG_HOME/speakrs/`, or
-//! `$HOME/.config/speakrs/`, with a per-device name. Use `--output PATH` to change
-//! that location, then set `SPEAKRS_CUDA_TUNE_FILE=PATH` when loading a model.
-//! The same environment variable can set the tuning output path. `--dry-run`
-//! measures and prints the table without writing or changing a file.
-//!
-//! A file is used only when the device name, compute capability, SM count, NVIDIA
-//! driver release, cuDNN and cuBLAS versions (or driver-only mode), speakrs version,
-//! embedded artifact digest, and accuracy-policy version all match. A bad key or
-//! row rejects the complete file; selection then uses recipes and defaults.
-//! Missing rows use the normal fallback. There is no automatic tuning at startup.
-//! The library API is `speakrs::inference::cuda::{tune_cuda, CudaTuneOptions}`.
-//!
-//! The ONNX Runtime dependency for `migraphx` and the optional external session helper
-//! (`ort` 2.0.0-rc.13) is still pre-release.
+//! The [CUDA backend details](https://github.com/avencera/speakrs/blob/master/docs/cuda.md)
+//! cover kernel selection, built-in profiles, tuning options and debugging settings.
 //!
 //! # Public API
 //!
