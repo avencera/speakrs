@@ -129,16 +129,17 @@ pub(crate) use sinc::Oxide as SincOxide;
 // the GPU development checks force selections made for other devices
 #[cfg(all(test, feature = "_cuda-libraries"))]
 pub(crate) use lstmproj::RecurrencePlan;
+#[cfg(all(test, feature = "_cuda-libraries"))]
+pub(crate) use wideconv::Device as WideconvDevice;
 #[cfg(test)]
 pub(crate) use wideconv::Fp16Tiles as WideconvFp16Tiles;
 pub(crate) use wideconv::{
     Algorithm as WideconvAlgorithm, FP16_OPERAND_LIMIT, Fp16Policy,
     TensorKernel as WideconvTensorKernel, WinogradProducts as WideconvProducts,
 };
-#[cfg(all(test, feature = "_cuda-libraries"))]
+#[cfg(all(test, any(feature = "_cuda-libraries", feature = "cuda-sm80")))]
 pub(crate) use wideconv::{
-    Config as WideconvConfig, Device as WideconvDevice, Partition as WideconvPartition,
-    SplitCells as WideconvSplitCells,
+    Config as WideconvConfig, Partition as WideconvPartition, SplitCells as WideconvSplitCells,
 };
 pub(crate) use wideconv::{Oxide as WideconvOxide, Pin as WideconvPin};
 
