@@ -32,6 +32,9 @@
 #[cfg(feature = "tier-sm80")]
 use cuda_device::DynamicSharedArray;
 use cuda_device::shared::cvta_generic_to_shared_u32;
+#[cfg(feature = "tier-sm80")]
+use cuda_device::vector::F32x2;
+use cuda_device::vector::F32x4;
 use cuda_device::{DisjointSlice, SharedArray, kernel, launch_bounds, ptx_asm, thread, warp};
 
 /// Output channels of both segmentation convolutions
@@ -239,17 +242,7 @@ unsafe fn ldg1(pointer: *const f32) -> f32 {
 unsafe fn stg4(pointer: *mut f32, value: [f32; 4]) {
     // safety: the caller passes an aligned pointer to four writable floats that no
     // other thread writes
-    unsafe {
-        ptx_asm!(
-            "{ .reg .u64 g; cvta.to.global.u64 g, %0; st.global.v4.f32 [g], {%1, %2, %3, %4}; }",
-            in("l") pointer as u64,
-            in("f") value[0],
-            in("f") value[1],
-            in("f") value[2],
-            in("f") value[3],
-            clobber("memory"),
-        );
-    }
+    unsafe { *(pointer as *mut F32x4) = F32x4::new(value) };
 }
 
 /// Copies 16 bytes from global to shared memory without a register round trip,
@@ -474,15 +467,7 @@ fn mma16(acc: [f32; 4], a: [u32; 4], b: [u32; 2]) -> [f32; 4] {
 unsafe fn stg2(pointer: *mut f32, value: [f32; 2]) {
     // safety: the caller passes an aligned pointer to two writable floats that no
     // other thread writes
-    unsafe {
-        ptx_asm!(
-            "{ .reg .u64 g; cvta.to.global.u64 g, %0; st.global.v2.f32 [g], {%1, %2}; }",
-            in("l") pointer as u64,
-            in("f") value[0],
-            in("f") value[1],
-            clobber("memory"),
-        );
-    }
+    unsafe { *(pointer as *mut F32x2) = F32x2::new(value) };
 }
 
 /// `x` for non-negative values and NaN, `x * slope` otherwise, as the library epilogue

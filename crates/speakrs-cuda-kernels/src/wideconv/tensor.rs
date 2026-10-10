@@ -92,6 +92,7 @@ pub fn spk_wideconv_pack_tc(weight: &[f32], cin: u32, cout: u32, mut packed: Dis
 #[cfg(feature = "tier-sm80")]
 pub(super) mod ops {
     use cuda_device::ptx_asm;
+    use cuda_device::vector::F32x2;
 
     /// Starts a 4-byte asynchronous copy; an invalid source writes a zero instead
     #[inline(always)]
@@ -263,13 +264,7 @@ pub(super) mod ops {
     pub(crate) unsafe fn store2(pointer: *mut f32, value: [f32; 2]) {
         // safety: the caller passes an aligned pair that only this lane writes
         unsafe {
-            ptx_asm!(
-                "{ .reg .u64 g; cvta.to.global.u64 g, %0; st.global.v2.f32 [g], {%1, %2}; }",
-                in("l") pointer as u64,
-                in("f") value[0],
-                in("f") value[1],
-                clobber("memory"),
-            );
+            *(pointer as *mut F32x2) = F32x2::new(value);
         }
     }
 
