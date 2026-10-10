@@ -1,33 +1,29 @@
 # Changelog
 
-## [unreleased]
+## [0.6.0] - 2026-10-09
 
+- Make ONNX Runtime optional (breaking): no inference backend is enabled by default, so enable `coreml` (macOS), `cuda` (NVIDIA), `migraphx` (AMD), or the new `cpu` feature; a build without one fails with a compile error naming these choices, and a `coreml`-only build no longer compiles, links, or downloads ONNX Runtime
 - Run `ExecutionMode::Cpu` with native Rust PyanNet, WeSpeaker, and filterbank models instead of ONNX Runtime (breaking); the `cpu` feature no longer compiles, links, or downloads ONNX Runtime, and CPU shared clones reuse immutable weights with private workspaces
 - Load the two native safetensors weight files, PLDA files, and embedding metadata for CPU mode; canonical ONNX paths remain family selectors, but arbitrary ONNX models are not supported. MIGraphX still uses ONNX Runtime, and `load-dynamic` retains the optional external ONNX session helpers
-
-- Use the qualified cuda-oxide ResNet, LSTM, and SincNet kernels at their tested layer, batch, and math combinations; keep cuDNN for every other combination and keep the existing CUDA runtime defaults
-- Add a locked CUDA qualification harness with content-addressed assets stored outside the source tree
-
-- Run the GPU benchmark without S3 credentials: fetch public models and datasets, keep results locally, and print DER and RTFx in the captured log
-
-- Run `ExecutionMode::Cuda` and `CudaFast` on a native NVIDIA backend instead of ONNX Runtime (breaking): the `cuda` feature no longer enables ONNX Runtime, and builds without a CUDA toolkit because it loads the driver, cuBLAS, and cuDNN 9 at run time; it needs a Turing (compute capability 7.5) or newer GPU. The filterbank, ResNet34 embedding, and segmentation run on the GPU with cuBLAS, cuDNN, and speakrs kernels, and the filterbank features stay on the device
+- Require the `cpu` feature for `ExecutionMode::Cpu`, including `SegmentationModel::new` and `EmbeddingModel::new`; `load-dynamic` now needs `cpu` or `migraphx` alongside it, and a build with `load-dynamic` but neither fails with a compile error
+- Run `ExecutionMode::Cuda` and `CudaFast` on a native NVIDIA backend instead of ONNX Runtime (breaking): the `cuda` feature no longer enables ONNX Runtime and builds without a CUDA toolkit, because it loads the driver, cuBLAS, and cuDNN 9 at run time; it needs a Turing (compute capability 7.5) or newer GPU. The filterbank, ResNet34 embedding, and segmentation all run on the GPU, and the filterbank features stay on the device. On an RTX 4090, `cuda` runs VoxConverse dev at 978x real time, up from 59x with the ONNX Runtime backend, with matching DER
 - Load `segmentation-3.0.safetensors` and `wespeaker-multimask-tail.safetensors` in CUDA modes instead of ONNX models (breaking); `ModelManager` downloads only those, the PLDA files, and the embedding metadata for CUDA modes, `scripts/cuda/export_weights.py --runtime-assets <dir>` exports them, and a missing file is a `ModelLoadError::MissingCudaWeights` or `CudaAssetsUnavailable` that names the export command
+- Run every layer that has a speakrs CUDA kernel on that kernel, on every GPU; cuDNN and cuBLAS run only the layers without one. The kernels include TF32 tensor-core and Winograd ResNet trunk convolutions, FP16 tensor-core trunk convolutions on Turing and Ada in TF32 mode, a tiled LSTM, and an FFT filterbank
+- Pick each layer's kernel by batch size and math mode from, in order, a tune file, a built-in recipe measured on the T4, A100, RTX 4060 Ti, RTX 4090, or RTX 5060 Ti, and a default for the device class; `SPEAKRS_CUDA_FORCE_LIBRARY=1` forces cuDNN and cuBLAS where the library has an implementation
+- Add the `cuda-sm75`, `cuda-sm80`, `cuda-sm90`, and `cuda-sm120` GPU target features and the `cuda-rtx20`, `cuda-rtx30`, `cuda-rtx40`, `cuda-a100`, and `cuda-rtx50` aliases; `cuda` enables every target plus cuDNN and cuBLAS, while a target feature with `default-features = false` builds a driver-only backend that never links or loads cuDNN or cuBLAS, and `SPEAKRS_CUDA_PTX_TIER` forces a lower compiled-in tier
+- Add the `speakrs cuda tune` command and the `speakrs::inference::cuda::tune_cuda` API, which time each layer's kernel candidates on the current GPU and write a tune file that later runs load automatically; tune files are keyed by GPU, driver, kernel artifacts, speakrs version, and accuracy policy, `--dry-run` writes nothing, `--include-library` also compares cuDNN and cuBLAS, and `SPEAKRS_CUDA_TUNE_FILE` sets a custom path
 - Add CUDA options to `RuntimeConfig`: `cuda_segmentation_math` (`CudaMath::Fp32` by default; TF32 worsened one VoxConverse-dev file's DER by 4.5 points) and `cuda_embedding_math` (`CudaMath::Tf32` by default, DER-neutral on VoxConverse-dev), `cuda_lstm_algorithm` (`CudaLstmAlgorithm::PersistStaticSmallH` by default; `PersistDynamic` falls back to `Standard` with a warning when NVRTC is missing), and `cuda_graphs` (`CudaGraphs::Enabled` by default); the filterbank always runs in FP32
 - Add `SegmentationModel::with_mode_and_config`, so segmentation picks up the CUDA options outside the pipeline builder
-- Add `InferenceError::Cuda`, `ModelLoadError::Cuda`, and the public `CudaError`, `CudaLibrary`, `ComputeCapability`, and `PtxTier` types; the internal `speakrs::inference::cuda` module is no longer public
+- Add `InferenceError::Cuda`, `ModelLoadError::Cuda`, and the public `CudaError`, `CudaLibrary`, `GeometryError`, `WeightFault`, `ComputeCapability`, and `PtxTier` types
 - `OwnedDiarizationPipeline::clone_shared` in CUDA modes loads a second copy of the models on its own CUDA stream instead of sharing ONNX Runtime sessions
 - `with_execution_mode` maps the CUDA modes to the ONNX Runtime CPU provider, as it already did for CoreML, because speakrs no longer builds ONNX Runtime CUDA sessions
-- Add the `cuda-sm80`, `cuda-sm90`, and `cuda-sm120` features, off by default, which embed native CUDA kernels built for newer NVIDIA GPUs; default builds target Turing (`sm_75`) and newer, and `SPEAKRS_CUDA_PTX_TIER` forces a lower compiled-in tier
+- Overlap multi-file batches with inference: up to four workers decode audio ahead of the current file, and clustering for one file runs while the next file is in inference. Results keep input order, a failed stream returns no partial batch, and the pipeline stays reusable
+- Decode a lookahead file early only when it is a regular file, so pipes and devices are read in turn, and reject WAV `fmt` chunks larger than 64 KiB
 - Remove the `default-linalg`, `intel-mkl`, `openblas-static`, and `openblas-system` features: PLDA setup now uses a small built-in Rust solver, so builds no longer link MKL or OpenBLAS
-- Make ONNX Runtime optional (breaking): no inference backend is enabled by default, so enable `coreml` (macOS), `cuda` (NVIDIA), `migraphx` (AMD), or the new `cpu` feature; a build without one fails with a compile error naming these choices, and a `coreml`-only build no longer compiles, links, or downloads ONNX Runtime
-- Require the `cpu` feature for `ExecutionMode::Cpu`, including `SegmentationModel::new` and `EmbeddingModel::new`; `load-dynamic` now needs `cpu` or `migraphx` alongside it, and a build with `load-dynamic` but neither fails with a compile error
 - Replace `ort::Error` in the public API with the new `InferenceError`: `EmbeddingModel` methods return it, `SegmentationModel::run` returns `SegmentationError`, and `SegmentationError::Ort` and `PipelineError::Ort` become `SegmentationError::Inference` and `PipelineError::Inference`; native CoreML failures surface as the typed `CoreMlError` and shape failures as `TensorShapeError`
 - Gate `ModelLoadError::Ort`, `ModelLoadError::Runtime`, `OrtRuntimeError`, `DynamicRuntimeError`, and `with_execution_mode` behind the ONNX Runtime backends; `with_execution_mode` now returns `ModelLoadError`
 - Stop building ONNX Runtime sessions in CoreML modes: `EmbeddingModel::embed`, `embed_masked`, and `embed_batch` run on the native CoreML filterbank and tail, following `RuntimeConfig::chunk_emb_compute_units` (use `CpuOnly` for the closest match to the CPU path)
 - Stop downloading ONNX files for CoreML modes in `ModelManager`; CoreML modes need only the compiled bundles, PLDA files, and embedding metadata
-
-## [0.6.0] - 2026-10-02
-
 - Add `QueueConfig` so queue channel capacity is configurable at construction (default 64; capacity 0 is rejected)
 - Add non-blocking `QueueSender::try_push`, which returns typed `QueueError::Full` with the rejected request when the queue is at capacity
 - Remove `QueueSender::push`; callers submit work with `try_push`
@@ -40,13 +36,14 @@
 - Fix exclusive diarization so overlaps resolve by activation score instead of cluster index
 - Add checked filterbank session-pool and thread settings to `RuntimeConfig`
 - Add `OwnedDiarizationPipeline::clone_shared` for non-CoreML concurrent pipelines that share model sessions
-- Speed up the CUDA path with a pooled CPU filterbank, vectorized VBx, and bounded parallel AHC distances (`SPEAKRS_AHC_THREADS` overrides the worker count)
+- Pool the ONNX Runtime filterbank sessions, and speed up clustering with vectorized VBx and bounded parallel AHC distances (`SPEAKRS_AHC_THREADS` overrides the worker count)
 - Use available cores for embedding ONNX session intra-op threads
 - Fix multi-mask embedding batching so the batched tail model loads at the multi-mask batch size
 - Fix chunk embedding returning all-zero filterbank features when the 30s filterbank model is absent
 - Pad non-empty audio shorter than one window into a single segmentation window instead of producing no output
 - Match CoreML diarization accuracy with CUDA by fixing chunk filterbank stitching and using a 1 second segmentation step
 - Validate tensor shapes, PLDA dimensions, and inference output geometry before computation
+- Run the GPU benchmark without S3 credentials: fetch public models and datasets, keep results locally, and print DER and RTFx in the captured log
 
 ## [0.5.0] - 2026-07-07
 
