@@ -87,18 +87,23 @@ Hardware: Apple M4 Pro, macOS 26.3
 
 ## Linux (CUDA)
 
-The speakrs CUDA rows and paired VoxConverse pyannote rows use one NVIDIA
-RTX 4090, with 16 CPU cores and 8 GiB of RAM. The cloud host doesn't report
-its CPU model. For each VoxConverse dataset,
-speakrs CUDA, speakrs CUDA Fast, and pyannote CUDA ran sequentially in the same
-container. They shared the GPU, CPU, driver, RAM, image, local disk, and data copy.
-Average CPU use for the earlier speakrs runs on the other datasets was
-0.95–1.18 cores; this is measured CPU use, not a thread limit.
+The VoxConverse rows use an NVIDIA RTX 4090 container with 16 CPU cores and
+8 GiB of RAM. The cloud host doesn't report its CPU model. The speakrs CUDA and
+CUDA Fast rows for VoxConverse were measured on the current version. The
+VoxConverse pyannote rows ran earlier in a container with the same GPU model,
+CPU count and RAM, so those speedups compare separate runs. The speakrs rows
+for the other datasets come from an earlier version, before the current CUDA
+kernels, so they understate current speakrs speed. Average CPU use for those
+earlier speakrs runs was 0.95–1.18 cores; this is measured CPU use, not a
+thread limit.
 
 Audio and models were copied to the container's local disk before each dataset
-run. Time and RTFx use the unchanged `speakrs-bm` timer: WAV loading, inference,
+run. Time and RTFx use the `speakrs-bm` timer: WAV loading, inference,
 clustering and RTTM output are included; downloads, data copy and DER scoring
-are excluded. Native speakrs timing excludes model and pipeline construction.
+are excluded. The current speakrs rows run through the library batch API
+(`run_batch_stream`), which decodes upcoming files on worker threads and
+clusters each finished file while the GPU runs the next. Native speakrs timing
+excludes model and pipeline construction.
 Pyannote timing includes the complete Python subprocess, including pipeline
 construction. Pyannote uses batch size 32.
 
@@ -114,26 +119,28 @@ comparison.
 
 ### VoxConverse Dev (216 files, 1217.8 min)
 
-Shared hardware: NVIDIA RTX 4090, 16 CPU cores (model not reported), 8 GiB RAM;
+Hardware: NVIDIA RTX 4090, 16 CPU cores (model not reported), 8 GiB RAM;
 driver 580.126.18, nvidia-smi CUDA 13.0.
-All three ran sequentially in the same container.
+The speakrs rows are the median of 3 runs in one container. pyannote CUDA ran
+earlier in a container with the same configuration.
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
-| **speakrs CUDA** | **7.0%** | 2.3% | 2.3% | 2.4% | 63.4s | 1153x |
-| speakrs CUDA Fast | 7.4% | 2.3% | 2.3% | 2.8% | 36.8s | **1985x** |
+| **speakrs CUDA** | **7.0%** | 2.3% | 2.3% | 2.4% | 40.9s | 1786x |
+| speakrs CUDA Fast | 7.4% | 2.3% | 2.3% | 2.8% | 22.0s | **3325x** |
 | pyannote CUDA | 7.2% | 2.3% | 2.3% | 2.6% | 2301.3s | 32x |
 
 ### VoxConverse Test (232 files, 2612.2 min)
 
-Shared hardware: NVIDIA RTX 4090, 16 CPU cores (model not reported), 8 GiB RAM;
-driver 580.126.18, nvidia-smi CUDA 13.0.
-All three ran sequentially in the same container.
+Hardware: NVIDIA RTX 4090, 16 CPU cores (model not reported), 8 GiB RAM.
+The speakrs rows are one run each, with driver 595.99.02 (nvidia-smi CUDA 13.2).
+pyannote CUDA ran earlier in a container with driver 580.126.18 (nvidia-smi
+CUDA 13.0) and otherwise the same configuration.
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
-| **speakrs CUDA** | **11.1%** | 3.4% | 4.1% | 3.7% | 150.5s | 1041x |
-| speakrs CUDA Fast | 11.2% | 3.3% | 4.1% | 3.8% | 84.2s | **1862x** |
+| **speakrs CUDA** | **11.1%** | 3.4% | 4.1% | 3.7% | 81.6s | 1921x |
+| speakrs CUDA Fast | 11.2% | 3.3% | 4.1% | 3.8% | 42.1s | **3722x** |
 | **pyannote CUDA** | **11.1%** | 3.4% | 4.1% | 3.7% | 6341.3s | 25x |
 
 ### AMI IHM (34 files, 1123.8 min)
