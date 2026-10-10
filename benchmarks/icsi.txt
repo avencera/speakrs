@@ -14,5 +14,5 @@ Native speakrs CUDA: 1s step; CUDA Fast: 2s step. Audio and models use local dis
 
 Implementation                                 DER%   Missed%   FalseAlarm%   Confusion%      Time    RTFx
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────
-speakrs CUDA                                  33.3%     19.5%          9.5%         4.3%    248.8s   1037x
-speakrs CUDA Fast                             33.7%     19.4%          9.6%         4.7%    134.7s   1917x
+speakrs CUDA                                  33.3%     19.5%          9.5%         4.3%    142.2s   1814x
+speakrs CUDA Fast                             33.7%     19.4%          9.6%         4.7%     71.1s   3628x

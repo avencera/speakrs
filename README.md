@@ -179,22 +179,20 @@ threads ahead of it; it clusters each finished file while the GPU runs the next.
 |---|---:|---:|---:|---:|---:|
 | VoxConverse dev | 20.3 h | 7.0% | 1786x | 7.4% | 3325x |
 | VoxConverse test | 43.5 h | 11.1% | 1921x | 11.2% | 3722x |
-| AMI IHM | 18.7 h | 17.0% | 914x | 17.4% | 1589x |
-| AMI SDM | 18.7 h | 19.7% | 899x | 20.6% | 1489x |
-| AISHELL-4 | 12.7 h | 11.1% | 1046x | 11.4% | 1929x |
-| Earnings-21 | 39.3 h | 9.7% | 915x | 9.2% | 1567x |
-| ICSI | 71.7 h | 33.3% | 1037x | 33.7% | 1917x |
-| AVA-AVD | 4.4 h | 45.4% | 1047x | 48.9% | 1942x |
+| AMI IHM | 18.7 h | 17.0% | 1955x | 17.4% | 3796x |
+| AMI SDM | 18.7 h | 19.7% | 1874x | 20.6% | 3665x |
+| AISHELL-4 | 12.7 h | 11.1% | 1916x | 11.4% | 3706x |
+| Earnings-21 | 39.3 h | 9.7% | 1864x | 9.2% | 3578x |
+| ICSI | 71.7 h | 33.3% | 1814x | 33.7% | 3628x |
+| AVA-AVD | 4.4 h | 45.4% | 2083x | 48.9% | 3899x |
 
-That's about 229 hours of audio in 12 minutes with `cuda`, or 7 minutes with
-`cuda-fast`. The VoxConverse dev row comes from the runs above, and the
-VoxConverse test row from one run of the same version on another RTX 4090
-container with 16 CPU cores, 8 GiB of RAM and driver 595.99.02. The other datasets ran on an earlier version,
-before the current CUDA kernels, on a different RTX 4090 host, so their speeds
-understate this version. On VoxConverse test, `cuda` and pyannote CUDA
-both score 11.1% DER; pyannote ran at 25x in an earlier container, about 78
-times slower than `cuda`. On AMI IHM and
-Earnings-21, `cuda` matches the earlier pyannote runs at 17.0% and 9.7% DER,
+That's about 229 hours of audio in under 8 minutes with `cuda`, or under 4
+minutes with `cuda-fast`. The VoxConverse dev row comes from the runs above;
+the other rows are single runs of the same version on RTX 4090 containers with
+16 CPU cores and 8 GiB of RAM.
+On VoxConverse test, `cuda` and pyannote CUDA both score 11.1% DER; pyannote
+ran at 25x in an earlier container, about 78 times slower than `cuda`. On AMI
+IHM and Earnings-21, `cuda` matches the earlier pyannote runs at 17.0% and 9.7% DER,
 where pyannote ran at 15x and 18x. On macOS, `coreml` runs these datasets at
 450x to 644x, with DER within 1.6 points of pyannote's. See
 [benchmarks/](https://github.com/avencera/speakrs/tree/master/benchmarks) for
