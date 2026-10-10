@@ -255,26 +255,25 @@ fn embedding_b32_matches_reference() -> Result<(), CudaError> {
         );
 
         // the half comparison below only means something where a block runs half;
-        // FP32 math never selects FP16 tiles, and TF32 recipes with wide FP16
-        // 32- and 64-channel tiles must pass every such pair as halves
-        let (wide_pairs, half_pairs) = batch.half_hidden_blocks();
-        eprintln!("b32 {math:?}: {half_pairs} half hidden blocks, {wide_pairs} wide FP16 pairs");
+        // FP32 math never selects FP16 tiles, and TF32 recipes with wide 32- and
+        // 64-channel or narrow 128- and 256-channel FP16 tiles must pass every such
+        // pair as halves
+        let (fp16_pairs, half_pairs) = batch.half_hidden_blocks();
+        eprintln!("b32 {math:?}: {half_pairs} half hidden blocks, {fp16_pairs} FP16 pairs");
         assert_eq!(
-            half_pairs, wide_pairs,
-            "b32 {math:?}: a wide FP16 pair keeps its hidden activation FP32"
+            half_pairs, fp16_pairs,
+            "b32 {math:?}: an FP16 pair keeps its hidden activation FP32"
         );
         if math == CudaMath::Fp32 {
-            assert_eq!(wide_pairs, 0, "b32 FP32 selected FP16 tiles");
+            assert_eq!(fp16_pairs, 0, "b32 FP32 selected FP16 tiles");
         }
-        // consecutive wide pairs without a shortcut between them pass the residual
+        // consecutive FP16 pairs without a shortcut between them pass the residual
         // stream as halves, so the forward pass below reads half residuals
-        let (wide_outputs, half_outputs) = batch.half_output_blocks();
-        eprintln!(
-            "b32 {math:?}: {half_outputs} half block outputs, {wide_outputs} wide FP16 links"
-        );
+        let (fp16_outputs, half_outputs) = batch.half_output_blocks();
+        eprintln!("b32 {math:?}: {half_outputs} half block outputs, {fp16_outputs} FP16 links");
         assert_eq!(
-            half_outputs, wide_outputs,
-            "b32 {math:?}: a wide FP16 link keeps its block output FP32"
+            half_outputs, fp16_outputs,
+            "b32 {math:?}: an FP16 link keeps its block output FP32"
         );
 
         // a replayed graph must give the eager result bit for bit, and a second
