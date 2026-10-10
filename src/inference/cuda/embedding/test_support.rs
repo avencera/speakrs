@@ -66,6 +66,21 @@ impl EmbeddingBatch {
     /// channels, and how many of those [`Self::forward`] passes a half hidden
     /// activation, read from the selected plans
     pub fn half_hidden_blocks(&self) -> (usize, usize) {
+        let (wide_pairs, half_pairs, _, _) = self.half_blocks();
+        (wide_pairs, half_pairs)
+    }
+
+    /// Residual blocks whose output feeds a next block without a shortcut, where the
+    /// block's second convolution and both of the next block's run wide FP16 tiles on
+    /// 32 or 64 channels, and how many of those [`Self::forward`] writes as halves
+    pub fn half_output_blocks(&self) -> (usize, usize) {
+        let (_, _, wide_outputs, half_outputs) = self.half_blocks();
+        (wide_outputs, half_outputs)
+    }
+
+    /// The wide and half counts of [`Self::half_hidden_blocks`] and
+    /// [`Self::half_output_blocks`]
+    fn half_blocks(&self) -> (usize, usize, usize, usize) {
         let plan = |layer: &ConvLayer| {
             self.plans.iter().find_map(|(name, plan)| match plan {
                 Plan::Wideconv(plan) if name == layer.name() => Some(plan),
@@ -94,7 +109,20 @@ impl EmbeddingBatch {
             .iter()
             .filter(|block| half(&block.conv1) && half(&block.conv2))
             .count();
-        (wide_pairs, half_pairs)
+        // a shortcut reads the block input as FP32, so its block's input stays FP32
+        let outputs = |run: &dyn Fn(&ConvLayer) -> bool| {
+            blocks
+                .windows(2)
+                .filter(|pair| {
+                    let [block, next] = pair else { return false };
+                    next.shortcut.is_none()
+                        && run(&block.conv2)
+                        && run(&next.conv1)
+                        && run(&next.conv2)
+                })
+                .count()
+        };
+        (wide_pairs, half_pairs, outputs(&wide), outputs(&half))
     }
 
     /// Whether [`Self::forward`] replays a captured CUDA graph
