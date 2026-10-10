@@ -611,9 +611,13 @@ mod tests {
     use crate::powerset::PowersetMapping;
     use ndarray::{Array2, s};
 
+    /// Runs the multi-mask loop over windows whose first speaker is `active`; batch `n`
+    /// finishes at once when `done(n)`, the way non-CUDA backends and the CUDA
+    /// fallbacks return, and stays running otherwise
     fn run_windows(
         active: &[bool],
         batch_size: usize,
+        done: fn(usize) -> bool,
     ) -> (ConcurrentEmbeddingResult, Vec<Vec<usize>>) {
         let powerset = PowersetMapping::new(3, 2);
         // equal window and step sizes make each audio slice a distinct window
@@ -637,8 +641,10 @@ mod tests {
 
         let mut embedder = RecordingEmbedder {
             active,
+            done,
             batches: Vec::new(),
             running: None,
+            waits: 0,
         };
         let result = runner
             .run_multi_mask_with(receiver, batch_size, 0, &mut embedder)
@@ -647,20 +653,25 @@ mod tests {
             embedder.running.is_none(),
             "the last batch was never waited"
         );
+        let running = (0..embedder.batches.len()).filter(|&n| !done(n)).count();
+        assert_eq!(embedder.waits, running, "each running batch is waited once");
         (result, embedder.batches)
     }
 
-    /// Checks each started batch, then leaves it running with every mask row filled
-    /// with its window index plus one
+    /// Checks each started batch, then returns it done or leaves it running with every
+    /// mask row filled with its window index plus one
     struct RecordingEmbedder<'a> {
         active: &'a [bool],
+        done: fn(usize) -> bool,
         batches: Vec<Vec<usize>>,
         running: Option<Array2<f32>>,
+        waits: usize,
     }
 
     impl MultiMaskEmbedder for RecordingEmbedder<'_> {
         fn start(&mut self, batch: &MultiMaskBatch<'_>) -> Result<MultiMaskStart, PipelineError> {
             assert!(self.running.is_none(), "started a batch while one runs");
+            let done = (self.done)(self.batches.len());
             self.batches.push(batch.chunk_indices.to_vec());
             assert_eq!(batch.audio_slices.len(), batch.chunk_indices.len());
             let mut rows = Array2::zeros((batch.chunk_indices.len() * 3, 256));
@@ -681,11 +692,16 @@ mod tests {
                 rows.slice_mut(s![row * 3..row * 3 + 3, ..])
                     .fill(index as f32 + 1.0);
             }
+            if done {
+                return Ok(MultiMaskStart::Done(rows));
+            }
+
             self.running = Some(rows);
             Ok(MultiMaskStart::Running)
         }
 
         fn wait(&mut self) -> Result<Array2<f32>, PipelineError> {
+            self.waits += 1;
             Ok(self.running.take().expect("waited without a running batch"))
         }
     }
@@ -693,7 +709,17 @@ mod tests {
     #[test]
     fn inactive_windows_keep_indices_across_full_and_partial_batches() {
         let active = [false, true, false, true, true, false, true, false, true];
-        let (result, batches) = run_windows(&active, 2);
+        // every batch running, every batch done, and both alternations, so rows land
+        // in their windows whichever way each batch returns
+        let patterns: [fn(usize) -> bool; 4] =
+            [|_| false, |_| true, |n| n % 2 == 0, |n| n % 2 == 1];
+        for done in patterns {
+            check_full_and_partial_batches(&active, done);
+        }
+    }
+
+    fn check_full_and_partial_batches(active: &[bool], done: fn(usize) -> bool) {
+        let (result, batches) = run_windows(active, 2, done);
         assert_eq!(batches, [vec![1, 3], vec![4, 6], vec![8]]);
         assert_eq!(result.num_chunks, active.len());
         assert_eq!(result.embeddings.dim(), (9, 3, 256));
@@ -718,7 +744,7 @@ mod tests {
 
     #[test]
     fn all_inactive_windows_do_not_flush() {
-        let (result, batches) = run_windows(&[false; 5], 2);
+        let (result, batches) = run_windows(&[false; 5], 2, |_| false);
         assert!(batches.is_empty());
         assert_eq!(result.num_chunks, 5);
         assert_eq!(result.segmentations.dim(), (5, 589, 3));
@@ -729,7 +755,7 @@ mod tests {
 
     #[test]
     fn empty_input_keeps_empty_result() {
-        let (result, batches) = run_windows(&[], 2);
+        let (result, batches) = run_windows(&[], 2, |_| false);
         assert!(batches.is_empty());
         assert!(result.is_empty());
         assert_eq!(result.segmentations.dim(), (0, 0, 0));
