@@ -256,8 +256,8 @@ fn embedding_b32_matches_reference() -> Result<(), CudaError> {
 
         // the half comparison below only means something where a block runs half;
         // FP32 math never selects FP16 tiles, and TF32 recipes with wide 32- and
-        // 64-channel or narrow 128- and 256-channel FP16 tiles must pass every such
-        // pair as halves
+        // 64-channel or any 128- and 256-channel FP16 tiles must pass every such pair
+        // as halves
         let (fp16_pairs, half_pairs) = batch.half_hidden_blocks();
         eprintln!("b32 {math:?}: {half_pairs} half hidden blocks, {fp16_pairs} FP16 pairs");
         assert_eq!(

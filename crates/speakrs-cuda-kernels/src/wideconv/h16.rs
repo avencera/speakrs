@@ -1218,6 +1218,186 @@ h16_conv3x3! {
     half_output = false,
 }
 
+h16_conv3x3! {
+    /// As `spk_wideconv_h16_c128`, writing `y` as the half `[batch, 16, 20, 250, 8]` tensor
+    /// `spk_wideconv_h16_c128_half_in` reads, for a block's first convolution
+    spk_wideconv_h16_c128_half_out,
+    channels = 128,
+    h = 20,
+    w = 250,
+    m_tiles = 4,
+    channel_warps = 2,
+    rows = 2,
+    n_tiles = 8,
+    threads = 128,
+    min_blocks = 2,
+    half_input = false,
+    half_residual = false,
+    half_output = true,
+}
+
+h16_conv3x3! {
+    /// As `spk_wideconv_h16_c128`, reading `x` as the half tensor
+    /// `spk_wideconv_h16_c128_half_out` writes, for a block's second convolution
+    spk_wideconv_h16_c128_half_in,
+    channels = 128,
+    h = 20,
+    w = 250,
+    m_tiles = 4,
+    channel_warps = 2,
+    rows = 2,
+    n_tiles = 8,
+    threads = 128,
+    min_blocks = 2,
+    half_input = true,
+    half_residual = false,
+    half_output = false,
+}
+
+h16_conv3x3! {
+    /// As `spk_wideconv_h16_c128`, reading `x` and writing `y` as half tensors, for a
+    /// block's first convolution on a half block input
+    spk_wideconv_h16_c128_half_in_out,
+    channels = 128,
+    h = 20,
+    w = 250,
+    m_tiles = 4,
+    channel_warps = 2,
+    rows = 2,
+    n_tiles = 8,
+    threads = 128,
+    min_blocks = 2,
+    half_input = true,
+    half_residual = false,
+    half_output = true,
+}
+
+h16_conv3x3! {
+    /// As `spk_wideconv_h16_c128`, with `x`, `residual` and `y` all half tensors, for the
+    /// second convolution of a block between a layer's first and last
+    spk_wideconv_h16_c128_half_all,
+    channels = 128,
+    h = 20,
+    w = 250,
+    m_tiles = 4,
+    channel_warps = 2,
+    rows = 2,
+    n_tiles = 8,
+    threads = 128,
+    min_blocks = 2,
+    half_input = true,
+    half_residual = true,
+    half_output = true,
+}
+
+h16_conv3x3! {
+    /// As `spk_wideconv_h16_c128`, reading `x` and `residual` as half tensors and writing `y` as
+    /// FP32, for the second convolution of a layer's last block
+    spk_wideconv_h16_c128_half_in_res,
+    channels = 128,
+    h = 20,
+    w = 250,
+    m_tiles = 4,
+    channel_warps = 2,
+    rows = 2,
+    n_tiles = 8,
+    threads = 128,
+    min_blocks = 2,
+    half_input = true,
+    half_residual = true,
+    half_output = false,
+}
+
+h16_conv3x3! {
+    /// As `spk_wideconv_h16_c256`, writing `y` as the half `[batch, 32, 10, 125, 8]` tensor
+    /// `spk_wideconv_h16_c256_half_in` reads, for a block's first convolution
+    spk_wideconv_h16_c256_half_out,
+    channels = 256,
+    h = 10,
+    w = 125,
+    m_tiles = 4,
+    channel_warps = 2,
+    rows = 2,
+    n_tiles = 8,
+    threads = 128,
+    min_blocks = 2,
+    half_input = false,
+    half_residual = false,
+    half_output = true,
+}
+
+h16_conv3x3! {
+    /// As `spk_wideconv_h16_c256`, reading `x` as the half tensor
+    /// `spk_wideconv_h16_c256_half_out` writes, for a block's second convolution
+    spk_wideconv_h16_c256_half_in,
+    channels = 256,
+    h = 10,
+    w = 125,
+    m_tiles = 4,
+    channel_warps = 2,
+    rows = 2,
+    n_tiles = 8,
+    threads = 128,
+    min_blocks = 2,
+    half_input = true,
+    half_residual = false,
+    half_output = false,
+}
+
+h16_conv3x3! {
+    /// As `spk_wideconv_h16_c256`, reading `x` and writing `y` as half tensors, for a
+    /// block's first convolution on a half block input
+    spk_wideconv_h16_c256_half_in_out,
+    channels = 256,
+    h = 10,
+    w = 125,
+    m_tiles = 4,
+    channel_warps = 2,
+    rows = 2,
+    n_tiles = 8,
+    threads = 128,
+    min_blocks = 2,
+    half_input = true,
+    half_residual = false,
+    half_output = true,
+}
+
+h16_conv3x3! {
+    /// As `spk_wideconv_h16_c256`, with `x`, `residual` and `y` all half tensors, for the
+    /// second convolution of a block between a layer's first and last
+    spk_wideconv_h16_c256_half_all,
+    channels = 256,
+    h = 10,
+    w = 125,
+    m_tiles = 4,
+    channel_warps = 2,
+    rows = 2,
+    n_tiles = 8,
+    threads = 128,
+    min_blocks = 2,
+    half_input = true,
+    half_residual = true,
+    half_output = true,
+}
+
+h16_conv3x3! {
+    /// As `spk_wideconv_h16_c256`, reading `x` and `residual` as half tensors and writing `y` as
+    /// FP32, for the second convolution of a layer's last block
+    spk_wideconv_h16_c256_half_in_res,
+    channels = 256,
+    h = 10,
+    w = 125,
+    m_tiles = 4,
+    channel_warps = 2,
+    rows = 2,
+    n_tiles = 8,
+    threads = 128,
+    min_blocks = 2,
+    half_input = true,
+    half_residual = true,
+    half_output = false,
+}
+
 /// Expands to one 3x3, stride-2, padding-1 FP16 convolution from `in_channels` to
 /// `out_channels` channels on `h x w` inputs
 ///
