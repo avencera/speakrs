@@ -179,7 +179,7 @@ threads ahead of it; it clusters each finished file while the GPU runs the next.
 |---|---:|---:|---:|---:|---:|
 | VoxConverse dev | 20.3 h | 7.0% | 1786x | 7.4% | 3325x |
 | VoxConverse test | 43.5 h | 11.1% | 1921x | 11.2% | 3722x |
-| AMI IHM | 18.7 h | 17.0% | 1746x | 17.4% | 3507x |
+| AMI IHM | 18.7 h | 17.0% | 1745x | 17.4% | 3507x |
 | AMI SDM | 18.7 h | 19.7% | 1717x | 20.6% | 3286x |
 | AISHELL-4 | 12.7 h | 11.1% | 1997x | 11.4% | 4258x |
 | Earnings-21 | 39.3 h | 9.7% | 1747x | 9.2% | 3459x |

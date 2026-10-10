@@ -144,7 +144,7 @@ Earlier pyannote hardware: NVIDIA L40S, AMD EPYC 9354.
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
-| **speakrs CUDA** | **17.0%** | 8.1% | 4.3% | 4.5% | 38.6s | 1746x |
+| **speakrs CUDA** | **17.0%** | 8.1% | 4.3% | 4.5% | 38.6s | 1745x |
 | speakrs CUDA Fast | 17.4% | 8.2% | 4.3% | 4.9% | 19.2s | **3507x** |
 | **pyannote CUDA (L40S, earlier run)** | **17.0%** | 8.1% | 4.3% | 4.5% | 4388.1s | 15x |
 
