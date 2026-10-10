@@ -141,6 +141,9 @@ pub(crate) enum MultiMaskStart {
     /// Embedded already, one row per mask
     Done(Array2<f32>),
     /// Still running; [`EmbeddingModel::wait_multi_mask_audio_windows`] returns its rows
+    // only CUDA leaves a batch running, but the multi-mask loop handles it for every
+    // backend
+    #[cfg_attr(not(any(feature = "_cuda", test)), allow(dead_code))]
     Running,
 }
 
