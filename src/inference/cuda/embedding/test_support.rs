@@ -62,58 +62,62 @@ impl EmbeddingBatch {
         self.plans.len()
     }
 
-    /// Residual blocks whose two convolutions run wide FP16 tiles on 32 or 64
-    /// channels, and how many blocks [`Self::forward`] passes a half hidden activation
+    /// Residual blocks whose two convolutions run FP16 tiles, wide on 32 or 64
+    /// channels or narrow on 128 or 256, and how many blocks [`Self::forward`] passes a
+    /// half hidden activation
     pub fn half_hidden_blocks(&self) -> (usize, usize) {
-        let (wide_pairs, _, half_pairs, _) = self.half_blocks();
-        (wide_pairs, half_pairs)
+        let (fp16_pairs, _, half_pairs, _) = self.half_blocks();
+        (fp16_pairs, half_pairs)
     }
 
     /// Residual blocks whose output feeds a next block without a shortcut, where the
-    /// block's second convolution and both of the next block's run wide FP16 tiles on
-    /// 32 or 64 channels, and how many blocks [`Self::forward`] writes as halves
+    /// block's second convolution and both of the next block's run such FP16 tiles,
+    /// and how many blocks [`Self::forward`] writes as halves
     pub fn half_output_blocks(&self) -> (usize, usize) {
-        let (_, wide_outputs, _, half_outputs) = self.half_blocks();
-        (wide_outputs, half_outputs)
+        let (_, fp16_outputs, _, half_outputs) = self.half_blocks();
+        (fp16_outputs, half_outputs)
     }
 
-    /// The wide FP16 pairs and links read from the selected plans' configs, then the
+    /// The FP16 pairs and links read from the selected plans' configs, then the
     /// half hidden activations and outputs the forward pass's own [`BlockForm::plan`]
     /// gives, so a forward pass that stops passing halves fails the comparison
     fn half_blocks(&self) -> (usize, usize, usize, usize) {
-        let wide = |layer: &ConvLayer| {
+        let fp16 = |layer: &ConvLayer| {
             let conv = layer.conv(self.chunks, self.model.math);
-            matches!(conv.in_channels, 32 | 64)
-                && conv.out_channels == conv.in_channels
+            let tiles = match conv.in_channels {
+                32 | 64 => WideconvFp16Tiles::Wide,
+                128 | 256 => WideconvFp16Tiles::Narrow,
+                _ => return false,
+            };
+            conv.out_channels == conv.in_channels
                 && conv.stride == [1, 1]
                 && self.plans.iter().any(|(name, plan)| {
                     name == layer.name()
                         && matches!(plan, Plan::Wideconv(plan)
-                            if plan.config().algorithm
-                                == WideconvAlgorithm::Fp16(WideconvFp16Tiles::Wide))
+                            if plan.config().algorithm == WideconvAlgorithm::Fp16(tiles))
                 })
         };
         let blocks = &self.model.trunk.blocks;
-        let wide_pairs = blocks
+        let fp16_pairs = blocks
             .iter()
-            .filter(|block| wide(&block.conv1) && wide(&block.conv2))
+            .filter(|block| fp16(&block.conv1) && fp16(&block.conv2))
             .count();
         // a shortcut reads the block input as FP32, so its block's input stays FP32
-        let wide_outputs = blocks
+        let fp16_outputs = blocks
             .windows(2)
             .filter(|pair| {
                 let [block, next] = pair else { return false };
                 next.shortcut.is_none()
-                    && wide(&block.conv2)
-                    && wide(&next.conv1)
-                    && wide(&next.conv2)
+                    && fp16(&block.conv2)
+                    && fp16(&next.conv1)
+                    && fp16(&next.conv2)
             })
             .count();
 
         let forms = BlockForm::plan(blocks, &self.plans, ActivationForm::Half);
         let half_pairs = forms.iter().filter(|form| form.hidden).count();
         let half_outputs = forms.iter().filter(|form| form.output).count();
-        (wide_pairs, wide_outputs, half_pairs, half_outputs)
+        (fp16_pairs, fp16_outputs, half_pairs, half_outputs)
     }
 
     /// Whether [`Self::forward`] replays a captured CUDA graph

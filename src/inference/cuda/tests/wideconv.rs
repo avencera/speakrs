@@ -33,9 +33,9 @@ use serde_json::json;
 
 use super::super::candidate::{
     ConfigPin, ConvCandidate, ConvInputs, ConvKernel, ConvLayerSpec, ConvOxide, ConvPin,
-    DriverCandidate, Epilogue, Fp16Policy, Phases, PlanError, WideconvAlgorithm, WideconvConfig,
-    WideconvDevice, WideconvFp16Tiles, WideconvOxide, WideconvPartition, WideconvProducts,
-    WideconvSplitCells, WideconvTensorKernel,
+    DriverCandidate, Epilogue, FP16_OPERAND_LIMIT, Fp16Policy, HalfIo, Phases, PlanError,
+    WideconvAlgorithm, WideconvConfig, WideconvDevice, WideconvFp16Tiles, WideconvOxide,
+    WideconvPartition, WideconvProducts, WideconvSplitCells, WideconvTensorKernel, f16_bits,
 };
 use super::super::dnn::ConvPlanner;
 use super::super::geometry::{Conv2d, Residual};
@@ -1006,6 +1006,326 @@ fn driver_trunk_embedding_matches_library() -> Result<(), CudaError> {
                 cosine >= min_cosine_bound(math),
                 "{case} {math:?}: cosine {cosine}"
             );
+        }
+    }
+    Ok(())
+}
+
+/// The same-channel FP16 shapes whose tiles have [`HalfIo`] launches: channels, input
+/// plane and tiles
+const HALF_SHAPES: [(usize, [usize; 2], WideconvFp16Tiles); 4] = [
+    (32, [80, 998], WideconvFp16Tiles::Wide),
+    (64, [40, 499], WideconvFp16Tiles::Wide),
+    (128, [20, 250], WideconvFp16Tiles::Narrow),
+    (256, [10, 125], WideconvFp16Tiles::Narrow),
+];
+
+/// Seeded values uniform in `[-scale, scale)`, from SplitMix64
+fn seeded(seed: u64, len: usize, scale: f32) -> Vec<f32> {
+    let mut state = seed;
+    (0..len)
+        .map(|_| {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^= z >> 31;
+            // 24 bits give an exact float in [0, 1)
+            let unit = (z >> 40) as f32 / (1u64 << 24) as f32;
+            (2.0 * unit - 1.0) * scale
+        })
+        .collect()
+}
+
+/// `value` as the FP16 tiles convert an activation: scaled by 2^10, saturated at the
+/// largest finite FP16 value and rounded to nearest even
+fn half_bits(value: f32) -> u16 {
+    f16_bits((value * 1024.0).clamp(-65504.0, 65504.0))
+}
+
+/// The FP32 value of [`half_bits`], which a half residual adds back
+fn half_value(value: f32) -> f32 {
+    let bits = half_bits(value);
+    let magnitude = i32::from((bits >> 10) & 0x1f);
+    let mantissa = f32::from(bits & 0x3ff);
+    // saturation keeps every half finite, and both scales are powers of two
+    let scaled = if magnitude == 0 {
+        mantissa * 2f32.powi(-24)
+    } else {
+        (1024.0 + mantissa) * 2f32.powi(magnitude - 25)
+    };
+    let sign = if bits & 0x8000 == 0 { 1.0 } else { -1.0 };
+    sign * scaled / 1024.0
+}
+
+/// NCHW `values` as a half tensor, `[batch, channels / 8, h, w, 8]` halves, two to a word
+fn half_tensor(values: &[f32], channels: usize, plane: usize) -> Vec<u16> {
+    let mut halves = vec![0u16; values.len()];
+    for (index, &value) in values.iter().enumerate() {
+        let item = index / (channels * plane);
+        let channel = index / plane % channels;
+        let pixel = index % plane;
+        let at = (item * channels + channel / 8 * 8) * plane + pixel * 8 + channel % 8;
+        halves[at] = half_bits(value);
+    }
+    halves
+}
+
+/// The halves of a half tensor's words, low half first
+fn halves(words: &[f32]) -> Vec<u16> {
+    words
+        .iter()
+        .flat_map(|word| {
+            let bits = word.to_bits();
+            [bits as u16, (bits >> 16) as u16]
+        })
+        .collect()
+}
+
+/// Packs halves two to a word, as a half tensor's FP32 buffer holds them
+fn half_words(halves: &[u16]) -> Vec<f32> {
+    halves
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&[low, high]| f32::from_bits(u32::from(low) | u32::from(high) << 16))
+        .collect()
+}
+
+/// Asserts equal sequences, naming the first difference instead of printing both
+fn assert_same<T: PartialEq + std::fmt::Debug>(context: &str, actual: &[T], expected: &[T]) {
+    assert_eq!(actual.len(), expected.len(), "{context}: length");
+    if let Some(index) = actual.iter().zip(expected).position(|(a, e)| a != e) {
+        panic!(
+            "{context}: element {index} is {:?}, expected {:?}",
+            actual[index], expected[index]
+        );
+    }
+}
+
+/// One forced FP16 plan with its weights
+struct HalfLayer {
+    plan: WideconvOxide,
+    weight: CudaSlice<f32>,
+    /// FP32 elements of the output
+    len: usize,
+}
+
+impl HalfLayer {
+    /// Runs the plan once with the operands `io` names as half tensors: the output
+    /// words, and whether the launch set the out-of-range word
+    fn run(
+        &self,
+        stream: &Arc<CudaStream>,
+        bias: &CudaSlice<f32>,
+        x: &CudaSlice<f32>,
+        residual: Option<&CudaSlice<f32>>,
+        io: HalfIo,
+    ) -> Result<(Vec<f32>, bool), CudaError> {
+        let words = if io.output { self.len / 2 } else { self.len };
+        let mut y = stream.alloc_zeros::<f32>(words)?;
+        let mut range = stream.alloc_zeros::<f32>(1)?;
+        let residual = residual.map(|value| value.as_view());
+        self.plan.enqueue_half(
+            ConvInputs {
+                x: &x.as_view(),
+                residual: residual.as_ref(),
+                weight: &self.weight.as_view(),
+                bias: &bias.as_view(),
+            },
+            &mut y.as_view_mut(),
+            &mut range.as_view_mut(),
+            io,
+            &Phases::new(),
+            stream,
+        )?;
+        let values = stream.clone_dtoh(&y)?;
+        let range = stream.clone_dtoh(&range)?;
+        // cuMemcpyDtoHAsync into pageable memory has no completion guarantee
+        stream.synchronize()?;
+        Ok((values, range[0].to_bits() != 0))
+    }
+}
+
+/// Every FP16 plan with [`HalfIo`] launches, forced whatever this device selects, on a
+/// residual block of seeded activations and weights: the hidden activation passed as
+/// halves gives the FP32 pair's result bit for bit, a half residual gives the FP32
+/// result with that residual rounded to FP16 bit for bit, half outputs are the FP32
+/// outputs converted as the staging would, and a saturating half output sets the
+/// out-of-range word
+#[test]
+fn forced_fp16_half_launches_match_fp32() -> Result<(), CudaError> {
+    const TEST: &str = "forced_fp16_half_launches_match_fp32";
+    let Some(runtime) = runtime(TEST) else {
+        return Ok(());
+    };
+    let kernels = runtime.load_module(runtime.embedded_exact_request(KernelModule::Wideconv)?)?;
+    let stream = runtime.stream();
+    let fp32 = HalfIo::FP32;
+    let io = |input, residual, output| HalfIo {
+        input,
+        residual,
+        output,
+    };
+    for (shape, &(channels, input, tiles)) in HALF_SHAPES.iter().enumerate() {
+        for batch in [2, 3] {
+            let conv = Conv2d {
+                batch,
+                in_channels: channels,
+                out_channels: channels,
+                input,
+                kernel: [3, 3],
+                padding: [1, 1],
+                stride: [1, 1],
+                dilation: [1, 1],
+                math: CudaMath::Tf32,
+            };
+            let len = conv.output_shape().iter().product::<usize>();
+            let plane = input[0] * input[1];
+            let name = format!("c{channels} {tiles:?} b{batch}");
+
+            // activations of a few units, as the trunk's are, and weights that keep
+            // each convolution's output variance near its input's, so nothing saturates
+            let seed = 16 * shape as u64 + 4 * batch as u64;
+            let scale = (3.0 / (9 * channels) as f32).sqrt();
+            let xh = seeded(seed, len, 2.0);
+            let b1h = seeded(seed + 1, channels, 0.1);
+            let b2h = seeded(seed + 2, channels, 0.1);
+            let xd = stream.clone_htod(&xh)?;
+            let b1 = stream.clone_htod(&b1h)?;
+            let b2 = stream.clone_htod(&b2h)?;
+            let mut layers = Vec::new();
+            for (offset, epilogue) in [(3, Epilogue::BiasRelu), (4, Epilogue::BiasReluResidual)] {
+                let weight =
+                    stream.clone_htod(&seeded(seed + offset, channels * channels * 9, scale))?;
+                let bias = if offset == 3 { &b1 } else { &b2 };
+                let spec = ConvLayerSpec {
+                    name: &name,
+                    conv,
+                    epilogue,
+                    weight: &weight,
+                    bias,
+                };
+                let config = WideconvConfig {
+                    algorithm: WideconvAlgorithm::Fp16(tiles),
+                    partition: WideconvPartition::Whole,
+                    split_cells: WideconvSplitCells::All,
+                };
+                // the FP16 tiles build on every tier, so no device may skip a shape
+                let plan = WideconvOxide::with_config(&runtime, &kernels, spec, config).map_err(
+                    |error| CudaError::Unsupported {
+                        context: "forced FP16 half plan",
+                        reason: format!("{name}: {error}"),
+                    },
+                )?;
+                layers.push(HalfLayer { plan, weight, len });
+            }
+
+            let [conv1, conv2] = &layers[..] else {
+                unreachable!("a residual block has two convolutions");
+            };
+            assert!(
+                conv1.plan.has_half_io() && conv2.plan.has_half_io(),
+                "{name}: no half launches"
+            );
+
+            // (a) the hidden activation as halves: conv1's half output is the FP32
+            // output as the staging converts it, and conv2 reads it to the FP32 pair's
+            // result bit for bit, from the FP32 and from the half block input
+            let (hidden, saturated) = conv1.run(stream, &b1, &xd, None, fp32)?;
+            assert!(!saturated, "{name}: FP32 conv1 set the range word");
+            let hidden_halves = half_tensor(&hidden, channels, plane);
+            let x_half = stream.clone_htod(&half_words(&half_tensor(&xh, channels, plane)))?;
+            for (form, x, io) in [
+                ("half out", &xd, io(false, false, true)),
+                ("half in out", &x_half, io(true, false, true)),
+            ] {
+                let (words, saturated) = conv1.run(stream, &b1, x, None, io)?;
+                assert!(!saturated, "{name}: conv1 {form} set the range word");
+                assert_same(
+                    &format!("{name}: conv1 {form}"),
+                    &halves(&words),
+                    &hidden_halves,
+                );
+            }
+            let (from_half, _) = conv1.run(stream, &b1, &x_half, None, io(true, false, false))?;
+            assert_same(
+                &format!("{name}: conv1 half in"),
+                &bits(&from_half),
+                &bits(&hidden),
+            );
+
+            let hd = stream.clone_htod(&hidden)?;
+            let hidden_half = stream.clone_htod(&half_words(&hidden_halves))?;
+            let (output, _) = conv2.run(stream, &b2, &hd, Some(&xd), fp32)?;
+            let (paired, saturated) =
+                conv2.run(stream, &b2, &hidden_half, Some(&xd), io(true, false, false))?;
+            assert!(!saturated, "{name}: conv2 half in set the range word");
+            assert_same(
+                &format!("{name}: conv2 half in"),
+                &bits(&paired),
+                &bits(&output),
+            );
+            let (words, _) =
+                conv2.run(stream, &b2, &hidden_half, Some(&xd), io(true, false, true))?;
+            assert_same(
+                &format!("{name}: conv2 half in out"),
+                &halves(&words),
+                &half_tensor(&output, channels, plane),
+            );
+
+            // (b) the residual as halves adds exactly the FP16-rounded residual, so the
+            // FP32 launch with that residual rounded on the host is the bit-exact bound
+            let rounded: Vec<f32> = xh.iter().map(|&value| half_value(value)).collect();
+            let rd = stream.clone_htod(&rounded)?;
+            let (expected, _) = conv2.run(stream, &b2, &hd, Some(&rd), fp32)?;
+            let (actual, saturated) = conv2.run(
+                stream,
+                &b2,
+                &hidden_half,
+                Some(&x_half),
+                io(true, true, false),
+            )?;
+            assert!(!saturated, "{name}: conv2 half in res set the range word");
+            assert_same(
+                &format!("{name}: conv2 half in res"),
+                &bits(&actual),
+                &bits(&expected),
+            );
+            let (words, saturated) = conv2.run(
+                stream,
+                &b2,
+                &hidden_half,
+                Some(&x_half),
+                io(true, true, true),
+            )?;
+            assert!(!saturated, "{name}: conv2 half all set the range word");
+            assert_same(
+                &format!("{name}: conv2 half all"),
+                &halves(&words),
+                &half_tensor(&expected, channels, plane),
+            );
+
+            // (c) a bias above the FP16 operand range saturates one output channel: the
+            // FP32 output passes it through, and the half output clamps it to the largest
+            // finite FP16 value and sets the range word
+            let mut loud = b1h.clone();
+            loud[0] = 2.0 * FP16_OPERAND_LIMIT;
+            let loud = stream.clone_htod(&loud)?;
+            let (unclamped, saturated) = conv1.run(stream, &loud, &xd, None, fp32)?;
+            assert!(!saturated, "{name}: an FP32 output set the range word");
+            let (words, saturated) = conv1.run(stream, &loud, &xd, None, io(false, false, true))?;
+            assert!(
+                saturated,
+                "{name}: a saturating half output left the range word clear"
+            );
+            assert_same(
+                &format!("{name}: saturated conv1 half out"),
+                &halves(&words),
+                &half_tensor(&unclamped, channels, plane),
+            );
+
+            eprintln!("FP16_HALF {name}: ok");
         }
     }
     Ok(())

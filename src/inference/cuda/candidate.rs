@@ -116,6 +116,9 @@ pub(super) use lstm::REQUIRED_KERNELS as LSTM_KERNELS;
 pub(super) use lstmproj::REQUIRED_KERNELS as LSTMPROJ_KERNELS;
 #[cfg(test)]
 pub(super) use sinc::REQUIRED_KERNELS as SINC_KERNELS;
+// the forced FP16 checks convert their references as the kernels do
+#[cfg(all(test, feature = "_cuda-libraries"))]
+pub(super) use segdense::f16_bits;
 
 pub(crate) use conv::Oxide as ConvOxide;
 pub(crate) use fbank::Oxide as FbankOxide;
