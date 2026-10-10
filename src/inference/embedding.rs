@@ -136,6 +136,17 @@ struct EmbeddingMeta {
     min_num_samples: usize,
 }
 
+/// How [`EmbeddingModel::start_multi_mask_audio_windows`] left its batch
+pub(crate) enum MultiMaskStart {
+    /// Embedded already, one row per mask
+    Done(Array2<f32>),
+    /// Still running; [`EmbeddingModel::wait_multi_mask_audio_windows`] returns its rows
+    // only CUDA leaves a batch running, but the multi-mask loop handles it for every
+    // backend
+    #[cfg_attr(not(any(feature = "_cuda", test)), allow(dead_code))]
+    Running,
+}
+
 /// WeSpeaker speaker embedding model with split-backend and chunk embedding support
 pub struct EmbeddingModel {
     meta: EmbeddingMeta,
@@ -344,34 +355,59 @@ impl EmbeddingModel {
         )
     }
 
-    /// Filterbanks and multi-mask embeddings for up to one multi-mask batch of windows
-    /// of one recording
+    /// Starts filterbanks and multi-mask embeddings for up to one multi-mask batch of
+    /// windows of one recording
     ///
     /// `masks` holds three rows per window. The CUDA backend uploads the audio the
-    /// windows cover once and keeps the filterbanks on the device; the others compute
-    /// them with [`Self::compute_chunk_fbanks_batch`] first
-    pub(crate) fn embed_multi_mask_audio_windows(
+    /// windows cover once, keeps the filterbanks on the device and may return while the
+    /// batch runs, so the caller can prepare the next batch meanwhile; the others
+    /// compute them with [`Self::compute_chunk_fbanks_batch`] and embed at once. A
+    /// running batch must be finished with [`Self::wait_multi_mask_audio_windows`]
+    /// before this model embeds anything else
+    pub(crate) fn start_multi_mask_audio_windows(
         &mut self,
         windows: &AudioWindows<'_>,
         masks: &[&[f32]],
-    ) -> Result<Array2<f32>, InferenceError> {
+    ) -> Result<MultiMaskStart, InferenceError> {
         match &mut self.backend {
             #[cfg(feature = "cpu")]
-            EmbeddingBackend::Cpu(backend) => {
-                backend.embed_multi_mask_audio_batch(&self.meta, &windows.slices(), masks)
-            }
+            EmbeddingBackend::Cpu(backend) => backend
+                .embed_multi_mask_audio_batch(&self.meta, &windows.slices(), masks)
+                .map(MultiMaskStart::Done),
             #[cfg(feature = "migraphx")]
-            EmbeddingBackend::Ort(backend) => {
-                backend.embed_multi_mask_audio_batch(&self.meta, &windows.slices(), masks)
-            }
+            EmbeddingBackend::Ort(backend) => backend
+                .embed_multi_mask_audio_batch(&self.meta, &windows.slices(), masks)
+                .map(MultiMaskStart::Done),
             #[cfg(feature = "coreml")]
-            EmbeddingBackend::CoreMl(backend) => {
-                backend.embed_multi_mask_audio_batch(&self.meta, &windows.slices(), masks)
-            }
+            EmbeddingBackend::CoreMl(backend) => backend
+                .embed_multi_mask_audio_batch(&self.meta, &windows.slices(), masks)
+                .map(MultiMaskStart::Done),
             #[cfg(feature = "_cuda")]
             EmbeddingBackend::Cuda(backend) => {
-                backend.embed_multi_mask_audio_windows(&self.meta, windows, masks)
+                backend.start_multi_mask_audio_windows(&self.meta, windows, masks)
             }
+        }
+    }
+
+    /// Waits for the batch [`Self::start_multi_mask_audio_windows`] left running and
+    /// returns one embedding row per mask
+    pub(crate) fn wait_multi_mask_audio_windows(&mut self) -> Result<Array2<f32>, InferenceError> {
+        // only CUDA leaves batches running
+        match &mut self.backend {
+            #[cfg(feature = "cpu")]
+            EmbeddingBackend::Cpu(_) => Err(InferenceError::MissingOutput {
+                context: "cpu multi-mask batch is not running",
+            }),
+            #[cfg(feature = "migraphx")]
+            EmbeddingBackend::Ort(_) => Err(InferenceError::MissingOutput {
+                context: "ort multi-mask batch is not running",
+            }),
+            #[cfg(feature = "coreml")]
+            EmbeddingBackend::CoreMl(_) => Err(InferenceError::MissingOutput {
+                context: "coreml multi-mask batch is not running",
+            }),
+            #[cfg(feature = "_cuda")]
+            EmbeddingBackend::Cuda(backend) => backend.wait_multi_mask_audio_windows(),
         }
     }
 
