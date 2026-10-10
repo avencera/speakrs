@@ -752,14 +752,15 @@ impl EmbeddingBatch {
             let half_len = |half: bool, len: usize| if half { len / 2 } else { len };
             let (input_buffer, output_buffer) = read_write(trunk, block.input_slot);
             let input = input_buffer.slice(..half_len(input_half, input_len));
-            let mut block_out = output_buffer.slice_mut(..half_len(output_half, output_len));
             let hidden_len = half_len(half, output_len);
 
             // the block output buffer is free until the second convolution, so it
-            // stands in as the first convolution's unused residual operand
+            // stands in as the first convolution's unused residual operand; a library
+            // plan sizes that operand as the FP32 output even when the block's output
+            // is half
             let mut hidden_out = hidden.slice_mut(..hidden_len);
             #[cfg(feature = "_cuda-libraries")]
-            let scratch = block_out.as_view();
+            let scratch = output_buffer.slice(..output_len);
             convs.conv_bias_relu(
                 &block.conv1,
                 &input,
@@ -777,6 +778,8 @@ impl EmbeddingBatch {
             if !half {
                 tap(EmbeddingTap::Hidden { block: index }, &hidden_out.as_view())?;
             }
+
+            let mut block_out = output_buffer.slice_mut(..half_len(output_half, output_len));
 
             // only read for a block with a shortcut, where the buffer holds the whole
             // output; the bound keeps the view valid for the other blocks
