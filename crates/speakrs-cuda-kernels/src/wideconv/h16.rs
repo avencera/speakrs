@@ -42,6 +42,10 @@
 //! the same values, and a `_half_in` stage copies the 16-byte pixels as they are, so the
 //! pair computes bit for bit what the FP32 pair does while moving half the bytes
 //!
+//! A half epilogue passes each channel tile of a warp's output row through the free
+//! stage memory in that pixel-major form, so it loads a half residual and stores a half
+//! output as whole 16-byte pixels instead of one 2-byte value per lane and fragment slot
+//!
 //! The `_half_in_out`, `_half_all` and `_half_in_res` instances also keep the residual
 //! stream between blocks of one layer in that form: a block's second convolution writes
 //! its output as halves for the next block's first convolution to stage and its second
@@ -107,36 +111,102 @@ fn half1_checked(value: f32) -> (u32, u32) {
     (bits, out_of_range)
 }
 
-/// Stores the low half of `bits` at half-word `half_offset` of a global buffer
+/// Stores the low half of `bits` at a 2-byte aligned shared address
 #[inline(always)]
-unsafe fn sth(pointer: *mut f32, half_offset: usize, bits: u32) {
-    // safety: the caller passes a half-word inside the checked output that only this
-    // lane writes
+unsafe fn sts_half(address: u32, bits: u32) {
+    // safety: the caller passes an address inside this warp's epilogue tile that no
+    // other lane accesses before the next warp barrier
     unsafe {
         ptx_asm!(
-            "{ .reg .u64 g; .reg .u16 v; cvta.to.global.u64 g, %0; cvt.u16.u32 v, %1; st.global.u16 [g], v; }",
-            in("l") (pointer as *mut u16).add(half_offset) as u64,
+            "{ .reg .u16 v; cvt.u16.u32 v, %1; st.shared.u16 [%0], v; }",
+            in("r") address,
             in("r") bits,
             clobber("memory"),
         );
     }
 }
 
-/// The FP16 value at half-word `half_offset` of a global buffer, widened to FP32 and
-/// still scaled by 2^10
+/// The FP16 value at a 2-byte aligned shared address, widened to FP32 and still scaled
+/// by 2^10
 #[inline(always)]
-unsafe fn ldh(pointer: *const f32, half_offset: usize) -> f32 {
+unsafe fn lds_half(address: u32) -> f32 {
     let value: f32;
-    // safety: the caller passes a readable half-word; a plain load, since the residual
-    // may alias the output
+    // safety: the caller passes an address inside this warp's published epilogue tile
     unsafe {
         ptx_asm!(
-            "{ .reg .u64 g; .reg .b16 h; cvta.to.global.u64 g, %1; ld.global.b16 h, [g]; cvt.f32.f16 %0, h; }",
+            "{ .reg .b16 h; ld.shared.b16 h, [%1]; cvt.f32.f16 %0, h; }",
             out("=f") value,
-            in("l") (pointer as *const u16).add(half_offset) as u64,
+            in("r") address,
+            clobber("memory"),
         );
     }
     value
+}
+
+/// Four words at a 16-byte aligned shared address
+#[inline(always)]
+unsafe fn lds4(address: u32) -> [u32; 4] {
+    let (a, b, c, d): (u32, u32, u32, u32);
+    // safety: the caller passes an address inside this warp's published epilogue tile
+    unsafe {
+        ptx_asm!(
+            "ld.shared.v4.b32 {%0, %1, %2, %3}, [%4];",
+            out("=r") a,
+            out("=r") b,
+            out("=r") c,
+            out("=r") d,
+            in("r") address,
+            clobber("memory"),
+        );
+    }
+    [a, b, c, d]
+}
+
+/// Four words at a 16-byte aligned address of a global buffer; a plain load, since the
+/// residual may alias the output
+#[inline(always)]
+unsafe fn ld4(pointer: *const f32) -> [u32; 4] {
+    let (a, b, c, d): (u32, u32, u32, u32);
+    // safety: the caller passes a readable, 16-byte aligned run of four words
+    unsafe {
+        ptx_asm!(
+            "{ .reg .u64 g; cvta.to.global.u64 g, %4; ld.global.v4.u32 {%0, %1, %2, %3}, [g]; }",
+            out("=r") a,
+            out("=r") b,
+            out("=r") c,
+            out("=r") d,
+            in("l") pointer as u64,
+            clobber("memory"),
+        );
+    }
+    [a, b, c, d]
+}
+
+/// Stores four words at a 16-byte aligned address of a global buffer
+#[inline(always)]
+unsafe fn stg4(pointer: *mut f32, value: [u32; 4]) {
+    // safety: the caller passes a 16-byte aligned run of four words inside the checked
+    // output that only this lane writes
+    unsafe {
+        ptx_asm!(
+            "{ .reg .u64 g; cvta.to.global.u64 g, %0; st.global.v4.b32 [g], {%1, %2, %3, %4}; }",
+            in("l") pointer as u64,
+            in("r") value[0],
+            in("r") value[1],
+            in("r") value[2],
+            in("r") value[3],
+            clobber("memory"),
+        );
+    }
+}
+
+/// Orders this warp's shared memory accesses before and after the call
+#[inline(always)]
+unsafe fn sync_warp() {
+    // safety: a convergent warp barrier; every caller runs it with all 32 lanes
+    unsafe {
+        ptx_asm!("bar.warp.sync -1;", clobber("memory"));
+    }
 }
 
 /// Four words at a 16-byte aligned address of a global buffer no kernel writes during
@@ -403,6 +473,11 @@ macro_rules! h16_conv3x3 {
             const HALF_RESIDUAL_PREFETCHES: usize = HALF_RESIDUAL_LINES.div_ceil(32) as usize;
             // removes the 2^10 operand scale of a half residual; exact, as a power of two
             const RESIDUAL_UNSCALE: f32 = 1.0 / 1024.0;
+            // a half epilogue passes one channel tile of the warp's output row at a time
+            // through shared memory, pixel-major like the half tensors: two channel groups
+            // of 64 pixels, 16 bytes each, so global accesses are whole 16-byte pixels
+            const GROUP_BYTES: u32 = COLS * 16;
+            const TILE_BYTES: u32 = 2 * GROUP_BYTES;
             const _: () = assert!(
                 THREADS == 32 * WM * ROWS
                     && C % CTA_CHANNELS == 0
@@ -410,6 +485,7 @@ macro_rules! h16_conv3x3 {
                     && C % 16 == 0
                     && COLS == 64
                     && MT % 2 == 0
+                    && (!(HALF_OUT || HALF_RES) || WM * ROWS * TILE_BYTES <= 2 * STAGE_BYTES)
             );
 
             let item = thread::blockIdx_z() / BLOCKS;
@@ -649,6 +725,12 @@ macro_rules! h16_conv3x3 {
                 }
                 i += 1;
             }
+            // this warp's epilogue tile; the stages are free once the last barrier above
+            // closed their reads
+            let tile_smem = smem + warp * TILE_BYTES;
+            // this lane's offset in a tile for slot 0 of fragment 0: channel `g` of the
+            // first group at pixel `2t`
+            let lane_half = 2 * t * 16 + g * 2;
             // the residual may alias the output, so reading it all before any store lets
             // the loads overlap; the sum goes in before the bias, as cuDNN's fused call
             // adds them
@@ -657,21 +739,42 @@ macro_rules! h16_conv3x3 {
                 let mut i = 0;
                 #[unroll]
                 while i < MT {
+                    if HALF_RES {
+                        // lane `l` copies pixels `l` and `l + 32` of both channel groups
+                        let mut part = 0;
+                        #[unroll]
+                        while part < 4 {
+                            let column = lane + part as u32 % 2 * 32;
+                            let ox = ox0 + column;
+                            if ox < W {
+                                let group = item * CHUNKS + (tile0 + i as u32) * 2 + part as u32 / 2;
+                                // safety: inside the checked half residual, 16-byte aligned
+                                let words = unsafe { ld4(residual_ptr.add(((group * HW + oy * W + ox) * 4) as usize)) };
+                                // safety: inside this warp's tile
+                                unsafe { sts4(tile_smem + part as u32 / 2 * GROUP_BYTES + column * 16, words) };
+                            }
+                            part += 1;
+                        }
+                        // safety: every lane of the warp reaches it
+                        unsafe { sync_warp() };
+                    }
                     let mut slot = 0;
                     #[unroll]
                     while slot < 4 {
                         let channel = (tile0 + i as u32) * 16 + g + slot as u32 / 2 * 8;
                         let channel_row = row + channel * HW;
-                        // the half residual's half-word of this channel at column 0 of the row
-                        let half_row = base + channel / 8 * 8 * HW + oy * W * 8 + channel % 8;
                         let mut j = 0;
                         #[unroll]
                         while j < NT {
                             let ox = ox0 + j as u32 * 8 + 2 * t + slot as u32 % 2;
                             if ox < W {
                                 acc[i][j][slot] += if HALF_RES {
-                                    // safety: inside the checked half residual
-                                    (unsafe { ldh(residual_ptr, (half_row + ox * 8) as usize) }) * RESIDUAL_UNSCALE
+                                    let address = tile_smem
+                                        + slot as u32 / 2 * GROUP_BYTES
+                                        + (j as u32 * 8 + slot as u32 % 2) * 16
+                                        + lane_half;
+                                    // safety: inside this warp's published tile
+                                    (unsafe { lds_half(address) }) * RESIDUAL_UNSCALE
                                 } else {
                                     // safety: inside the checked residual
                                     unsafe { *residual_ptr.add((channel_row + ox) as usize) }
@@ -681,11 +784,17 @@ macro_rules! h16_conv3x3 {
                         }
                         slot += 1;
                     }
+                    if HALF_RES {
+                        // closes this tile's reads before the next tile's copy
+                        // safety: every lane of the warp reaches it
+                        unsafe { sync_warp() };
+                    }
                     i += 1;
                 }
             }
 
             let bias_ptr = bias.as_ptr();
+            let y_ptr = y.as_mut_ptr();
             let mut i = 0;
             #[unroll]
             while i < MT {
@@ -696,8 +805,6 @@ macro_rules! h16_conv3x3 {
                     // safety: `channel < C`, inside the checked bias
                     let b = unsafe { *bias_ptr.add(channel as usize) };
                     let channel_row = row + channel * HW;
-                    // the half output's half-word of this channel at column 0 of the row
-                    let half_row = base + channel / 8 * 8 * HW + oy * W * 8 + channel % 8;
                     let mut j = 0;
                     #[unroll]
                     while j < NT {
@@ -707,8 +814,12 @@ macro_rules! h16_conv3x3 {
                             if HALF_OUT {
                                 let (bits, out_of_range) = half1_checked(value);
                                 output_out_of_range |= out_of_range;
-                                // safety: inside the checked half output; this lane is its only writer
-                                unsafe { sth(y.as_mut_ptr(), (half_row + ox * 8) as usize, bits) };
+                                let address = tile_smem
+                                    + slot as u32 / 2 * GROUP_BYTES
+                                    + (j as u32 * 8 + slot as u32 % 2) * 16
+                                    + lane_half;
+                                // safety: inside this warp's tile; this lane is its only writer
+                                unsafe { sts_half(address, bits) };
                             } else {
                                 // safety: inside the checked output; this lane is its only writer
                                 unsafe { *y.get_unchecked_mut((channel_row + ox) as usize) = value };
@@ -717,6 +828,29 @@ macro_rules! h16_conv3x3 {
                         j += 1;
                     }
                     slot += 1;
+                }
+                if HALF_OUT {
+                    // safety: every lane of the warp reaches it
+                    unsafe { sync_warp() };
+                    // lane `l` writes pixels `l` and `l + 32` of both channel groups
+                    let mut part = 0;
+                    #[unroll]
+                    while part < 4 {
+                        let column = lane + part as u32 % 2 * 32;
+                        let ox = ox0 + column;
+                        if ox < W {
+                            let group = item * CHUNKS + (tile0 + i as u32) * 2 + part as u32 / 2;
+                            // safety: inside this warp's published tile
+                            let words = unsafe { lds4(tile_smem + part as u32 / 2 * GROUP_BYTES + column * 16) };
+                            // safety: inside the checked half output, 16-byte aligned; this
+                            // lane is the pixel's only writer
+                            unsafe { stg4(y_ptr.add(((group * HW + oy * W + ox) * 4) as usize), words) };
+                        }
+                        part += 1;
+                    }
+                    // closes this tile's reads before the next tile's stores
+                    // safety: every lane of the warp reaches it
+                    unsafe { sync_warp() };
                 }
                 i += 1;
             }

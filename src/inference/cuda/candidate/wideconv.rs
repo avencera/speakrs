@@ -1935,13 +1935,29 @@ impl Oxide {
                 }
                 _ => None,
             };
+            // half tensors move each pixel's eight channels with one 16-byte access: the
+            // input staging, the residual load and the output store
+            let aligned = |pointer: u64| pointer.is_multiple_of(16);
             if io.input {
-                // a half input stages each pixel's eight channels with one 16-byte load
                 let (x_ptr, _x) = inputs.x.device_ptr(stream);
-                if !x_ptr.is_multiple_of(16) {
+                if !aligned(x_ptr) {
                     return Err(unsupported("half inputs need 16-byte alignment"));
                 }
                 drop(_x);
+            }
+            if io.residual {
+                let (res_ptr, _res) = residual.device_ptr(stream);
+                if !aligned(res_ptr) {
+                    return Err(unsupported("half residuals need 16-byte alignment"));
+                }
+                drop(_res);
+            }
+            if io.output {
+                let (out_ptr, _out) = output.device_ptr(stream);
+                if !aligned(out_ptr) {
+                    return Err(unsupported("half outputs need 16-byte alignment"));
+                }
+                drop(_out);
             }
             let range_len = range.as_ref().map_or(0, |range| range.len() as u64);
             let mut launch = stream.launch_builder(function);
