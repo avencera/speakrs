@@ -24,7 +24,7 @@ use super::super::{
     CudaError, CudaLstmAlgorithm, CudaMath, CudaRuntime, CudaSegmentation, KernelModule,
     LoadedKernels, SafetensorsFile, SegmentationOptions,
 };
-use super::{reference_dir, runtime};
+use super::{reference_dir, runtime, skip};
 
 type DevResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -526,4 +526,152 @@ fn recurrence_dev(runtime: &CudaRuntime, dir: &std::path::Path) -> DevResult<()>
         );
     }
     Ok(())
+}
+
+/// Whether the single-block recurrence matches the exchange kernels bit for bit on the
+/// runtime weights, with eager timings of all three and the error of the first and last
+/// window against the f64 stack
+///
+/// Needs only `SPEAKRS_CUDA_ASSETS`, the directory with `segmentation-3.0.safetensors`;
+/// the input is deterministic and spans small to saturating activations. Each case
+/// prints one `LSTMRES_CASE` JSON line. Skips devices whose plan is not resident
+#[test]
+#[ignore = "GPU development check; hold /workspace/gpu-bench.lock"]
+fn lstmproj_resident_dev() {
+    let Some(runtime) = runtime("lstmproj_resident_dev") else {
+        return;
+    };
+    let Some(assets) = std::env::var_os("SPEAKRS_CUDA_ASSETS").map(std::path::PathBuf::from) else {
+        skip("lstmproj_resident_dev", "set SPEAKRS_CUDA_ASSETS");
+        return;
+    };
+    if let Err(error) = resident_dev(&runtime, &assets) {
+        eprintln!("FAILED: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn resident_dev(runtime: &CudaRuntime, assets: &std::path::Path) -> DevResult<()> {
+    let weights = SafetensorsFile::open(assets.join("segmentation-3.0.safetensors"))?;
+    let layers = host_layers(&weights)?;
+    let kernels = runtime.load_module(runtime.embedded_exact_request(KernelModule::LstmProj)?)?;
+    let device = runtime.device();
+    if !RecurrencePlan::resident_fits(runtime, &kernels)? {
+        let reason = format!(
+            "{} (cc {}) does not run the resident plan",
+            device.name(),
+            device.capability()
+        );
+        skip("lstmproj_resident_dev", &reason);
+        return Ok(());
+    }
+
+    let budget = RecurrencePlan::tiled_budget(runtime, &kernels)?;
+    let batches: Vec<usize> = env_list("SPEAKRS_LSTMPROJ_BATCHES", "1,2,7,8,9,31,32,33,64")
+        .iter()
+        .map(|batch| batch.parse().expect("batch"))
+        .collect();
+    for math in modes() {
+        for &batch in &batches {
+            let input = synthetic_input(batch);
+            let spec = spec(&layers, batch, math);
+            let pin = LstmProjOxide::device_pin(device, kernels.tier(), &spec)?;
+            let chosen = RecurrencePlan::select(runtime, &kernels, batch)?;
+            let wide_plan = RecurrencePlan::wide(runtime, &kernels, batch)?;
+            let wide = candidate_with(runtime, &kernels, spec, pin, wide_plan, &input)?;
+            let tiled = match RecurrencePlan::tiled_fit(batch, budget) {
+                Some(plan) => Some(candidate_with(runtime, &kernels, spec, pin, plan, &input)?),
+                None => None,
+            };
+            let resident = candidate_with(
+                runtime,
+                &kernels,
+                spec,
+                pin,
+                RecurrencePlan::Resident,
+                &input,
+            )?;
+
+            let rows = [0, batch - 1];
+            let truth: Vec<Vec<f64>> = rows
+                .iter()
+                .map(|&row| {
+                    f64_stack(
+                        &layers,
+                        &input[row * STEPS * FEATURES..][..STEPS * FEATURES],
+                    )
+                })
+                .collect();
+            let resident_truth = truth_error(&resident.output, &rows, &truth);
+
+            let matches_wide = bits_equal(&resident.output, &wide.output);
+            let matches_tiled = tiled
+                .as_ref()
+                .map(|run| bits_equal(&resident.output, &run.output));
+            let case = json!({
+                "device": device.name(),
+                "cc": device.capability().to_string(),
+                "tier": kernels.tier().to_string(),
+                "artifact": format!("{:?}", kernels.artifact()),
+                "math": format!("{math:?}"),
+                "batch": batch,
+                "chosen": format!("{chosen:?}"),
+                "wide": {"ms": wide.time.0, "spread": wide.time.1},
+                "tiled": tiled.as_ref().map(|run| json!({"ms": run.time.0, "spread": run.time.1})),
+                "resident": {"ms": resident.time.0, "spread": resident.time.1, "bitwise": resident.bitwise},
+                "f64_rows": rows,
+                "resident_f64": {"l2": resident_truth.0, "abs": resident_truth.1},
+                "resident_matches_wide": matches_wide,
+                "resident_matches_tiled": matches_tiled,
+            });
+            println!("LSTMRES_CASE {case}");
+
+            // a lone window runs the wide kernel, which was faster there under TF32
+            if batch == 1 {
+                assert!(
+                    matches!(chosen, RecurrencePlan::Wide(_)),
+                    "b1 {math:?}: chose {chosen:?}, expected Wide"
+                );
+            } else {
+                assert_eq!(
+                    chosen,
+                    RecurrencePlan::Resident,
+                    "b{batch} {math:?}: chose {chosen:?}"
+                );
+            }
+            assert!(
+                resident.bitwise,
+                "b{batch} {math:?}: repeated resident passes differ"
+            );
+            assert!(
+                matches_wide,
+                "b{batch} {math:?}: resident output differs from wide"
+            );
+            assert_ne!(
+                matches_tiled,
+                Some(false),
+                "b{batch} {math:?}: resident output differs from tiled"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Batch-major `[batch, 589, 60]` input whose windows scale from 0.25 to 2, so the
+/// gates run from their linear range into saturation
+fn synthetic_input(batch: usize) -> Vec<f32> {
+    let mut state = 0x9e37_79b9_u32;
+    let mut input = Vec::with_capacity(batch * STEPS * FEATURES);
+    for b in 0..batch {
+        let scale = 0.25 * (1 + b % 8) as f32;
+        for t in 0..STEPS {
+            for c in 0..FEATURES {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let noise = (state >> 8) as f32 / (1u32 << 24) as f32 - 0.5;
+                let wave = (0.037 * t as f32 + 0.41 * c as f32 + b as f32).sin();
+                input.push(scale * (wave + noise));
+            }
+        }
+    }
+    input
 }

@@ -9,10 +9,11 @@
 //! stream, so both directions share the GPU instead of running one after the other;
 //! the next layer waits for both
 //!
-//! [`RecurrencePlan`] picks one of two recurrence kernels with bitwise identical
+//! [`RecurrencePlan`] picks one of three recurrence kernels with bitwise identical
 //! results: the wide kernel's sixteen eight-unit blocks per tile for up to eight
-//! windows, and eight-window tiles of sixteen-unit blocks for larger batches whose
-//! grids fit the GPU together
+//! windows, eight-window tiles of sixteen-unit blocks for larger batches whose grids
+//! fit the GPU together, and on the A100 one block per window and direction that holds
+//! the whole recurrent matrix and needs no exchange
 //!
 //! The exchange owns an allocation with a 2 MiB-aligned active subview. Producer
 //! lines, step parities, batch tiles and directions have disjoint padded regions.
@@ -33,6 +34,7 @@ use cudarc::driver::{
 
 use self::layout::{
     AlignedSpan, ExchangeLayout, GATE_COLUMNS, GROUPS, HIDDEN, KERNEL, ProjectionLayout,
+    RESIDENT_KERNEL, RESIDENT_SHARED_BYTES, RESIDENT_STATIC_SHARED_BYTES, RESIDENT_THREADS,
     STATE_TILE, Schedule, TENSOR_SHARED_BYTES, THREADS, TILED_GROUPS, TILED_KERNEL, TILED_ROWS,
     TILED_THREADS, pack_bias, pack_directions, pack_input_directions, padded_input, tiled_exchange,
 };
@@ -51,9 +53,10 @@ const SPK_LSTM_PROJECTION_SMALL: &str = "spk_lstm_projection_small";
 const SPK_LSTM_PROJECTION_TF32: &str = "spk_lstm_projection_tf32";
 
 /// Kernel entries this host plan may load, in every tier
-pub(crate) const REQUIRED_KERNELS: [&str; 6] = [
+pub(crate) const REQUIRED_KERNELS: [&str; 7] = [
     KERNEL,
     TILED_KERNEL,
+    RESIDENT_KERNEL,
     SPK_LSTM_CLEAR,
     SPK_LSTM_PROJECTION,
     SPK_LSTM_PROJECTION_SMALL,
@@ -70,6 +73,15 @@ const SMALL_PROJECTION_ROWS: usize = 2048;
 /// on the RTX 5060 Ti and RTX 4060 Ti. It needs two tiles: one tile occupies only 16
 /// SMs, and up to eight windows ran as fast or faster on the wide kernel
 const TILED_MIN_BATCH: usize = 9;
+/// The capability whose SMs ran the single-block recurrence faster than both exchange
+/// kernels: on an A100 at batch 32 it took 0.97 ms per layer against 1.38 ms for the
+/// tiled kernel. Hopper SMs also hold the matrix but were not measured
+const RESIDENT_CAPABILITY: ComputeCapability = ComputeCapability::new(8, 0);
+/// Fewest windows that run the single-block recurrence. From two windows up it beat the
+/// wide kernel by 18% or more on an A100. At one window the two were close and runs
+/// disagreed: one TF32 stack took 3.21 ms on the wide kernel against 4.00 ms resident,
+/// another 4.13 against 4.03 ms. So a lone window keeps the wide kernel
+const RESIDENT_MIN_BATCH: usize = 2;
 
 /// One layer's weights in the packed gate order, both directions stacked
 #[derive(Debug)]
@@ -98,8 +110,9 @@ pub(crate) struct Oxide {
     plan: RecurrencePlan,
     /// `[2, batch * steps, 512]`: each direction's input projection
     gates: AlignedScratch<f32>,
-    /// Aligned, padded flag and value words, cleared before each pass
-    state: Exchange,
+    /// Aligned, padded flag and value words, cleared before each pass; the
+    /// single-block recurrence exchanges nothing
+    state: Option<Exchange>,
     /// Runs the reverse direction when the schedule makes the directions concurrent
     side: SideStream,
 }
@@ -266,6 +279,12 @@ impl Oxide {
         let projection = InputProjection::new(runtime.device(), kernels, projection)?;
         let clear = kernels.function(SPK_LSTM_CLEAR)?;
         let recurrence = plan.function(kernels)?;
+        if plan == RecurrencePlan::Resident {
+            recurrence.set_attribute(
+                CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                RESIDENT_SHARED_BYTES as i32,
+            )?;
+        }
 
         let stream = runtime.stream();
         let layout = projection.layout();
@@ -293,7 +312,10 @@ impl Oxide {
             steps: spec.frames,
             plan,
             gates: AlignedScratch::zeros(runtime, 2 * spec.batch * spec.frames * GATE_COLUMNS)?,
-            state: Exchange::new(runtime, plan.exchange_layout())?,
+            state: plan
+                .exchange_layout()
+                .map(|layout| Exchange::new(runtime, layout))
+                .transpose()?,
             side: SideStream::new(runtime)?,
         })
     }
@@ -301,8 +323,11 @@ impl Oxide {
     /// Zeroes the exchange state, so no word from an earlier pass carries a flag this
     /// pass expects
     fn clear_state(&self, stream: &CudaStream) -> Result<(), CudaError> {
-        let mut storage = self.state.buffer.storage.get();
-        let mut state = storage.slice_mut(self.state.buffer.span.range());
+        let Some(exchange) = &self.state else {
+            return Ok(());
+        };
+        let mut storage = exchange.buffer.storage.get();
+        let mut state = storage.slice_mut(exchange.buffer.span.range());
         let len = state.len();
         let len_arg = len as u64;
         let mut builder = stream.launch_builder(&self.clear);
@@ -325,8 +350,14 @@ impl Oxide {
     ) -> Result<(), CudaError> {
         let context = "lstmproj recurrence";
         let rows = self.batch * self.steps;
-        let mut storage = self.state.buffer.storage.get();
-        let mut state = storage.slice_mut(self.state.buffer.span.range());
+        let Some(exchange) = &self.state else {
+            // one launch runs both directions
+            return phases.recurrence(index, Direction::Forward, || {
+                self.launch_resident(stream, layer, output)
+            });
+        };
+        let mut storage = exchange.buffer.storage.get();
+        let mut state = storage.slice_mut(exchange.buffer.span.range());
         let gate_storage = self.gates.storage.get();
         let gates = gate_storage.slice(self.gates.span.range());
         // cudarc orders accesses per allocation, so taking these pointers on the side
@@ -349,7 +380,7 @@ impl Oxide {
                 // the kernel made ptxas (CUDA 13.0, sm_120) truncate the pointer to
                 // 32 bits
                 output: output + (d * HIDDEN * size_of::<f32>()) as u64,
-                state: state + (self.state.layout.direction(d) * size_of::<u64>()) as u64,
+                state: state + (exchange.layout.direction(d) * size_of::<u64>()) as u64,
                 flag_base: to_u32(context, index * self.steps)?,
             };
             let on: &CudaStream = if concurrent && d == 1 {
@@ -394,6 +425,12 @@ impl Oxide {
         let direction = to_u32(context, direction)?;
         let schedule = match self.plan {
             RecurrencePlan::Wide(schedule) => schedule,
+            RecurrencePlan::Resident => {
+                return Err(CudaError::Unsupported {
+                    context,
+                    reason: "the single-block recurrence has no per-direction launch".to_owned(),
+                });
+            }
             RecurrencePlan::Tiled { tiles } => {
                 let first = 0u32;
                 let mut builder = stream.launch_builder(&self.recurrence);
@@ -468,6 +505,57 @@ impl Oxide {
     }
 }
 
+impl Oxide {
+    /// The single launch of both directions of one layer, one block per window and
+    /// direction
+    fn launch_resident(
+        &self,
+        stream: &CudaStream,
+        layer: &PackedLayer,
+        output: &mut CudaViewMut<'_, f32>,
+    ) -> Result<(), CudaError> {
+        let context = "lstmproj resident recurrence";
+        let gate_storage = self.gates.storage.get();
+        let gates = gate_storage.slice(self.gates.span.range());
+        let r_storage = layer.r.storage.get();
+        let r = r_storage.slice(layer.r.span.range());
+        let bias = layer.bias.as_view();
+        let lens = [gates.len(), r.len(), bias.len()].map(|len| len as u64);
+        let (output, _output_record) = output.device_ptr_mut(stream);
+        // the kernel takes each direction's first output column; adding it in the
+        // kernel made ptxas (CUDA 13.0, sm_120) truncate the pointer to 32 bits
+        let reverse = output + (HIDDEN * size_of::<f32>()) as u64;
+        let batch = to_u32(context, self.batch)?;
+        let steps = to_u32(context, self.steps)?;
+        let mut builder = stream.launch_builder(&self.recurrence);
+        builder
+            .arg(&gates)
+            .arg(&lens[0])
+            .arg(&r)
+            .arg(&lens[1])
+            .arg(&bias)
+            .arg(&lens[2])
+            .arg(&output)
+            .arg(&reverse)
+            .arg(&batch)
+            .arg(&steps);
+        let config = LaunchConfig {
+            grid_dim: (batch, 2, 1),
+            block_dim: (RESIDENT_THREADS, 1, 1),
+            shared_mem_bytes: RESIDENT_SHARED_BYTES,
+        };
+        // SAFETY: the arguments follow the PTX signature of
+        // `spk_lstm_recurrence_resident` (pointer and length per slice, both output
+        // pointers, then two scalars). The gate view holds `[2, batch * steps, 512]`,
+        // R `[2, 512, 128]` on an aligned base and the bias `[2, 512]`; the output holds
+        // `[batch, steps, 256]`. Blocks never wait for each other, so the launch needs
+        // no residency guarantee, and the plan raised the function's dynamic shared
+        // limit to the bytes requested here
+        unsafe { builder.launch(config) }?;
+        Ok(())
+    }
+}
+
 /// Owns a naturally allocated buffer and its typed, explicitly aligned subview
 #[derive(Debug)]
 struct AlignedScratch<T> {
@@ -515,6 +603,10 @@ impl Exchange {
 /// The recurrence kernel a plan runs and how its batch tiles launch
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecurrencePlan {
+    /// One block per window and direction holding the whole recurrent matrix, on
+    /// [`RESIDENT_CAPABILITY`] parts that can host it, from [`RESIDENT_MIN_BATCH`]
+    /// windows; no exchange and no cooperative launch
+    Resident,
     /// Sixteen eight-unit blocks per tile of 8, 16 or 32 windows; the faster kernel for
     /// a lone window, and the fallback when the tiled grids do not fit together
     Wide(Schedule),
@@ -529,11 +621,45 @@ impl RecurrencePlan {
         kernels: &LoadedKernels,
         batch: usize,
     ) -> Result<Self, PlanError> {
+        if batch >= RESIDENT_MIN_BATCH && Self::resident_fits(runtime, kernels)? {
+            return Ok(Self::Resident);
+        }
         if let Some(plan) = Self::tiled(batch, Self::tiled_budget(runtime, kernels)?) {
             return Ok(plan);
         }
 
         Self::wide(runtime, kernels, batch)
+    }
+
+    /// Whether this context runs the single-block recurrence: a measured capability
+    /// whose blocks can take its dynamic shared memory, and at least one resident block
+    /// per SM once the function allows that much
+    pub(crate) fn resident_fits(
+        runtime: &CudaRuntime,
+        kernels: &LoadedKernels,
+    ) -> Result<bool, PlanError> {
+        let device = runtime.device();
+        if !Self::resident_device(device.capability(), device.shared_optin_bytes()) {
+            return Ok(false);
+        }
+
+        let resident = kernels.function(RESIDENT_KERNEL)?;
+        resident.set_attribute(
+            CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+            RESIDENT_SHARED_BYTES as i32,
+        )?;
+        let per_sm = resident.occupancy_max_active_blocks_per_multiprocessor(
+            RESIDENT_THREADS,
+            RESIDENT_SHARED_BYTES as usize,
+            None,
+        )?;
+        Ok(per_sm >= 1)
+    }
+
+    /// The device rule of the single-block recurrence, before the occupancy check
+    pub(crate) fn resident_device(capability: ComputeCapability, shared_optin_bytes: u32) -> bool {
+        capability == RESIDENT_CAPABILITY
+            && shared_optin_bytes >= RESIDENT_SHARED_BYTES + RESIDENT_STATIC_SHARED_BYTES
     }
 
     /// Blocks of the tiled kernel that both directions' cooperative grids can keep
@@ -566,6 +692,7 @@ impl RecurrencePlan {
         let name = match self {
             Self::Wide(_) => KERNEL,
             Self::Tiled { .. } => TILED_KERNEL,
+            Self::Resident => RESIDENT_KERNEL,
         };
         Ok(kernels.function(name)?)
     }
@@ -591,13 +718,17 @@ impl RecurrencePlan {
         match self {
             Self::Wide(schedule) => schedule.concurrent,
             Self::Tiled { .. } => true,
+            // one launch runs both directions without the side stream
+            Self::Resident => false,
         }
     }
 
-    fn exchange_layout(self) -> ExchangeLayout {
+    /// The hidden-state exchange the kernel needs, if any
+    fn exchange_layout(self) -> Option<ExchangeLayout> {
         match self {
-            Self::Wide(schedule) => ExchangeLayout::new(schedule.tiles, STATE_TILE),
-            Self::Tiled { tiles } => ExchangeLayout::new(tiles, tiled_exchange::TILE),
+            Self::Wide(schedule) => Some(ExchangeLayout::new(schedule.tiles, STATE_TILE)),
+            Self::Tiled { tiles } => Some(ExchangeLayout::new(tiles, tiled_exchange::TILE)),
+            Self::Resident => None,
         }
     }
 }

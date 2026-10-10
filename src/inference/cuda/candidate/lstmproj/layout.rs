@@ -50,6 +50,17 @@ pub(crate) const TILED_THREADS: u32 = 256;
 /// Windows per tile of the batched recurrence, `tiled::TILE_ROWS`
 pub(crate) const TILED_ROWS: usize = tiled_exchange::ROWS;
 
+/// The recurrence with one window and direction per block, `spk_lstm_recurrence_resident`
+/// in the kernel crate's `lstmproj` area
+pub(crate) const RESIDENT_KERNEL: &str = "spk_lstm_recurrence_resident";
+/// Threads per block of the single-block recurrence, `resident::THREADS`
+pub(crate) const RESIDENT_THREADS: u32 = 256;
+/// Dynamic shared bytes of the single-block recurrence, `resident::SHARED_BYTES`: the
+/// half of one direction's recurrent matrix that does not fit in registers
+pub(crate) const RESIDENT_SHARED_BYTES: u32 = (GATE_COLUMNS * HIDDEN * size_of::<f32>() / 2) as u32;
+/// Static shared bytes of the single-block recurrence: both parities of the hidden vector
+pub(crate) const RESIDENT_STATIC_SHARED_BYTES: u32 = (2 * HIDDEN * size_of::<f32>()) as u32;
+
 /// Dynamic shared bytes of the TF32 projection tile
 pub(crate) const TENSOR_SHARED_BYTES: u32 = 61_440;
 

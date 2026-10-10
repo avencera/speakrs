@@ -233,15 +233,6 @@ fn load_hidden(slot: *const u64, hidden_tile: *mut f32, rows: usize, flag: u32) 
     });
 }
 
-/// Adds lane pairs `$offset` apart, keeping values `0..$half` and sending the rest
-macro_rules! scatter {
-    ($values:ident, $offset:literal, $half:literal, [$($i:literal),*]) => {
-        $({
-            $values[$i] += warp::shuffle_xor_f32($values[$i + $half], $offset);
-        })*
-    };
-}
-
 /// The four recurrent gate sums of tile row `slice / 2` for this half-warp's unit
 ///
 /// Each lane adds its eight inputs in order with FMAs; the reduction then adds the 16
