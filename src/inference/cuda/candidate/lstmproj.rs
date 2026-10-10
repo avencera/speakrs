@@ -77,10 +77,10 @@ const TILED_MIN_BATCH: usize = 9;
 /// kernels: on an A100 at batch 32 it took 0.97 ms per layer against 1.38 ms for the
 /// tiled kernel. Hopper SMs also hold the matrix but were not measured
 const RESIDENT_CAPABILITY: ComputeCapability = ComputeCapability::new(8, 0);
-/// Fewest windows for which the single-block recurrence beat the wide kernel on an A100:
-/// at one window the TF32 stack took 3.21 ms on the wide kernel against 4.00 ms resident,
-/// and FP32 ran near even at 4.13 against 4.00 ms; from two windows up resident won by
-/// 18% or more
+/// Fewest windows that run the single-block recurrence. From two windows up it beat the
+/// wide kernel by 18% or more on an A100. At one window the two were close and runs
+/// disagreed: one TF32 stack took 3.21 ms on the wide kernel against 4.00 ms resident,
+/// another 4.13 against 4.03 ms. So a lone window keeps the wide kernel
 const RESIDENT_MIN_BATCH: usize = 2;
 
 /// One layer's weights in the packed gate order, both directions stacked
