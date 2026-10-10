@@ -54,7 +54,8 @@
 //! the result
 
 use cuda_device::shared::cvta_generic_to_shared_u32;
-use cuda_device::{DisjointSlice, DynamicSharedArray, kernel, launch_bounds, ptx_asm, thread};
+use cuda_device::vector::U32x4;
+use cuda_device::{DisjointSlice, DynamicSharedArray, kernel, launch_bounds, ptx_asm, thread, warp};
 
 /// Rounds `lo` and `hi` scaled by 2^10 to FP16 with round-to-nearest-even, saturating at
 /// the largest finite FP16 value, and packs them with `lo` in the low half
@@ -167,6 +168,9 @@ unsafe fn lds4(address: u32) -> [u32; 4] {
 #[inline(always)]
 unsafe fn ld4(pointer: *const f32) -> [u32; 4] {
     let (a, b, c, d): (u32, u32, u32, u32);
+    // asm rather than a typed load: the opaque load with a memory clobber cannot be moved
+    // past the output stores or turned into a non-coherent load, which a native load
+    // through a `&[f32]` parameter could be
     // safety: the caller passes a readable, 16-byte aligned run of four words
     unsafe {
         ptx_asm!(
@@ -187,26 +191,14 @@ unsafe fn ld4(pointer: *const f32) -> [u32; 4] {
 unsafe fn stg4(pointer: *mut f32, value: [u32; 4]) {
     // safety: the caller passes a 16-byte aligned run of four words inside the checked
     // output that only this lane writes
-    unsafe {
-        ptx_asm!(
-            "{ .reg .u64 g; cvta.to.global.u64 g, %0; st.global.v4.b32 [g], {%1, %2, %3, %4}; }",
-            in("l") pointer as u64,
-            in("r") value[0],
-            in("r") value[1],
-            in("r") value[2],
-            in("r") value[3],
-            clobber("memory"),
-        );
-    }
+    unsafe { *(pointer as *mut U32x4) = U32x4::new(value) };
 }
 
 /// Orders this warp's shared memory accesses before and after the call
 #[inline(always)]
-unsafe fn sync_warp() {
-    // safety: a convergent warp barrier; every caller runs it with all 32 lanes
-    unsafe {
-        ptx_asm!("bar.warp.sync -1;", clobber("memory"));
-    }
+fn sync_warp() {
+    // every caller runs it with all 32 lanes
+    warp::sync_mask(0xffff_ffff);
 }
 
 /// Four words at a 16-byte aligned address of a global buffer no kernel writes during
@@ -755,8 +747,7 @@ macro_rules! h16_conv3x3 {
                             }
                             part += 1;
                         }
-                        // safety: every lane of the warp reaches it
-                        unsafe { sync_warp() };
+                        sync_warp();
                     }
                     let mut slot = 0;
                     #[unroll]
@@ -786,8 +777,7 @@ macro_rules! h16_conv3x3 {
                     }
                     if HALF_RES {
                         // closes this tile's reads before the next tile's copy
-                        // safety: every lane of the warp reaches it
-                        unsafe { sync_warp() };
+                        sync_warp();
                     }
                     i += 1;
                 }
@@ -830,8 +820,7 @@ macro_rules! h16_conv3x3 {
                     slot += 1;
                 }
                 if HALF_OUT {
-                    // safety: every lane of the warp reaches it
-                    unsafe { sync_warp() };
+                    sync_warp();
                     // lane `l` writes pixels `l` and `l + 32` of both channel groups
                     let mut part = 0;
                     #[unroll]
@@ -849,8 +838,7 @@ macro_rules! h16_conv3x3 {
                         part += 1;
                     }
                     // closes this tile's reads before the next tile's stores
-                    // safety: every lane of the warp reaches it
-                    unsafe { sync_warp() };
+                    sync_warp();
                 }
                 i += 1;
             }

@@ -7,6 +7,7 @@
 //! The SIMT path always uses full FP32, including in TF32 mode
 
 use cuda_device::shared::cvta_generic_to_shared_u32;
+use cuda_device::vector::F32x2;
 use cuda_device::{DisjointSlice, SharedArray, kernel, launch_bounds, ptx_asm, thread};
 
 pub mod h16;
@@ -909,15 +910,7 @@ stem3x3! {
 #[inline(always)]
 unsafe fn stg2(pointer: *mut f32, value: [f32; 2]) {
     // safety: the caller passes an aligned pointer to two floats only this thread writes
-    unsafe {
-        ptx_asm!(
-            "{ .reg .u64 g; cvta.to.global.u64 g, %0; st.global.v2.f32 [g], {%1, %2}; }",
-            in("l") pointer as u64,
-            in("f") value[0],
-            in("f") value[1],
-            clobber("memory"),
-        );
-    }
+    unsafe { *(pointer as *mut F32x2) = F32x2::new(value) };
 }
 
 /// Shared words per stem output channel: nine weights, the bias and two pad words
@@ -926,6 +919,8 @@ const STEM_CHANNEL_WORDS: u32 = 12;
 /// Stores four floats at a 16-byte aligned global address
 #[inline(always)]
 unsafe fn stg4(pointer: *mut f32, value: [f32; 4]) {
+    // asm because a native `F32x4` store splits into a v2 store and two scalar stores here: LLVM
+    // sinks the last lane's math into the tail shared with the guarded scalar path
     // safety: the caller passes an aligned pointer to four floats only this thread writes
     unsafe {
         ptx_asm!(
