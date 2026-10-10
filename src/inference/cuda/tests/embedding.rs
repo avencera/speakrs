@@ -254,6 +254,19 @@ fn embedding_b32_matches_reference() -> Result<(), CudaError> {
             result.min_cosine
         );
 
+        // the half comparison below only means something where a block runs half;
+        // FP32 math never selects FP16 tiles, and TF32 recipes with wide FP16
+        // 32- and 64-channel tiles must pass every such pair as halves
+        let (wide_pairs, half_pairs) = batch.half_hidden_blocks();
+        eprintln!("b32 {math:?}: {half_pairs} half hidden blocks, {wide_pairs} wide FP16 pairs");
+        assert_eq!(
+            half_pairs, wide_pairs,
+            "b32 {math:?}: a wide FP16 pair keeps its hidden activation FP32"
+        );
+        if math == CudaMath::Fp32 {
+            assert_eq!(wide_pairs, 0, "b32 FP32 selected FP16 tiles");
+        }
+
         // a replayed graph must give the eager result bit for bit, and a second
         // eager pass must too, since algorithms are picked once per plan
         let again = run_case(&runtime, &mut batch, &case);
