@@ -91,6 +91,11 @@ kernel_entries! {
     WTP1_C128 => "spk_wideconv_wtp1_c128",
     WTP1_C256 => "spk_wideconv_wtp1_c256",
     H16_C128 => "spk_wideconv_h16_c128",
+    H16_C128_HALF_OUT => "spk_wideconv_h16_c128_half_out",
+    H16_C128_HALF_IN => "spk_wideconv_h16_c128_half_in",
+    H16_C128_HALF_IN_OUT => "spk_wideconv_h16_c128_half_in_out",
+    H16_C128_HALF_ALL => "spk_wideconv_h16_c128_half_all",
+    H16_C128_HALF_IN_RES => "spk_wideconv_h16_c128_half_in_res",
     H16_C128_NARROW => "spk_wideconv_h16_c128_narrow",
     H16_C128_NARROW_HALF_OUT => "spk_wideconv_h16_c128_narrow_half_out",
     H16_C128_NARROW_HALF_IN => "spk_wideconv_h16_c128_narrow_half_in",
@@ -98,6 +103,11 @@ kernel_entries! {
     H16_C128_NARROW_HALF_ALL => "spk_wideconv_h16_c128_narrow_half_all",
     H16_C128_NARROW_HALF_IN_RES => "spk_wideconv_h16_c128_narrow_half_in_res",
     H16_C256 => "spk_wideconv_h16_c256",
+    H16_C256_HALF_OUT => "spk_wideconv_h16_c256_half_out",
+    H16_C256_HALF_IN => "spk_wideconv_h16_c256_half_in",
+    H16_C256_HALF_IN_OUT => "spk_wideconv_h16_c256_half_in_out",
+    H16_C256_HALF_ALL => "spk_wideconv_h16_c256_half_all",
+    H16_C256_HALF_IN_RES => "spk_wideconv_h16_c256_half_in_res",
     H16_C256_NARROW => "spk_wideconv_h16_c256_narrow",
     H16_C256_NARROW_HALF_OUT => "spk_wideconv_h16_c256_narrow_half_out",
     H16_C256_NARROW_HALF_IN => "spk_wideconv_h16_c256_narrow_half_in",
@@ -1155,7 +1165,7 @@ impl Shape {
     }
 
     /// The [`HalfIo`] entries of the same-channel shapes whose FP16 tiles have them, in
-    /// [`HalfLaunches`] order: wide 32- and 64-channel tiles and narrow 128- and
+    /// [`HalfLaunches`] order: wide 32- and 64-channel tiles and both tiles of the 128- and
     /// 256-channel ones
     fn fp16_half_entries(self, tiles: Fp16Tiles) -> Option<[&'static str; 5]> {
         match (self, tiles) {
@@ -1173,12 +1183,26 @@ impl Shape {
                 entries::H16_C64_HALF_ALL,
                 entries::H16_C64_HALF_IN_RES,
             ]),
+            (Self::C128, Fp16Tiles::Wide) => Some([
+                entries::H16_C128_HALF_OUT,
+                entries::H16_C128_HALF_IN,
+                entries::H16_C128_HALF_IN_OUT,
+                entries::H16_C128_HALF_ALL,
+                entries::H16_C128_HALF_IN_RES,
+            ]),
             (Self::C128, Fp16Tiles::Narrow) => Some([
                 entries::H16_C128_NARROW_HALF_OUT,
                 entries::H16_C128_NARROW_HALF_IN,
                 entries::H16_C128_NARROW_HALF_IN_OUT,
                 entries::H16_C128_NARROW_HALF_ALL,
                 entries::H16_C128_NARROW_HALF_IN_RES,
+            ]),
+            (Self::C256, Fp16Tiles::Wide) => Some([
+                entries::H16_C256_HALF_OUT,
+                entries::H16_C256_HALF_IN,
+                entries::H16_C256_HALF_IN_OUT,
+                entries::H16_C256_HALF_ALL,
+                entries::H16_C256_HALF_IN_RES,
             ]),
             (Self::C256, Fp16Tiles::Narrow) => Some([
                 entries::H16_C256_NARROW_HALF_OUT,
@@ -2223,7 +2247,7 @@ impl Oxide {
     }
 
     /// Whether this plan has the [`HalfIo`] launches, which wide FP16 tiles of the 32-
-    /// and 64-channel shapes and narrow ones of the 128- and 256-channel shapes do
+    /// and 64-channel shapes and both tiles of the 128- and 256-channel shapes do
     pub(crate) fn has_half_io(&self) -> bool {
         self.half.is_some()
     }

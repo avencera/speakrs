@@ -63,8 +63,8 @@ impl EmbeddingBatch {
     }
 
     /// Residual blocks whose two convolutions run FP16 tiles, wide on 32 or 64
-    /// channels or narrow on 128 or 256, and how many blocks [`Self::forward`] passes a
-    /// half hidden activation
+    /// channels or either tile on 128 or 256, and how many blocks [`Self::forward`]
+    /// passes a half hidden activation
     pub fn half_hidden_blocks(&self) -> (usize, usize) {
         let (fp16_pairs, _, half_pairs, _) = self.half_blocks();
         (fp16_pairs, half_pairs)
@@ -84,9 +84,9 @@ impl EmbeddingBatch {
     fn half_blocks(&self) -> (usize, usize, usize, usize) {
         let fp16 = |layer: &ConvLayer| {
             let conv = layer.conv(self.chunks, self.model.math);
-            let tiles = match conv.in_channels {
-                32 | 64 => WideconvFp16Tiles::Wide,
-                128 | 256 => WideconvFp16Tiles::Narrow,
+            let tiles: &[WideconvFp16Tiles] = match conv.in_channels {
+                32 | 64 => &[WideconvFp16Tiles::Wide],
+                128 | 256 => &[WideconvFp16Tiles::Wide, WideconvFp16Tiles::Narrow],
                 _ => return false,
             };
             conv.out_channels == conv.in_channels
@@ -94,7 +94,9 @@ impl EmbeddingBatch {
                 && self.plans.iter().any(|(name, plan)| {
                     name == layer.name()
                         && matches!(plan, Plan::Wideconv(plan)
-                            if plan.config().algorithm == WideconvAlgorithm::Fp16(tiles))
+                        if tiles.iter().any(|&tiles| {
+                            plan.config().algorithm == WideconvAlgorithm::Fp16(tiles)
+                        }))
                 })
         };
         let blocks = &self.model.trunk.blocks;

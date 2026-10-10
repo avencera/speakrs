@@ -1013,10 +1013,12 @@ fn driver_trunk_embedding_matches_library() -> Result<(), CudaError> {
 
 /// The same-channel FP16 shapes whose tiles have [`HalfIo`] launches: channels, input
 /// plane and tiles
-const HALF_SHAPES: [(usize, [usize; 2], WideconvFp16Tiles); 4] = [
+const HALF_SHAPES: [(usize, [usize; 2], WideconvFp16Tiles); 6] = [
     (32, [80, 998], WideconvFp16Tiles::Wide),
     (64, [40, 499], WideconvFp16Tiles::Wide),
+    (128, [20, 250], WideconvFp16Tiles::Wide),
     (128, [20, 250], WideconvFp16Tiles::Narrow),
+    (256, [10, 125], WideconvFp16Tiles::Wide),
     (256, [10, 125], WideconvFp16Tiles::Narrow),
 ];
 
