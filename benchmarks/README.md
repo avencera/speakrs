@@ -144,23 +144,23 @@ Earlier pyannote hardware: NVIDIA L40S, AMD EPYC 9354.
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
-| **speakrs CUDA** | **17.0%** | 8.1% | 4.3% | 4.5% | 38.6s | 1745x |
-| speakrs CUDA Fast | 17.4% | 8.2% | 4.3% | 4.9% | 19.2s | **3507x** |
+| **speakrs CUDA** | **17.0%** | 8.1% | 4.3% | 4.5% | 34.5s | 1955x |
+| speakrs CUDA Fast | 17.4% | 8.2% | 4.3% | 4.9% | 17.8s | **3796x** |
 | **pyannote CUDA (L40S, earlier run)** | **17.0%** | 8.1% | 4.3% | 4.5% | 4388.1s | 15x |
 
 ### AMI SDM (34 files, 1123.8 min)
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
-| **speakrs CUDA** | **19.7%** | 9.6% | 4.3% | 5.7% | 39.3s | 1717x |
-| speakrs CUDA Fast | 20.6% | 9.6% | 4.3% | 6.6% | 20.5s | **3286x** |
+| **speakrs CUDA** | **19.7%** | 9.6% | 4.3% | 5.7% | 36.0s | 1874x |
+| speakrs CUDA Fast | 20.6% | 9.6% | 4.3% | 6.6% | 18.4s | **3665x** |
 
 ### AISHELL-4 (20 files, 763.5 min)
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
-| **speakrs CUDA** | **11.1%** | 3.9% | 3.9% | 3.3% | 22.9s | 1997x |
-| speakrs CUDA Fast | 11.4% | 3.9% | 3.9% | 3.6% | 10.8s | **4258x** |
+| **speakrs CUDA** | **11.1%** | 3.9% | 3.9% | 3.3% | 23.9s | 1916x |
+| speakrs CUDA Fast | 11.4% | 3.9% | 3.9% | 3.6% | 12.4s | **3706x** |
 
 ### Earnings-21 (44 files, 2355.8 min)
 
@@ -168,23 +168,23 @@ Earlier pyannote hardware: NVIDIA RTX 4090, AMD EPYC 7B13.
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
-| speakrs CUDA | 9.7% | 2.6% | 2.4% | 4.7% | 80.9s | 1747x |
-| **speakrs CUDA Fast** | **9.2%** | 2.5% | 2.5% | 4.2% | 40.9s | **3459x** |
+| speakrs CUDA | 9.7% | 2.6% | 2.4% | 4.7% | 75.8s | 1864x |
+| **speakrs CUDA Fast** | **9.2%** | 2.5% | 2.5% | 4.2% | 39.5s | **3578x** |
 | pyannote CUDA (RTX 4090, earlier run) | 9.7% | 2.6% | 2.4% | 4.7% | 8036.8s | 18x |
 
 ### ICSI (75 files, 4301.2 min)
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
-| **speakrs CUDA** | **33.3%** | 19.5% | 9.5% | 4.3% | 130.3s | 1980x |
-| speakrs CUDA Fast | 33.7% | 19.4% | 9.6% | 4.7% | 61.0s | **4231x** |
+| **speakrs CUDA** | **33.3%** | 19.5% | 9.5% | 4.3% | 142.2s | 1814x |
+| speakrs CUDA Fast | 33.7% | 19.4% | 9.6% | 4.7% | 71.1s | **3628x** |
 
 ### AVA-AVD (54 files, 266.1 min)
 
 | Implementation | DER | Missed | False Alarm | Confusion | Time | RTFx |
 |---|---|---|---|---|---|---|
-| **speakrs CUDA** | **45.4%** | 16.1% | 10.8% | 18.6% | 8.0s | 1999x |
-| speakrs CUDA Fast | 48.9% | 15.9% | 11.3% | 21.8% | 3.7s | **4286x** |
+| **speakrs CUDA** | **45.4%** | 16.1% | 10.8% | 18.6% | 7.7s | 2083x |
+| speakrs CUDA Fast | 48.9% | 15.9% | 11.3% | 21.8% | 4.1s | **3899x** |
 
 ## Other implementations
 
