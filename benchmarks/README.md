@@ -87,8 +87,8 @@ Hardware: Apple M4 Pro, macOS 26.3
 
 ## Linux (CUDA)
 
-The VoxConverse rows use an NVIDIA RTX 4090 container with 16 CPU cores and
-8 GiB of RAM. The cloud host doesn't report its CPU model. The speakrs CUDA and
+The VoxConverse rows use NVIDIA RTX 4090 containers with 16 CPU cores and
+8 GiB of RAM, one per split. The cloud host doesn't report its CPU model. The speakrs CUDA and
 CUDA Fast rows for VoxConverse were measured on the current version. The
 VoxConverse pyannote rows ran earlier in a container with the same GPU model,
 CPU count and RAM, so those speedups compare separate runs. The speakrs rows
@@ -101,7 +101,7 @@ Audio and models were copied to the container's local disk before each dataset
 run. Time and RTFx use the `speakrs-bm` timer: WAV loading, inference,
 clustering and RTTM output are included; downloads, data copy and DER scoring
 are excluded. The current speakrs rows run through the library batch API
-(`run_batch_stream`), which decodes upcoming files on worker threads and
+(`run_batch_stream`), with WAV files decoded on worker threads ahead of it; it
 clusters each finished file while the GPU runs the next. Native speakrs timing
 excludes model and pipeline construction.
 Pyannote timing includes the complete Python subprocess, including pipeline

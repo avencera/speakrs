@@ -2,7 +2,7 @@
 
 Fast Rust speaker diarization (who spoke when) with pyannote-level accuracy.
 
-On VoxConverse dev, `speakrs` gets **7.0% DER at 1786x realtime** on an RTX 4090, so an hour of audio takes about 2.0 seconds. On an Apple M4 Pro with CoreML it gets 7.1% DER at 529x. pyannote gets 7.2% at 32x on an RTX 4090, and 24x on the M4 Pro. Full results are in [benchmarks/](https://github.com/avencera/speakrs/tree/master/benchmarks).
+On VoxConverse dev, `speakrs` gets **7.0% DER at 1786x realtime** on an RTX 4090, so an hour of audio takes about 2.0 seconds. On an Apple M4 Pro with CoreML it gets 7.1% DER at 529x. pyannote gets 7.2% at 32x in an earlier run on an RTX 4090, and 24x on the M4 Pro. Full results are in [benchmarks/](https://github.com/avencera/speakrs/tree/master/benchmarks).
 
 If you want a small end-to-end app using it, see [avencera/smrze](https://github.com/avencera/smrze).
 
@@ -146,8 +146,8 @@ meetings, lectures, podcasts, or bulk archives.
 ## Benchmarks
 
 On VoxConverse dev on an RTX 4090, speakrs `cuda` is about 56 times faster than
-pyannote CUDA, with 7.0% versus 7.2% DER. `cuda-fast` is about 105 times faster,
-with 7.4% DER.
+an earlier pyannote CUDA run, with 7.0% versus 7.2% DER. `cuda-fast` is about 105
+times faster, with 7.4% DER.
 On an RTX 4090, an hour of audio takes about 2.0 seconds with `cuda` and
 1.1 seconds with `cuda-fast`. On an Apple M4 Pro with CoreML it takes about 7 seconds.
 
@@ -170,8 +170,8 @@ cloud host doesn't report the CPU model), 8 GiB of RAM and NVIDIA driver
 580.126.18. Their times are the median of 3 runs. The pyannote row ran earlier in
 a container with the same GPU, CPU count, RAM and driver, so the speedups compare
 separate runs. The speakrs CUDA timings use the batch API,
-[`OwnedDiarizationPipeline::run_batch_stream`](https://docs.rs/speakrs/latest/speakrs/pipeline/struct.OwnedDiarizationPipeline.html#method.run_batch_stream), which decodes upcoming files and
-clusters finished ones while the GPU works.
+[`OwnedDiarizationPipeline::run_batch_stream`](https://docs.rs/speakrs/latest/speakrs/pipeline/struct.OwnedDiarizationPipeline.html#method.run_batch_stream), with WAV files decoded on worker
+threads ahead of it; it clusters each finished file while the GPU runs the next.
 
 ### All datasets on an RTX 4090
 
@@ -188,8 +188,8 @@ clusters finished ones while the GPU works.
 
 That's about 229 hours of audio in 12 minutes with `cuda`, or 7 minutes with
 `cuda-fast`. The VoxConverse dev row comes from the runs above, and the
-VoxConverse test row from the same version on another RTX 4090 container with
-16 CPU cores and 8 GiB of RAM. The other datasets ran on an earlier version,
+VoxConverse test row from one run of the same version on another RTX 4090
+container with 16 CPU cores, 8 GiB of RAM and driver 595.99.02. The other datasets ran on an earlier version,
 before the current CUDA kernels, on a different RTX 4090 host, so their speeds
 understate this version. On VoxConverse test, `cuda` and pyannote CUDA
 both score 11.1% DER; pyannote ran at 25x in an earlier container, about 78
