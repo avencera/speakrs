@@ -31,12 +31,11 @@ use std::sync::Arc;
 use cudarc::driver::{CudaGraph, CudaSlice, CudaStream, LaunchConfig, PushKernelArg, sys};
 use serde_json::json;
 
-use super::super::candidate::segdense::f16_bits;
 use super::super::candidate::{
     ConfigPin, ConvCandidate, ConvInputs, ConvKernel, ConvLayerSpec, ConvOxide, ConvPin,
     DriverCandidate, Epilogue, FP16_OPERAND_LIMIT, Fp16Policy, HalfIo, Phases, PlanError,
     WideconvAlgorithm, WideconvConfig, WideconvDevice, WideconvFp16Tiles, WideconvOxide,
-    WideconvPartition, WideconvProducts, WideconvSplitCells, WideconvTensorKernel,
+    WideconvPartition, WideconvProducts, WideconvSplitCells, WideconvTensorKernel, f16_bits,
 };
 use super::super::dnn::ConvPlanner;
 use super::super::geometry::{Conv2d, Residual};
@@ -1168,7 +1167,6 @@ fn forced_fp16_half_launches_match_fp32() -> Result<(), CudaError> {
         residual,
         output,
     };
-    let mut ran = Vec::new();
     for (shape, &(channels, input, tiles)) in HALF_SHAPES.iter().enumerate() {
         for batch in [2, 3] {
             let conv = Conv2d {
@@ -1213,23 +1211,18 @@ fn forced_fp16_half_launches_match_fp32() -> Result<(), CudaError> {
                     partition: WideconvPartition::Whole,
                     split_cells: WideconvSplitCells::All,
                 };
-                match WideconvOxide::with_config(&runtime, &kernels, spec, config) {
-                    Ok(plan) => layers.push(HalfLayer { plan, weight, len }),
-                    // only a tier without these FP16 tiles may skip them
-                    Err(PlanError::DeviceUnsupported { reason }) => {
-                        eprintln!("FP16_HALF {name}: skipped on {}: {reason}", kernels.tier());
-                        break;
-                    }
-                    Err(error) => {
-                        return Err(CudaError::Unsupported {
-                            context: "forced FP16 half plan",
-                            reason: format!("{name}: {error}"),
-                        });
-                    }
-                }
+                // the FP16 tiles build on every tier, so no device may skip a shape
+                let plan = WideconvOxide::with_config(&runtime, &kernels, spec, config).map_err(
+                    |error| CudaError::Unsupported {
+                        context: "forced FP16 half plan",
+                        reason: format!("{name}: {error}"),
+                    },
+                )?;
+                layers.push(HalfLayer { plan, weight, len });
             }
+
             let [conv1, conv2] = &layers[..] else {
-                continue;
+                unreachable!("a residual block has two convolutions");
             };
             assert!(
                 conv1.plan.has_half_io() && conv2.plan.has_half_io(),
@@ -1333,13 +1326,7 @@ fn forced_fp16_half_launches_match_fp32() -> Result<(), CudaError> {
             );
 
             eprintln!("FP16_HALF {name}: ok");
-            ran.push(name);
         }
     }
-    eprintln!(
-        "FP16_HALF ran {} of {}: {ran:?}",
-        ran.len(),
-        2 * HALF_SHAPES.len()
-    );
     Ok(())
 }
