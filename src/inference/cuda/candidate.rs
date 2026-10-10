@@ -41,7 +41,7 @@ mod conv;
 mod fbank;
 mod lstm;
 mod lstmproj;
-mod segdense;
+pub(crate) mod segdense;
 mod sinc;
 mod wideconv;
 

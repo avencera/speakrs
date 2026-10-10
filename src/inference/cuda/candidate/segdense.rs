@@ -1143,7 +1143,7 @@ pub(super) fn half_scale(largest: f32) -> (f32, f32) {
 
 /// `value` rounded to the nearest FP16, ties to even, as binary16 bits, which is what
 /// the kernels' `cvt.rn.f16x2.f32` gives
-pub(super) fn f16_bits(value: f32) -> u16 {
+pub(crate) fn f16_bits(value: f32) -> u16 {
     let bits = value.to_bits();
     let sign = ((bits >> 16) & 0x8000) as u16;
     let exponent = ((bits >> 23) & 0xff) as i32;
