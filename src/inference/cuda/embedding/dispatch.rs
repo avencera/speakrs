@@ -69,14 +69,8 @@ impl Plan {
 }
 
 impl Convs<'_> {
-    /// Whether a layer runs a plan with [`HalfIo`] launches
-    pub(super) fn has_half_io(&self, layer: &ConvLayer) -> Result<bool, CudaError> {
-        self.plan(layer)
-            .map(|plan| matches!(plan, Plan::Wideconv(plan) if plan.has_half_io()))
-    }
-
     /// Run only the owner built for this layer and batch class, with the operands `io`
-    /// names as half tensors, which only [`Self::has_half_io`] plans accept
+    /// names as half tensors, which only wideconv plans with half launches accept
     pub(super) fn conv_bias_relu(
         &mut self,
         layer: &ConvLayer,

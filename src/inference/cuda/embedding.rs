@@ -45,7 +45,7 @@ use tracing::{debug, warn};
 use self::dispatch::Plan;
 use self::kernels::{ChannelBias, EmbeddingKernels, PoolShape};
 use self::storage::{ActivationStorage, Captured};
-use self::trunk::{ConvLayer, STEM_SLOT, Trunk};
+use self::trunk::{BasicBlock, ConvLayer, STEM_SLOT, Trunk};
 use super::candidate::{DenseSite, DenseSpec, FP16_OPERAND_LIMIT, Fp16Policy, HalfIo};
 use super::dense::DensePlan;
 use super::error::{check_len, element_count};
@@ -410,6 +410,46 @@ enum ActivationForm {
     Half,
 }
 
+/// Whether a residual block's hidden activation and output are half tensors
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BlockForm {
+    hidden: bool,
+    output: bool,
+}
+
+impl BlockForm {
+    /// The forms `form` gives `blocks` under `plans`
+    ///
+    /// A block's hidden activation is half when both its convolutions have [`HalfIo`]
+    /// launches. Its output is half when its second convolution and both of the next
+    /// block's have them, since the next block stages the output and adds it back as
+    /// its residual, unless the next block has a shortcut, which reads it as FP32
+    fn plan(blocks: &[BasicBlock], plans: &[(String, Plan)], form: ActivationForm) -> Vec<Self> {
+        let half_io = |layer: &ConvLayer| {
+            form == ActivationForm::Half
+                && plans.iter().any(|(name, plan)| {
+                    name == layer.name()
+                        && matches!(plan, Plan::Wideconv(plan) if plan.has_half_io())
+                })
+        };
+        let hidden: Vec<bool> = blocks
+            .iter()
+            .map(|block| half_io(&block.conv1) && half_io(&block.conv2))
+            .collect();
+
+        blocks
+            .iter()
+            .enumerate()
+            .map(|(index, block)| Self {
+                hidden: hidden[index],
+                output: blocks.get(index + 1).is_some_and(|next| {
+                    hidden[index + 1] && next.shortcut.is_none() && half_io(&block.conv2)
+                }),
+            })
+            .collect()
+    }
+}
+
 /// Growing activation storage shared only by serial class plans on one runtime
 ///
 /// A successful growth changes the generation; each batch must recapture a graph
@@ -719,15 +759,7 @@ impl EmbeddingBatch {
         tap(EmbeddingTap::Stem, &stem_out.as_view())?;
 
         let blocks = &model.trunk.blocks;
-        // whether each block's hidden activation is half
-        let mut hidden_half = Vec::with_capacity(blocks.len());
-        for block in blocks {
-            hidden_half.push(
-                form == ActivationForm::Half
-                    && convs.has_half_io(&block.conv1)?
-                    && convs.has_half_io(&block.conv2)?,
-            );
-        }
+        let forms = BlockForm::plan(blocks, plans, form);
         // whether the current block's input, the previous block's output, is half
         let mut input_half = false;
         for (index, block) in blocks.iter().enumerate() {
@@ -737,17 +769,10 @@ impl EmbeddingBatch {
             )?;
             let output_len = chunks * block.conv2.output_len();
 
-            // the next block stages this output and adds it back as its residual, so
-            // both of its convolutions must take halves, and a shortcut reads FP32
-            let output_half = match blocks.get(index + 1) {
-                Some(next) => {
-                    hidden_half[index + 1]
-                        && next.shortcut.is_none()
-                        && convs.has_half_io(&block.conv2)?
-                }
-                None => false,
-            };
-            let half = hidden_half[index];
+            let BlockForm {
+                hidden: half,
+                output: output_half,
+            } = forms[index];
             // a half tensor holds two values per word
             let half_len = |half: bool, len: usize| if half { len / 2 } else { len };
             let (input_buffer, output_buffer) = read_write(trunk, block.input_slot);
