@@ -77,6 +77,11 @@ const TILED_MIN_BATCH: usize = 9;
 /// kernels: on an A100 at batch 32 it took 0.97 ms per layer against 1.38 ms for the
 /// tiled kernel. Hopper SMs also hold the matrix but were not measured
 const RESIDENT_CAPABILITY: ComputeCapability = ComputeCapability::new(8, 0);
+/// Fewest windows for which the single-block recurrence beat the wide kernel on an A100:
+/// at one window the TF32 stack took 3.21 ms on the wide kernel against 4.00 ms resident,
+/// and FP32 ran near even at 4.13 against 4.00 ms; from two windows up resident won by
+/// 18% or more
+const RESIDENT_MIN_BATCH: usize = 2;
 
 /// One layer's weights in the packed gate order, both directions stacked
 #[derive(Debug)]
@@ -599,8 +604,8 @@ impl Exchange {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RecurrencePlan {
     /// One block per window and direction holding the whole recurrent matrix, on
-    /// [`RESIDENT_CAPABILITY`] parts that can host it; no exchange and no cooperative
-    /// launch
+    /// [`RESIDENT_CAPABILITY`] parts that can host it, from [`RESIDENT_MIN_BATCH`]
+    /// windows; no exchange and no cooperative launch
     Resident,
     /// Sixteen eight-unit blocks per tile of 8, 16 or 32 windows; the faster kernel for
     /// a lone window, and the fallback when the tiled grids do not fit together
@@ -616,7 +621,7 @@ impl RecurrencePlan {
         kernels: &LoadedKernels,
         batch: usize,
     ) -> Result<Self, PlanError> {
-        if Self::resident_fits(runtime, kernels)? {
+        if batch >= RESIDENT_MIN_BATCH && Self::resident_fits(runtime, kernels)? {
             return Ok(Self::Resident);
         }
         if let Some(plan) = Self::tiled(batch, Self::tiled_budget(runtime, kernels)?) {

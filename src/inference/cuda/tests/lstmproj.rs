@@ -626,6 +626,19 @@ fn resident_dev(runtime: &CudaRuntime, assets: &std::path::Path) -> DevResult<()
             });
             println!("LSTMRES_CASE {case}");
 
+            // a lone window runs the wide kernel, which was faster there under TF32
+            if batch == 1 {
+                assert!(
+                    matches!(chosen, RecurrencePlan::Wide(_)),
+                    "b1 {math:?}: chose {chosen:?}, expected Wide"
+                );
+            } else {
+                assert_eq!(
+                    chosen,
+                    RecurrencePlan::Resident,
+                    "b{batch} {math:?}: chose {chosen:?}"
+                );
+            }
             assert!(
                 resident.bitwise,
                 "b{batch} {math:?}: repeated resident passes differ"
