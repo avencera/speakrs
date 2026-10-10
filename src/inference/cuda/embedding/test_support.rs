@@ -3,6 +3,10 @@
 use super::{EmbeddingBatch, ResNetEmbedding, SharedEmbeddingActivations};
 #[cfg(feature = "_cuda-libraries")]
 use super::{EmbeddingTapFn, SPEAKERS_PER_CHUNK};
+#[cfg(feature = "_cuda-libraries")]
+use super::{dispatch::Plan, trunk::ConvLayer};
+#[cfg(feature = "_cuda-libraries")]
+use crate::inference::cuda::candidate::{WideconvAlgorithm, WideconvFp16Tiles, WideconvOxide};
 use crate::inference::cuda::{CudaError, CudaRuntime};
 use cudarc::driver::CudaSlice;
 use std::sync::Arc;
@@ -24,6 +28,7 @@ impl EmbeddingBatch {
         self.run_with_activations(
             runtime,
             super::PlanSet::Selected,
+            super::HiddenForm::Fp32,
             tap,
             storage.buffers_mut(),
         )
@@ -55,6 +60,41 @@ impl EmbeddingBatch {
     /// Distinct convolution shapes, one cuDNN plan each
     pub fn plan_count(&self) -> usize {
         self.plans.len()
+    }
+
+    /// Residual blocks whose two convolutions run wide FP16 tiles on 32 or 64
+    /// channels, and how many of those [`Self::forward`] passes a half hidden
+    /// activation, read from the selected plans
+    pub fn half_hidden_blocks(&self) -> (usize, usize) {
+        let plan = |layer: &ConvLayer| {
+            self.plans.iter().find_map(|(name, plan)| match plan {
+                Plan::Wideconv(plan) if name == layer.name() => Some(plan),
+                _ => None,
+            })
+        };
+        // the shape test is separate from the half launches so a wide FP16 pair
+        // that lost them is counted here but not as half
+        let wide = |layer: &ConvLayer| {
+            let conv = layer.conv(self.chunks, self.model.math);
+            matches!(conv.in_channels, 32 | 64)
+                && conv.out_channels == conv.in_channels
+                && conv.stride == [1, 1]
+                && plan(layer).is_some_and(|plan| {
+                    plan.config().algorithm == WideconvAlgorithm::Fp16(WideconvFp16Tiles::Wide)
+                })
+        };
+        let half = |layer: &ConvLayer| plan(layer).is_some_and(WideconvOxide::has_half_io);
+
+        let blocks = &self.model.trunk.blocks;
+        let wide_pairs = blocks
+            .iter()
+            .filter(|block| wide(&block.conv1) && wide(&block.conv2))
+            .count();
+        let half_pairs = blocks
+            .iter()
+            .filter(|block| half(&block.conv1) && half(&block.conv2))
+            .count();
+        (wide_pairs, half_pairs)
     }
 
     /// Whether [`Self::forward`] replays a captured CUDA graph

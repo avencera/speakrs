@@ -141,7 +141,7 @@ pub(crate) use wideconv::{
 pub(crate) use wideconv::{
     Config as WideconvConfig, Partition as WideconvPartition, SplitCells as WideconvSplitCells,
 };
-pub(crate) use wideconv::{Oxide as WideconvOxide, Pin as WideconvPin};
+pub(crate) use wideconv::{HalfIo, Oxide as WideconvOxide, Pin as WideconvPin};
 
 /// A planning refusal that is distinct from a CUDA or model error
 ///
