@@ -118,6 +118,12 @@ jobs:
             echo "the packaged CPU consumer includes ONNX Runtime" >&2
             exit 1
           fi
+          # the CPU consumer gets no patch, so this also proves CPU builds resolve
+          # without the artifact crates being published
+          if awk '$1 ~ /^speakrs-ptx-/ { found = 1 } END { exit !found }' cpu-dependencies.log; then
+            echo "the packaged CPU consumer includes CUDA artifact crates" >&2
+            exit 1
+          fi
           check_consumer load-dynamic "{ path = \"$package_path\", features = [\"cpu\", \"load-dynamic\"] }"
 
           # the CUDA consumer embeds every tier, so it also proves each packaged artifact
