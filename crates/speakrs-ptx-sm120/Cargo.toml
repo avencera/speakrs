@@ -1,0 +1,10 @@
+[package]
+name = "speakrs-ptx-sm120"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Prebuilt sm120 tier CUDA kernels (PTX and cubins) for the speakrs native CUDA backend"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+include = ["/src/**", "/ptx/**", "/Cargo.toml"]

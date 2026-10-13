@@ -6,7 +6,7 @@
 use super::{BoundaryId, Modules, PlanRequest, Selected, TokenEvidence};
 use crate::inference::cuda::device::DeviceAttributes;
 use crate::inference::cuda::device::test_support::Builder;
-use crate::inference::cuda::kernels::{ArtifactHash, LoadedArtifact, ModuleRequest};
+use crate::inference::cuda::kernels::{ArtifactHash, LoadedArtifact, ModuleRequest, shipped_ptx};
 use crate::inference::cuda::{ComputeCapability, CudaError, CudaMath, KernelModule, PtxTier};
 
 /// One physical device class the golden table covers
@@ -260,9 +260,9 @@ fn golden_legacy_module_requests_are_unchanged() {
             KernelModule::Segmentation,
         ] {
             let ptx = match area {
-                KernelModule::Fbank => include_str!("../ptx/fbank.sm75.ptx"),
-                KernelModule::Embedding => include_str!("../ptx/embedding.sm75.ptx"),
-                _ => include_str!("../ptx/segmentation.sm75.ptx"),
+                KernelModule::Fbank => shipped_ptx("ptx/fbank.sm75.ptx"),
+                KernelModule::Embedding => shipped_ptx("ptx/embedding.sm75.ptx"),
+                _ => shipped_ptx("ptx/segmentation.sm75.ptx"),
             };
             assert_eq!(
                 module_request(device, area),

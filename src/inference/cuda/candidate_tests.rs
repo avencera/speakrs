@@ -95,7 +95,9 @@ fn insufficient_cooperative_capacity_falls_back_only_in_library_allowed_producti
         KernelModule::Lstm,
         PtxTier::Sm75,
         LoadedArtifact::PtxJit {
-            sha256: ArtifactHash::of(include_str!("ptx/lstm.sm75.ptx").as_bytes()),
+            sha256: ArtifactHash::of(
+                crate::inference::cuda::kernels::shipped_ptx("ptx/lstm.sm75.ptx").as_bytes(),
+            ),
         },
     );
     let Selected::Oxide(token) = select(

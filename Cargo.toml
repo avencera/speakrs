@@ -1,6 +1,15 @@
 [workspace]
-members = ["xtask"]
+members = ["xtask", "crates/speakrs-ptx-sm75", "crates/speakrs-ptx-sm80", "crates/speakrs-ptx-sm120"]
 exclude = ["scripts/", "crates/speakrs-cuda-kernels"]
+
+# shared by the kernel artifact crates, which release in lockstep with speakrs
+[workspace.package]
+version = "0.6.0"
+edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0"
+repository = "https://github.com/avencera/speakrs"
+authors = ["Praveen Perera"]
 
 [package]
 name = "speakrs"
@@ -33,14 +42,15 @@ coreml = [
 cuda = ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120", "_cuda-libraries"]
 # internal: optional numerical libraries, added only by cuda
 _cuda-libraries = ["_cuda", "cudarc/cublas", "cudarc/cudnn"]
-# internal: driver and committed PTX, without optional numerical libraries
+# internal: driver support, without optional numerical libraries or kernel artifacts
 _cuda = ["dep:cudarc", "dep:libloading", "dep:safetensors", "dep:sha2", "dep:serde", "dep:serde_json", "dep:getrandom", "_backend"]
-# each target embeds every area's best shipped variant for that target
+# each target embeds every area's best shipped variant for that target, so it pulls in
+# the artifact crate of every tier it may use; areas without a newer variant use sm75
 # default-features = false with cuda-rtx50 alone is a driver-only build
-cuda-sm75 = ["_cuda"]
-cuda-sm80 = ["_cuda"]
-cuda-sm90 = ["_cuda"]
-cuda-sm120 = ["_cuda"]
+cuda-sm75 = ["_cuda", "dep:speakrs-ptx-sm75"]
+cuda-sm80 = ["_cuda", "dep:speakrs-ptx-sm75", "dep:speakrs-ptx-sm80"]
+cuda-sm90 = ["_cuda", "dep:speakrs-ptx-sm75", "dep:speakrs-ptx-sm80"]
+cuda-sm120 = ["_cuda", "dep:speakrs-ptx-sm75", "dep:speakrs-ptx-sm80", "dep:speakrs-ptx-sm120"]
 # RTX 20: Turing; RTX 30: Ampere; RTX 40: Ada; A100: Ampere
 cuda-rtx20 = ["cuda-sm75"]
 cuda-rtx30 = ["cuda-sm80"]
@@ -89,6 +99,11 @@ cudarc = { version = "0.19.10", optional = true, default-features = false, featu
     "cuda-12040",
 ] }
 safetensors = { version = "0.8.0", optional = true, default-features = false, features = ["alloc"] }
+# prebuilt PTX and cubins, one crate per tier so each stays under the crates.io upload
+# limit; exact pins because the host code and the kernels change together
+speakrs-ptx-sm75 = { version = "=0.6.0", path = "crates/speakrs-ptx-sm75", optional = true }
+speakrs-ptx-sm80 = { version = "=0.6.0", path = "crates/speakrs-ptx-sm80", optional = true }
+speakrs-ptx-sm120 = { version = "=0.6.0", path = "crates/speakrs-ptx-sm120", optional = true }
 libloading = { version = "0.9.0", optional = true }
 
 # logging

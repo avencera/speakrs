@@ -43,17 +43,39 @@ jobs:
             *) echo "expected x86_64 host, got $host" >&2; exit 1 ;;
           esac
 
-      - name: Package crate
+      # the kernel artifact crates are packaged with speakrs, so its verification
+      # resolves them from this checkout before they are on crates.io
+      - name: Package crates
         run: |
           rm -rf target/package
-          cargo package --locked --features cpu
+          cargo package --locked \
+            -p speakrs-ptx-sm75 -p speakrs-ptx-sm80 -p speakrs-ptx-sm120 -p speakrs \
+            --features speakrs/cpu
+
+      - name: Check crate sizes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # crates.io rejects uploads over 10 MiB unless it has raised the crate's limit
+          limit=$((10 * 1024 * 1024))
+          too_large=0
+          for crate in target/package/*.crate; do
+            size="$(stat -c %s "$crate")"
+            echo "$(basename "$crate"): $size bytes"
+            if [ "$size" -gt "$limit" ]; then
+              echo "$crate is over the crates.io limit of $limit bytes" >&2
+              too_large=1
+            fi
+          done
+          exit "$too_large"
 
       - name: Check packaged crate as a dependency
         shell: bash
         run: |
           set -euo pipefail
 
-          package_dir="$(find target/package -mindepth 1 -maxdepth 1 -type d -name 'speakrs-*' -print -quit)"
+          package_dir="$(find target/package -mindepth 1 -maxdepth 1 -type d -name 'speakrs-[0-9]*' -print -quit)"
           test -n "$package_dir"
 
           package_path="$PWD/$package_dir"
@@ -61,6 +83,7 @@ jobs:
           check_consumer() {
             local name="$1"
             local dependency="$2"
+            local patch="${3:-}"
             local consumer="$RUNNER_TEMP/speakrs-package-consumer-$name"
 
             rm -rf "$consumer"
@@ -75,6 +98,7 @@ jobs:
 
           [dependencies]
           speakrs = $dependency
+          $patch
           EOF
 
             cat > "$consumer/src/lib.rs" <<'EOF'
@@ -95,3 +119,13 @@ jobs:
             exit 1
           fi
           check_consumer load-dynamic "{ path = \"$package_path\", features = [\"cpu\", \"load-dynamic\"] }"
+
+          # the CUDA consumer embeds every tier, so it also proves each packaged artifact
+          # crate ships the files its generated source includes
+          ptx_patch="[patch.crates-io]"
+          for tier in sm75 sm80 sm120; do
+            ptx_dir="$(find target/package -mindepth 1 -maxdepth 1 -type d -name "speakrs-ptx-$tier-*" -print -quit)"
+            test -n "$ptx_dir"
+            ptx_patch+=$'\n'"speakrs-ptx-$tier = { path = \"$PWD/$ptx_dir\" }"
+          done
+          check_consumer cuda "{ path = \"$package_path\", default-features = false, features = [\"cuda\"] }" "$ptx_patch"

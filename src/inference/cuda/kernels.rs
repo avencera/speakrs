@@ -16,17 +16,72 @@ macro_rules! tier_ptx {
         #[cfg(any($(feature = $feature),+))]
         const CUBINS: &[EmbeddedCubin] = &[$(EmbeddedCubin {
             arch: ComputeCapability::new($arch / 10, $arch % 10),
-            bytes: include_bytes!(concat!($stem, ".sm_", stringify!($arch), ".cubin")),
+            bytes: shipped_cubin(concat!($stem, ".sm_", stringify!($arch), ".cubin")),
         }),+];
         #[cfg(any($(feature = $feature),+))]
         let ptx = Some(EmbeddedPtx {
-            text: include_str!(concat!($stem, ".ptx")),
+            text: const { shipped_ptx(concat!($stem, ".ptx")) },
             cubins: CUBINS,
         });
         #[cfg(not(any($(feature = $feature),+)))]
         let ptx = None;
         ptx
     }};
+}
+
+/// A shipped PTX file, from the `speakrs-ptx-<tier>` crate that carries its tier
+///
+/// Each tier ships in its own crate so every published crate stays under the crates.io
+/// upload limit. Call this only in const context outside tests: a run-time call would
+/// link every file of every enabled tier crate into the binary
+#[cfg(any(
+    feature = "cuda-sm75",
+    feature = "cuda-sm80",
+    feature = "cuda-sm90",
+    feature = "cuda-sm120"
+))]
+pub(crate) const fn shipped_ptx(path: &str) -> &'static str {
+    if let Some(text) = speakrs_ptx_sm75::ptx(path) {
+        return text;
+    }
+
+    #[cfg(any(feature = "cuda-sm80", feature = "cuda-sm90", feature = "cuda-sm120"))]
+    if let Some(text) = speakrs_ptx_sm80::ptx(path) {
+        return text;
+    }
+
+    #[cfg(feature = "cuda-sm120")]
+    if let Some(text) = speakrs_ptx_sm120::ptx(path) {
+        return text;
+    }
+
+    panic!("no enabled speakrs-ptx crate ships this PTX file")
+}
+
+/// A shipped cubin, from the crate that carries its PTX tier; const context only, like
+/// [`shipped_ptx`]
+#[cfg(any(
+    feature = "cuda-sm75",
+    feature = "cuda-sm80",
+    feature = "cuda-sm90",
+    feature = "cuda-sm120"
+))]
+const fn shipped_cubin(path: &str) -> &'static [u8] {
+    if let Some(bytes) = speakrs_ptx_sm75::cubin(path) {
+        return bytes;
+    }
+
+    #[cfg(any(feature = "cuda-sm80", feature = "cuda-sm90", feature = "cuda-sm120"))]
+    if let Some(bytes) = speakrs_ptx_sm80::cubin(path) {
+        return bytes;
+    }
+
+    #[cfg(feature = "cuda-sm120")]
+    if let Some(bytes) = speakrs_ptx_sm120::cubin(path) {
+        return bytes;
+    }
+
+    panic!("no enabled speakrs-ptx crate ships this cubin")
 }
 
 /// Set to `1` to disable cubins and use embedded PTX JIT for diagnosis
@@ -263,7 +318,8 @@ pub(super) fn load_artifact<T, E>(
 
 /// A cuda-oxide kernel area, embedded as committed PTX
 ///
-/// `cargo xtask cuda-kernels build` regenerates `ptx/<area>.<tier>.ptx` on a GPU box,
+/// `cargo xtask cuda-kernels build` regenerates `ptx/<area>.<tier>.ptx` in the
+/// `speakrs-ptx-<tier>` crate on a GPU box,
 /// and `cargo xtask cuda-kernels check` fails when that PTX is stale. Each GPU tier
 /// feature embeds the best shipped variant of each area for that target. The `cuda`
 /// feature enables all four targets and embeds all shipped variants

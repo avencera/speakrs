@@ -80,9 +80,16 @@ bump level:
         *) echo "Usage: just bump major|minor|patch"; exit 1 ;;
     esac
     NEW="${MAJOR}.${MINOR}.${PATCH}"
+    # updates speakrs and the shared [workspace.package] version of the artifact crates
     sed -i '' "s/^version = \"${CURRENT}\"/version = \"${NEW}\"/" Cargo.toml
+    sed -i '' "s/version = \"=${CURRENT}\"/version = \"=${NEW}\"/" Cargo.toml
     cargo generate-lockfile --quiet
     echo "Bumped ${CURRENT} → ${NEW}"
+
+# Publish speakrs and its CUDA artifact crates together: just publish [--dry-run]
+# the artifact crates go first, and verification needs a backend feature
+publish *args:
+    cargo publish --locked -p speakrs-ptx-sm75 -p speakrs-ptx-sm80 -p speakrs-ptx-sm120 -p speakrs --features speakrs/cpu {{args}}
 
 # passthrough to cargo xtask
 x *args:

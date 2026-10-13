@@ -2205,10 +2205,25 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "speakrs-ptx-sm120",
+ "speakrs-ptx-sm75",
+ "speakrs-ptx-sm80",
  "thiserror",
  "tracing",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "speakrs-ptx-sm120"
+version = "0.6.0"
+
+[[package]]
+name = "speakrs-ptx-sm75"
+version = "0.6.0"
+
+[[package]]
+name = "speakrs-ptx-sm80"
+version = "0.6.0"
 
 [[package]]
 name = "stable_deref_trait"

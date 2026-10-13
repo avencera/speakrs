@@ -1,10 +1,13 @@
 //! Build and check committed PTX and per-architecture cubins for the CUDA backend
 //!
 //! The kernel crate `crates/speakrs-cuda-kernels` needs a pinned nightly and CUDA 13,
-//! so its PTX is generated on a GPU box and committed under `src/inference/cuda/ptx`.
-//! Every area ships an `sm75` baseline variant and may add higher tiers, written as
-//! `<area>.<tier>.ptx`, plus one `<area>.manifest` that records, per variant, the
-//! target, the hash of the sources that produced it and the hash of the PTX itself.
+//! so its PTX is generated on a GPU box and committed under
+//! `crates/speakrs-ptx-<tier>/ptx`, one published crate per tier. The kernel crate's
+//! own docs still name the old directory; editing them would change every manifest's
+//! source hash. Every area ships an `sm75` baseline variant and may add higher tiers,
+//! written as `<area>.<tier>.ptx`, plus one `<area>.manifest` in
+//! `src/inference/cuda/ptx` that records, per variant, the target, the hash of the
+//! sources that produced it and the hash of the PTX itself.
 //! Cubins use the exact PTX bytes and pinned CUDA 13.0 ptxas, with one file per
 //! compatible exact GPU capability. Manifests bind each cubin to its source PTX
 //! Parallel work on different areas never edits the same generated file. Plain
@@ -277,11 +280,11 @@ impl Ptxas {
         Ok(Self(path))
     }
 
-    fn compile(&self, ptx_dir: &Path, out_dir: &Path, cubin: Cubin) -> Result<()> {
+    fn compile(&self, dirs: &ArtifactDirs, out_dir: &Path, cubin: Cubin) -> Result<()> {
         run_cmd(
             Command::new(&self.0)
                 .arg(format!("-arch={}", cubin.arch.name()))
-                .arg(ptx_dir.join(cubin.variant.file_name()))
+                .arg(dirs.ptx(cubin.variant))
                 .arg("-o")
                 .arg(out_dir.join(cubin.file_name())),
         )
@@ -299,11 +302,167 @@ const CUDA_OXIDE_NIGHTLY: &str = "nightly-2026-08-28";
 const MAX_PTX_ISA: (u32, u32) = (9, 0);
 
 const KERNEL_CRATE: &str = "crates/speakrs-cuda-kernels";
-const PTX_DIR: &str = "src/inference/cuda/ptx";
+/// Per-area manifests, which stay in speakrs because they cover every tier
+const MANIFEST_DIR: &str = "src/inference/cuda/ptx";
 /// The host file that embeds each variant for its selected GPU tiers
 const HOST_KERNELS: &str = "src/inference/cuda/kernels.rs";
 /// Name cuda-oxide gives the PTX of the kernel crate
 const OXIDE_PTX_NAME: &str = "speakrs_cuda_kernels.ptx";
+
+/// Where generated kernel files live, relative to a project root
+///
+/// Manifests stay in speakrs. Each tier's PTX and cubins ship in a `speakrs-ptx-<tier>`
+/// crate, because together they exceed the crates.io upload limit
+struct ArtifactDirs(PathBuf);
+
+impl ArtifactDirs {
+    fn manifests(&self) -> PathBuf {
+        self.0.join(MANIFEST_DIR)
+    }
+
+    fn manifest(&self, area: Area) -> PathBuf {
+        self.manifests().join(format!("{}.manifest", area.name))
+    }
+
+    fn tier_crate(&self, tier: Tier) -> PathBuf {
+        self.0.join(format!("crates/speakrs-ptx-{}", tier.name()))
+    }
+
+    fn tier(&self, tier: Tier) -> PathBuf {
+        self.tier_crate(tier).join("ptx")
+    }
+
+    fn ptx(&self, variant: Variant) -> PathBuf {
+        self.tier(variant.tier).join(variant.file_name())
+    }
+
+    fn cubin(&self, cubin: Cubin) -> PathBuf {
+        self.tier(cubin.variant.tier).join(cubin.file_name())
+    }
+
+    /// The `src/lib.rs` that embeds a tier crate's files
+    fn tier_lib(&self, tier: Tier) -> PathBuf {
+        self.tier_crate(tier).join("src/lib.rs")
+    }
+
+    /// The display form of a generated file, relative to the project root
+    fn relative(&self, path: &Path) -> String {
+        path.strip_prefix(&self.0)
+            .unwrap_or(path)
+            .display()
+            .to_string()
+    }
+}
+
+/// Tiers that ship at least one variant, and so have an artifact crate
+fn shipped_tiers() -> Vec<Tier> {
+    let mut tiers: Vec<_> = AREAS
+        .iter()
+        .flat_map(|area| area.tiers.iter().copied())
+        .collect();
+    tiers.sort();
+    tiers.dedup();
+    tiers
+}
+
+/// The generated source of a tier crate, which embeds every file the tier ships
+fn render_tier_lib(tier: Tier) -> String {
+    let variants: Vec<_> = AREAS
+        .iter()
+        .flat_map(|area| area.variants())
+        .filter(|variant| variant.tier == tier)
+        .collect();
+    let list = |names: Vec<String>| -> String {
+        names
+            .iter()
+            .map(|name| format!("    \"{name}\",\n"))
+            .collect()
+    };
+    let ptx = list(variants.iter().map(|variant| variant.file_name()).collect());
+    let cubins = list(
+        variants
+            .iter()
+            .flat_map(|variant| variant.cubins())
+            .map(Cubin::file_name)
+            .collect(),
+    );
+    let tier = tier.name();
+    format!(
+        r#"//! Prebuilt {tier} tier CUDA kernels for speakrs
+//!
+//! speakrs embeds these PTX and cubin files through its `cuda-*` features. Each tier
+//! ships in its own crate so every published crate stays under the crates.io upload
+//! limit. This crate has no stable API of its own
+//!
+//! Generated by `cargo xtask cuda-kernels build`; do not edit
+#![no_std]
+
+/// Embeds files from `ptx/`, keyed by their path relative to the crate root
+macro_rules! files {{
+    ($include:ident; $($name:literal,)*) => {{
+        &[$((concat!("ptx/", $name), $include!(concat!("../ptx/", $name)))),*]
+    }};
+}}
+
+const PTX: &[(&str, &str)] = files! {{ include_str;
+{ptx}}};
+
+const CUBINS: &[(&str, &[u8])] = files! {{ include_bytes;
+{cubins}}};
+
+/// The PTX at `path`, such as `ptx/fbank.sm75.ptx`, if this tier ships it
+pub const fn ptx(path: &str) -> Option<&'static str> {{
+    let mut index = 0;
+    while index < PTX.len() {{
+        if same(PTX[index].0, path) {{
+            return Some(PTX[index].1);
+        }}
+        index += 1;
+    }}
+    None
+}}
+
+/// The cubin at `path`, such as `ptx/fbank.sm75.sm_75.cubin`, if this tier ships it
+pub const fn cubin(path: &str) -> Option<&'static [u8]> {{
+    let mut index = 0;
+    while index < CUBINS.len() {{
+        if same(CUBINS[index].0, path) {{
+            return Some(CUBINS[index].1);
+        }}
+        index += 1;
+    }}
+    None
+}}
+
+// str equality is not const
+const fn same(left: &str, right: &str) -> bool {{
+    let (left, right) = (left.as_bytes(), right.as_bytes());
+    if left.len() != right.len() {{
+        return false;
+    }}
+    let mut index = 0;
+    while index < left.len() {{
+        if left[index] != right[index] {{
+            return false;
+        }}
+        index += 1;
+    }}
+    true
+}}
+"#
+    )
+}
+
+/// Write each tier crate's source so it embeds exactly the declared files
+fn write_tier_libs(dirs: &ArtifactDirs) -> Result<()> {
+    for tier in shipped_tiers() {
+        let path = dirs.tier_lib(tier);
+        fs::create_dir_all(path.parent().expect("lib.rs has a parent"))?;
+        fs::write(&path, render_tier_lib(tier))?;
+    }
+
+    Ok(())
+}
 
 /// Regenerate PTX for every variant of the given areas, or of every area when none
 /// are given, then build their cubins with the pinned ptxas
@@ -312,18 +471,21 @@ pub fn build(areas: &[String]) -> Result<()> {
     let areas = selected_areas(areas)?;
     let ptxas = Ptxas::pinned()?;
     let crate_dir = root.join(KERNEL_CRATE);
-    let ptx_dir = root.join(PTX_DIR);
-    fs::create_dir_all(&ptx_dir)?;
-
-    for area in areas {
-        build_area(&crate_dir, &ptx_dir, area)?;
-        build_area_cubins(&crate_dir, &ptx_dir, area, &ptxas)?;
+    let dirs = ArtifactDirs(root);
+    fs::create_dir_all(dirs.manifests())?;
+    for tier in shipped_tiers() {
+        fs::create_dir_all(dirs.tier(tier))?;
     }
 
-    Ok(())
+    for area in areas {
+        build_area(&crate_dir, &dirs, area)?;
+        build_area_cubins(&crate_dir, &dirs, area, &ptxas)?;
+    }
+
+    write_tier_libs(&dirs)
 }
 
-fn build_area(crate_dir: &Path, ptx_dir: &Path, area: Area) -> Result<()> {
+fn build_area(crate_dir: &Path, dirs: &ArtifactDirs, area: Area) -> Result<()> {
     let mut built = Vec::new();
     for variant in area.variants() {
         let ptx = compile_variant(crate_dir, variant)?;
@@ -339,10 +501,10 @@ fn build_area(crate_dir: &Path, ptx_dir: &Path, area: Area) -> Result<()> {
         .collect();
     check_entry_points(area, &modules)?;
 
-    remove_undeclared_variants(ptx_dir, area)?;
+    remove_undeclared_variants(dirs, area)?;
     let mut manifest = Manifest::default();
     for (variant, ptx, version) in built {
-        fs::write(ptx_dir.join(variant.file_name()), &ptx)?;
+        fs::write(dirs.ptx(variant), &ptx)?;
         manifest.variants.push(ManifestVariant {
             tier: variant.tier,
             sources: sources_hash(crate_dir, variant)?,
@@ -350,19 +512,16 @@ fn build_area(crate_dir: &Path, ptx_dir: &Path, area: Area) -> Result<()> {
             cubins: Vec::new(),
         });
         println!(
-            "{}: wrote {PTX_DIR}/{} (PTX ISA {}.{}, {})",
+            "{}: wrote {} (PTX ISA {}.{}, {})",
             area.name,
-            variant.file_name(),
+            dirs.relative(&dirs.ptx(variant)),
             version.0,
             version.1,
             variant.tier.arch()
         );
     }
 
-    fs::write(
-        ptx_dir.join(format!("{}.manifest", area.name)),
-        manifest.render(),
-    )?;
+    fs::write(dirs.manifest(area), manifest.render())?;
     Ok(())
 }
 
@@ -373,22 +532,29 @@ pub fn build_cubins(areas: &[String]) -> Result<()> {
     let root = project_root();
     let areas = selected_areas(areas)?;
     let ptxas = Ptxas::pinned()?;
+    let crate_dir = root.join(KERNEL_CRATE);
+    let dirs = ArtifactDirs(root);
     for area in areas {
-        build_area_cubins(&root.join(KERNEL_CRATE), &root.join(PTX_DIR), area, &ptxas)?;
+        build_area_cubins(&crate_dir, &dirs, area, &ptxas)?;
     }
 
-    Ok(())
+    write_tier_libs(&dirs)
 }
 
-fn build_area_cubins(crate_dir: &Path, ptx_dir: &Path, area: Area, ptxas: &Ptxas) -> Result<()> {
-    let mut manifest = read_manifest(ptx_dir, area)?;
-    check_area_ptx(crate_dir, ptx_dir, area, &manifest)?;
+fn build_area_cubins(
+    crate_dir: &Path,
+    dirs: &ArtifactDirs,
+    area: Area,
+    ptxas: &Ptxas,
+) -> Result<()> {
+    let mut manifest = read_manifest(dirs, area)?;
+    check_area_ptx(crate_dir, dirs, area, &manifest)?;
     // keep temporary writes inside the checkout, including on the rented box
-    let out = tempfile::tempdir_in(ptx_dir)?;
+    let out = tempfile::tempdir_in(dirs.manifests())?;
     for (variant, entry) in area.variants().zip(&mut manifest.variants) {
         entry.cubins.clear();
         for cubin in variant.cubins() {
-            ptxas.compile(ptx_dir, out.path(), cubin)?;
+            ptxas.compile(dirs, out.path(), cubin)?;
             entry.cubins.push(ManifestCubin {
                 arch: cubin.arch,
                 sha256: sha256_hex(&fs::read(out.path().join(cubin.file_name()))?),
@@ -399,32 +565,24 @@ fn build_area_cubins(crate_dir: &Path, ptx_dir: &Path, area: Area, ptxas: &Ptxas
 
     // finish the whole area before replacing artifacts or their manifest
     for cubin in area.variants().flat_map(Variant::cubins) {
-        fs::copy(
-            out.path().join(cubin.file_name()),
-            ptx_dir.join(cubin.file_name()),
-        )?;
+        fs::copy(out.path().join(cubin.file_name()), dirs.cubin(cubin))?;
     }
 
-    remove_undeclared_variants(ptx_dir, area)?;
+    remove_undeclared_variants(dirs, area)?;
     manifest.ptxas = Some(PTXAS_VERSION.into());
     manifest.ptxas_flags = Some(PTXAS_FLAGS.into());
-    fs::write(
-        ptx_dir.join(format!("{}.manifest", area.name)),
-        manifest.render(),
-    )?;
+    fs::write(dirs.manifest(area), manifest.render())?;
     println!("{}: built cubins from committed PTX", area.name);
     Ok(())
 }
 
-fn rebuild_cubins(ptx_dir: &Path) -> Result<()> {
+fn rebuild_cubins(dirs: &ArtifactDirs) -> Result<()> {
     let ptxas = Ptxas::pinned()?;
-    let out = tempfile::tempdir_in(ptx_dir)?;
+    let out = tempfile::tempdir_in(dirs.manifests())?;
     for area in AREAS {
         for cubin in area.variants().flat_map(Variant::cubins) {
-            ptxas.compile(ptx_dir, out.path(), cubin)?;
-            if fs::read(out.path().join(cubin.file_name()))?
-                != fs::read(ptx_dir.join(cubin.file_name()))?
-            {
+            ptxas.compile(dirs, out.path(), cubin)?;
+            if fs::read(out.path().join(cubin.file_name()))? != fs::read(dirs.cubin(cubin))? {
                 bail!(
                     "{} rebuild is not byte-identical to the committed cubin",
                     cubin.file_name()
@@ -446,17 +604,19 @@ fn rebuild_cubins(ptx_dir: &Path) -> Result<()> {
 pub fn check(rebuild: bool) -> Result<()> {
     let root = project_root();
     let crate_dir = root.join(KERNEL_CRATE);
-    let ptx_dir = root.join(PTX_DIR);
+    let host_kernels = root.join(HOST_KERNELS);
+    let dirs = ArtifactDirs(root);
     let mut problems = Vec::new();
 
     for area in AREAS {
-        if let Err(error) = check_area(&crate_dir, &ptx_dir, *area) {
+        if let Err(error) = check_area(&crate_dir, &dirs, *area) {
             problems.push(format!("{}: {error:#}", area.name));
         }
     }
 
-    problems.extend(unexpected_ptx_files(&ptx_dir)?);
-    problems.extend(host_embed_problems(&root.join(HOST_KERNELS))?);
+    problems.extend(unexpected_ptx_files(&dirs)?);
+    problems.extend(tier_lib_problems(&dirs));
+    problems.extend(host_embed_problems(&host_kernels)?);
     if !problems.is_empty() {
         bail!(
             "committed CUDA PTX or cubins failed checks; use `cargo xtask cuda-kernels build` for PTX or `build-cubins` for cubins on the GPU box\n  {}",
@@ -470,7 +630,7 @@ pub fn check(rebuild: bool) -> Result<()> {
         .map(|variant| format!("{}.{}", variant.area.name, variant.tier.name()))
         .collect();
     if rebuild {
-        rebuild_cubins(&ptx_dir)?;
+        rebuild_cubins(&dirs)?;
     }
 
     println!(
@@ -593,44 +753,55 @@ fn empty_module_ptx(variant: Variant) -> String {
 
 /// Deletes variant files of `area` that it no longer declares, including the
 /// untiered `<area>.ptx` from before tiers existed
-fn remove_undeclared_variants(ptx_dir: &Path, area: Area) -> Result<()> {
+fn remove_undeclared_variants(dirs: &ArtifactDirs, area: Area) -> Result<()> {
     let declared: BTreeSet<_> = area
         .variants()
         .flat_map(|variant| {
             std::iter::once(variant.file_name()).chain(variant.cubins().map(Cubin::file_name))
         })
         .collect();
-    for entry in fs::read_dir(ptx_dir)? {
-        let path = entry?.path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+    // a variant in another tier's crate is in the wrong place, so it is removed too
+    let in_place = |tier: Tier, name: &str| {
+        declared.contains(name) && name.split('.').nth(1) == Some(tier.name())
+    };
+    for tier in shipped_tiers() {
+        let tier_dir = dirs.tier(tier);
+        if !tier_dir.is_dir() {
             continue;
-        };
+        }
 
-        let ours = (name.ends_with(".ptx") || name.ends_with(".cubin"))
-            && file_area(name) == Some(area.name);
-        if ours && !declared.contains(name) {
-            fs::remove_file(&path)?;
-            println!("{}: removed undeclared {PTX_DIR}/{name}", area.name);
+        for entry in fs::read_dir(&tier_dir)? {
+            let path = entry?.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+
+            let ours = (name.ends_with(".ptx") || name.ends_with(".cubin"))
+                && file_area(name) == Some(area.name);
+            if ours && !in_place(tier, name) {
+                fs::remove_file(&path)?;
+                println!("{}: removed undeclared {}", area.name, dirs.relative(&path));
+            }
         }
     }
 
     Ok(())
 }
 
-fn read_manifest(ptx_dir: &Path, area: Area) -> Result<Manifest> {
-    let manifest_path = ptx_dir.join(format!("{}.manifest", area.name));
+fn read_manifest(dirs: &ArtifactDirs, area: Area) -> Result<Manifest> {
+    let manifest_path = dirs.manifest(area);
     fs::read_to_string(&manifest_path)
         .map_err(|_| eyre!("missing {}", manifest_path.display()))
         .and_then(|text| Manifest::parse(&text))
 }
 
-fn check_area(crate_dir: &Path, ptx_dir: &Path, area: Area) -> Result<()> {
-    let manifest = read_manifest(ptx_dir, area)?;
-    check_area_ptx(crate_dir, ptx_dir, area, &manifest)?;
-    check_area_cubins(ptx_dir, area, &manifest)
+fn check_area(crate_dir: &Path, dirs: &ArtifactDirs, area: Area) -> Result<()> {
+    let manifest = read_manifest(dirs, area)?;
+    check_area_ptx(crate_dir, dirs, area, &manifest)?;
+    check_area_cubins(dirs, area, &manifest)
 }
 
-fn check_area_cubins(ptx_dir: &Path, area: Area, manifest: &Manifest) -> Result<()> {
+fn check_area_cubins(dirs: &ArtifactDirs, area: Area, manifest: &Manifest) -> Result<()> {
     if manifest.ptxas.as_deref() != Some(PTXAS_VERSION) {
         bail!(
             "wrong ptxas version in manifest: expected `{PTXAS_VERSION}`, got {:?}",
@@ -665,7 +836,7 @@ fn check_area_cubins(ptx_dir: &Path, area: Area, manifest: &Manifest) -> Result<
             }
 
             let bytes =
-                fs::read(ptx_dir.join(&name)).wrap_err_with(|| format!("missing cubin {name}"))?;
+                fs::read(dirs.cubin(cubin)).wrap_err_with(|| format!("missing cubin {name}"))?;
             if sha256_hex(&bytes) != record.sha256 {
                 bail!("{name} cubin sha256 does not match its manifest");
             }
@@ -675,7 +846,12 @@ fn check_area_cubins(ptx_dir: &Path, area: Area, manifest: &Manifest) -> Result<
     Ok(())
 }
 
-fn check_area_ptx(crate_dir: &Path, ptx_dir: &Path, area: Area, manifest: &Manifest) -> Result<()> {
+fn check_area_ptx(
+    crate_dir: &Path,
+    dirs: &ArtifactDirs,
+    area: Area,
+    manifest: &Manifest,
+) -> Result<()> {
     let listed: Vec<_> = manifest.variants.iter().map(|entry| entry.tier).collect();
     if listed != area.tiers {
         bail!(
@@ -687,7 +863,7 @@ fn check_area_ptx(crate_dir: &Path, ptx_dir: &Path, area: Area, manifest: &Manif
 
     let mut modules = Vec::new();
     for (variant, entry) in area.variants().zip(&manifest.variants) {
-        let ptx_path = ptx_dir.join(variant.file_name());
+        let ptx_path = dirs.ptx(variant);
         let ptx =
             fs::read_to_string(&ptx_path).map_err(|_| eyre!("missing {}", ptx_path.display()))?;
 
@@ -732,35 +908,65 @@ fn file_area(name: &str) -> Option<&'static str> {
         .find(|area| *area == stem)
 }
 
-fn unexpected_ptx_files(ptx_dir: &Path) -> Result<Vec<String>> {
-    let expected: BTreeSet<String> = AREAS
+/// Files in the manifest or tier directories that are not declared there
+///
+/// A missing directory holds no stray files; the per-area checks report what it lacks
+fn unexpected_ptx_files(dirs: &ArtifactDirs) -> Result<Vec<String>> {
+    let manifests: BTreeSet<String> = AREAS
         .iter()
-        .flat_map(|area| {
-            area.variants()
-                .flat_map(|variant| {
-                    std::iter::once(variant.file_name())
-                        .chain(variant.cubins().map(Cubin::file_name))
-                })
-                .chain([format!("{}.manifest", area.name)])
-        })
+        .map(|area| format!("{}.manifest", area.name))
         .collect();
+    let mut expected = vec![(dirs.manifests(), manifests)];
+    for tier in shipped_tiers() {
+        let files = AREAS
+            .iter()
+            .flat_map(|area| area.variants())
+            .filter(|variant| variant.tier == tier)
+            .flat_map(|variant| {
+                std::iter::once(variant.file_name()).chain(variant.cubins().map(Cubin::file_name))
+            })
+            .collect();
+        expected.push((dirs.tier(tier), files));
+    }
 
     let mut problems = Vec::new();
-    for entry in fs::read_dir(ptx_dir)? {
-        let path = entry?.path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+    for (dir, files) in expected {
+        if !dir.is_dir() {
             continue;
-        };
+        }
 
-        if !expected.contains(name) {
-            problems.push(format!(
-                "{} is not a declared PTX, cubin or manifest; declare its tier in AREAS or delete the file",
-                path.display()
-            ));
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+
+            if !files.contains(name) {
+                problems.push(format!(
+                    "{} is not a declared PTX, cubin or manifest for this directory; declare its tier in AREAS or delete the file",
+                    path.display()
+                ));
+            }
         }
     }
 
     Ok(problems)
+}
+
+/// Each tier crate must embed exactly the files its tier declares
+fn tier_lib_problems(dirs: &ArtifactDirs) -> Vec<String> {
+    shipped_tiers()
+        .into_iter()
+        .filter(|tier| {
+            fs::read_to_string(dirs.tier_lib(*tier)).ok() != Some(render_tier_lib(*tier))
+        })
+        .map(|tier| {
+            format!(
+                "{} is stale; run `cargo xtask cuda-kernels build-cubins` to regenerate it",
+                dirs.relative(&dirs.tier_lib(tier))
+            )
+        })
+        .collect()
 }
 
 /// The host must embed each declared variant only for tiers that select it
@@ -1333,9 +1539,10 @@ impl ManifestVariant {
 #[cfg(test)]
 mod tests {
     use super::{
-        AREAS, Area, Manifest, ManifestCubin, ManifestVariant, PTXAS_FLAGS, PTXAS_VERSION, Tier,
-        Variant, area_of, belongs_to, check_area_cubins, check_entry_points, check_ptx_header,
-        entry_points, host_embed_source_problems, sha256_hex, unexpected_ptx_files,
+        AREAS, Area, ArtifactDirs, Manifest, ManifestCubin, ManifestVariant, PTXAS_FLAGS,
+        PTXAS_VERSION, Tier, Variant, area_of, belongs_to, check_area_cubins, check_entry_points,
+        check_ptx_header, entry_points, host_embed_source_problems, sha256_hex,
+        unexpected_ptx_files,
     };
 
     const PROBE_PTX: &str = "//\n// Generated by LLVM\n//\n.version 6.3\n.target sm_75\n.address_size 64\n\n\t// .globl\tprobe_scale_add // .entry fake(\n.visible .entry probe_scale_add(\n\t.param .f32 probe_scale_add_param_0,\n\t.param .u64 .ptr .align 4 probe_scale_add_param_1,\n\t.param .u64 probe_scale_add_param_2\n)\n{\n\tret;\n}\n";
@@ -1575,56 +1782,58 @@ mod tests {
         }
     }
 
-    fn cubin_fixture() -> (tempfile::TempDir, Manifest) {
+    fn cubin_fixture() -> (tempfile::TempDir, ArtifactDirs, Manifest) {
         let dir = tempfile::tempdir().expect("temporary directory");
+        let dirs = ArtifactDirs(dir.path().to_path_buf());
         let manifest = Manifest {
             ptxas: Some(PTXAS_VERSION.into()),
             ptxas_flags: Some(PTXAS_FLAGS.into()),
             variants: AREAS[0].variants().map(fixture_variant).collect(),
         };
         for cubin in AREAS[0].variants().flat_map(Variant::cubins) {
-            std::fs::write(dir.path().join(cubin.file_name()), b"cubin").expect("write cubin");
+            std::fs::create_dir_all(dirs.tier(cubin.variant.tier)).expect("tier directory");
+            std::fs::write(dirs.cubin(cubin), b"cubin").expect("write cubin");
         }
 
-        check_area_cubins(dir.path(), AREAS[0], &manifest).expect("valid cubins");
-        (dir, manifest)
+        check_area_cubins(&dirs, AREAS[0], &manifest).expect("valid cubins");
+        (dir, dirs, manifest)
     }
 
     #[test]
     fn check_rejects_tampered_cubin() {
-        let (dir, manifest) = cubin_fixture();
+        let (_dir, dirs, manifest) = cubin_fixture();
         let cubin = probe(Tier::Sm75).cubins().next().expect("cubin");
-        std::fs::write(dir.path().join(cubin.file_name()), b"tampered").expect("tamper");
-        let error = check_area_cubins(dir.path(), AREAS[0], &manifest).expect_err("tampered hash");
+        std::fs::write(dirs.cubin(cubin), b"tampered").expect("tamper");
+        let error = check_area_cubins(&dirs, AREAS[0], &manifest).expect_err("tampered hash");
         assert!(error.to_string().contains("cubin sha256 does not match"));
     }
 
     #[test]
     fn check_rejects_cubin_ptx_mismatch() {
-        let (dir, mut manifest) = cubin_fixture();
+        let (_dir, dirs, mut manifest) = cubin_fixture();
         manifest.variants[0].cubins[0].ptx = "different-ptx".into();
-        let error = check_area_cubins(dir.path(), AREAS[0], &manifest).expect_err("PTX mismatch");
+        let error = check_area_cubins(&dirs, AREAS[0], &manifest).expect_err("PTX mismatch");
         assert!(error.to_string().contains("PTX hash does not match"));
     }
 
     #[test]
     fn check_rejects_wrong_ptxas_version_and_flags() {
-        let (dir, mut manifest) = cubin_fixture();
+        let (_dir, dirs, mut manifest) = cubin_fixture();
         manifest.ptxas = Some("Cuda compilation tools, release 12.8, V12.8.93".into());
-        let error = check_area_cubins(dir.path(), AREAS[0], &manifest).expect_err("wrong ptxas");
+        let error = check_area_cubins(&dirs, AREAS[0], &manifest).expect_err("wrong ptxas");
         assert!(error.to_string().contains("wrong ptxas version"));
         manifest.ptxas = Some(PTXAS_VERSION.into());
         manifest.ptxas_flags = Some("-lineinfo".into());
-        let error = check_area_cubins(dir.path(), AREAS[0], &manifest).expect_err("wrong flags");
+        let error = check_area_cubins(&dirs, AREAS[0], &manifest).expect_err("wrong flags");
         assert!(error.to_string().contains("wrong ptxas flags"));
     }
 
     #[test]
     fn check_rejects_missing_cubin() {
-        let (dir, manifest) = cubin_fixture();
+        let (_dir, dirs, manifest) = cubin_fixture();
         let cubin = probe(Tier::Sm75).cubins().next().expect("cubin");
-        std::fs::remove_file(dir.path().join(cubin.file_name())).expect("remove cubin");
-        let error = check_area_cubins(dir.path(), AREAS[0], &manifest).expect_err("missing cubin");
+        std::fs::remove_file(dirs.cubin(cubin)).expect("remove cubin");
+        let error = check_area_cubins(&dirs, AREAS[0], &manifest).expect_err("missing cubin");
         assert!(
             error
                 .to_string()
@@ -1634,20 +1843,40 @@ mod tests {
 
     #[test]
     fn check_rejects_stray_cubin() {
-        let (dir, _) = cubin_fixture();
-        std::fs::write(dir.path().join("probe.sm75.sm_100.cubin"), b"stray").expect("stray cubin");
-        let errors = unexpected_ptx_files(dir.path()).expect("scan directory");
-        assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("probe.sm75.sm_100.cubin is not a declared"));
+        let (_dir, dirs, _) = cubin_fixture();
+        std::fs::write(
+            dirs.tier(Tier::Sm75).join("probe.sm75.sm_100.cubin"),
+            b"stray",
+        )
+        .expect("stray cubin");
+        // a declared file in another tier's crate is stray too
+        let misplaced = probe(Tier::Sm80)
+            .cubins()
+            .next()
+            .expect("cubin")
+            .file_name();
+        std::fs::write(dirs.tier(Tier::Sm75).join(&misplaced), b"cubin").expect("misplaced");
+        let errors = unexpected_ptx_files(&dirs).expect("scan directories");
+        assert_eq!(errors.len(), 2);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("probe.sm75.sm_100.cubin is not a declared"))
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains(&format!("{misplaced} is not a declared")))
+        );
     }
 
     #[test]
     fn check_rejects_missing_or_incompatible_manifest_arches() {
-        let (dir, mut manifest) = cubin_fixture();
+        let (_dir, dirs, mut manifest) = cubin_fixture();
         manifest.variants[0].cubins.pop();
-        assert!(check_area_cubins(dir.path(), AREAS[0], &manifest).is_err());
+        assert!(check_area_cubins(&dirs, AREAS[0], &manifest).is_err());
         manifest.variants[1].cubins = fixture_variant(probe(Tier::Sm75)).cubins;
         manifest.variants[0] = fixture_variant(probe(Tier::Sm75));
-        assert!(check_area_cubins(dir.path(), AREAS[0], &manifest).is_err());
+        assert!(check_area_cubins(&dirs, AREAS[0], &manifest).is_err());
     }
 }

@@ -9,7 +9,9 @@ use crate::inference::cuda::candidate::{
 };
 use crate::inference::cuda::device::DeviceAttributes;
 use crate::inference::cuda::device::test_support::Builder;
-use crate::inference::cuda::kernels::{AreaPtx, ArtifactHash, LoadedArtifact, ModuleRequest};
+use crate::inference::cuda::kernels::{
+    AreaPtx, ArtifactHash, LoadedArtifact, ModuleRequest, shipped_ptx,
+};
 
 use crate::inference::cuda::{
     ComputeCapability, CudaError, CudaLibrary, CudaMath, GeometryError, KernelModule, PtxTier,
@@ -28,9 +30,9 @@ fn device(capability: ComputeCapability) -> DeviceAttributes {
 
 fn legacy_ptx(area: KernelModule) -> &'static str {
     match area {
-        KernelModule::Lstm => include_str!("../ptx/lstm.sm75.ptx"),
-        KernelModule::Sincnet => include_str!("../ptx/sincnet.sm75.ptx"),
-        _ => include_str!("../ptx/resnet.sm75.ptx"),
+        KernelModule::Lstm => shipped_ptx("ptx/lstm.sm75.ptx"),
+        KernelModule::Sincnet => shipped_ptx("ptx/sincnet.sm75.ptx"),
+        _ => shipped_ptx("ptx/resnet.sm75.ptx"),
     }
 }
 
