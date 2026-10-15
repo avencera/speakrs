@@ -1,0 +1,372 @@
+//! The pipeline and queue behind `speakrs.Pipeline` and `speakrs.Queue`
+
+use std::path::PathBuf;
+use std::sync::{Mutex, PoisonError};
+
+use pyo3::buffer::PyBuffer;
+use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::prelude::*;
+use speakrs_sdk::speakrs::ExecutionMode;
+use speakrs_sdk::{
+    CancelToken, ProgressEvent, RunOptions, SdkError, SdkPipeline, SdkQueue, mode_name,
+};
+
+use crate::config::{PyPipelineConfig, PyRuntimeConfig};
+use crate::models::PyPreparedModels;
+use crate::results::{PyDiarizationResult, PyProgressEvent, PyQueueResult};
+use crate::{lock, mode_from, py_bool, sdk_err};
+
+/// Cancels a running diarization from any thread
+///
+/// The check runs between stages and between batch files; a stage that has
+/// already started finishes first.
+#[pyclass(name = "CancelToken", module = "speakrs", frozen, from_py_object)]
+#[derive(Clone)]
+pub(crate) struct PyCancelToken(pub(crate) CancelToken);
+
+#[pymethods]
+impl PyCancelToken {
+    #[new]
+    fn new() -> Self {
+        Self(CancelToken::new())
+    }
+
+    /// Request cancellation
+    fn cancel(&self) {
+        self.0.cancel();
+    }
+
+    /// Whether cancellation was requested
+    #[getter]
+    fn cancelled(&self) -> bool {
+        self.0.is_cancelled()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("CancelToken(cancelled={})", py_bool(self.0.is_cancelled()))
+    }
+}
+
+/// 16 kHz mono samples, borrowed from a float32 buffer when possible
+enum Samples {
+    Borrowed(PyBuffer<f32>),
+    Owned(Vec<f32>),
+}
+
+impl Samples {
+    fn extract(samples: &Bound<'_, PyAny>) -> PyResult<Self> {
+        match PyBuffer::<f32>::get(samples) {
+            Ok(buffer) => {
+                if buffer.dimensions() != 1 {
+                    return Err(PyValueError::new_err(format!(
+                        "samples must be a 1-D array of mono audio, got {} dimensions",
+                        buffer.dimensions()
+                    )));
+                }
+                if buffer.as_slice_ptr().is_some() {
+                    Ok(Self::Borrowed(buffer))
+                } else {
+                    // strided views cannot be borrowed as one slice
+                    Ok(Self::Owned(buffer.to_vec(samples.py())?))
+                }
+            }
+            Err(error) => {
+                if let Ok(buffer) = pyo3::buffer::PyUntypedBuffer::get(samples) {
+                    return Err(PyTypeError::new_err(format!(
+                        "samples must be float32, got buffer format '{}'; convert with numpy.asarray(samples, dtype=numpy.float32)",
+                        buffer.format().to_string_lossy()
+                    )));
+                }
+                samples.extract::<Vec<f32>>().map(Self::Owned).map_err(|_| {
+                    PyTypeError::new_err(format!(
+                        "samples must be a float32 buffer or a sequence of floats ({error})"
+                    ))
+                })
+            }
+        }
+    }
+
+    fn as_slice(&self) -> &[f32] {
+        match self {
+            // SAFETY: the buffer export keeps the memory alive and C-contiguous until
+            // `self` drops; a caller that mutates the array during the call races
+            // with this read, as with any extension that releases the GIL
+            Self::Borrowed(buffer) => unsafe {
+                buffer
+                    .as_slice_ptr()
+                    .expect("checked C-contiguous at extraction")
+                    .as_ref()
+            },
+            Self::Owned(samples) => samples,
+        }
+    }
+
+    fn into_vec(self) -> Vec<f32> {
+        match self {
+            Self::Owned(samples) => samples,
+            borrowed => borrowed.as_slice().to_vec(),
+        }
+    }
+}
+
+/// Collects the first exception a Python progress callback raises
+pub(crate) struct ProgressSink {
+    callback: Option<Py<PyAny>>,
+    cancel_on_signal: Option<CancelToken>,
+    error: Mutex<Option<PyErr>>,
+}
+
+impl ProgressSink {
+    pub(crate) fn new(callback: Option<Py<PyAny>>, cancel_on_signal: Option<CancelToken>) -> Self {
+        Self {
+            callback,
+            cancel_on_signal,
+            error: Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.callback.is_some() || self.cancel_on_signal.is_some()
+    }
+
+    pub(crate) fn send(&self, event: ProgressEvent) {
+        Python::attach(|py| {
+            // Ctrl+C sets a flag that only Python code observes, so batch calls poll it
+            // here and cancel at the next file boundary
+            if let Some(token) = &self.cancel_on_signal
+                && let Err(error) = py.check_signals()
+            {
+                token.cancel();
+                self.record(error);
+            }
+
+            if let Some(callback) = &self.callback
+                && let Err(error) = callback.call1(py, (PyProgressEvent(event),))
+            {
+                self.record(error);
+            }
+        });
+    }
+
+    fn record(&self, error: PyErr) {
+        lock(&self.error).get_or_insert(error);
+    }
+
+    /// Prefer a callback's exception over the result, so it is never lost
+    pub(crate) fn finish<T>(self, result: Result<T, SdkError>) -> PyResult<T> {
+        match self
+            .error
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner)
+        {
+            Some(error) => Err(error),
+            None => result.map_err(sdk_err),
+        }
+    }
+}
+
+/// Native pipeline; `speakrs.Pipeline` wraps it
+#[pyclass(name = "_Pipeline", module = "speakrs._native", frozen)]
+pub(crate) struct PyPipeline {
+    // `None` after `into_queue`
+    inner: Mutex<Option<SdkPipeline>>,
+    mode: ExecutionMode,
+}
+
+impl PyPipeline {
+    /// Run `f` with the GIL released and the pipeline locked
+    ///
+    /// Locking after release keeps a second Python thread that waits for the
+    /// pipeline from holding the GIL a progress callback needs
+    fn with_pipeline<T: Send>(
+        &self,
+        py: Python<'_>,
+        f: impl FnOnce(&mut SdkPipeline) -> Result<T, SdkError> + Send,
+    ) -> Result<T, SdkError> {
+        py.detach(|| {
+            let mut inner = lock(&self.inner);
+            let pipeline = inner.as_mut().ok_or_else(|| {
+                SdkError::configuration("the pipeline was moved into a queue with into_queue()")
+            })?;
+            f(pipeline)
+        })
+    }
+}
+
+#[pymethods]
+impl PyPipeline {
+    #[getter]
+    fn mode(&self) -> &'static str {
+        mode_name(self.mode)
+    }
+
+    #[getter]
+    fn pipeline_config(&self, py: Python<'_>) -> PyResult<PyPipelineConfig> {
+        self.with_pipeline(py, |pipeline| Ok(pipeline.pipeline_config()))
+            .map(PyPipelineConfig)
+            .map_err(sdk_err)
+    }
+
+    #[pyo3(signature = (samples, file_id, pipeline_config=None, cancel_token=None, progress=None))]
+    fn diarize_samples(
+        &self,
+        py: Python<'_>,
+        samples: &Bound<'_, PyAny>,
+        file_id: String,
+        pipeline_config: Option<PyPipelineConfig>,
+        cancel_token: Option<PyCancelToken>,
+        progress: Option<Py<PyAny>>,
+    ) -> PyResult<PyDiarizationResult> {
+        let samples = Samples::extract(samples)?;
+        let sink = ProgressSink::new(progress, None);
+        let result = self.with_pipeline(py, |pipeline| {
+            let callback = |event| sink.send(event);
+            pipeline.diarize_samples(
+                samples.as_slice(),
+                &file_id,
+                RunOptions {
+                    pipeline_config: pipeline_config.as_ref().map(|config| &config.0),
+                    cancel_token: cancel_token.as_ref().map(|token| &token.0),
+                    progress: sink.is_active().then_some(&callback),
+                },
+            )
+        });
+        sink.finish(result).map(PyDiarizationResult)
+    }
+
+    #[pyo3(signature = (path, file_id, pipeline_config=None, cancel_token=None, progress=None))]
+    fn diarize_file(
+        &self,
+        py: Python<'_>,
+        path: PathBuf,
+        file_id: String,
+        pipeline_config: Option<PyPipelineConfig>,
+        cancel_token: Option<PyCancelToken>,
+        progress: Option<Py<PyAny>>,
+    ) -> PyResult<PyDiarizationResult> {
+        let sink = ProgressSink::new(progress, None);
+        let result = self.with_pipeline(py, |pipeline| {
+            let callback = |event| sink.send(event);
+            pipeline.diarize_file(
+                &path,
+                &file_id,
+                RunOptions {
+                    pipeline_config: pipeline_config.as_ref().map(|config| &config.0),
+                    cancel_token: cancel_token.as_ref().map(|token| &token.0),
+                    progress: sink.is_active().then_some(&callback),
+                },
+            )
+        });
+        sink.finish(result).map(PyDiarizationResult)
+    }
+
+    #[pyo3(signature = (files, pipeline_config=None, cancel_token=None, progress=None))]
+    fn diarize_files(
+        &self,
+        py: Python<'_>,
+        files: Vec<(String, PathBuf)>,
+        pipeline_config: Option<PyPipelineConfig>,
+        cancel_token: Option<PyCancelToken>,
+        progress: Option<Py<PyAny>>,
+    ) -> PyResult<Vec<PyDiarizationResult>> {
+        let token = cancel_token.map_or_else(CancelToken::new, |token| token.0);
+        let sink = ProgressSink::new(progress, Some(token.clone()));
+        let result = self.with_pipeline(py, |pipeline| {
+            let callback = |event| sink.send(event);
+            pipeline.diarize_files(
+                files,
+                RunOptions {
+                    pipeline_config: pipeline_config.as_ref().map(|config| &config.0),
+                    cancel_token: Some(&token),
+                    progress: Some(&callback),
+                },
+            )
+        });
+        sink.finish(result)
+            .map(|results| results.into_iter().map(PyDiarizationResult).collect())
+    }
+
+    #[pyo3(name = "into_queue", signature = (pipeline_config=None, capacity=None))]
+    fn make_queue(
+        &self,
+        py: Python<'_>,
+        pipeline_config: Option<PyPipelineConfig>,
+        capacity: Option<usize>,
+    ) -> PyResult<PyQueue> {
+        py.detach(|| {
+            let pipeline = lock(&self.inner).take().ok_or_else(|| {
+                SdkError::configuration("the pipeline was already moved into a queue")
+            })?;
+            pipeline.into_queue(pipeline_config.map(|config| config.0), capacity)
+        })
+        .map(PyQueue)
+        .map_err(sdk_err)
+    }
+}
+
+/// Native queue; `speakrs.Queue` wraps it
+#[pyclass(name = "_Queue", module = "speakrs._native", frozen)]
+pub(crate) struct PyQueue(pub(crate) SdkQueue);
+
+#[pymethods]
+impl PyQueue {
+    fn push_samples(
+        &self,
+        py: Python<'_>,
+        file_id: String,
+        samples: &Bound<'_, PyAny>,
+    ) -> PyResult<u64> {
+        let samples = Samples::extract(samples)?;
+        py.detach(|| self.0.push_samples(file_id, samples.into_vec()))
+            .map_err(sdk_err)
+    }
+
+    fn push_file(&self, py: Python<'_>, file_id: String, path: PathBuf) -> PyResult<u64> {
+        py.detach(|| self.0.push_file(file_id, &path))
+            .map_err(sdk_err)
+    }
+
+    fn close(&self) {
+        self.0.close();
+    }
+
+    fn recv(&self, py: Python<'_>) -> PyResult<PyQueueResult> {
+        py.detach(|| self.0.recv())
+            .map(PyQueueResult)
+            .map_err(sdk_err)
+    }
+
+    fn try_recv(&self, py: Python<'_>) -> PyResult<Option<PyQueueResult>> {
+        py.detach(|| self.0.try_recv())
+            .map(|item| item.map(PyQueueResult))
+            .map_err(sdk_err)
+    }
+}
+
+#[pyfunction]
+pub(crate) fn _build_pipeline(
+    py: Python<'_>,
+    prepared: PyPreparedModels,
+    mode: &str,
+    pipeline_config: Option<PyPipelineConfig>,
+    runtime_config: Option<PyRuntimeConfig>,
+) -> PyResult<PyPipeline> {
+    let mode = mode_from(mode)?;
+    let runtime = runtime_config
+        .map(|config| config.0.to_runtime_config())
+        .transpose()
+        .map_err(sdk_err)?;
+    py.detach(|| {
+        SdkPipeline::from_prepared(
+            &prepared.0,
+            mode,
+            pipeline_config.map(|config| config.0),
+            runtime,
+        )
+    })
+    .map(|pipeline| PyPipeline {
+        inner: Mutex::new(Some(pipeline)),
+        mode,
+    })
+    .map_err(sdk_err)
+}
