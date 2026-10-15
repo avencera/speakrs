@@ -135,7 +135,10 @@ impl ModelStore {
         };
 
         match &options.manifest {
-            Some(manifest) => manifest.verify(&model_dir)?,
+            Some(manifest) => {
+                manifest.check_covers(mode)?;
+                manifest.verify(&model_dir)?;
+            }
             None => {
                 for file in required_model_files(mode) {
                     if !model_dir.join(&file).is_file() {
@@ -190,14 +193,19 @@ impl ModelStore {
 
         let repo_dir = self.repo_dir();
         let snapshot = repo_dir.join("snapshots").join(revision);
+        if !snapshot.is_dir() {
+            return Ok(false);
+        }
+
+        // refs go first so a failure never leaves a ref to a deleted snapshot
+        remove_refs_to(&repo_dir.join("refs"), revision)
+            .map_err(|err| ModelPrepareError::cache(&repo_dir, err))?;
         match std::fs::remove_dir_all(&snapshot) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(err) => return Err(ModelPrepareError::cache(&snapshot, err)),
         }
 
-        remove_refs_to(&repo_dir.join("refs"), revision)
-            .map_err(|err| ModelPrepareError::cache(&repo_dir, err))?;
         remove_unreferenced_blobs(&repo_dir)
             .map_err(|err| ModelPrepareError::cache(&repo_dir, err))?;
         Ok(true)
@@ -348,10 +356,29 @@ impl ModelManifest {
         })
     }
 
+    /// Check that the manifest lists every file `mode` loads
+    pub fn check_covers(&self, mode: ExecutionMode) -> Result<(), ModelManifestError> {
+        for path in required_model_files(mode) {
+            if !self.files.iter().any(|entry| entry.path == path) {
+                return Err(ModelManifestError::NotListed { path });
+            }
+        }
+
+        Ok(())
+    }
+
     /// Check that every listed file exists with the recorded size and digest
+    ///
+    /// Paths must stay inside `model_dir`, so a manifest cannot point at other files
     pub fn verify(&self, model_dir: impl AsRef<Path>) -> Result<(), ModelManifestError> {
         let model_dir = model_dir.as_ref();
         for expected in &self.files {
+            if !is_relative_inside(&expected.path) {
+                return Err(ModelManifestError::UnsafePath {
+                    path: expected.path.clone(),
+                });
+            }
+
             let actual = ModelManifestEntry::from_file(
                 expected.path.clone(),
                 &model_dir.join(&expected.path),
@@ -454,6 +481,22 @@ pub enum ModelManifestError {
     /// Manifest JSON could not be parsed
     #[error("invalid model manifest JSON: {0}")]
     Parse(String),
+
+    /// The manifest omits a file the execution mode loads
+    #[error("model manifest does not list `{path}`, which this mode needs")]
+    NotListed { path: String },
+
+    /// A manifest path is absolute or leaves the model directory
+    #[error("model manifest path `{path}` must be relative and stay inside the model directory")]
+    UnsafePath { path: String },
+}
+
+fn is_relative_inside(path: &str) -> bool {
+    !path.is_empty()
+        && !path.contains('\\')
+        && Path::new(path)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 fn is_safe_cache_revision(revision: &str) -> bool {
@@ -465,15 +508,18 @@ fn is_safe_cache_revision(revision: &str) -> bool {
     matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
 }
 
-/// Remove branch refs that point at a deleted snapshot
+/// Remove refs, including nested ones such as `refs/pr/1`, that point at a deleted snapshot
 fn remove_refs_to(refs_dir: &Path, revision: &str) -> std::io::Result<()> {
     let Ok(entries) = std::fs::read_dir(refs_dir) else {
         return Ok(());
     };
 
     for entry in entries {
-        let path = entry?.path();
-        if path.is_file() && std::fs::read_to_string(&path)?.trim() == revision {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            remove_refs_to(&path, revision)?;
+        } else if std::fs::read(&path)?.trim_ascii() == revision.as_bytes() {
             std::fs::remove_file(path)?;
         }
     }
@@ -492,7 +538,11 @@ fn remove_unreferenced_blobs(repo_dir: &Path) -> std::io::Result<()> {
 
     for blob in blobs {
         let blob = blob?;
-        if !referenced.contains(&blob.file_name()) {
+        let name = blob.file_name();
+        // a download in progress writes `<blob>.part` next to `<blob>.lock`, and
+        // finished blobs are bare hashes, so anything with an extension is left alone
+        let in_progress = name.to_string_lossy().contains('.');
+        if !in_progress && !referenced.contains(&name) {
             std::fs::remove_file(blob.path())?;
         }
     }
@@ -537,7 +587,27 @@ mod tests {
         let manifest = ModelManifest::generate(&dir, ExecutionMode::Cpu).unwrap();
         let parsed = ModelManifest::from_json(&manifest.to_json()).unwrap();
         assert_eq!(parsed, manifest);
+        parsed.check_covers(ExecutionMode::Cpu).unwrap();
         parsed.verify(&dir).unwrap();
+
+        let mut partial = manifest.clone();
+        partial.files.pop();
+        assert!(matches!(
+            partial.check_covers(ExecutionMode::Cpu),
+            Err(ModelManifestError::NotListed { .. })
+        ));
+
+        for path in ["../outside", "/etc/hosts", "a/../../b", ""] {
+            let mut escaping = manifest.clone();
+            escaping.files[0].path = path.to_string();
+            assert!(
+                matches!(
+                    escaping.verify(&dir),
+                    Err(ModelManifestError::UnsafePath { .. })
+                ),
+                "{path}"
+            );
+        }
 
         let first = &manifest.files[0].path;
         write_file(&dir.join(first), b"changed contents of a different length");
@@ -573,7 +643,10 @@ mod tests {
         let repo = store.repo_dir();
         write_file(&repo.join("blobs/shared"), b"shared");
         write_file(&repo.join("blobs/old-only"), b"old");
+        write_file(&repo.join("blobs/downloading.part"), b"partial");
         write_file(&repo.join("refs/main"), b"old-rev");
+        write_file(&repo.join("refs/pr/1"), b"old-rev\n");
+        write_file(&repo.join("refs/other"), b"new-rev");
         for (revision, blobs) in [
             ("old-rev", ["shared", "old-only"]),
             ("new-rev", ["shared", "shared"]),
@@ -601,7 +674,10 @@ mod tests {
         assert!(!store.cleanup_revision("old-rev").unwrap());
         assert!(repo.join("blobs/shared").exists());
         assert!(!repo.join("blobs/old-only").exists());
+        assert!(repo.join("blobs/downloading.part").exists());
         assert!(!repo.join("refs/main").exists());
+        assert!(!repo.join("refs/pr/1").exists());
+        assert!(repo.join("refs/other").exists());
         assert!(matches!(
             store.cleanup_revision("../escape"),
             Err(ModelPrepareError::InvalidRevision(_))
