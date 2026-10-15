@@ -24,6 +24,13 @@ const _: () = {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct QueuedDiarizationJobId(u64);
 
+impl QueuedDiarizationJobId {
+    /// Return the numeric id, unique within one sender lineage
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
 /// Construction options for a background diarization queue
 ///
 /// The local queue is in-process only. Capacity bounds the request channel and
