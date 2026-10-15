@@ -162,6 +162,11 @@ impl Iterator for DecodePool<'_> {
         }
         self.next_index += 1;
 
+        // the callback may have cancelled, so this file must not reach inference
+        if let Err(err) = CancelToken::check(self.cancel_token.as_ref()) {
+            return Some(Err(err));
+        }
+
         Some(audio.map(|audio| OwnedBatchInput { audio, file_id }))
     }
 }

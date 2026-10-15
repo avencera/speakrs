@@ -153,7 +153,7 @@ Every failure inside speakrs raises `SpeakrsError`, which has these fields:
 | `audio_resample` | the audio could not be resampled to 16 kHz |
 | `pipeline` | inference, clustering, or reconstruction failed |
 | `queue` | queue failure; codes `queue_full` and `queue_closed` |
-| `cancelled` | a `CancelToken` or Ctrl+C stopped the call |
+| `cancelled` | a `CancelToken` stopped the call; Ctrl+C raises `KeyboardInterrupt` instead |
 | `internal` | a bug in the bindings |
 
 Wrong argument types raise `TypeError`.

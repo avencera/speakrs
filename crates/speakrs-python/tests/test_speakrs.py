@@ -40,6 +40,10 @@ def test_samples_input_validation(cpu_pipeline):
 
     with pytest.raises(TypeError, match="float32"):
         cpu_pipeline.diarize_samples(samples.astype(np.float64))
+    # big-endian float32 is byte-swapped on copy, not read as native floats
+    expected = cpu_pipeline.diarize_samples(samples).rttm()
+    assert "SPEAKER" in expected
+    assert cpu_pipeline.diarize_samples(samples.astype(">f4")).rttm() == expected
     with pytest.raises(ValueError, match="1-D"):
         cpu_pipeline.diarize_samples(samples.reshape(1, -1))
     with pytest.raises(TypeError):
@@ -138,6 +142,12 @@ def test_misuse_fails_fast_and_keeps_the_pipeline_usable(cpu_models):
         pipeline.diarize_files([TEST_WAV, SHORT_WAV, TEST_WAV], progress=fail_on_first_file)
     # the raise cancels the batch, so later files never start
     assert events == ["batch_file"]
+
+    # a cancel raised by the event that opens a stage stops that stage, too
+    events.clear()
+    with pytest.raises(RuntimeError, match="stop"):
+        pipeline.diarize_samples(read_wav(SHORT_WAV), progress=fail_on_first_file)
+    assert events == ["running_pipeline"]
 
     assert pipeline.diarize_file(SHORT_WAV).rttm() == expected
 

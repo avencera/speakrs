@@ -55,6 +55,15 @@ impl RunOptions<'_> {
     fn check_cancelled(&self) -> Result<(), SdkError> {
         CancelToken::check(self.cancel_token)
     }
+
+    /// Report a stage, then check the token
+    ///
+    /// The check follows the event because a binding's callback may cancel, for
+    /// example on a Ctrl+C it can only observe while handling an event
+    fn begin(&self, event: ProgressEvent) -> Result<(), SdkError> {
+        self.emit(event);
+        self.check_cancelled()
+    }
 }
 
 /// Wall-clock time spent in each stage of a single-file call, in milliseconds
@@ -154,8 +163,7 @@ impl SdkPipeline {
         options: RunOptions<'_>,
     ) -> Result<Diarization, SdkError> {
         let start = Instant::now();
-        options.check_cancelled()?;
-        options.emit(ProgressEvent::RunningPipeline);
+        options.begin(ProgressEvent::RunningPipeline)?;
         let mut diarization = self.run(samples, file_id, &options)?;
         let pipeline_ms = elapsed_ms(start);
         diarization.timing = Some(TimingStats {
@@ -175,24 +183,21 @@ impl SdkPipeline {
         options: RunOptions<'_>,
     ) -> Result<Diarization, SdkError> {
         let start = Instant::now();
-        options.check_cancelled()?;
-        options.emit(ProgressEvent::DecodingAudio);
+        options.begin(ProgressEvent::DecodingAudio)?;
         let audio = decode_file_to_mono(path).map_err(SdkError::from_audio_error)?;
         let audio_decode_ms = elapsed_ms(start);
 
-        options.check_cancelled()?;
         let resample_start = Instant::now();
         let samples = if audio.sample_rate_hz == SDK_SAMPLE_RATE_HZ {
             audio.samples
         } else {
-            options.emit(ProgressEvent::ResamplingAudio);
+            options.begin(ProgressEvent::ResamplingAudio)?;
             resample_mono_to_16khz(audio.samples, audio.sample_rate_hz)
                 .map_err(SdkError::from_audio_error)?
         };
         let audio_resample_ms = elapsed_ms(resample_start);
 
-        options.check_cancelled()?;
-        options.emit(ProgressEvent::RunningPipeline);
+        options.begin(ProgressEvent::RunningPipeline)?;
         let pipeline_start = Instant::now();
         let mut diarization = self.run(&samples, file_id, &options)?;
         diarization.timing = Some(TimingStats {
