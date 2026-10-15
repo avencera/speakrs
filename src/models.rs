@@ -577,13 +577,17 @@ mod local_tests {
     }
 }
 
-#[cfg(all(test, feature = "online"))]
+// the catalog tests also keep its accessors used in builds without `online`
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(feature = "online")]
     const MODEL_FILENAME: &str = "segmentation-3.0.onnx";
+    #[cfg(feature = "online")]
     const EXPECTED_MODEL_URL: &str = "https://huggingface.co/avencera/speakrs-models/resolve/67f963b6a1d94fcd4678948237b3cc8bd69bf1d8/segmentation-3.0.onnx";
 
+    #[cfg(feature = "online")]
     #[test]
     fn pinned_repository_selects_model_card_revision() {
         let repo = PINNED_MODEL_REPOSITORY.into_hf_repo();
@@ -595,6 +599,7 @@ mod tests {
         assert_eq!(api_repo.url(MODEL_FILENAME), EXPECTED_MODEL_URL);
     }
 
+    #[cfg(feature = "online")]
     #[test]
     fn default_and_custom_cache_managers_share_pinned_repository() {
         let default_manager = ModelManager::new().unwrap();
