@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use pyo3::buffer::PyBuffer;
+use pyo3::buffer::PyUntypedBuffer;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use speakrs_sdk::speakrs::ExecutionMode;
@@ -61,53 +61,66 @@ impl PyCancelToken {
 
 /// 16 kHz mono samples, borrowed from a float32 buffer when possible
 enum Samples {
-    Borrowed(PyBuffer<f32>),
+    // checked at extraction: 1-D, native-endian float32, C-contiguous, aligned, non-empty
+    Borrowed(PyUntypedBuffer),
     Owned(Vec<f32>),
 }
 
 impl Samples {
     fn extract(samples: &Bound<'_, PyAny>) -> PyResult<Self> {
-        match PyBuffer::<f32>::get(samples) {
-            Ok(buffer) => {
-                if buffer.dimensions() != 1 {
-                    return Err(PyValueError::new_err(format!(
-                        "samples must be a 1-D array of mono audio, got {} dimensions",
-                        buffer.dimensions()
-                    )));
-                }
-                if buffer.as_slice_ptr().is_some() {
-                    Ok(Self::Borrowed(buffer))
-                } else {
-                    // strided views cannot be borrowed as one slice
-                    Ok(Self::Owned(buffer.to_vec(samples.py())?))
-                }
-            }
-            Err(error) => {
-                if let Ok(buffer) = pyo3::buffer::PyUntypedBuffer::get(samples) {
-                    return Err(PyTypeError::new_err(format!(
-                        "samples must be float32, got buffer format '{}'; convert with numpy.asarray(samples, dtype=numpy.float32)",
-                        buffer.format().to_string_lossy()
-                    )));
-                }
-                samples.extract::<Vec<f32>>().map(Self::Owned).map_err(|_| {
-                    PyTypeError::new_err(format!(
-                        "samples must be a float32 buffer or a sequence of floats ({error})"
-                    ))
-                })
-            }
+        let Ok(buffer) = PyUntypedBuffer::get(samples) else {
+            return samples.extract::<Vec<f32>>().map(Self::Owned).map_err(|_| {
+                PyTypeError::new_err("samples must be a float32 buffer or a sequence of floats")
+            });
+        };
+
+        // the format is checked here because PyO3 0.30's own float32 check accepts
+        // the non-native byte order and rejects an explicit native one
+        let format = buffer.format().to_bytes();
+        let Some(byte_order) = float32_byte_order(format).filter(|_| buffer.item_size() == 4)
+        else {
+            return Err(PyTypeError::new_err(format!(
+                "samples must be float32, got buffer format '{}'; convert with numpy.asarray(samples, dtype=numpy.float32)",
+                String::from_utf8_lossy(format)
+            )));
+        };
+        if buffer.dimensions() != 1 {
+            return Err(PyValueError::new_err(format!(
+                "samples must be a 1-D array of mono audio, got {} dimensions",
+                buffer.dimensions()
+            )));
         }
+
+        let aligned = buffer.buf_ptr().cast::<f32>().is_aligned();
+        if byte_order == ByteOrder::Native
+            && buffer.is_c_contiguous()
+            && aligned
+            && buffer.item_count() > 0
+        {
+            return Ok(Self::Borrowed(buffer));
+        }
+
+        // strided, unaligned, or byte-swapped buffers cannot be borrowed as a slice
+        let copied = (0..buffer.item_count())
+            .map(|index| {
+                // SAFETY: `index` is within the 1-D shape and each item is 4 bytes
+                let bits = unsafe { buffer.get_ptr(&[index]).cast::<u32>().read_unaligned() };
+                match byte_order {
+                    ByteOrder::Native => f32::from_bits(bits),
+                    ByteOrder::Swapped => f32::from_bits(bits.swap_bytes()),
+                }
+            })
+            .collect();
+        Ok(Self::Owned(copied))
     }
 
     fn as_slice(&self) -> &[f32] {
         match self {
-            // SAFETY: the buffer export keeps the memory alive and C-contiguous until
-            // `self` drops; a caller that mutates the array during the call races
-            // with this read, as with any extension that releases the GIL
+            // SAFETY: extraction checked the layout, and the buffer export keeps the
+            // memory alive until `self` drops; a caller that mutates the array during
+            // the call races with this read, as with any extension that releases the GIL
             Self::Borrowed(buffer) => unsafe {
-                buffer
-                    .as_slice_ptr()
-                    .expect("checked C-contiguous at extraction")
-                    .as_ref()
+                std::slice::from_raw_parts(buffer.buf_ptr().cast::<f32>(), buffer.item_count())
             },
             Self::Owned(samples) => samples,
         }
@@ -118,6 +131,37 @@ impl Samples {
             Self::Owned(samples) => samples,
             borrowed => borrowed.as_slice().to_vec(),
         }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ByteOrder {
+    Native,
+    Swapped,
+}
+
+/// Byte order of a struct-module format string for one float32, or `None` for
+/// any other type
+fn float32_byte_order(format: &[u8]) -> Option<ByteOrder> {
+    let (prefix, code) = match format {
+        [code] => (b'@', *code),
+        [prefix, code] => (*prefix, *code),
+        _ => return None,
+    };
+    if code != b'f' {
+        return None;
+    }
+
+    let little = match prefix {
+        b'@' | b'=' => return Some(ByteOrder::Native),
+        b'<' => true,
+        b'>' | b'!' => false,
+        _ => return None,
+    };
+    if little == cfg!(target_endian = "little") {
+        Some(ByteOrder::Native)
+    } else {
+        Some(ByteOrder::Swapped)
     }
 }
 
