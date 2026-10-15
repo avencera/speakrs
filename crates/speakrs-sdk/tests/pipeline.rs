@@ -29,7 +29,10 @@ fn cpu_pipeline() -> SdkPipeline {
 #[test]
 fn batch_matches_single_file_runs_in_input_order() {
     let mut pipeline = cpu_pipeline();
-    let files = [("long", fixture("test.wav")), ("short", fixture("test_short.wav"))];
+    let files = [
+        ("long", fixture("test.wav")),
+        ("short", fixture("test_short.wav")),
+    ];
 
     let singles: Vec<_> = files
         .iter()
@@ -124,7 +127,9 @@ fn queue_returns_every_job_with_its_duration_then_closes() {
     let path_job = queue
         .push_file("path".into(), &fixture("test_short.wav"))
         .unwrap();
-    let silence_job = queue.push_samples("silence".into(), vec![0.0; 16_000]).unwrap();
+    let silence_job = queue
+        .push_samples("silence".into(), vec![0.0; 16_000])
+        .unwrap();
     queue.close();
 
     let mut items = [queue.recv().unwrap(), queue.recv().unwrap()];
@@ -138,6 +143,8 @@ fn queue_returns_every_job_with_its_duration_then_closes() {
 
     let closed = queue.recv().unwrap_err();
     assert_eq!(closed.code, speakrs_sdk::queue::QUEUE_CLOSED);
-    let rejected = queue.push_samples("late".into(), vec![0.0; 16]).unwrap_err();
+    let rejected = queue
+        .push_samples("late".into(), vec![0.0; 16])
+        .unwrap_err();
     assert_eq!(rejected.code, speakrs_sdk::queue::QUEUE_CLOSED);
 }

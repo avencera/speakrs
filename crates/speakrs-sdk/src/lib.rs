@@ -12,6 +12,7 @@ pub mod error;
 pub mod models;
 pub mod pipeline;
 pub mod queue;
+pub mod runtime;
 
 /// The core crate, re-exported so bindings use the same version
 pub use speakrs;
@@ -28,3 +29,4 @@ pub use pipeline::{
     Diarization, ProgressCallback, ProgressEvent, RunOptions, SdkPipeline, TimingStats,
 };
 pub use queue::{QueueItem, SdkQueue};
+pub use runtime::{RuntimeOptions, available_modes, mode_name, parse_mode};

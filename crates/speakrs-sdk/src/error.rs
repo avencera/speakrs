@@ -85,7 +85,8 @@ impl SdkError {
         Self::new(SdkErrorCategory::Cancelled, "operation was cancelled")
     }
 
-    pub(crate) fn configuration(message: impl Into<String>) -> Self {
+    /// An invalid argument or configuration value
+    pub fn configuration(message: impl Into<String>) -> Self {
         Self::new(SdkErrorCategory::Configuration, message)
     }
 
