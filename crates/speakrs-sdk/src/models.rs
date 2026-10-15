@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -295,6 +296,10 @@ pub enum ModelPrepareError {
     /// The revision is not a single path component
     #[error("invalid revision `{0}`: expected a single directory name")]
     InvalidRevision(String),
+
+    /// The cancel token was set before a download
+    #[error("model download was cancelled")]
+    Cancelled,
 }
 
 impl ModelPrepareError {
@@ -527,22 +532,38 @@ fn remove_refs_to(refs_dir: &Path, revision: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+// a download renames its finished blob into place just before linking it from its
+// snapshot, so a blob this new may belong to a download still in progress
+const BLOB_GRACE_PERIOD: Duration = Duration::from_secs(10 * 60);
+
 /// Snapshots link into `blobs/`, so a blob no remaining snapshot links to is garbage
 fn remove_unreferenced_blobs(repo_dir: &Path) -> std::io::Result<()> {
     let mut referenced = HashSet::new();
+    // any read error aborts, since a partial scan would make kept blobs look unused
     collect_link_targets(&repo_dir.join("snapshots"), &mut referenced)?;
 
-    let Ok(blobs) = std::fs::read_dir(repo_dir.join("blobs")) else {
-        return Ok(());
+    let blobs = match std::fs::read_dir(repo_dir.join("blobs")) {
+        Ok(blobs) => blobs,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
     };
 
+    let now = SystemTime::now();
     for blob in blobs {
         let blob = blob?;
         let name = blob.file_name();
         // a download in progress writes `<blob>.part` next to `<blob>.lock`, and
         // finished blobs are bare hashes, so anything with an extension is left alone
         let in_progress = name.to_string_lossy().contains('.');
-        if !in_progress && !referenced.contains(&name) {
+        if in_progress || referenced.contains(&name) {
+            continue;
+        }
+
+        let modified = blob.metadata()?.modified()?;
+        let recent = now
+            .duration_since(modified)
+            .is_ok_and(|age| age < BLOB_GRACE_PERIOD);
+        if !recent {
             std::fs::remove_file(blob.path())?;
         }
     }
@@ -554,8 +575,10 @@ fn collect_link_targets(
     dir: &Path,
     targets: &mut HashSet<std::ffi::OsString>,
 ) -> std::io::Result<()> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Ok(());
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
     };
 
     for entry in entries {
@@ -644,6 +667,14 @@ mod tests {
         write_file(&repo.join("blobs/shared"), b"shared");
         write_file(&repo.join("blobs/old-only"), b"old");
         write_file(&repo.join("blobs/downloading.part"), b"partial");
+        write_file(&repo.join("blobs/just-published"), b"new");
+        // the unreferenced blob must predate the grace period to be collected
+        std::fs::File::options()
+            .write(true)
+            .open(repo.join("blobs/old-only"))
+            .unwrap()
+            .set_modified(SystemTime::now() - 2 * BLOB_GRACE_PERIOD)
+            .unwrap();
         write_file(&repo.join("refs/main"), b"old-rev");
         write_file(&repo.join("refs/pr/1"), b"old-rev\n");
         write_file(&repo.join("refs/other"), b"new-rev");
@@ -675,6 +706,7 @@ mod tests {
         assert!(repo.join("blobs/shared").exists());
         assert!(!repo.join("blobs/old-only").exists());
         assert!(repo.join("blobs/downloading.part").exists());
+        assert!(repo.join("blobs/just-published").exists());
         assert!(!repo.join("refs/main").exists());
         assert!(!repo.join("refs/pr/1").exists());
         assert!(repo.join("refs/other").exists());
