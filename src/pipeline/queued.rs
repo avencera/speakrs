@@ -3,8 +3,9 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
-use crossbeam_channel::{Receiver, Sender, TrySendError};
+use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, TrySendError};
 
 use super::{
     BatchInput, DiarizationResult, OwnedDiarizationPipeline, PipelineConfig, PipelineError,
@@ -291,6 +292,26 @@ impl QueueReceiver {
             Ok(result) => Ok(Some(result)),
             Err(crossbeam_channel::TryRecvError::Empty) => Ok(None),
             Err(crossbeam_channel::TryRecvError::Disconnected) => Err(self.join_terminal_worker()),
+        }
+    }
+
+    /// Wait up to `timeout` for the next result, returning `None` if none arrived
+    ///
+    /// Lets a caller that must stay responsive, such as a language binding watching
+    /// for interrupts, wait in bounded slices. Returns [`QueueError::Closed`] after the
+    /// worker has finished and all queued results have been drained
+    pub fn recv_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<QueuedDiarizationResult>, QueueError> {
+        if !matches!(self.state, QueueReceiverState::Running) {
+            return Err(self.terminal_error());
+        }
+
+        match self.result_rx.recv_timeout(timeout) {
+            Ok(result) => Ok(Some(result)),
+            Err(RecvTimeoutError::Timeout) => Ok(None),
+            Err(RecvTimeoutError::Disconnected) => Err(self.join_terminal_worker()),
         }
     }
 
