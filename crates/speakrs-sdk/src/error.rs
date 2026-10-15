@@ -101,6 +101,17 @@ impl SdkError {
         Self::new(category, error.to_string())
     }
 
+    /// Map an error from building a pipeline, where any failure other than an
+    /// unsupported mode means the models could not be loaded, including PLDA files
+    pub(crate) fn from_load_error(error: speakrs::pipeline::PipelineError) -> Self {
+        match error {
+            speakrs::pipeline::PipelineError::UnsupportedExecutionMode(_) => {
+                Self::from_pipeline_error(error)
+            }
+            other => Self::new(SdkErrorCategory::ModelLoad, other.to_string()),
+        }
+    }
+
     pub(crate) fn from_audio_error(error: crate::audio::AudioDecodeError) -> Self {
         let category = match &error {
             crate::audio::AudioDecodeError::Resample(_) => SdkErrorCategory::AudioResample,

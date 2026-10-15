@@ -121,7 +121,7 @@ impl SdkPipeline {
         runtime_config: Option<RuntimeConfig>,
     ) -> Result<Self, SdkError> {
         let mut builder = PipelineBuilder::from_dir(&prepared.model_dir, mode)
-            .map_err(SdkError::from_pipeline_error)?;
+            .map_err(SdkError::from_load_error)?;
         if let Some(config) = pipeline_config {
             builder = builder.pipeline(config);
         }
@@ -130,7 +130,7 @@ impl SdkPipeline {
         }
 
         Ok(Self {
-            pipeline: builder.build().map_err(SdkError::from_pipeline_error)?,
+            pipeline: builder.build().map_err(SdkError::from_load_error)?,
             mode,
             model_revision: prepared.revision.clone(),
         })
