@@ -125,6 +125,8 @@ def test_misuse_fails_fast_and_keeps_the_pipeline_usable(cpu_models):
     with pytest.raises(speakrs.SpeakrsError, match="progress callback") as reentrant:
         pipeline.diarize_file(SHORT_WAV, progress=lambda _: pipeline.pipeline_config)
     assert reentrant.value.category == "configuration"
+    with pytest.raises(speakrs.SpeakrsError, match="progress callback"):
+        pipeline.diarize_file(SHORT_WAV, progress=lambda _: pipeline.into_queue())
 
     events = []
 

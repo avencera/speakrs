@@ -123,16 +123,16 @@ impl Samples {
 
 /// Collects the first exception a Python progress callback raises
 ///
-/// With a cancel token, that exception or a Ctrl+C also cancels the run at the
+/// That exception, or a Ctrl+C seen at an event, also cancels the run at the
 /// next stage or file boundary
 pub(crate) struct ProgressSink {
     callback: Option<Py<PyAny>>,
-    cancel: Option<CancelToken>,
+    cancel: CancelToken,
     error: Mutex<Option<PyErr>>,
 }
 
 impl ProgressSink {
-    pub(crate) fn new(callback: Option<Py<PyAny>>, cancel: Option<CancelToken>) -> Self {
+    pub(crate) fn new(callback: Option<Py<PyAny>>, cancel: CancelToken) -> Self {
         Self {
             callback,
             cancel,
@@ -140,16 +140,10 @@ impl ProgressSink {
         }
     }
 
-    pub(crate) fn is_active(&self) -> bool {
-        self.callback.is_some() || self.cancel.is_some()
-    }
-
     pub(crate) fn send(&self, event: ProgressEvent) {
         Python::attach(|py| {
             // Ctrl+C sets a flag that only Python code observes, so it is polled here
-            if self.cancel.is_some()
-                && let Err(error) = py.check_signals()
-            {
+            if let Err(error) = py.check_signals() {
                 self.record(error);
             }
 
@@ -165,9 +159,7 @@ impl ProgressSink {
     }
 
     fn record(&self, error: PyErr) {
-        if let Some(token) = &self.cancel {
-            token.cancel();
-        }
+        self.cancel.cancel();
         lock(&self.error).get_or_insert(error);
     }
 
@@ -202,12 +194,7 @@ impl PyPipeline {
         py: Python<'_>,
         f: impl FnOnce(&mut SdkPipeline) -> Result<T, SdkError> + Send,
     ) -> Result<T, SdkError> {
-        if IN_PROGRESS_CALLBACK.get() {
-            return Err(SdkError::configuration(
-                "a progress callback cannot call a pipeline; the running call holds it",
-            ));
-        }
-
+        reject_reentry()?;
         py.detach(|| {
             let mut inner = lock(&self.inner);
             let pipeline = inner.as_mut().ok_or_else(|| {
@@ -317,6 +304,7 @@ impl PyPipeline {
         pipeline_config: Option<PyPipelineConfig>,
         capacity: Option<usize>,
     ) -> PyResult<PyQueue> {
+        reject_reentry().map_err(sdk_err)?;
         // validate before taking the pipeline, so a bad capacity leaves it usable
         let queue_config = match capacity {
             Some(capacity) => QueueConfig::new(capacity).map_err(config_err)?,
@@ -379,6 +367,18 @@ impl PyQueue {
     }
 }
 
+/// Fail instead of waiting forever when a progress callback calls back into a
+/// pipeline whose lock its caller holds
+fn reject_reentry() -> Result<(), SdkError> {
+    if IN_PROGRESS_CALLBACK.get() {
+        return Err(SdkError::configuration(
+            "a progress callback cannot call a pipeline; the running call holds it",
+        ));
+    }
+
+    Ok(())
+}
+
 /// The caller's cancel token, or a private one, wired to a progress sink
 ///
 /// Every call gets a token so Ctrl+C and a raising callback stop the run early
@@ -387,7 +387,7 @@ fn cancellable(
     progress: Option<Py<PyAny>>,
 ) -> (CancelToken, ProgressSink) {
     let token = cancel_token.map_or_else(CancelToken::new, |token| token.0);
-    let sink = ProgressSink::new(progress, Some(token.clone()));
+    let sink = ProgressSink::new(progress, token.clone());
     (token, sink)
 }
 

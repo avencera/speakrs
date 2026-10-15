@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ctypes
 import sys
+import threading
 from pathlib import Path
 
 _CUDA_MODES = {"cuda", "cudafast"}
@@ -32,16 +33,23 @@ _LIBRARIES = (
     ),
 )
 _prepared = False
+# a second thread must wait for the first to finish loading, not skip ahead
+_lock = threading.Lock()
 
 
 def prepare_libraries(mode: str) -> None:
     """Load the pip CUDA libraries once, before the first CUDA pipeline."""
     global _prepared
     normalized = mode.lower().replace("-", "").replace("_", "")
-    if _prepared or normalized not in _CUDA_MODES or not sys.platform.startswith("linux"):
+    if normalized not in _CUDA_MODES or not sys.platform.startswith("linux"):
         return
-    _prepared = True
+    with _lock:
+        if not _prepared:
+            _load()
+            _prepared = True
 
+
+def _load() -> None:
     try:
         import nvidia  # namespace package shared by the nvidia-* wheels
     except ImportError:

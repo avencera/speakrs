@@ -4,9 +4,9 @@ use std::path::PathBuf;
 
 use pyo3::prelude::*;
 use speakrs_sdk::{
-    CacheEntry, ModelManifest, ModelManifestEntry, ModelManifestError, ModelPrepareError,
-    ModelStore, PrepareModelsOptions, PreparedModels, ProgressEvent, SdkError, SdkErrorCategory,
-    mode_name,
+    CacheEntry, CancelToken, ModelManifest, ModelManifestEntry, ModelManifestError,
+    ModelPrepareError, ModelStore, PrepareModelsOptions, PreparedModels, ProgressEvent, SdkError,
+    SdkErrorCategory, mode_name,
 };
 
 use crate::pipeline::ProgressSink;
@@ -17,6 +17,7 @@ fn prepare_sdk_err(error: ModelPrepareError) -> SdkError {
         ModelPrepareError::Manifest(error) => {
             SdkError::new(SdkErrorCategory::ModelManifest, error.to_string())
         }
+        ModelPrepareError::Cancelled => SdkError::cancelled(),
         other => SdkError::new(SdkErrorCategory::ModelPrepare, other.to_string()),
     }
 }
@@ -207,13 +208,13 @@ pub(crate) fn _prepare(
     options.model_dir = model_dir;
     options.manifest = manifest.map(|manifest| manifest.0);
     let store = cache_dir.map_or_else(ModelStore::default, ModelStore::new);
-    let sink = ProgressSink::new(progress, None);
+    // a raising callback or Ctrl+C cancels before the next file downloads
+    let token = CancelToken::new();
+    options.cancel_token = Some(token.clone());
+    let sink = ProgressSink::new(progress, token);
     let result = py.detach(|| {
-        let on_download = |file: &str| {
-            if sink.is_active() {
-                sink.send(ProgressEvent::DownloadingModel { file: file.into() });
-            }
-        };
+        let on_download =
+            |file: &str| sink.send(ProgressEvent::DownloadingModel { file: file.into() });
         store
             .prepare(options, &on_download)
             .map_err(prepare_sdk_err)

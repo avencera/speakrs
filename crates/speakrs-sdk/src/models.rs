@@ -8,6 +8,8 @@ use sha2::{Digest, Sha256};
 use speakrs::ExecutionMode;
 use thiserror::Error;
 
+use crate::cancel::CancelToken;
+
 pub use speakrs::models::{
     MODEL_REPOSITORY as DEFAULT_MODEL_REPOSITORY, MODEL_REVISION as DEFAULT_MODEL_REVISION,
     required_model_files,
@@ -17,7 +19,7 @@ pub use speakrs::models::{
 pub const CACHE_DIR_ENV: &str = "SPEAKRS_CACHE_DIR";
 
 /// Where to find or download the models for one execution mode
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct PrepareModelsOptions {
     /// Mode whose files must be present
     pub mode: ExecutionMode,
@@ -25,6 +27,8 @@ pub struct PrepareModelsOptions {
     pub model_dir: Option<PathBuf>,
     /// Verify every listed file's size and SHA-256 before returning
     pub manifest: Option<ModelManifest>,
+    /// Checked before each download, so cancelling stops before the next file
+    pub cancel_token: Option<CancelToken>,
 }
 
 impl PrepareModelsOptions {
@@ -34,6 +38,7 @@ impl PrepareModelsOptions {
             mode,
             model_dir: None,
             manifest: None,
+            cancel_token: None,
         }
     }
 }
@@ -130,7 +135,7 @@ impl ModelStore {
                 (model_dir, revision)
             }
             None => (
-                self.ensure_snapshot(mode, on_download)?,
+                self.ensure_snapshot(mode, options.cancel_token.as_ref(), on_download)?,
                 Some(DEFAULT_MODEL_REVISION.to_string()),
             ),
         };
@@ -223,6 +228,7 @@ impl ModelStore {
     fn ensure_snapshot(
         &self,
         mode: ExecutionMode,
+        cancel_token: Option<&CancelToken>,
         on_download: &dyn Fn(&str),
     ) -> Result<PathBuf, ModelPrepareError> {
         use hf_hub::api::sync::ApiBuilder;
@@ -245,6 +251,9 @@ impl ModelStore {
         for file in required_model_files(mode) {
             if cached.get(&file).is_none() {
                 on_download(&file);
+                if cancel_token.is_some_and(CancelToken::is_cancelled) {
+                    return Err(ModelPrepareError::Cancelled);
+                }
             }
             remote.get(&file).map_err(ModelPrepareError::download)?;
         }
@@ -257,6 +266,7 @@ impl ModelStore {
     fn ensure_snapshot(
         &self,
         _mode: ExecutionMode,
+        _cancel_token: Option<&CancelToken>,
         _on_download: &dyn Fn(&str),
     ) -> Result<PathBuf, ModelPrepareError> {
         let model_dir = self.snapshot_dir();
