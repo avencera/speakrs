@@ -54,7 +54,8 @@ python-lint:
 lint: clippy python-lint
 
 test *args:
-    cargo test --workspace {{args}}
+    # speakrs-python enables its platform backend and is tested with pytest
+    cargo test --workspace --exclude speakrs-python {{args}}
     cargo test -p speakrs --features "cpu load-dynamic" {{args}}
     cargo test -p speakrs --no-default-features --features "online cuda" {{args}}
     cargo test -p speakrs --no-default-features --features "online cuda-rtx50" {{args}}

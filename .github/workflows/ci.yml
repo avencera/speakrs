@@ -331,8 +331,10 @@ jobs:
             test -s "fixtures/models/${file}"
           done
 
+      # the Python crate turns on its platform's GPU backend, and pytest covers it in
+      # the package workflow, so leave it out of the CPU fixture test run
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude speakrs-python
 
       # hashes and PTX entry points only; the PTX itself is generated on a GPU box
       - name: Check committed CUDA PTX against the kernel sources
