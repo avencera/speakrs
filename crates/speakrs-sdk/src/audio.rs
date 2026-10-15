@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use rubato::audioadapter_buffers::owned::InterleavedOwned;
-use rubato::{Async, FixedAsync, PolynomialDegree, Resampler};
+use rubato::{Fft, FixedSync, Resampler};
 use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::FormatOptions;
@@ -140,14 +140,14 @@ pub fn resample_mono_to_16khz(
     let input_len = samples.len();
     let input = InterleavedOwned::new_from(samples, 1, input_len)
         .map_err(|err| AudioDecodeError::Resample(err.to_string()))?;
-    let ratio = f64::from(SDK_SAMPLE_RATE_HZ) / f64::from(sample_rate_hz);
-    let mut resampler = Async::<f32>::new_poly(
-        ratio,
-        1.1,
-        PolynomialDegree::Septic,
+    // the FFT resampler low-passes before decimating, so content above 8 kHz
+    // cannot fold back into the band the models hear
+    let mut resampler = Fft::<f32>::new(
+        sample_rate_hz as usize,
+        SDK_SAMPLE_RATE_HZ as usize,
         1024,
         1,
-        FixedAsync::Input,
+        FixedSync::Input,
     )
     .map_err(|err| AudioDecodeError::Resample(err.to_string()))?;
     let output_capacity = resampler.process_all_needed_output_len(input_len);
@@ -282,11 +282,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resamples_mono_audio_to_sdk_rate() {
-        let input: Vec<f32> = (0..4_800).map(|idx| (idx as f32 / 25.0).sin()).collect();
-        let output = resample_mono_to_16khz(input, 48_000).unwrap();
+    fn resamples_mono_audio_to_sdk_rate_without_aliasing() {
+        let tone = |rate: u32, hz: f32, len: usize| -> Vec<f32> {
+            (0..len)
+                .map(|idx| (std::f32::consts::TAU * hz * idx as f32 / rate as f32).sin())
+                .collect()
+        };
+        // skip the filter's edges, where a tone has not fully ramped in or out
+        let rms = |samples: &[f32]| {
+            let middle = &samples[samples.len() / 4..samples.len() * 3 / 4];
+            (middle.iter().map(|value| value * value).sum::<f32>() / middle.len() as f32).sqrt()
+        };
 
-        assert_eq!(output.len(), 1_600);
+        let kept = resample_mono_to_16khz(tone(48_000, 1_000.0, 48_000), 48_000).unwrap();
+        assert_eq!(kept.len(), 16_000);
+        assert!((rms(&kept) - std::f32::consts::FRAC_1_SQRT_2).abs() < 0.02);
+
+        // 12 kHz is above the 8 kHz output Nyquist and would alias to 4 kHz unfiltered
+        let removed = resample_mono_to_16khz(tone(48_000, 12_000.0, 48_000), 48_000).unwrap();
+        assert!(rms(&removed) < 0.01, "aliased energy {}", rms(&removed));
+
+        let from_cd = resample_mono_to_16khz(tone(44_100, 1_000.0, 44_100), 44_100).unwrap();
+        assert_eq!(from_cd.len(), 16_000);
     }
 
     #[test]
