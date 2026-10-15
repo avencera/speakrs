@@ -1,0 +1,42 @@
+[package]
+name = "speakrs-sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Binding-friendly facade over speakrs: audio decoding, model preparation, and plain result types"
+publish = false
+
+[features]
+default = ["online", "cpu"]
+# download models from Hugging Face over rustls, so wheels never link OpenSSL
+online = ["dep:hf-hub"]
+cpu = ["speakrs/cpu"]
+coreml = ["speakrs/coreml"]
+# every GPU tier plus the cuDNN/cuBLAS fallback, loaded at run time
+cuda = ["speakrs/cuda"]
+
+[dependencies]
+crossbeam-channel = "0.5"
+hf-hub = { version = "0.5", optional = true, default-features = false, features = ["ureq"] }
+rubato = "5.0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+speakrs = { path = "../..", default-features = false }
+symphonia = { version = "0.6.1", default-features = false, features = [
+    "aac",
+    "flac",
+    "isomp4",
+    "mp3",
+    "ogg",
+    "pcm",
+    "vorbis",
+    "wav",
+] }
+thiserror = "2.0.18"
+
+[dev-dependencies]
+hound = "3.5.1"

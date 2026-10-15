@@ -1,5 +1,11 @@
 [workspace]
-members = ["xtask", "crates/speakrs-ptx-sm75", "crates/speakrs-ptx-sm80", "crates/speakrs-ptx-sm120"]
+members = [
+    "xtask",
+    "crates/speakrs-ptx-sm75",
+    "crates/speakrs-ptx-sm80",
+    "crates/speakrs-ptx-sm120",
+    "crates/speakrs-sdk",
+]
 exclude = ["scripts/", "crates/speakrs-cuda-kernels"]
 
 # shared by the kernel artifact crates, which release in lockstep with speakrs
