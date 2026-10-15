@@ -2,11 +2,15 @@
 
 from os import PathLike
 from pathlib import Path
-from typing import Callable, Sequence, final
+from typing import Any, Callable, Protocol, Sequence, final
 
 from typing_extensions import Buffer
 
-_Samples = Buffer | Sequence[float]
+class _ArrayInterface(Protocol):
+    @property
+    def __array_interface__(self) -> dict[str, Any]: ...
+
+_Samples = Buffer | _ArrayInterface | Sequence[float]
 _Progress = Callable[[ProgressEvent], object] | None
 _StrPath = str | PathLike[str]
 

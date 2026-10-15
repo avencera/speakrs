@@ -52,9 +52,17 @@ from ._native import (
 )
 
 if TYPE_CHECKING:
+    from typing import Any, Protocol
+
     from typing_extensions import Buffer
 
-    Samples = Union[Buffer, Sequence[float]]
+    class _ArrayInterface(Protocol):
+        # NumPy only declares __buffer__ for Python 3.12+, so match its array
+        # interface too
+        @property
+        def __array_interface__(self) -> dict[str, Any]: ...
+
+    Samples = Union[Buffer, _ArrayInterface, Sequence[float]]
 
 try:
     __version__ = metadata.version("speakrs")
