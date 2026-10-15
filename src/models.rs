@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-#[cfg(feature = "online")]
 use crate::inference::ExecutionMode;
 #[cfg(feature = "online")]
 use hf_hub::api::sync::{Api, ApiBuilder, ApiRepo};
@@ -85,11 +84,11 @@ fn download_error(
     source.into()
 }
 
-#[cfg(feature = "online")]
-const HF_REPO: &str = "avencera/speakrs-models";
-#[cfg(feature = "online")]
+/// Hugging Face repository that hosts the speakrs models
+pub const MODEL_REPOSITORY: &str = "avencera/speakrs-models";
+/// Revision of [`MODEL_REPOSITORY`] that this release loads
 // CI downloads fixtures from this same revision via SPEAKRS_MODEL_FIXTURE_REV
-const HF_REVISION: &str = "67f963b6a1d94fcd4678948237b3cc8bd69bf1d8";
+pub const MODEL_REVISION: &str = "67f963b6a1d94fcd4678948237b3cc8bd69bf1d8";
 
 #[cfg(feature = "online")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -110,8 +109,8 @@ struct PinnedModelRepository {
 impl PinnedModelRepository {
     const fn speakrs_models() -> Self {
         Self {
-            id: ModelRepositoryId(HF_REPO),
-            revision: ModelRevision(HF_REVISION),
+            id: ModelRepositoryId(MODEL_REPOSITORY),
+            revision: ModelRevision(MODEL_REVISION),
         }
     }
 
@@ -164,7 +163,7 @@ impl ModelManager {
 
     /// Ensure all files for a mode are downloaded, return base models dir
     pub fn ensure(&self, mode: ExecutionMode) -> Result<PathBuf, hf_hub::api::sync::ApiError> {
-        let files = required_files(mode);
+        let files = required_model_files(mode);
         for file in &files {
             self.repo.get(file)?;
         }
@@ -177,7 +176,6 @@ impl ModelManager {
     }
 }
 
-#[cfg(feature = "online")]
 const PLDA_FILES: &[&str] = &[
     "plda_lda.npy",
     "plda_tr.npy",
@@ -190,7 +188,6 @@ const PLDA_FILES: &[&str] = &[
 
 /// The safetensors weights the native CPU and CUDA modes load, exported by
 /// `scripts/cuda/export_weights.py --runtime-assets`
-#[cfg(feature = "online")]
 const NATIVE_WEIGHT_FILES: &[(&str, ModelFamily)] = &[
     ("segmentation-3.0.safetensors", ModelFamily::Segmentation),
     (
@@ -199,7 +196,6 @@ const NATIVE_WEIGHT_FILES: &[(&str, ModelFamily)] = &[
     ),
 ];
 
-#[cfg(feature = "online")]
 fn mlmodelc_files(name: &str) -> Vec<String> {
     vec![
         format!("{name}/model.mil"),
@@ -209,7 +205,6 @@ fn mlmodelc_files(name: &str) -> Vec<String> {
     ]
 }
 
-#[cfg(feature = "online")]
 const COREML_COMMON_MODEL_STEMS: &[&str] = &[
     "segmentation-3.0.mlmodelc",
     "segmentation-3.0-b32.mlmodelc",
@@ -223,7 +218,6 @@ const COREML_COMMON_MODEL_STEMS: &[&str] = &[
     "wespeaker-voxceleb-resnet34-tail-b32.mlmodelc",
 ];
 
-#[cfg(feature = "online")]
 const COREML_CHUNK_MODEL_STEMS: &[&str] = &[
     "wespeaker-chunk-emb-p1s-w21.mlmodelc",
     "wespeaker-chunk-emb-p1s-w36.mlmodelc",
@@ -232,14 +226,12 @@ const COREML_CHUNK_MODEL_STEMS: &[&str] = &[
     "wespeaker-chunk-emb-p1s-w111.mlmodelc",
 ];
 
-#[cfg(feature = "online")]
 const COREML_FAST_SEGMENTATION_MODEL_STEMS: &[&str] = &[
     "segmentation-3.0-w8a16.mlmodelc",
     "segmentation-3.0-b32-w8a16.mlmodelc",
     "segmentation-3.0-b64-w8a16.mlmodelc",
 ];
 
-#[cfg(feature = "online")]
 const COREML_FAST_CHUNK_MODEL_STEMS: &[&str] = &[
     "wespeaker-chunk-emb-s25-w11.mlmodelc",
     "wespeaker-chunk-emb-s25-w16.mlmodelc",
@@ -251,7 +243,6 @@ const COREML_FAST_CHUNK_MODEL_STEMS: &[&str] = &[
 ];
 
 /// Model family owned by the asset catalog
-#[cfg(feature = "online")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ModelFamily {
     Segmentation,
@@ -265,7 +256,6 @@ pub(crate) enum ModelFamily {
 }
 
 /// Backend that consumes a catalog asset
-#[cfg(feature = "online")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ModelBackend {
     SharedData,
@@ -276,7 +266,6 @@ pub(crate) enum ModelBackend {
 }
 
 /// Weight precision recorded for a catalog asset
-#[cfg(feature = "online")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ModelPrecision {
     Fp32,
@@ -284,7 +273,6 @@ pub(crate) enum ModelPrecision {
 }
 
 /// Whether a catalog asset must be downloaded for a mode
-#[cfg(feature = "online")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AssetRequirement {
     Required,
@@ -292,7 +280,6 @@ pub(crate) enum AssetRequirement {
 }
 
 /// One remote model file or compiled CoreML bundle stem
-#[cfg(feature = "online")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ModelAsset {
     file_name: &'static str,
@@ -303,7 +290,6 @@ pub(crate) struct ModelAsset {
     requirement: AssetRequirement,
 }
 
-#[cfg(feature = "online")]
 impl ModelAsset {
     const fn new(
         file_name: &'static str,
@@ -367,7 +353,6 @@ impl ModelAsset {
     }
 }
 
-#[cfg(feature = "online")]
 fn family_for_stem(name: &str) -> ModelFamily {
     if name.starts_with("segmentation") {
         ModelFamily::Segmentation
@@ -384,7 +369,6 @@ fn family_for_stem(name: &str) -> ModelFamily {
     }
 }
 
-#[cfg(feature = "online")]
 fn batch_from_name(name: &str) -> Option<u32> {
     let stem = name
         .trim_end_matches(".mlmodelc")
@@ -394,7 +378,6 @@ fn batch_from_name(name: &str) -> Option<u32> {
         .and_then(|(_, batch)| batch.parse().ok())
 }
 
-#[cfg(feature = "online")]
 fn onnx_asset(name: &'static str, family: ModelFamily) -> ModelAsset {
     ModelAsset::new(
         name,
@@ -406,7 +389,6 @@ fn onnx_asset(name: &'static str, family: ModelFamily) -> ModelAsset {
     )
 }
 
-#[cfg(feature = "online")]
 fn catalog_assets(mode: ExecutionMode) -> Vec<ModelAsset> {
     let mut assets: Vec<ModelAsset> = PLDA_FILES
         .iter()
@@ -541,8 +523,11 @@ fn catalog_assets(mode: ExecutionMode) -> Vec<ModelAsset> {
     assets
 }
 
-#[cfg(feature = "online")]
-fn required_files(mode: ExecutionMode) -> Vec<String> {
+/// Files that `mode` loads, relative to the model directory
+///
+/// The model manager downloads exactly these files from [`MODEL_REPOSITORY`] at
+/// [`MODEL_REVISION`]. Compiled CoreML bundles are listed file by file
+pub fn required_model_files(mode: ExecutionMode) -> Vec<String> {
     catalog_assets(mode)
         .into_iter()
         .filter(|asset| asset.requirement() == AssetRequirement::Required)
@@ -603,7 +588,7 @@ mod tests {
     fn pinned_repository_selects_model_card_revision() {
         let repo = PINNED_MODEL_REPOSITORY.into_hf_repo();
         assert_eq!(repo.folder_name(), "models--avencera--speakrs-models");
-        assert_eq!(repo.revision(), HF_REVISION);
+        assert_eq!(repo.revision(), MODEL_REVISION);
 
         let api = ApiBuilder::new().with_progress(false).build().unwrap();
         let api_repo = api.repo(repo);
@@ -625,7 +610,7 @@ mod tests {
 
     #[test]
     fn coreml_required_files_include_chunk_fast_path_assets() {
-        let files = required_files(ExecutionMode::CoreMl);
+        let files = required_model_files(ExecutionMode::CoreMl);
         assert!(files.contains(&"segmentation-3.0-b64.mlmodelc/model.mil".to_string()));
         assert!(files.contains(&"wespeaker-fbank-30s.mlmodelc/model.mil".to_string()));
         assert!(files.contains(&"wespeaker-multimask-tail-b32.mlmodelc/model.mil".to_string()));
@@ -635,7 +620,7 @@ mod tests {
     #[test]
     fn coreml_modes_download_no_onnx_files() {
         for mode in [ExecutionMode::CoreMl, ExecutionMode::CoreMlFast] {
-            let files = required_files(mode);
+            let files = required_model_files(mode);
             assert!(
                 files.iter().all(|path| !path.contains(".onnx")),
                 "{mode} downloads ONNX files: {files:?}"
@@ -647,7 +632,7 @@ mod tests {
 
     #[test]
     fn coreml_fast_required_files_include_fast_assets() {
-        let files = required_files(ExecutionMode::CoreMlFast);
+        let files = required_model_files(ExecutionMode::CoreMlFast);
         assert!(files.contains(&"segmentation-3.0-w8a16.mlmodelc/model.mil".to_string()));
         assert!(files.contains(&"segmentation-3.0-b64-w8a16.mlmodelc/model.mil".to_string()));
         assert!(files.contains(&"wespeaker-chunk-emb-s25-w56.mlmodelc/model.mil".to_string()));
@@ -679,7 +664,7 @@ mod tests {
             .find(|asset| asset.batch() == Some(64) && asset.family() == ModelFamily::EmbeddingTail)
             .expect("optional batch-64 CoreML tail");
         assert_eq!(optional.requirement(), AssetRequirement::Optional);
-        let files = required_files(ExecutionMode::CoreMl);
+        let files = required_model_files(ExecutionMode::CoreMl);
         assert!(!files.iter().any(|path| path.contains("tail-b64")));
     }
 
@@ -700,7 +685,7 @@ mod tests {
             ExecutionMode::Cuda,
             ExecutionMode::CudaFast,
         ] {
-            let mut files = required_files(mode);
+            let mut files = required_model_files(mode);
             files.sort();
             assert_eq!(files, expected, "unexpected assets for {mode}");
 
@@ -721,7 +706,7 @@ mod tests {
 
     #[test]
     fn migraphx_required_files_include_accelerated_onnx_assets() {
-        let files = required_files(ExecutionMode::MiGraphX);
+        let files = required_model_files(ExecutionMode::MiGraphX);
         assert!(files.contains(&"segmentation-3.0-b32.onnx".to_string()));
         assert!(files.contains(&"wespeaker-fbank.onnx".to_string()));
         assert!(files.contains(&"wespeaker-fbank-b32.onnx".to_string()));
