@@ -181,3 +181,15 @@ def test_cuda_rttm_matches_rust_pipeline(mode, cpu_pipeline):
     assert batch[0].rttm() == expected
     # the GPU finds the same speakers as the CPU on this clean two-speaker file
     assert result.speakers == cpu_pipeline.diarize_file(TEST_WAV).speakers
+
+
+@pytest.mark.skipif("CUDA" not in speakrs.available_modes(), reason="build without CUDA")
+@pytest.mark.skipif(_has_nvidia_gpu(), reason="checks the behavior without a GPU")
+def test_cuda_build_without_gpu_runs_cpu_and_fails_cuda_cleanly(cpu_models, cpu_pipeline):
+    # the CPU and CUDA modes load the same files, so the fixtures serve both
+    assert speakrs.required_model_files("cuda") == speakrs.required_model_files("cpu")
+    assert len(cpu_pipeline.diarize_file(SHORT_WAV).segments) > 0
+
+    with pytest.raises(speakrs.SpeakrsError) as error:
+        speakrs.Pipeline.from_prepared(cpu_models, "cuda")
+    assert error.value.category == "model_load"
