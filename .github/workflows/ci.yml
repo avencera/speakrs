@@ -175,7 +175,7 @@ jobs:
 
       # the host-only PLDA tests read these
       - name: Cache PLDA fixtures
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: fixtures/models
           key: ${{ runner.os }}-speakrs-plda-fixtures-${{ env.SPEAKRS_MODEL_FIXTURE_REV }}
@@ -296,7 +296,7 @@ jobs:
           prefix-key: v1-rust
 
       - name: Cache model fixtures
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: fixtures/models
           key: ${{ runner.os }}-speakrs-model-fixtures-${{ env.SPEAKRS_MODEL_FIXTURE_REV }}
@@ -356,7 +356,7 @@ jobs:
           prefix-key: v1-rust-no-default
 
       - name: Cache model fixtures
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: fixtures/models
           key: ${{ runner.os }}-speakrs-model-fixtures-${{ env.SPEAKRS_MODEL_FIXTURE_REV }}
