@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+- Add Python bindings: `pip install speakrs` ships one abi3 wheel per platform, with CPU and CoreML on macOS arm64 and CPU and CUDA on Linux x86_64, plus a `speakrs diarize` command; see `crates/speakrs-python`
+- Add `speakrs::models::{MODEL_REPOSITORY, MODEL_REVISION, required_model_files}`, available without the `online` feature, so callers can download or verify the files a mode loads with their own HTTP client
+- Add `QueuedDiarizationJobId::as_u64`
+
 ## [0.6.0] - 2026-10-13
 
 - Make ONNX Runtime optional (breaking): no inference backend is enabled by default, so enable `coreml` (macOS), `cuda` (NVIDIA), `migraphx` (AMD), or the new `cpu` feature; a build without one fails with a compile error naming these choices, and a `coreml`-only build no longer compiles, links, or downloads ONNX Runtime

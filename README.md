@@ -119,6 +119,23 @@ let mut pipeline = OwnedDiarizationPipeline::from_dir(
 let result = pipeline.run(&audio)?;
 ```
 
+### Python
+
+```sh
+pip install speakrs
+```
+
+```python
+import speakrs
+
+pipeline = speakrs.Pipeline.from_pretrained("coreml")  # or "cpu", "cuda"
+print(pipeline.diarize_file("meeting.wav").rttm())
+```
+
+The macOS arm64 wheel includes CPU and CoreML, and the Linux x86_64 wheel
+includes CPU and CUDA. See [the Python package](crates/speakrs-python/README.md)
+and its [API reference](crates/speakrs-python/API.md).
+
 ## Choosing a mode
 
 | Mode | Backend | Step | Use it for |
