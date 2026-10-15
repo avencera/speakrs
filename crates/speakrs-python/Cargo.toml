@@ -1,0 +1,36 @@
+[package]
+name = "speakrs-python"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Python bindings for speakrs"
+publish = false
+
+[lib]
+name = "speakrs_native"
+crate-type = ["cdylib"]
+# the extension is tested through pytest; a Rust test harness would have to link libpython
+test = false
+doctest = false
+
+[features]
+default = ["online", "cpu"]
+online = ["speakrs-sdk/online"]
+cpu = ["speakrs-sdk/cpu"]
+coreml = ["speakrs-sdk/coreml"]
+cuda = ["speakrs-sdk/cuda"]
+
+[dependencies]
+pyo3 = { version = "0.30.1", features = ["abi3-py311"] }
+speakrs-sdk = { path = "../speakrs-sdk", default-features = false }
+
+# one wheel per platform carries every backend that platform can run, so a plain
+# `maturin build` produces the release wheel
+[target.'cfg(target_os = "macos")'.dependencies]
+speakrs-sdk = { path = "../speakrs-sdk", default-features = false, features = ["coreml"] }
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+speakrs-sdk = { path = "../speakrs-sdk", default-features = false, features = ["cuda"] }

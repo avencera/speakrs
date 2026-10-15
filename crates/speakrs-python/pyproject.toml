@@ -1,0 +1,63 @@
+[build-system]
+requires = ["maturin>=1.9,<2"]
+build-backend = "maturin"
+
+[project]
+name = "speakrs"
+dynamic = ["version"]
+description = "Fast speaker diarization with pyannote-level accuracy on CPU, CoreML, and CUDA"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Praveen Perera" }]
+keywords = ["speaker", "diarization", "audio", "pyannote", "rttm"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Rust",
+    "Topic :: Multimedia :: Sound/Audio :: Analysis",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+# cuDNN and cuBLAS for layers without a speakrs kernel; the driver alone runs the rest
+cuda = [
+    "nvidia-cublas-cu12>=12.4; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "nvidia-cudnn-cu12>=9,<10; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[project.scripts]
+speakrs = "speakrs.cli:main"
+
+[project.urls]
+Repository = "https://github.com/avencera/speakrs"
+Documentation = "https://github.com/avencera/speakrs/blob/master/crates/speakrs-python/API.md"
+Changelog = "https://github.com/avencera/speakrs/blob/master/CHANGELOG.md"
+
+[dependency-groups]
+test = ["pytest>=8", "numpy>=1.26"]
+
+[tool.maturin]
+module-name = "speakrs._native"
+python-source = "python"
+features = ["pyo3/extension-module"]
+
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "coreml: needs a macOS build with CoreML",
+    "cuda: needs a CUDA build and an NVIDIA GPU",
+]

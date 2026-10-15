@@ -5,6 +5,7 @@ members = [
     "crates/speakrs-ptx-sm80",
     "crates/speakrs-ptx-sm120",
     "crates/speakrs-sdk",
+    "crates/speakrs-python",
 ]
 exclude = ["scripts/", "crates/speakrs-cuda-kernels"]
 
