@@ -111,7 +111,11 @@ Mode = Union[ExecutionMode, str]
 """An :class:`ExecutionMode` or its name."""
 
 ProgressCallback = Callable[[ProgressEvent], object]
-"""Called on the thread running the operation, with the GIL held."""
+"""Called with the GIL held while the operation runs.
+
+It must not call a pipeline method. An exception it raises cancels the
+operation, which then re-raises it.
+"""
 
 StrPath = Union[str, "PathLike[str]"]
 
@@ -273,6 +277,9 @@ class Pipeline:
         order. The first failure raises and discards the batch. Cancellation and
         Ctrl+C take effect at the next file boundary. ``file_ids`` default to the
         file names without extensions.
+
+        On CoreML, every file is decoded before inference starts, so memory grows
+        with the whole batch.
         """
         paths = [Path(path) for path in paths]
         if file_ids is None:
@@ -350,7 +357,7 @@ class Queue:
         """Wait for the next finished job.
 
         Raises :class:`SpeakrsError` with code ``queue_closed`` once the queue is
-        closed and drained.
+        closed and drained. Ctrl+C interrupts the wait.
         """
         return self._native.recv()
 

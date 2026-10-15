@@ -4,8 +4,10 @@
 
 use std::cell::RefCell;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use speakrs_sdk::speakrs::ExecutionMode;
+use speakrs_sdk::speakrs::pipeline::QueueConfig;
 use speakrs_sdk::{
     CancelToken, ModelStore, PrepareModelsOptions, ProgressEvent, RunOptions, SdkErrorCategory,
     SdkPipeline,
@@ -122,7 +124,9 @@ fn queue_returns_every_job_with_its_duration_then_closes() {
     let reference = cpu_pipeline()
         .diarize_file(&fixture("test_short.wav"), "path", RunOptions::default())
         .unwrap();
-    let queue = cpu_pipeline().into_queue(None, Some(4)).unwrap();
+    let queue = cpu_pipeline()
+        .into_queue(None, QueueConfig::new(4).unwrap())
+        .unwrap();
 
     let path_job = queue
         .push_file("path".into(), &fixture("test_short.wav"))
@@ -132,7 +136,13 @@ fn queue_returns_every_job_with_its_duration_then_closes() {
         .unwrap();
     queue.close();
 
-    let mut items = [queue.recv().unwrap(), queue.recv().unwrap()];
+    let mut items = [
+        queue.recv().unwrap(),
+        queue
+            .recv_timeout(Duration::from_secs(600))
+            .unwrap()
+            .expect("the second job finishes"),
+    ];
     items.sort_by_key(|item| item.job_id);
     assert_eq!([items[0].job_id, items[1].job_id], [path_job, silence_job]);
 

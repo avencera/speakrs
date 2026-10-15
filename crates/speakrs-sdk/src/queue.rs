@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use speakrs::ExecutionMode;
 use speakrs::pipeline::{QueueError, QueueReceiver, QueueSender, QueuedDiarizationRequest};
@@ -89,6 +90,17 @@ impl SdkQueue {
     pub fn recv(&self) -> Result<QueueItem, SdkError> {
         let result = lock(&self.receiver).recv().map_err(Self::map_error)?;
         Ok(self.item(result))
+    }
+
+    /// Wait up to `timeout` for the next finished job
+    ///
+    /// Receives share one lock, so a short timeout also bounds how long a
+    /// concurrent [`Self::try_recv`] waits
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<Option<QueueItem>, SdkError> {
+        let result = lock(&self.receiver)
+            .recv_timeout(timeout)
+            .map_err(Self::map_error)?;
+        Ok(result.map(|result| self.item(result)))
     }
 
     /// Return a finished job if one is ready

@@ -1,12 +1,15 @@
 //! The pipeline and queue behind `speakrs.Pipeline` and `speakrs.Queue`
 
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
 
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use speakrs_sdk::speakrs::ExecutionMode;
+use speakrs_sdk::speakrs::pipeline::QueueConfig;
 use speakrs_sdk::{
     CancelToken, ProgressEvent, RunOptions, SdkError, SdkPipeline, SdkQueue, mode_name,
 };
@@ -14,7 +17,16 @@ use speakrs_sdk::{
 use crate::config::{PyPipelineConfig, PyRuntimeConfig};
 use crate::models::PyPreparedModels;
 use crate::results::{PyDiarizationResult, PyProgressEvent, PyQueueResult};
-use crate::{lock, mode_from, py_bool, sdk_err};
+use crate::{config_err, lock, mode_from, py_bool, sdk_err};
+
+// how long a blocking `recv` waits before checking for Ctrl+C
+const RECV_SIGNAL_POLL: Duration = Duration::from_millis(100);
+
+thread_local! {
+    // set while a progress callback runs, so a callback that calls back into a
+    // pipeline fails instead of waiting forever on the lock its caller holds
+    static IN_PROGRESS_CALLBACK: Cell<bool> = const { Cell::new(false) };
+}
 
 /// Cancels a running diarization from any thread
 ///
@@ -110,45 +122,52 @@ impl Samples {
 }
 
 /// Collects the first exception a Python progress callback raises
+///
+/// With a cancel token, that exception or a Ctrl+C also cancels the run at the
+/// next stage or file boundary
 pub(crate) struct ProgressSink {
     callback: Option<Py<PyAny>>,
-    cancel_on_signal: Option<CancelToken>,
+    cancel: Option<CancelToken>,
     error: Mutex<Option<PyErr>>,
 }
 
 impl ProgressSink {
-    pub(crate) fn new(callback: Option<Py<PyAny>>, cancel_on_signal: Option<CancelToken>) -> Self {
+    pub(crate) fn new(callback: Option<Py<PyAny>>, cancel: Option<CancelToken>) -> Self {
         Self {
             callback,
-            cancel_on_signal,
+            cancel,
             error: Mutex::new(None),
         }
     }
 
     pub(crate) fn is_active(&self) -> bool {
-        self.callback.is_some() || self.cancel_on_signal.is_some()
+        self.callback.is_some() || self.cancel.is_some()
     }
 
     pub(crate) fn send(&self, event: ProgressEvent) {
         Python::attach(|py| {
-            // Ctrl+C sets a flag that only Python code observes, so batch calls poll it
-            // here and cancel at the next file boundary
-            if let Some(token) = &self.cancel_on_signal
+            // Ctrl+C sets a flag that only Python code observes, so it is polled here
+            if self.cancel.is_some()
                 && let Err(error) = py.check_signals()
             {
-                token.cancel();
                 self.record(error);
             }
 
-            if let Some(callback) = &self.callback
-                && let Err(error) = callback.call1(py, (PyProgressEvent(event),))
-            {
-                self.record(error);
+            if let Some(callback) = &self.callback {
+                IN_PROGRESS_CALLBACK.set(true);
+                let called = callback.call1(py, (PyProgressEvent(event),));
+                IN_PROGRESS_CALLBACK.set(false);
+                if let Err(error) = called {
+                    self.record(error);
+                }
             }
         });
     }
 
     fn record(&self, error: PyErr) {
+        if let Some(token) = &self.cancel {
+            token.cancel();
+        }
         lock(&self.error).get_or_insert(error);
     }
 
@@ -183,6 +202,12 @@ impl PyPipeline {
         py: Python<'_>,
         f: impl FnOnce(&mut SdkPipeline) -> Result<T, SdkError> + Send,
     ) -> Result<T, SdkError> {
+        if IN_PROGRESS_CALLBACK.get() {
+            return Err(SdkError::configuration(
+                "a progress callback cannot call a pipeline; the running call holds it",
+            ));
+        }
+
         py.detach(|| {
             let mut inner = lock(&self.inner);
             let pipeline = inner.as_mut().ok_or_else(|| {
@@ -218,7 +243,7 @@ impl PyPipeline {
         progress: Option<Py<PyAny>>,
     ) -> PyResult<PyDiarizationResult> {
         let samples = Samples::extract(samples)?;
-        let sink = ProgressSink::new(progress, None);
+        let (token, sink) = cancellable(cancel_token, progress);
         let result = self.with_pipeline(py, |pipeline| {
             let callback = |event| sink.send(event);
             pipeline.diarize_samples(
@@ -226,8 +251,8 @@ impl PyPipeline {
                 &file_id,
                 RunOptions {
                     pipeline_config: pipeline_config.as_ref().map(|config| &config.0),
-                    cancel_token: cancel_token.as_ref().map(|token| &token.0),
-                    progress: sink.is_active().then_some(&callback),
+                    cancel_token: Some(&token),
+                    progress: Some(&callback),
                 },
             )
         });
@@ -244,7 +269,7 @@ impl PyPipeline {
         cancel_token: Option<PyCancelToken>,
         progress: Option<Py<PyAny>>,
     ) -> PyResult<PyDiarizationResult> {
-        let sink = ProgressSink::new(progress, None);
+        let (token, sink) = cancellable(cancel_token, progress);
         let result = self.with_pipeline(py, |pipeline| {
             let callback = |event| sink.send(event);
             pipeline.diarize_file(
@@ -252,8 +277,8 @@ impl PyPipeline {
                 &file_id,
                 RunOptions {
                     pipeline_config: pipeline_config.as_ref().map(|config| &config.0),
-                    cancel_token: cancel_token.as_ref().map(|token| &token.0),
-                    progress: sink.is_active().then_some(&callback),
+                    cancel_token: Some(&token),
+                    progress: Some(&callback),
                 },
             )
         });
@@ -269,8 +294,7 @@ impl PyPipeline {
         cancel_token: Option<PyCancelToken>,
         progress: Option<Py<PyAny>>,
     ) -> PyResult<Vec<PyDiarizationResult>> {
-        let token = cancel_token.map_or_else(CancelToken::new, |token| token.0);
-        let sink = ProgressSink::new(progress, Some(token.clone()));
+        let (token, sink) = cancellable(cancel_token, progress);
         let result = self.with_pipeline(py, |pipeline| {
             let callback = |event| sink.send(event);
             pipeline.diarize_files(
@@ -293,11 +317,16 @@ impl PyPipeline {
         pipeline_config: Option<PyPipelineConfig>,
         capacity: Option<usize>,
     ) -> PyResult<PyQueue> {
+        // validate before taking the pipeline, so a bad capacity leaves it usable
+        let queue_config = match capacity {
+            Some(capacity) => QueueConfig::new(capacity).map_err(config_err)?,
+            None => QueueConfig::default(),
+        };
         py.detach(|| {
             let pipeline = lock(&self.inner).take().ok_or_else(|| {
                 SdkError::configuration("the pipeline was already moved into a queue")
             })?;
-            pipeline.into_queue(pipeline_config.map(|config| config.0), capacity)
+            pipeline.into_queue(pipeline_config.map(|config| config.0), queue_config)
         })
         .map(PyQueue)
         .map_err(sdk_err)
@@ -331,9 +360,16 @@ impl PyQueue {
     }
 
     fn recv(&self, py: Python<'_>) -> PyResult<PyQueueResult> {
-        py.detach(|| self.0.recv())
-            .map(PyQueueResult)
-            .map_err(sdk_err)
+        // wait in slices so Ctrl+C can interrupt a wait on an open, idle queue
+        loop {
+            if let Some(item) = py
+                .detach(|| self.0.recv_timeout(RECV_SIGNAL_POLL))
+                .map_err(sdk_err)?
+            {
+                return Ok(PyQueueResult(item));
+            }
+            py.check_signals()?;
+        }
     }
 
     fn try_recv(&self, py: Python<'_>) -> PyResult<Option<PyQueueResult>> {
@@ -341,6 +377,18 @@ impl PyQueue {
             .map(|item| item.map(PyQueueResult))
             .map_err(sdk_err)
     }
+}
+
+/// The caller's cancel token, or a private one, wired to a progress sink
+///
+/// Every call gets a token so Ctrl+C and a raising callback stop the run early
+fn cancellable(
+    cancel_token: Option<PyCancelToken>,
+    progress: Option<Py<PyAny>>,
+) -> (CancelToken, ProgressSink) {
+    let token = cancel_token.map_or_else(CancelToken::new, |token| token.0);
+    let sink = ProgressSink::new(progress, Some(token.clone()));
+    (token, sink)
 }
 
 #[pyfunction]

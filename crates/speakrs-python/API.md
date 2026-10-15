@@ -68,6 +68,9 @@ time, so build a pipeline per thread to run several in parallel.
 ahead of inference, and one file's clustering runs during the next file's
 inference. Results keep input order. The first failure raises and discards the
 batch. A `CancelToken` or Ctrl+C stops the batch at the next file boundary.
+On CoreML, the batch decodes every file before inference starts, so memory
+grows with the whole batch (about 230 MB per hour of audio), and cancellation
+only applies while files are decoding.
 
 File decoding supports WAV, FLAC, MP3, Ogg Vorbis, and AAC in MP4/M4A. Each
 file is decoded into memory whole.
@@ -80,7 +83,8 @@ file is decoded into memory whole.
 
 Pushes never block. A full queue raises `SpeakrsError` with code `queue_full`.
 After `close()`, receiving drains the remaining results and then raises with
-code `queue_closed`, which also ends iteration.
+code `queue_closed`, which also ends iteration. Ctrl+C interrupts a waiting
+`recv()`.
 
 ## Results
 
@@ -123,11 +127,12 @@ A `progress` callback receives `ProgressEvent` objects with these fields:
 - `name`
 - `index`
 
-The callback runs on the calling thread with the GIL held. An exception it
-raises is re-raised when the call returns.
+The callback runs with the GIL held while the call holds its pipeline, so it
+must not call a pipeline method; doing so raises `SpeakrsError`. An exception
+the callback raises cancels the call, which then re-raises it.
 
-`CancelToken().cancel()` stops a call at the next stage or file boundary. A
-stage that has already started finishes first.
+`CancelToken().cancel()` or Ctrl+C stops a call at the next stage or file
+boundary. A stage that has already started finishes first.
 
 ## Errors
 

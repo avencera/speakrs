@@ -238,17 +238,15 @@ impl SdkPipeline {
     }
 
     /// Move the pipeline onto a background worker fed by a bounded queue
+    ///
+    /// Takes a validated [`QueueConfig`] so a bad capacity is rejected before the
+    /// pipeline is consumed; only a failure to start the worker thread loses it
     pub fn into_queue(
         self,
         pipeline_config: Option<PipelineConfig>,
-        capacity: Option<usize>,
+        queue_config: QueueConfig,
     ) -> Result<SdkQueue, SdkError> {
         let config = pipeline_config.unwrap_or_else(|| self.pipeline.pipeline_config());
-        let queue_config = match capacity {
-            Some(capacity) => QueueConfig::new(capacity)
-                .map_err(|error| SdkError::configuration(error.to_string()))?,
-            None => QueueConfig::default(),
-        };
         let (sender, receiver) = self
             .pipeline
             .into_queued_with_configs(config, queue_config)

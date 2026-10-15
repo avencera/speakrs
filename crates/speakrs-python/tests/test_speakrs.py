@@ -112,6 +112,34 @@ def test_errors_carry_stable_categories(cpu_models, cpu_pipeline, tmp_path):
     assert speakrs.prepare("cpu", model_dir=cpu_models.model_dir, manifest=restored).revision == manifest.revision
 
 
+def test_misuse_fails_fast_and_keeps_the_pipeline_usable(cpu_models):
+    pipeline = speakrs.Pipeline.from_prepared(cpu_models)
+    expected = pipeline.diarize_file(SHORT_WAV).rttm()
+    assert "SPEAKER" in expected
+
+    with pytest.raises(speakrs.SpeakrsError) as capacity:
+        pipeline.into_queue(capacity=0)
+    assert capacity.value.category == "configuration"
+
+    # a callback calling back into the pipeline would wait on the lock its caller holds
+    with pytest.raises(speakrs.SpeakrsError, match="progress callback") as reentrant:
+        pipeline.diarize_file(SHORT_WAV, progress=lambda _: pipeline.pipeline_config)
+    assert reentrant.value.category == "configuration"
+
+    events = []
+
+    def fail_on_first_file(event):
+        events.append(event.kind)
+        raise RuntimeError("stop")
+
+    with pytest.raises(RuntimeError, match="stop"):
+        pipeline.diarize_files([TEST_WAV, SHORT_WAV, TEST_WAV], progress=fail_on_first_file)
+    # the raise cancels the batch, so later files never start
+    assert events == ["batch_file"]
+
+    assert pipeline.diarize_file(SHORT_WAV).rttm() == expected
+
+
 def test_pipeline_config_changes_results(cpu_pipeline):
     default = cpu_pipeline.diarize_file(TEST_WAV)
     merged = cpu_pipeline.diarize_file(
