@@ -6,7 +6,7 @@
 use speakrs::ExecutionMode;
 use speakrs::pipeline::RuntimeConfig;
 
-use crate::error::{SdkError, SdkErrorCategory};
+use crate::error::SdkError;
 
 /// Stable display name of a mode, as bindings expose it
 pub fn mode_name(mode: ExecutionMode) -> &'static str {
@@ -159,7 +159,7 @@ impl RuntimeOptions {
 #[cfg(not(all(feature = "coreml", feature = "cuda")))]
 fn missing_backend(option: &str, backend: &str, value: &str) -> SdkError {
     SdkError::new(
-        SdkErrorCategory::UnsupportedRuntime,
+        crate::error::SdkErrorCategory::UnsupportedRuntime,
         format!("`{option}={value}` needs {backend} support, which this build does not include"),
     )
 }
@@ -219,6 +219,7 @@ fn cuda_math_name(math: speakrs::inference::CudaMath) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::SdkErrorCategory;
 
     #[test]
     fn mode_names_round_trip_and_accept_cli_spellings() {
