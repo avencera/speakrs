@@ -33,18 +33,10 @@ def test_cpu_rttm_matches_rust_pipeline(cpu_models, cpu_pipeline):
 
     samples = read_wav(TEST_WAV)
     assert cpu_pipeline.diarize_samples(samples, file_id="test").rttm() == expected
-    # a strided view takes the item-by-item copy
+    # a strided view cannot be borrowed in place and is copied instead
     doubled = np.repeat(samples, 2)[::2]
     assert cpu_pipeline.diarize_samples(doubled, file_id="test").rttm() == expected
     assert cpu_pipeline.diarize_samples(samples.tolist(), file_id="test").rttm() == expected
-
-    # the samples are copied before inference, so the caller's array can change mid-run
-    def silence_caller_array(_event):
-        samples[:] = 0.0
-
-    changed = cpu_pipeline.diarize_samples(samples, file_id="test", progress=silence_caller_array)
-    assert not samples.any()
-    assert changed.rttm() == expected
 
 
 def test_samples_input_validation(cpu_pipeline):

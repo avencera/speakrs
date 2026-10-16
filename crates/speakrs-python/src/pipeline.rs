@@ -59,17 +59,22 @@ impl PyCancelToken {
     }
 }
 
-/// 16 kHz mono samples copied out of a Python buffer or sequence
+/// 16 kHz mono samples, borrowed from a float32 buffer when possible
 ///
-/// The copy happens while the GIL is held. Borrowing the buffer across the
-/// GIL-free run would let another Python thread write memory Rust is reading,
-/// and the copy costs about 0.1% of a CUDA-fast run
-struct Samples(Vec<f32>);
+/// The borrow outlives the GIL, so the caller must not write the buffer during the
+/// call, which the Python docs state. Copying instead was measured at about 4 ms
+/// per 8.7 minutes of audio on a Linux server, 2-3% of a CUDA-fast run on an H100,
+/// and a multi-threaded copy was slower still
+enum Samples {
+    // checked at extraction: 1-D, native-endian float32, C-contiguous, aligned, non-empty
+    Borrowed(PyUntypedBuffer),
+    Owned(Vec<f32>),
+}
 
 impl Samples {
     fn extract(samples: &Bound<'_, PyAny>) -> PyResult<Self> {
         let Ok(buffer) = PyUntypedBuffer::get(samples) else {
-            return samples.extract::<Vec<f32>>().map(Self).map_err(|_| {
+            return samples.extract::<Vec<f32>>().map(Self::Owned).map_err(|_| {
                 PyTypeError::new_err("samples must be a float32 buffer or a sequence of floats")
             });
         };
@@ -97,16 +102,10 @@ impl Samples {
             && aligned
             && buffer.item_count() > 0
         {
-            // SAFETY: the checks above make this a valid `[f32]` view, the buffer
-            // export keeps the memory alive, and the held GIL keeps Python code from
-            // writing it until the copy ends
-            let view = unsafe {
-                std::slice::from_raw_parts(buffer.buf_ptr().cast::<f32>(), buffer.item_count())
-            };
-            return Ok(Self(view.to_vec()));
+            return Ok(Self::Borrowed(buffer));
         }
 
-        // strided, unaligned, or byte-swapped buffers are copied item by item
+        // strided, unaligned, or byte-swapped buffers cannot be borrowed as a slice
         let copied = (0..buffer.item_count())
             .map(|index| {
                 // SAFETY: `index` is within the 1-D shape and each item is 4 bytes
@@ -117,7 +116,26 @@ impl Samples {
                 }
             })
             .collect();
-        Ok(Self(copied))
+        Ok(Self::Owned(copied))
+    }
+
+    fn as_slice(&self) -> &[f32] {
+        match self {
+            // SAFETY: extraction checked the layout, and the buffer export keeps the
+            // memory alive until `self` drops; a caller that mutates the array during
+            // the call races with this read, as with any extension that releases the GIL
+            Self::Borrowed(buffer) => unsafe {
+                std::slice::from_raw_parts(buffer.buf_ptr().cast::<f32>(), buffer.item_count())
+            },
+            Self::Owned(samples) => samples,
+        }
+    }
+
+    fn into_vec(self) -> Vec<f32> {
+        match self {
+            Self::Owned(samples) => samples,
+            borrowed => borrowed.as_slice().to_vec(),
+        }
     }
 }
 
@@ -268,7 +286,7 @@ impl PyPipeline {
         let result = self.with_pipeline(py, |pipeline| {
             let callback = |event| sink.send(event);
             pipeline.diarize_samples(
-                &samples.0,
+                samples.as_slice(),
                 &file_id,
                 RunOptions {
                     pipeline_config: pipeline_config.as_ref().map(|config| &config.0),
@@ -368,7 +386,7 @@ impl PyQueue {
         samples: &Bound<'_, PyAny>,
     ) -> PyResult<u64> {
         let samples = Samples::extract(samples)?;
-        py.detach(|| self.0.push_samples(file_id, samples.0))
+        py.detach(|| self.0.push_samples(file_id, samples.into_vec()))
             .map_err(sdk_err)
     }
 

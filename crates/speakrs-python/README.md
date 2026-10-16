@@ -35,8 +35,8 @@ inference and overlaps clustering with the next file:
 results = pipeline.diarize_files(["a.wav", "b.flac", "c.mp3"])
 ```
 
-Audio that is already in memory has to be 16 kHz mono float32, such as a NumPy
-array:
+Audio that is already in memory has to be 16 kHz mono float32. A NumPy array is
+read in place, without a copy:
 
 ```python
 result = pipeline.diarize_samples(samples, file_id="call-42")

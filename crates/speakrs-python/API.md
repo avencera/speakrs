@@ -56,11 +56,16 @@ crate's `ModelManager`. `HF_ENDPOINT` selects a mirror.
 - `diarize_samples_async`, `diarize_file_async`, `diarize_files_async`
 - `into_queue(*, pipeline_config=None, capacity=None) -> Queue`
 
-`samples` is 16 kHz mono audio: a 1-D float32 buffer, such as a NumPy array,
-or a sequence of floats. Either is copied before the GIL is released, so the
-caller can change or reuse it while inference runs; the copy costs about 0.1%
-of a CUDA-fast run. Any other buffer dtype raises `TypeError`, and more than
-one dimension raises `ValueError`.
+`samples` is 16 kHz mono audio. A 1-D float32 buffer, such as a NumPy array,
+is read in place without a copy; a sequence of floats is copied. Any other
+buffer dtype raises `TypeError`, and more than one dimension raises
+`ValueError`.
+
+The buffer is read while the GIL is released, so it must not change until the
+call returns: writing it from another thread during the call is undefined
+behavior. Pass `samples.copy()` if another thread may write the array.
+Copying 8.7 minutes of audio costs about 4 ms on a Linux server, 2-3% of a
+CUDA-fast run on an H100, which is why the binding does not copy for you.
 
 Every call releases the GIL while it runs. Calls on one pipeline run one at a
 time, so build a pipeline per thread to run several in parallel.
