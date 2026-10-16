@@ -6,6 +6,7 @@
 - Add `speakrs::models::{MODEL_REPOSITORY, MODEL_REVISION, required_model_files}`, available without the `online` feature, so callers can download or verify the files a mode loads with their own HTTP client
 - Add `QueuedDiarizationJobId::as_u64`
 - Add `QueueReceiver::recv_timeout`, so a caller can wait for results in bounded slices and stay responsive to interrupts
+- Fix CUDA builds embedding every PTX and cubin file more than once, which roughly doubled the size of the linked binary
 
 ## [0.6.0] - 2026-10-13
 

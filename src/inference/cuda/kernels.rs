@@ -395,6 +395,9 @@ impl KernelModule {
     }
 
     /// The PTX variants embedded in this build
+    // without calls rustc treats this as inlinable and gives every calling codegen unit
+    // a local copy, each with its own copy of every embedded PTX and cubin
+    #[inline(never)]
     pub const fn variants(self) -> AreaPtx {
         match self {
             #[cfg(test)]
