@@ -24,16 +24,16 @@ No inference backend is enabled by default. Pick the one for your platform:
 
 ```toml
 # macOS (CoreML)
-speakrs = { version = "0.6", features = ["coreml"] }
+speakrs = { version = "0.7", features = ["coreml"] }
 
 # NVIDIA GPU
-speakrs = { version = "0.6", features = ["cuda"] }
+speakrs = { version = "0.7", features = ["cuda"] }
 
 # CPU
-speakrs = { version = "0.6", features = ["cpu"] }
+speakrs = { version = "0.7", features = ["cpu"] }
 
 # AMD GPU
-speakrs = { version = "0.6", features = ["migraphx"] }
+speakrs = { version = "0.7", features = ["migraphx"] }
 ```
 
 The `cpu`, `coreml` and `cuda` features run native backends, so a build with only those
@@ -318,7 +318,7 @@ layer without a speakrs kernel, and loads them only then. On the GPUs listed
 below every layer has a kernel, so the libraries aren't loaded.
 
 ```toml
-speakrs = { version = "0.6", features = ["cuda"] }
+speakrs = { version = "0.7", features = ["cuda"] }
 ```
 
 **Know your GPU? Use its feature for fewer dependencies and a smaller install.**
@@ -338,7 +338,7 @@ On the GPUs we tested, these builds run within about 1% of `cuda`.
 | RTX 50 series | `cuda-rtx50` |
 
 ```toml
-speakrs = { version = "0.6", features = ["cuda-rtx40"] }
+speakrs = { version = "0.7", features = ["cuda-rtx40"] }
 ```
 
 #### Tested NVIDIA GPUs

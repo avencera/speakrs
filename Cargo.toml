@@ -11,7 +11,7 @@ exclude = ["scripts/", "crates/speakrs-cuda-kernels"]
 
 # shared by the kernel artifact crates, which release in lockstep with speakrs
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.89"
 license = "Apache-2.0"
@@ -20,7 +20,7 @@ authors = ["Praveen Perera"]
 
 [package]
 name = "speakrs"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.89"
 description = "Fast Rust speaker diarization with pyannote-level accuracy and native CPU/CoreML/CUDA inference"
@@ -108,9 +108,9 @@ cudarc = { version = "0.19.10", optional = true, default-features = false, featu
 safetensors = { version = "0.8.0", optional = true, default-features = false, features = ["alloc"] }
 # prebuilt PTX and cubins, one crate per tier so each stays under the crates.io upload
 # limit; exact pins because the host code and the kernels change together
-speakrs-ptx-sm75 = { version = "=0.6.0", path = "crates/speakrs-ptx-sm75", optional = true }
-speakrs-ptx-sm80 = { version = "=0.6.0", path = "crates/speakrs-ptx-sm80", optional = true }
-speakrs-ptx-sm120 = { version = "=0.6.0", path = "crates/speakrs-ptx-sm120", optional = true }
+speakrs-ptx-sm75 = { version = "=0.7.0", path = "crates/speakrs-ptx-sm75", optional = true }
+speakrs-ptx-sm80 = { version = "=0.7.0", path = "crates/speakrs-ptx-sm80", optional = true }
+speakrs-ptx-sm120 = { version = "=0.7.0", path = "crates/speakrs-ptx-sm120", optional = true }
 libloading = { version = "0.9.0", optional = true }
 
 # logging

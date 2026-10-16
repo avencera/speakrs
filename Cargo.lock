@@ -2315,7 +2315,7 @@ dependencies = [
 
 [[package]]
 name = "speakrs"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "approx",
  "block2",
@@ -2348,19 +2348,19 @@ dependencies = [
 
 [[package]]
 name = "speakrs-ptx-sm120"
-version = "0.6.0"
+version = "0.7.0"
 
 [[package]]
 name = "speakrs-ptx-sm75"
-version = "0.6.0"
+version = "0.7.0"
 
 [[package]]
 name = "speakrs-ptx-sm80"
-version = "0.6.0"
+version = "0.7.0"
 
 [[package]]
 name = "speakrs-python"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "pyo3",
  "speakrs-sdk",
@@ -2368,7 +2368,7 @@ dependencies = [
 
 [[package]]
 name = "speakrs-sdk"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "crossbeam-channel",
  "hf-hub",
