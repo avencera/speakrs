@@ -163,7 +163,8 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
           args: --release --locked --out dist -m crates/speakrs-python/Cargo.toml
-          sccache: true
+          # tag builds are published, so they never reuse objects from the shared cache
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
       - name: Check wheel size
         shell: bash
