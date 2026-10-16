@@ -133,8 +133,8 @@ print(pipeline.diarize_file("meeting.wav").rttm())
 ```
 
 The macOS arm64 wheel includes CPU and CoreML, and the Linux x86_64 wheel
-includes CPU and CUDA. See [the Python package](crates/speakrs-python/README.md)
-and its [API reference](crates/speakrs-python/API.md).
+includes CPU and CUDA. See [the Python package](https://github.com/avencera/speakrs/blob/master/crates/speakrs-python/README.md)
+and its [API reference](https://github.com/avencera/speakrs/blob/master/crates/speakrs-python/API.md).
 
 ## Choosing a mode
 
