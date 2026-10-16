@@ -78,7 +78,7 @@ file is decoded into memory whole.
 ## Queue
 
 - `queue.push_samples(file_id, samples) -> int`, `queue.push_file(file_id, path) -> int`
-- `queue.recv()`, `queue.recv_async()`, `queue.try_recv()`
+- `queue.recv()`, `queue.recv_async()`, `queue.try_recv()`; cancelling a `recv_async()` wait never consumes a result
 - `queue.close()`, `for result in queue: ...`, `with pipeline.into_queue() as queue: ...`
 
 Pushes never block. A full queue raises `SpeakrsError` with code `queue_full`.

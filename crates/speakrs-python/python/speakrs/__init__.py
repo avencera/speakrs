@@ -69,6 +69,11 @@ try:
 except metadata.PackageNotFoundError:  # pragma: no cover - source checkout without install
     __version__ = "0.0.0"
 
+# Queue.recv_async backs off between these, in seconds; a job takes far longer
+# than the longest wait, so polling adds little latency
+_RECV_ASYNC_POLL_MIN = 0.001
+_RECV_ASYNC_POLL_MAX = 0.05
+
 
 class ExecutionMode(str, Enum):
     """Inference backend and precision.
@@ -362,8 +367,20 @@ class Queue:
         return self._native.recv()
 
     async def recv_async(self) -> QueueResult:
-        """:meth:`recv` on a worker thread."""
-        return await asyncio.to_thread(self.recv)
+        """Wait for the next finished job without blocking the event loop.
+
+        Cancelling the wait, for example with :func:`asyncio.wait_for`, never
+        consumes a result. Raises like :meth:`recv` once the queue is closed and
+        drained.
+        """
+        # poll on the event loop instead of awaiting a blocking recv on a worker
+        # thread: a cancelled await would leave that thread waiting, and it would
+        # take and drop the next result
+        delay = _RECV_ASYNC_POLL_MIN
+        while (result := self.try_recv()) is None:
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, _RECV_ASYNC_POLL_MAX)
+        return result
 
     def try_recv(self) -> QueueResult | None:
         """Return a finished job if one is ready, else ``None``."""

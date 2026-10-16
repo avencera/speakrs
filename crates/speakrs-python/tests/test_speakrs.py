@@ -88,6 +88,23 @@ def test_queue_returns_results_then_stops(cpu_models):
     assert closed.value.code == "queue_closed"
 
 
+def test_cancelled_recv_async_leaves_results_for_later_receivers(cpu_models):
+    async def scenario(queue):
+        # nothing is pushed yet, so this wait times out and is cancelled
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(queue.recv_async(), timeout=0.05)
+        job = queue.push_file("after-timeout", SHORT_WAV)
+        queue.close()
+        result = await asyncio.wait_for(queue.recv_async(), timeout=120)
+        assert result.job_id == job and result.ok
+        assert "SPEAKER" in result.unwrap().rttm()
+        with pytest.raises(speakrs.SpeakrsError) as closed:
+            await asyncio.wait_for(queue.recv_async(), timeout=10)
+        assert closed.value.code == "queue_closed"
+
+    with speakrs.Pipeline.from_prepared(cpu_models).into_queue(capacity=4) as queue:
+        asyncio.run(scenario(queue))
+
 def test_errors_carry_stable_categories(cpu_models, cpu_pipeline, tmp_path):
     with pytest.raises(speakrs.SpeakrsError) as missing:
         speakrs.prepare("cpu", model_dir=tmp_path)
@@ -104,6 +121,10 @@ def test_errors_carry_stable_categories(cpu_models, cpu_pipeline, tmp_path):
     with pytest.raises(speakrs.SpeakrsError) as config:
         speakrs.VbxConfig(max_iters=0)
     assert config.value.category == "configuration"
+    for epsilon in (-0.1, float("nan"), float("inf")):
+        with pytest.raises(speakrs.SpeakrsError, match="smoothing_epsilon") as smoothing:
+            speakrs.PipelineConfig(smoothing_epsilon=epsilon)
+        assert smoothing.value.category == "configuration"
 
     token = speakrs.CancelToken()
     token.cancel()
@@ -121,10 +142,6 @@ def test_misuse_fails_fast_and_keeps_the_pipeline_usable(cpu_models):
     expected = pipeline.diarize_file(SHORT_WAV).rttm()
     assert "SPEAKER" in expected
 
-    for epsilon in (-0.1, float("nan"), float("inf")):
-        with pytest.raises(speakrs.SpeakrsError, match="smoothing_epsilon") as smoothing:
-            speakrs.PipelineConfig(smoothing_epsilon=epsilon)
-        assert smoothing.value.category == "configuration"
     with pytest.raises(speakrs.SpeakrsError) as capacity:
         pipeline.into_queue(capacity=0)
     assert capacity.value.category == "configuration"
