@@ -283,3 +283,100 @@ jobs:
       - name: Run tests
         working-directory: crates/speakrs-python
         run: ../../.venv-wheel/bin/python -m pytest -rA
+
+  # a v* tag publishes to TestPyPI, installs that release, and only then publishes to
+  # PyPI; each index trusts this workflow and environment, so no token is stored
+  testpypi-publish:
+    name: Publish to TestPyPI
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [python-wheels, python-sdist, python-tests]
+    runs-on: ubuntu-24.04
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/speakrs/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download wheels and sdist
+        uses: actions/download-artifact@v8
+        with:
+          pattern: python-*
+          path: dist
+          merge-multiple: true
+
+      - name: Check files match the tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          ls -la dist
+          test "$(find dist -type f | wc -l)" -eq 3
+          for file in dist/*; do
+            case "$(basename "$file")" in
+              "speakrs-${version}"-*.whl | "speakrs-${version}.tar.gz") ;;
+              *) echo "$file does not match tag $GITHUB_REF_NAME"; exit 1 ;;
+            esac
+          done
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@v1.14.2
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  testpypi-install:
+    name: Install from TestPyPI (${{ matrix.name }})
+    needs: testpypi-publish
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-24.04
+          - name: macOS arm64
+            os: macos-15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.0
+
+      - name: Install the release and diarize
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          uv venv --python 3.12 .venv-release
+          # a new release can take a few minutes to appear in the index
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            if uv pip install --python .venv-release --no-cache --only-binary speakrs \
+              --index-url https://test.pypi.org/simple/ "speakrs==${version}"; then
+              break
+            fi
+            test "$attempt" -lt 10
+            sleep 30
+          done
+          .venv-release/bin/python -c "import speakrs; print(speakrs.__version__, speakrs.available_modes())"
+          rttm="$(.venv-release/bin/speakrs diarize --mode cpu fixtures/test_short.wav)"
+          printf '%s\n' "$rttm"
+          grep -q '^SPEAKER ' <<< "$rttm"
+
+  pypi-publish:
+    name: Publish to PyPI
+    needs: testpypi-install
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/project/speakrs/
+    permissions:
+      id-token: write
+    steps:
+      - name: Download wheels and sdist
+        uses: actions/download-artifact@v8
+        with:
+          pattern: python-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@v1.14.2
