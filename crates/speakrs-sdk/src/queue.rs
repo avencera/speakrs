@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::Duration;
 
 use speakrs::ExecutionMode;
@@ -93,9 +93,6 @@ impl SdkQueue {
     }
 
     /// Wait up to `timeout` for the next finished job
-    ///
-    /// Receives share one lock, so a short timeout also bounds how long a
-    /// concurrent [`Self::try_recv`] waits
     pub fn recv_timeout(&self, timeout: Duration) -> Result<Option<QueueItem>, SdkError> {
         let result = lock(&self.receiver)
             .recv_timeout(timeout)
@@ -103,9 +100,20 @@ impl SdkQueue {
         Ok(result.map(|result| self.item(result)))
     }
 
-    /// Return a finished job if one is ready
+    /// Return a finished job if one is ready, without blocking
+    ///
+    /// Returns `None` while another receive holds the receiver, since that receive
+    /// takes the next result anyway
     pub fn try_recv(&self) -> Result<Option<QueueItem>, SdkError> {
-        let result = lock(&self.receiver).try_recv().map_err(Self::map_error)?;
+        // waiting for the lock would block an async caller's event loop for up to a
+        // concurrent `recv_timeout` slice
+        let mut receiver = match self.receiver.try_lock() {
+            Ok(receiver) => receiver,
+            Err(TryLockError::WouldBlock) => return Ok(None),
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        };
+        let result = receiver.try_recv().map_err(Self::map_error)?;
+        drop(receiver);
         Ok(result.map(|result| self.item(result)))
     }
 

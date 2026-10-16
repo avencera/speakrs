@@ -383,7 +383,7 @@ class Queue:
         return result
 
     def try_recv(self) -> QueueResult | None:
-        """Return a finished job if one is ready, else ``None``."""
+        """Return a finished job if one is ready, else ``None``; never blocks."""
         return self._native.try_recv()
 
     def __iter__(self) -> Iterator[QueueResult]:

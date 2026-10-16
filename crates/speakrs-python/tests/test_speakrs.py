@@ -6,6 +6,8 @@ import asyncio
 import shutil
 import subprocess
 import sys
+import threading
+import time
 
 import numpy as np
 import pytest
@@ -104,6 +106,33 @@ def test_cancelled_recv_async_leaves_results_for_later_receivers(cpu_models):
 
     with speakrs.Pipeline.from_prepared(cpu_models).into_queue(capacity=4) as queue:
         asyncio.run(scenario(queue))
+
+def test_try_recv_never_waits_for_a_blocked_receiver(cpu_models):
+    with speakrs.Pipeline.from_prepared(cpu_models).into_queue(capacity=4) as queue:
+        errors = []
+
+        def wait_on_idle_queue():
+            try:
+                queue.recv()
+            except speakrs.SpeakrsError as error:
+                errors.append(error.code)
+
+        receiver = threading.Thread(target=wait_on_idle_queue)
+        receiver.start()
+        time.sleep(0.2)
+        # the blocked recv holds the receiver in 100 ms slices; pausing between polls,
+        # as recv_async does, lands inside a slice, where waiting would stall the loop
+        slowest = 0.0
+        for _ in range(10):
+            time.sleep(0.01)
+            started = time.monotonic()
+            assert queue.try_recv() is None
+            slowest = max(slowest, time.monotonic() - started)
+        assert slowest < 0.05
+
+        queue.close()
+        receiver.join(timeout=10)
+    assert errors == ["queue_closed"]
 
 def test_errors_carry_stable_categories(cpu_models, cpu_pipeline, tmp_path):
     with pytest.raises(speakrs.SpeakrsError) as missing:
