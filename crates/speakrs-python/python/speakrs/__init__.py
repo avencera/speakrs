@@ -20,7 +20,7 @@ from enum import Enum
 from importlib import metadata
 from os import PathLike
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, Iterator, Sequence, Union
+from typing import TYPE_CHECKING, Callable, Iterator, Sequence, TypeVar, Union
 
 from . import _cuda, _native
 from ._errors import SpeakrsError
@@ -68,6 +68,8 @@ try:
     __version__ = metadata.version("speakrs")
 except metadata.PackageNotFoundError:  # pragma: no cover - source checkout without install
     __version__ = "0.0.0"
+
+_T = TypeVar("_T")
 
 # Queue.recv_async backs off between these, in seconds; a job takes far longer
 # than the longest wait, so polling adds little latency
@@ -303,22 +305,23 @@ class Pipeline:
     ) -> DiarizationResult:
         """:meth:`diarize_samples` on a worker thread.
 
-        Cancelling the awaiting task does not stop the work; pass a
-        :class:`CancelToken` for that.
+        Cancelling the await cancels the call and returns only once the worker
+        has stopped reading ``samples``, so the buffer can be reused afterwards.
+        The worker stops at the next stage boundary, so that can take a while.
         """
-        return await asyncio.to_thread(self.diarize_samples, samples, **kwargs)  # type: ignore[arg-type]
+        return await _run_on_worker(self.diarize_samples, samples, **kwargs)
 
     async def diarize_file_async(
         self, path: StrPath, **kwargs: object
     ) -> DiarizationResult:
-        """:meth:`diarize_file` on a worker thread."""
-        return await asyncio.to_thread(self.diarize_file, path, **kwargs)  # type: ignore[arg-type]
+        """:meth:`diarize_file` on a worker thread; cancelling the await cancels the call."""
+        return await _run_on_worker(self.diarize_file, path, **kwargs)
 
     async def diarize_files_async(
         self, paths: Sequence[StrPath], **kwargs: object
     ) -> list[DiarizationResult]:
-        """:meth:`diarize_files` on a worker thread."""
-        return await asyncio.to_thread(self.diarize_files, paths, **kwargs)  # type: ignore[arg-type]
+        """:meth:`diarize_files` on a worker thread; cancelling the await cancels the call."""
+        return await _run_on_worker(self.diarize_files, paths, **kwargs)
 
     def into_queue(
         self,
@@ -333,6 +336,36 @@ class Pipeline:
         """
         return Queue(self._native.into_queue(pipeline_config, capacity))
 
+
+
+async def _run_on_worker(call: Callable[..., _T], *args: object, **kwargs: object) -> _T:
+    """Run a pipeline call on a worker thread, cancelling it with the await.
+
+    A cancelled await waits for the worker before re-raising: the worker may be
+    reading the caller's sample buffer, which the caller is free to reuse once the
+    cancellation reaches it. The call runs on a child of any token the caller
+    passed, so cancelling the await never cancels that token.
+    """
+    caller_token = kwargs.pop("cancel_token", None)
+    if caller_token is not None and not isinstance(caller_token, CancelToken):
+        raise TypeError("cancel_token must be a CancelToken")
+    token = caller_token.child() if caller_token is not None else CancelToken()
+    worker = asyncio.ensure_future(
+        asyncio.to_thread(call, *args, cancel_token=token, **kwargs)
+    )
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        token.cancel()
+        while not worker.done():
+            try:
+                await asyncio.wait({worker})
+            except asyncio.CancelledError:
+                # a repeated cancel still has to wait for the buffer to be released
+                pass
+        if not worker.cancelled():
+            worker.exception()  # retrieved, so asyncio does not log it as unhandled
+        raise
 
 class Queue:
     """A pipeline running on a background thread.

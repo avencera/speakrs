@@ -54,6 +54,12 @@ impl PyCancelToken {
         self.0.is_cancelled()
     }
 
+    /// A token cancelled along with this one, whose own cancellation leaves this
+    /// one untouched
+    fn child(&self) -> Self {
+        Self(self.0.child())
+    }
+
     fn __repr__(&self) -> String {
         format!("CancelToken(cancelled={})", py_bool(self.0.is_cancelled()))
     }

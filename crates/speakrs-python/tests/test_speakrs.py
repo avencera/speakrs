@@ -92,6 +92,27 @@ def test_queue_returns_results_then_stops(cpu_models):
     assert closed.value.code == "queue_closed"
 
 
+def test_cancelled_async_call_stops_before_returning(cpu_pipeline):
+    samples = read_wav(TEST_WAV)
+    events = []
+    caller_token = speakrs.CancelToken()
+
+    async def time_out():
+        call = cpu_pipeline.diarize_samples_async(
+            samples, cancel_token=caller_token, progress=lambda event: events.append(event.kind)
+        )
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(call, timeout=0.05)
+        # the worker reads `samples`, so the timeout may only arrive once it stopped
+        return list(events)
+
+    seen_at_timeout = asyncio.run(time_out())
+    # a later call waits for the pipeline, so any worker still running finishes first
+    cpu_pipeline.diarize_file(SHORT_WAV)
+    assert events == seen_at_timeout
+    assert "completed" not in events
+    assert not caller_token.cancelled
+
 def test_cancelled_recv_async_leaves_results_for_later_receivers(cpu_models):
     async def scenario(queue):
         # nothing is pushed yet, so this wait times out and is cancelled

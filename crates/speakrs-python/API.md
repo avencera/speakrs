@@ -53,7 +53,7 @@ crate's `ModelManager`. `HF_ENDPOINT` selects a mirror.
 - `diarize_samples(samples, *, file_id="file1", pipeline_config=None, cancel_token=None, progress=None)`
 - `diarize_file(path, *, file_id=None, ...)`; `file_id` defaults to the file name without its extension
 - `diarize_files(paths, *, file_ids=None, ...)`: the batch entry point
-- `diarize_samples_async`, `diarize_file_async`, `diarize_files_async`
+- `diarize_samples_async`, `diarize_file_async`, `diarize_files_async`: cancelling the await cancels the call and returns once the worker has stopped, so a sample buffer can be reused afterwards
 - `into_queue(*, pipeline_config=None, capacity=None) -> Queue`
 
 `samples` is 16 kHz mono audio. A 1-D float32 buffer, such as a NumPy array,
@@ -139,6 +139,9 @@ the callback raises cancels the call, which then re-raises it.
 
 `CancelToken().cancel()` or Ctrl+C stops a call at the next stage or file
 boundary. A stage that has already started finishes first.
+A call that fails or is interrupted never cancels the token passed in, and
+`token.child()` gives a token that one call can cancel without affecting the
+others sharing the parent.
 
 ## Errors
 

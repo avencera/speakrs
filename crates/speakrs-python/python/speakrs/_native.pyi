@@ -33,6 +33,8 @@ class CancelToken:
     @property
     def cancelled(self) -> bool:
         """Whether cancellation was requested."""
+    def child(self) -> CancelToken:
+        """A token cancelled along with this one, whose own cancellation leaves this one untouched."""
 
 @final
 class ActivityCleanup:
