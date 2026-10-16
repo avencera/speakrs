@@ -233,10 +233,9 @@ class Pipeline:
     ) -> DiarizationResult:
         """Diarize 16 kHz mono audio.
 
-        ``samples`` is a 1-D float32 buffer, such as a NumPy array, which is read
-        in place without copying, or a sequence of floats, which is copied.
-        Other buffer dtypes raise ``TypeError``. Do not modify the buffer while
-        the call runs.
+        ``samples`` is a 1-D float32 buffer, such as a NumPy array, or a sequence
+        of floats; either is copied before inference starts, so the caller may
+        reuse it right away. Other buffer dtypes raise ``TypeError``.
         """
         return self._native.diarize_samples(
             samples, file_id, pipeline_config, cancel_token, progress
