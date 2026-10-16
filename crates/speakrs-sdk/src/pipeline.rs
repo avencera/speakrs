@@ -197,15 +197,16 @@ impl SdkPipeline {
         let audio = decode_file_to_mono(path).map_err(SdkError::from_audio_error)?;
         let audio_decode_ms = elapsed_ms(start);
 
-        let resample_start = Instant::now();
-        let samples = if audio.sample_rate_hz == SDK_SAMPLE_RATE_HZ {
-            audio.samples
+        // timed only when it runs, so 16 kHz input reports exactly zero as documented
+        let (samples, audio_resample_ms) = if audio.sample_rate_hz == SDK_SAMPLE_RATE_HZ {
+            (audio.samples, 0.0)
         } else {
             options.begin(ProgressEvent::ResamplingAudio)?;
-            resample_mono_to_16khz(audio.samples, audio.sample_rate_hz)
-                .map_err(SdkError::from_audio_error)?
+            let resample_start = Instant::now();
+            let samples = resample_mono_to_16khz(audio.samples, audio.sample_rate_hz)
+                .map_err(SdkError::from_audio_error)?;
+            (samples, elapsed_ms(resample_start))
         };
-        let audio_resample_ms = elapsed_ms(resample_start);
 
         options.begin(ProgressEvent::RunningPipeline)?;
         let pipeline_start = Instant::now();

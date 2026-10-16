@@ -28,6 +28,8 @@ def test_cpu_rttm_matches_rust_pipeline(cpu_models, cpu_pipeline):
     assert from_file.duration == pytest.approx(26.0154375)
     assert from_file.speakers == sorted({segment.speaker for segment in from_file.segments})
     assert from_file.timing is not None and from_file.timing.pipeline_ms > 0
+    # the fixture is already 16 kHz, so nothing was resampled
+    assert from_file.timing.audio_resample_ms == 0.0
 
     samples = read_wav(TEST_WAV)
     assert cpu_pipeline.diarize_samples(samples, file_id="test").rttm() == expected
