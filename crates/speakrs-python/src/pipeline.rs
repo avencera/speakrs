@@ -192,9 +192,12 @@ impl ProgressSink {
             }
 
             if let Some(callback) = &self.callback {
-                IN_PROGRESS_CALLBACK.set(true);
-                let called = callback.call1(py, (PyProgressEvent(event),));
-                IN_PROGRESS_CALLBACK.set(false);
+                // restore rather than clear, so a nested callback, such as one passed
+                // to `prepare()` from inside this one, keeps the outer guard set; the
+                // return value drops inside the guard because its finalizer is Python
+                let outer = IN_PROGRESS_CALLBACK.replace(true);
+                let called = callback.call1(py, (PyProgressEvent(event),)).map(drop);
+                IN_PROGRESS_CALLBACK.set(outer);
                 if let Err(error) = called {
                     self.record(error);
                 }
