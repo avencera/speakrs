@@ -207,6 +207,13 @@ def test_misuse_fails_fast_and_keeps_the_pipeline_usable(cpu_models):
         pipeline.diarize_samples(read_wav(SHORT_WAV), progress=fail_on_first_file)
     assert events == ["running_pipeline"]
 
+    # the raise cancels only its own call, never a token the caller passed in
+    token = speakrs.CancelToken()
+    with pytest.raises(RuntimeError, match="stop"):
+        pipeline.diarize_file(SHORT_WAV, cancel_token=token, progress=fail_on_first_file)
+    assert not token.cancelled
+    assert pipeline.diarize_file(SHORT_WAV, cancel_token=token).rttm() == expected
+
     assert pipeline.diarize_file(SHORT_WAV).rttm() == expected
 
 

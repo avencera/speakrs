@@ -415,12 +415,14 @@ fn reject_reentry() -> Result<(), SdkError> {
 
 /// The caller's cancel token, or a private one, wired to a progress sink
 ///
-/// Every call gets a token so Ctrl+C and a raising callback stop the run early
+/// Every call gets its own token so Ctrl+C and a raising callback stop the run
+/// early. It is a child of the caller's token, so cancelling the call never
+/// cancels a token the caller shares with other calls
 fn cancellable(
     cancel_token: Option<PyCancelToken>,
     progress: Option<Py<PyAny>>,
 ) -> (CancelToken, ProgressSink) {
-    let token = cancel_token.map_or_else(CancelToken::new, |token| token.0);
+    let token = cancel_token.map_or_else(CancelToken::new, |token| token.0.child());
     let sink = ProgressSink::new(progress, token.clone());
     (token, sink)
 }

@@ -6,7 +6,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Operations check the flag between stages and between batch files; a stage
 /// that is already running finishes first
 #[derive(Debug, Clone, Default)]
-pub struct CancelToken(Arc<AtomicBool>);
+pub struct CancelToken {
+    flag: Arc<AtomicBool>,
+    parent: Option<Box<CancelToken>>,
+}
 
 impl CancelToken {
     /// Create a token that is not cancelled
@@ -14,14 +17,30 @@ impl CancelToken {
         Self::default()
     }
 
-    /// Request cancellation; every clone observes it
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::SeqCst);
+    /// A token that is cancelled when this one is, but whose own cancellation
+    /// leaves this one untouched
+    ///
+    /// A binding uses one per call, so a failure that cancels the call never
+    /// cancels a token the caller shares with other calls
+    pub fn child(&self) -> Self {
+        Self {
+            flag: Arc::default(),
+            parent: Some(Box::new(self.clone())),
+        }
     }
 
-    /// Whether cancellation was requested
+    /// Request cancellation; every clone observes it
+    pub fn cancel(&self) {
+        self.flag.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether cancellation was requested on this token or a parent
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.flag.load(Ordering::SeqCst)
+            || self
+                .parent
+                .as_deref()
+                .is_some_and(CancelToken::is_cancelled)
     }
 
     pub(crate) fn check(token: Option<&Self>) -> Result<(), crate::SdkError> {
