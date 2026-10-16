@@ -293,9 +293,18 @@ impl PyPipelineConfig {
         };
         let reconstruct_method = match (reconstruct_method.unwrap_or("smoothed"), smoothing_epsilon)
         {
-            ("smoothed", epsilon) => ReconstructMethod::Smoothed {
-                epsilon: epsilon.unwrap_or(default_epsilon),
-            },
+            ("smoothed", epsilon) => {
+                let epsilon = epsilon.unwrap_or(default_epsilon);
+                // the core keeps the previous speaker while scores differ by less than
+                // epsilon, so NaN or a negative value would silently disable smoothing
+                // and infinity would never switch speakers
+                if !(epsilon.is_finite() && epsilon >= 0.0) {
+                    return Err(config_err(format!(
+                        "smoothing_epsilon must be finite and non-negative, got {epsilon}"
+                    )));
+                }
+                ReconstructMethod::Smoothed { epsilon }
+            }
             ("standard", None) => ReconstructMethod::Standard,
             ("standard", Some(_)) => {
                 return Err(config_err(

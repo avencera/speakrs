@@ -121,6 +121,10 @@ def test_misuse_fails_fast_and_keeps_the_pipeline_usable(cpu_models):
     expected = pipeline.diarize_file(SHORT_WAV).rttm()
     assert "SPEAKER" in expected
 
+    for epsilon in (-0.1, float("nan"), float("inf")):
+        with pytest.raises(speakrs.SpeakrsError, match="smoothing_epsilon") as smoothing:
+            speakrs.PipelineConfig(smoothing_epsilon=epsilon)
+        assert smoothing.value.category == "configuration"
     with pytest.raises(speakrs.SpeakrsError) as capacity:
         pipeline.into_queue(capacity=0)
     assert capacity.value.category == "configuration"
