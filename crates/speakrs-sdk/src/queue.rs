@@ -1,3 +1,5 @@
+//! A pipeline on a background worker, fed by a bounded request queue
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError, TryLockError};

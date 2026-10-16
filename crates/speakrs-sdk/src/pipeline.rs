@@ -1,3 +1,5 @@
+//! The binding-facing pipeline: single files, samples, batches, and progress
+
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -18,7 +20,10 @@ use crate::queue::SdkQueue;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProgressEvent {
     /// A model file is about to be downloaded
-    DownloadingModel { file: String },
+    DownloadingModel {
+        /// File name within the model repository
+        file: String,
+    },
     /// An audio file is being decoded
     DecodingAudio,
     /// Decoded audio is being resampled to 16 kHz
@@ -26,7 +31,12 @@ pub enum ProgressEvent {
     /// Inference and clustering are running
     RunningPipeline,
     /// A batch started inference on the file at `index`
-    BatchFile { index: usize, file_id: String },
+    BatchFile {
+        /// Position of the file in the batch, from 0
+        index: usize,
+        /// File id of that file
+        file_id: String,
+    },
     /// The operation finished successfully
     Completed,
 }

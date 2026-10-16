@@ -1,3 +1,5 @@
+//! Errors with stable category and code strings that bindings expose as-is
+
 use thiserror::Error;
 
 /// Stable error category exposed to binding users

@@ -1,3 +1,5 @@
+//! Model downloads, the model cache, and manifests that verify model files
+
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
@@ -301,7 +303,12 @@ pub enum ModelPrepareError {
 
     /// A cache directory could not be read or changed
     #[error("model cache `{}`: {message}", path.display())]
-    Cache { path: PathBuf, message: String },
+    Cache {
+        /// The cache directory or file
+        path: PathBuf,
+        /// Why it failed
+        message: String,
+    },
 
     /// The revision is not a single path component
     #[error("invalid revision `{0}`: expected a single directory name")]
@@ -471,25 +478,39 @@ impl ModelManifestEntry {
 pub enum ModelManifestError {
     /// A required file does not exist
     #[error("model file `{path}` is missing")]
-    MissingFile { path: String },
+    MissingFile {
+        /// Path relative to the model directory
+        path: String,
+    },
 
     /// A file exists but could not be read
     #[error("failed to read model file `{path}`: {message}")]
-    ReadFile { path: String, message: String },
+    ReadFile {
+        /// Path relative to the model directory
+        path: String,
+        /// Why it failed
+        message: String,
+    },
 
     /// A file's size differs from the manifest
     #[error("model file `{path}` has size {actual}, expected {expected}")]
     SizeMismatch {
+        /// Path relative to the model directory
         path: String,
+        /// Size the manifest lists, in bytes
         expected: u64,
+        /// Size on disk, in bytes
         actual: u64,
     },
 
     /// A file's digest differs from the manifest
     #[error("model file `{path}` has SHA-256 {actual}, expected {expected}")]
     ChecksumMismatch {
+        /// Path relative to the model directory
         path: String,
+        /// Digest the manifest lists, as lowercase hex
         expected: String,
+        /// Digest of the file on disk, as lowercase hex
         actual: String,
     },
 
@@ -499,11 +520,17 @@ pub enum ModelManifestError {
 
     /// The manifest omits a file the execution mode loads
     #[error("model manifest does not list `{path}`, which this mode needs")]
-    NotListed { path: String },
+    NotListed {
+        /// Path relative to the model directory
+        path: String,
+    },
 
     /// A manifest path is absolute or leaves the model directory
     #[error("model manifest path `{path}` must be relative and stay inside the model directory")]
-    UnsafePath { path: String },
+    UnsafePath {
+        /// The path as the manifest writes it
+        path: String,
+    },
 }
 
 fn is_relative_inside(path: &str) -> bool {

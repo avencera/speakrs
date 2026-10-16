@@ -1,3 +1,5 @@
+//! Decoding audio files to the 16 kHz mono samples the pipeline takes
+
 use std::path::Path;
 
 use rubato::audioadapter_buffers::owned::InterleavedOwned;
@@ -43,35 +45,71 @@ pub enum AudioDecodeError {
 
     /// The interleaved buffer does not hold whole frames
     #[error("audio sample count {samples} is not divisible by channel count {channels}")]
-    InvalidInterleavedLength { samples: usize, channels: usize },
+    InvalidInterleavedLength {
+        /// Samples in the buffer
+        samples: usize,
+        /// Channels per frame
+        channels: usize,
+    },
 
     /// The file could not be opened
     #[error("failed to open audio file `{path}`: {message}")]
-    Open { path: String, message: String },
+    Open {
+        /// The audio file
+        path: String,
+        /// Why it failed
+        message: String,
+    },
 
     /// The container format was not recognized
     #[error("failed to probe audio file `{path}`: {message}")]
-    Probe { path: String, message: String },
+    Probe {
+        /// The audio file
+        path: String,
+        /// Why it failed
+        message: String,
+    },
 
     /// The container has no audio track
     #[error("audio file `{path}` has no decodable audio track")]
-    MissingAudioTrack { path: String },
+    MissingAudioTrack {
+        /// The audio file
+        path: String,
+    },
 
     /// The audio codec is not compiled in
     #[error("unsupported audio codec in `{path}`: {message}")]
-    UnsupportedCodec { path: String, message: String },
+    UnsupportedCodec {
+        /// The audio file
+        path: String,
+        /// Why it failed
+        message: String,
+    },
 
     /// Reading a packet from the container failed
     #[error("failed to read audio packet from `{path}`: {message}")]
-    ReadPacket { path: String, message: String },
+    ReadPacket {
+        /// The audio file
+        path: String,
+        /// Why it failed
+        message: String,
+    },
 
     /// Decoding a packet failed
     #[error("failed to decode audio packet from `{path}`: {message}")]
-    Decode { path: String, message: String },
+    Decode {
+        /// The audio file
+        path: String,
+        /// Why it failed
+        message: String,
+    },
 
     /// The file decoded to zero samples
     #[error("decoded audio file `{path}` did not contain samples")]
-    EmptyAudio { path: String },
+    EmptyAudio {
+        /// The audio file
+        path: String,
+    },
 
     /// The resampler rejected the input
     #[error("failed to resample audio: {0}")]

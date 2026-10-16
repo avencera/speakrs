@@ -5,6 +5,8 @@
 //! downloading and verifying models, batch decoding that overlaps inference,
 //! cancellation, progress events, and errors with stable category codes
 
+#![warn(missing_docs)]
+
 pub mod audio;
 mod batch;
 pub mod cancel;

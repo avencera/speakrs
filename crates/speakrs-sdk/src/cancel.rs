@@ -1,3 +1,5 @@
+//! Cooperative cancellation shared between a caller and a running operation
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
