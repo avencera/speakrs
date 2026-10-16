@@ -195,6 +195,26 @@ jobs:
           command: sdist
           args: --out dist -m crates/speakrs-python/Cargo.toml
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.0
+
+      # pip builds the sdist on platforms without a wheel, so build it the same way,
+      # outside the checkout, and diarize with the result
+      - name: Install sdist into a fresh environment
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          uv venv --python 3.12 sdist-venv
+          uv pip install --python sdist-venv "$GITHUB_WORKSPACE"/dist/*.tar.gz
+          sdist-venv/bin/python -c "import speakrs; print(speakrs.__version__, speakrs.available_modes())"
+          rttm="$(sdist-venv/bin/speakrs diarize --mode cpu "$GITHUB_WORKSPACE/fixtures/test_short.wav")"
+          printf '%s\n' "$rttm"
+          grep -q '^SPEAKER ' <<< "$rttm"
+
       - name: Upload sdist
         uses: actions/upload-artifact@v7
         with:
