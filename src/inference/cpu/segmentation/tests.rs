@@ -1,8 +1,9 @@
 use super::{CpuPyanNet, WeightsFile};
 use crate::powerset::PowersetMapping;
 use ndarray::{Array2, Array3, Axis};
-use ndarray_npy::{NpzReader, read_npy};
+use ndarray_npy::{ReadNpyExt, read_npy};
 use std::{fs::File, path::PathBuf, time::Instant};
+use zip::ZipArchive;
 
 fn load() -> CpuPyanNet {
     CpuPyanNet::load(
@@ -208,11 +209,11 @@ fn all_pinned_raw_and_saved_rust_windows() {
         let path = std::path::Path::new(record["input"]["path"].as_str().unwrap());
         let name = path.file_stem().unwrap().to_str().unwrap();
         let audio = wav(path);
-        let mut archive = NpzReader::new(
+        let mut archive = ZipArchive::new(
             File::open(baseline.join(format!("optimized-tensors/{name}.npz"))).unwrap(),
         )
         .unwrap();
-        let logits: Array3<f32> = archive.by_name("logits").unwrap();
+        let logits = Array3::<f32>::read_npy(archive.by_name("logits.npy").unwrap()).unwrap();
         for (index, row) in record["rows"].as_array().unwrap().iter().enumerate() {
             let offset = row["offset_samples"].as_u64().unwrap() as usize;
             let end = (offset + 160000).min(audio.len());
