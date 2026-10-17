@@ -1,8 +1,9 @@
 use super::{CpuResNet34, WeightsFile};
 use crate::inference::cpu::fbank::CpuFbank;
 use ndarray::{Array2, Array3, Axis, s};
-use ndarray_npy::{NpzReader, read_npy};
+use ndarray_npy::{ReadNpyExt, read_npy};
 use std::{fs::File, path::PathBuf, time::Instant};
+use zip::ZipArchive;
 
 fn load() -> CpuResNet34 {
     CpuResNet34::load(
@@ -216,12 +217,12 @@ fn all_pinned_raw_and_saved_rust_windows() {
         let path = std::path::Path::new(record["input"]["path"].as_str().unwrap());
         let name = path.file_stem().unwrap().to_str().unwrap();
         let audio = wav(path);
-        let mut archive = NpzReader::new(
+        let mut archive = ZipArchive::new(
             File::open(baseline.join(format!("optimized-tensors/{name}.npz"))).unwrap(),
         )
         .unwrap();
-        let masks: Array3<f32> = archive.by_name("masks").unwrap();
-        let expected: Array3<f32> = archive.by_name("embeddings").unwrap();
+        let masks = Array3::<f32>::read_npy(archive.by_name("masks.npy").unwrap()).unwrap();
+        let expected = Array3::<f32>::read_npy(archive.by_name("embeddings.npy").unwrap()).unwrap();
         let rust_embeddings: Array3<f32> =
             read_npy(baseline.join(format!("measurements/{name}/library/embeddings.npy"))).unwrap();
         let decoded: Array3<f32> =
