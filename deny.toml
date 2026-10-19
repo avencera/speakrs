@@ -27,6 +27,8 @@ allow = [
 multiple-versions = "allow"
 wildcards = "allow"
 highlight = "all"
+# the zip advisory ignores above hold only for the ndarray-npy test path
+deny = [{ crate = "zip", wrappers = ["ndarray-npy"], reason = "only ndarray-npy's npz test reader may use zip while its advisories are ignored" }]
 
 [sources]
 unknown-registry = "deny"
