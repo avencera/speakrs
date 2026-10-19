@@ -1378,7 +1378,6 @@ checksum = "58e8a348bca0075000d999d750420d74434fd0d3e0993b456554f885e7657a11"
 dependencies = [
  "byteorder",
  "ndarray",
- "num-complex",
  "num-traits",
  "py_literal",
  "zip",
