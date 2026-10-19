@@ -1933,6 +1933,12 @@ macro_rules! mma_conv {
             let x_offset = (warp_index * NT as u32 * 8 + g) * 4;
             let w_offset = (X_STAGE + lane * 4) * 4;
             let mut stage = 0;
+            // the ring buffer of `stage`, advanced apart from it: LLVM's scalar
+            // evolution would model `stage % STAGES` as the affine
+            // `stage - STAGES * (stage / STAGES)`, and next to the producer's slot of
+            // the same stride, loop strength reduction would then give each fragment
+            // address its own induction variable instead of one base plus immediates
+            let mut slot = 0;
             while stage < STEPS {
                 // safety: completes this thread's copies of `stage`
                 unsafe { cp_wait(STAGES - 2) };
@@ -1945,9 +1951,9 @@ macro_rules! mma_conv {
                 // safety: as above
                 unsafe { cp_commit() };
 
-                let buffer = smem + (stage % STAGES) * STAGE * 4;
-                let x_at = opaque(buffer + x_offset);
-                let w_at = opaque(buffer + w_offset);
+                let buffer = smem + slot * STAGE * 4;
+                let x_at = buffer + x_offset;
+                let w_at = buffer + w_offset;
                 let mut step = 0;
                 #[unroll]
                 while step < 5 {
@@ -2015,6 +2021,7 @@ macro_rules! mma_conv {
                     }
                     step += 1;
                 }
+                slot = (slot + 1) % STAGES;
                 stage += 1;
             }
 
@@ -2357,6 +2364,8 @@ macro_rules! mma_half_split {
             let b_offset = ((split * BK / 2 + t) * B_ROW + warp_col * WN + g) * 4;
 
             let mut stage = 0;
+            // the ring buffer of `stage`, advanced apart from it as in `mma_conv!`
+            let mut slot = 0;
             while stage < stages {
                 // safety: completes this thread's copies of `stage`
                 unsafe { cp_wait(STAGES - 2) };
@@ -2369,10 +2378,8 @@ macro_rules! mma_half_split {
                 // safety: as above
                 unsafe { cp_commit() };
 
-                // opaque bases keep the fragment addresses as base plus constant
-                // offsets
-                let a_base = opaque(slice_base + a_offset + stage * KT / 2 * 4);
-                let b_base = opaque(ring + (stage % STAGES) * B_STAGE * 4 + b_offset);
+                let a_base = slice_base + a_offset + stage * KT / 2 * 4;
+                let b_base = ring + slot * B_STAGE * 4 + b_offset;
                 let mut kk = 0;
                 #[unroll]
                 while kk < BK / 16 {
@@ -2417,6 +2424,7 @@ macro_rules! mma_half_split {
                     }
                     kk += 1;
                 }
+                slot = (slot + 1) % STAGES;
                 stage += 1;
             }
 
