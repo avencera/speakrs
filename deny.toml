@@ -1,7 +1,12 @@
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+# ndarray-npy 0.10, the latest release, requires zip 6; drop these once it allows zip 9
+ignore = [
+    { id = "RUSTSEC-2026-0367", reason = "zip 6 is only a test dependency through ndarray-npy's npz reader, which reads trusted fixtures by entry and never calls the affected extract APIs" },
+    { id = "RUSTSEC-2026-0368", reason = "zip 6 is only a test dependency through ndarray-npy's npz reader, which reads trusted fixtures by entry and never calls the affected extract APIs" },
+    { id = "RUSTSEC-2026-0369", reason = "zip 6 is only a test dependency through ndarray-npy's npz reader, which reads trusted fixtures by entry and never calls the affected extract APIs" },
+]
 
 [licenses]
 version = 2
@@ -22,6 +27,8 @@ allow = [
 multiple-versions = "allow"
 wildcards = "allow"
 highlight = "all"
+# the zip advisory ignores above hold only for the ndarray-npy test path
+deny = [{ crate = "zip", wrappers = ["ndarray-npy"], reason = "only ndarray-npy's npz test reader may use zip while its advisories are ignored" }]
 
 [sources]
 unknown-registry = "deny"
