@@ -58,10 +58,10 @@ cancellation, and error categories.
 combines speakrs with [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
 to write a transcript that says who said what. It runs diarization and
 transcription at the same time and gives each word to the speaker talking
-at that moment:
+at that moment. uv can run it straight from GitHub:
 
 ```sh
-uv run transcribe.py meeting.mp3
+uv run https://raw.githubusercontent.com/avencera/speakrs/master/crates/speakrs-python/examples/transcribe.py meeting.mp3
 ```
 
 ```

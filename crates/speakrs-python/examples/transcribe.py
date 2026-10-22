@@ -14,6 +14,7 @@ transcribed word goes to the speaker talking at that moment.
 """
 
 import argparse
+import itertools
 import sys
 import time
 from collections.abc import Callable
@@ -27,9 +28,11 @@ from faster_whisper import WhisperModel
 
 T = TypeVar("T")
 
-# a lone word this close to a neighboring turn is timestamp jitter; a real
-# interjection like "Yeah?" has a pause on both sides
+# a lone word this close to the turns on both sides is timestamp jitter; a real
+# reply like "Yeah?" usually has a pause before or after it
 JITTER_GAP = 0.6
+# words get this label when diarization found no speech at all
+UNKNOWN = ""
 
 
 @dataclass
@@ -63,8 +66,16 @@ def diarize(pipeline: speakrs.Pipeline, path: str) -> list[speakrs.Segment]:
     return pipeline.diarize_file(path).exclusive_segments
 
 
-def transcribe(path: str, model_name: str) -> list[tuple[float, float, str]]:
-    model = WhisperModel(model_name, device="auto", compute_type="auto")
+def whisper_device(mode: str) -> str:
+    # whisper follows the speakrs mode: its GPU backend only finds the pip CUDA
+    # libraries after a speakrs CUDA pipeline has loaded them
+    return "cuda" if mode.lower().replace("-", "").startswith("cuda") else "cpu"
+
+
+def transcribe(
+    path: str, model_name: str, device: str
+) -> list[tuple[float, float, str]]:
+    model = WhisperModel(model_name, device=device, compute_type="auto")
     segments, _info = model.transcribe(path, word_timestamps=True, vad_filter=True)
     return [
         (word.start, word.end, word.word)
@@ -105,14 +116,14 @@ def is_jitter(turns: list[Turn], speaker: str, start: float) -> bool:
         return False
 
     lone, before = turns[-1], turns[-2]
-    return min(lone.start - before.end, start - lone.end) < JITTER_GAP
+    return max(lone.start - before.end, start - lone.end) < JITTER_GAP
 
 
 def best_speaker(
     segments: list[speakrs.Segment], index: int, start: float, end: float
 ) -> str:
     best, best_overlap = None, 0.0
-    for segment in segments[index:]:
+    for segment in itertools.islice(segments, index, None):
         if segment.start >= end:
             break
 
@@ -126,7 +137,7 @@ def best_speaker(
     # a word in a pause between speakers goes to whoever is closest in time
     nearby = segments[max(index - 1, 0) : index + 1]
     if not nearby:
-        return "UNKNOWN"
+        return UNKNOWN
 
     return min(nearby, key=lambda s: max(s.start - end, start - s.end)).speaker
 
@@ -169,17 +180,19 @@ def main() -> None:
             transcribe,
             args.audio,
             args.whisper_model,
+            whisper_device(args.mode),
         )
         segments, words = diarization.result(), transcription.result()
 
     # number speakers in the order they first talk
-    names: dict[str, str] = {}
+    names: dict[str, str] = {UNKNOWN: "Unknown"}
     for turn in assign_speakers(words, segments):
-        name = names.setdefault(turn.speaker, f"Speaker {len(names) + 1}")
+        name = names.setdefault(turn.speaker, f"Speaker {len(names)}")
         print(f"[{timestamp(turn.start)}] {name}: {''.join(turn.words).strip()}\n")
 
     print(
-        f"{len(names)} speakers, {time.perf_counter() - started:.1f}s", file=sys.stderr
+        f"{len(names) - 1} speakers, {time.perf_counter() - started:.1f}s",
+        file=sys.stderr,
     )
 
 
