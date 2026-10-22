@@ -30,7 +30,7 @@ const STAGES: [(usize, usize); 4] = [(32, 3), (64, 4), (128, 6), (256, 3)];
 const OUTPUT_BINS: usize = 10;
 
 /// A runtime on device 0 with the pipeline's recipe mode, or `None` to skip
-fn runtime(test: &str) -> Option<CudaRuntime> {
+pub(crate) fn runtime(test: &str) -> Option<CudaRuntime> {
     let required = std::env::var_os("SPEAKRS_REQUIRE_GPU").is_some_and(|value| value != "0");
     match CudaRuntime::new(0) {
         Ok(runtime) => {
@@ -53,7 +53,7 @@ fn runtime(test: &str) -> Option<CudaRuntime> {
 }
 
 /// Every tensor `ResNetEmbedding::load` reads, all zero until set
-struct SyntheticModel(BTreeMap<String, (Vec<usize>, Vec<f32>)>);
+pub(crate) struct SyntheticModel(BTreeMap<String, (Vec<usize>, Vec<f32>)>);
 
 impl SyntheticModel {
     fn zeros() -> Self {
@@ -98,7 +98,7 @@ impl SyntheticModel {
     /// An identity path for channel 0 from the stem's bias to embedding element 0: every
     /// shortcut copies channel 0 and the head reads the mean of channel 0, bin 0. With
     /// every other weight zero, each block passes its input through its residual
-    fn channel_zero_path(stem_bias: f32) -> Self {
+    pub(crate) fn channel_zero_path(stem_bias: f32) -> Self {
         let mut model = Self::zeros();
         model.set("resnet.conv1.weight_bias", 0, stem_bias);
         for stage in 2..=4 {
@@ -109,7 +109,7 @@ impl SyntheticModel {
     }
 
     /// Sets the centre tap from input channel 0 to output channel 0 of a 3x3 layer
-    fn center(&mut self, layer: &str, value: f32) {
+    pub(crate) fn center(&mut self, layer: &str, value: f32) {
         self.set(&format!("{layer}.weight"), 4, value);
     }
 
@@ -118,7 +118,7 @@ impl SyntheticModel {
         values[index] = value;
     }
 
-    fn write(&self, path: &Path) -> SafetensorsFile {
+    pub(crate) fn write(&self, path: &Path) -> SafetensorsFile {
         let bytes: BTreeMap<&str, (Vec<usize>, Vec<u8>)> = self
             .0
             .iter()
@@ -143,7 +143,7 @@ impl SyntheticModel {
 }
 
 /// A scratch path unique to this process and case
-fn scratch(name: &str) -> PathBuf {
+pub(crate) fn scratch(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("speakrs-{}-{name}.safetensors", std::process::id()))
 }
 

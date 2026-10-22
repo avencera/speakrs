@@ -58,7 +58,7 @@ mod weights;
 #[cfg(test)]
 pub(crate) mod batch_class_tests;
 #[cfg(test)]
-mod fp16_range_tests;
+pub(crate) mod fp16_range_tests;
 #[cfg(all(test, feature = "_cuda-libraries"))]
 mod test_support;
 #[cfg(all(test, feature = "_cuda-libraries"))]

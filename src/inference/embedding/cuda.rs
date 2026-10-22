@@ -55,9 +55,12 @@ pub(super) struct CudaEmbedding {
     masks: Vec<f32>,
     /// `[chunks, 998, 80]` host filterbanks for the next batch
     fbanks: Vec<f32>,
-    /// The multi-mask batch [`Self::wait_multi_mask_audio_windows`] finishes: the
-    /// embeddings of its batch classes before the last, and the last, still running
+    /// The newest multi-mask batch: the embeddings of its batch classes before the
+    /// last, and the last, still running
     running: Option<(Vec<f32>, Launch)>,
+    /// The batch before `running`, whose output download is already queued behind it;
+    /// [`Self::wait_multi_mask_audio_windows`] finishes it first
+    pending: Option<(Vec<f32>, Launch)>,
 }
 
 /// The device models and buffers; a session keeps them with the runtime they were
@@ -84,12 +87,19 @@ struct Batches {
     model: ResNetEmbedding,
     graphs: bool,
     plans: [Option<EmbeddingBatch>; 5],
+    /// A second 32-chunk batch that full batches alternate with, so one can launch
+    /// while the previous one's inputs stay intact for its FP16 range recompute
+    spare: Option<EmbeddingBatch>,
+    /// Whether the next 32-chunk launch uses `spare`
+    next_spare: bool,
     activations: Option<SharedEmbeddingActivations>,
 }
 
 /// A batch class launched on the device whose embeddings are not yet downloaded
 struct Launch {
     class: EmbeddingBatchClass,
+    /// Whether the launch ran on [`Batches::spare`]
+    spare: bool,
     plan_us: u128,
     stage_us: u128,
     launch_us: u128,
@@ -138,6 +148,7 @@ impl CudaEmbedding {
             masks: Vec::new(),
             fbanks: Vec::new(),
             running: None,
+            pending: None,
         }
     }
 
@@ -221,10 +232,18 @@ impl CudaEmbedding {
         windows: &AudioWindows<'_>,
         masks: &[&[f32]],
     ) -> Result<MultiMaskStart, InferenceError> {
-        debug_assert!(
-            self.running.is_none(),
-            "a multi-mask batch is still running"
-        );
+        if self.pending.is_some() {
+            return Err(InferenceError::MissingOutput {
+                context: "cuda multi-mask batch started with two batches unfinished",
+            });
+        }
+        // queue the running batch's download before anything below reuses its buffers,
+        // so the device runs straight on into this batch while the host waits for that
+        if let Some((values, running)) = self.running.take() {
+            self.session
+                .run(|runtime, state| state.batches.enqueue_download(runtime, &running))?;
+            self.pending = Some((values, running));
+        }
         // the span is cut on the GPU filterbank's own fixed window
         if meta.window_samples != FBANK_WINDOW_SAMPLES {
             let rows = self.embed_multi_mask_audio_batch(meta, &windows.slices(), masks)?;
@@ -263,11 +282,18 @@ impl CudaEmbedding {
         }
     }
 
-    /// Waits for the batch [`Self::start_multi_mask_audio_windows`] started and returns
-    /// one embedding row per mask
+    /// Waits for the oldest batch [`Self::start_multi_mask_audio_windows`] left
+    /// unfinished and returns one embedding row per mask
     pub(in crate::inference::embedding) fn wait_multi_mask_audio_windows(
         &mut self,
     ) -> Result<Array2<f32>, InferenceError> {
+        if let Some((mut values, pending)) = self.pending.take() {
+            let last = self
+                .session
+                .run(|runtime, state| state.batches.finish_download(runtime, pending))?;
+            values.extend(last);
+            return embedding_rows(values);
+        }
         let Some((mut values, running)) = self.running.take() else {
             return Err(InferenceError::MissingOutput {
                 context: "cuda multi-mask batch is not running",
@@ -484,7 +510,11 @@ impl Batches {
 
             let rows = start..start + class.chunks();
             let plan_start = std::time::Instant::now();
-            let batch = self.batch(runtime, class)?;
+            let spare = class == EmbeddingBatchClass::ThirtyTwo && self.next_spare;
+            if class == EmbeddingBatchClass::ThirtyTwo {
+                self.next_spare = !self.next_spare;
+            }
+            let batch = self.batch(runtime, class, spare)?;
             let plan_us = plan_start.elapsed().as_micros();
             let stage_start = std::time::Instant::now();
             fill(runtime, rows.clone(), batch.fbank_mut())?;
@@ -497,6 +527,7 @@ impl Batches {
             batch.forward(runtime)?;
             running = Some(Launch {
                 class,
+                spare,
                 plan_us,
                 stage_us,
                 launch_us: launch_start.elapsed().as_micros(),
@@ -507,16 +538,49 @@ impl Batches {
         Ok((embeddings, running))
     }
 
+    /// The planned batch a launch ran on
+    fn launched(&mut self, launch: &Launch) -> Result<&mut EmbeddingBatch, CudaError> {
+        let batch = if launch.spare {
+            &mut self.spare
+        } else {
+            &mut self.plans[launch.class.slot()]
+        };
+        batch.as_mut().ok_or_else(|| CudaError::Unsupported {
+            context: "cuda embedding download",
+            reason: format!("batch class {} was never launched", launch.class.chunks()),
+        })
+    }
+
     /// Waits for a launched batch class and downloads its embeddings
     fn download(&mut self, runtime: &CudaRuntime, launch: Launch) -> Result<Vec<f32>, CudaError> {
-        let Some(batch) = &mut self.plans[launch.class.slot()] else {
-            return Err(CudaError::Unsupported {
-                context: "cuda embedding download",
-                reason: format!("batch class {} was never launched", launch.class.chunks()),
-            });
-        };
         let output_start = std::time::Instant::now();
-        let embeddings = batch.download_output(runtime)?;
+        let embeddings = self.launched(&launch)?.download_output(runtime)?;
+        Self::trace_download(&launch, output_start);
+        Ok(embeddings)
+    }
+
+    /// Queues a launched batch's download behind it without waiting
+    fn enqueue_download(
+        &mut self,
+        runtime: &CudaRuntime,
+        launch: &Launch,
+    ) -> Result<(), CudaError> {
+        self.launched(launch)?.enqueue_output_download(runtime)
+    }
+
+    /// Waits for the download [`Self::enqueue_download`] queued and returns its embeddings
+    fn finish_download(
+        &mut self,
+        runtime: &CudaRuntime,
+        launch: Launch,
+    ) -> Result<Vec<f32>, CudaError> {
+        let output_start = std::time::Instant::now();
+        let embeddings = self.launched(&launch)?.finish_output_download(runtime)?;
+        Self::trace_download(&launch, output_start);
+        Ok(embeddings)
+    }
+
+    fn trace_download(launch: &Launch, output_start: std::time::Instant) {
         trace!(
             target: "speakrs::timing",
             class = launch.class.chunks(),
@@ -526,7 +590,6 @@ impl Batches {
             output_wait_us = output_start.elapsed().as_micros(),
             "CUDA embedding batch timing"
         );
-        Ok(embeddings)
     }
 
     /// The batch for `chunks` chunks, planned and (with graphs on) captured on first use
@@ -534,6 +597,7 @@ impl Batches {
         &mut self,
         runtime: &CudaRuntime,
         class: EmbeddingBatchClass,
+        spare: bool,
     ) -> Result<&mut EmbeddingBatch, CudaError> {
         let activations = match &self.activations {
             Some(activations) => {
@@ -547,7 +611,11 @@ impl Batches {
                 activations
             }
         };
-        let slot = &mut self.plans[class.slot()];
+        let slot = if spare {
+            &mut self.spare
+        } else {
+            &mut self.plans[class.slot()]
+        };
         if let Some(batch) = slot {
             return Ok(batch);
         }
@@ -593,6 +661,8 @@ fn open_session(
                     model,
                     graphs: graphs.enabled(),
                     plans: std::array::from_fn(|_| None),
+                    spare: None,
+                    next_spare: false,
                     activations: None,
                 },
             })

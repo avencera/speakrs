@@ -361,9 +361,10 @@ impl EmbeddingModel {
     /// `masks` holds three rows per window. The CUDA backend uploads the audio the
     /// windows cover once, keeps the filterbanks on the device and may return while the
     /// batch runs, so the caller can prepare the next batch meanwhile; the others
-    /// compute them with [`Self::compute_chunk_fbanks_batch`] and embed at once. A
-    /// running batch must be finished with [`Self::wait_multi_mask_audio_windows`]
-    /// before this model embeds anything else
+    /// compute them with [`Self::compute_chunk_fbanks_batch`] and embed at once. One
+    /// earlier batch may still run when the next starts; every running batch must be
+    /// finished with [`Self::wait_multi_mask_audio_windows`], oldest first, before
+    /// this model embeds anything else
     pub(crate) fn start_multi_mask_audio_windows(
         &mut self,
         windows: &AudioWindows<'_>,
@@ -389,8 +390,8 @@ impl EmbeddingModel {
         }
     }
 
-    /// Waits for the batch [`Self::start_multi_mask_audio_windows`] left running and
-    /// returns one embedding row per mask
+    /// Waits for the oldest batch [`Self::start_multi_mask_audio_windows`] left running
+    /// and returns one embedding row per mask
     pub(crate) fn wait_multi_mask_audio_windows(&mut self) -> Result<Array2<f32>, InferenceError> {
         // only CUDA leaves batches running
         match &mut self.backend {

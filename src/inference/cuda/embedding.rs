@@ -39,7 +39,7 @@ mod trunk;
 use std::sync::{Arc, Mutex, Once};
 
 use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
-use cudarc::driver::{CudaGraph, CudaSlice, CudaView, CudaViewMut};
+use cudarc::driver::{CudaGraph, CudaSlice, CudaView, CudaViewMut, PinnedHostSlice};
 use tracing::{debug, warn};
 
 use self::dispatch::Plan;
@@ -324,6 +324,7 @@ impl ResNetEmbedding {
             activations,
             pooled: stream.alloc_zeros(rows * 2 * columns)?,
             output: stream.alloc_zeros(rows * EMBEDDING_DIM + RANGE_WORDS)?,
+            output_host: None,
             plans,
             workspace: stream.alloc_zeros(workspace_bytes.max(1))?,
             fallback: None,
@@ -352,6 +353,9 @@ pub struct EmbeddingBatch {
     pooled: CudaSlice<f32>,
     /// embeddings `[chunks * 3, 256]`, then the out-of-range word of `RANGE_WORDS`
     output: CudaSlice<f32>,
+    /// page-locked copy of `output` for downloads that let later work launch first,
+    /// allocated on first use
+    output_host: Option<PinnedHostSlice<f32>>,
     plans: Vec<(String, Plan)>,
     /// cuDNN workspace shared by every plan, sized for the largest
     workspace: CudaSlice<u8>,
@@ -912,6 +916,50 @@ impl EmbeddingBatch {
             return Ok(embeddings);
         }
 
+        self.recompute_saturated(runtime)
+    }
+
+    /// Queues the copy of the output and its out-of-range word into page-locked host
+    /// memory without waiting, so the next batch can launch before this one is read
+    ///
+    /// Finish with [`Self::finish_output_download`] before this batch's inputs or
+    /// output are written again
+    pub fn enqueue_output_download(&mut self, runtime: &CudaRuntime) -> Result<(), CudaError> {
+        let host = match &mut self.output_host {
+            Some(host) => host,
+            // cached, not write-combined: the host reads every word back
+            // SAFETY: the copy below writes the whole slice before it is read
+            None => self.output_host.insert(unsafe {
+                runtime
+                    .context()
+                    .alloc_pinned_with_flags::<f32>(self.output.len(), 0)
+            }?),
+        };
+        runtime.stream().memcpy_dtoh(&self.output, host)?;
+        Ok(())
+    }
+
+    /// Waits for the copy [`Self::enqueue_output_download`] queued, not the whole stream,
+    /// and returns the embeddings as [`Self::download_output`] does
+    pub fn finish_output_download(&mut self, runtime: &CudaRuntime) -> Result<Vec<f32>, CudaError> {
+        let Some(host) = &self.output_host else {
+            return Err(CudaError::Unsupported {
+                context: "cuda embedding download",
+                reason: "no output download was queued".to_owned(),
+            });
+        };
+        let values = host.as_slice()?;
+        let (embeddings, range) = values.split_at(values.len() - RANGE_WORDS);
+        if range.iter().all(|word| word.to_bits() == 0) {
+            return Ok(embeddings.to_vec());
+        }
+
+        self.recompute_saturated(runtime)
+    }
+
+    /// Recomputes the batch from its own inputs with plans that exclude FP16 tiles,
+    /// after an FP16 tile saturated an activation
+    fn recompute_saturated(&mut self, runtime: &CudaRuntime) -> Result<Vec<f32>, CudaError> {
         FP16_RANGE_WARNING.call_once(|| {
             warn!(
                 limit = FP16_OPERAND_LIMIT,
