@@ -51,7 +51,9 @@ use batch::BatchPostProcessor;
 pub use batch::{BatchOutput, BatchStreamError, OwnedBatchInput};
 
 mod concurrent;
-use concurrent::ConcurrentEmbeddingRunner;
+use concurrent::{ConcurrentEmbeddingResult, ConcurrentEmbeddingRunner};
+
+mod prefetch;
 
 mod post_inference;
 pub use post_inference::post_inference;
@@ -148,7 +150,9 @@ macro_rules! pipeline_run_methods {
         ///
         /// The producer is consumed on the calling thread. Audio is released after
         /// inference. No partial output is returned if an input or pipeline stage
-        /// fails. CoreML retains its existing whole-batch chunk schedule
+        /// fails. CoreML retains its existing whole-batch chunk schedule. CUDA
+        /// modes take the next input before the current one finishes, so they
+        /// segment it while the current file's embedding runs and hold its audio
         pub fn run_batch_stream<E>(
             &mut self,
             files: impl IntoIterator<Item = Result<OwnedBatchInput, E>>,
@@ -290,6 +294,76 @@ impl OwnedDiarizationPipeline {
         queue: QueueConfig,
     ) -> Result<(QueueSender, QueueReceiver), QueueError> {
         QueueSender::new(self, config, queue)
+    }
+}
+
+/// Segmentation windows a file's segmentation may run ahead of its embedding
+const CONCURRENT_WINDOW_QUEUE: usize = 64;
+
+/// The model settings one file's concurrent inference uses, read before the
+/// segmentation model moves to its own thread
+struct ConcurrentPlan {
+    layout: ChunkLayout,
+    embedding_path: EmbeddingPath,
+    batch_size: usize,
+    min_num_samples: usize,
+}
+
+impl ConcurrentPlan {
+    /// Embeds the windows segmentation sends for `audio` as they arrive
+    fn embed(
+        &self,
+        powerset: &PowersetMapping,
+        emb_model: &mut EmbeddingModel,
+        audio: &[f32],
+        windows: crossbeam_channel::Receiver<Array2<f32>>,
+    ) -> Result<ConcurrentEmbeddingResult, PipelineError> {
+        let runner = ConcurrentEmbeddingRunner {
+            powerset,
+            audio,
+            step_samples: self.layout.step_samples,
+            window_samples: self.layout.window_samples,
+            num_speakers: 3,
+        };
+        match self.embedding_path {
+            EmbeddingPath::MultiMask => {
+                runner.run_multi_mask(windows, emb_model, self.batch_size, self.min_num_samples)
+            }
+            EmbeddingPath::Split => {
+                runner.run_split(windows, emb_model, self.batch_size, self.min_num_samples)
+            }
+            EmbeddingPath::Masked => runner.run_masked(windows, emb_model, self.batch_size),
+        }
+    }
+
+    /// The inference artifacts of one file's embedded windows
+    fn artifacts(
+        &self,
+        result: ConcurrentEmbeddingResult,
+        inference_elapsed: std::time::Duration,
+    ) -> Result<InferenceArtifacts, PipelineError> {
+        let layout = self.layout.clone();
+        if result.is_empty() {
+            return Ok(InferenceArtifacts::empty_with_layout(layout));
+        }
+
+        let layout = layout.with_num_chunks(result.num_chunks);
+        debug!(
+            target: "speakrs::timing",
+            chunks = result.segmentations.shape()[0],
+            speakers = result.segmentations.shape()[2],
+            inference_ms = inference_elapsed.as_millis(),
+            embedding_path = ?self.embedding_path,
+            "Concurrent seg+emb complete"
+        );
+
+        InferenceArtifacts::try_new(
+            layout,
+            DecodedSegmentations(result.segmentations),
+            ChunkEmbeddings(result.embeddings),
+            #[cfg(feature = "_metrics")]
+            None,
+        )
     }
 }
 
@@ -519,14 +593,27 @@ impl<'a> PipelineRunner<'a> {
         self.run_ordered_stream(inputs, config)
     }
 
-    fn run_ordered_stream<E, A: AsRef<[f32]>, S: AsRef<str>>(
+    fn run_ordered_stream<E, A: AsRef<[f32]> + Send + Sync, S: AsRef<str>>(
         &mut self,
         files: impl IntoIterator<Item = Result<(S, A), E>>,
         config: &PipelineConfig,
     ) -> Result<Vec<BatchOutput>, BatchStreamError<E>> {
         let plda = self.plda;
+        // CUDA segmentation runs on its own stream, so the next file's can overlap
+        // this file's last embedding batches
+        let prefetch = matches!(
+            self.seg_model.mode(),
+            ExecutionMode::Cuda | ExecutionMode::CudaFast
+        ) && matches!(self.inference_path(), InferencePath::Concurrent);
         std::thread::scope(|scope| {
             let mut post = BatchPostProcessor::new(scope, plda, config)?;
+            if prefetch {
+                let run = self.run_prefetched_stream(files, &mut post);
+                // an earlier post-inference error takes precedence over a later input or inference error
+                let outputs = post.finish()?;
+                run?;
+                return Ok(outputs);
+            }
             let run = (|| {
                 let mut files = files.into_iter();
                 loop {
@@ -613,26 +700,8 @@ impl<'a> PipelineRunner<'a> {
         &mut self,
         audio: &[f32],
     ) -> Result<InferenceArtifacts, PipelineError> {
-        let layout = ChunkLayout::without_frame_extent(
-            self.seg_model.step_seconds(),
-            self.seg_model.step_samples(),
-            self.seg_model.window_samples(),
-        );
-        let concurrent_embedding_runner = ConcurrentEmbeddingRunner {
-            powerset: self.powerset,
-            audio,
-            step_samples: layout.step_samples,
-            window_samples: layout.window_samples,
-            num_speakers: 3,
-        };
-        let embedding_path = self.embedding_path();
-        let batch_size = match embedding_path {
-            EmbeddingPath::MultiMask => self.emb_model.multi_mask_batch_size(),
-            EmbeddingPath::Split => self.emb_model.split_primary_batch_size(),
-            EmbeddingPath::Masked => self.emb_model.primary_batch_size(),
-        };
-        let min_num_samples = self.emb_model.min_num_samples();
-        let (tx, rx) = crossbeam_channel::bounded::<Array2<f32>>(64);
+        let plan = self.concurrent_plan();
+        let (tx, rx) = crossbeam_channel::bounded::<Array2<f32>>(CONCURRENT_WINDOW_QUEUE);
 
         let inference_start = std::time::Instant::now();
         let use_parallel_seg = matches!(
@@ -653,23 +722,7 @@ impl<'a> PipelineRunner<'a> {
                 scope.spawn(|| self.seg_model.run_streaming(audio, tx))
             };
 
-            let embedding_result = match embedding_path {
-                EmbeddingPath::MultiMask => concurrent_embedding_runner.run_multi_mask(
-                    rx,
-                    self.emb_model,
-                    batch_size,
-                    min_num_samples,
-                ),
-                EmbeddingPath::Split => concurrent_embedding_runner.run_split(
-                    rx,
-                    self.emb_model,
-                    batch_size,
-                    min_num_samples,
-                ),
-                EmbeddingPath::Masked => {
-                    concurrent_embedding_runner.run_masked(rx, self.emb_model, batch_size)
-                }
-            };
+            let embedding_result = plan.embed(self.powerset, self.emb_model, audio, rx);
 
             let segmentation_result =
                 segmentation_handle
@@ -682,30 +735,27 @@ impl<'a> PipelineRunner<'a> {
         let inference_elapsed = inference_start.elapsed();
 
         segmentation_result??;
+        plan.artifacts(embedding_result?, inference_elapsed)
+    }
 
-        let concurrent_result = embedding_result?;
-        if concurrent_result.is_empty() {
-            return Ok(Self::empty_inference_artifacts(layout));
+    /// The per-file settings of concurrent inference, read from both models up front
+    fn concurrent_plan(&self) -> ConcurrentPlan {
+        let embedding_path = self.embedding_path();
+        let batch_size = match embedding_path {
+            EmbeddingPath::MultiMask => self.emb_model.multi_mask_batch_size(),
+            EmbeddingPath::Split => self.emb_model.split_primary_batch_size(),
+            EmbeddingPath::Masked => self.emb_model.primary_batch_size(),
+        };
+        ConcurrentPlan {
+            layout: ChunkLayout::without_frame_extent(
+                self.seg_model.step_seconds(),
+                self.seg_model.step_samples(),
+                self.seg_model.window_samples(),
+            ),
+            embedding_path,
+            batch_size,
+            min_num_samples: self.emb_model.min_num_samples(),
         }
-
-        let num_chunks = concurrent_result.num_chunks;
-        let layout = layout.with_num_chunks(num_chunks);
-        debug!(
-            target: "speakrs::timing",
-            chunks = concurrent_result.segmentations.shape()[0],
-            speakers = concurrent_result.segmentations.shape()[2],
-            inference_ms = inference_elapsed.as_millis(),
-            embedding_path = ?embedding_path,
-            "Concurrent seg+emb complete"
-        );
-
-        InferenceArtifacts::try_new(
-            layout,
-            DecodedSegmentations(concurrent_result.segmentations),
-            ChunkEmbeddings(concurrent_result.embeddings),
-            #[cfg(feature = "_metrics")]
-            None,
-        )
     }
 
     fn run_post_inference(
@@ -714,9 +764,5 @@ impl<'a> PipelineRunner<'a> {
         config: &PipelineConfig,
     ) -> Result<DiarizationResult, PipelineError> {
         post_inference(inference_artifacts, config, self.plda)
-    }
-
-    fn empty_inference_artifacts(layout: ChunkLayout) -> InferenceArtifacts {
-        InferenceArtifacts::empty_with_layout(layout)
     }
 }

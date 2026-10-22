@@ -17,8 +17,8 @@ use std::thread;
 
 use speakrs::inference::{CudaGraphs, CudaLstmAlgorithm, CudaMath, ExecutionMode, ModelLoadError};
 use speakrs::pipeline::{
-    DiarizationResult, OwnedDiarizationPipeline, PipelineBuilder, PipelineError,
-    QueuedDiarizationRequest, RuntimeConfig,
+    BatchStreamError, DiarizationResult, OwnedBatchInput, OwnedDiarizationPipeline,
+    PipelineBuilder, PipelineError, QueuedDiarizationRequest, RuntimeConfig,
 };
 
 mod support;
@@ -156,4 +156,79 @@ fn cuda_pipeline_runs_with_every_runtime_option() {
         let result = pipeline.run(&audio).unwrap();
         assert!(!turns(&result).is_empty(), "{label}: no speaker turns");
     }
+}
+
+/// Batches segment the next file while the current one embeds; outputs must still match
+/// independent runs byte for byte and keep input order, in both CUDA modes
+#[test]
+fn cuda_batch_stream_matches_sequential_runs() {
+    let test = "cuda_batch_stream_matches_sequential_runs";
+    let (audio, _) = load_wav_samples(&fixture_path("test.wav"));
+    // a short file between longer ones, so one file's segmentation ends early
+    let files = [
+        ("third", audio[..320_001].to_vec()),
+        ("short", audio[160_000..200_000].to_vec()),
+        ("first", audio[160_000..400_003].to_vec()),
+        ("second", audio[..400_007].to_vec()),
+    ];
+    for mode in [ExecutionMode::Cuda, ExecutionMode::CudaFast] {
+        let Some(mut pipeline) = pipeline(test, mode) else {
+            return;
+        };
+        let expected: Vec<_> = files
+            .iter()
+            .map(|(file_id, audio)| {
+                pipeline
+                    .run_with_file_id(audio, file_id)
+                    .unwrap()
+                    .rttm(file_id)
+            })
+            .collect();
+        for round in 0..2 {
+            let stream = files.iter().map(|(file_id, audio)| {
+                Ok::<_, std::convert::Infallible>(OwnedBatchInput {
+                    file_id: (*file_id).to_owned(),
+                    audio: audio.clone(),
+                })
+            });
+            let outputs = pipeline.run_batch_stream(stream).unwrap();
+            assert_eq!(outputs.len(), files.len());
+            for ((output, (file_id, _)), expected) in outputs.iter().zip(&files).zip(&expected) {
+                assert_eq!(output.file_id, *file_id, "{mode} round {round}");
+                assert_eq!(
+                    output.result.rttm(file_id).as_bytes(),
+                    expected.as_bytes(),
+                    "{mode} round {round}: {file_id}"
+                );
+            }
+        }
+    }
+}
+
+/// An input error stops the stream after the file before it, without reading further
+/// inputs, and the pipeline still runs afterwards
+#[test]
+fn cuda_stream_failure_returns_no_partial_batch() {
+    let test = "cuda_stream_failure_returns_no_partial_batch";
+    let (audio, _) = load_wav_samples(&fixture_path("test.wav"));
+    let audio = audio[..320_001].to_vec();
+    let Some(mut pipeline) = pipeline(test, ExecutionMode::Cuda) else {
+        return;
+    };
+    let expected = turns(&pipeline.run(&audio).unwrap());
+    let mut consumed = 0;
+    let source = [
+        Ok(OwnedBatchInput {
+            file_id: "good".to_owned(),
+            audio: audio.clone(),
+        }),
+        Err("decode failure"),
+        Err("must not consume this file"),
+    ]
+    .into_iter()
+    .inspect(|_| consumed += 1);
+    let error = pipeline.run_batch_stream(source).err().unwrap();
+    assert!(matches!(error, BatchStreamError::Input("decode failure")));
+    assert_eq!(consumed, 2);
+    assert_eq!(turns(&pipeline.run(&audio).unwrap()), expected);
 }
