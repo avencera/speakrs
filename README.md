@@ -356,7 +356,7 @@ VoxConverse subset, and their times include process start-up and model loading:
 | RTX 4090 | 1453x | 1438x |
 
 Every run had 16 CPU cores, and each value is the median of 3 runs. The RTX 4060
-Ti and RTX 5060 Ti also have tuned kernel profiles. In an earlier version, on the
+Ti, RTX 5060 Ti and RTX 5090 also have tuned kernel profiles. In an earlier version, on the
 same subset, speakrs's own kernels were 1.4x to 2.0x faster than cuDNN and cuBLAS
 on the RTX 4090, L4, A10 and H100. See [benchmarks/](https://github.com/avencera/speakrs/tree/master/benchmarks)
 for full results across all datasets.
