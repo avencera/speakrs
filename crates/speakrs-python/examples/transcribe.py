@@ -54,6 +54,23 @@ def default_mode() -> str:
     return "CPU"
 
 
+def load_pipeline(mode: str | None) -> speakrs.Pipeline:
+    if mode is not None:
+        return speakrs.Pipeline.from_pretrained(mode)
+
+    guess = default_mode()
+    try:
+        return speakrs.Pipeline.from_pretrained(guess)
+    except speakrs.SpeakrsError as error:
+        # a visible GPU can still be older than speakrs supports (Turing), so an
+        # automatic CUDA pick falls back to the CPU instead of failing
+        if guess != "CUDA" or error.category != "model_load":
+            raise
+
+        print(f"CUDA unavailable, using CPU: {error}", file=sys.stderr)
+        return speakrs.Pipeline.from_pretrained("CPU")
+
+
 def timed(label: str, step: Callable[..., T], *args: object) -> T:
     started = time.perf_counter()
     result = step(*args)
@@ -66,10 +83,10 @@ def diarize(pipeline: speakrs.Pipeline, path: str) -> list[speakrs.Segment]:
     return pipeline.diarize_file(path).exclusive_segments
 
 
-def whisper_device(mode: str) -> str:
+def whisper_device(pipeline: speakrs.Pipeline) -> str:
     # whisper follows the speakrs mode: its GPU backend only finds the pip CUDA
     # libraries after a speakrs CUDA pipeline has loaded them
-    return "cuda" if mode.lower().replace("-", "").startswith("cuda") else "cpu"
+    return "cuda" if pipeline.mode.value.startswith("CUDA") else "cpu"
 
 
 def transcribe(
@@ -154,7 +171,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("audio", help="WAV, FLAC, MP3, Ogg Vorbis, or M4A")
     parser.add_argument(
-        "--mode", default=default_mode(), help="speakrs mode (default: %(default)s)"
+        "--mode",
+        help="speakrs mode (default: CoreML on macOS, CUDA with a supported "
+        "NVIDIA GPU, otherwise CPU)",
     )
     parser.add_argument(
         "--whisper-model",
@@ -167,12 +186,12 @@ def main() -> None:
     # load speakrs before whisper starts: in CUDA mode it preloads the cuDNN and
     # cuBLAS that the speakrs[cuda] extra installs, and whisper's GPU backend
     # cannot find those pip libraries on its own
-    pipeline = speakrs.Pipeline.from_pretrained(args.mode)
+    pipeline = load_pipeline(args.mode)
 
     # speakrs releases the GIL while it runs, so diarization and transcription overlap
     with ThreadPoolExecutor(max_workers=2) as pool:
         diarization = pool.submit(
-            timed, f"speakrs ({args.mode})", diarize, pipeline, args.audio
+            timed, f"speakrs ({pipeline.mode.value})", diarize, pipeline, args.audio
         )
         transcription = pool.submit(
             timed,
@@ -180,7 +199,7 @@ def main() -> None:
             transcribe,
             args.audio,
             args.whisper_model,
-            whisper_device(args.mode),
+            whisper_device(pipeline),
         )
         segments, words = diarization.result(), transcription.result()
 

@@ -75,8 +75,9 @@ uv run https://raw.githubusercontent.com/avencera/speakrs/master/crates/speakrs-
 speakrs diarizes a 17-minute meeting in 0.6 seconds on an RTX 5090 and in
 under 5 seconds on an M4 Pro in CoreML mode, so whisper takes almost all of
 the time. The script picks CoreML
-on macOS and CUDA on Linux when it finds an NVIDIA GPU; `--mode` overrides
-that, and `--whisper-model turbo` gives a better transcript.
+on macOS and CUDA on Linux when it finds an NVIDIA GPU, falling back to the
+CPU when that GPU is older than Turing; `--mode` overrides that, and
+`--whisper-model turbo` gives a better transcript.
 
 ## CUDA
 
