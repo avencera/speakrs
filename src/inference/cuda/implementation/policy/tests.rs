@@ -627,7 +627,7 @@ fn turing_default_changes_only_tf32_3x3_trunk_layers_after_the_stem() {
 }
 
 #[test]
-fn rtx5090_fp16_covers_only_its_point_and_the_early_trunk() {
+fn rtx5090_fp16_covers_only_its_point_and_its_measured_trunk_batches() {
     use crate::inference::cuda::candidate::{
         ConfigPin, WideconvAlgorithm, WideconvFp16Tiles, WideconvPin,
     };
@@ -653,18 +653,25 @@ fn rtx5090_fp16_covers_only_its_point_and_the_early_trunk() {
         assert_eq!(Recipe::fp16_device(&device, PtxTier::Sm80), None, "{name}");
     }
 
+    // each trunk shape starts on FP16 tiles at its measured batch class
     for batch in [1, 4, 8, 16, 32] {
-        for name in [
-            "resnet.layer1.0.conv1",
-            "resnet.layer1.2.conv2",
-            "resnet.layer2.0.conv2",
-            "resnet.layer2.3.conv1",
+        for (name, from) in [
+            ("resnet.layer1.0.conv1", 1),
+            ("resnet.layer1.2.conv2", 1),
+            ("resnet.layer2.0.conv1", 1),
+            ("resnet.layer2.0.conv2", 4),
+            ("resnet.layer2.3.conv1", 4),
+            ("resnet.layer3.0.conv1", 4),
+            ("resnet.layer3.0.conv2", 8),
+            ("resnet.layer3.5.conv2", 8),
+            ("resnet.layer4.0.conv1", 8),
+            ("resnet.layer4.0.conv2", 16),
+            ("resnet.layer4.2.conv2", 16),
         ] {
             let boundary = BoundaryId::named(name);
             let pin =
                 Recipe::Rtx5090.fixed_pin(boundary, batch, CudaMath::Tf32, Fp16Policy::Allowed);
-            let expected = name.starts_with("resnet.layer1.") || batch >= 4;
-            assert_eq!(pin.is_some(), expected, "{name} b{batch}");
+            assert_eq!(pin.is_some(), batch >= from, "{name} b{batch}");
             if let Some(ConfigPin::Wideconv(WideconvPin::Configured(config))) = pin {
                 assert_eq!(
                     config.algorithm,
@@ -683,11 +690,7 @@ fn rtx5090_fp16_covers_only_its_point_and_the_early_trunk() {
         }
         for name in [
             "resnet.conv1",
-            "resnet.layer2.0.conv1",
-            "resnet.layer3.0.conv1",
-            "resnet.layer3.1.conv1",
-            "resnet.layer4.0.conv1",
-            "resnet.layer4.2.conv2",
+            "resnet.layer2.0.shortcut.0",
             "resnet.layer4.0.shortcut.0",
         ] {
             assert_eq!(

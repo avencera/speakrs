@@ -174,7 +174,7 @@ impl Recipe {
                 "fc55d67 boundary measurements: fixed driver pins at embedding b1/b4/b8/b16/b32, staged one-product C128/C256 and 8-window LSTM tiles; FP32 segmentation and TF32 embedding"
             }
             Self::Rtx5090 => {
-                "tune at f444dd4: FP16 C32 at every batch and C64 from batch 4, 1.07-2.3x the TF32 rule per layer; dev216 39.0 to 35.0 s, DER 7.0123 unchanged, 3 RTTMs differ; FP32 segmentation and TF32 embedding"
+                "tune with the sm120 m16n8k16 FP16 kernels: FP16 C32 and C32 stride 2 at every batch, C64 from batch 4, C128 from batch 8, C256 from batch 16; dev216 Cuda 31.0 to 27.3 s, DER 7.0123 to 7.0112, 5 RTTMs differ; FP32 segmentation and TF32 embedding"
             }
             Self::TeslaT4 => {
                 "FP16 stride-1 trunk at every batch; 216-file dev DER 7.0125 to 7.0118; 10-file driver 154.5x versus FP32 driver 92.2x; FP32 segmentation and TF32 embedding"
@@ -266,8 +266,9 @@ impl Recipe {
             // layerwins v4090b: per-layer trunk timing only; these pins still use
             // the portable trunk accuracy policy, with no dense-head exception
             Self::Rtx4090 => WideconvPin::measured_rtx4090_fp16(boundary.name(), batch, math),
-            // tune at f444dd4: dev216 DER 7.0123 unchanged in Cuda mode with 3 of 216 RTTMs
-            // changed, CudaFast 7.3674 to 7.3654; these pins use the portable trunk policy
+            // dev216 Cuda DER 7.0123 to 7.0112 with 5 of 216 RTTMs changed, the worst file
+            // by +0.038 points; CudaFast DER 7.3674 unchanged with one RTTM changed. These
+            // pins use the portable trunk policy
             Self::Rtx5090 => WideconvPin::measured_rtx5090_fp16(boundary.name(), batch, math),
             Self::A100Pcie | Self::A100Sxm4 => {
                 // layerwins a100-e4 and pcie-e1: subset/hard/test30 identical RTTMs

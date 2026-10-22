@@ -698,24 +698,34 @@ impl Pin {
     }
 
     /// Wide FP16 tiles in TF32 mode at the RTX 5090 points where they beat the TF32
-    /// early trunk: the same-channel 32-channel layers at every batch and the
-    /// same-channel 64-channel layers from batch 4
+    /// kernels: the 32-channel layers, stride 2 included, at every batch, the 64-channel
+    /// ones from batch 4, the 128-channel ones from batch 8 and the same-channel
+    /// 256-channel ones from batch 16
     ///
-    /// A tune at f444dd4 timed the 32-channel layers 1.25-2.3x faster than the TF32 rule
-    /// at every batch, and the 64-channel ones 1.07-1.4x faster from batch 4 with a tie
-    /// at batch 1. The stride-2 layers tie or win by under 10%, and the 128- and
-    /// 256-channel layers lose to TF32 Winograd at batch 32, so they keep the TF32 rule
+    /// The thresholds come from a tune with the sm120 FP16 kernels, which pair taps into
+    /// m16n8k16 products. At batch 32 FP16 tiles ran the 32- and 64-channel layers
+    /// 1.6-2.5x faster than the TF32 rule, the 128-channel layers 1.15-1.35x faster than
+    /// TF32 Winograd, the 256-channel ones 1.1-1.15x, and the stride-2 layers 1.07-1.5x.
+    /// One batch class below each threshold the two stay within about 10% or the TF32
+    /// kernels win some layers of the shape, and at batch 1 the TF32 kernels win every
+    /// layer of 64 or more input channels
     pub(crate) fn measured_rtx5090_fp16(name: &str, batch: usize, math: CudaMath) -> Option<Self> {
         if math != CudaMath::Tf32 {
             return None;
         }
 
         let shape = Shape::of(model_conv(name, batch, math).ok()?).ok()?;
-        match shape {
-            Shape::C32 => {}
-            Shape::C64 if RTX5090_FP16_C64_BATCHES.contains(&batch) => {}
+        let from = match shape {
+            Shape::C32 | Shape::C32Stride2 => 1,
+            Shape::C64 | Shape::C64Stride2 => RTX5090_FP16_C64_BATCHES[0],
+            Shape::C128 | Shape::C128Stride2 => 8,
+            Shape::C256 => 16,
             _ => return None,
+        };
+        if batch < from {
+            return None;
         }
+
         shape.fp16_entry(Fp16Tiles::Wide)?;
         Some(Self::Configured(Config {
             algorithm: Algorithm::Fp16(Fp16Tiles::Wide),
@@ -2548,9 +2558,9 @@ const A100_FP16_COVERAGE: [CoverageEntry; 3] = [
     RTX4060TI_FP16_COVERAGE[2],
 ];
 
-/// The 5090 FP16 recipe adds the same-channel 32-channel layers at every batch and the
-/// 64-channel ones from batch 4
-const RTX5090_FP16_COVERAGE: [CoverageEntry; 3] = [
+/// The 5090 FP16 recipe adds the 32-channel layers, stride 2 included, at every batch
+/// and the same-channel 64-channel ones from batch 4
+const RTX5090_FP16_COVERAGE: [CoverageEntry; 4] = [
     RTX4060TI_FP16_COVERAGE[0],
     CoverageEntry {
         layers: &C64_LAYERS,
@@ -2558,6 +2568,7 @@ const RTX5090_FP16_COVERAGE: [CoverageEntry; 3] = [
         maths: Maths::Only(&[CudaMath::Tf32]),
     },
     RTX4060TI_FP16_COVERAGE[2],
+    RTX4090_FP16_COVERAGE[3],
 ];
 
 /// The 4090 FP16 recipe also runs the 32->64 stride-2 layer on FP16 tiles

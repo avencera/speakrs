@@ -61,10 +61,12 @@ name and SM count.
   TF32 embedding.
 - **RTX 4090:** has a measured recipe.
 - **RTX 5090 (cc 12.0, 170 SMs):** with FP32 segmentation and TF32 embedding, uses
-  FP16 same-channel trunk kernels for C32 at every batch and for C64 from batch 4.
-  The other trunk layers keep TF32 kernels, which are faster on this device at
-  batch 32. On voxconverse-dev this cut the Cuda run from 39.0 s to 35.0 s with DER
-  unchanged at 7.01%.
+  FP16 trunk kernels for the 32-channel layers at every batch, the 64-channel ones
+  from batch 4, the 128-channel ones from batch 8 and the 256-channel ones from
+  batch 16, stride-2 layers included. It loads its own sm120 build of these
+  kernels, which does twice the FP16 work per tensor instruction; other cc 12.x
+  GPUs keep the sm80 build. On voxconverse-dev the Cuda run takes 27.3 s at 7.01%
+  DER. Layers are grouped by input channels.
 
 Other devices use their kernel defaults. Measured speed evidence is reported,
 but isn't required to select a kernel. GPU-specific builds stay driver-only and
