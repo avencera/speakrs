@@ -1597,3 +1597,47 @@ fn broad_evidence_rejects_weak_or_single_architecture_claims() {
         );
     }
 }
+
+#[cfg(feature = "cuda-sm120")]
+#[test]
+fn only_the_rtx5090_binds_the_sm120_wideconv_variant() {
+    let area = KernelModule::Wideconv;
+    let shipped = area
+        .variants()
+        .driver_request(area, PtxTier::Sm120, BLACKWELL)
+        .unwrap();
+    assert_eq!(shipped.tier(), PtxTier::Sm120);
+
+    // the binding pins the shipped sm120 cubin, so a rebuild must update its hash
+    let rtx5090 = Builder::new(BLACKWELL)
+        .multiprocessors(170)
+        .name("NVIDIA GeForce RTX 5090")
+        .build();
+    let bound = super::production_module(area, &rtx5090, PtxTier::Sm120, area.variants());
+    assert_eq!(bound.unwrap(), Some(shipped));
+    assert_eq!(
+        super::production_tier(area, &rtx5090, PtxTier::Sm90),
+        Some(PtxTier::Sm80)
+    );
+
+    // every other cc 12.0 point, including a 5090 name with another SM count, keeps sm80
+    for (sms, name) in [
+        (36, "NVIDIA GeForce RTX 5060 Ti"),
+        (84, "NVIDIA GeForce RTX 5080"),
+        (84, "NVIDIA GeForce RTX 5090"),
+    ] {
+        let device = Builder::new(BLACKWELL)
+            .multiprocessors(sms)
+            .name(name)
+            .build();
+        let request = super::production_module(area, &device, PtxTier::Sm120, area.variants())
+            .unwrap()
+            .unwrap();
+        assert_eq!(request.tier(), PtxTier::Sm80, "{name} {sms}");
+        assert_eq!(
+            super::production_tier(area, &device, PtxTier::Sm120),
+            Some(PtxTier::Sm80),
+            "{name} {sms}"
+        );
+    }
+}

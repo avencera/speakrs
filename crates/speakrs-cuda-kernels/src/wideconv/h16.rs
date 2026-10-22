@@ -3,7 +3,8 @@
 //! their FP32 rate and that have no TF32 tensor cores
 //!
 //! Both operands are scaled by 2^10 and rounded to FP16 with `cvt.rn`, which keeps FP16
-//! subnormals, and `mma.sync` m16n8k8 accumulates the products in FP32; the epilogue
+//! subnormals, and `mma.sync` accumulates the products in FP32, as m16n8k8 products or,
+//! on the sm120 tier, m16n8k16 products that pair two taps; the epilogue
 //! removes the 2^20 product scale before the residual and bias. The scale is a power of
 //! two, so it changes only which values fall below the FP16 subnormal range. Scaled
 //! operands saturate at the largest finite FP16 value instead of overflowing to
@@ -374,6 +375,61 @@ fn mma(c: [f32; 4], a: [u32; 2], b: u32) -> [f32; 4] {
     [c0, c1, c2, c3]
 }
 
+/// Whether tap `tap` of a chunk only holds its fragments for the next tap's product
+///
+/// m16n8k16 runs at the m16n8k8 instruction rate, so it does twice the work per tensor
+/// issue: on the sm120 tier an even tap's fragments wait in a held pair and enter the
+/// next tap's product as its upper eight input channels, so a chunk's nine taps take four
+/// k16 products and one k8 product. Each k16 product sums the same FP16 products as the
+/// two k8 products it replaces, in a different FP32 order. Lower tiers keep one k8
+/// product per tap
+#[cfg(feature = "tier-sm120")]
+#[inline(always)]
+fn holds(tap: usize) -> bool {
+    tap % 2 == 0 && tap < 8
+}
+
+/// Adds one product of tap `tap` to `c`, pairing an odd tap with the held fragments of
+/// the tap before it; the tap is a constant in the unrolled tap loops, so the branches
+/// fold away
+#[cfg(feature = "tier-sm120")]
+#[inline(always)]
+fn tap_product(c: [f32; 4], tap: usize, held_a: [u32; 2], a: [u32; 2], held_b: u32, b: u32) -> [f32; 4] {
+    if tap % 2 == 1 {
+        mma_pair(c, held_a, a, held_b, b)
+    } else if holds(tap) {
+        c
+    } else {
+        mma(c, a, b)
+    }
+}
+
+/// Accumulates one m16n8k16 FP16 product into `c` in FP32: `lo` and `b_lo` cover input
+/// channels 0..8 and `hi` and `b_hi` channels 8..16, in the m16n8k8 fragment layouts
+#[cfg(feature = "tier-sm120")]
+#[inline(always)]
+fn mma_pair(c: [f32; 4], lo: [u32; 2], hi: [u32; 2], b_lo: u32, b_hi: u32) -> [f32; 4] {
+    let [mut c0, mut c1, mut c2, mut c3] = c;
+    // safety: a convergent warp-wide register operation; every caller runs it with all
+    // 32 lanes active
+    unsafe {
+        ptx_asm!(
+            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};",
+            inout("+f") c0,
+            inout("+f") c1,
+            inout("+f") c2,
+            inout("+f") c3,
+            in("r") lo[0],
+            in("r") lo[1],
+            in("r") hi[0],
+            in("r") hi[1],
+            in("r") b_lo,
+            in("r") b_hi,
+        );
+    }
+    [c0, c1, c2, c3]
+}
+
 /// Passes `value` through a side-effecting register move, so staging indices derived
 /// from it are recomputed in every pipeline iteration instead of held in registers
 #[inline(always)]
@@ -618,6 +674,8 @@ macro_rules! h16_conv3x3 {
                         }
                     }
                     let stage = smem + chunk % 2 * STAGE_BYTES + lane_row;
+                    #[cfg(feature = "tier-sm120")]
+                    let mut held = ([[0u32; 2]; MT], [0u32; NT]);
                     let mut tap = 0;
                     #[unroll]
                     while tap < 9 {
@@ -643,16 +701,37 @@ macro_rules! h16_conv3x3 {
                             b[4 * q + 3] = quad[3];
                             q += 1;
                         }
-                        let mut j = 0;
-                        #[unroll]
-                        while j < NT {
-                            let mut i = 0;
+                        #[cfg(not(feature = "tier-sm120"))]
+                        {
+                            let mut j = 0;
                             #[unroll]
-                            while i < MT {
-                                acc[i][j] = mma(acc[i][j], ring[tap % 3][i], b[j]);
-                                i += 1;
+                            while j < NT {
+                                let mut i = 0;
+                                #[unroll]
+                                while i < MT {
+                                    acc[i][j] = mma(acc[i][j], ring[tap % 3][i], b[j]);
+                                    i += 1;
+                                }
+                                j += 1;
                             }
-                            j += 1;
+                        }
+                        #[cfg(feature = "tier-sm120")]
+                        {
+                            let mut j = 0;
+                            #[unroll]
+                            while j < NT {
+                                let mut i = 0;
+                                #[unroll]
+                                while i < MT {
+                                    let (a, c) = (ring[tap % 3][i], acc[i][j]);
+                                    acc[i][j] = tap_product(c, tap, held.0[i], a, held.1[j], b[j]);
+                                    i += 1;
+                                }
+                                j += 1;
+                            }
+                            if holds(tap) {
+                                held = (ring[tap % 3], b);
+                            }
                         }
                         tap += 1;
                     }
@@ -1681,6 +1760,8 @@ macro_rules! h16_conv3x3_s2 {
                 if i_stage > 0 {
                     let chunk = i_stage - 1;
                     let stage = smem + chunk % 2 * STAGE_BYTES + lane_row;
+                    #[cfg(feature = "tier-sm120")]
+                    let mut held = ([[0u32; 2]; MT], [0u32; NT]);
                     let mut tap = 0;
                     #[unroll]
                     while tap < 9 {
@@ -1709,16 +1790,37 @@ macro_rules! h16_conv3x3_s2 {
                             b[4 * q + 3] = quad[3];
                             q += 1;
                         }
-                        let mut j = 0;
-                        #[unroll]
-                        while j < NT {
-                            let mut i = 0;
+                        #[cfg(not(feature = "tier-sm120"))]
+                        {
+                            let mut j = 0;
                             #[unroll]
-                            while i < MT {
-                                acc[i][j] = mma(acc[i][j], ring[tap % 3][i], b[j]);
-                                i += 1;
+                            while j < NT {
+                                let mut i = 0;
+                                #[unroll]
+                                while i < MT {
+                                    acc[i][j] = mma(acc[i][j], ring[tap % 3][i], b[j]);
+                                    i += 1;
+                                }
+                                j += 1;
                             }
-                            j += 1;
+                        }
+                        #[cfg(feature = "tier-sm120")]
+                        {
+                            let mut j = 0;
+                            #[unroll]
+                            while j < NT {
+                                let mut i = 0;
+                                #[unroll]
+                                while i < MT {
+                                    let (a, c) = (ring[tap % 3][i], acc[i][j]);
+                                    acc[i][j] = tap_product(c, tap, held.0[i], a, held.1[j], b[j]);
+                                    i += 1;
+                                }
+                                j += 1;
+                            }
+                            if holds(tap) {
+                                held = (ring[tap % 3], b);
+                            }
                         }
                         tap += 1;
                     }

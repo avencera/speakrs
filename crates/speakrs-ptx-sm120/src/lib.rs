@@ -16,10 +16,12 @@ macro_rules! files {
 
 const PTX: &[(&str, &str)] = files! { include_str;
     "lstmproj.sm120.ptx",
+    "wideconv.sm120.ptx",
 };
 
 const CUBINS: &[(&str, &[u8])] = files! { include_bytes;
     "lstmproj.sm120.sm_120.cubin",
+    "wideconv.sm120.sm_120.cubin",
 };
 
 /// The PTX at `path`, such as `ptx/fbank.sm75.ptx`, if this tier ships it

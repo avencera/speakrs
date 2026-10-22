@@ -111,6 +111,9 @@ pub struct Area {
     /// A production binding pins the baseline's exact bytes, so every target embeds it
     /// and higher tiers may export entries the baseline lacks instead of stubs
     pinned_baseline: bool,
+    /// A production binding selects the top tier on one measured device only, so that
+    /// tier's targets also embed the tier below it for every other device
+    bound_top: bool,
 }
 
 impl Area {
@@ -133,6 +136,7 @@ impl Area {
             name,
             tiers,
             pinned_baseline: false,
+            bound_top: false,
         }
     }
 
@@ -142,6 +146,24 @@ impl Area {
             pinned_baseline: true,
             ..Self::new(name, tiers)
         }
+    }
+
+    /// As [`Area::new`], for an area whose top tier only a device binding selects
+    const fn bound_top(name: &'static str, tiers: &'static [Tier]) -> Self {
+        assert!(tiers.len() > 1, "a bound top tier needs a tier below it");
+        Self {
+            bound_top: true,
+            ..Self::new(name, tiers)
+        }
+    }
+
+    /// Whether `variant` is embedded for the targets of `tier`
+    fn embeds(self, variant: Tier, tier: Tier) -> bool {
+        let newest = self.tiers.iter().rev().find(|shipped| **shipped <= tier);
+        let below_top = self.bound_top.then(|| self.tiers[self.tiers.len() - 2]);
+        (self.pinned_baseline && variant == Tier::BASELINE)
+            || newest == Some(&variant)
+            || (below_top == Some(variant) && tier >= variant)
     }
 
     fn variants(self) -> impl Iterator<Item = Variant> {
@@ -173,8 +195,10 @@ pub const AREAS: &[Area] = &[
     // the driver-only LSTM stack; sm80 adds TF32 tensor projections, and sm120 is the
     // same source built for the newest target
     Area::new("lstmproj", &[Tier::Sm75, Tier::Sm80, Tier::Sm120]),
-    // the sm80 variant adds the tensor-core kernels; sm75 traps in those entries
-    Area::new("wideconv", &[Tier::Sm75, Tier::Sm80]),
+    // the sm80 variant adds the tensor-core kernels; sm75 traps in those entries. sm120
+    // pairs the FP16 trunk kernels' taps into m16n8k16 products, and only the RTX 5090
+    // binding selects it
+    Area::bound_top("wideconv", &[Tier::Sm75, Tier::Sm80, Tier::Sm120]),
 ];
 
 /// One PTX file: an area built for one tier
@@ -985,11 +1009,7 @@ fn host_embed_source_problems(source: &str) -> Vec<String> {
                 // each GPU tier uses the newest variant that this area ships
                 let features = [Tier::Sm75, Tier::Sm80, Tier::Sm90, Tier::Sm120]
                     .into_iter()
-                    .filter(|tier| {
-                        (area.pinned_baseline && variant.tier == Tier::BASELINE)
-                            || area.tiers.iter().rev().find(|shipped| **shipped <= *tier)
-                                == Some(&variant.tier)
-                    })
+                    .filter(|tier| area.embeds(variant.tier, *tier))
                     .map(Tier::host_feature)
                     .collect();
                 (variant.file_name(), features)
@@ -1666,16 +1686,7 @@ mod tests {
             .map(|variant| {
                 let mask = [Tier::Sm75, Tier::Sm80, Tier::Sm90, Tier::Sm120]
                     .into_iter()
-                    .filter(|tier| {
-                        (variant.area.pinned_baseline && variant.tier == Tier::BASELINE)
-                            || variant
-                                .area
-                                .tiers
-                                .iter()
-                                .rev()
-                                .find(|shipped| **shipped <= *tier)
-                                == Some(&variant.tier)
-                    })
+                    .filter(|tier| variant.area.embeds(variant.tier, *tier))
                     .map(|tier| format!("{:?}", tier.host_feature()))
                     .collect::<Vec<_>>()
                     .join(", ");

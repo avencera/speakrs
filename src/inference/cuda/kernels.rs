@@ -493,13 +493,15 @@ impl KernelModule {
                     "ptx/wideconv.sm75",
                     [75, 80, 86, 89, 90, 120]
                 ),
+                // other cc 12.x devices keep this variant in sm120 builds; only the
+                // RTX 5090 binds the sm120 one
                 sm80: tier_ptx!(
                     ["cuda-sm80", "cuda-sm90", "cuda-sm120"],
                     "ptx/wideconv.sm80",
                     [80, 86, 89, 90, 120]
                 ),
                 sm90: None,
-                sm120: None,
+                sm120: tier_ptx!(["cuda-sm120"], "ptx/wideconv.sm120", [120]),
             },
         }
     }

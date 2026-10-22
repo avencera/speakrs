@@ -19,6 +19,7 @@ mod production {
     pub(super) mod lstm;
     pub(super) mod resnet;
     pub(super) mod sincnet;
+    pub(super) mod wideconv;
 
     use super::{RecordHash, SpeedEvidence, SpeedScope, SpeedStatus, TupleProof};
     use crate::inference::cuda::candidate::ConfigPin;
@@ -174,7 +175,8 @@ pub(crate) enum Selected {
 const PRODUCTION: &[Binding] = &[production::lstm::BINDING, production::sincnet::BINDING];
 
 /// Measured complete ports fix artifacts without fabricating qualification records
-const MEASURED_MODULES: &[ModuleBinding] = &[production::resnet::BINDING];
+const MEASURED_MODULES: &[ModuleBinding] =
+    &[production::resnet::BINDING, production::wideconv::BINDING];
 
 // always-on areas retain the artifact policy used before cubins were shipped
 const ALWAYS_ON: &[KernelModule] = &[
@@ -215,7 +217,20 @@ pub(crate) fn production_module(
     variants: AreaPtx,
 ) -> Result<Option<ModuleRequest>, CudaError> {
     let qualified = qualified_module(area, device, limit, variants)?;
-    Ok(qualified.or_else(|| variants.driver_request(area, limit, device.capability())))
+    Ok(qualified
+        .or_else(|| variants.driver_request(area, unbound_limit(area, limit), device.capability())))
+}
+
+/// The highest tier an area loads without a module binding
+///
+/// The wideconv sm120 variant is measured only on the device that binds it; the sm120
+/// build compiles every wideconv kernel differently, so other devices keep the sm80
+/// variant
+fn unbound_limit(area: KernelModule, limit: PtxTier) -> PtxTier {
+    match area {
+        KernelModule::Wideconv => limit.min(PtxTier::Sm90),
+        _ => limit,
+    }
 }
 
 /// Bound artifacts and the always-on baseline, independent of complete port fallback
@@ -257,7 +272,10 @@ fn production_tier(
     }
     bound_production_module(area, device, limit)
         .map(ModuleRequest::tier)
-        .or_else(|| area.variants().runnable_tier(limit, device.capability()))
+        .or_else(|| {
+            area.variants()
+                .runnable_tier(unbound_limit(area, limit), device.capability())
+        })
 }
 
 fn bound_production_module(
