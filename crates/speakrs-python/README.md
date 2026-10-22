@@ -52,6 +52,32 @@ See [API.md](https://github.com/avencera/speakrs/blob/master/crates/speakrs-pyth
 for the full API: the queue, async methods, configuration, progress events,
 cancellation, and error categories.
 
+## Example: a transcript with speakers
+
+[`examples/transcribe.py`](https://github.com/avencera/speakrs/blob/master/crates/speakrs-python/examples/transcribe.py)
+combines speakrs with [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
+to write a transcript that says who said what. It runs diarization and
+transcription at the same time and gives each word to the speaker talking
+at that moment:
+
+```sh
+uv run transcribe.py meeting.mp3
+```
+
+```
+[06:31] Speaker 2: Crocodile?
+
+[06:34] Speaker 5: Yeah, it can be a crocodile. It can be a crocodile. Firstly, it was an attempt at a T-rex, and then it sort of changed into a pelican, but it can be a crocodile.
+
+[06:59] Speaker 1: That's lovely.
+```
+
+speakrs diarizes a 17-minute meeting in 0.6 seconds on an RTX 5090 and in
+under 5 seconds on an M4 Pro in CoreML mode, so whisper takes almost all of
+the time. The script picks CoreML
+on macOS and CUDA on Linux when it finds an NVIDIA GPU; `--mode` overrides
+that, and `--whisper-model turbo` gives a better transcript.
+
 ## CUDA
 
 The Linux wheel includes the CUDA backend. It needs an NVIDIA driver and a
