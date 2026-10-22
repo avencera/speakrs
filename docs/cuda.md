@@ -60,6 +60,11 @@ name and SM count.
 - **A100 PCIe-40GB and SXM4-40GB (cc 8.0, 108 SMs):** use FP32 segmentation and
   TF32 embedding.
 - **RTX 4090:** has a measured recipe.
+- **RTX 5090 (cc 12.0, 170 SMs):** with FP32 segmentation and TF32 embedding, uses
+  FP16 same-channel trunk kernels for C32 at every batch and for C64 from batch 4.
+  The other trunk layers keep TF32 kernels, which are faster on this device at
+  batch 32. On voxconverse-dev this cut the Cuda run from 39.0 s to 35.0 s with DER
+  unchanged at 7.01%.
 
 Other devices use their kernel defaults. Measured speed evidence is reported,
 but isn't required to select a kernel. GPU-specific builds stay driver-only and

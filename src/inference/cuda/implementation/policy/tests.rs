@@ -625,3 +625,76 @@ fn turing_default_changes_only_tf32_3x3_trunk_layers_after_the_stem() {
         );
     }
 }
+
+#[test]
+fn rtx5090_fp16_covers_only_its_point_and_the_early_trunk() {
+    use crate::inference::cuda::candidate::{
+        ConfigPin, WideconvAlgorithm, WideconvFp16Tiles, WideconvPin,
+    };
+    let rtx5090 = Builder::new(ComputeCapability::new(12, 0))
+        .multiprocessors(170)
+        .name("NVIDIA GeForce RTX 5090")
+        .build();
+    assert_eq!(
+        Recipe::fp16_device(&rtx5090, PtxTier::Sm80),
+        Some(Recipe::Rtx5090)
+    );
+    assert_eq!(Recipe::fp16_device(&rtx5090, PtxTier::Sm75), None);
+    // other Blackwell points, including a 5090 name with another SM count, keep their paths
+    for (sms, name) in [
+        (36, "NVIDIA GeForce RTX 5060 Ti"),
+        (170, "NVIDIA GeForce RTX 5080"),
+        (84, "NVIDIA GeForce RTX 5090"),
+    ] {
+        let device = Builder::new(ComputeCapability::new(12, 0))
+            .multiprocessors(sms)
+            .name(name)
+            .build();
+        assert_eq!(Recipe::fp16_device(&device, PtxTier::Sm80), None, "{name}");
+    }
+
+    for batch in [1, 4, 8, 16, 32] {
+        for name in [
+            "resnet.layer1.0.conv1",
+            "resnet.layer1.2.conv2",
+            "resnet.layer2.0.conv2",
+            "resnet.layer2.3.conv1",
+        ] {
+            let boundary = BoundaryId::named(name);
+            let pin =
+                Recipe::Rtx5090.fixed_pin(boundary, batch, CudaMath::Tf32, Fp16Policy::Allowed);
+            let expected = name.starts_with("resnet.layer1.") || batch >= 4;
+            assert_eq!(pin.is_some(), expected, "{name} b{batch}");
+            if let Some(ConfigPin::Wideconv(WideconvPin::Configured(config))) = pin {
+                assert_eq!(
+                    config.algorithm,
+                    WideconvAlgorithm::Fp16(WideconvFp16Tiles::Wide),
+                    "{name} b{batch}"
+                );
+            }
+            assert_eq!(
+                Recipe::Rtx5090.fixed_pin(boundary, batch, CudaMath::Fp32, Fp16Policy::Allowed),
+                None
+            );
+            assert_eq!(
+                Recipe::Rtx5090.fixed_pin(boundary, batch, CudaMath::Tf32, Fp16Policy::Excluded),
+                None
+            );
+        }
+        for name in [
+            "resnet.conv1",
+            "resnet.layer2.0.conv1",
+            "resnet.layer3.0.conv1",
+            "resnet.layer3.1.conv1",
+            "resnet.layer4.0.conv1",
+            "resnet.layer4.2.conv2",
+            "resnet.layer4.0.shortcut.0",
+        ] {
+            assert_eq!(
+                Recipe::Rtx5090.fp16_pin(BoundaryId::named(name), batch, CudaMath::Tf32),
+                None,
+                "{name} b{batch}"
+            );
+        }
+    }
+}

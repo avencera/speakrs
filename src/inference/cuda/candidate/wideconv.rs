@@ -197,6 +197,10 @@ const C32_STRIDE2_LAYERS: [&str; 1] = ["resnet.layer2.0.conv1"];
 /// layers on FP16 tiles; the TF32 early trunk is faster at batches 1, 4 and 8
 const A100_FP16_C64_BATCHES: [usize; 2] = [16, 32];
 
+/// Embedding batch classes at which the RTX 5090 recipe runs the 64-channel same-channel
+/// layers on FP16 tiles; at batch 1 the TF32 early trunk ties or wins
+const RTX5090_FP16_C64_BATCHES: [usize; 4] = [4, 8, 16, 32];
+
 /// The capability whose FP32 mode runs `C64_LAYERS` here, in FFMA Winograd
 const TURING: ComputeCapability = ComputeCapability::new(7, 5);
 
@@ -688,6 +692,33 @@ impl Pin {
         shape.fp16_entry(tiles)?;
         Some(Self::Configured(Config {
             algorithm: Algorithm::Fp16(tiles),
+            partition: Partition::Whole,
+            split_cells: SplitCells::All,
+        }))
+    }
+
+    /// Wide FP16 tiles in TF32 mode at the RTX 5090 points where they beat the TF32
+    /// early trunk: the same-channel 32-channel layers at every batch and the
+    /// same-channel 64-channel layers from batch 4
+    ///
+    /// A tune at f444dd4 timed the 32-channel layers 1.25-2.3x faster than the TF32 rule
+    /// at every batch, and the 64-channel ones 1.07-1.4x faster from batch 4 with a tie
+    /// at batch 1. The stride-2 layers tie or win by under 10%, and the 128- and
+    /// 256-channel layers lose to TF32 Winograd at batch 32, so they keep the TF32 rule
+    pub(crate) fn measured_rtx5090_fp16(name: &str, batch: usize, math: CudaMath) -> Option<Self> {
+        if math != CudaMath::Tf32 {
+            return None;
+        }
+
+        let shape = Shape::of(model_conv(name, batch, math).ok()?).ok()?;
+        match shape {
+            Shape::C32 => {}
+            Shape::C64 if RTX5090_FP16_C64_BATCHES.contains(&batch) => {}
+            _ => return None,
+        }
+        shape.fp16_entry(Fp16Tiles::Wide)?;
+        Some(Self::Configured(Config {
+            algorithm: Algorithm::Fp16(Fp16Tiles::Wide),
             partition: Partition::Whole,
             split_cells: SplitCells::All,
         }))
@@ -2517,6 +2548,18 @@ const A100_FP16_COVERAGE: [CoverageEntry; 3] = [
     RTX4060TI_FP16_COVERAGE[2],
 ];
 
+/// The 5090 FP16 recipe adds the same-channel 32-channel layers at every batch and the
+/// 64-channel ones from batch 4
+const RTX5090_FP16_COVERAGE: [CoverageEntry; 3] = [
+    RTX4060TI_FP16_COVERAGE[0],
+    CoverageEntry {
+        layers: &C64_LAYERS,
+        batches: Batches::Only(&RTX5090_FP16_C64_BATCHES),
+        maths: Maths::Only(&[CudaMath::Tf32]),
+    },
+    RTX4060TI_FP16_COVERAGE[2],
+];
+
 /// The 4090 FP16 recipe also runs the 32->64 stride-2 layer on FP16 tiles
 const RTX4090_FP16_COVERAGE: [CoverageEntry; 4] = [
     RTX4060TI_FP16_COVERAGE[0],
@@ -2555,6 +2598,7 @@ impl super::DriverCandidate for Oxide {
         match Recipe::fp16_device(device, tier).filter(|_| fp16.allows()) {
             Some(Recipe::Rtx4060Ti) => Coverage(&RTX4060TI_FP16_COVERAGE),
             Some(Recipe::Rtx4090) => Coverage(&RTX4090_FP16_COVERAGE),
+            Some(Recipe::Rtx5090) => Coverage(&RTX5090_FP16_COVERAGE),
             Some(Recipe::A100Pcie | Recipe::A100Sxm4) => Coverage(&A100_FP16_COVERAGE),
             _ => Self::coverage_on(tier, device.capability(), fp16),
         }
