@@ -17,8 +17,8 @@ Native speakrs CUDA: 1s step; CUDA Fast: 2s step. Audio and models use local dis
 
 Implementation             DER%    Missed%   FalseAlarm%   Confusion%      Time    RTFx
 ──────────────────────────────────────────────────────────────────────────────────────────
-speakrs CUDA               7.0%       2.3%           2.3%          2.4%      40.9s    1786x
-speakrs CUDA Fast          7.4%       2.3%           2.3%          2.8%      22.0s    3325x
+speakrs CUDA               7.0%       2.3%           2.3%          2.4%      38.2s    1912x
+speakrs CUDA Fast          7.4%       2.3%           2.3%          2.8%      20.0s    3646x
 pyannote CUDA              7.2%       2.3%           2.3%          2.6%    2301.3s      32x
 
 Linux — NVIDIA RTX 5090; Intel Core Ultra 7 270K Plus, 24 CPU cores; 57 GiB RAM
