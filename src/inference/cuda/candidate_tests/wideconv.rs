@@ -2,7 +2,7 @@ use super::super::wideconv::{
     Algorithm, Layout, Partition, SplitCells, TensorKernel, WinogradProducts,
 };
 use crate::inference::cuda::geometry::Conv2d;
-use crate::inference::cuda::{CudaError, CudaMath};
+use crate::inference::cuda::{CudaError, CudaMath, PtxTier};
 
 fn stem(batch: usize, input: [usize; 2]) -> Conv2d {
     Conv2d {
@@ -279,7 +279,7 @@ fn winograd_launch_mirrors_device_tiles() {
 #[test]
 fn selection_follows_device_attributes() {
     use super::super::wideconv::{Config, Device, Fp16Policy};
-    use crate::inference::cuda::{ComputeCapability, PtxTier};
+    use crate::inference::cuda::ComputeCapability;
 
     let device = |major, minor, sms, tier| Device {
         capability: ComputeCapability::new(major, minor),
@@ -488,16 +488,34 @@ fn rejects_empty_and_partitioned_stems() {
 }
 
 /// FP16 tiles scale weights by 2^10, so a weight just above 65504 / 1024 would
-/// saturate; NaN and infinity must exclude the layer too
+/// saturate; NaN and infinity must exclude the layer too. A weight whose Winograd
+/// transform could pass that bound keeps the direct tiles only, as does any device
+/// without the sm120 wideconv variant
 #[test]
 fn fp16_weight_guard_excludes_any_weight_that_would_saturate() {
-    use super::super::wideconv::{FP16_OPERAND_LIMIT, Fp16Policy};
+    use super::super::wideconv::{FP16_OPERAND_LIMIT, FP16_WINOGRAD_WEIGHT_LIMIT, Fp16Policy};
 
     assert_eq!(FP16_OPERAND_LIMIT, 63.968_75);
     let shipped = [0.0, -1.7, 1.7, f32::MIN_POSITIVE];
     assert_eq!(Fp16Policy::of_weights(&shipped), Fp16Policy::Allowed);
+    let winograd_edge = [FP16_WINOGRAD_WEIGHT_LIMIT, -FP16_WINOGRAD_WEIGHT_LIMIT];
+    assert_eq!(Fp16Policy::of_weights(&winograd_edge), Fp16Policy::Allowed);
+    let direct = [0.5, FP16_WINOGRAD_WEIGHT_LIMIT.next_up()];
+    assert_eq!(Fp16Policy::of_weights(&direct), Fp16Policy::Direct);
     let edge = [FP16_OPERAND_LIMIT, -FP16_OPERAND_LIMIT];
-    assert_eq!(Fp16Policy::of_weights(&edge), Fp16Policy::Allowed);
+    assert_eq!(Fp16Policy::of_weights(&edge), Fp16Policy::Direct);
+    assert_eq!(
+        Fp16Policy::Allowed.on_tier(PtxTier::Sm80),
+        Fp16Policy::Direct
+    );
+    assert_eq!(
+        Fp16Policy::Allowed.on_tier(PtxTier::Sm120),
+        Fp16Policy::Allowed
+    );
+    assert_eq!(
+        Fp16Policy::Excluded.on_tier(PtxTier::Sm80),
+        Fp16Policy::Excluded
+    );
     for weight in [
         FP16_OPERAND_LIMIT.next_up(),
         -128.0,

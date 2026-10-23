@@ -20,6 +20,16 @@ fn missing<'a>(ptx: &str, required: &'a [&'a str]) -> Vec<&'a str> {
         .collect()
 }
 
+/// Entries an area's `tier` variant must export: its host requirements, and for the
+/// sm120 wideconv variant the entries only that variant has
+fn required_in(area: KernelModule, tier: PtxTier, required: &[&'static str]) -> Vec<&'static str> {
+    let mut required = required.to_vec();
+    if area == KernelModule::Wideconv && tier == PtxTier::Sm120 {
+        required.extend_from_slice(candidate::WIDECONV_SM120_KERNELS);
+    }
+    required
+}
+
 fn plans() -> Vec<(KernelModule, Vec<&'static str>)> {
     let plans = vec![
         (KernelModule::Fbank, fbank::REQUIRED_KERNELS.to_vec()),
@@ -84,7 +94,8 @@ fn every_host_configuration_has_entries_in_every_paired_ptx_tier() {
                         continue;
                     }
                     pairings += 1;
-                    let absent = missing(ptx, &required);
+                    let tier_required = required_in(area, tier, &required);
+                    let absent = missing(ptx, &tier_required);
                     assert!(
                         absent.is_empty(),
                         "{} {tier} on {device}: missing {absent:?}",
@@ -102,6 +113,7 @@ fn every_host_configuration_has_entries_in_every_paired_ptx_tier() {
 fn missing_entry_is_detected_in_an_in_memory_ptx_fixture() {
     for (area, required) in plans() {
         for (tier, ptx) in area.variants().iter() {
+            let required = required_in(area, tier, &required);
             assert!(missing(ptx, &required).is_empty(), "{} {tier}", area.name());
             for name in &required {
                 let fixture = ptx.replace(
@@ -127,9 +139,9 @@ fn full_cuda_embeds_all_targets_and_every_shipped_areas_kernels() {
     );
     for (area, required) in plans() {
         let variants = area.variants();
-        for (_, ptx) in variants.iter() {
+        for (tier, ptx) in variants.iter() {
             assert!(
-                missing(ptx, &required).is_empty(),
+                missing(ptx, &required_in(area, tier, &required)).is_empty(),
                 "{} is missing shipped kernels",
                 area.name()
             );

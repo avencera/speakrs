@@ -58,6 +58,11 @@ use cuda_device::shared::cvta_generic_to_shared_u32;
 use cuda_device::vector::U32x4;
 use cuda_device::{DisjointSlice, DynamicSharedArray, kernel, launch_bounds, ptx_asm, thread, warp};
 
+/// FP16 Winograd kernels for the same-channel shapes, which only the RTX 5090 binding
+/// loads
+#[cfg(feature = "tier-sm120")]
+pub mod wino;
+
 /// Rounds `lo` and `hi` scaled by 2^10 to FP16 with round-to-nearest-even, saturating at
 /// the largest finite FP16 value, and packs them with `lo` in the low half
 #[inline(always)]

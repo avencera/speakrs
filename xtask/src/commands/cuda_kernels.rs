@@ -166,6 +166,13 @@ impl Area {
             || (below_top == Some(variant) && tier >= variant)
     }
 
+    /// Whether `tier` may export entries the baseline lacks: every higher tier of a
+    /// pinned baseline, and a bound top tier, whose binding's host plans the added
+    /// entries only where that tier is loaded
+    fn may_add(self, tier: Tier) -> bool {
+        self.pinned_baseline || (self.bound_top && self.tiers.last() == Some(&tier))
+    }
+
     fn variants(self) -> impl Iterator<Item = Variant> {
         self.tiers
             .iter()
@@ -196,8 +203,8 @@ pub const AREAS: &[Area] = &[
     // same source built for the newest target
     Area::new("lstmproj", &[Tier::Sm75, Tier::Sm80, Tier::Sm120]),
     // the sm80 variant adds the tensor-core kernels; sm75 traps in those entries. sm120
-    // pairs the FP16 trunk kernels' taps into m16n8k16 products, and only the RTX 5090
-    // binding selects it
+    // pairs the FP16 trunk kernels' taps into m16n8k16 products and adds FP16 Winograd
+    // entries the lower tiers lack, and only the RTX 5090 binding selects it
     Area::bound_top("wideconv", &[Tier::Sm75, Tier::Sm80, Tier::Sm120]),
 ];
 
@@ -1279,7 +1286,7 @@ fn check_entry_points(area: Area, modules: &[(Variant, &str)]) -> Result<()> {
             &expected,
             &variant.file_name(),
             &actual,
-            area.pinned_baseline,
+            area.may_add(variant.tier),
         ));
     }
 
@@ -1314,8 +1321,9 @@ fn entry_point_differences(
         }
     }
 
-    // a pinned baseline cannot gain trapping stubs, so the host plans the added entries
-    // only for the tiers that export them
+    // a pinned baseline cannot gain trapping stubs, and a bound top tier would put them
+    // in every other device's artifact, so the host plans the added entries only for the
+    // tiers that export them
     let added = actual.keys().filter(|name| !expected.contains_key(*name));
     for name in added.filter(|_| !may_add) {
         problems.push(format!(

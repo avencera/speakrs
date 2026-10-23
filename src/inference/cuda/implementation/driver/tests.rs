@@ -900,7 +900,7 @@ fn measured_a100_recipe_uses_class_defaults_for_every_pipeline_boundary() {
                     panic!("driver boundary")
                 };
                 assert_eq!(hybrid.pin, driver.pin, "{name} {boundary} b{batch}");
-                if let Some(fp16) = recipe.fp16_pin(boundary, batch, math) {
+                if let Some(fp16) = recipe.fp16_pin(boundary, batch, math, Fp16Policy::Allowed) {
                     assert_eq!(driver.pin, super::super::PlanPin::Pinned(fp16));
                 }
                 assert_eq!(hybrid.target, driver.target);

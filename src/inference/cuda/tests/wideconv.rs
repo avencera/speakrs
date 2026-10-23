@@ -1013,14 +1013,22 @@ fn driver_trunk_embedding_matches_library() -> Result<(), CudaError> {
 
 /// The same-channel FP16 shapes whose tiles have [`HalfIo`] launches: channels, input
 /// plane and tiles
-const HALF_SHAPES: [(usize, [usize; 2], WideconvFp16Tiles); 6] = [
+const HALF_SHAPES: [(usize, [usize; 2], WideconvFp16Tiles); 8] = [
     (32, [80, 998], WideconvFp16Tiles::Wide),
     (64, [40, 499], WideconvFp16Tiles::Wide),
     (128, [20, 250], WideconvFp16Tiles::Wide),
     (128, [20, 250], WideconvFp16Tiles::Narrow),
+    (128, [20, 250], WideconvFp16Tiles::Winograd),
     (256, [10, 125], WideconvFp16Tiles::Wide),
     (256, [10, 125], WideconvFp16Tiles::Narrow),
+    (256, [10, 125], WideconvFp16Tiles::Winograd),
 ];
+
+/// Whether `tiles` exist in the loaded wideconv variant: FP16 Winograd tiles only in
+/// the sm120 one
+fn tiles_loaded(tiles: WideconvFp16Tiles, tier: PtxTier) -> bool {
+    tiles != WideconvFp16Tiles::Winograd || tier >= PtxTier::Sm120
+}
 
 /// Seeded values uniform in `[-scale, scale)`, from SplitMix64
 fn seeded(seed: u64, len: usize, scale: f32) -> Vec<f32> {
@@ -1170,6 +1178,13 @@ fn forced_fp16_half_launches_match_fp32() -> Result<(), CudaError> {
         output,
     };
     for (shape, &(channels, input, tiles)) in HALF_SHAPES.iter().enumerate() {
+        if !tiles_loaded(tiles, kernels.tier()) {
+            eprintln!(
+                "FP16_HALF c{channels} {tiles:?}: skipped on the {} variant",
+                kernels.tier()
+            );
+            continue;
+        }
         for batch in [2, 3] {
             let conv = Conv2d {
                 batch,
@@ -1213,7 +1228,7 @@ fn forced_fp16_half_launches_match_fp32() -> Result<(), CudaError> {
                     partition: WideconvPartition::Whole,
                     split_cells: WideconvSplitCells::All,
                 };
-                // the FP16 tiles build on every tier, so no device may skip a shape
+                // the direct FP16 tiles build on every tier, so no device may skip them
                 let plan = WideconvOxide::with_config(&runtime, &kernels, spec, config).map_err(
                     |error| CudaError::Unsupported {
                         context: "forced FP16 half plan",
@@ -1329,6 +1344,100 @@ fn forced_fp16_half_launches_match_fp32() -> Result<(), CudaError> {
 
             eprintln!("FP16_HALF {name}: ok");
         }
+    }
+    Ok(())
+}
+
+/// FP16 Winograd tiles against the FP32 spatial kernel on seeded residual-block inputs:
+/// their error stays within a small multiple of the direct FP16 tiles' error, which
+/// rounds the same operands to FP16 before a direct sum
+#[test]
+fn forced_fp16_winograd_error_tracks_direct_fp16() -> Result<(), CudaError> {
+    const TEST: &str = "forced_fp16_winograd_error_tracks_direct_fp16";
+    let Some(runtime) = runtime(TEST) else {
+        return Ok(());
+    };
+    let kernels = runtime.load_module(runtime.embedded_exact_request(KernelModule::Wideconv)?)?;
+    if !tiles_loaded(WideconvFp16Tiles::Winograd, kernels.tier()) {
+        eprintln!(
+            "skipping {TEST}: the {} wideconv variant has no FP16 Winograd tiles",
+            kernels.tier()
+        );
+        return Ok(());
+    }
+    let stream = runtime.stream();
+    for (channels, input) in [(128, [20, 250]), (256, [10, 125])] {
+        let batch = 3;
+        let conv = |math| Conv2d {
+            batch,
+            in_channels: channels,
+            out_channels: channels,
+            input,
+            kernel: [3, 3],
+            padding: [1, 1],
+            stride: [1, 1],
+            dilation: [1, 1],
+            math,
+        };
+        let len = conv(CudaMath::Fp32)
+            .output_shape()
+            .iter()
+            .product::<usize>();
+        let seed = 7 * channels as u64;
+        let scale = (3.0 / (9 * channels) as f32).sqrt();
+        let x = stream.clone_htod(&seeded(seed, len, 2.0))?;
+        let residual = stream.clone_htod(&seeded(seed + 1, len, 2.0))?;
+        let bias = stream.clone_htod(&seeded(seed + 2, channels, 0.1))?;
+        let weight = stream.clone_htod(&seeded(seed + 3, channels * channels * 9, scale))?;
+        let run = |math, algorithm| -> Result<Vec<f32>, CudaError> {
+            let name = format!("c{channels} {algorithm:?}");
+            let spec = ConvLayerSpec {
+                name: &name,
+                conv: conv(math),
+                epilogue: Epilogue::BiasReluResidual,
+                weight: &weight,
+                bias: &bias,
+            };
+            let config = WideconvConfig {
+                algorithm,
+                partition: WideconvPartition::Whole,
+                split_cells: WideconvSplitCells::All,
+            };
+            let plan =
+                WideconvOxide::with_config(&runtime, &kernels, spec, config).map_err(|error| {
+                    CudaError::Unsupported {
+                        context: "forced FP16 Winograd error plan",
+                        reason: format!("{name}: {error}"),
+                    }
+                })?;
+            let layer = HalfLayer {
+                plan,
+                weight: weight.clone(),
+                len,
+            };
+            let (values, saturated) =
+                layer.run(stream, &bias, &x, Some(&residual), HalfIo::FP32)?;
+            assert!(!saturated, "{name}: set the range word");
+            Ok(values)
+        };
+        let reference = run(CudaMath::Fp32, WideconvAlgorithm::Spatial)?;
+        let direct = run(
+            CudaMath::Tf32,
+            WideconvAlgorithm::Fp16(WideconvFp16Tiles::Wide),
+        )?;
+        let winograd = run(
+            CudaMath::Tf32,
+            WideconvAlgorithm::Fp16(WideconvFp16Tiles::Winograd),
+        )?;
+        let (direct_max, direct_rms) = difference(&direct, &reference);
+        let (winograd_max, winograd_rms) = difference(&winograd, &reference);
+        eprintln!(
+            "FP16_WINOGRAD c{channels}: direct max {direct_max:.3e} rms {direct_rms:.3e}, winograd max {winograd_max:.3e} rms {winograd_rms:.3e}"
+        );
+        assert!(
+            winograd_rms <= 3.0 * direct_rms && winograd_max <= 4.0 * direct_max,
+            "c{channels}: FP16 Winograd error {winograd_max:.3e} max {winograd_rms:.3e} rms against direct {direct_max:.3e} max {direct_rms:.3e} rms"
+        );
     }
     Ok(())
 }

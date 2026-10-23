@@ -1044,7 +1044,10 @@ impl PlanRequest {
         if matches!(self, Self::Hybrid)
             && let Some(choice) = modules.tune_choice(boundary, batch, math)?
         {
-            if !modules.fp16().allows() && choice.is_fp16() {
+            let fp16 = modules.fp16();
+            if (!fp16.allows() && choice.is_fp16())
+                || (!fp16.allows_winograd() && choice.is_fp16_winograd())
+            {
                 if modules.is_tuning() {
                     return Err(super::tuning::invalid(
                         "FP16 tuning candidate is excluded by the layer weights",

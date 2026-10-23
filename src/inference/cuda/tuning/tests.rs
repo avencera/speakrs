@@ -1,6 +1,7 @@
 //! Host-only proof that timing cannot create an execution permission
 
 use super::{ApprovedChoice, BenchmarkMeasurement, Catalogue, Tuple, select_winners};
+use crate::inference::cuda::candidate::Fp16Policy;
 use crate::inference::cuda::device::{DeviceAttributes, test_support::Builder};
 use crate::inference::cuda::implementation::BoundaryId;
 use crate::inference::cuda::{ComputeCapability, CudaMath, PtxTier};
@@ -914,7 +915,9 @@ fn catalogue_contains_every_measured_stride2_fp16_startup_pin() {
         {
             let boundary = BoundaryId::named(name);
             for batch in boundary.batches().iter().filter(|batch| *batch >= minimum) {
-                let pin = recipe.fp16_pin(boundary, batch, CudaMath::Tf32).unwrap();
+                let pin = recipe
+                    .fp16_pin(boundary, batch, CudaMath::Tf32, Fp16Policy::Allowed)
+                    .unwrap();
                 assert!(pin.is_fp16(), "{recipe:?} {name} b{batch}");
                 let tuple = Tuple::new(boundary, batch, CudaMath::Tf32).unwrap();
                 assert!(

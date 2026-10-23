@@ -259,6 +259,10 @@ impl ApprovedChoice {
         matches!(self, Self::Kernel(config) if config.pin.is_fp16())
     }
 
+    pub(crate) fn is_fp16_winograd(&self) -> bool {
+        matches!(self, Self::Kernel(config) if config.pin.is_fp16_winograd())
+    }
+
     pub(crate) fn label(&self) -> String {
         match self {
             Self::Library => "Library".into(),

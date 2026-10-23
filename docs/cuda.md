@@ -64,9 +64,11 @@ name and SM count.
   FP16 trunk kernels for the 32-channel layers at every batch, the 64-channel ones
   from batch 4, the 128-channel ones from batch 8 and the 256-channel ones from
   batch 16, stride-2 layers included. It loads its own sm120 build of these
-  kernels, which does twice the FP16 work per tensor instruction; other cc 12.x
-  GPUs keep the sm80 build. On voxconverse-dev the Cuda run takes 27.3 s at 7.01%
-  DER. Layers are grouped by input channels.
+  kernels, which does twice the FP16 work per tensor instruction and adds FP16
+  Winograd kernels for the same-channel 128- and 256-channel layers; other cc
+  12.x GPUs keep the sm80 build. Weights whose Winograd transform would leave the
+  FP16 range keep the direct FP16 kernels. On voxconverse-dev the Cuda run takes
+  25.7 s at 7.01% DER. Layers are grouped by input channels.
 
 Other devices use their kernel defaults. Measured speed evidence is reported,
 but isn't required to select a kernel. GPU-specific builds stay driver-only and

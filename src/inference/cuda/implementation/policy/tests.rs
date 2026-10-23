@@ -336,7 +336,12 @@ fn fp16_recipes_exclude_fp32_strided_layers_and_unmeasured_devices() {
             }
             for name in ["resnet.conv1", "resnet.layer4.0.shortcut.0"] {
                 assert_eq!(
-                    recipe.fp16_pin(BoundaryId::named(name), batch, CudaMath::Tf32),
+                    recipe.fp16_pin(
+                        BoundaryId::named(name),
+                        batch,
+                        CudaMath::Tf32,
+                        Fp16Policy::Allowed
+                    ),
                     None
                 );
             }
@@ -347,8 +352,11 @@ fn fp16_recipes_exclude_fp32_strided_layers_and_unmeasured_devices() {
                 "resnet.layer4.0.conv1",
             ] {
                 let boundary = BoundaryId::named(name);
-                assert_eq!(recipe.fp16_pin(boundary, batch, CudaMath::Fp32), None);
-                let pin = recipe.fp16_pin(boundary, batch, CudaMath::Tf32);
+                assert_eq!(
+                    recipe.fp16_pin(boundary, batch, CudaMath::Fp32, Fp16Policy::Allowed),
+                    None
+                );
+                let pin = recipe.fp16_pin(boundary, batch, CudaMath::Tf32, Fp16Policy::Allowed);
                 if recipe == Recipe::Rtx4060Ti {
                     assert_eq!(pin, None, "{name} b{batch}");
                     continue;
@@ -425,16 +433,22 @@ fn a100_fp16_pins(recipe: Recipe) {
             WideconvAlgorithm::Fp16(WideconvFp16Tiles::Wide),
             "{name}"
         );
-        assert_eq!(recipe.fp16_pin(boundary, 1, CudaMath::Tf32), None);
+        assert_eq!(
+            recipe.fp16_pin(boundary, 1, CudaMath::Tf32, Fp16Policy::Allowed),
+            None
+        );
         let stride2 = name.ends_with(".0.conv1");
         if name == "resnet.layer4.0.conv1" {
-            assert_eq!(recipe.fp16_pin(boundary, 4, CudaMath::Tf32), None);
+            assert_eq!(
+                recipe.fp16_pin(boundary, 4, CudaMath::Tf32, Fp16Policy::Allowed),
+                None
+            );
         }
         for batch in [4, 8, 16] {
             if name == "resnet.layer4.0.conv1" && batch == 4 {
                 continue;
             }
-            let mid = recipe.fp16_pin(boundary, batch, CudaMath::Tf32);
+            let mid = recipe.fp16_pin(boundary, batch, CudaMath::Tf32, Fp16Policy::Allowed);
             let Some(ConfigPin::Wideconv(WideconvPin::Configured(config))) = mid else {
                 panic!("{name} b{batch}: {mid:?}")
             };
@@ -449,7 +463,10 @@ fn a100_fp16_pins(recipe: Recipe) {
                 "{name} b{batch}"
             );
         }
-        assert_eq!(recipe.fp16_pin(boundary, 32, CudaMath::Fp32), None);
+        assert_eq!(
+            recipe.fp16_pin(boundary, 32, CudaMath::Fp32, Fp16Policy::Allowed),
+            None
+        );
         assert_ne!(
             recipe.fixed_pin(boundary, 32, CudaMath::Tf32, Fp16Policy::Excluded),
             pin
@@ -467,19 +484,24 @@ fn a100_fp16_pins(recipe: Recipe) {
         for name in ["resnet.layer1.0.conv1", "resnet.layer1.2.conv2"] {
             let boundary = BoundaryId::named(name);
             assert_eq!(
-                recipe.fp16_pin(boundary, batch, CudaMath::Tf32),
+                recipe.fp16_pin(boundary, batch, CudaMath::Tf32, Fp16Policy::Allowed),
                 wide,
                 "{name} b{batch}"
             );
             assert_eq!(
-                recipe.fp16_pin(boundary, batch, CudaMath::Fp32),
+                recipe.fp16_pin(boundary, batch, CudaMath::Fp32, Fp16Policy::Allowed),
                 None,
                 "{name} b{batch}"
             );
         }
         for name in ["resnet.layer2.0.conv2", "resnet.layer2.3.conv1"] {
             let expected = if batch >= 16 { wide } else { None };
-            let pin = recipe.fp16_pin(BoundaryId::named(name), batch, CudaMath::Tf32);
+            let pin = recipe.fp16_pin(
+                BoundaryId::named(name),
+                batch,
+                CudaMath::Tf32,
+                Fp16Policy::Allowed,
+            );
             assert_eq!(pin, expected, "{name} b{batch}");
         }
     }
@@ -491,7 +513,12 @@ fn a100_fp16_pins(recipe: Recipe) {
     ] {
         for batch in [1, 4, 8, 16, 32] {
             assert_eq!(
-                recipe.fp16_pin(BoundaryId::named(name), batch, CudaMath::Tf32),
+                recipe.fp16_pin(
+                    BoundaryId::named(name),
+                    batch,
+                    CudaMath::Tf32,
+                    Fp16Policy::Allowed
+                ),
                 None,
                 "{name} b{batch}"
             );
@@ -673,9 +700,18 @@ fn rtx5090_fp16_covers_only_its_point_and_its_measured_trunk_batches() {
                 Recipe::Rtx5090.fixed_pin(boundary, batch, CudaMath::Tf32, Fp16Policy::Allowed);
             assert_eq!(pin.is_some(), batch >= from, "{name} b{batch}");
             if let Some(ConfigPin::Wideconv(WideconvPin::Configured(config))) = pin {
+                // the same-channel 128- and 256-channel layers take FP16 Winograd tiles
+                let same_channel = (name.starts_with("resnet.layer3.")
+                    || name.starts_with("resnet.layer4."))
+                    && !name.ends_with(".0.conv1");
+                let tiles = if same_channel {
+                    WideconvFp16Tiles::Winograd
+                } else {
+                    WideconvFp16Tiles::Wide
+                };
                 assert_eq!(
                     config.algorithm,
-                    WideconvAlgorithm::Fp16(WideconvFp16Tiles::Wide),
+                    WideconvAlgorithm::Fp16(tiles),
                     "{name} b{batch}"
                 );
             }
@@ -694,7 +730,12 @@ fn rtx5090_fp16_covers_only_its_point_and_its_measured_trunk_batches() {
             "resnet.layer4.0.shortcut.0",
         ] {
             assert_eq!(
-                Recipe::Rtx5090.fp16_pin(BoundaryId::named(name), batch, CudaMath::Tf32),
+                Recipe::Rtx5090.fp16_pin(
+                    BoundaryId::named(name),
+                    batch,
+                    CudaMath::Tf32,
+                    Fp16Policy::Allowed
+                ),
                 None,
                 "{name} b{batch}"
             );
