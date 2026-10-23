@@ -174,7 +174,7 @@ impl Recipe {
                 "fc55d67 boundary measurements: fixed driver pins at embedding b1/b4/b8/b16/b32, staged one-product C128/C256 and 8-window LSTM tiles; FP32 segmentation and TF32 embedding"
             }
             Self::Rtx5090 => {
-                "tune with the sm120 m16n8k16 FP16 kernels: FP16 C32 and C32 stride 2 at every batch, C64 from batch 4, C128 from batch 8, C256 from batch 16, with FP16 Winograd on the same-channel C128 and C256 layers; dev216 Cuda 31.0 to 27.3 s, DER 7.0123 to 7.0112, 5 RTTMs differ, then 27.0 to 25.7 s with FP16 Winograd, DER 7.0123, 7 RTTMs differ; FP32 segmentation and TF32 embedding"
+                "tune with the sm120 m16n8k16 FP16 kernels: FP16 C32 and C32 stride 2 at every batch, C64 from batch 4, C128 from batch 8, C256 from batch 16, with FP16 Winograd on the same-channel C64, C128 and C256 layers; dev216 Cuda 31.0 to 27.3 s, DER 7.0123 to 7.0112, 5 RTTMs differ, then 27.0 to 25.7 s with FP16 Winograd, DER 7.0123, 7 RTTMs differ, and 25.3 to 24.9 s with C64 Winograd, DER 7.0119, 4 RTTMs differ; FP32 segmentation and TF32 embedding"
             }
             Self::TeslaT4 => {
                 "FP16 stride-1 trunk at every batch; 216-file dev DER 7.0125 to 7.0118; 10-file driver 154.5x versus FP32 driver 92.2x; FP32 segmentation and TF32 embedding"

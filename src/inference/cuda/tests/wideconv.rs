@@ -1013,9 +1013,10 @@ fn driver_trunk_embedding_matches_library() -> Result<(), CudaError> {
 
 /// The same-channel FP16 shapes whose tiles have [`HalfIo`] launches: channels, input
 /// plane and tiles
-const HALF_SHAPES: [(usize, [usize; 2], WideconvFp16Tiles); 8] = [
+const HALF_SHAPES: [(usize, [usize; 2], WideconvFp16Tiles); 9] = [
     (32, [80, 998], WideconvFp16Tiles::Wide),
     (64, [40, 499], WideconvFp16Tiles::Wide),
+    (64, [40, 499], WideconvFp16Tiles::Winograd),
     (128, [20, 250], WideconvFp16Tiles::Wide),
     (128, [20, 250], WideconvFp16Tiles::Narrow),
     (128, [20, 250], WideconvFp16Tiles::Winograd),
@@ -1348,9 +1349,9 @@ fn forced_fp16_half_launches_match_fp32() -> Result<(), CudaError> {
     Ok(())
 }
 
-/// FP16 Winograd tiles against the FP32 spatial kernel on seeded residual-block inputs:
-/// their error stays within a small multiple of the direct FP16 tiles' error, which
-/// rounds the same operands to FP16 before a direct sum
+/// FP16 Winograd tiles against an FP32 kernel on seeded residual-block inputs: their
+/// error stays within a small multiple of the direct FP16 tiles' error, which rounds
+/// the same operands to FP16 before a direct sum
 #[test]
 fn forced_fp16_winograd_error_tracks_direct_fp16() -> Result<(), CudaError> {
     const TEST: &str = "forced_fp16_winograd_error_tracks_direct_fp16";
@@ -1366,7 +1367,14 @@ fn forced_fp16_winograd_error_tracks_direct_fp16() -> Result<(), CudaError> {
         return Ok(());
     }
     let stream = runtime.stream();
-    for (channels, input) in [(128, [20, 250]), (256, [10, 125])] {
+    // the 64-channel shape has no spatial tiles, so its FP32 Winograd kernel is the
+    // reference; its error sits far below FP16 rounding
+    let fp32_winograd = WideconvAlgorithm::Winograd(WideconvProducts::Fp32);
+    for (channels, input, exact) in [
+        (64, [40, 499], fp32_winograd),
+        (128, [20, 250], WideconvAlgorithm::Spatial),
+        (256, [10, 125], WideconvAlgorithm::Spatial),
+    ] {
         let batch = 3;
         let conv = |math| Conv2d {
             batch,
@@ -1420,7 +1428,7 @@ fn forced_fp16_winograd_error_tracks_direct_fp16() -> Result<(), CudaError> {
             assert!(!saturated, "{name}: set the range word");
             Ok(values)
         };
-        let reference = run(CudaMath::Fp32, WideconvAlgorithm::Spatial)?;
+        let reference = run(CudaMath::Fp32, exact)?;
         let direct = run(
             CudaMath::Tf32,
             WideconvAlgorithm::Fp16(WideconvFp16Tiles::Wide),

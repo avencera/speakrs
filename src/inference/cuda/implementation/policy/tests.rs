@@ -700,10 +700,9 @@ fn rtx5090_fp16_covers_only_its_point_and_its_measured_trunk_batches() {
                 Recipe::Rtx5090.fixed_pin(boundary, batch, CudaMath::Tf32, Fp16Policy::Allowed);
             assert_eq!(pin.is_some(), batch >= from, "{name} b{batch}");
             if let Some(ConfigPin::Wideconv(WideconvPin::Configured(config))) = pin {
-                // the same-channel 128- and 256-channel layers take FP16 Winograd tiles
-                let same_channel = (name.starts_with("resnet.layer3.")
-                    || name.starts_with("resnet.layer4."))
-                    && !name.ends_with(".0.conv1");
+                // the same-channel layers of 64 or more channels take FP16 Winograd tiles
+                let same_channel =
+                    !name.starts_with("resnet.layer1.") && !name.ends_with(".0.conv1");
                 let tiles = if same_channel {
                     WideconvFp16Tiles::Winograd
                 } else {

@@ -141,6 +141,12 @@ kernel_entries! {
     H16_C128S2_NARROW => "spk_wideconv_h16_c128s2_narrow",
     PACK_H16 => "spk_wideconv_pack_h16";
     // only the sm120 variant exports these
+    WH16_C64 => "spk_wideconv_wh16_c64",
+    WH16_C64_HALF_OUT => "spk_wideconv_wh16_c64_half_out",
+    WH16_C64_HALF_IN => "spk_wideconv_wh16_c64_half_in",
+    WH16_C64_HALF_IN_OUT => "spk_wideconv_wh16_c64_half_in_out",
+    WH16_C64_HALF_ALL => "spk_wideconv_wh16_c64_half_all",
+    WH16_C64_HALF_IN_RES => "spk_wideconv_wh16_c64_half_in_res",
     WH16_C128 => "spk_wideconv_wh16_c128",
     WH16_C128_HALF_OUT => "spk_wideconv_wh16_c128_half_out",
     WH16_C128_HALF_IN => "spk_wideconv_wh16_c128_half_in",
@@ -285,9 +291,10 @@ pub(crate) enum Fp16Tiles {
     Wide,
     /// 64 channels of the 128- and 256-channel shapes, which doubles the CTAs of a batch
     Narrow,
-    /// Fused Winograd F(2x2, 3x3) on m16n8k16 FP16 products for the 128- and 256-channel
-    /// shapes: 64 channels by one row of 32 2x2 tiles per CTA, with the operands of the
-    /// direct tiles; sm120 tier only, which only the RTX 5090 binding loads
+    /// Fused Winograd F(2x2, 3x3) on m16n8k16 FP16 products for the 64-, 128- and
+    /// 256-channel shapes: 64 channels by one row of 32 2x2 tiles per CTA, with the
+    /// operands of the direct tiles; sm120 tier only, which only the RTX 5090 binding
+    /// loads
     Winograd,
 }
 
@@ -762,13 +769,15 @@ impl Pin {
     /// FP16 tiles in TF32 mode at the RTX 5090 points where they beat the TF32 kernels:
     /// the 32-channel layers, stride 2 included, at every batch, the 64-channel ones
     /// from batch 4, the 128-channel ones from batch 8 and the same-channel 256-channel
-    /// ones from batch 16. The same-channel 128- and 256-channel layers take FP16
+    /// ones from batch 16. The same-channel 64-, 128- and 256-channel layers take FP16
     /// Winograd tiles when `fp16` allows them, the others wide direct tiles
     ///
     /// At batch 32 the FP16 Winograd tiles ran the same-channel 128- and 256-channel
     /// layers 1.2-1.6x faster than the direct ones, and dev216 Cuda went from 27.0 to
     /// 25.7 s with DER 7.0112 to 7.0123 and 7 of 216 RTTMs changed, the worst file by
-    /// +0.14 points; CudaFast went from 14.0 to 13.2 s with DER unchanged
+    /// +0.14 points; CudaFast went from 14.0 to 13.2 s with DER unchanged. Adding the
+    /// 64-channel layers, which ran 1.05-1.2x faster than the direct tiles, took Cuda
+    /// from 25.3 to 24.9 s with DER 7.0123 to 7.0119 and 4 RTTMs changed
     ///
     /// The thresholds come from a tune with the sm120 FP16 kernels, which pair taps into
     /// m16n8k16 products. At batch 32 FP16 tiles ran the 32- and 64-channel layers
@@ -800,7 +809,7 @@ impl Pin {
         }
 
         let tiles = match shape {
-            Shape::C128 | Shape::C256 if fp16.allows_winograd() => Fp16Tiles::Winograd,
+            Shape::C64 | Shape::C128 | Shape::C256 if fp16.allows_winograd() => Fp16Tiles::Winograd,
             _ => Fp16Tiles::Wide,
         };
         shape.fp16_entry(tiles)?;
@@ -1263,6 +1272,7 @@ impl Shape {
         match (self, tiles) {
             (Self::C32, Fp16Tiles::Wide) => Some(entries::H16_C32),
             (Self::C64, Fp16Tiles::Wide) => Some(entries::H16_C64),
+            (Self::C64, Fp16Tiles::Winograd) => Some(entries::WH16_C64),
             (Self::C128, Fp16Tiles::Wide) => Some(entries::H16_C128),
             (Self::C128, Fp16Tiles::Narrow) => Some(entries::H16_C128_NARROW),
             (Self::C128, Fp16Tiles::Winograd) => Some(entries::WH16_C128),
@@ -1331,6 +1341,13 @@ impl Shape {
                 entries::H16_C256_NARROW_HALF_ALL,
                 entries::H16_C256_NARROW_HALF_IN_RES,
             ]),
+            (Self::C64, Fp16Tiles::Winograd) => Some([
+                entries::WH16_C64_HALF_OUT,
+                entries::WH16_C64_HALF_IN,
+                entries::WH16_C64_HALF_IN_OUT,
+                entries::WH16_C64_HALF_ALL,
+                entries::WH16_C64_HALF_IN_RES,
+            ]),
             (Self::C128, Fp16Tiles::Winograd) => Some([
                 entries::WH16_C128_HALF_OUT,
                 entries::WH16_C128_HALF_IN,
@@ -1363,6 +1380,7 @@ impl Shape {
         if tiles == Fp16Tiles::Winograd {
             // one CTA per 64 output channels and row of 32 2x2 tiles, as the TF32 Winograd
             let channels = match self {
+                Self::C64 => 64,
                 Self::C128 => 128,
                 Self::C256 => 256,
                 _ => return None,

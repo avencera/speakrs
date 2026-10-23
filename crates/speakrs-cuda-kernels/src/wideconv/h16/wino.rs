@@ -26,15 +26,15 @@
 //! transform stores and the transform's raw reads each hit 32 banks
 //!
 //! The epilogue moves the products through shared memory in four rounds of 16 channels,
-//! as in `wtc`, and gives each thread two adjacent channels of one tile. A half residual
-//! is read as those channels' words, and a half output passes through a pixel-major tile
-//! so it leaves as whole 16-byte pixels
+//! as in `wtc`, and gives each thread two adjacent channels of one tile. The residual is
+//! pulled into L2 while the last chunks compute; a half residual and a half output pass
+//! through pixel-major tiles, so they move as whole 16-byte pixels
 
 use cuda_device::shared::cvta_generic_to_shared_u32;
 use cuda_device::{DisjointSlice, DynamicSharedArray, kernel, launch_bounds, ptx_asm, thread};
 
 use super::super::tensor::ops::{commit, fragment, opaque, wait_all};
-use super::{flag_out_of_range, half2, half2_checked, ldg, lds4, relu, stg4};
+use super::{flag_out_of_range, half2, half2_checked, ld4, ldg, lds4, prefetch, relu, stg4, sts4};
 
 /// Output channels per CTA
 const CHANNELS: u32 = 64;
@@ -199,27 +199,6 @@ unsafe fn sts_word(address: u32, value: u32) {
             clobber("memory"),
         );
     }
-}
-
-/// One global word of a half tensor, through the coherent path, since a half residual
-/// may alias the output
-///
-/// # Safety
-///
-/// `pointer` must address a readable word
-#[inline(always)]
-unsafe fn ld_word(pointer: *const f32) -> u32 {
-    let value: u32;
-    // safety: forwarded from this function's contract
-    unsafe {
-        ptx_asm!(
-            "{ .reg .u64 g; cvta.to.global.u64 g, %1; ld.global.b32 %0, [g]; }",
-            out("=r") value,
-            in("l") pointer as u64,
-            clobber("memory"),
-        );
-    }
-    value
 }
 
 /// The two FP16 values of a word as FP32, low half first
@@ -661,6 +640,30 @@ macro_rules! wh16_3x3 {
                     // safety: as the early transform above
                     unsafe { transform(smem, raw, v_next, vp, vt) };
                 }
+                if add_residual != 0 && c + 2 == CHUNKS {
+                    // pulls this CTA's residual into L2 while the last chunks compute, so the
+                    // epilogue does not wait on DRAM: one 128-byte line per thread, half a row
+                    // of 64 FP32 columns of one channel, or one of eight lines of a half
+                    // tensor's channel-group row
+                    let residual_ptr = residual.as_ptr();
+                    if HALF_RES {
+                        if tid < 128 {
+                            let group = item * GROUPS + cotile * (CHANNELS / 8) + tid / 16;
+                            let (oy, ox) = (2 * ty + tid / 8 % 2, 2 * tx0 + tid % 8 * 8);
+                            if oy < H && ox < W {
+                                // safety: inside the checked half residual
+                                unsafe { prefetch(residual_ptr.add(((group * HW + oy * W + ox) * 4) as usize)) };
+                            }
+                        }
+                    } else {
+                        let channel = cotile * CHANNELS + tid / 4;
+                        let (oy, ox) = (2 * ty + tid / 2 % 2, 2 * tx0 + tid % 2 * 32);
+                        if oy < H && ox < W {
+                            // safety: inside the checked residual
+                            unsafe { prefetch(residual_ptr.add(((item * C + channel) * HW + oy * W + ox) as usize)) };
+                        }
+                    }
+                }
                 if refill && !HALF_IN {
                     let mut j = 0;
                     #[unroll]
@@ -696,6 +699,7 @@ macro_rules! wh16_3x3 {
             // `2 pair` and `2 pair + 1` of tile `t`
             let base = opaque(smem);
             let pixels = opaque(smem + M_WORDS * 4);
+            let residual_pixels = opaque(smem + (M_WORDS + PIXEL_WORDS) * 4);
             let pair = tid / 32;
             let t = lane;
             let tx = tx0 + t;
@@ -710,24 +714,30 @@ macro_rules! wh16_3x3 {
                 // the residual may alias the output, so this round's residual is read
                 // before any of its outputs is stored
                 let mut shortcut = [[0.0f32; 2]; 4];
-                if add_residual != 0 && tile_inside {
+                if add_residual != 0 && HALF_RES {
+                    // thread `(group, row, column)` copies one 16-byte pixel of the round's
+                    // two channel groups into the residual tile
+                    let group = tid / (4 * T);
+                    let row = tid / (2 * T) % 2;
+                    let column = tid % (2 * T);
+                    let (oy, ox) = (2 * ty + row, 2 * tx0 + column);
+                    if oy < H && ox < W {
+                        let at = ((item * GROUPS + (cotile * CHANNELS + 16 * r as u32) / 8 + group) * HW + oy * W + ox) * 4;
+                        // safety: inside the checked half residual, 16-byte aligned
+                        let words = unsafe { ld4(residual_ptr.add(at as usize)) };
+                        // safety: this thread's pixel of the residual tile, published by the
+                        // barrier below
+                        unsafe { sts4(residual_pixels + ((group * 2 + row) * 2 * T + column) * 16, words) };
+                    }
+                } else if add_residual != 0 && tile_inside {
                     let mut k = 0;
                     #[unroll]
                     while k < 4 {
                         let (oy, ox) = (2 * ty + k as u32 / 2, 2 * tx + k as u32 % 2);
                         if oy < H && ox < W {
-                            if HALF_RES {
-                                let group = item * GROUPS + channel0 / 8;
-                                let word_index = (group * HW + oy * W + ox) * 4 + pair % 4;
-                                // safety: inside the checked half residual
-                                let word = unsafe { ld_word(residual_ptr.add(word_index as usize)) };
-                                let [lo, hi] = unpack(word);
-                                shortcut[k] = [lo * RESIDUAL_UNSCALE, hi * RESIDUAL_UNSCALE];
-                            } else {
-                                let at = (item * C + channel0) * HW + oy * W + ox;
-                                // safety: inside the checked residual
-                                shortcut[k] = unsafe { [*residual_ptr.add(at as usize), *residual_ptr.add((at + HW) as usize)] };
-                            }
+                            let at = (item * C + channel0) * HW + oy * W + ox;
+                            // safety: inside the checked residual
+                            shortcut[k] = unsafe { [*residual_ptr.add(at as usize), *residual_ptr.add((at + HW) as usize)] };
                         }
                         k += 1;
                     }
@@ -756,6 +766,18 @@ macro_rules! wh16_3x3 {
                 thread::sync_threads();
 
                 if tile_inside {
+                    if add_residual != 0 && HALF_RES {
+                        let mut k = 0;
+                        #[unroll]
+                        while k < 4 {
+                            let slot = residual_pixels + ((pair / 4 * 2 + k as u32 / 2) * 2 * T + 2 * t + k as u32 % 2) * 16 + pair % 4 * 4;
+                            // safety: written before the barrier above; pixels outside the
+                            // image are never stored
+                            let [lo, hi] = unpack(unsafe { lds_word(slot) });
+                            shortcut[k] = [lo * RESIDUAL_UNSCALE, hi * RESIDUAL_UNSCALE];
+                            k += 1;
+                        }
+                    }
                     // `values[channel][k]` with output pixel `k` of the tile, row-major
                     let mut values = [[0.0f32; 4]; 2];
                     let mut ch = 0;
@@ -848,6 +870,77 @@ macro_rules! wh16_3x3 {
             }
         }
     };
+}
+
+wh16_3x3! {
+    /// FP16 Winograd `y = relu(conv3x3(x, weight) + bias [+ residual])` for 64 channels,
+    /// stride 1, on 40x499 inputs, with the operands of `spk_wideconv_h16_c64`
+    ///
+    /// `weight` comes from [`spk_wideconv_pack_wh16`]; `range` is one word the launch sets
+    /// nonzero when an activation saturates. Launch 256 threads with `grid = (1, batch *
+    /// 160)` and [`WH16_SHARED_BYTES`] of dynamic shared memory
+    spk_wideconv_wh16_c64,
+    channels = 64,
+    h = 40,
+    w = 499,
+    half_input = false,
+    half_residual = false,
+    half_output = false,
+}
+
+wh16_3x3! {
+    /// As `spk_wideconv_wh16_c64`, writing `y` as the half tensor a block's second convolution reads, like `spk_wideconv_h16_c64_half_out`
+    spk_wideconv_wh16_c64_half_out,
+    channels = 64,
+    h = 40,
+    w = 499,
+    half_input = false,
+    half_residual = false,
+    half_output = true,
+}
+
+wh16_3x3! {
+    /// As `spk_wideconv_wh16_c64`, reading `x` as a half tensor, like `spk_wideconv_h16_c64_half_in`
+    spk_wideconv_wh16_c64_half_in,
+    channels = 64,
+    h = 40,
+    w = 499,
+    half_input = true,
+    half_residual = false,
+    half_output = false,
+}
+
+wh16_3x3! {
+    /// As `spk_wideconv_wh16_c64`, reading `x` and writing `y` as half tensors, like `spk_wideconv_h16_c64_half_in_out`
+    spk_wideconv_wh16_c64_half_in_out,
+    channels = 64,
+    h = 40,
+    w = 499,
+    half_input = true,
+    half_residual = false,
+    half_output = true,
+}
+
+wh16_3x3! {
+    /// As `spk_wideconv_wh16_c64`, with `x`, `residual` and `y` all half tensors, like `spk_wideconv_h16_c64_half_all`
+    spk_wideconv_wh16_c64_half_all,
+    channels = 64,
+    h = 40,
+    w = 499,
+    half_input = true,
+    half_residual = true,
+    half_output = true,
+}
+
+wh16_3x3! {
+    /// As `spk_wideconv_wh16_c64`, reading `x` and `residual` as half tensors and writing `y` as FP32, like `spk_wideconv_h16_c64_half_in_res`
+    spk_wideconv_wh16_c64_half_in_res,
+    channels = 64,
+    h = 40,
+    w = 499,
+    half_input = true,
+    half_residual = true,
+    half_output = false,
 }
 
 wh16_3x3! {
