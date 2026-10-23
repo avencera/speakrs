@@ -20,3 +20,14 @@ Implementation             DER%    Missed%   FalseAlarm%   Confusion%      Time 
 speakrs CUDA               7.0%       2.3%           2.3%          2.4%      40.9s    1786x
 speakrs CUDA Fast          7.4%       2.3%           2.3%          2.8%      22.0s    3325x
 pyannote CUDA              7.2%       2.3%           2.3%          2.6%    2301.3s      32x
+
+Linux — NVIDIA RTX 5090; Intel Core Ultra 7 270K Plus, 24 CPU cores; 57 GiB RAM
+Driver 595.99.02; nvidia-smi CUDA 13.2
+VoxConverse Dev DER (216 files, 1217.8 min, collar=0ms)
+speakrs CUDA and CUDA Fast: median of 3 runs, through the batch API.
+Native speakrs CUDA: 1s step; CUDA Fast: 2s step. Audio and models use local disk.
+
+Implementation             DER%    Missed%   FalseAlarm%   Confusion%      Time    RTFx
+──────────────────────────────────────────────────────────────────────────────────────────
+speakrs CUDA               7.0%       2.3%          2.3%         2.4%     25.0s   2922x
+speakrs CUDA Fast          7.4%       2.3%          2.3%         2.8%     13.0s   5633x

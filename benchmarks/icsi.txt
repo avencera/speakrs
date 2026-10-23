@@ -16,3 +16,14 @@ Implementation                                 DER%   Missed%   FalseAlarm%   Co
 ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 speakrs CUDA                                  33.3%     19.5%          9.5%         4.3%    142.2s   1814x
 speakrs CUDA Fast                             33.7%     19.4%          9.6%         4.7%     71.1s   3628x
+
+Linux — NVIDIA RTX 5090; Intel Core Ultra 7 270K Plus, 24 CPU cores; 57 GiB RAM
+Driver 595.99.02; nvidia-smi CUDA 13.2
+ICSI DER (75 files, 4301.2 min, collar=0ms)
+speakrs CUDA and CUDA Fast: one run each, through the batch API.
+Native speakrs CUDA: 1s step; CUDA Fast: 2s step. Audio and models use local disk.
+
+Implementation                                 DER%   Missed%   FalseAlarm%   Confusion%      Time    RTFx
+──────────────────────────────────────────────────────────────────────────────────────────────────────────
+speakrs CUDA                                  33.3%     19.5%          9.5%         4.3%     89.4s   2888x
+speakrs CUDA Fast                             33.7%     19.4%          9.6%         4.7%     45.1s   5725x
