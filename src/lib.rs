@@ -163,18 +163,18 @@
 //!
 //! # Benchmarks
 //!
-//! On VoxConverse dev on an RTX 4090, speakrs `cuda` is about 56 times faster than
-//! an earlier pyannote CUDA run, with 7.0% versus 7.2% DER. `cuda-fast` is about 105
+//! On VoxConverse dev on an RTX 4090, speakrs `cuda` is about 60 times faster than
+//! an earlier pyannote CUDA run, with 7.0% versus 7.2% DER. `cuda-fast` is about 115
 //! times faster, with 7.4% DER.
-//! On an RTX 4090, an hour of audio takes about 2.0 seconds with `cuda` and
-//! 1.1 seconds with `cuda-fast`. On an Apple M4 Pro with CoreML it takes about 7 seconds.
+//! On an RTX 4090, an hour of audio takes about 1.9 seconds with `cuda` and
+//! 1.0 second with `cuda-fast`. On an Apple M4 Pro with CoreML it takes about 7 seconds.
 //!
 //! VoxConverse dev, collar=0ms:
 //!
 //! | Platform | Implementation | DER | Time | RTFx |
 //! |----------|----------------|-----|------|------|
-//! | RTX 4090 | `speakrs` `cuda` | **7.0%** | 40.9s | 1786x |
-//! | RTX 4090 | `speakrs` `cuda-fast` | 7.4% | 22.0s | **3325x** |
+//! | RTX 4090 | `speakrs` `cuda` | **7.0%** | 38.2s | 1912x |
+//! | RTX 4090 | `speakrs` `cuda-fast` | 7.4% | 20.0s | **3646x** |
 //! | RTX 4090 | pyannote community-1 (CUDA) | 7.2% | 2301.3s | 32x |
 //! | Apple M4 Pro | `speakrs` `coreml` | **7.1%** | 138s | **529x** |
 //! | Apple M4 Pro | `speakrs` `coreml-fast` | 7.4% | 169s | 434x |
@@ -195,21 +195,21 @@
 //!
 //! | Dataset | Audio | `cuda` DER | `cuda` RTFx | `cuda-fast` DER | `cuda-fast` RTFx |
 //! |---|---:|---:|---:|---:|---:|
-//! | VoxConverse dev | 20.3 h | 7.0% | 1786x | 7.4% | 3325x |
-//! | VoxConverse test | 43.5 h | 11.1% | 1921x | 11.2% | 3722x |
-//! | AMI IHM | 18.7 h | 17.0% | 1955x | 17.4% | 3796x |
-//! | AMI SDM | 18.7 h | 19.7% | 1874x | 20.6% | 3665x |
-//! | AISHELL-4 | 12.7 h | 11.1% | 1916x | 11.4% | 3706x |
-//! | Earnings-21 | 39.3 h | 9.7% | 1864x | 9.2% | 3578x |
-//! | ICSI | 71.7 h | 33.3% | 1814x | 33.7% | 3628x |
-//! | AVA-AVD | 4.4 h | 45.4% | 2083x | 48.9% | 3899x |
+//! | VoxConverse dev | 20.3 h | 7.0% | 1912x | 7.4% | 3646x |
+//! | VoxConverse test | 43.5 h | 11.1% | 1859x | 11.2% | 3618x |
+//! | AMI IHM | 18.7 h | 17.0% | 1909x | 17.4% | 3563x |
+//! | AMI SDM | 18.7 h | 19.7% | 1791x | 20.6% | 3754x |
+//! | AISHELL-4 | 12.7 h | 11.1% | 1866x | 11.4% | 3534x |
+//! | Earnings-21 | 39.3 h | 9.7% | 1876x | 9.2% | 3613x |
+//! | ICSI | 71.7 h | 33.3% | 1937x | 33.7% | 3708x |
+//! | AVA-AVD | 4.4 h | 45.4% | 2075x | 48.9% | 3927x |
 //!
 //! That's about 229 hours of audio in under 8 minutes with `cuda`, or under 4
 //! minutes with `cuda-fast`. The VoxConverse dev row comes from the runs above;
 //! the other rows are single runs of the same version on RTX 4090 containers with
 //! 16 CPU cores and 8 GiB of RAM.
 //! On VoxConverse test, `cuda` and pyannote CUDA both score 11.1% DER; pyannote
-//! ran at 25x in an earlier container, about 78 times slower than `cuda`. On AMI
+//! ran at 25x in an earlier container, about 75 times slower than `cuda`. On AMI
 //! IHM and Earnings-21, `cuda` matches the earlier pyannote runs at 17.0% and 9.7% DER,
 //! where pyannote ran at 15x and 18x. On macOS, `coreml` runs these datasets at
 //! 450x to 644x, with DER within 1.6 points of pyannote's. See
@@ -357,7 +357,7 @@
 //! | RTX 4090 | 1453x | 1438x |
 //!
 //! Every run had 16 CPU cores, and each value is the median of 3 runs. The RTX 4060
-//! Ti and RTX 5060 Ti also have tuned kernel profiles. In an earlier version, on the
+//! Ti, RTX 5060 Ti and RTX 5090 also have tuned kernel profiles. In an earlier version, on the
 //! same subset, speakrs's own kernels were 1.4x to 2.0x faster than cuDNN and cuBLAS
 //! on the RTX 4090, L4, A10 and H100. See [benchmarks/](https://github.com/avencera/speakrs/tree/master/benchmarks)
 //! for full results across all datasets.
