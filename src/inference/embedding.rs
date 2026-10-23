@@ -412,6 +412,22 @@ impl EmbeddingModel {
         }
     }
 
+    /// Forgets the batches a failed multi-mask run left unfinished, so a later
+    /// recording on this model starts clean
+    pub(crate) fn discard_multi_mask_batches(&mut self) {
+        // only CUDA leaves batches running
+        match &mut self.backend {
+            #[cfg(feature = "cpu")]
+            EmbeddingBackend::Cpu(_) => {}
+            #[cfg(feature = "migraphx")]
+            EmbeddingBackend::Ort(_) => {}
+            #[cfg(feature = "coreml")]
+            EmbeddingBackend::CoreMl(_) => {}
+            #[cfg(feature = "_cuda")]
+            EmbeddingBackend::Cuda(backend) => backend.discard_multi_mask_batches(),
+        }
+    }
+
     pub(crate) fn embed_tail_batch_inputs(
         &mut self,
         inputs: &[SplitTailInput<'_>],

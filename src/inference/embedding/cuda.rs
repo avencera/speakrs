@@ -306,6 +306,14 @@ impl CudaEmbedding {
         embedding_rows(values)
     }
 
+    /// Forgets the batches a failed run left unfinished, so the next recording's
+    /// first start finds none; their buffers stay with the handle, and any download
+    /// still queued finishes in stream order before the next launch reuses them
+    pub(in crate::inference::embedding) fn discard_multi_mask_batches(&mut self) {
+        self.running = None;
+        self.pending = None;
+    }
+
     pub(in crate::inference::embedding) fn embed_multi_mask_batch(
         &mut self,
         meta: &EmbeddingMeta,

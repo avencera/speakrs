@@ -191,7 +191,13 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
             runner: self,
             model: embedding_model,
         };
-        self.run_multi_mask_with(receiver, batch_size, min_num_samples, &mut embedder)
+        let result = self.run_multi_mask_with(receiver, batch_size, min_num_samples, &mut embedder);
+        if result.is_err() {
+            // an early return can leave batches on the model, which the next
+            // recording's starts would trip over
+            embedding_model.discard_multi_mask_batches();
+        }
+        result
     }
 
     fn run_multi_mask_with(
