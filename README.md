@@ -359,11 +359,11 @@ VoxConverse subset, and their times include process start-up and model loading:
 | GPU | `cuda` | GPU-specific build |
 |---|---:|---:|
 | T4 | 294x | 294x |
-| A10 | 432x | 436x |
-| L4 | 310x | 312x |
+| A10 | 432x | **436x** |
+| L4 | 310x | **312x** |
 | A100 40 GB | 1296x | 1296x |
-| RTX 4090 | 1453x | 1438x |
-| RTX 5090 | 2500x | 2501x |
+| RTX 4090 | **1453x** | 1438x |
+| RTX 5090 | 2500x | **2501x** |
 
 Every run had 16 CPU cores, and each value is the median of 3 runs. The RTX 5090
 row comes from a later version than the others. The RTX 4060 Ti and RTX 5060 Ti
