@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Drop `zip` from the dependency tree: `ndarray-npy` no longer enables its `npz` feature, which pulled in `zip` 6 with RUSTSEC-2026-0367, RUSTSEC-2026-0368, and RUSTSEC-2026-0369
+
 ## [0.7.0] - 2026-10-15
 
 - Add Python bindings: `pip install speakrs` ships one abi3 wheel per platform, with CPU and CoreML on macOS arm64 and CPU and CUDA on Linux x86_64, plus a `speakrs diarize` command; see `crates/speakrs-python`
