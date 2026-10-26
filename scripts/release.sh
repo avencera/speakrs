@@ -44,10 +44,18 @@ check_checkout() {
     done
 
     [ -z "$(git status --porcelain)" ] || fail "the working tree has changes"
-    [ "$(git branch --show-current)" = master ] || fail "not on master"
     git fetch --quiet origin master --tags
-    [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/master)" ] ||
-        fail "HEAD is not origin/master; run git pull --ff-only"
+
+    # a rerun resumes from the tagged commit, even after master has moved on, so a
+    # partial release finishes with the files and crates it started with
+    if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+        [ "$(git rev-parse HEAD)" = "$(git rev-parse "$tag^{commit}")" ] ||
+            fail "$tag already exists; run git switch --detach $tag to resume it"
+    else
+        [ "$(git branch --show-current)" = master ] || fail "not on master"
+        [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/master)" ] ||
+            fail "HEAD is not origin/master; run git pull --ff-only"
+    fi
 
     local manifest_version
     manifest_version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
@@ -57,12 +65,8 @@ check_checkout() {
 }
 
 push_tag() {
-    local head
-    head="$(git rev-parse HEAD)"
-
-    # a rerun reuses the tag, but only when it already points at this commit
+    # check_checkout already required an existing tag to point at HEAD
     if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-        [ "$(git rev-parse "$tag^{commit}")" = "$head" ] || fail "$tag exists on another commit"
         log "Tag $tag already exists at HEAD"
     else
         log "Tagging $tag"
@@ -113,7 +117,9 @@ download_files() {
         esac
     done
 
-    uvx --quiet twine check --strict "$work/dist"/*
+    # uvx runs downloaded code, so keep the upload tokens out of its environment
+    env -u TESTPYPI_TOKEN -u PYPI_TOKEN uvx --quiet --no-build \
+        twine check --strict "$work/dist"/*
 }
 
 # compares the index's SHA-256 digests with the local files, so the index serves
@@ -148,14 +154,15 @@ sys.exit(f"{url} files do not match: expected {sorted(local)}, got {remote}")
 EOF
 }
 
-# installs the published wheel, never the sdist, into a fresh environment and diarizes
+# installs the published wheel, never the sdist, into a fresh environment and diarizes;
+# --isolated keeps uvx from reusing a speakrs installed with uv tool install
 check_install() {
     local index="$1"
     local rttm
 
     for _ in $(seq 1 10); do
-        if rttm="$(uvx --no-cache --python 3.12 --no-build-package speakrs \
-            --default-index "$index" "speakrs@$version" \
+        if rttm="$(env -u TESTPYPI_TOKEN -u PYPI_TOKEN uvx --isolated --no-cache \
+            --no-build --python 3.12 --default-index "$index" "speakrs@$version" \
             diarize --mode cpu fixtures/test_short.wav)"; then
             printf '%s\n' "$rttm"
             grep -q '^SPEAKER ' <<<"$rttm" || fail "diarize printed no SPEAKER lines"
@@ -186,11 +193,13 @@ publish_crates() {
         fi
 
         log "Publishing $crate $version to crates.io"
-        # speakrs has no default backend, so verification needs one enabled
+        # the check above queries crates.io, so publish there even if cargo's
+        # registry.default points elsewhere; speakrs has no default backend, so
+        # its verification build needs one enabled
         if [ "$crate" = speakrs ]; then
-            cargo publish --locked -p "$crate" --features cpu
+            cargo publish --locked --registry crates-io -p "$crate" --features cpu
         else
-            cargo publish --locked -p "$crate"
+            cargo publish --locked --registry crates-io -p "$crate"
         fi
     done
 }
