@@ -1,16 +1,17 @@
 # Changelog
 
-## [Unreleased]
+## [0.7.0] - 2026-10-26
 
-- Drop `zip` from the dependency tree: `ndarray-npy` no longer enables its `npz` feature, which pulled in `zip` 6 with RUSTSEC-2026-0367, RUSTSEC-2026-0368, and RUSTSEC-2026-0369
-
-## [0.7.0] - 2026-10-15
-
-- Add Python bindings: `pip install speakrs` ships one abi3 wheel per platform, with CPU and CoreML on macOS arm64 and CPU and CUDA on Linux x86_64, plus a `speakrs diarize` command; see `crates/speakrs-python`
+- Add Python bindings: `pip install speakrs` ships one abi3 wheel per platform, with CPU and CoreML on macOS arm64 and CPU and CUDA on Linux x86_64, plus a `speakrs diarize` command and a speaker-labeled transcript example; see `crates/speakrs-python`
 - Add `speakrs::models::{MODEL_REPOSITORY, MODEL_REVISION, required_model_files}`, available without the `online` feature, so callers can download or verify the files a mode loads with their own HTTP client
 - Add `QueuedDiarizationJobId::as_u64`
 - Add `QueueReceiver::recv_timeout`, so a caller can wait for results in bounded slices and stay responsive to interrupts
 - Fix CUDA builds embedding every PTX and cubin file more than once, which roughly doubled the size of the linked binary
+- Add a built-in RTX 5090 recipe that runs the 32- and 64-channel early trunk layers on FP16 tensor cores; on VoxConverse dev, `cuda` drops from 39.0 s to 35.0 s and `cuda-fast` from 20.4 s to 18.3 s, with DER unchanged
+- Keep the GPU busy between CUDA batches and files: the next embedding batch launches before the current one is read back, and in concurrent mode the next file's segmentation runs during the current file's last embedding batches; results and their order don't change
+- Speed up the tensor-core trunk convolutions by 0.7 to 1.2% on an RTX 5090, with bitwise-identical output
+- Drop `zip` from the dependency tree: `ndarray-npy` no longer enables its `npz` feature, which pulled in `zip` 6 with RUSTSEC-2026-0367, RUSTSEC-2026-0368, and RUSTSEC-2026-0369
+- Update the locked `rustls-webpki` to 0.103.16 and `webpki-roots` and `webpki-root-certs` to 1.0.10 for RUSTSEC-2026-0381, RUSTSEC-2026-0382, and RUSTSEC-2026-0383
 
 ## [0.6.0] - 2026-10-13
 
