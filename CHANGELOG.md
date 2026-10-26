@@ -7,9 +7,9 @@
 - Add `QueuedDiarizationJobId::as_u64`
 - Add `QueueReceiver::recv_timeout`, so a caller can wait for results in bounded slices and stay responsive to interrupts
 - Fix CUDA builds embedding every PTX and cubin file more than once, which roughly doubled the size of the linked binary
-- Add a built-in RTX 5090 recipe that runs the 32- and 64-channel early trunk layers on FP16 tensor cores; on VoxConverse dev, `cuda` drops from 39.0 s to 35.0 s and `cuda-fast` from 20.4 s to 18.3 s, with DER unchanged
+- Run the RTX 5090 embedding trunk on FP16 tensor cores: a built-in recipe moves each layer to FP16 above a per-layer batch size, sm120 kernels pair taps into m16n8k16 products, and FP16 Winograd kernels run the 64-, 128-, and 256-channel layers. On VoxConverse dev, `cuda` drops from about 39 s to 25 s with DER moving from 7.0123 to 7.0119, and `cuda-fast` from about 20 s to 13 s with DER unchanged; other GPUs keep their kernels
 - Keep the GPU busy between CUDA batches and files: the next embedding batch launches before the current one is read back, and in concurrent mode the next file's segmentation runs during the current file's last embedding batches; results and their order don't change
-- Speed up the tensor-core trunk convolutions by 0.7 to 1.2% on an RTX 5090, with bitwise-identical output
+- Speed up the tensor-core segmentation convolutions by 0.7 to 1.2% on an RTX 5090, with bitwise-identical output
 - Drop `zip` from the dependency tree: `ndarray-npy` no longer enables its `npz` feature, which pulled in `zip` 6 with RUSTSEC-2026-0367, RUSTSEC-2026-0368, and RUSTSEC-2026-0369
 - Update the locked `rustls-webpki` to 0.103.16 and `webpki-roots` and `webpki-root-certs` to 1.0.10 for RUSTSEC-2026-0381, RUSTSEC-2026-0382, and RUSTSEC-2026-0383
 
