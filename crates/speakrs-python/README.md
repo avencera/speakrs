@@ -48,6 +48,13 @@ The command line prints RTTM:
 speakrs diarize meeting.wav --mode coreml
 ```
 
+To install only the command line, in its own environment, use
+[uv](https://docs.astral.sh/uv/):
+
+```sh
+uv tool install speakrs
+```
+
 See [API.md](https://github.com/avencera/speakrs/blob/master/crates/speakrs-python/API.md)
 for the full API: the queue, async methods, configuration, progress events,
 cancellation, and error categories.
