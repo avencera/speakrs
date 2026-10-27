@@ -6,6 +6,25 @@ On VoxConverse dev, `speakrs` gets **7.0% DER at 1912x realtime** on an RTX 4090
 
 If you want a small end-to-end app using it, see [avencera/smrze](https://github.com/avencera/smrze).
 
+## Contents
+
+- [Overview](#overview)
+- [Usage](#usage)
+  - [Quick start](#quick-start)
+  - [Speaker turns](#speaker-turns)
+  - [Background queue](#background-queue)
+  - [Local models](#local-models)
+  - [Python](#python)
+- [Choosing a mode](#choosing-a-mode)
+- [Benchmarks](#benchmarks)
+- [Why not pyannote-rs?](#why-not-pyannote-rs)
+- [Models](#models)
+- [Features and build notes](#features-and-build-notes)
+  - [NVIDIA GPUs](#nvidia-gpus)
+- [Public API](#public-api)
+- [Contributing](#contributing)
+- [References](#references)
+
 ## Overview
 
 <!-- cargo-rdme start -->
@@ -131,6 +150,9 @@ import speakrs
 pipeline = speakrs.Pipeline.from_pretrained("coreml")  # or "cpu", "cuda"
 print(pipeline.diarize_file("meeting.wav").rttm())
 ```
+
+For the `speakrs diarize` command line alone, `uv tool install speakrs`
+installs it in its own environment.
 
 The macOS arm64 wheel includes CPU and CoreML, and the Linux x86_64 wheel
 includes CPU and CUDA. See [the Python package](https://github.com/avencera/speakrs/blob/master/crates/speakrs-python/README.md)
