@@ -6,6 +6,25 @@ On VoxConverse dev, `speakrs` gets **7.0% DER at 1912x realtime** on an RTX 4090
 
 If you want a small end-to-end app using it, see [avencera/smrze](https://github.com/avencera/smrze).
 
+## Contents
+
+- [Overview](#overview)
+- [Usage](#usage)
+  - [Quick start](#quick-start)
+  - [Speaker turns](#speaker-turns)
+  - [Background queue](#background-queue)
+  - [Local models](#local-models)
+  - [Python](#python)
+- [Choosing a mode](#choosing-a-mode)
+- [Benchmarks](#benchmarks)
+- [Why not pyannote-rs?](#why-not-pyannote-rs)
+- [Models](#models)
+- [Features and build notes](#features-and-build-notes)
+  - [NVIDIA GPUs](#nvidia-gpus)
+- [Public API](#public-api)
+- [Contributing](#contributing)
+- [References](#references)
+
 ## Overview
 
 <!-- cargo-rdme start -->
