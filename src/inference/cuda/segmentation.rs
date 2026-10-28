@@ -631,9 +631,9 @@ impl Network {
         }
 
         if workspace.graph.is_none() {
-            // SAFETY: the graph is stored in `workspace`, which owns every buffer the
-            // forward pass touches, never reallocates them, and drops the graph with them;
-            // the weights live in `self`, which outlives its workspaces
+            // SAFETY: the graph is launched only below, through `workspace`, which owns
+            // every buffer the forward pass touches and never reallocates them; the
+            // weights live in `self`, which is borrowed for every launch
             let graph = unsafe { runtime.capture(|| self.enqueue(runtime, workspace)) }?.ok_or(
                 CudaError::BufferLength {
                     context: "segmentation CUDA graph nodes",

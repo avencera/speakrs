@@ -628,8 +628,10 @@ impl EmbeddingBatch {
         }
         // capture first waits for weight packing and prior buffer work, since it pauses
         // their events
-        // SAFETY: `Captured` keeps the graph with the storage whose buffers it records
-        // and drops the graph first; the weights live in `self`, which owns both
+        // SAFETY: `forward` launches the graph only through `Captured::current` under
+        // the storage lock, which refuses it once growth has replaced the recorded
+        // activations (growth finishes prior device work before freeing them); the
+        // batch's own buffers and the model weights stay in place for its lifetime
         let captured = unsafe {
             runtime.capture(|| {
                 self.run_with_activations(
