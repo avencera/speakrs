@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Prepare a rented Ubuntu 24.04 NVIDIA box for the native CUDA backend work
 #
-# Run from a synced speakrs tree with cudakit checked out beside it (the path
-# dependency already needs it): `bash scripts/cuda/setup-gpu-box.sh`. cudakit's
+# Run from a synced speakrs tree: `bash scripts/cuda/setup-gpu-box.sh`. cudakit's
 # `scripts/setup-gpu-box.sh` installs the kernel toolchain with speakrs's pins and
 # probes the speakrs kernel crate; this script then adds speakrs's variables and
-# models. Set `CUDAKIT_DIR` when cudakit lives elsewhere
+# models. The cudakit script comes from `CUDAKIT_DIR` when set, otherwise from the
+# cudakit release speakrs depends on
 #
 # Beyond cudakit's layout it produces:
 #   /workspace/models      public CUDA-mode ONNX models, PLDA and metadata files
@@ -13,17 +13,27 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CUDAKIT_DIR="${CUDAKIT_DIR:-$REPO_ROOT/../cudakit}"
+# the commit cudakit 0.1.0 was published from; the crate package omits its scripts
+CUDAKIT_REV="bcb03304b8f0325b2a0e91bd91f5de0ddd0acf4d"
 WORKSPACE="/workspace"
 
 log() { printf '\n==> %s\n' "$*"; }
 
 # --- toolchain --------------------------------------------------------------------
+if [[ -n "${CUDAKIT_DIR:-}" ]]; then
+    CUDAKIT_SETUP="$CUDAKIT_DIR/scripts/setup-gpu-box.sh"
+else
+    CUDAKIT_SETUP="$(mktemp)"
+    trap 'rm -f "$CUDAKIT_SETUP"' EXIT
+    curl -fsSL --retry 3 -o "$CUDAKIT_SETUP" \
+        "https://raw.githubusercontent.com/avencera/cudakit/${CUDAKIT_REV}/scripts/setup-gpu-box.sh"
+fi
+
 # speakrs pins its own cuda-oxide; keep the rev in sync with
 # crates/speakrs-cuda-kernels/Cargo.toml
 CUDA_OXIDE_REV="918bbde123671153b29a89542f1781f1c7494c14" \
     CUDA_OXIDE_NIGHTLY="nightly-2026-08-28" \
-    bash "$CUDAKIT_DIR/scripts/setup-gpu-box.sh" \
+    bash "$CUDAKIT_SETUP" \
     --probe "$REPO_ROOT/crates/speakrs-cuda-kernels" --probe-features probe
 
 # --- speakrs layout ---------------------------------------------------------------

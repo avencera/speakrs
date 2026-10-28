@@ -472,6 +472,8 @@ dependencies = [
 [[package]]
 name = "cudakit"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87714d487777176f54c3a628bc75acd7a180146f2f809816983c08ee805e4548"
 dependencies = [
  "cudarc",
  "libloading",
@@ -484,6 +486,8 @@ dependencies = [
 [[package]]
 name = "cudakit-build"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2ab4ba6d0bf3554121325dc24f1568e0562f0cb9fedd49096833343363bc2105"
 dependencies = [
  "eyre",
  "sha2",
