@@ -361,6 +361,7 @@ mod tests {
                     assert_eq!(artifact, cubin_key);
                 }
                 let loaded = LoadedKernels::from_module(
+                    runtime.context().clone(),
                     ModuleRequest::new(area, tier, artifact),
                     module,
                     ptx_hash,
