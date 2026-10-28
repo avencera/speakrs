@@ -157,7 +157,7 @@ fn ptx_tier_selection_follows_capability_and_build() {
             Err(CudaError::TierNotCompiledIn {
                 tier: PtxTier::Sm80,
                 device,
-                feature: "cuda-sm80",
+                feature: Some("cuda-sm80"),
             }) if device == blackwell
         ));
     }

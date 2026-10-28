@@ -21,6 +21,7 @@ pub const PROJECT: Project = Project {
     manifest_dir: "src/inference/cuda/ptx",
     host_kernels: "src/inference/cuda/kernels.rs",
     host_feature: "cuda-{tier}",
+    targets: &[Tier::Sm75, Tier::Sm80, Tier::Sm90, Tier::Sm120],
     tier_crate: TierCrate {
         path: "crates/speakrs-ptx-{tier}",
         description: "Prebuilt {tier} tier CUDA kernels for speakrs

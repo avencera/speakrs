@@ -19,7 +19,7 @@ fn rule(target: ProjectionTarget, batch: usize, math: CudaMath) -> LstmProjectio
 
 #[test]
 fn fp32_mode_never_uses_tensor_projections() {
-    for tier in PtxTier::ALL {
+    for &tier in PtxTier::ALL {
         let device = target(8, 0, tier);
         assert_eq!(rule(device, 1, CudaMath::Fp32), LstmProjection::Small);
         assert_eq!(rule(device, 3, CudaMath::Fp32), LstmProjection::Small);

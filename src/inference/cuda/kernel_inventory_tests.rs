@@ -85,7 +85,7 @@ fn every_host_configuration_has_entries_in_every_paired_ptx_tier() {
             ComputeCapability::new(12, 0),
             ComputeCapability::new(13, 0),
         ] {
-            for requested in std::iter::once(None).chain(PtxTier::ALL.map(Some)) {
+            for requested in std::iter::once(None).chain(PtxTier::ALL.iter().copied().map(Some)) {
                 let Ok(limit) = PtxTier::select(device, requested) else {
                     continue;
                 };

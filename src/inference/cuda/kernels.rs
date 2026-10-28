@@ -1,6 +1,7 @@
 use cudakit::{KernelArea, Profile};
 
 // identity types speakrs's plans and records pin, kept under the kernel registry
+use cudakit::PtxTier;
 pub(crate) use cudakit::{AreaPtx, ArtifactHash, LoadedArtifact};
 
 /// A cuda-oxide area's loaded module
@@ -162,16 +163,19 @@ impl KernelModule {
     pub const fn variants(self) -> AreaPtx {
         match self {
             #[cfg(test)]
-            Self::Probe => AreaPtx {
-                sm75: tier_ptx!(["cuda-sm75"], "ptx/probe.sm75", [75, 80, 86, 89, 90, 120]),
-                sm80: tier_ptx!(
-                    ["cuda-sm80", "cuda-sm90", "cuda-sm120"],
-                    "ptx/probe.sm80",
-                    [80, 86, 89, 90, 120]
+            Self::Probe => AreaPtx::EMPTY
+                .with(
+                    PtxTier::Sm75,
+                    tier_ptx!(["cuda-sm75"], "ptx/probe.sm75", [75, 80, 86, 89, 90, 120]),
+                )
+                .with(
+                    PtxTier::Sm80,
+                    tier_ptx!(
+                        ["cuda-sm80", "cuda-sm90", "cuda-sm120"],
+                        "ptx/probe.sm80",
+                        [80, 86, 89, 90, 120]
+                    ),
                 ),
-                sm90: None,
-                sm120: None,
-            },
             Self::Fbank => AreaPtx::baseline(tier_ptx!(
                 ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120"],
                 "ptx/fbank.sm75",
@@ -189,20 +193,23 @@ impl KernelModule {
             )),
             // the capability 12.0 binding pins the sm75 bytes, so every target embeds
             // them; the sm80 tier adds the TF32 tensor-core entries
-            Self::Resnet => AreaPtx {
-                sm75: tier_ptx!(
-                    ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120"],
-                    "ptx/resnet.sm75",
-                    [75, 80, 86, 89, 90, 120]
+            Self::Resnet => AreaPtx::EMPTY
+                .with(
+                    PtxTier::Sm75,
+                    tier_ptx!(
+                        ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120"],
+                        "ptx/resnet.sm75",
+                        [75, 80, 86, 89, 90, 120]
+                    ),
+                )
+                .with(
+                    PtxTier::Sm80,
+                    tier_ptx!(
+                        ["cuda-sm80", "cuda-sm90", "cuda-sm120"],
+                        "ptx/resnet.sm80",
+                        [80, 86, 89, 90, 120]
+                    ),
                 ),
-                sm80: tier_ptx!(
-                    ["cuda-sm80", "cuda-sm90", "cuda-sm120"],
-                    "ptx/resnet.sm80",
-                    [80, 86, 89, 90, 120]
-                ),
-                sm90: None,
-                sm120: None,
-            },
             Self::Lstm => AreaPtx::baseline(tier_ptx!(
                 ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120"],
                 "ptx/lstm.sm75",
@@ -215,55 +222,72 @@ impl KernelModule {
             )),
             // the sm80 tier adds tensor-core kernels; on cc 8.0 and newer it replaces
             // the sm75 variant, whose tensor-core entries are trapping stubs
-            Self::Segdense => AreaPtx {
-                sm75: tier_ptx!(
-                    ["cuda-sm75"],
-                    "ptx/segdense.sm75",
-                    [75, 80, 86, 89, 90, 120]
+            Self::Segdense => AreaPtx::EMPTY
+                .with(
+                    PtxTier::Sm75,
+                    tier_ptx!(
+                        ["cuda-sm75"],
+                        "ptx/segdense.sm75",
+                        [75, 80, 86, 89, 90, 120]
+                    ),
+                )
+                .with(
+                    PtxTier::Sm80,
+                    tier_ptx!(
+                        ["cuda-sm80", "cuda-sm90", "cuda-sm120"],
+                        "ptx/segdense.sm80",
+                        [80, 86, 89, 90, 120]
+                    ),
                 ),
-                sm80: tier_ptx!(
-                    ["cuda-sm80", "cuda-sm90", "cuda-sm120"],
-                    "ptx/segdense.sm80",
-                    [80, 86, 89, 90, 120]
-                ),
-                sm90: None,
-                sm120: None,
-            },
             Self::FbankDft => AreaPtx::baseline(tier_ptx!(
                 ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120"],
                 "ptx/fbankdft.sm75",
                 [75, 80, 86, 89, 90, 120]
             )),
-            Self::LstmProj => AreaPtx {
-                sm75: tier_ptx!(
-                    ["cuda-sm75"],
-                    "ptx/lstmproj.sm75",
-                    [75, 80, 86, 89, 90, 120]
+            Self::LstmProj => AreaPtx::EMPTY
+                .with(
+                    PtxTier::Sm75,
+                    tier_ptx!(
+                        ["cuda-sm75"],
+                        "ptx/lstmproj.sm75",
+                        [75, 80, 86, 89, 90, 120]
+                    ),
+                )
+                .with(
+                    PtxTier::Sm80,
+                    tier_ptx!(
+                        ["cuda-sm80", "cuda-sm90"],
+                        "ptx/lstmproj.sm80",
+                        [80, 86, 89, 90, 120]
+                    ),
+                )
+                .with(
+                    PtxTier::Sm120,
+                    tier_ptx!(["cuda-sm120"], "ptx/lstmproj.sm120", [120]),
                 ),
-                sm80: tier_ptx!(
-                    ["cuda-sm80", "cuda-sm90"],
-                    "ptx/lstmproj.sm80",
-                    [80, 86, 89, 90, 120]
-                ),
-                sm90: None,
-                sm120: tier_ptx!(["cuda-sm120"], "ptx/lstmproj.sm120", [120]),
-            },
-            Self::Wideconv => AreaPtx {
-                sm75: tier_ptx!(
-                    ["cuda-sm75"],
-                    "ptx/wideconv.sm75",
-                    [75, 80, 86, 89, 90, 120]
-                ),
+            Self::Wideconv => AreaPtx::EMPTY
+                .with(
+                    PtxTier::Sm75,
+                    tier_ptx!(
+                        ["cuda-sm75"],
+                        "ptx/wideconv.sm75",
+                        [75, 80, 86, 89, 90, 120]
+                    ),
+                )
                 // other cc 12.x devices keep this variant in sm120 builds; only the
                 // RTX 5090 binds the sm120 one
-                sm80: tier_ptx!(
-                    ["cuda-sm80", "cuda-sm90", "cuda-sm120"],
-                    "ptx/wideconv.sm80",
-                    [80, 86, 89, 90, 120]
+                .with(
+                    PtxTier::Sm80,
+                    tier_ptx!(
+                        ["cuda-sm80", "cuda-sm90", "cuda-sm120"],
+                        "ptx/wideconv.sm80",
+                        [80, 86, 89, 90, 120]
+                    ),
+                )
+                .with(
+                    PtxTier::Sm120,
+                    tier_ptx!(["cuda-sm120"], "ptx/wideconv.sm120", [120]),
                 ),
-                sm90: None,
-                sm120: tier_ptx!(["cuda-sm120"], "ptx/wideconv.sm120", [120]),
-            },
         }
     }
 }
@@ -423,9 +447,12 @@ mod tests {
             }
         );
         let probe = KernelModule::Probe.variants();
-        assert_eq!(probe.sm75.is_some(), cfg!(feature = "cuda-sm75"));
         assert_eq!(
-            probe.sm80.is_some(),
+            probe.embedded(PtxTier::Sm75).is_some(),
+            cfg!(feature = "cuda-sm75")
+        );
+        assert_eq!(
+            probe.embedded(PtxTier::Sm80).is_some(),
             cfg!(any(
                 feature = "cuda-sm80",
                 feature = "cuda-sm90",
@@ -436,9 +463,9 @@ mod tests {
         let selected = probe.select(PtxTier::Sm120).map(|(tier, _)| tier);
         assert_eq!(
             selected,
-            if probe.sm80.is_some() {
+            if probe.embedded(PtxTier::Sm80).is_some() {
                 Some(PtxTier::Sm80)
-            } else if probe.sm75.is_some() {
+            } else if probe.embedded(PtxTier::Sm75).is_some() {
                 Some(PtxTier::Sm75)
             } else {
                 None

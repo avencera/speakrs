@@ -41,7 +41,12 @@ pub(super) static PROFILE: Profile = Profile {
         .with_if(PtxTier::Sm90, cfg!(feature = "cuda-sm90"))
         .with_if(PtxTier::Sm120, cfg!(feature = "cuda-sm120")),
     shipped: TierSet::of(&SHIPPED),
-    tier_features: ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120"],
+    tier_features: &[
+        (PtxTier::Sm75, "cuda-sm75"),
+        (PtxTier::Sm80, "cuda-sm80"),
+        (PtxTier::Sm90, "cuda-sm90"),
+        (PtxTier::Sm120, "cuda-sm120"),
+    ],
     libraries: if super::driver_only() {
         LibraryPolicy::DriverOnly
     } else {
@@ -56,15 +61,15 @@ pub(super) static PROFILE: Profile = Profile {
 
 /// speakrs's Cargo feature and environment override for each PTX tier
 pub(crate) trait TierPolicy: Sized {
-    /// Cargo feature for this GPU target
-    fn feature(self) -> &'static str;
+    /// Cargo feature for this GPU target; `None` for a cudakit tier speakrs does not ship
+    fn feature(self) -> Option<&'static str>;
 
     /// Reads `SPEAKRS_CUDA_PTX_TIER`; unset or empty means no override
     fn from_env() -> Result<Option<Self>, CudaError>;
 }
 
 impl TierPolicy for PtxTier {
-    fn feature(self) -> &'static str {
+    fn feature(self) -> Option<&'static str> {
         PROFILE.feature(self)
     }
 
@@ -140,7 +145,7 @@ mod tests {
             match expected {
                 Some(tier) => assert_eq!(selected.unwrap(), tier),
                 None => assert!(matches!(selected, Err(CudaError::TierNotCompiledIn {
-                    device: actual, feature: "cuda-sm75", ..
+                    device: actual, feature: Some("cuda-sm75"), ..
                 }) if actual == device)),
             }
         }
@@ -153,7 +158,7 @@ mod tests {
     #[test]
     fn overrides_require_the_target_feature_and_device_capability() {
         let device = ComputeCapability::new(12, 0);
-        for tier in PtxTier::ALL {
+        for &tier in PtxTier::ALL {
             let selected = PtxTier::select(device, Some(tier));
             if tier.is_compiled_in() {
                 assert_eq!(selected.unwrap(), tier);
@@ -196,8 +201,12 @@ mod tests {
 
     #[test]
     fn every_target_feature_maps_to_its_tier() {
-        for tier in PtxTier::ALL {
-            assert_eq!(tier.feature(), format!("cuda-{}", tier.name()));
+        // later cudakit tiers have no speakrs feature until speakrs targets them
+        for tier in [PtxTier::Sm75, PtxTier::Sm80, PtxTier::Sm90, PtxTier::Sm120] {
+            assert_eq!(
+                tier.feature(),
+                Some(format!("cuda-{}", tier.name()).as_str())
+            );
         }
     }
 }
