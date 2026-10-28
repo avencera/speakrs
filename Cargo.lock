@@ -485,7 +485,7 @@ dependencies = [
 name = "cudakit-build"
 version = "0.1.0"
 dependencies = [
- "color-eyre",
+ "eyre",
  "sha2",
  "tempfile",
 ]
