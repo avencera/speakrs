@@ -296,11 +296,14 @@ mod tests {
         use crate::inference::cuda::CudaRuntime;
         use std::fs::{OpenOptions, TryLockError};
 
-        // the proof process must be serialized, including context creation and drops
+        // the proof process must be serialized, including context creation and drops;
+        // the lock path follows prove-driver-only.sh
+        let path = std::env::var_os("SPEAKRS_GPU_LOCK")
+            .unwrap_or_else(|| "/workspace/gpu-bench.lock".into());
         let lock = OpenOptions::new()
             .read(true)
             .write(true)
-            .open("/workspace/gpu-bench.lock")
+            .open(path)
             .expect("proof runs under the shared GPU lock");
         assert!(matches!(lock.try_lock(), Err(TryLockError::WouldBlock)));
         let runtime = CudaRuntime::new(0)?;
