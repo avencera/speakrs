@@ -107,7 +107,7 @@ jobs:
       - name: Check the CPU backend alone
         run: cargo check -p speakrs --no-default-features --features "online cpu"
 
-      - name: Keep ONNX Runtime out of CPU dependency trees
+      - name: Keep ONNX Runtime and CUDA out of CPU and CoreML dependency trees
         run: bash scripts/check_cpu_dependencies.sh
 
       - name: Require a backend feature
