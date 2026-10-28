@@ -219,18 +219,26 @@ impl PipelineConfig {
     }
 
     /// Mode-specific defaults. Fast modes use min-duration filtering to remove
-    /// single-frame speaker flicker from the larger step size.
+    /// single-frame speaker flicker from the larger step size, and stop VBx after
+    /// three iterations with a speaker-keep threshold of `1e-6` instead of `1e-7`.
     pub fn for_mode(mode: ExecutionMode) -> Self {
         match mode {
             ExecutionMode::CoreMlFast | ExecutionMode::CudaFast => Self {
                 activity: ActivityCleanup::new(3, 3, 0, 0),
-                clustering: ClusteringConfig::default().with_backend(
-                    ClusteringBackend::GaussianVbx(
+                clustering: ClusteringConfig::default()
+                    .with_backend(ClusteringBackend::GaussianVbx(
                         VbxConfig::default()
                             .with_max_iters(3)
                             .expect("fast-mode iteration count is valid"),
-                    ),
-                ),
+                    ))
+                    // pyannote's 1e-7 assumes VBx ran to convergence; after three
+                    // iterations, fragmented AHC clusters still sit above it (270 of
+                    // 1916 on CHiME-6 S21), and assignment and reconstruction scale
+                    // with every cluster kept. Higher thresholds start dropping real
+                    // speakers: 1e-5 raises VoxConverse dev DER and 2e-5 merges S21
+                    // into two speakers
+                    .with_speaker_keep_threshold(1e-6)
+                    .expect("fast-mode keep threshold is valid"),
                 ..Self::default()
             },
             _ => Self::default(),

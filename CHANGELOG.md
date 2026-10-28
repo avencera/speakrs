@@ -6,6 +6,7 @@
 - Remove `PtxTier::{SHIPPED, native, feature, is_compiled_in, compiled_in, from_env, select}` (breaking): `PtxTier` and `ComputeCapability` are now cudakit's types, and parsing a tier returns `cudakit::Error`; `SPEAKRS_CUDA_PTX_TIER` and the GPU target features behave as before
 - `CudaMath` is no longer `#[non_exhaustive]`
 - Fix `scripts/cuda/make_reference.py` and `scripts/cuda/setup-gpu-box.sh` failing to read the model revision from `src/models.rs`
+- Fix `cuda-fast` and `coreml-fast` keeping hundreds of spurious speakers on recordings where AHC splits the embeddings into many small clusters: fast modes now drop speakers whose VBx prior is at most `1e-6` instead of `1e-7`, because three VBx iterations leave those clusters above the old threshold. On CHiME-6 S21, `cuda-fast` goes from 30.4 s to 2.2 s and from 10 speakers to 8, with DER at 54.7%. `cuda-fast` DER on AMI SDM drops from 20.58% to 20.31%; AMI IHM, Earnings-21, AISHELL-4, and ICSI drop by up to 0.03 points, VoxConverse dev and test are unchanged, and AVA-AVD rises from 48.93% to 48.98%
 
 ## [0.7.0] - 2026-10-26
 
