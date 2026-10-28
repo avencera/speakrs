@@ -219,18 +219,26 @@ impl PipelineConfig {
     }
 
     /// Mode-specific defaults. Fast modes use min-duration filtering to remove
-    /// single-frame speaker flicker from the larger step size.
+    /// single-frame speaker flicker from the larger step size, and stop VBx after
+    /// three iterations with a speaker-keep threshold of `1e-6` instead of `1e-7`.
     pub fn for_mode(mode: ExecutionMode) -> Self {
         match mode {
             ExecutionMode::CoreMlFast | ExecutionMode::CudaFast => Self {
                 activity: ActivityCleanup::new(3, 3, 0, 0),
-                clustering: ClusteringConfig::default().with_backend(
-                    ClusteringBackend::GaussianVbx(
+                clustering: ClusteringConfig::default()
+                    .with_backend(ClusteringBackend::GaussianVbx(
                         VbxConfig::default()
                             .with_max_iters(3)
                             .expect("fast-mode iteration count is valid"),
-                    ),
-                ),
+                    ))
+                    // pyannote's 1e-7 assumes VBx ran to convergence; after three
+                    // iterations, fragmented AHC clusters still sit above it (270 of
+                    // 1916 on CHiME-6 S21), and assignment and reconstruction scale
+                    // with every cluster kept. Higher thresholds start dropping real
+                    // speakers: 1e-5 raises VoxConverse dev DER and 2e-5 merges S21
+                    // into two speakers
+                    .with_speaker_keep_threshold(1e-6)
+                    .expect("fast-mode keep threshold is valid"),
                 ..Self::default()
             },
             _ => Self::default(),
@@ -1039,6 +1047,30 @@ mod clean_frame_duration_tests {
         assert_eq!(fast.max_iters(), 3);
         assert_eq!(segmentation_step_seconds(ExecutionMode::CoreMl), 1.0);
         assert_eq!(segmentation_step_seconds(ExecutionMode::CoreMlFast), 2.0);
+    }
+
+    // losing the fast-mode threshold brings back hundreds of kept clusters on
+    // fragmented recordings, and only a long far-field run would show it
+    #[test]
+    fn fast_modes_prune_unconverged_speakers() {
+        for mode in [ExecutionMode::CoreMlFast, ExecutionMode::CudaFast] {
+            let threshold = PipelineConfig::for_mode(mode)
+                .clustering
+                .speaker_keep_threshold();
+            assert_eq!(threshold, 1e-6, "{mode}");
+        }
+
+        for mode in [
+            ExecutionMode::Cpu,
+            ExecutionMode::CoreMl,
+            ExecutionMode::Cuda,
+            ExecutionMode::MiGraphX,
+        ] {
+            let threshold = PipelineConfig::for_mode(mode)
+                .clustering
+                .speaker_keep_threshold();
+            assert_eq!(threshold, 1e-7, "{mode}");
+        }
     }
 
     #[test]
