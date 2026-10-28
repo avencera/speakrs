@@ -468,7 +468,7 @@ impl CudaEmbedding {
                 .batches
                 .embed(runtime, chunks, masks, |runtime, rows, target| {
                     let source = &fbanks[rows.start * FBANK_LEN..rows.end * FBANK_LEN];
-                    target.copy_from_host(runtime.stream(), source)
+                    Ok(target.copy_from_host(runtime.stream(), source)?)
                 })
         })?;
 

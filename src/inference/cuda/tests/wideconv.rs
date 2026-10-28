@@ -28,8 +28,11 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
 
-use cudarc::driver::{CudaGraph, CudaSlice, CudaStream, LaunchConfig, PushKernelArg, sys};
+use cudakit::Graph;
+use cudarc::driver::{CudaSlice, CudaStream, LaunchConfig, PushKernelArg, sys};
 use serde_json::json;
+
+use cudakit::dnn::Residual;
 
 use super::super::candidate::{
     ConfigPin, ConvCandidate, ConvInputs, ConvKernel, ConvLayerSpec, ConvOxide, ConvPin,
@@ -38,7 +41,7 @@ use super::super::candidate::{
     WideconvPartition, WideconvProducts, WideconvSplitCells, WideconvTensorKernel, f16_bits,
 };
 use super::super::dnn::ConvPlanner;
-use super::super::geometry::{Conv2d, Residual};
+use super::super::geometry::Conv2d;
 use super::super::implementation::Choice;
 use super::super::kernels::ModuleRequest;
 use super::super::{
@@ -46,6 +49,7 @@ use super::super::{
     SafetensorsFile,
 };
 use super::{reference_dir, runtime};
+use crate::inference::cuda::tier::test_support::TierPolicy;
 
 const B1_MODEL: &str = "wespeaker-multimask-tail";
 const B32_MODEL: &str = "wespeaker-multimask-tail-b32";
@@ -243,21 +247,9 @@ fn items(values: &[f32], items: usize, batch: usize) -> Vec<f32> {
         .collect()
 }
 
-fn capture(
-    stream: &Arc<CudaStream>,
-    mut enqueue: impl FnMut() -> Result<(), CudaError>,
-) -> Result<CudaGraph, CudaError> {
-    stream.synchronize()?;
-    stream.begin_capture(sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)?;
-    let enqueued = enqueue();
-    let captured = stream.end_capture(sys::CUgraphInstantiate_flags(0));
-    enqueued?;
-    Ok(captured?.expect("nonempty graph"))
-}
-
 /// Median milliseconds per replay over 10 samples of 10 replays, after 100 ms of
 /// warm-up so the clock settles
-fn timed(graph: &CudaGraph, stream: &CudaStream) -> Result<f64, CudaError> {
+fn timed(graph: &Graph, stream: &CudaStream) -> Result<f64, CudaError> {
     let start = stream.record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))?;
     loop {
         for _ in 0..5 {
@@ -425,7 +417,7 @@ fn trunk_resnet_override_obeys_forced_ptx_jit() -> Result<(), CudaError> {
                 Some(override_name),
                 PtxTier::Sm80,
                 device,
-                |request| request.diagnostic_request(force_jit),
+                |request| Ok(request.diagnostic_request(force_jit)?),
             )?
             .expect("trunk override selects an artifact");
             let artifact = if force_jit {
@@ -646,7 +638,7 @@ impl Library {
     ) -> Result<(), CudaError> {
         if !layer.shortcut {
             let residual_view = residual.map(|value| value.as_view());
-            return self.plan.forward_bias_relu(
+            return Ok(self.plan.forward_bias_relu(
                 &mut self.workspace.as_view_mut(),
                 &x.as_view(),
                 &weight.as_view(),
@@ -658,7 +650,7 @@ impl Library {
                     Residual::Add,
                 ),
                 &mut out.as_view_mut(),
-            );
+            )?);
         }
         self.plan.forward(
             &mut self.workspace.as_view_mut(),
@@ -773,7 +765,8 @@ fn driver_trunk_layers_match_library() -> Result<(), CudaError> {
                 let mut enqueue_library =
                     || library.enqueue(stream, &layer, &xd, &wd, &bd, rd.as_ref(), &mut lib_out);
                 enqueue_library()?;
-                let lib_graph = capture(stream, &mut enqueue_library)?;
+                // SAFETY: the case's buffers are declared before the graph and outlive it
+                let lib_graph = unsafe { runtime.capture_nonempty(&mut enqueue_library) }?;
                 let lib_values = stream.clone_dtoh(&lib_out)?;
                 // cuMemcpyDtoHAsync into pageable memory has no completion guarantee
                 stream.synchronize()?;
@@ -795,7 +788,8 @@ fn driver_trunk_layers_match_library() -> Result<(), CudaError> {
                     )
                 };
                 enqueue()?;
-                let graph = capture(stream, &mut enqueue)?;
+                // SAFETY: the case's buffers are declared before the graph and outlive it
+                let graph = unsafe { runtime.capture_nonempty(&mut enqueue) }?;
                 let eager = stream.clone_dtoh(&out)?;
                 // cuMemcpyDtoHAsync into pageable memory has no completion guarantee
                 stream.synchronize()?;

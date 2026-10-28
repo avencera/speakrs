@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 
+use cudakit::DeviceAttributes;
 use cudarc::driver::sys::CUfunction_attribute;
 use cudarc::driver::{
     CudaFunction, CudaSlice, CudaStream, CudaView, CudaViewMut, LaunchConfig, PushKernelArg,
@@ -24,7 +25,6 @@ use super::{
     GeometryError, InfinityContract, Maths, NanContract, Op, Phases, PlanError, Scratch,
     SegConvCandidate, SegConvSite, SegConvSpec, SignedZeroContract, SpecialValues,
 };
-use crate::inference::cuda::device::DeviceAttributes;
 use crate::inference::cuda::error::check_len;
 use crate::inference::cuda::{
     ComputeCapability, CudaError, CudaMath, CudaRuntime, KernelModule, LoadedKernels, PtxTier,

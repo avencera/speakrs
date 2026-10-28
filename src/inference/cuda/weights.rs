@@ -24,7 +24,11 @@ impl SafetensorsFile {
         expected_shape: &[usize],
     ) -> Result<DeviceTensor<f32>, CudaError> {
         let host = self.read_f32(name, expected_shape)?;
-        DeviceTensor::upload(runtime.stream(), &host, expected_shape)
+        Ok(DeviceTensor::upload(
+            runtime.stream(),
+            &host,
+            expected_shape,
+        )?)
     }
 
     /// Reads tensor `name` to the host after the same checks as [`Self::upload`]

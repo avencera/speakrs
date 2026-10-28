@@ -1,8 +1,9 @@
 //! Measured whole-plan recipes and device-class defaults are distinct speed claims
 
+use cudakit::DeviceAttributes;
+
 use super::{BoundaryId, SpeedScope};
 use crate::inference::cuda::candidate::{ConfigPin, Fp16Policy, SegdensePin, WideconvPin};
-use crate::inference::cuda::device::DeviceAttributes;
 use crate::inference::cuda::{ComputeCapability, CudaMath, KernelModule, PtxTier};
 
 /// The source of a boundary choice, in decreasing policy precedence

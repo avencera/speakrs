@@ -74,7 +74,7 @@ fn pins_refuse_other_boundaries_and_lower_modules() {
         32,
         CudaMath::Tf32,
         PtxTier::Sm80,
-        &crate::inference::cuda::device::test_support::Builder::new(ComputeCapability::new(12, 0))
+        &cudakit::DeviceAttributesBuilder::new(ComputeCapability::new(12, 0))
             .multiprocessors(36)
             .build(),
     )

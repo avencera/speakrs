@@ -1,8 +1,9 @@
 //! Scalar tuner alternatives retain the pipeline mode required by the plan
 
+use cudakit::DeviceAttributesBuilder as Builder;
+
 use super::{Area, Entry, Site};
 use crate::inference::cuda::candidate::{ConfigPin, DriverCandidate};
-use crate::inference::cuda::device::test_support::Builder;
 use crate::inference::cuda::implementation::BoundaryId;
 use crate::inference::cuda::{ComputeCapability, CudaMath, PtxTier};
 

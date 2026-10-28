@@ -1,7 +1,8 @@
 //! Host-only proof that timing cannot create an execution permission
 
+use cudakit::{DeviceAttributes, DeviceAttributesBuilder as Builder};
+
 use super::{ApprovedChoice, BenchmarkMeasurement, Catalogue, Tuple, select_winners};
-use crate::inference::cuda::device::{DeviceAttributes, test_support::Builder};
 use crate::inference::cuda::implementation::BoundaryId;
 use crate::inference::cuda::{ComputeCapability, CudaMath, PtxTier};
 

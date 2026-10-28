@@ -84,7 +84,8 @@ fn unknown_or_reduced_context_budget_selects_sequential() {
 
 #[test]
 fn insufficient_cooperative_capacity_falls_back_only_in_library_allowed_production() {
-    use crate::inference::cuda::device::test_support::Builder;
+    use cudakit::DeviceAttributesBuilder as Builder;
+
     use crate::inference::cuda::implementation::{BoundaryId, Selected, select};
     use crate::inference::cuda::kernels::{ArtifactHash, LoadedArtifact, ModuleRequest};
     use crate::inference::cuda::{ComputeCapability, CudaError, CudaMath, KernelModule, PtxTier};

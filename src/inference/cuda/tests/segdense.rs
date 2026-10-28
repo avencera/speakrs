@@ -11,15 +11,16 @@
 //! their correctness on another GPU without timing them. `SEGDENSE_ENTRY` times one
 //! batch-32 embedding entry in place of the device rule's
 
-use cudarc::driver::sys::{CUevent_flags, CUgraphInstantiate_flags, CUstreamCaptureMode};
-use cudarc::driver::{CudaFunction, CudaGraph, CudaSlice, LaunchConfig, PushKernelArg};
+use cudakit::DeviceAttributes;
+use cudakit::DeviceAttributesBuilder as Builder;
+use cudakit::Graph;
+use cudarc::driver::sys::CUevent_flags;
+use cudarc::driver::{CudaFunction, CudaSlice, LaunchConfig, PushKernelArg};
 
 use super::super::candidate::{
     DenseCandidate, DenseOxide, DenseSite, DenseSpec, Phases, SegConvCandidate, SegConvOxide,
     SegConvSite, SegConvSpec, SegdensePin,
 };
-use super::super::device::DeviceAttributes;
-use super::super::device::test_support::Builder;
 use super::super::dnn::ConvPlan;
 use super::super::{
     ComputeCapability, Conv2d, ConvPlanner, CudaError, CudaLibrary, CudaMath, CudaRuntime,
@@ -210,12 +211,12 @@ impl Library {
         output: &mut CudaSlice<f32>,
     ) -> Result<(), CudaError> {
         if let Some(conv) = &self.conv {
-            return conv.forward(
+            return Ok(conv.forward(
                 &mut self.workspace.as_view_mut(),
                 &input.as_view(),
                 &weight.as_view(),
                 &mut output.as_view_mut(),
-            );
+            )?);
         }
 
         let embedding = self.site == Site::Dense(DenseSite::Embedding);
@@ -350,39 +351,13 @@ fn capture(
     runtime: &CudaRuntime,
     repetitions: usize,
     mut enqueue: impl FnMut() -> Result<(), CudaError>,
-) -> Result<CudaGraph, CudaError> {
-    let stream = runtime.stream();
-    stream.synchronize()?;
-    let context = runtime.context();
-    let tracking = context.is_event_tracking();
-    // safety: all buffers use this one synchronized stream throughout capture
-    unsafe { context.disable_event_tracking() };
-    let result = stream
-        .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)
-        .map_err(CudaError::from)
-        .and_then(|()| {
-            let result = (0..repetitions).try_for_each(|_| enqueue());
-            let graph = stream.end_capture(CUgraphInstantiate_flags(0));
-            result?;
-            Ok(graph?)
-        });
-    if tracking {
-        // safety: restore the context state after capture has ended
-        unsafe { context.enable_event_tracking() };
-    }
-
-    result?.ok_or_else(|| CudaError::Unsupported {
-        context: "segdense capture",
-        reason: "empty graph".into(),
-    })
+) -> Result<Graph, CudaError> {
+    // SAFETY: callers keep every buffer `enqueue` touches alive until the graph drops
+    unsafe { runtime.capture_nonempty(|| (0..repetitions).try_for_each(|_| enqueue())) }
 }
 
 /// Milliseconds per enqueue of ten replays of `graph`, after five warm-up replays
-fn timed(
-    runtime: &CudaRuntime,
-    graph: &CudaGraph,
-    repetitions: usize,
-) -> Result<Vec<f64>, CudaError> {
+fn timed(runtime: &CudaRuntime, graph: &Graph, repetitions: usize) -> Result<Vec<f64>, CudaError> {
     for _ in 0..5 {
         graph.launch()?;
     }

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Move the CUDA host stack (driver and library loading, module registry, device buffers, cuBLAS products, graph capture, the cuDNN convolution planner and the driver release reader) into the shared `cudakit` crate; CUDA modes run the same kernels and give the same results
+- Remove `PtxTier::{SHIPPED, native, feature, is_compiled_in, compiled_in, from_env, select}` (breaking): `PtxTier` and `ComputeCapability` are now cudakit's types, and parsing a tier returns `cudakit::Error`; `SPEAKRS_CUDA_PTX_TIER` and the GPU target features behave as before
+- `CudaMath` is no longer `#[non_exhaustive]`
 - Fix `scripts/cuda/make_reference.py` and `scripts/cuda/setup-gpu-box.sh` failing to read the model revision from `src/models.rs`
 
 ## [0.7.0] - 2026-10-26

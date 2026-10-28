@@ -8,10 +8,11 @@
 
 use std::fmt;
 
+use cudakit::DeviceAttributes;
+
 use super::BoundaryId;
 use super::boundary::same as same_text;
 use crate::inference::cuda::candidate::ConfigPin;
-use crate::inference::cuda::device::DeviceAttributes;
 use crate::inference::cuda::kernels::{ArtifactHash, LoadedArtifact, ModuleRequest};
 use crate::inference::cuda::{ComputeCapability, CudaMath, KernelModule, PtxTier};
 

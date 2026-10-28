@@ -340,7 +340,7 @@ impl ConvCandidate for Oxide {
                 // uses the small blocks, which spread the same work evenly
                 let (large, small) = shape.tilings();
                 let multiprocessors = if small.is_some() {
-                    runtime.multiprocessor_count()?
+                    runtime.multiprocessor_count()
                 } else {
                     0
                 };
@@ -531,7 +531,7 @@ impl super::DriverCandidate for Oxide {
 
     fn driver_coverage(
         _tier: super::PtxTier,
-        _device: &super::super::device::DeviceAttributes,
+        _device: &cudakit::DeviceAttributes,
         _fp16: super::Fp16Policy,
     ) -> Coverage {
         IMPLEMENTED
@@ -541,7 +541,7 @@ impl super::DriverCandidate for Oxide {
         boundary: super::super::implementation::BoundaryId,
         batch: usize,
         math: CudaMath,
-        device: &super::super::device::DeviceAttributes,
+        device: &cudakit::DeviceAttributes,
         tier: super::PtxTier,
     ) -> Option<super::super::implementation::SpeedScope> {
         if device.capability() == ComputeCapability::new(12, 0) {
@@ -564,7 +564,7 @@ impl super::DriverCandidate for Oxide {
         boundary: super::super::implementation::BoundaryId,
         batch: usize,
         math: CudaMath,
-        device: &super::super::device::DeviceAttributes,
+        device: &cudakit::DeviceAttributes,
         tier: PtxTier,
     ) -> Result<Option<super::ConfigPin>, PlanError> {
         if math == CudaMath::Fp32 {
@@ -586,7 +586,7 @@ impl super::DriverCandidate for Oxide {
         boundary: super::super::implementation::BoundaryId,
         batch: usize,
         math: CudaMath,
-        device: &super::super::device::DeviceAttributes,
+        device: &cudakit::DeviceAttributes,
         tier: super::PtxTier,
         _fp16: super::Fp16Policy,
     ) -> Result<super::ConfigPin, PlanError> {
@@ -642,7 +642,7 @@ impl super::DriverCandidate for Oxide {
 fn tensor_kernel(
     shape: ConvShape,
     math: CudaMath,
-    device: &super::super::device::DeviceAttributes,
+    device: &cudakit::DeviceAttributes,
     tier: PtxTier,
     batch: usize,
     output: [usize; 2],

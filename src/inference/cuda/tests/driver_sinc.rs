@@ -8,9 +8,8 @@
 //! Each case prints one `SINC` JSON line; `TRUNK_BATCHES` and `TRUNK_MATHS` filter
 //! cases and `TRUNK_TIMING=1` adds graph-timed medians at batches 1 and 32
 
-use std::sync::Arc;
-
-use cudarc::driver::{CudaGraph, CudaStream, sys};
+use cudakit::Graph;
+use cudarc::driver::{CudaStream, sys};
 use serde_json::json;
 
 use super::super::candidate::{Phases, SincCandidate, SincInputs, SincOxide, SincPin, SincSpec};
@@ -33,20 +32,8 @@ fn read(file: &SafetensorsFile, name: &str) -> Result<Vec<f32>, CudaError> {
     file.read_f32(name, &shape)
 }
 
-fn capture(
-    stream: &Arc<CudaStream>,
-    mut enqueue: impl FnMut() -> Result<(), CudaError>,
-) -> Result<CudaGraph, CudaError> {
-    stream.synchronize()?;
-    stream.begin_capture(sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)?;
-    let enqueued = enqueue();
-    let captured = stream.end_capture(sys::CUgraphInstantiate_flags(0));
-    enqueued?;
-    Ok(captured?.expect("nonempty graph"))
-}
-
 /// Median milliseconds per replay of 10 samples of 10 replays after 100 ms of warm-up
-fn timed(graph: &CudaGraph, stream: &CudaStream) -> Result<f64, CudaError> {
+fn timed(graph: &Graph, stream: &CudaStream) -> Result<f64, CudaError> {
     let start = stream.record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))?;
     loop {
         graph.launch()?;
@@ -193,7 +180,8 @@ fn driver_sinc_matches_library() -> Result<(), CudaError> {
                 )
             };
             enqueue()?;
-            let graph = capture(stream, &mut enqueue)?;
+            // SAFETY: the case's buffers are declared before the graph and outlive it
+            let graph = unsafe { runtime.capture_nonempty(&mut enqueue) }?;
             let eager = stream.clone_dtoh(&out)?;
             graph.launch()?;
             let bitwise = eager == stream.clone_dtoh(&out)?;
@@ -221,7 +209,8 @@ fn driver_sinc_matches_library() -> Result<(), CudaError> {
                 )
             };
             enqueue_library()?;
-            let lib_graph = capture(stream, &mut enqueue_library)?;
+            // SAFETY: the case's buffers are declared before the graph and outlive it
+            let lib_graph = unsafe { runtime.capture_nonempty(&mut enqueue_library) }?;
             let lib_pooled = pool(&stream.clone_dtoh(&raw)?, batch);
 
             let kernel_error = error(&eager, &truth);

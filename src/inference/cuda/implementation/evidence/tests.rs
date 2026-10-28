@@ -1,5 +1,6 @@
 use super::super::MEASURED_MODULES;
 use crate::inference::cuda::kernels::LoadedArtifact;
+use crate::inference::cuda::tier::test_support::BuildTiers;
 
 /// A kernel rebuild changes the shipped cubin, and a binding still naming the old hash
 /// refuses to load on its device; checked wherever this build embeds the bound tier

@@ -2,8 +2,9 @@
 
 use std::sync::Once;
 
+use cudakit::DeviceAttributes;
+
 use super::super::PtxTier;
-use super::super::device::DeviceAttributes;
 use super::super::implementation::policy::Recipe;
 
 static HINT: Once = Once::new();
@@ -32,8 +33,10 @@ fn eligible(
 
 #[cfg(test)]
 mod tests {
+    use cudakit::DeviceAttributesBuilder as Builder;
+
     use super::eligible;
-    use crate::inference::cuda::device::test_support::Builder;
+    use crate::inference::cuda::tier::test_support::BuildTiers;
     use crate::inference::cuda::{ComputeCapability, PtxTier};
 
     #[test]

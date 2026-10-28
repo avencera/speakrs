@@ -312,7 +312,7 @@ impl super::DriverCandidate for Oxide {
     const AREA: KernelModule = KernelModule::FbankDft;
     fn driver_coverage(
         tier: PtxTier,
-        _device: &crate::inference::cuda::device::DeviceAttributes,
+        _device: &cudakit::DeviceAttributes,
         _fp16: super::Fp16Policy,
     ) -> Coverage {
         Self::coverage(tier)
@@ -339,7 +339,7 @@ impl super::DriverCandidate for Oxide {
         _boundary: crate::inference::cuda::implementation::BoundaryId,
         _batch: usize,
         math: CudaMath,
-        device: &crate::inference::cuda::device::DeviceAttributes,
+        device: &cudakit::DeviceAttributes,
         _tier: PtxTier,
     ) -> Option<crate::inference::cuda::implementation::SpeedScope> {
         use crate::inference::cuda::implementation::SpeedScope;
@@ -369,7 +369,7 @@ impl super::DriverCandidate for Oxide {
         _boundary: crate::inference::cuda::implementation::BoundaryId,
         batch: usize,
         math: CudaMath,
-        _device: &crate::inference::cuda::device::DeviceAttributes,
+        _device: &cudakit::DeviceAttributes,
         _tier: PtxTier,
         _fp16: super::Fp16Policy,
     ) -> Result<super::ConfigPin, PlanError> {

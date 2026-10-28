@@ -109,7 +109,7 @@ impl Convs<'_> {
                     x,
                     &layer.weight().data().as_view(),
                     &layer.bias().data().as_view(),
-                    residual,
+                    residual.library(),
                     y,
                 )?;
 

@@ -229,7 +229,7 @@ impl super::DriverCandidate for Oxide {
 
     fn driver_coverage(
         _tier: super::PtxTier,
-        _device: &super::super::device::DeviceAttributes,
+        _device: &cudakit::DeviceAttributes,
         _fp16: super::Fp16Policy,
     ) -> Coverage {
         IMPLEMENTED
@@ -239,7 +239,7 @@ impl super::DriverCandidate for Oxide {
         _boundary: super::super::implementation::BoundaryId,
         _batch: usize,
         _math: CudaMath,
-        _device: &super::super::device::DeviceAttributes,
+        _device: &cudakit::DeviceAttributes,
         _tier: super::PtxTier,
         _fp16: super::Fp16Policy,
     ) -> Result<super::ConfigPin, PlanError> {

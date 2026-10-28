@@ -1,8 +1,9 @@
 //! Forced segdense pins for development checks that time one kernel entry against
 //! the library on the device in hand
 
+use cudakit::DeviceAttributes;
+
 use super::{Choice, Entry, Hardware, SegdensePin};
-use crate::inference::cuda::device::DeviceAttributes;
 use crate::inference::cuda::{CudaMath, PtxTier};
 
 impl SegdensePin {

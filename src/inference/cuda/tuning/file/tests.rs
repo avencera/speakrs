@@ -2,10 +2,11 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use cudakit::DeviceAttributesBuilder as Builder;
+use cudakit::identity::DriverRelease;
+
 use super::{ChoiceKey, DeviceKey, Entry, FileError, MathKey, TuneFile, read};
-use crate::inference::cuda::device::test_support::Builder;
 use crate::inference::cuda::implementation::BoundaryId;
-use crate::inference::cuda::tuning::driver_version::DriverRelease;
 use crate::inference::cuda::tuning::{Catalogue, Tuple};
 use crate::inference::cuda::{ComputeCapability, CudaMath, PtxTier};
 
@@ -276,7 +277,8 @@ fn numerical_library_versions_are_required_even_for_a_kernel_winner() {
 
 #[test]
 fn api_only_identity_cannot_key_writes_or_loads() {
-    use crate::inference::cuda::tuning::driver_version::DriverIdentity;
+    use cudakit::identity::DriverIdentity;
+
     use crate::inference::cuda::tuning::{CudaTuneError, TuneControl};
 
     let directory =
@@ -285,7 +287,9 @@ fn api_only_identity_cannot_key_writes_or_loads() {
     let path = directory.join("device.json");
     let make_key = || -> Result<DeviceKey, CudaTuneError> {
         Ok(DeviceKey {
-            driver_version: DriverIdentity::ApiOnly(13000).require_release()?,
+            driver_version: crate::inference::cuda::tuning::driver_release(
+                DriverIdentity::ApiOnly(13000),
+            )?,
             ..key()
         })
     };

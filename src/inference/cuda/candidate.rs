@@ -32,10 +32,10 @@ use cudarc::driver::{
     CudaEvent, CudaSlice, CudaStream, CudaView, CudaViewMut, DeviceRepr, ValidAsZeroBits,
 };
 
-use super::device::DeviceAttributes;
 pub(crate) use super::error::{GeometryError, WeightFault};
 use super::geometry::Conv2d;
 use super::{CudaError, CudaMath, CudaRuntime, KernelModule, LoadedKernels, PtxTier, Sgemm};
+use cudakit::DeviceAttributes;
 
 mod conv;
 mod fbank;
@@ -180,6 +180,12 @@ pub(crate) enum PlanError {
 
 impl From<cudarc::driver::DriverError> for PlanError {
     fn from(error: cudarc::driver::DriverError) -> Self {
+        Self::Cuda(error.into())
+    }
+}
+
+impl From<cudakit::Error> for PlanError {
+    fn from(error: cudakit::Error) -> Self {
         Self::Cuda(error.into())
     }
 }
@@ -1075,7 +1081,7 @@ impl<'a> Projection<'a> {
             math: self.math,
             ..Sgemm::new(self.rows, gemm.n, k)
         };
-        self.runtime.sgemm(spec, a, weight, c)
+        Ok(self.runtime.sgemm(spec, a, weight, c)?)
     }
 }
 
@@ -1665,7 +1671,7 @@ pub(crate) trait DriverCandidate {
         boundary: super::implementation::BoundaryId,
         batch: usize,
         math: CudaMath,
-        device: &super::device::DeviceAttributes,
+        device: &cudakit::DeviceAttributes,
         tier: PtxTier,
         fp16: Fp16Policy,
     ) -> Result<ConfigPin, PlanError>;

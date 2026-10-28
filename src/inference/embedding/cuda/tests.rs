@@ -49,10 +49,10 @@ fn embed(session: &mut CudaSession<Batches>, case: &Case) -> Result<Vec<f32>, Cu
             case.chunks,
             &case.masks,
             |runtime, rows, target| {
-                target.copy_from_host(
+                Ok(target.copy_from_host(
                     runtime.stream(),
                     &case.fbank[rows.start * FBANK_LEN..rows.end * FBANK_LEN],
-                )
+                )?)
             },
         )
     })
@@ -174,7 +174,7 @@ fn queued_download_survives_the_next_full_batch() -> Result<(), CudaError> {
     let masks = vec![1.0; 32 * CHUNK_MASKS_LEN];
     let fill = |value: f32| {
         move |runtime: &CudaRuntime, rows: std::ops::Range<usize>, target: &mut DeviceTensor| {
-            target.copy_from_host(runtime.stream(), &vec![value; rows.len() * FBANK_LEN])
+            Ok(target.copy_from_host(runtime.stream(), &vec![value; rows.len() * FBANK_LEN])?)
         }
     };
 

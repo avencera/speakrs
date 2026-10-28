@@ -1,8 +1,9 @@
 //! Scope checks do not need a GPU or optional libraries
 
+use cudakit::DeviceAttributesBuilder as Builder;
+
 use super::{DeviceDefault, Recipe, RecipeMode, Source};
 use crate::inference::cuda::candidate::Fp16Policy;
-use crate::inference::cuda::device::test_support::Builder;
 use crate::inference::cuda::implementation::BoundaryId;
 use crate::inference::cuda::{ComputeCapability, CudaMath, KernelModule, PtxTier};
 

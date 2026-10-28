@@ -38,8 +38,7 @@ mod trunk;
 
 use std::sync::{Arc, Mutex, Once};
 
-use cudarc::driver::sys::{CUgraphInstantiate_flags, CUstreamCaptureMode};
-use cudarc::driver::{CudaGraph, CudaSlice, CudaView, CudaViewMut, PinnedHostSlice};
+use cudarc::driver::{CudaSlice, CudaView, CudaViewMut, PinnedHostSlice};
 use tracing::{debug, warn};
 
 use self::dispatch::Plan;
@@ -548,7 +547,7 @@ impl EmbeddingHead {
 }
 
 /// A captured forward pass; cudarc's graph type has no `Debug`
-struct ForwardGraph(Captured<CudaGraph>);
+struct ForwardGraph(Captured<cudakit::Graph>);
 
 impl std::fmt::Debug for ForwardGraph {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -627,41 +626,21 @@ impl EmbeddingBatch {
                 storage.buffers_mut(),
             )?;
         }
-        // finish weight packing and prior buffer work before capture drops their events
-        runtime.synchronize()?;
-
-        let context = runtime.context();
-        let tracking = context.is_event_tracking();
-        // cudarc records and waits on per-buffer events for cross-stream safety;
-        // inside a capture those would become graph nodes or waits on events from
-        // outside the capture, and every buffer here lives on this one stream
-        // SAFETY: the runtime issues all work on its single stream, so stream order
-        // alone keeps these buffers consistent while tracking is off
-        unsafe { context.disable_event_tracking() };
-
-        let stream = runtime.stream();
-        let captured = stream
-            .begin_capture(CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)
-            .map_err(CudaError::from)
-            .and_then(|()| {
-                let run = self.run_with_activations(
+        // capture first waits for weight packing and prior buffer work, since it pauses
+        // their events
+        // SAFETY: `Captured` keeps the graph with the storage whose buffers it records
+        // and drops the graph first; the weights live in `self`, which owns both
+        let captured = unsafe {
+            runtime.capture(|| {
+                self.run_with_activations(
                     runtime,
                     PlanSet::Selected,
                     ActivationForm::Half,
                     &mut |_, _| Ok(()),
                     storage.buffers_mut(),
-                );
-                // always end the capture, even after a failed launch, so the stream
-                // leaves capture mode
-                let graph = stream.end_capture(CUgraphInstantiate_flags(0));
-                run?;
-                Ok(graph?)
-            });
-
-        if tracking {
-            // SAFETY: restores the tracking state from before the capture
-            unsafe { context.enable_event_tracking() };
-        }
+                )
+            })
+        };
 
         self.graph = captured?.map(|graph| ForwardGraph(Captured::new(graph, storage)));
         debug!(
@@ -1052,7 +1031,9 @@ impl<'a> Convs<'a> {
                 x,
                 &layer.weight().data().as_view(),
                 y,
-            )
+            )?;
+
+            Ok(())
         }
         #[cfg(not(feature = "_cuda-libraries"))]
         {

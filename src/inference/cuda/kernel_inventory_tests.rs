@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 
 use super::{ComputeCapability, KernelModule, PtxTier, candidate, embedding, fbank, segmentation};
+use crate::inference::cuda::tier::test_support::BuildTiers;
 
 fn entries(ptx: &str) -> BTreeSet<&str> {
     ptx.lines()

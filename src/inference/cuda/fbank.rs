@@ -22,12 +22,12 @@
 
 mod constants;
 
+use cudakit::unfold_windows;
 use cudarc::driver::{
     CudaEvent, CudaFunction, CudaSlice, CudaView, CudaViewMut, DevicePtrMut, LaunchConfig,
     PinnedHostSlice, PushKernelArg,
 };
 
-use super::buffer::unfold_windows;
 use super::candidate::{FbankCandidate, FbankOxide, FbankSpec, Phases};
 use super::error::check_len;
 use super::implementation::{Selected, plan_selection};

@@ -11,6 +11,7 @@ use super::super::{
     PtxTier, SafetensorsFile, Sgemm,
 };
 use super::{runtime, runtime_with_tier};
+use crate::inference::cuda::tier::test_support::BuildTiers;
 
 /// Deterministic values in [-1, 1) with full FP32 mantissas, so a TF32 path (10-bit
 /// mantissa) would show errors around 1e-3 instead of FP32's 1e-7
@@ -164,7 +165,7 @@ fn ptx_tier_selection_follows_capability_and_build() {
     assert_eq!("sm80".parse::<PtxTier>().ok(), Some(PtxTier::Sm80));
     assert!(matches!(
         "sm_80".parse::<PtxTier>(),
-        Err(CudaError::InvalidPtxTier { .. })
+        Err(cudakit::Error::InvalidPtxTier { .. })
     ));
 }
 
@@ -424,7 +425,7 @@ fn cooperative_capacity_is_occupancy_times_sms() -> Result<(), CudaError> {
     };
     let kernels = runtime.load_kernels(super::super::KernelModule::Segmentation)?;
     let function = kernels.function("segmentation_bias_leaky")?;
-    let sms = runtime.multiprocessor_count()?;
+    let sms = runtime.multiprocessor_count();
     let per_sm = function.occupancy_max_active_blocks_per_multiprocessor(256, 0, None)?;
     let capacity = runtime.cooperative_capacity(&function, 256, 0)?;
     eprintln!("cooperative capacity: {capacity} blocks = {per_sm} per SM x {sms} SMs");

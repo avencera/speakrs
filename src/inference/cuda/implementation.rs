@@ -67,6 +67,8 @@ pub(crate) use evidence::{
     SpeedScope, SpeedStatus, TupleProof,
 };
 
+use cudakit::DeviceAttributes;
+
 #[cfg(all(test, feature = "_cuda-libraries"))]
 use super::candidate::{Batches, Coverage, CoverageEntry, Maths};
 use super::candidate::{
@@ -75,9 +77,9 @@ use super::candidate::{
     LstmSpec, PlanError, SegConvCandidate, SegConvOxide, SegConvSpec, SincCandidate, SincOxide,
     SincSpec, WideconvOxide,
 };
-use super::device::DeviceAttributes;
 use super::error::GeometryError;
 use super::kernels::{AreaPtx, LoadedArtifact, ModuleRequest};
+use super::tier::TierPolicy;
 use super::tuning::ApprovedChoice;
 use super::{
     ComputeCapability, CudaError, CudaLibrary, CudaMath, CudaRuntime, KernelModule, PtxTier,

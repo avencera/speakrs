@@ -4,12 +4,12 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use cudakit::DeviceAttributes;
+use cudakit::identity::DriverRelease;
 use serde::{Deserialize, Serialize};
 
-use super::driver_version::DriverRelease;
 use super::{ApprovedChoice, Catalogue, LibraryVersions, Tuple};
 use crate::inference::cuda::CudaMath;
-use crate::inference::cuda::device::DeviceAttributes;
 
 const FORMAT_VERSION: u32 = 4;
 const MAX_FILE_BYTES: u64 = 4 << 20;

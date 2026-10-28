@@ -1,5 +1,8 @@
 //! Production bindings, module requests and token policy, independent of declarations
 
+use cudakit::DeviceAttributes;
+use cudakit::DeviceAttributesBuilder as Builder;
+
 use super::{
     Binding, BoundaryId, Choice, LibraryNeed, Modules, PRODUCTION, PlanRequest, RecordHash,
     Selected, Selection, SpeedEvidence, SpeedScope, SpeedStatus, TokenEvidence, TupleProof, select,
@@ -7,8 +10,6 @@ use super::{
 use crate::inference::cuda::candidate::{
     ConfigPin, ConvKernel, ConvPin, ConvShape, LstmPin, PlanError, SincPin,
 };
-use crate::inference::cuda::device::DeviceAttributes;
-use crate::inference::cuda::device::test_support::Builder;
 use crate::inference::cuda::kernels::{
     AreaPtx, ArtifactHash, LoadedArtifact, ModuleRequest, shipped_ptx,
 };

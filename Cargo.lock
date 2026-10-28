@@ -470,6 +470,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cudakit"
+version = "0.1.0"
+dependencies = [
+ "cudarc",
+ "libloading",
+ "serde",
+ "sha2",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "cudarc"
 version = "0.19.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2316,6 +2328,7 @@ dependencies = [
  "approx",
  "block2",
  "crossbeam-channel",
+ "cudakit",
  "cudarc",
  "getrandom 0.3.4",
  "hf-hub",

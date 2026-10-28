@@ -14,7 +14,6 @@
 //! batch class and reused
 
 mod dispatch;
-mod graph;
 mod kernels;
 #[cfg(test)]
 pub(super) use kernels::REQUIRED_KERNELS;
@@ -23,9 +22,9 @@ mod rnn;
 mod shape;
 mod weights;
 
+use cudakit::unfold_windows;
 use cudarc::driver::CudaSlice;
 
-use self::graph::CapturedGraph;
 use self::kernels::{PoolNorm, RowLayout, SegmentationKernels};
 #[cfg(feature = "_cuda-libraries")]
 use self::rnn::{CudnnLstm, LstmPlan};
@@ -37,7 +36,6 @@ use self::shape::{SINC_KERNEL, SINC_STRIDE};
 use self::weights::{LstmLayer, SegmentationWeights};
 #[cfg(feature = "_cuda-libraries")]
 use super::CudaLstmAlgorithm;
-use super::buffer::unfold_windows;
 use super::candidate::{
     DenseSite, DenseSpec, LstmOxide, LstmProjOxide, Phases, SegConvCandidate, SegConvOxide,
     SegConvSite, SegConvSpec, SincCandidate, SincOutput, SincOxide,
@@ -107,7 +105,7 @@ pub struct SegmentationWorkspace {
     lstm: LstmStage,
     dense: [DensePlan; 3],
     tensors: Tensors,
-    graph: Option<CapturedGraph>,
+    graph: Option<cudakit::Graph>,
 }
 
 /// One owner for the Sinc producer
@@ -204,7 +202,7 @@ impl ConvStage {
         match *self {
             Self::Oxide(ref plan) => plan.enqueue(input, output, &Phases::new(), runtime),
             #[cfg(feature = "_cuda-libraries")]
-            Self::Library(ref plan) => plan.forward(workspace, input, weight, output),
+            Self::Library(ref plan) => Ok(plan.forward(workspace, input, weight, output)?),
         }
     }
 }
@@ -633,12 +631,21 @@ impl Network {
         }
 
         if workspace.graph.is_none() {
-            let graph = CapturedGraph::capture(runtime, || self.enqueue(runtime, workspace))?;
+            // SAFETY: the graph is stored in `workspace`, which owns every buffer the
+            // forward pass touches, never reallocates them, and drops the graph with them;
+            // the weights live in `self`, which outlives its workspaces
+            let graph = unsafe { runtime.capture(|| self.enqueue(runtime, workspace)) }?.ok_or(
+                CudaError::BufferLength {
+                    context: "segmentation CUDA graph nodes",
+                    expected: 1,
+                    actual: 0,
+                },
+            )?;
             workspace.graph = Some(graph);
         }
 
         match &workspace.graph {
-            Some(graph) => graph.launch(),
+            Some(graph) => Ok(graph.launch()?),
             None => Ok(()),
         }
     }
@@ -816,12 +823,12 @@ impl SegmentationWorkspace {
 
     /// Copies `[batch, samples]` waveforms into the input buffer
     pub fn upload_input(&mut self, runtime: &CudaRuntime, input: &[f32]) -> Result<(), CudaError> {
-        self.tensors.input.copy_from_host(runtime.stream(), input)
+        Ok(self.tensors.input.copy_from_host(runtime.stream(), input)?)
     }
 
     /// Copies the `[batch, frames, 7]` log-probabilities back; waits for the stream
     pub fn download_output(&self, runtime: &CudaRuntime) -> Result<Vec<f32>, CudaError> {
-        self.tensors.output.download(runtime.stream())
+        Ok(self.tensors.output.download(runtime.stream())?)
     }
 }
 

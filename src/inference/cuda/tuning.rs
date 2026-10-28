@@ -5,18 +5,18 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use cudarc::driver::CudaGraph;
+use cudakit::DeviceAttributes;
+use cudakit::Graph;
+use cudakit::identity::{DriverIdentity, DriverRelease};
 use sha2::{Digest, Sha256};
 
 use super::candidate::ConfigPin;
-use super::device::DeviceAttributes;
 use super::implementation::{self, BoundaryId};
 use super::kernels::ModuleRequest;
 use super::{CudaError, CudaMath, CudaRuntime, KernelModule, PtxTier};
 
 pub(crate) mod accuracy;
 mod bench;
-mod driver_version;
 mod file;
 
 /// Inputs to the opt-in tuner; precision must match the pipeline that will use it
@@ -138,7 +138,7 @@ pub fn tune_cuda(options: &CudaTuneOptions) -> Result<CudaTuneReport, CudaTuneEr
         BenchKind::CatalogueSlot(0),
         options.include_library,
     )?;
-    let driver = driver_version::DriverIdentity::read()?.require_release()?;
+    let driver = driver_release(DriverIdentity::read().map_err(CudaError::from)?)?;
     let catalogue = Catalogue::new(runtime.device(), runtime.ptx_tier())?;
     let key = device_key(
         runtime.device(),
@@ -166,6 +166,17 @@ pub fn tune_cuda(options: &CudaTuneOptions) -> Result<CudaTuneReport, CudaTuneEr
 }
 
 /// Numerical implementations compared during tuning, separate from driver-only runs
+/// Only a full driver release can identify saved measurements; an API-level identity
+/// is never written to or matched against a tune file
+fn driver_release(identity: DriverIdentity) -> Result<DriverRelease, CudaTuneError> {
+    match identity {
+        DriverIdentity::Release(release) => Ok(release),
+        DriverIdentity::ApiOnly(cuda_api) => {
+            Err(CudaTuneError::DriverReleaseUnreadable { cuda_api })
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum LibraryVersions {
@@ -419,7 +430,7 @@ impl TuneControl {
             // computing only the path does not hash artifacts or load candidate modules
             let path = file::path(device, None)?;
             let Some(file) = Self::load_file(&path, |libraries| {
-                let driver = driver_version::DriverIdentity::read()?.require_release()?;
+                let driver = driver_release(DriverIdentity::read().map_err(CudaError::from)?)?;
                 let catalogue = Catalogue::new(device, tier)?;
                 let libraries = LibraryVersions::for_tuning(libraries.includes_library(), || {
                     runtime.tuning_library_versions()
@@ -554,31 +565,10 @@ impl TuneControl {
             // shorter catalogues still execute the full model but add no duplicate timing
             return run();
         };
-        runtime.synchronize()?;
-        let context = runtime.context();
-        let tracking = context.is_event_tracking();
-        // all buffers in this captured boundary use this runtime's single stream
-        // SAFETY: stream order provides the same dependency ordering during capture
-        unsafe { context.disable_event_tracking() };
-        let stream = runtime.stream();
-        let captured = stream
-            .begin_capture(
-                cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
-            )
-            .map_err(CudaError::from)
-            .and_then(|()| {
-                let enqueued = run();
-                let graph = stream.end_capture(cudarc::driver::sys::CUgraphInstantiate_flags(0));
-                enqueued?;
-                graph
-                    .map_err(CudaError::from)?
-                    .ok_or_else(|| invalid("boundary capture produced no graph"))
-            });
-        if tracking {
-            // SAFETY: restores the tracking state observed before the capture
-            unsafe { context.enable_event_tracking() };
-        }
-        let graph = captured?;
+        // SAFETY: the boundary graphs go to `bench::CapturedModel`, which owns the model
+        // state behind every captured buffer and drops the graphs first
+        let graph = unsafe { runtime.capture(run) }?
+            .ok_or_else(|| invalid("boundary capture produced no graph"))?;
         // execute once so the following boundary receives the normal upstream values
         graph.launch()?;
         self.graphs
@@ -600,7 +590,7 @@ pub(crate) struct BoundaryGraph {
     pub(crate) batch: usize,
     pub(crate) math: CudaMath,
     pub(crate) choice: ApprovedChoice,
-    pub(crate) graph: CudaGraph,
+    pub(crate) graph: Graph,
 }
 
 impl std::fmt::Debug for BoundaryGraph {
@@ -679,7 +669,7 @@ fn select_winners(
 fn device_key(
     device: &DeviceAttributes,
     catalogue: Option<&Catalogue>,
-    driver: driver_version::DriverRelease,
+    driver: DriverRelease,
     libraries: LibraryVersions,
 ) -> Result<file::DeviceKey, CudaTuneError> {
     let cc = device.capability();

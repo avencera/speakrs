@@ -7,6 +7,7 @@ use super::{
     CudaError, CudaFbank, CudaMath, CudaRuntime, CudaSegmentation, PtxTier, ResNetEmbedding,
     SafetensorsFile, SegmentationOptions,
 };
+use crate::inference::cuda::tier::test_support::BuildTiers;
 
 fn maps(stage: &str) -> Result<String, Box<dyn Error>> {
     let maps = std::fs::read_to_string("/proc/self/maps")?;

@@ -48,9 +48,9 @@ coreml = [
 # cuda defaults to speakrs kernels on every GPU, with cuDNN/cuBLAS fallback
 cuda = ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120", "_cuda-libraries"]
 # internal: optional numerical libraries, added only by cuda
-_cuda-libraries = ["_cuda", "cudarc/cublas", "cudarc/cudnn"]
+_cuda-libraries = ["_cuda", "cudarc/cublas", "cudarc/cudnn", "cudakit/libraries"]
 # internal: driver support, without optional numerical libraries or kernel artifacts
-_cuda = ["dep:cudarc", "dep:libloading", "dep:safetensors", "dep:sha2", "dep:serde", "dep:serde_json", "dep:getrandom", "_backend"]
+_cuda = ["dep:cudakit", "cudakit/serde", "dep:cudarc", "dep:libloading", "dep:safetensors", "dep:sha2", "dep:serde", "dep:serde_json", "dep:getrandom", "_backend"]
 # each target embeds every area's best shipped variant for that target, so it pulls in
 # the artifact crate of every tier it may use; areas without a newer variant use sm75
 # default-features = false with cuda-rtx50 alone is a driver-only build
@@ -106,6 +106,8 @@ cudarc = { version = "0.19.10", optional = true, default-features = false, featu
     "dynamic-loading",
     "cuda-12040",
 ] }
+# the shared driver-only CUDA host stack; speakrs keeps its kernels, plans and policy
+cudakit = { path = "../cudakit/crates/cudakit", optional = true }
 safetensors = { version = "0.8.0", optional = true, default-features = false, features = ["alloc"] }
 # prebuilt PTX and cubins, one crate per tier so each stays under the crates.io upload
 # limit; exact pins because the host code and the kernels change together
@@ -178,6 +180,8 @@ name = "speaker_airtime"
 required-features = ["cpu"]
 
 [dev-dependencies]
+# device-attribute builders and fixture PTX for host-only CUDA tests
+cudakit = { path = "../cudakit/crates/cudakit", features = ["test-support"] }
 hound = "3.5.1"
 sha2 = "0.10"
 libloading = "0.9.0"

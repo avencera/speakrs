@@ -3,10 +3,12 @@
 //! The expectations are literal and independent of the production table. Only
 //! `observe` and `module_request` adapt the selection API under test
 
+use cudakit::DeviceAttributes;
+use cudakit::DeviceAttributesBuilder as Builder;
+
 use super::{BoundaryId, Modules, PlanRequest, Selected, TokenEvidence};
-use crate::inference::cuda::device::DeviceAttributes;
-use crate::inference::cuda::device::test_support::Builder;
 use crate::inference::cuda::kernels::{ArtifactHash, LoadedArtifact, ModuleRequest, shipped_ptx};
+use crate::inference::cuda::tier::test_support::BuildTiers;
 use crate::inference::cuda::{ComputeCapability, CudaError, CudaMath, KernelModule, PtxTier};
 
 /// One physical device class the golden table covers

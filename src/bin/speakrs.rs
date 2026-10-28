@@ -140,7 +140,6 @@ fn print_report(report: &CudaTuneReport) {
         let math = match row.math {
             CudaMath::Fp32 => "fp32",
             CudaMath::Tf32 => "tf32",
-            _ => "unknown",
         };
         for measurement in &row.candidates {
             let selected = if measurement.candidate == row.selected {

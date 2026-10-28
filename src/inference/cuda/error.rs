@@ -1,4 +1,3 @@
-use std::fmt;
 use std::path::PathBuf;
 
 #[cfg(feature = "_cuda-libraries")]
@@ -11,29 +10,7 @@ use safetensors::SafeTensorError;
 use super::{ComputeCapability, CudaMath, PtxTier};
 
 /// A CUDA shared library that the native backend loads at run time
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum CudaLibrary {
-    /// The driver API, `libcuda`, installed with the NVIDIA driver
-    Driver,
-    /// cuBLAS
-    Cublas,
-    /// cuDNN 9
-    Cudnn,
-    /// Runtime compilation used by the cuDNN dynamic LSTM
-    Nvrtc,
-}
-
-impl fmt::Display for CudaLibrary {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Driver => "CUDA driver (libcuda)",
-            Self::Cublas => "cuBLAS",
-            Self::Cudnn => "cuDNN",
-            Self::Nvrtc => "NVRTC",
-        })
-    }
-}
+pub use cudakit::Library as CudaLibrary;
 
 /// Errors from the native CUDA backend
 #[derive(Debug, thiserror::Error)]
@@ -231,7 +208,7 @@ pub enum CudaError {
         /// The kernel area
         module: &'static str,
         /// The requested record identity
-        artifact: super::kernels::LoadedArtifact,
+        artifact: cudakit::LoadedArtifact,
     },
     /// The driver rejected the artifact requested by qualification
     #[error("CUDA module `{module}` rejected requested artifact {artifact:?}: {source}")]
@@ -239,7 +216,7 @@ pub enum CudaError {
         /// The kernel area
         module: &'static str,
         /// The requested record identity
-        artifact: super::kernels::LoadedArtifact,
+        artifact: cudakit::LoadedArtifact,
         /// The driver's refusal
         #[source]
         source: DriverError,
@@ -390,7 +367,7 @@ impl CudaError {
 /// Converts a dimension for a cuBLAS or cuDNN call
 #[cfg(feature = "_cuda-libraries")]
 pub(super) fn to_c_int(context: &'static str, value: usize) -> Result<i32, CudaError> {
-    i32::try_from(value).map_err(|_| CudaError::DimensionOverflow { context, value })
+    Ok(cudakit::to_c_int(context, value)?)
 }
 
 /// Checks that a buffer holds exactly the elements an operation reads or writes
@@ -399,25 +376,103 @@ pub(super) fn check_len(
     expected: usize,
     actual: usize,
 ) -> Result<(), CudaError> {
-    if expected != actual {
-        return Err(CudaError::BufferLength {
-            context,
-            expected,
-            actual,
-        });
-    }
-
-    Ok(())
+    Ok(cudakit::check_len(context, expected, actual)?)
 }
 
 /// Number of elements in a shape
 pub(super) fn element_count(context: &'static str, shape: &[usize]) -> Result<usize, CudaError> {
-    shape.iter().try_fold(1_usize, |count, &dim| {
-        count.checked_mul(dim).ok_or(CudaError::DimensionOverflow {
-            context,
-            value: dim,
-        })
-    })
+    Ok(cudakit::element_count(context, shape)?)
+}
+
+/// cudakit's generic failures keep their existing speakrs variants and messages
+impl From<cudakit::Error> for CudaError {
+    fn from(error: cudakit::Error) -> Self {
+        use cudakit::Error as Kit;
+
+        match error {
+            Kit::LibraryUnavailable { library } => Self::LibraryUnavailable { library },
+            Kit::LibraryForbidden { library } => Self::LibraryForbidden { library },
+            Kit::LibraryUnprepared { library } => Self::Unsupported {
+                context: "CUDA plan",
+                reason: format!("{library} was not prepared before forward"),
+            },
+            Kit::TierNotCompiledIn {
+                tier,
+                device,
+                feature,
+            } => Self::TierNotCompiledIn {
+                tier,
+                device,
+                feature,
+            },
+            Kit::AreaTierNotCompiledIn {
+                area,
+                tier,
+                device,
+                feature,
+            } => Self::AreaTierNotCompiledIn {
+                area,
+                tier,
+                device,
+                feature,
+            },
+            Kit::NoDevice { ordinal, count } => Self::NoDevice { ordinal, count },
+            Kit::UnsupportedDevice {
+                capability,
+                baseline,
+            } => Self::UnsupportedDevice {
+                capability,
+                baseline,
+            },
+            Kit::InvalidPtxTier { value } => Self::InvalidPtxTier { value },
+            Kit::PtxTierAboveDevice { tier, capability } => {
+                Self::PtxTierAboveDevice { tier, capability }
+            }
+            Kit::Driver(error) => Self::Driver(error),
+            #[cfg(feature = "_cuda-libraries")]
+            Kit::Cublas(error) => Self::Cublas(error),
+            #[cfg(feature = "_cuda-libraries")]
+            Kit::Cudnn(error) => Self::Cudnn(error),
+            Kit::ArtifactUnavailable { module, artifact } => {
+                Self::ArtifactUnavailable { module, artifact }
+            }
+            Kit::ArtifactLoad {
+                module,
+                artifact,
+                source,
+            } => Self::ArtifactLoad {
+                module,
+                artifact,
+                source,
+            },
+            Kit::KernelMissing {
+                module,
+                kernel,
+                source,
+            } => Self::KernelMissing {
+                module,
+                kernel,
+                source,
+            },
+            Kit::BufferLength {
+                context,
+                expected,
+                actual,
+            } => Self::BufferLength {
+                context,
+                expected,
+                actual,
+            },
+            Kit::DimensionOverflow { context, value } => Self::DimensionOverflow { context, value },
+            Kit::Unsupported { context, reason } => Self::Unsupported { context, reason },
+            // empty captures and library errors from a cudakit feature speakrs did not
+            // enable keep cudakit's message
+            other => Self::Unsupported {
+                context: "cudakit",
+                reason: other.to_string(),
+            },
+        }
+    }
 }
 
 impl From<crate::inference::native_model::NativeWeightsError> for CudaError {

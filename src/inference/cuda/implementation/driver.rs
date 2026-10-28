@@ -1,12 +1,13 @@
 //! Kernel routing uses complete implemented coverage, never speed acceptance
 
+use cudakit::DeviceAttributes;
+
 use super::policy::{DeviceDefault, Recipe};
 use super::{BoundaryId, Modules, PlanPin, Qualified, Selected, Selection, Target, TokenEvidence};
 use crate::inference::cuda::candidate::{
     ConfigPin, ConvOxide, Coverage, DriverCandidate, FbankOxide, Fp16Policy, LstmProjOxide,
     PlanError, SegdenseArea, SincOxide, WideconvOxide,
 };
-use crate::inference::cuda::device::DeviceAttributes;
 use crate::inference::cuda::tuning::accuracy::RuntimePolicy;
 use crate::inference::cuda::{CudaError, CudaMath, KernelModule, PtxTier};
 

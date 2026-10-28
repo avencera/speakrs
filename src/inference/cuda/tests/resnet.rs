@@ -1,12 +1,14 @@
 //! The fused ResNet convolution candidate against the cuDNN fused call, on seeded
 //! random tensors, so it runs on any GPU without the reference files
 
+use cudakit::dnn::Residual;
+
 use super::super::candidate::{
     ConvCandidate, ConvInputs, ConvKernel, ConvLayerSpec, ConvOxide, ConvPin, ConvShape, Phases,
     PlanError,
 };
 use super::super::dnn::ConvPlanner;
-use super::super::geometry::{Conv2d, Residual};
+use super::super::geometry::Conv2d;
 use super::super::{CudaError, CudaMath};
 use super::runtime;
 

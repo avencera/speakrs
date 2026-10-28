@@ -14,6 +14,7 @@
 //! A100. Partitioned plans own their partial-sum planes, allocated in `plan`, so
 //! enqueueing allocates nothing and is capturable
 
+use cudakit::DeviceAttributes;
 use cudarc::driver::sys::CUfunction_attribute;
 use cudarc::driver::{
     CudaFunction, CudaSlice, CudaStream, CudaView, CudaViewMut, DevicePtr, LaunchConfig,
@@ -25,7 +26,6 @@ use super::{
     FiniteContract, GeometryError, InfinityContract, Maths, NanContract, Op, Phases, PlanError,
     Scratch, SignedZeroContract, SpecialValues,
 };
-use crate::inference::cuda::device::DeviceAttributes;
 use crate::inference::cuda::error::{check_len, element_count};
 use crate::inference::cuda::geometry::Conv2d;
 use crate::inference::cuda::{
