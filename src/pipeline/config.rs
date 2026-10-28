@@ -1049,6 +1049,30 @@ mod clean_frame_duration_tests {
         assert_eq!(segmentation_step_seconds(ExecutionMode::CoreMlFast), 2.0);
     }
 
+    // losing the fast-mode threshold brings back hundreds of kept clusters on
+    // fragmented recordings, and only a long far-field run would show it
+    #[test]
+    fn fast_modes_prune_unconverged_speakers() {
+        for mode in [ExecutionMode::CoreMlFast, ExecutionMode::CudaFast] {
+            let threshold = PipelineConfig::for_mode(mode)
+                .clustering
+                .speaker_keep_threshold();
+            assert_eq!(threshold, 1e-6, "{mode}");
+        }
+
+        for mode in [
+            ExecutionMode::Cpu,
+            ExecutionMode::CoreMl,
+            ExecutionMode::Cuda,
+            ExecutionMode::MiGraphX,
+        ] {
+            let threshold = PipelineConfig::for_mode(mode)
+                .clustering
+                .speaker_keep_threshold();
+            assert_eq!(threshold, 1e-7, "{mode}");
+        }
+    }
+
     #[test]
     fn default_clean_frame_duration_preserves_the_previous_frame_threshold() {
         assert_eq!(CleanFrameDuration::default().minimum_frames(), 118.0);
