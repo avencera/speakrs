@@ -157,9 +157,9 @@ rm -rf "$probe_dir"
 (cd "$KERNEL_CRATE" && cargo "+${CUDA_OXIDE_NIGHTLY}" oxide doctor)
 
 # --- models -----------------------------------------------------------------------
-HF_REVISION="$(sed -n 's/^const HF_REVISION: &str = "\([0-9a-f]\{40\}\)";$/\1/p' "$REPO_ROOT/src/models.rs")"
+HF_REVISION="$(sed -n 's/^pub const MODEL_REVISION: &str = "\([0-9a-f]\{40\}\)";$/\1/p' "$REPO_ROOT/src/models.rs")"
 if [[ -z "$HF_REVISION" ]]; then
-    echo "could not read HF_REVISION from $REPO_ROOT/src/models.rs" >&2
+    echo "could not read MODEL_REVISION from $REPO_ROOT/src/models.rs" >&2
     exit 1
 fi
 

@@ -110,11 +110,11 @@ def revision() -> str:
     import re
 
     match = re.search(
-        r'const HF_REVISION: &str = "([a-f0-9]+)";',
+        r'pub const MODEL_REVISION: &str = "([a-f0-9]+)";',
         (ROOT / "src/models.rs").read_text(),
     )
     if match is None:
-        raise ValueError("HF_REVISION was not found in src/models.rs")
+        raise ValueError("MODEL_REVISION was not found in src/models.rs")
     return match[1]
 
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fix `scripts/cuda/make_reference.py` and `scripts/cuda/setup-gpu-box.sh` failing to read the model revision from `src/models.rs`
+
 ## [0.7.0] - 2026-10-26
 
 - Add Python bindings: `pip install speakrs` ships one abi3 wheel per platform, with CPU and CoreML on macOS arm64 and CPU and CUDA on Linux x86_64, plus a `speakrs diarize` command and a speaker-labeled transcript example; see `crates/speakrs-python`
