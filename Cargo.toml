@@ -13,7 +13,7 @@ exclude = ["scripts/", "crates/speakrs-cuda-kernels"]
 [workspace.package]
 version = "0.7.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.96"
 license = "Apache-2.0"
 repository = "https://github.com/avencera/speakrs"
 authors = ["Praveen Perera"]
@@ -22,7 +22,7 @@ authors = ["Praveen Perera"]
 name = "speakrs"
 version = "0.7.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.96"
 description = "Fast Rust speaker diarization with pyannote-level accuracy and native CPU/CoreML/CUDA inference"
 license = "Apache-2.0"
 repository = "https://github.com/avencera/speakrs"
