@@ -45,7 +45,7 @@ pub use download::{Hub, HubError, HubRepo};
 mod download {
     use std::fs;
     use std::io;
-    use std::path::{Path, PathBuf};
+    use std::path::{Component, Path, PathBuf};
 
     use ureq::Agent;
     use ureq::http::Response;
@@ -85,6 +85,23 @@ mod download {
             url: String,
             /// Name of the missing header
             header: &'static str,
+        },
+        /// The Hub's answer has a header value that cannot name a cache entry, such as a
+        /// commit that is not a hash or an etag with path separators
+        #[error("Hugging Face's answer for {url} has an invalid {header} header: {value:?}")]
+        InvalidHeader {
+            /// Requested URL
+            url: String,
+            /// Name of the invalid header
+            header: &'static str,
+            /// Value the Hub sent
+            value: String,
+        },
+        /// The requested file is not a relative path inside the repo
+        #[error("{file:?} is not a file path inside the repo")]
+        InvalidFile {
+            /// Requested file
+            file: String,
         },
         /// The Hub kept redirecting
         #[error("Hugging Face redirected {url} more than {MAX_REDIRECTS} times")]
@@ -224,10 +241,25 @@ mod download {
                     Ok(etag) => etag,
                     Err(_) => header(&response, &current, "etag")?,
                 };
+                // weak validators and quotes are not part of the blob name
+                let etag = etag.trim_start_matches("W/").replace('"', "");
+                let commit = header(&response, &current, "x-repo-commit")?;
+                // both become cache paths, so a hostile endpoint must not reach outside it
+                let invalid = |header, value: String| HubError::InvalidHeader {
+                    url: current.clone(),
+                    header,
+                    value,
+                };
+                if !is_blob_name(&etag) {
+                    return Err(invalid("etag", etag));
+                }
+                if !is_commit_hash(&commit) {
+                    return Err(invalid("x-repo-commit", commit));
+                }
+
                 return Ok(Metadata {
-                    commit: header(&response, &current, "x-repo-commit")?,
-                    // weak validators and quotes are not part of the blob name
-                    etag: etag.trim_start_matches("W/").replace('"', ""),
+                    commit,
+                    etag,
                     location,
                 });
             }
@@ -317,12 +349,17 @@ mod download {
         /// A commit hash names its snapshot directly; a branch or tag goes through the commit
         /// that its `refs/` entry recorded at the last download
         pub fn cached(&self, file: &str) -> Option<PathBuf> {
+            if !is_repo_file(file) {
+                return None;
+            }
+
             let repo_dir = self.repo_dir();
             let commit = if is_commit_hash(&self.revision) {
                 self.revision.clone()
             } else {
                 let reference = repo_dir.join("refs").join(&self.revision);
-                fs::read_to_string(reference).ok()?.trim().to_owned()
+                let commit = fs::read_to_string(reference).ok()?.trim().to_owned();
+                is_commit_hash(&commit).then_some(commit)?
             };
 
             let path = repo_dir.join("snapshots").join(commit).join(file);
@@ -344,6 +381,12 @@ mod download {
         /// Downloads `file` into the cache, even when a copy is cached, and returns its
         /// snapshot path
         pub fn download(&self, file: &str) -> Result<PathBuf, HubError> {
+            if !is_repo_file(file) {
+                return Err(HubError::InvalidFile {
+                    file: file.to_owned(),
+                });
+            }
+
             let url = format!(
                 "{}/{}/resolve/{}/{file}",
                 self.hub.endpoint,
@@ -352,6 +395,14 @@ mod download {
                 self.revision.replace('/', "%2F"),
             );
             let metadata = self.hub.metadata(&url)?;
+            // a pinned commit must land in its own snapshot, not one the Hub picks
+            if is_commit_hash(&self.revision) && metadata.commit != self.revision {
+                return Err(HubError::InvalidHeader {
+                    url,
+                    header: "x-repo-commit",
+                    value: metadata.commit,
+                });
+            }
 
             let repo_dir = self.repo_dir();
             let blob = repo_dir.join("blobs").join(&metadata.etag);
@@ -418,6 +469,22 @@ mod download {
 
     fn is_commit_hash(revision: &str) -> bool {
         revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }
+
+    /// Hub etags are git or SHA-256 hashes, so anything else cannot be a blob name
+    fn is_blob_name(etag: &str) -> bool {
+        !etag.is_empty()
+            && etag
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    }
+
+    /// A relative path that stays inside the snapshot, such as `dir/model.bin`
+    fn is_repo_file(file: &str) -> bool {
+        !file.is_empty()
+            && Path::new(file)
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
     }
 
     /// Points `snapshot_file` at `blob` with a relative link, as `huggingface_hub` does, so
@@ -591,6 +658,29 @@ mod download {
 
             assert_eq!(by_branch, by_commit);
             assert_eq!(requests.lock().unwrap().len(), before);
+        }
+
+        #[test]
+        fn rejects_names_that_leave_the_cache() {
+            let (origin, requests) = serve();
+            let cache = tempfile::tempdir().unwrap();
+            let hub = hub(&origin, cache.path());
+
+            let escaping = hub.model("owner/model", "main").get("../../outside.bin");
+            // the server answers with commit COMMIT, not the pinned one
+            let other_commit = "fedcba9876543210fedcba9876543210fedcba98";
+            let mismatched = hub.model("owner/model", other_commit).get("model.bin");
+
+            assert!(matches!(escaping, Err(HubError::InvalidFile { .. })));
+            assert!(matches!(
+                mismatched,
+                Err(HubError::InvalidHeader {
+                    header: "x-repo-commit",
+                    ..
+                })
+            ));
+            assert_eq!(requests.lock().unwrap().len(), 1);
+            assert!(!cache.path().join("models--owner--model/snapshots").exists());
         }
 
         #[test]
