@@ -5,10 +5,6 @@
 //! Selection resolves the module request from the binding before any load, so adding
 //! another embedded tier never changes what an existing binding loads
 
-// runtime wiring is deferred until override policy and input ownership are defined
-#[allow(dead_code)]
-pub(crate) mod overrides;
-
 mod boundary;
 mod driver;
 mod evidence;
