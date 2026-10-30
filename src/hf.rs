@@ -15,16 +15,31 @@ fn env_var(name: &str) -> Option<String> {
     env::var(name).ok().filter(|value| !value.is_empty())
 }
 
+fn home_dir() -> PathBuf {
+    env::home_dir().unwrap_or_else(env::temp_dir)
+}
+
+/// Path in the environment variable `name`, with a leading `~` expanded to the home
+/// directory as `huggingface_hub` does, so `HF_HOME=~/hf` names the same cache in both
+fn env_path(name: &str) -> Option<PathBuf> {
+    let value = env_var(name)?;
+    let path = match value.strip_prefix('~') {
+        Some("") => home_dir(),
+        Some(rest) if rest.starts_with(std::path::is_separator) => {
+            home_dir().join(rest.trim_start_matches(std::path::is_separator))
+        }
+        _ => PathBuf::from(value),
+    };
+    Some(path)
+}
+
 /// `$HF_HOME`, else `$XDG_CACHE_HOME/huggingface`, else `~/.cache/huggingface`
 fn hf_home() -> PathBuf {
-    if let Some(home) = env_var("HF_HOME") {
-        return PathBuf::from(home);
+    if let Some(home) = env_path("HF_HOME") {
+        return home;
     }
 
-    let cache = env_var("XDG_CACHE_HOME").map_or_else(
-        || env::home_dir().unwrap_or_else(env::temp_dir).join(".cache"),
-        PathBuf::from,
-    );
+    let cache = env_path("XDG_CACHE_HOME").unwrap_or_else(|| home_dir().join(".cache"));
     cache.join("huggingface")
 }
 
@@ -33,9 +48,9 @@ fn hf_home() -> PathBuf {
 /// `$HF_HUB_CACHE`, else `$HUGGINGFACE_HUB_CACHE`, else `$HF_HOME/hub`, where `HF_HOME`
 /// defaults to `$XDG_CACHE_HOME/huggingface`, else `~/.cache/huggingface`
 pub fn default_hub_cache_dir() -> PathBuf {
-    env_var("HF_HUB_CACHE")
-        .or_else(|| env_var("HUGGINGFACE_HUB_CACHE"))
-        .map_or_else(|| hf_home().join("hub"), PathBuf::from)
+    env_path("HF_HUB_CACHE")
+        .or_else(|| env_path("HUGGINGFACE_HUB_CACHE"))
+        .unwrap_or_else(|| hf_home().join("hub"))
 }
 
 #[cfg(feature = "online")]
@@ -45,12 +60,14 @@ pub use download::{Hub, HubError, HubRepo};
 mod download {
     use std::fs;
     use std::io;
-    use std::path::{Path, PathBuf};
+    use std::path::{Component, Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     use ureq::Agent;
     use ureq::http::Response;
 
-    use super::{default_hub_cache_dir, env_var, hf_home};
+    use super::{default_hub_cache_dir, env_path, env_var, hf_home};
 
     const DEFAULT_ENDPOINT: &str = "https://huggingface.co";
 
@@ -85,6 +102,23 @@ mod download {
             url: String,
             /// Name of the missing header
             header: &'static str,
+        },
+        /// The Hub's answer has a header value that cannot name a cache entry, such as a
+        /// commit that is not a hash or an etag with path separators
+        #[error("Hugging Face's answer for {url} has an invalid {header} header: {value:?}")]
+        InvalidHeader {
+            /// Requested URL
+            url: String,
+            /// Name of the invalid header
+            header: &'static str,
+            /// Value the Hub sent
+            value: String,
+        },
+        /// The requested file is not a relative path inside the repo
+        #[error("{file:?} is not a file path inside the repo")]
+        InvalidFile {
+            /// Requested file
+            file: String,
         },
         /// The Hub kept redirecting
         #[error("Hugging Face redirected {url} more than {MAX_REDIRECTS} times")]
@@ -224,10 +258,25 @@ mod download {
                     Ok(etag) => etag,
                     Err(_) => header(&response, &current, "etag")?,
                 };
+                // weak validators and quotes are not part of the blob name
+                let etag = etag.trim_start_matches("W/").replace('"', "");
+                let commit = header(&response, &current, "x-repo-commit")?;
+                // both become cache paths, so a hostile endpoint must not reach outside it
+                let invalid = |header, value: String| HubError::InvalidHeader {
+                    url: current.clone(),
+                    header,
+                    value,
+                };
+                if !is_blob_name(&etag) {
+                    return Err(invalid("etag", etag));
+                }
+                if !is_commit_hash(&commit) {
+                    return Err(invalid("x-repo-commit", commit));
+                }
+
                 return Ok(Metadata {
-                    commit: header(&response, &current, "x-repo-commit")?,
-                    // weak validators and quotes are not part of the blob name
-                    etag: etag.trim_start_matches("W/").replace('"', ""),
+                    commit,
+                    etag,
                     location,
                 });
             }
@@ -264,18 +313,7 @@ mod download {
 
             let blobs = blob.parent().expect("blob paths sit in blobs/");
             fs::create_dir_all(blobs).map_err(|error| HubError::io(blobs, error))?;
-            // the process id keeps two processes fetching the same blob out of each other's way
-            let partial = blob.with_extension(format!("{}.incomplete", std::process::id()));
-            let mut file =
-                fs::File::create(&partial).map_err(|error| HubError::io(&partial, error))?;
-            let copied = io::copy(&mut response.into_body().into_reader(), &mut file);
-            drop(file);
-            if let Err(error) = copied {
-                let _ = fs::remove_file(&partial);
-                return Err(HubError::io(&partial, error));
-            }
-
-            fs::rename(&partial, blob).map_err(|error| HubError::io(blob, error))
+            write_into_place(&mut response.into_body().into_reader(), blob)
         }
     }
 
@@ -317,12 +355,17 @@ mod download {
         /// A commit hash names its snapshot directly; a branch or tag goes through the commit
         /// that its `refs/` entry recorded at the last download
         pub fn cached(&self, file: &str) -> Option<PathBuf> {
+            if !is_repo_file(file) {
+                return None;
+            }
+
             let repo_dir = self.repo_dir();
             let commit = if is_commit_hash(&self.revision) {
                 self.revision.clone()
             } else {
                 let reference = repo_dir.join("refs").join(&self.revision);
-                fs::read_to_string(reference).ok()?.trim().to_owned()
+                let commit = fs::read_to_string(reference).ok()?.trim().to_owned();
+                is_commit_hash(&commit).then_some(commit)?
             };
 
             let path = repo_dir.join("snapshots").join(commit).join(file);
@@ -344,6 +387,12 @@ mod download {
         /// Downloads `file` into the cache, even when a copy is cached, and returns its
         /// snapshot path
         pub fn download(&self, file: &str) -> Result<PathBuf, HubError> {
+            if !is_repo_file(file) {
+                return Err(HubError::InvalidFile {
+                    file: file.to_owned(),
+                });
+            }
+
             let url = format!(
                 "{}/{}/resolve/{}/{file}",
                 self.hub.endpoint,
@@ -352,6 +401,14 @@ mod download {
                 self.revision.replace('/', "%2F"),
             );
             let metadata = self.hub.metadata(&url)?;
+            // a pinned commit must land in its own snapshot, not one the Hub picks
+            if is_commit_hash(&self.revision) && metadata.commit != self.revision {
+                return Err(HubError::InvalidHeader {
+                    url,
+                    header: "x-repo-commit",
+                    value: metadata.commit,
+                });
+            }
 
             let repo_dir = self.repo_dir();
             let blob = repo_dir.join("blobs").join(&metadata.etag);
@@ -380,16 +437,66 @@ mod download {
     }
 
     fn read_token() -> Result<Option<String>, HubError> {
-        if let Some(token) = env_var("HF_TOKEN") {
+        if let Some(token) = env_var("HF_TOKEN").as_deref().and_then(clean_token) {
             return Ok(Some(token));
         }
 
-        let path = env_var("HF_TOKEN_PATH").map_or_else(|| hf_home().join("token"), PathBuf::from);
+        let path = env_path("HF_TOKEN_PATH").unwrap_or_else(|| hf_home().join("token"));
         match fs::read_to_string(&path) {
-            Ok(token) => Ok(Some(token.trim().to_owned()).filter(|token| !token.is_empty())),
+            Ok(token) => Ok(clean_token(&token)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(HubError::io(&path, error)),
         }
+    }
+
+    /// Drops line breaks and surrounding whitespace, as `huggingface_hub` does, so a token
+    /// pasted with a trailing newline still authenticates; blank means no token
+    fn clean_token(raw: &str) -> Option<String> {
+        let token = raw.replace(['\r', '\n'], "");
+        let token = token.trim();
+        (!token.is_empty()).then(|| token.to_owned())
+    }
+
+    /// Writes `reader` to a file of its own next to `dest`, then renames it into place, so
+    /// readers never see a partial file and concurrent writers never share one
+    fn write_into_place(reader: &mut impl io::Read, dest: &Path) -> Result<(), HubError> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+
+        let name = dest.file_name().expect("cache paths end in a file name");
+        // the process id and counter separate downloads within a host, and the clock
+        // separates processes in other PID namespaces that share the cache
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.subsec_nanos());
+        let (partial, mut file) = loop {
+            let partial = dest.with_file_name(format!(
+                "{}.{}.{}.{nanos}.incomplete",
+                name.to_string_lossy(),
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed),
+            ));
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&partial)
+            {
+                Ok(file) => break (partial, file),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(HubError::io(&partial, error)),
+            }
+        };
+
+        let copied = io::copy(reader, &mut file);
+        drop(file);
+        if let Err(error) = copied {
+            let _ = fs::remove_file(&partial);
+            return Err(HubError::io(&partial, error));
+        }
+
+        fs::rename(&partial, dest).map_err(|error| {
+            let _ = fs::remove_file(&partial);
+            HubError::io(dest, error)
+        })
     }
 
     fn header(
@@ -420,6 +527,22 @@ mod download {
         revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
     }
 
+    /// Hub etags are git or SHA-256 hashes, so anything else cannot be a blob name
+    fn is_blob_name(etag: &str) -> bool {
+        !etag.is_empty()
+            && etag
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    }
+
+    /// A relative path that stays inside the snapshot, such as `dir/model.bin`
+    fn is_repo_file(file: &str) -> bool {
+        !file.is_empty()
+            && Path::new(file)
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+    }
+
     /// Points `snapshot_file` at `blob` with a relative link, as `huggingface_hub` does, so
     /// the cache stays valid when it moves
     fn link_blob(blob: &Path, snapshot_file: &Path, file: &str) -> Result<(), HubError> {
@@ -436,25 +559,31 @@ mod download {
             fs::remove_file(snapshot_file).map_err(|error| HubError::io(snapshot_file, error))?;
         }
 
-        // up from the file's directory to the snapshot, then out of snapshots/<commit>/
-        let depth = Path::new(file).components().count() + 1;
-        let mut target = PathBuf::new();
-        for _ in 0..depth {
-            target.push("..");
-        }
-        target.push("blobs");
-        target.push(blob.file_name().expect("blob paths end in the etag"));
-
         #[cfg(unix)]
-        let linked = std::os::unix::fs::symlink(&target, snapshot_file);
+        {
+            // up from the file's directory to the snapshot, then out of snapshots/<commit>/
+            let depth = Path::new(file).components().count() + 1;
+            let mut target = PathBuf::new();
+            for _ in 0..depth {
+                target.push("..");
+            }
+            target.push("blobs");
+            target.push(blob.file_name().expect("blob paths end in the etag"));
+
+            match std::os::unix::fs::symlink(&target, snapshot_file) {
+                Ok(()) => Ok(()),
+                // another process linked it first
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+                Err(error) => Err(HubError::io(snapshot_file, error)),
+            }
+        }
+
         // symlinks need extra privileges on Windows, so the snapshot gets a copy there
         #[cfg(not(unix))]
-        let linked = fs::copy(blob, snapshot_file).map(drop);
-        match linked {
-            Ok(()) => Ok(()),
-            // another process linked it first
-            Err(_) if snapshot_file.is_file() => Ok(()),
-            Err(error) => Err(HubError::io(snapshot_file, error)),
+        {
+            let _ = file;
+            let mut source = fs::File::open(blob).map_err(|error| HubError::io(blob, error))?;
+            write_into_place(&mut source, snapshot_file)
         }
     }
 
@@ -578,6 +707,12 @@ mod download {
         }
 
         #[test]
+        fn token_cleanup_matches_huggingface_hub() {
+            assert_eq!(clean_token("hf_abc\r\n").as_deref(), Some("hf_abc"));
+            assert_eq!(clean_token("  \n"), None);
+        }
+
+        #[test]
         fn cached_files_resolve_without_requests() {
             let (origin, requests) = serve();
             let cache = tempfile::tempdir().unwrap();
@@ -591,6 +726,29 @@ mod download {
 
             assert_eq!(by_branch, by_commit);
             assert_eq!(requests.lock().unwrap().len(), before);
+        }
+
+        #[test]
+        fn rejects_names_that_leave_the_cache() {
+            let (origin, requests) = serve();
+            let cache = tempfile::tempdir().unwrap();
+            let hub = hub(&origin, cache.path());
+
+            let escaping = hub.model("owner/model", "main").get("../../outside.bin");
+            // the server answers with commit COMMIT, not the pinned one
+            let other_commit = "fedcba9876543210fedcba9876543210fedcba98";
+            let mismatched = hub.model("owner/model", other_commit).get("model.bin");
+
+            assert!(matches!(escaping, Err(HubError::InvalidFile { .. })));
+            assert!(matches!(
+                mismatched,
+                Err(HubError::InvalidHeader {
+                    header: "x-repo-commit",
+                    ..
+                })
+            ));
+            assert_eq!(requests.lock().unwrap().len(), 1);
+            assert!(!cache.path().join("models--owner--model/snapshots").exists());
         }
 
         #[test]
