@@ -9,23 +9,22 @@ use objc2_core_ml::{
 };
 use objc2_foundation::{NSCopying, NSMutableDictionary, NSString, NSURL};
 
-use super::{CoreMlError, GpuPrecision};
+use super::CoreMlError;
 
 pub(super) fn load_model(
     path: &Path,
     compute_units: MLComputeUnits,
-    gpu_precision: GpuPrecision,
 ) -> Result<Retained<MLModel>, CoreMlError> {
     let path_str = NSString::from_str(&path.to_string_lossy());
     let url = NSURL::fileURLWithPath_isDirectory(&path_str, true);
-    let low_precision = matches!(gpu_precision, GpuPrecision::Low);
 
     // SAFETY: objc2 marks CoreML object construction as unsafe, but the URL and configuration
     // SAFETY: objects are valid for the duration of this call and are only used synchronously here
     unsafe {
         let config = MLModelConfiguration::new();
         config.setComputeUnits(compute_units);
-        config.setAllowLowPrecisionAccumulationOnGPU(low_precision);
+        // every speakrs model runs with FP16 GPU accumulation
+        config.setAllowLowPrecisionAccumulationOnGPU(true);
         MLModel::modelWithContentsOfURL_configuration_error(&url, &config)
     }
     .map_err(|e| CoreMlError::LoadFailed(format!("{e}")))
@@ -70,7 +69,7 @@ pub(super) fn predict_output(
     output_multi_array(&output, output_key, output_name)
 }
 
-pub(super) fn output_multi_array(
+fn output_multi_array(
     output: &ProtocolObject<dyn MLFeatureProvider>,
     output_key: &NSString,
     output_name: &str,

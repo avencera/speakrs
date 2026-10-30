@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use objc2_core_ml::MLComputeUnits;
 
-use crate::inference::coreml::{CachedInputShape, CoreMlError, GpuPrecision, SharedCoreMlModel};
+use crate::inference::coreml::{CachedInputShape, CoreMlError, SharedCoreMlModel};
 use crate::inference::{ExecutionMode, ModelLoadError};
 #[cfg(feature = "_metrics")]
 use crate::models::chunk_ladder::COREML_REDUCED_CHUNK_CONFIGS;
@@ -147,12 +147,7 @@ pub(super) fn load_chunk_session(
     spec: &ChunkSessionSpec,
     compute_units: MLComputeUnits,
 ) -> Result<ChunkEmbeddingSession, CoreMlError> {
-    let model = SharedCoreMlModel::load(
-        &spec.coreml_path,
-        compute_units,
-        "output",
-        GpuPrecision::Low,
-    )?;
+    let model = SharedCoreMlModel::load(&spec.coreml_path, compute_units, "output")?;
     Ok(ChunkEmbeddingSession {
         model: Arc::new(model),
         num_windows: spec.num_windows,
