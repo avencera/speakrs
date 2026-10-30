@@ -134,17 +134,12 @@ impl DecodedSegmentations {
         let min_num_samples = emb_model.min_num_samples();
 
         let mut storage = Array3Writer(embeddings);
-        let mut pending: Vec<PendingSplitEmbedding> = Vec::with_capacity(batch_size);
-        let mut fbanks: Vec<Array2<f32>> = Vec::new();
+        let mut batch = SplitEmbeddingBatch::new(batch_size);
         let mut tail_batches = 0usize;
         let mut active_items = 0usize;
 
         for chunk_idx in 0..self.0.shape()[0] {
             let chunk_audio = layout.chunk_audio(audio, chunk_idx);
-            let fbank = emb_model.compute_chunk_fbank(chunk_audio)?;
-            fbanks.push(fbank);
-            let mut current_fbank_idx = fbanks.len() - 1;
-
             let chunk_segmentations = self.0.slice(s![chunk_idx, .., ..]);
             let clean_masks = clean_masks(&chunk_segmentations);
 
@@ -159,31 +154,20 @@ impl DecodedSegmentations {
                     continue;
                 };
                 active_items += 1;
-                pending.push(PendingSplitEmbedding {
-                    chunk_idx,
-                    speaker_idx,
-                    fbank_idx: current_fbank_idx,
-                    weights,
-                });
-                if pending.len() == batch_size {
-                    flush_split(emb_model, &pending, &fbanks, &mut storage)?;
+                batch.push(chunk_idx, speaker_idx, weights, || {
+                    Ok(emb_model.compute_chunk_fbank(chunk_audio)?)
+                })?;
+                if batch.is_full() {
+                    batch.flush(|pending, fbanks| {
+                        flush_split(emb_model, pending, fbanks, &mut storage)
+                    })?;
                     tail_batches += 1;
-                    pending.clear();
-
-                    if speaker_idx + 1 < num_speakers {
-                        let kept_fbank = fbanks.swap_remove(current_fbank_idx);
-                        fbanks.clear();
-                        fbanks.push(kept_fbank);
-                        current_fbank_idx = 0;
-                    } else {
-                        fbanks.clear();
-                    }
                 }
             }
         }
 
-        if !pending.is_empty() {
-            flush_split(emb_model, &pending, &fbanks, &mut storage)?;
+        if !batch.is_empty() {
+            batch.flush(|pending, fbanks| flush_split(emb_model, pending, fbanks, &mut storage))?;
             tail_batches += 1;
         }
 
@@ -333,6 +317,78 @@ pub(in crate::pipeline) fn flush_masked<S: EmbeddingStorage>(
     Ok(())
 }
 
+/// Pending split-path embeddings and the chunk filterbanks they read
+///
+/// A chunk's filterbank is computed when its first active speaker is queued, so silent
+/// chunks never hold one, and the filterbanks are released when their batch flushes. Only
+/// the newest filterbank outlives a flush, because later speakers of the same chunk may
+/// still be queued against it
+pub(in crate::pipeline) struct SplitEmbeddingBatch {
+    pending: Vec<PendingSplitEmbedding>,
+    fbanks: Vec<Array2<f32>>,
+    capacity: usize,
+    /// The chunk whose filterbank is last in `fbanks`
+    fbank_chunk: Option<usize>,
+}
+
+impl SplitEmbeddingBatch {
+    pub(in crate::pipeline) fn new(capacity: usize) -> Self {
+        Self {
+            pending: Vec::with_capacity(capacity),
+            fbanks: Vec::new(),
+            capacity,
+            fbank_chunk: None,
+        }
+    }
+
+    /// Queue one active speaker, computing the chunk filterbank on the chunk's first speaker
+    pub(in crate::pipeline) fn push(
+        &mut self,
+        chunk_idx: usize,
+        speaker_idx: usize,
+        weights: Vec<f32>,
+        compute_fbank: impl FnOnce() -> Result<Array2<f32>, PipelineError>,
+    ) -> Result<(), PipelineError> {
+        if self.fbank_chunk != Some(chunk_idx) {
+            // a filterbank kept across the last flush has no pending reader once its chunk ends
+            if self.pending.is_empty() {
+                self.fbanks.clear();
+            }
+            self.fbanks.push(compute_fbank()?);
+            self.fbank_chunk = Some(chunk_idx);
+        }
+
+        self.pending.push(PendingSplitEmbedding {
+            chunk_idx,
+            speaker_idx,
+            fbank_idx: self.fbanks.len() - 1,
+            weights,
+        });
+        Ok(())
+    }
+
+    pub(in crate::pipeline) fn is_full(&self) -> bool {
+        self.pending.len() >= self.capacity
+    }
+
+    pub(in crate::pipeline) fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
+    /// Run the pending batch, then keep only the newest chunk filterbank
+    pub(in crate::pipeline) fn flush(
+        &mut self,
+        run: impl FnOnce(&[PendingSplitEmbedding], &[Array2<f32>]) -> Result<(), PipelineError>,
+    ) -> Result<(), PipelineError> {
+        run(&self.pending, &self.fbanks)?;
+        self.pending.clear();
+
+        let newest = self.fbanks.len().saturating_sub(1);
+        self.fbanks.drain(..newest);
+        Ok(())
+    }
+}
+
 pub(in crate::pipeline) fn flush_split<S: EmbeddingStorage>(
     emb_model: &mut EmbeddingModel,
     pending: &[PendingSplitEmbedding],
@@ -389,4 +445,66 @@ pub(in crate::pipeline) fn flush_multi_mask<S: EmbeddingStorage>(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use ndarray::Array2;
+
+    use super::{PipelineError, SplitEmbeddingBatch};
+
+    /// Queues `(chunk, speaker)` pairs, flushing whenever the batch fills, and records the
+    /// filterbank computations and what each flush saw
+    fn run(capacity: usize, active: &[(usize, usize)]) -> (Vec<usize>, Vec<Vec<(usize, f32)>>) {
+        let mut batch = SplitEmbeddingBatch::new(capacity);
+        let mut computed = Vec::new();
+        let mut flushes = Vec::new();
+        let mut flush = |batch: &mut SplitEmbeddingBatch| {
+            batch
+                .flush(|pending, fbanks| {
+                    // each filterbank holds its chunk index, so a pending item reads its own chunk
+                    let seen = pending
+                        .iter()
+                        .map(|item| (item.chunk_idx, fbanks[item.fbank_idx][[0, 0]]))
+                        .collect();
+                    flushes.push(seen);
+                    Ok::<(), PipelineError>(())
+                })
+                .unwrap();
+        };
+
+        for &(chunk_idx, speaker_idx) in active {
+            batch
+                .push(chunk_idx, speaker_idx, vec![1.0], || {
+                    computed.push(chunk_idx);
+                    Ok(Array2::from_elem((1, 1), chunk_idx as f32))
+                })
+                .unwrap();
+            if batch.is_full() {
+                flush(&mut batch);
+            }
+        }
+        if !batch.is_empty() {
+            flush(&mut batch);
+        }
+        assert!(batch.fbanks.len() <= 1);
+        (computed, flushes)
+    }
+
+    #[test]
+    fn silent_chunks_compute_and_hold_no_filterbank() {
+        // chunks 0-1, 3-7 and 9+ are silent and never reach the batch
+        let (computed, flushes) = run(2, &[(2, 0), (2, 1), (8, 0)]);
+
+        assert_eq!(computed, [2, 8]);
+        assert_eq!(flushes, [vec![(2, 2.0), (2, 2.0)], vec![(8, 8.0)]]);
+    }
+
+    #[test]
+    fn speakers_after_a_mid_chunk_flush_reuse_the_chunk_filterbank() {
+        let (computed, flushes) = run(1, &[(3, 0), (3, 1), (4, 2)]);
+
+        assert_eq!(computed, [3, 4]);
+        assert_eq!(flushes, [vec![(3, 3.0)], vec![(3, 3.0)], vec![(4, 4.0)]]);
+    }
 }
