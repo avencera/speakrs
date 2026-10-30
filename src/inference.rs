@@ -15,7 +15,7 @@ pub(crate) mod segmentation;
 
 use std::fmt;
 
-pub use embedding::EmbeddingModel;
+pub use embedding::{EmbeddingModel, MaskedEmbeddingInput};
 pub use error::{ExecutionModeError, InferenceError, ModelLoadError};
 pub use geometry::TensorShapeError;
 #[cfg(any(feature = "cpu", feature = "_cuda"))]

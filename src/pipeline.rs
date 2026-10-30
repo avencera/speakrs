@@ -56,6 +56,9 @@ use concurrent::{ConcurrentEmbeddingResult, ConcurrentEmbeddingRunner};
 mod prefetch;
 
 mod post_inference;
+// the PLDA transform is the model input `post_inference` needs besides the artifacts
+pub use crate::clustering::plda::{PldaError, PldaTransform};
+pub use crate::linalg::LinalgError;
 pub use post_inference::post_inference;
 
 #[cfg(feature = "coreml")]
@@ -80,7 +83,6 @@ use std::path::Path;
 use ndarray::Array2;
 use tracing::{debug, trace};
 
-use crate::clustering::plda::PldaTransform;
 use crate::inference::ExecutionMode;
 use crate::inference::embedding::EmbeddingModel;
 use crate::inference::segmentation::SegmentationModel;
