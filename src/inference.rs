@@ -23,7 +23,7 @@ pub use native_model::NativeWeightsError;
 #[cfg(feature = "_ort")]
 pub use ort_runtime::{DynamicRuntimeError, OrtRuntimeError, with_execution_mode};
 #[cfg(feature = "migraphx")]
-pub(crate) use ort_runtime::{OrtProvider, SharedSession, ensure_ort_ready};
+pub(crate) use ort_runtime::{OrtProvider, SharedSession, ort_environment};
 pub use segmentation::{SegmentationError, SegmentationModel};
 
 #[cfg(feature = "coreml")]

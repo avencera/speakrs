@@ -335,7 +335,7 @@ if none is enabled.
 The default `online` feature downloads models with `ModelManager`.
 `load-dynamic` loads ONNX Runtime at run time for `migraphx` or the external ONNX
 session helper. The native CPU backend doesn't need it. The ONNX Runtime
-dependency (`ort` 2.0.0-rc.13) is still a pre-release.
+dependency (`ort` 2.0.0-rc.15) is still a pre-release.
 
 ### NVIDIA GPUs
 

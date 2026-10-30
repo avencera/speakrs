@@ -2,11 +2,12 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ndarray::{Array2, Array3};
+use ort::environment::Environment;
 use ort::session::{HasSelectedOutputs, RunOptions, Session};
 
 #[cfg(not(feature = "coreml"))]
 use crate::inference::InferenceError;
-use crate::inference::{ModelLoadError, OrtProvider, SharedSession, ensure_ort_ready};
+use crate::inference::{ModelLoadError, OrtProvider, SharedSession, ort_environment};
 use crate::pipeline::{OrtThreadCount, RuntimeConfig};
 
 use super::buffers::EmbeddingBuffers;
@@ -56,13 +57,15 @@ impl OrtEmbedding {
         provider: OrtProvider,
         config: &RuntimeConfig,
     ) -> Result<Self, ModelLoadError> {
-        ensure_ort_ready()?;
+        let environment = ort_environment()?;
 
         let plan = OrtEmbeddingPlan::scan(model_path);
         let fbank_threads = config.fbank_threads;
-        let load = |path: &Path| build_session(path, provider).map(SharedSession::new);
+        let load =
+            |path: &Path| build_session(&environment, path, provider).map(SharedSession::new);
         let load_fbank = |path: &Path| {
-            build_fbank_session(path, OrtProvider::Cpu, fbank_threads).map(SharedSession::new)
+            build_fbank_session(&environment, path, OrtProvider::Cpu, fbank_threads)
+                .map(SharedSession::new)
         };
 
         let (fused, fused_elapsed) = timed(|| load(&plan.fused))?;
@@ -80,7 +83,8 @@ impl OrtEmbedding {
             timed(|| plan.multi_mask.as_deref().map(load).transpose())?;
         let (multi_mask_batched, multi_mask_batched_elapsed) =
             timed(|| plan.multi_mask_batched.as_deref().map(load).transpose())?;
-        let (fbank_pool, fbank_pool_elapsed) = timed(|| load_fbank_pool(&plan, config))?;
+        let (fbank_pool, fbank_pool_elapsed) =
+            timed(|| load_fbank_pool(&environment, &plan, config))?;
 
         let sessions = OrtEmbeddingPlan {
             fused,
@@ -194,6 +198,7 @@ fn fresh_primary_run_options(
 }
 
 fn load_fbank_pool(
+    environment: &Environment,
     plan: &OrtEmbeddingPlan<PathBuf>,
     config: &RuntimeConfig,
 ) -> Result<SharedFbankPool, ort::Error> {
@@ -205,15 +210,19 @@ fn load_fbank_pool(
     tracing::debug!(sessions, "CPU filterbank session pool");
     (0..sessions)
         .map(|_| {
-            build_fbank_session(path, OrtProvider::Cpu, config.fbank_threads)
+            build_fbank_session(environment, path, OrtProvider::Cpu, config.fbank_threads)
                 .map(SharedSession::new)
         })
         .collect::<Result<_, _>>()
         .map(SharedFbankPool::new)
 }
 
-fn build_session(model_path: &Path, provider: OrtProvider) -> Result<Session, ort::Error> {
-    let builder = Session::builder()?
+fn build_session(
+    environment: &Environment,
+    model_path: &Path,
+    provider: OrtProvider,
+) -> Result<Session, ort::Error> {
+    let builder = Session::builder(environment)?
         .with_independent_thread_pool()?
         // Embedding inference dominates CPU-mode wall time. With
         // intra_threads(1) the whole pipeline runs at ~1-2x realtime on
@@ -232,11 +241,12 @@ fn build_session(model_path: &Path, provider: OrtProvider) -> Result<Session, or
 }
 
 fn build_fbank_session(
+    environment: &Environment,
     model_path: &Path,
     provider: OrtProvider,
     threads: OrtThreadCount,
 ) -> Result<Session, ort::Error> {
-    let builder = Session::builder()?
+    let builder = Session::builder(environment)?
         .with_independent_thread_pool()?
         .with_intra_threads(threads.get())?
         .with_inter_threads(1)?

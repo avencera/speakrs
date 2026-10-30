@@ -717,7 +717,11 @@ fn device_key(
             }
         }
     }
-    key.artifact_version = format!("{:x}", digest.finalize());
+    key.artifact_version = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     Ok(key)
 }
 

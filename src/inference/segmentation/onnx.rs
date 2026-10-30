@@ -2,11 +2,12 @@ use std::path::Path;
 use std::time::Instant;
 
 use ndarray::{Array2, Array3};
+use ort::environment::Environment;
 use ort::session::Session;
 use ort::value::TensorRef;
 
 use crate::inference::{
-    InferenceError, ModelLoadError, OrtProvider, SharedSession, ensure_ort_ready,
+    InferenceError, ModelLoadError, OrtProvider, SharedSession, ort_environment,
 };
 
 use super::tensor::{first_output, output_shape3};
@@ -26,16 +27,16 @@ impl OrtSegmentation {
         provider: OrtProvider,
         window_samples: usize,
     ) -> Result<Self, ModelLoadError> {
-        ensure_ort_ready()?;
+        let environment = ort_environment()?;
 
         let session_start = Instant::now();
-        let session = SharedSession::new(build_session(model_path, provider)?);
+        let session = SharedSession::new(build_session(&environment, model_path, provider)?);
         let session_elapsed = session_start.elapsed();
 
         let batched_start = Instant::now();
         let primary_batched_session = batched_model_path(model_path, PRIMARY_BATCH_SIZE)
             .filter(|path| path.exists())
-            .map(|path| build_session(&path, provider).map(SharedSession::new))
+            .map(|path| build_session(&environment, &path, provider).map(SharedSession::new))
             .transpose()?;
         let batched_elapsed = batched_start.elapsed();
 
@@ -157,8 +158,12 @@ impl OrtSegmentation {
     }
 }
 
-fn build_session(model_path: &Path, provider: OrtProvider) -> Result<Session, ort::Error> {
-    let builder = Session::builder()?
+fn build_session(
+    environment: &Environment,
+    model_path: &Path,
+    provider: OrtProvider,
+) -> Result<Session, ort::Error> {
+    let builder = Session::builder(environment)?
         .with_independent_thread_pool()?
         .with_intra_threads(available_threads().min(6))?
         .with_inter_threads(1)?

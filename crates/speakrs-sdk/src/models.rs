@@ -94,22 +94,12 @@ impl ModelStore {
         }
     }
 
-    /// `$SPEAKRS_CACHE_DIR`, else `$HF_HOME/hub`, else `~/.cache/huggingface/hub`
+    /// `$SPEAKRS_CACHE_DIR`, else the Hugging Face hub cache, see
+    /// [`speakrs::default_hub_cache_dir`]
     pub fn default_cache_dir() -> PathBuf {
-        if let Some(path) = std::env::var_os(CACHE_DIR_ENV) {
-            return PathBuf::from(path);
-        }
-
-        if let Some(path) = std::env::var_os("HF_HOME") {
-            return PathBuf::from(path).join("hub");
-        }
-
-        // matches hf_hub::Cache::default, which speakrs::ModelManager uses
-        std::env::home_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join(".cache")
-            .join("huggingface")
-            .join("hub")
+        std::env::var_os(CACHE_DIR_ENV)
+            .filter(|path| !path.is_empty())
+            .map_or_else(speakrs::default_hub_cache_dir, PathBuf::from)
     }
 
     /// The hub cache directory this store reads and writes
@@ -233,25 +223,14 @@ impl ModelStore {
         cancel_token: Option<&CancelToken>,
         on_download: &dyn Fn(&str),
     ) -> Result<PathBuf, ModelPrepareError> {
-        use hf_hub::api::sync::ApiBuilder;
-        use hf_hub::{Cache, Repo, RepoType};
+        // downloads read `HF_ENDPOINT` and the token from the environment
+        let remote = speakrs::ModelManager::with_cache_dir(self.cache_dir.clone())
+            .map_err(ModelPrepareError::download)?;
 
-        let cache = Cache::new(self.cache_dir.clone());
-        let mut builder = ApiBuilder::from_cache(cache.clone()).with_progress(false);
-        if let Ok(endpoint) = std::env::var("HF_ENDPOINT") {
-            builder = builder.with_endpoint(endpoint);
-        }
-
-        let api = builder.build().map_err(ModelPrepareError::download)?;
-        let repo = Repo::with_revision(
-            DEFAULT_MODEL_REPOSITORY.to_string(),
-            RepoType::Model,
-            DEFAULT_MODEL_REVISION.to_string(),
-        );
-        let cached = cache.repo(repo.clone());
-        let remote = api.repo(repo);
+        // the pinned revision is a commit hash, so it names its own snapshot directory
+        let snapshot_dir = self.snapshot_dir();
         for file in required_model_files(mode) {
-            if cached.get(&file).is_none() {
+            if !snapshot_dir.join(&file).is_file() {
                 on_download(&file);
                 if cancel_token.is_some_and(CancelToken::is_cancelled) {
                     return Err(ModelPrepareError::Cancelled);
@@ -260,8 +239,7 @@ impl ModelStore {
             remote.get(&file).map_err(ModelPrepareError::download)?;
         }
 
-        // the pinned revision is a commit hash, so it names its own snapshot directory
-        Ok(self.snapshot_dir())
+        Ok(snapshot_dir)
     }
 
     #[cfg(not(feature = "online"))]

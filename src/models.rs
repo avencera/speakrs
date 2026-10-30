@@ -1,10 +1,8 @@
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "online")]
+use crate::hf::{Hub, HubError, HubRepo};
 use crate::inference::ExecutionMode;
-#[cfg(feature = "online")]
-use hf_hub::api::sync::{Api, ApiBuilder, ApiRepo};
-#[cfg(feature = "online")]
-use hf_hub::{Repo, RepoType};
 
 const SEGMENTATION_ONNX: &str = "segmentation-3.0.onnx";
 const EMBEDDING_ONNX: &str = "wespeaker-voxceleb-resnet34.onnx";
@@ -71,10 +69,7 @@ impl ModelBundle {
 
 /// Names the CUDA weights in the error when they cannot be downloaded
 #[cfg(feature = "online")]
-fn download_error(
-    mode: ExecutionMode,
-    source: hf_hub::api::sync::ApiError,
-) -> crate::inference::ModelLoadError {
+fn download_error(mode: ExecutionMode, source: HubError) -> crate::inference::ModelLoadError {
     #[cfg(feature = "_cuda")]
     if mode.is_cuda() {
         return crate::inference::ModelLoadError::CudaAssetsUnavailable { mode, source };
@@ -114,16 +109,8 @@ impl PinnedModelRepository {
         }
     }
 
-    fn into_hf_repo(self) -> Repo {
-        Repo::with_revision(
-            self.id.0.to_owned(),
-            RepoType::Model,
-            self.revision.0.to_owned(),
-        )
-    }
-
-    fn bind(self, api: &Api) -> ApiRepo {
-        api.repo(self.into_hf_repo())
+    fn bind(self, hub: &Hub) -> HubRepo {
+        hub.model(self.id.0, self.revision.0)
     }
 }
 
@@ -134,41 +121,44 @@ const PINNED_MODEL_REPOSITORY: PinnedModelRepository = PinnedModelRepository::sp
 #[cfg(feature = "online")]
 #[cfg_attr(docsrs, doc(cfg(feature = "online")))]
 pub struct ModelManager {
-    repo: ApiRepo,
+    repo: HubRepo,
 }
 
 #[cfg(feature = "online")]
 impl ModelManager {
-    /// Create a manager using the default HuggingFace cache directory
-    pub fn new() -> Result<Self, hf_hub::api::sync::ApiError> {
-        let api = Api::new()?;
-        Ok(Self::from_api(api))
+    /// Create a manager using the default Hugging Face cache directory
+    ///
+    /// The cache is [`default_hub_cache_dir`](crate::default_hub_cache_dir). Downloads read
+    /// `HF_ENDPOINT` and the token in `HF_TOKEN` or saved by `hf auth login`
+    pub fn new() -> Result<Self, HubError> {
+        Ok(Self::from_hub(&Hub::from_env()?))
     }
 
     /// Create a manager with a custom cache directory
-    pub fn with_cache_dir(cache_dir: PathBuf) -> Result<Self, hf_hub::api::sync::ApiError> {
-        let api = ApiBuilder::from_cache(hf_hub::Cache::new(cache_dir)).build()?;
-        Ok(Self::from_api(api))
+    pub fn with_cache_dir(cache_dir: PathBuf) -> Result<Self, HubError> {
+        Ok(Self::from_hub(&Hub::with_cache_dir(cache_dir)?))
     }
 
-    fn from_api(api: Api) -> Self {
-        let repo = PINNED_MODEL_REPOSITORY.bind(&api);
-        Self { repo }
+    fn from_hub(hub: &Hub) -> Self {
+        Self {
+            repo: PINNED_MODEL_REPOSITORY.bind(hub),
+        }
     }
 
     /// Download a single file, returns path to cached copy
-    pub fn get(&self, filename: impl AsRef<str>) -> Result<PathBuf, hf_hub::api::sync::ApiError> {
+    pub fn get(&self, filename: impl AsRef<str>) -> Result<PathBuf, HubError> {
+        // a commit-hash revision makes a cached snapshot file resolve without a request
         self.repo.get(filename.as_ref())
     }
 
     /// Ensure all files for a mode are downloaded, return base models dir
-    pub fn ensure(&self, mode: ExecutionMode) -> Result<PathBuf, hf_hub::api::sync::ApiError> {
+    pub fn ensure(&self, mode: ExecutionMode) -> Result<PathBuf, HubError> {
         let files = required_model_files(mode);
         for file in &files {
-            self.repo.get(file)?;
+            self.get(file)?;
         }
         // all files land in the same snapshot dir
-        let first = self.repo.get(&files[0])?;
+        let first = self.get(&files[0])?;
         let Some(parent) = first.parent() else {
             return Ok(first);
         };
@@ -583,34 +573,25 @@ mod tests {
     use super::*;
 
     #[cfg(feature = "online")]
-    const MODEL_FILENAME: &str = "segmentation-3.0.onnx";
-    #[cfg(feature = "online")]
-    const EXPECTED_MODEL_URL: &str = "https://huggingface.co/avencera/speakrs-models/resolve/67f963b6a1d94fcd4678948237b3cc8bd69bf1d8/segmentation-3.0.onnx";
-
-    #[cfg(feature = "online")]
     #[test]
-    fn pinned_repository_selects_model_card_revision() {
-        let repo = PINNED_MODEL_REPOSITORY.into_hf_repo();
-        assert_eq!(repo.folder_name(), "models--avencera--speakrs-models");
-        assert_eq!(repo.revision(), MODEL_REVISION);
-
-        let api = ApiBuilder::new().with_progress(false).build().unwrap();
-        let api_repo = api.repo(repo);
-        assert_eq!(api_repo.url(MODEL_FILENAME), EXPECTED_MODEL_URL);
-    }
-
-    #[cfg(feature = "online")]
-    #[test]
-    fn default_and_custom_cache_managers_share_pinned_repository() {
-        let default_manager = ModelManager::new().unwrap();
-        let custom_cache = std::env::temp_dir().join(format!(
+    fn manager_resolves_cached_snapshot_of_pinned_revision() {
+        let cache_dir = std::env::temp_dir().join(format!(
             "speakrs-pinned-model-manager-{}",
             std::process::id()
         ));
-        let custom_manager = ModelManager::with_cache_dir(custom_cache).unwrap();
+        let snapshot = cache_dir
+            .join("models--avencera--speakrs-models")
+            .join("snapshots")
+            .join(MODEL_REVISION);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        let cached = snapshot.join(SEGMENTATION_ONNX);
+        std::fs::write(&cached, b"cached").unwrap();
 
-        assert_eq!(default_manager.repo.url(MODEL_FILENAME), EXPECTED_MODEL_URL);
-        assert_eq!(custom_manager.repo.url(MODEL_FILENAME), EXPECTED_MODEL_URL);
+        // the pinned commit names its snapshot, so a cached file needs no network request
+        let manager = ModelManager::with_cache_dir(cache_dir.clone()).unwrap();
+        let resolved = manager.get(SEGMENTATION_ONNX);
+        std::fs::remove_dir_all(cache_dir).unwrap();
+        assert_eq!(resolved.unwrap(), cached);
     }
 
     #[test]
