@@ -575,11 +575,9 @@ mod tests {
     #[cfg(feature = "online")]
     #[test]
     fn manager_resolves_cached_snapshot_of_pinned_revision() {
-        let cache_dir = std::env::temp_dir().join(format!(
-            "speakrs-pinned-model-manager-{}",
-            std::process::id()
-        ));
+        let cache_dir = tempfile::tempdir().unwrap();
         let snapshot = cache_dir
+            .path()
             .join("models--avencera--speakrs-models")
             .join("snapshots")
             .join(MODEL_REVISION);
@@ -588,10 +586,8 @@ mod tests {
         std::fs::write(&cached, b"cached").unwrap();
 
         // the pinned commit names its snapshot, so a cached file needs no network request
-        let manager = ModelManager::with_cache_dir(cache_dir.clone()).unwrap();
-        let resolved = manager.get(SEGMENTATION_ONNX);
-        std::fs::remove_dir_all(cache_dir).unwrap();
-        assert_eq!(resolved.unwrap(), cached);
+        let manager = ModelManager::with_cache_dir(cache_dir.path().to_path_buf()).unwrap();
+        assert_eq!(manager.get(SEGMENTATION_ONNX).unwrap(), cached);
     }
 
     #[test]
