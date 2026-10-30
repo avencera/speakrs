@@ -3,8 +3,13 @@ use std::sync::Arc;
 
 use objc2_core_ml::MLComputeUnits;
 
-use crate::inference::coreml::{CachedInputShape, CoreMlError, GpuPrecision, SharedCoreMlModel};
+use crate::inference::coreml::{CachedInputShape, CoreMlError, SharedCoreMlModel};
 use crate::inference::{ExecutionMode, ModelLoadError};
+#[cfg(feature = "_metrics")]
+use crate::models::chunk_ladder::COREML_REDUCED_CHUNK_CONFIGS;
+use crate::models::chunk_ladder::{
+    COREML_CHUNK_CONFIGS, COREML_FAST_CHUNK_CONFIGS, ChunkSessionConfig,
+};
 use crate::pipeline::RuntimeConfig;
 #[cfg(feature = "_metrics")]
 use crate::pipeline::{CoreMlChunkLayout, CoreMlShapeLadder};
@@ -16,97 +21,6 @@ use super::super::{
     CHUNK_SPEAKER_BATCH_SIZE, ChunkEmbeddingSession, ChunkSessionSpec, FBANK_FEATURES, MASK_FRAMES,
     PRIMARY_BATCH_SIZE,
 };
-
-const CHUNK_WINDOW_FBANK_FRAMES: usize = 1000;
-const ONE_SECOND_FBANK_FRAMES: usize = 100;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ChunkModelLayout {
-    Aligned { step_resnet_frames: usize },
-    OneSecondPhased,
-}
-
-impl ChunkModelLayout {
-    fn model_suffix(self) -> String {
-        match self {
-            Self::Aligned { step_resnet_frames } => format!("s{step_resnet_frames}"),
-            Self::OneSecondPhased => "p1s".to_owned(),
-        }
-    }
-
-    const fn fbank_frames(self, num_windows: usize) -> usize {
-        let window_steps = num_windows - 1;
-        match self {
-            Self::Aligned { step_resnet_frames } => {
-                window_steps * step_resnet_frames * 8 + CHUNK_WINDOW_FBANK_FRAMES
-            }
-            Self::OneSecondPhased => {
-                window_steps * ONE_SECOND_FBANK_FRAMES + CHUNK_WINDOW_FBANK_FRAMES
-            }
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ChunkSessionConfig {
-    layout: ChunkModelLayout,
-    num_windows: usize,
-}
-
-impl ChunkSessionConfig {
-    const fn aligned(num_windows: usize, step_resnet_frames: usize) -> Self {
-        Self {
-            layout: ChunkModelLayout::Aligned { step_resnet_frames },
-            num_windows,
-        }
-    }
-
-    const fn one_second_phased(num_windows: usize) -> Self {
-        Self {
-            layout: ChunkModelLayout::OneSecondPhased,
-            num_windows,
-        }
-    }
-
-    fn model_stem(self) -> String {
-        let suffix = self.layout.model_suffix();
-        let num_windows = self.num_windows;
-        format!("wespeaker-chunk-emb-{suffix}-w{num_windows}")
-    }
-
-    const fn fbank_frames(self) -> usize {
-        self.layout.fbank_frames(self.num_windows)
-    }
-
-    const fn num_masks(self) -> usize {
-        self.num_windows * 3
-    }
-}
-
-const COREML_FAST_CHUNK_CONFIGS: &[ChunkSessionConfig] = &[
-    ChunkSessionConfig::aligned(11, 25),
-    ChunkSessionConfig::aligned(16, 25),
-    ChunkSessionConfig::aligned(21, 25),
-    ChunkSessionConfig::aligned(26, 25),
-    ChunkSessionConfig::aligned(36, 25),
-    ChunkSessionConfig::aligned(46, 25),
-    ChunkSessionConfig::aligned(56, 25),
-];
-
-const COREML_CHUNK_CONFIGS: &[ChunkSessionConfig] = &[
-    ChunkSessionConfig::one_second_phased(21),
-    ChunkSessionConfig::one_second_phased(36),
-    ChunkSessionConfig::one_second_phased(51),
-    ChunkSessionConfig::one_second_phased(81),
-    ChunkSessionConfig::one_second_phased(111),
-];
-
-#[cfg(feature = "_metrics")]
-const COREML_REDUCED_CHUNK_CONFIGS: &[ChunkSessionConfig] = &[
-    ChunkSessionConfig::one_second_phased(21),
-    ChunkSessionConfig::one_second_phased(51),
-    ChunkSessionConfig::one_second_phased(111),
-];
 
 /// Compiled CoreML embedding bundles derived from the base embedding ONNX path
 ///
@@ -221,7 +135,7 @@ fn chunk_session_specs(
 
             Some(ChunkSessionSpec {
                 coreml_path,
-                num_windows: config.num_windows,
+                num_windows: config.num_windows(),
                 fbank_frames: config.fbank_frames(),
                 num_masks: config.num_masks(),
             })
@@ -233,12 +147,7 @@ pub(super) fn load_chunk_session(
     spec: &ChunkSessionSpec,
     compute_units: MLComputeUnits,
 ) -> Result<ChunkEmbeddingSession, CoreMlError> {
-    let model = SharedCoreMlModel::load(
-        &spec.coreml_path,
-        compute_units,
-        "output",
-        GpuPrecision::Low,
-    )?;
+    let model = SharedCoreMlModel::load(&spec.coreml_path, compute_units, "output")?;
     Ok(ChunkEmbeddingSession {
         model: Arc::new(model),
         num_windows: spec.num_windows,
@@ -430,7 +339,7 @@ mod tests {
     fn reduced_one_second_ladder_keeps_endpoint_and_middle_capacities() {
         let capacities: Vec<_> = COREML_REDUCED_CHUNK_CONFIGS
             .iter()
-            .map(|config| config.num_windows)
+            .map(|config| config.num_windows())
             .collect();
 
         assert_eq!(capacities, [21, 51, 111]);

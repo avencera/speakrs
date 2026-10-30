@@ -157,6 +157,33 @@ fn f16_to_f32(bits: u16) -> f32 {
         return f32::from_bits((sign << 31) | (0xff_u32 << 23) | (mant << 13));
     }
 
-    let f32_exp = exp - 15 + 127;
+    // rebias before subtracting so a normal exponent below 15 never underflows the u32
+    let f32_exp = exp + (127 - 15);
     f32::from_bits((sign << 31) | (f32_exp << 23) | (mant << 13))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::f16_to_f32;
+
+    #[test]
+    fn f16_decodes_every_exponent_class() {
+        let cases: [(u16, f32); 9] = [
+            (0x0000, 0.0),
+            (0x0001, 2.0_f32.powi(-24)),
+            (0x03ff, 1023.0 * 2.0_f32.powi(-24)),
+            (0x0400, 2.0_f32.powi(-14)),
+            (0x3800, 0.5),
+            (0x3c00, 1.0),
+            (0xc000, -2.0),
+            (0x7bff, 65504.0),
+            (0x7c00, f32::INFINITY),
+        ];
+        for (bits, expected) in cases {
+            assert_eq!(f16_to_f32(bits), expected, "bits {bits:#06x}");
+        }
+
+        assert!(f16_to_f32(0x7e00).is_nan());
+        assert_eq!(f16_to_f32(0x8000).to_bits(), (-0.0_f32).to_bits());
+    }
 }

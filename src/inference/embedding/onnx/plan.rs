@@ -66,8 +66,10 @@ impl<S> OrtEmbeddingPlan<S> {
         self.fbank_batched.is_some()
     }
 
+    /// Multi-mask runs on host filterbanks, and every filterbank route, including the pool
+    /// and partial batches, needs the single-window filterbank model
     pub(super) fn prefers_multi_mask_path(&self) -> bool {
-        self.multi_mask.is_some()
+        self.multi_mask.is_some() && self.fbank.is_some()
     }
 
     pub(super) fn multi_mask_batch_size(&self) -> usize {
@@ -153,6 +155,20 @@ mod tests {
         assert!(plan.fbank.is_some());
         assert!(plan.tail.is_none());
         assert!(plan.prefers_multi_mask_path());
+        assert!(!plan.prefers_chunk_embedding_path());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn multi_mask_without_filterbank_keeps_the_fused_path() {
+        let dir = scratch_dir("multimask-no-fbank");
+        touch(&dir, "wespeaker-voxceleb-resnet34.onnx");
+        touch(&dir, "wespeaker-fbank-b32.onnx");
+        touch(&dir, "wespeaker-multimask-tail.onnx");
+        touch(&dir, "wespeaker-multimask-tail-b32.onnx");
+        let plan = plan_for(&dir);
+        assert!(plan.multi_mask.is_some());
+        assert!(!plan.prefers_multi_mask_path());
         assert!(!plan.prefers_chunk_embedding_path());
         let _ = fs::remove_dir_all(dir);
     }

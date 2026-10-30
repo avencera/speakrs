@@ -21,7 +21,7 @@ pub struct PldaTransform {
 
 /// Projected embeddings paired with the matching PLDA eigenvalues
 #[derive(Debug, Clone)]
-pub struct PldaFeatures {
+pub(crate) struct PldaFeatures {
     features: Array2<f32>,
     phi: Array1<f32>,
 }
@@ -48,7 +48,10 @@ struct PldaParameters {
 }
 
 impl PldaTransform {
-    /// Load model parameters and build the PLDA transform
+    /// Load the `plda_*.npy` parameters from a model directory and build the PLDA transform
+    ///
+    /// `models_dir` is the directory `ModelManager::ensure`
+    /// returns, or a local model directory with the same files
     pub fn from_dir(models_dir: &Path) -> Result<Self, PldaError> {
         Self::from_parameters(PldaParameters {
             mean1: read_array1_f64(models_dir.join("plda_mean1.npy"))?,
@@ -110,7 +113,7 @@ impl PldaTransform {
     }
 
     /// Project embeddings and return features paired with matching eigenvalues
-    pub fn project(&self, embeddings: &ArrayView2<f32>, lda_dim: usize) -> PldaFeatures {
+    pub(crate) fn project(&self, embeddings: &ArrayView2<f32>, lda_dim: usize) -> PldaFeatures {
         let embeddings_f64 = embeddings.mapv(|v| v as f64);
         let xvec = self.xvec_transform(&embeddings_f64.view());
         let lda_dim = lda_dim.min(self.phi.len());

@@ -6,7 +6,7 @@ use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2_core_ml::{MLComputeUnits, MLFeatureProvider, MLModel};
-use objc2_foundation::{NSArray, NSCopying, NSError, NSMutableDictionary, NSNumber, NSString};
+use objc2_foundation::{NSArray, NSCopying, NSMutableDictionary, NSNumber, NSString};
 
 mod array;
 mod path;
@@ -22,18 +22,7 @@ fn noop_deallocator() -> RcBlock<dyn Fn(NonNull<c_void>)> {
     RcBlock::new(|_ptr: NonNull<c_void>| {})
 }
 pub(crate) use path::{coreml_model_path, coreml_w8a16_model_path};
-use runtime::{
-    build_feature_provider, insert_input_feature, load_model, output_multi_array, predict_output,
-};
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum GpuPrecision {
-    /// FP16 intermediate accumulations on GPU
-    Low,
-    /// Full FP32 accumulation on GPU
-    #[expect(dead_code)]
-    Full,
-}
+use runtime::{build_feature_provider, insert_input_feature, load_model, predict_output};
 
 /// Errors returned by the native CoreML runtime
 #[derive(Debug, thiserror::Error)]
@@ -123,10 +112,9 @@ impl CoreMlModel {
         path: &Path,
         compute_units: MLComputeUnits,
         output_name: &str,
-        gpu_precision: GpuPrecision,
     ) -> Result<Self, CoreMlError> {
         Ok(Self {
-            model: load_model(path, compute_units, gpu_precision)?,
+            model: load_model(path, compute_units)?,
             output_key: NSString::from_str(output_name),
             noop_deallocator: noop_deallocator(),
             input_dict: NSMutableDictionary::new(),
@@ -216,10 +204,9 @@ impl SharedCoreMlModel {
         path: &Path,
         compute_units: MLComputeUnits,
         output_name: &str,
-        gpu_precision: GpuPrecision,
     ) -> Result<Self, CoreMlError> {
         Ok(Self {
-            model: load_model(path, compute_units, gpu_precision)?,
+            model: load_model(path, compute_units)?,
             output_key: NSString::from_str(output_name),
             output_name: output_name.to_owned(),
         })
@@ -249,76 +236,6 @@ impl SharedCoreMlModel {
             predict_output(&self.model, input_ref, &self.output_key, &self.output_name)?;
         extract_output(&output_array)
     }
-
-    /// Async prediction: queues work on ANE and returns via callback
-    ///
-    /// Uses predictionFromFeatures:completionHandler: which lets CoreML
-    /// pipeline multiple predictions onto ANE simultaneously. Critical for
-    /// concurrent ANE workers -- sync prediction serializes while async
-    /// lets the ANE queue depth (127) fill up
-    #[expect(dead_code)]
-    pub fn predict_async(
-        &self,
-        inputs: &[(&CachedInputShape, &[f32])],
-    ) -> Result<CoreMlTensor, CoreMlError> {
-        let deallocator = noop_deallocator();
-        let input_dict: Retained<NSMutableDictionary<NSString, AnyObject>> =
-            NSMutableDictionary::new();
-
-        for &(cached, data) in inputs {
-            let bound = cached.bind(data)?;
-            let multi_array =
-                create_multi_array_cached_with_deallocator(bound.data, bound.cached, &deallocator)?;
-            let key_copy: &ProtocolObject<dyn NSCopying> = ProtocolObject::from_ref(&*cached.name);
-            insert_input_feature(&input_dict, key_copy, &multi_array);
-        }
-
-        let provider = build_feature_provider(&input_dict)?;
-        let input_ref: &ProtocolObject<dyn MLFeatureProvider> =
-            ProtocolObject::from_ref(&*provider);
-
-        // bridge the async callback to a blocking channel
-        let (tx, rx) = std::sync::mpsc::sync_channel::<
-            Result<Retained<ProtocolObject<dyn MLFeatureProvider>>, String>,
-        >(1);
-
-        let completion = block2::RcBlock::new(
-            move |output: *mut ProtocolObject<dyn MLFeatureProvider>, error: *mut NSError| {
-                if !error.is_null() {
-                    // SAFETY: error is non-null in this branch and points to the NSError passed
-                    // SAFETY: by CoreML for the duration of the callback invocation
-                    let err_msg = unsafe { (*error).localizedDescription() }.to_string();
-                    let _ = tx.send(Err(err_msg));
-                } else if output.is_null() {
-                    let _ = tx.send(Err("nil output with no error".to_owned()));
-                } else {
-                    // SAFETY: output is non-null in this branch and retain extends the lifetime so
-                    // SAFETY: the returned feature provider survives after the callback returns
-                    let Some(retained) = (unsafe { Retained::retain(output) }) else {
-                        let _ = tx.send(Err("failed to retain CoreML output".to_owned()));
-                        return;
-                    };
-                    let _ = tx.send(Ok(retained));
-                }
-            },
-        );
-
-        // SAFETY: input_ref and completion stay alive for the duration of the Objective-C call and
-        // SAFETY: CoreML copies/retains the callback before invoking it asynchronously
-        unsafe {
-            self.model
-                .predictionFromFeatures_completionHandler(input_ref, &completion);
-        }
-
-        // block until the callback fires
-        let output = rx
-            .recv()
-            .map_err(|_| CoreMlError::PredictionFailed("channel closed".to_owned()))?
-            .map_err(CoreMlError::PredictionFailed)?;
-
-        let output_array = output_multi_array(&output, &self.output_key, &self.output_name)?;
-        extract_output(&output_array)
-    }
 }
 
 #[cfg(test)]
@@ -326,7 +243,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use super::{CachedInputShape, CoreMlModel, GpuPrecision, SharedCoreMlModel};
+    use super::{CachedInputShape, CoreMlModel, SharedCoreMlModel};
     use crate::inference::geometry::TensorShapeError;
 
     #[test]
@@ -391,13 +308,8 @@ mod tests {
         }
 
         let model = Arc::new(
-            SharedCoreMlModel::load(
-                &model_path,
-                CoreMlModel::default_compute_units(),
-                "output",
-                GpuPrecision::Low,
-            )
-            .unwrap(),
+            SharedCoreMlModel::load(&model_path, CoreMlModel::default_compute_units(), "output")
+                .unwrap(),
         );
         let cached_shape = Arc::new(CachedInputShape::new("input", &[1, 1, 160_000]));
         let input = Arc::new(vec![0.0_f32; 160_000]);

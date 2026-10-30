@@ -7,8 +7,7 @@ use ndarray::{Array2, Array3};
 use tracing::info;
 
 use crate::inference::coreml::{
-    CachedInputShape, CoreMlModel, GpuPrecision, SharedCoreMlModel, coreml_model_path,
-    coreml_w8a16_model_path,
+    CachedInputShape, CoreMlModel, SharedCoreMlModel, coreml_model_path, coreml_w8a16_model_path,
 };
 use crate::inference::{ExecutionMode, InferenceError, ModelLoadError};
 
@@ -96,17 +95,13 @@ fn load_native_model(
 ) -> Result<SharedCoreMlModel, ModelLoadError> {
     require_native_asset(coreml_path, mode)?;
 
-    SharedCoreMlModel::load(
-        coreml_path,
-        CoreMlModel::default_compute_units(),
-        "output",
-        GpuPrecision::Low,
+    SharedCoreMlModel::load(coreml_path, CoreMlModel::default_compute_units(), "output").map_err(
+        |err| ModelLoadError::NativeAssetLoad {
+            mode,
+            path: coreml_path.to_path_buf(),
+            message: format!("{load_error_message}: {err}"),
+        },
     )
-    .map_err(|err| ModelLoadError::NativeAssetLoad {
-        mode,
-        path: coreml_path.to_path_buf(),
-        message: format!("{load_error_message}: {err}"),
-    })
 }
 
 /// Native CoreML segmentation models plus private input staging
