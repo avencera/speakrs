@@ -113,7 +113,7 @@ pub enum ModelLoadError {
     /// Hugging Face Hub could not resolve a required model asset
     #[cfg(feature = "online")]
     #[error(transparent)]
-    HfHub(#[from] crate::hf::HubError),
+    HfHub(#[from] hf_fetch::HubError),
     /// Requested execution mode is not supported by this build
     #[error(transparent)]
     UnsupportedExecutionMode(#[from] ExecutionModeError),
@@ -163,7 +163,7 @@ pub enum ModelLoadError {
         mode: ExecutionMode,
         /// The Hugging Face Hub error
         #[source]
-        source: crate::hf::HubError,
+        source: hf_fetch::HubError,
     },
     /// A required native model asset exists but failed to load
     #[error("{mode} failed to load native asset `{path}`: {message}")]

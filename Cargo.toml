@@ -35,8 +35,8 @@ include = ["/src/**", "/examples/**", "/README.md", "/LICENSE", "/Cargo.toml"]
 
 [features]
 default = ["online"]
-# Hugging Face downloads over ureq's rustls, so nothing links against the system OpenSSL
-online = ["dep:ureq"]
+# blocking Hub downloads through hf-fetch, with rustls and no async runtime
+online = ["hf-fetch/online"]
 cpu = ["dep:safetensors", "dep:rustfft", "dep:libloading", "_backend"]
 coreml = [
     "dep:block2",
@@ -123,7 +123,7 @@ tracing = "0.1.44"
 thiserror = "2.0.21"
 
 # model downloads
-ureq = { version = "3.5.0", optional = true, default-features = false, features = ["rustls"] }
+hf-fetch = { version = "0.1.0", git = "https://github.com/avencera/hf-fetch", rev = "d72ac792f5247544af89e00fea7b51010244b1e2", default-features = false }
 
 # concurrency
 crossbeam-channel = "0.5"

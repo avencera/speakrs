@@ -26,3 +26,6 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+# use the pinned shared downloader until its first crates.io release
+allow-git = ["https://github.com/avencera/hf-fetch"]

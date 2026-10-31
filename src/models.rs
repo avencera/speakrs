@@ -1,9 +1,9 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
-#[cfg(feature = "online")]
-use crate::hf::{Hub, HubError, HubRepo};
 use crate::inference::ExecutionMode;
+#[cfg(feature = "online")]
+use hf_fetch::{Hub, HubError, HubRepo};
 
 pub(crate) mod chunk_ladder;
 

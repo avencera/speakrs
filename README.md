@@ -424,6 +424,10 @@ Start here:
 
 <!-- cargo-rdme end -->
 
+Model downloads use [`hf-fetch`](https://github.com/avencera/hf-fetch), a small
+blocking client with rustls and the shared Python Hugging Face cache. The `online`
+feature enables downloads; local model loading works without it.
+
 ## [Contributing](CONTRIBUTING.md)
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, model downloads, fixture generation, and the standard check commands used in this repo.

@@ -445,8 +445,6 @@ compile_error!(
 pub(crate) mod binarize;
 #[cfg(feature = "_backend")]
 pub(crate) mod clustering;
-#[cfg(feature = "_backend")]
-mod hf;
 /// Segmentation and embedding model wrappers
 #[cfg(feature = "_backend")]
 pub mod inference;
@@ -476,9 +474,9 @@ pub(crate) mod utils;
 #[cfg(feature = "online")]
 #[cfg_attr(docsrs, doc(cfg(feature = "online")))]
 #[cfg(feature = "_backend")]
-pub use hf::HubError;
+pub use hf_fetch::HubError;
 #[cfg(feature = "_backend")]
-pub use hf::default_hub_cache_dir;
+pub use hf_fetch::default_hub_cache_dir;
 #[cfg(feature = "_backend")]
 pub use inference::{CoreMlComputeUnits, ExecutionMode};
 #[cfg(feature = "_backend")]
