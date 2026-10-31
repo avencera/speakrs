@@ -15,7 +15,7 @@ pub(crate) mod segmentation;
 
 use std::fmt;
 
-pub use embedding::EmbeddingModel;
+pub use embedding::{EmbeddingModel, MaskedEmbeddingInput};
 pub use error::{ExecutionModeError, InferenceError, ModelLoadError};
 pub use geometry::TensorShapeError;
 #[cfg(any(feature = "cpu", feature = "_cuda"))]
@@ -23,7 +23,10 @@ pub use native_model::NativeWeightsError;
 #[cfg(feature = "_ort")]
 pub use ort_runtime::{DynamicRuntimeError, OrtRuntimeError, with_execution_mode};
 #[cfg(feature = "migraphx")]
-pub(crate) use ort_runtime::{OrtProvider, SharedSession, ensure_ort_ready};
+pub(crate) use ort_runtime::{OrtProvider, SharedSession};
+#[cfg(feature = "migraphx")]
+#[cfg_attr(docsrs, doc(cfg(feature = "migraphx")))]
+pub use ort_runtime::{ort_environment, use_ort_environment};
 pub use segmentation::{SegmentationError, SegmentationModel};
 
 #[cfg(feature = "coreml")]

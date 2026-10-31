@@ -8,6 +8,7 @@ on:
   pull_request:
     branches:
       - master
+      - update-crates
 
 permissions:
   contents: read
@@ -25,8 +26,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust 1.89
-        uses: dtolnay/rust-toolchain@1.89
+      - name: Install Rust 1.96
+        uses: dtolnay/rust-toolchain@1.96
 
       # a prebuilt binary instead of cargo-deny-action, whose Docker build fails
       # whenever Docker Hub rate-limits or times out the runner
@@ -39,13 +40,13 @@ jobs:
         run: cargo deny --no-default-features --features online,cpu,cuda,migraphx,load-dynamic,_metrics check
 
   msrv:
-    name: MSRV Rust 1.89
+    name: MSRV Rust 1.96
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust 1.89
-        uses: dtolnay/rust-toolchain@1.89
+      - name: Install Rust 1.96
+        uses: dtolnay/rust-toolchain@1.96
 
       - name: Cache Rust builds
         uses: Swatinem/rust-cache@v2

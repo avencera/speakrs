@@ -111,7 +111,7 @@ pub(super) fn digest_paths_cached(
         metadata_digest.update(modified.as_secs().to_le_bytes());
         metadata_digest.update(modified.subsec_nanos().to_le_bytes());
     }
-    let key = format!("{:x}", metadata_digest.finalize());
+    let key = hex::encode(metadata_digest.finalize());
     let cache_path = cache_dir.join(format!("{key}.sha256"));
     if let Ok(cached) = fs::read_to_string(&cache_path) {
         let cached = cached.trim();
@@ -164,7 +164,7 @@ fn digest_files(root: &Path, files: &[PathBuf]) -> Result<String> {
             path.display()
         );
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(hex::encode(digest.finalize()))
 }
 
 #[cfg(target_os = "macos")]
@@ -213,7 +213,7 @@ fn dirty_diff_digest(root: &Path) -> Result<String> {
             update_length_prefixed(&mut digest, &contents);
         }
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(hex::encode(digest.finalize()))
 }
 
 #[cfg(target_os = "macos")]

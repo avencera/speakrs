@@ -358,7 +358,7 @@ fn result_fingerprint(result: &DiarizationResult) -> String {
     for value in result.discrete_diarization.iter() {
         digest.update(value.to_bits().to_le_bytes());
     }
-    format!("{:x}", digest.finalize())
+    hex::encode(digest.finalize())
 }
 
 #[cfg(test)]

@@ -10,5 +10,7 @@ path = "src/main.rs"
 [dependencies]
 pyannote-rs = "0.3"
 eyre = "0.6"
-ort = { version = "=2.0.0-rc.12", features = ["ndarray"] }
-ndarray = "0.17"
+# pyannote-rs 0.3.4 accepts any ort >= 2.0.0-rc.10 but only compiles against rc.10, the last
+# release on ndarray 0.16, so pin ort and ndarray to the versions it was written for
+ort = { version = "=2.0.0-rc.10", features = ["ndarray"] }
+ndarray = "0.16"

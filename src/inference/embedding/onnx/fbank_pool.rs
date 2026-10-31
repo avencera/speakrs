@@ -145,7 +145,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::inference::{OrtProvider, ensure_ort_ready};
+    use crate::inference::{OrtProvider, ort_environment};
     use crate::pipeline::OrtThreadCount;
 
     use super::super::build_fbank_session;
@@ -180,21 +180,25 @@ mod tests {
     fn pool_preserves_output_values_and_input_order() {
         let model_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/models/wespeaker-fbank.onnx");
-        if !model_path.is_file() || ensure_ort_ready().is_err() {
-            eprintln!(
-                "skipping fbank pool test; missing {} or ONNX Runtime",
-                model_path.display()
-            );
-            return;
-        }
+        let environment = match ort_environment() {
+            Ok(environment) if model_path.is_file() => environment,
+            _ => {
+                eprintln!(
+                    "skipping fbank pool test; missing {} or ONNX Runtime",
+                    model_path.display()
+                );
+                return;
+            }
+        };
         let threads = OrtThreadCount::new(1).unwrap();
         let sessions: Vec<_> = (0..2)
             .map(|_| {
-                build_fbank_session(&model_path, OrtProvider::Cpu, threads).map(SharedSession::new)
+                build_fbank_session(&environment, &model_path, OrtProvider::Cpu, threads)
+                    .map(SharedSession::new)
             })
             .collect::<Result<_, _>>()
             .unwrap();
-        let reference = build_fbank_session(&model_path, OrtProvider::Cpu, threads)
+        let reference = build_fbank_session(&environment, &model_path, OrtProvider::Cpu, threads)
             .map(SharedSession::new)
             .unwrap();
         let first = vec![0.0; 24_000];

@@ -335,7 +335,7 @@ if none is enabled.
 The default `online` feature downloads models with `ModelManager`.
 `load-dynamic` loads ONNX Runtime at run time for `migraphx` or the external ONNX
 session helper. The native CPU backend doesn't need it. The ONNX Runtime
-dependency (`ort` 2.0.0-rc.13) is still a pre-release.
+dependency (`ort` 2.0.0-rc.15) is still a pre-release.
 
 ### NVIDIA GPUs
 
@@ -423,6 +423,10 @@ Start here:
 - [`Segment`](https://docs.rs/speakrs/latest/speakrs/segment/struct.Segment.html): a single speaker turn
 
 <!-- cargo-rdme end -->
+
+Model downloads use [`hf-fetch`](https://github.com/avencera/hf-fetch), a small
+blocking client with rustls and the shared Python Hugging Face cache. The `online`
+feature enables downloads; local model loading works without it.
 
 ## [Contributing](CONTRIBUTING.md)
 

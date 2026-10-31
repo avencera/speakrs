@@ -37,7 +37,7 @@ mode can still fail at load time without an NVIDIA driver; that raises
 - `prepare(mode="CPU", *, cache_dir=None, model_dir=None, manifest=None, progress=None) -> PreparedModels`
 - `generate_manifest(model_dir, mode="CPU") -> ModelManifest`, with `to_json()` and `ModelManifest.from_json()`
 - `required_model_files(mode="CPU") -> list[str]`
-- `default_cache_dir() -> Path`: `$SPEAKRS_CACHE_DIR`, else `$HF_HOME/hub`, else `~/.cache/huggingface/hub`
+- `default_cache_dir() -> Path`: `$SPEAKRS_CACHE_DIR`, else `$HF_HUB_CACHE`, else `$HF_HOME/hub`, else `~/.cache/huggingface/hub`
 - `list_cache(cache_dir=None) -> list[CacheEntry]`
 - `cleanup_revision(revision, cache_dir=None) -> bool`
 - `DEFAULT_MODEL_REPOSITORY`, `DEFAULT_MODEL_REVISION`

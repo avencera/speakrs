@@ -422,7 +422,7 @@ def required_model_files(mode: str = "CPU") -> list[str]:
     """Files ``mode`` loads, relative to the model directory."""
 
 def default_cache_dir() -> Path:
-    """``$SPEAKRS_CACHE_DIR``, else ``$HF_HOME/hub``, else ``~/.cache/huggingface/hub``."""
+    """``$SPEAKRS_CACHE_DIR``, else ``$HF_HUB_CACHE``, else ``$HF_HOME/hub``, else ``~/.cache/huggingface/hub``."""
 
 def list_cache(cache_dir: _StrPath | None = None) -> list[CacheEntry]:
     """Cached revisions of the model repository."""

@@ -317,7 +317,7 @@
 //! The default `online` feature downloads models with `ModelManager`.
 //! `load-dynamic` loads ONNX Runtime at run time for `migraphx` or the external ONNX
 //! session helper. The native CPU backend doesn't need it. The ONNX Runtime
-//! dependency (`ort` 2.0.0-rc.13) is still a pre-release.
+//! dependency (`ort` 2.0.0-rc.15) is still a pre-release.
 //!
 //! ## NVIDIA GPUs
 //!
@@ -471,6 +471,12 @@ pub mod segment;
 pub(crate) mod utils;
 
 // crate-root re-exports for the main import path
+#[cfg(feature = "online")]
+#[cfg_attr(docsrs, doc(cfg(feature = "online")))]
+#[cfg(feature = "_backend")]
+pub use hf_fetch::HubError;
+#[cfg(feature = "_backend")]
+pub use hf_fetch::default_hub_cache_dir;
 #[cfg(feature = "_backend")]
 pub use inference::{CoreMlComputeUnits, ExecutionMode};
 #[cfg(feature = "_backend")]

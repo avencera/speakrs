@@ -243,8 +243,8 @@ pub(crate) fn required_model_files(mode: &str) -> PyResult<Vec<String>> {
     Ok(speakrs_sdk::required_model_files(mode_from(mode)?))
 }
 
-/// The model cache: `$SPEAKRS_CACHE_DIR`, else `$HF_HOME/hub`, else
-/// `~/.cache/huggingface/hub`
+/// The model cache: `$SPEAKRS_CACHE_DIR`, else `$HF_HUB_CACHE`, else `$HF_HOME/hub`,
+/// else `~/.cache/huggingface/hub`
 #[pyfunction]
 pub(crate) fn default_cache_dir() -> PathBuf {
     ModelStore::default_cache_dir()

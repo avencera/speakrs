@@ -13,15 +13,17 @@ use std::ffi::CStr;
 ))]
 use std::path::Path;
 use std::path::PathBuf;
+#[cfg(feature = "migraphx")]
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+
+#[cfg(feature = "migraphx")]
+use ort::environment::Environment;
 #[cfg(all(
     feature = "migraphx",
     feature = "load-dynamic",
     not(target_arch = "wasm32")
 ))]
-use std::sync::OnceLock;
-#[cfg(feature = "migraphx")]
-use std::sync::{Arc, Mutex, MutexGuard};
-
+use ort::environment::EnvironmentBuilder;
 use ort::ep;
 #[cfg(feature = "migraphx")]
 use ort::session::Session;
@@ -95,26 +97,49 @@ pub fn with_execution_mode(
     Ok(provider.apply(builder)?)
 }
 
-#[cfg(all(
-    feature = "migraphx",
-    feature = "load-dynamic",
-    not(target_arch = "wasm32")
-))]
-static ORT_RUNTIME_INIT: OnceLock<Result<(), OrtRuntimeError>> = OnceLock::new();
+// ort allows one environment per process and refuses to build another even after the first is
+// dropped, so the first one is kept for the life of the process
+#[cfg(feature = "migraphx")]
+static ORT_ENVIRONMENT: OnceLock<Result<Environment, OrtRuntimeError>> = OnceLock::new();
+
+/// The process-wide ONNX Runtime environment that speakrs builds its sessions in, created on
+/// first use
+///
+/// `ort` allows one environment per process, so an application that also builds its own ONNX
+/// Runtime sessions, such as with [`with_execution_mode`], builds them in this one, or hands
+/// speakrs its own with [`use_ort_environment`] before speakrs loads a model
+#[cfg(feature = "migraphx")]
+#[cfg_attr(docsrs, doc(cfg(feature = "migraphx")))]
+pub fn ort_environment() -> Result<Environment, OrtRuntimeError> {
+    ORT_ENVIRONMENT.get_or_init(build_environment).clone()
+}
+
+/// Makes speakrs build its ONNX Runtime sessions in `environment`, an application's own
+///
+/// Call it before speakrs loads a model. Once speakrs has an environment, this hands
+/// `environment` back unused; [`ort_environment`] returns the one speakrs uses
+#[cfg(feature = "migraphx")]
+#[cfg_attr(docsrs, doc(cfg(feature = "migraphx")))]
+pub fn use_ort_environment(environment: Environment) -> Result<(), Environment> {
+    match ORT_ENVIRONMENT.set(Ok(environment)) {
+        Ok(()) => Ok(()),
+        Err(Ok(environment)) => Err(environment),
+        Err(Err(_)) => unreachable!("OnceLock::set hands back the value it was given"),
+    }
+}
 
 #[cfg(feature = "migraphx")]
-pub(crate) fn ensure_ort_ready() -> Result<(), ModelLoadError> {
-    #[cfg(all(
-        feature = "migraphx",
-        feature = "load-dynamic",
-        not(target_arch = "wasm32")
-    ))]
-    {
-        let init_result = ORT_RUNTIME_INIT.get_or_init(|| OrtRuntimeLoader::new().initialize());
-        init_result.clone()?;
-    }
+fn build_environment() -> Result<Environment, OrtRuntimeError> {
+    #[cfg(all(feature = "load-dynamic", not(target_arch = "wasm32")))]
+    let builder = OrtRuntimeLoader::new().load()?;
+    #[cfg(not(all(feature = "load-dynamic", not(target_arch = "wasm32"))))]
+    let builder = ort::init();
 
-    Ok(())
+    builder
+        .build()
+        .map_err(|error| OrtRuntimeError::Initialization {
+            message: error.to_string(),
+        })
 }
 
 /// Errors that can occur while preparing the process-wide ONNX Runtime environment
@@ -125,7 +150,7 @@ pub enum OrtRuntimeError {
     /// Dynamic runtime discovery or validation failed before `ort` could initialize
     #[error(transparent)]
     Dynamic(#[from] DynamicRuntimeError),
-    /// `ort::init_from` failed after runtime validation succeeded
+    /// ONNX Runtime failed to load or create its environment after runtime validation succeeded
     #[error("failed to initialize ONNX Runtime: {message}")]
     Initialization {
         /// The initialization error returned by `ort`
@@ -203,17 +228,13 @@ impl OrtRuntimeLoader {
         }
     }
 
-    fn initialize(&self) -> Result<(), OrtRuntimeError> {
+    fn load(&self) -> Result<EnvironmentBuilder, OrtRuntimeError> {
         let path = self.resolve_library_path()?;
         self.validate_library(&path)?;
 
-        ort::init_from(&path)
-            .map(|builder| {
-                builder.commit();
-            })
-            .map_err(|error| OrtRuntimeError::Initialization {
-                message: error.to_string(),
-            })
+        ort::init_from(&path).map_err(|error| OrtRuntimeError::Initialization {
+            message: error.to_string(),
+        })
     }
 
     fn resolve_library_path(&self) -> Result<PathBuf, DynamicRuntimeError> {
@@ -357,8 +378,7 @@ fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     not(target_arch = "wasm32")
 ))]
 mod tests {
-    use super::{DynamicRuntimeError, OrtRuntimeError, ensure_ort_ready};
-    use crate::inference::ModelLoadError;
+    use super::{DynamicRuntimeError, OrtRuntimeError, OrtRuntimeLoader};
 
     #[test]
     fn dynamic_runtime_preflight_fails_instead_of_hanging() {
@@ -369,12 +389,14 @@ mod tests {
             std::env::set_var("ORT_DYLIB_PATH", &missing);
         }
 
-        let error = ensure_ort_ready().unwrap_err();
+        // the loader rather than `ort_environment`, whose process-wide environment another
+        // test may already have created
+        let Err(error) = OrtRuntimeLoader::new().load() else {
+            panic!("a missing runtime library must not create an environment");
+        };
         assert!(matches!(
             error,
-            ModelLoadError::Runtime(OrtRuntimeError::Dynamic(
-                DynamicRuntimeError::Missing { .. }
-            ))
+            OrtRuntimeError::Dynamic(DynamicRuntimeError::Missing { .. })
         ));
 
         // safety: this test restores the original process-global env var before returning

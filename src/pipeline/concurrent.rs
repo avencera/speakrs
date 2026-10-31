@@ -7,7 +7,7 @@ use crate::powerset::PowersetMapping;
 
 use super::config::MIN_SPEAKER_ACTIVITY;
 use super::types::{
-    Array3Writer, EmbeddingStorage, PendingEmbedding, PendingSplitEmbedding, PipelineError,
+    Array3Writer, EmbeddingStorage, PendingEmbedding, PipelineError, SplitEmbeddingBatch,
     chunk_audio_raw, flush_masked, flush_split,
 };
 use super::{clean_masks, select_speaker_weights, write_speaker_mask_to_slice};
@@ -108,8 +108,7 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
         let total_windows = self.total_windows();
         let mut seg_array: Option<Array3<f32>> = None;
         let mut emb_array: Option<Array3<f32>> = None;
-        let mut pending: Vec<PendingSplitEmbedding> = Vec::with_capacity(batch_size);
-        let mut fbanks: Vec<Array2<f32>> = Vec::new();
+        let mut batch = SplitEmbeddingBatch::new(batch_size);
         let mut chunk_idx = 0usize;
 
         for raw_window in receiver {
@@ -129,10 +128,6 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
             );
             let clean = clean_masks(&seg_view);
 
-            let fbank = embedding_model.compute_chunk_fbank(chunk_audio)?;
-            fbanks.push(fbank);
-            let mut current_fbank_idx = fbanks.len() - 1;
-
             for speaker_idx in 0..self.num_speakers {
                 let Some(weights) = select_speaker_weights(
                     &seg_view,
@@ -143,38 +138,28 @@ impl<'a> ConcurrentEmbeddingRunner<'a> {
                 ) else {
                     continue;
                 };
-                pending.push(PendingSplitEmbedding {
-                    chunk_idx,
-                    speaker_idx,
-                    fbank_idx: current_fbank_idx,
-                    weights,
-                });
-                if pending.len() == batch_size {
+                batch.push(chunk_idx, speaker_idx, weights, || {
+                    Ok(embedding_model.compute_chunk_fbank(chunk_audio)?)
+                })?;
+                if batch.is_full() {
                     let emb = emb_array.get_or_insert_with(|| {
                         Array3::from_elem((total_windows, self.num_speakers, 256), f32::NAN)
                     });
-                    flush_split(embedding_model, &pending, &fbanks, &mut Array3Writer(emb))?;
-                    pending.clear();
-
-                    // keep the current chunk fbank alive if later speakers in this chunk still need it
-                    if speaker_idx + 1 < self.num_speakers {
-                        let kept_fbank = fbanks.swap_remove(current_fbank_idx);
-                        fbanks.clear();
-                        fbanks.push(kept_fbank);
-                        current_fbank_idx = 0;
-                    } else {
-                        fbanks.clear();
-                    }
+                    batch.flush(|pending, fbanks| {
+                        flush_split(embedding_model, pending, fbanks, &mut Array3Writer(emb))
+                    })?;
                 }
             }
             chunk_idx += 1;
         }
 
-        if !pending.is_empty() {
+        if !batch.is_empty() {
             let emb = emb_array.get_or_insert_with(|| {
                 Array3::from_elem((total_windows, self.num_speakers, 256), f32::NAN)
             });
-            flush_split(embedding_model, &pending, &fbanks, &mut Array3Writer(emb))?;
+            batch.flush(|pending, fbanks| {
+                flush_split(embedding_model, pending, fbanks, &mut Array3Writer(emb))
+            })?;
         }
 
         self.finalize(seg_array, emb_array, chunk_idx, total_windows)

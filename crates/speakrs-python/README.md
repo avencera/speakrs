@@ -105,6 +105,7 @@ pip install "speakrs[cuda]"
 `prepare()` and `from_pretrained()` download the models from the
 [`avencera/speakrs-models`](https://huggingface.co/avencera/speakrs-models)
 Hugging Face repository. They go into the Hugging Face hub cache, which is set
-by `SPEAKRS_CACHE_DIR` or `HF_HOME`.
+by `SPEAKRS_CACHE_DIR`, `HF_HUB_CACHE` or `HF_HOME`. A token in `HF_TOKEN`, or
+saved by `hf auth login`, is sent with downloads.
 
 To skip the download, pass `model_dir=` to use a local directory instead.

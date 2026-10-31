@@ -1,10 +1,13 @@
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use crate::inference::ExecutionMode;
 #[cfg(feature = "online")]
-use hf_hub::api::sync::{Api, ApiBuilder, ApiRepo};
-#[cfg(feature = "online")]
-use hf_hub::{Repo, RepoType};
+use hf_fetch::{Hub, HubError, HubRepo};
+
+pub(crate) mod chunk_ladder;
+
+use chunk_ladder::{COREML_CHUNK_CONFIGS, COREML_FAST_CHUNK_CONFIGS, ChunkSessionConfig};
 
 const SEGMENTATION_ONNX: &str = "segmentation-3.0.onnx";
 const EMBEDDING_ONNX: &str = "wespeaker-voxceleb-resnet34.onnx";
@@ -71,10 +74,7 @@ impl ModelBundle {
 
 /// Names the CUDA weights in the error when they cannot be downloaded
 #[cfg(feature = "online")]
-fn download_error(
-    mode: ExecutionMode,
-    source: hf_hub::api::sync::ApiError,
-) -> crate::inference::ModelLoadError {
+fn download_error(mode: ExecutionMode, source: HubError) -> crate::inference::ModelLoadError {
     #[cfg(feature = "_cuda")]
     if mode.is_cuda() {
         return crate::inference::ModelLoadError::CudaAssetsUnavailable { mode, source };
@@ -114,16 +114,8 @@ impl PinnedModelRepository {
         }
     }
 
-    fn into_hf_repo(self) -> Repo {
-        Repo::with_revision(
-            self.id.0.to_owned(),
-            RepoType::Model,
-            self.revision.0.to_owned(),
-        )
-    }
-
-    fn bind(self, api: &Api) -> ApiRepo {
-        api.repo(self.into_hf_repo())
+    fn bind(self, hub: &Hub) -> HubRepo {
+        hub.model(self.id.0, self.revision.0)
     }
 }
 
@@ -134,41 +126,44 @@ const PINNED_MODEL_REPOSITORY: PinnedModelRepository = PinnedModelRepository::sp
 #[cfg(feature = "online")]
 #[cfg_attr(docsrs, doc(cfg(feature = "online")))]
 pub struct ModelManager {
-    repo: ApiRepo,
+    repo: HubRepo,
 }
 
 #[cfg(feature = "online")]
 impl ModelManager {
-    /// Create a manager using the default HuggingFace cache directory
-    pub fn new() -> Result<Self, hf_hub::api::sync::ApiError> {
-        let api = Api::new()?;
-        Ok(Self::from_api(api))
+    /// Create a manager using the default Hugging Face cache directory
+    ///
+    /// The cache is [`default_hub_cache_dir`](crate::default_hub_cache_dir). Downloads read
+    /// `HF_ENDPOINT` and the token in `HF_TOKEN` or saved by `hf auth login`
+    pub fn new() -> Result<Self, HubError> {
+        Ok(Self::from_hub(&Hub::from_env()?))
     }
 
     /// Create a manager with a custom cache directory
-    pub fn with_cache_dir(cache_dir: PathBuf) -> Result<Self, hf_hub::api::sync::ApiError> {
-        let api = ApiBuilder::from_cache(hf_hub::Cache::new(cache_dir)).build()?;
-        Ok(Self::from_api(api))
+    pub fn with_cache_dir(cache_dir: PathBuf) -> Result<Self, HubError> {
+        Ok(Self::from_hub(&Hub::with_cache_dir(cache_dir)?))
     }
 
-    fn from_api(api: Api) -> Self {
-        let repo = PINNED_MODEL_REPOSITORY.bind(&api);
-        Self { repo }
+    fn from_hub(hub: &Hub) -> Self {
+        Self {
+            repo: PINNED_MODEL_REPOSITORY.bind(hub),
+        }
     }
 
     /// Download a single file, returns path to cached copy
-    pub fn get(&self, filename: impl AsRef<str>) -> Result<PathBuf, hf_hub::api::sync::ApiError> {
+    pub fn get(&self, filename: impl AsRef<str>) -> Result<PathBuf, HubError> {
+        // a commit-hash revision makes a cached snapshot file resolve without a request
         self.repo.get(filename.as_ref())
     }
 
     /// Ensure all files for a mode are downloaded, return base models dir
-    pub fn ensure(&self, mode: ExecutionMode) -> Result<PathBuf, hf_hub::api::sync::ApiError> {
+    pub fn ensure(&self, mode: ExecutionMode) -> Result<PathBuf, HubError> {
         let files = required_model_files(mode);
         for file in &files {
-            self.repo.get(file)?;
+            self.get(file)?;
         }
         // all files land in the same snapshot dir
-        let first = self.repo.get(&files[0])?;
+        let first = self.get(&files[0])?;
         let Some(parent) = first.parent() else {
             return Ok(first);
         };
@@ -218,28 +213,10 @@ const COREML_COMMON_MODEL_STEMS: &[&str] = &[
     "wespeaker-voxceleb-resnet34-tail-b32.mlmodelc",
 ];
 
-const COREML_CHUNK_MODEL_STEMS: &[&str] = &[
-    "wespeaker-chunk-emb-p1s-w21.mlmodelc",
-    "wespeaker-chunk-emb-p1s-w36.mlmodelc",
-    "wespeaker-chunk-emb-p1s-w51.mlmodelc",
-    "wespeaker-chunk-emb-p1s-w81.mlmodelc",
-    "wespeaker-chunk-emb-p1s-w111.mlmodelc",
-];
-
 const COREML_FAST_SEGMENTATION_MODEL_STEMS: &[&str] = &[
     "segmentation-3.0-w8a16.mlmodelc",
     "segmentation-3.0-b32-w8a16.mlmodelc",
     "segmentation-3.0-b64-w8a16.mlmodelc",
-];
-
-const COREML_FAST_CHUNK_MODEL_STEMS: &[&str] = &[
-    "wespeaker-chunk-emb-s25-w11.mlmodelc",
-    "wespeaker-chunk-emb-s25-w16.mlmodelc",
-    "wespeaker-chunk-emb-s25-w21.mlmodelc",
-    "wespeaker-chunk-emb-s25-w26.mlmodelc",
-    "wespeaker-chunk-emb-s25-w36.mlmodelc",
-    "wespeaker-chunk-emb-s25-w46.mlmodelc",
-    "wespeaker-chunk-emb-s25-w56.mlmodelc",
 ];
 
 /// Model family owned by the asset catalog
@@ -280,9 +257,9 @@ pub(crate) enum AssetRequirement {
 }
 
 /// One remote model file or compiled CoreML bundle stem
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ModelAsset {
-    file_name: &'static str,
+    file_name: Cow<'static, str>,
     family: ModelFamily,
     backend: ModelBackend,
     precision: ModelPrecision,
@@ -291,8 +268,8 @@ pub(crate) struct ModelAsset {
 }
 
 impl ModelAsset {
-    const fn new(
-        file_name: &'static str,
+    fn new(
+        file_name: impl Into<Cow<'static, str>>,
         family: ModelFamily,
         backend: ModelBackend,
         precision: ModelPrecision,
@@ -300,7 +277,7 @@ impl ModelAsset {
         requirement: AssetRequirement,
     ) -> Self {
         Self {
-            file_name,
+            file_name: file_name.into(),
             family,
             backend,
             precision,
@@ -311,42 +288,42 @@ impl ModelAsset {
 
     /// Remote file name or compiled-bundle directory
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn file_name(self) -> &'static str {
-        self.file_name
+    pub(crate) fn file_name(&self) -> &str {
+        &self.file_name
     }
 
     /// Model family this asset belongs to
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn family(self) -> ModelFamily {
+    pub(crate) fn family(&self) -> ModelFamily {
         self.family
     }
 
     /// Backend that loads this asset
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn backend(self) -> ModelBackend {
+    pub(crate) fn backend(&self) -> ModelBackend {
         self.backend
     }
 
     /// Recorded weight precision
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn precision(self) -> ModelPrecision {
+    pub(crate) fn precision(&self) -> ModelPrecision {
         self.precision
     }
 
     /// Batch dimension when the asset is a fixed-shape model
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn batch(self) -> Option<u32> {
+    pub(crate) fn batch(&self) -> Option<u32> {
         self.batch
     }
 
     /// Whether this asset must be present for the selected mode
-    pub(crate) fn requirement(self) -> AssetRequirement {
+    pub(crate) fn requirement(&self) -> AssetRequirement {
         self.requirement
     }
 
-    fn remote_paths(self) -> Vec<String> {
+    fn remote_paths(&self) -> Vec<String> {
         if self.file_name.ends_with(".mlmodelc") {
-            mlmodelc_files(self.file_name)
+            mlmodelc_files(&self.file_name)
         } else {
             vec![self.file_name.to_string()]
         }
@@ -373,7 +350,9 @@ fn batch_from_name(name: &str) -> Option<u32> {
     let stem = name
         .trim_end_matches(".mlmodelc")
         .trim_end_matches(".onnx")
-        .trim_end_matches(".onnx.data");
+        .trim_end_matches(".onnx.data")
+        // quantized bundles put the precision after the batch, as in `-b32-w8a16`
+        .trim_end_matches("-w8a16");
     stem.rsplit_once("-b")
         .and_then(|(_, batch)| batch.parse().ok())
 }
@@ -389,10 +368,23 @@ fn onnx_asset(name: &'static str, family: ModelFamily) -> ModelAsset {
     )
 }
 
+fn chunk_assets(configs: &[ChunkSessionConfig]) -> impl Iterator<Item = ModelAsset> + '_ {
+    configs.iter().map(|config| {
+        ModelAsset::new(
+            format!("{}.mlmodelc", config.model_stem()),
+            ModelFamily::ChunkEmbedding,
+            ModelBackend::CoreMl,
+            ModelPrecision::Fp32,
+            None,
+            AssetRequirement::Required,
+        )
+    })
+}
+
 fn catalog_assets(mode: ExecutionMode) -> Vec<ModelAsset> {
     let mut assets: Vec<ModelAsset> = PLDA_FILES
         .iter()
-        .map(|name| {
+        .map(|&name| {
             let family = if name.ends_with(".txt") {
                 ModelFamily::Metadata
             } else {
@@ -476,16 +468,7 @@ fn catalog_assets(mode: ExecutionMode) -> Vec<ModelAsset> {
                 )
             }));
             if matches!(mode, ExecutionMode::CoreMl) {
-                assets.extend(COREML_CHUNK_MODEL_STEMS.iter().map(|&name| {
-                    ModelAsset::new(
-                        name,
-                        ModelFamily::ChunkEmbedding,
-                        ModelBackend::CoreMl,
-                        ModelPrecision::Fp32,
-                        batch_from_name(name),
-                        AssetRequirement::Required,
-                    )
-                }));
+                assets.extend(chunk_assets(COREML_CHUNK_CONFIGS));
             }
             if matches!(mode, ExecutionMode::CoreMlFast) {
                 assets.extend(COREML_FAST_SEGMENTATION_MODEL_STEMS.iter().map(|&name| {
@@ -498,16 +481,7 @@ fn catalog_assets(mode: ExecutionMode) -> Vec<ModelAsset> {
                         AssetRequirement::Required,
                     )
                 }));
-                assets.extend(COREML_FAST_CHUNK_MODEL_STEMS.iter().map(|&name| {
-                    ModelAsset::new(
-                        name,
-                        ModelFamily::ChunkEmbedding,
-                        ModelBackend::CoreMl,
-                        ModelPrecision::Fp32,
-                        batch_from_name(name),
-                        AssetRequirement::Required,
-                    )
-                }));
+                assets.extend(chunk_assets(COREML_FAST_CHUNK_CONFIGS));
             }
             assets.push(ModelAsset::new(
                 "wespeaker-voxceleb-resnet34-tail-b64.mlmodelc",
@@ -531,7 +505,7 @@ pub fn required_model_files(mode: ExecutionMode) -> Vec<String> {
     catalog_assets(mode)
         .into_iter()
         .filter(|asset| asset.requirement() == AssetRequirement::Required)
-        .flat_map(ModelAsset::remote_paths)
+        .flat_map(|asset| asset.remote_paths())
         .collect()
 }
 
@@ -583,34 +557,21 @@ mod tests {
     use super::*;
 
     #[cfg(feature = "online")]
-    const MODEL_FILENAME: &str = "segmentation-3.0.onnx";
-    #[cfg(feature = "online")]
-    const EXPECTED_MODEL_URL: &str = "https://huggingface.co/avencera/speakrs-models/resolve/67f963b6a1d94fcd4678948237b3cc8bd69bf1d8/segmentation-3.0.onnx";
-
-    #[cfg(feature = "online")]
     #[test]
-    fn pinned_repository_selects_model_card_revision() {
-        let repo = PINNED_MODEL_REPOSITORY.into_hf_repo();
-        assert_eq!(repo.folder_name(), "models--avencera--speakrs-models");
-        assert_eq!(repo.revision(), MODEL_REVISION);
+    fn manager_resolves_cached_snapshot_of_pinned_revision() {
+        let cache_dir = tempfile::tempdir().unwrap();
+        let snapshot = cache_dir
+            .path()
+            .join("models--avencera--speakrs-models")
+            .join("snapshots")
+            .join(MODEL_REVISION);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        let cached = snapshot.join(SEGMENTATION_ONNX);
+        std::fs::write(&cached, b"cached").unwrap();
 
-        let api = ApiBuilder::new().with_progress(false).build().unwrap();
-        let api_repo = api.repo(repo);
-        assert_eq!(api_repo.url(MODEL_FILENAME), EXPECTED_MODEL_URL);
-    }
-
-    #[cfg(feature = "online")]
-    #[test]
-    fn default_and_custom_cache_managers_share_pinned_repository() {
-        let default_manager = ModelManager::new().unwrap();
-        let custom_cache = std::env::temp_dir().join(format!(
-            "speakrs-pinned-model-manager-{}",
-            std::process::id()
-        ));
-        let custom_manager = ModelManager::with_cache_dir(custom_cache).unwrap();
-
-        assert_eq!(default_manager.repo.url(MODEL_FILENAME), EXPECTED_MODEL_URL);
-        assert_eq!(custom_manager.repo.url(MODEL_FILENAME), EXPECTED_MODEL_URL);
+        // the pinned commit names its snapshot, so a cached file needs no network request
+        let manager = ModelManager::with_cache_dir(cache_dir.path().to_path_buf()).unwrap();
+        assert_eq!(manager.get(SEGMENTATION_ONNX).unwrap(), cached);
     }
 
     #[test]
@@ -671,6 +632,23 @@ mod tests {
         assert_eq!(optional.requirement(), AssetRequirement::Optional);
         let files = required_model_files(ExecutionMode::CoreMl);
         assert!(!files.iter().any(|path| path.contains("tail-b64")));
+    }
+
+    #[test]
+    fn coreml_fast_catalog_records_quantized_segmentation_batches() {
+        let batches: Vec<_> = catalog_assets(ExecutionMode::CoreMlFast)
+            .into_iter()
+            .filter(|asset| asset.precision() == ModelPrecision::W8A16)
+            .map(|asset| (asset.file_name().to_owned(), asset.batch()))
+            .collect();
+        assert_eq!(
+            batches,
+            [
+                ("segmentation-3.0-w8a16.mlmodelc".to_owned(), None),
+                ("segmentation-3.0-b32-w8a16.mlmodelc".to_owned(), Some(32)),
+                ("segmentation-3.0-b64-w8a16.mlmodelc".to_owned(), Some(64)),
+            ]
+        );
     }
 
     #[test]
