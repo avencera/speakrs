@@ -758,9 +758,9 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hf-fetch"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf7c911ba31f06524e007accfc892592b902cec055ae535c4278f7982d413e5e"
+checksum = "0a9abb87eb199e1f7fdfedfc22b7c9fc0e99f43dcd92177dfd6826993628bb58"
 dependencies = [
  "thiserror",
  "ureq",
