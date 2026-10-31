@@ -102,10 +102,30 @@ pub fn with_execution_mode(
 #[cfg(feature = "migraphx")]
 static ORT_ENVIRONMENT: OnceLock<Result<Environment, OrtRuntimeError>> = OnceLock::new();
 
-/// The process-wide ONNX Runtime environment that speakrs sessions are built in, created on first use
+/// The process-wide ONNX Runtime environment that speakrs builds its sessions in, created on
+/// first use
+///
+/// `ort` allows one environment per process, so an application that also builds its own ONNX
+/// Runtime sessions, such as with [`with_execution_mode`], builds them in this one, or hands
+/// speakrs its own with [`use_ort_environment`] before speakrs loads a model
 #[cfg(feature = "migraphx")]
-pub(crate) fn ort_environment() -> Result<Environment, ModelLoadError> {
-    Ok(ORT_ENVIRONMENT.get_or_init(build_environment).clone()?)
+#[cfg_attr(docsrs, doc(cfg(feature = "migraphx")))]
+pub fn ort_environment() -> Result<Environment, OrtRuntimeError> {
+    ORT_ENVIRONMENT.get_or_init(build_environment).clone()
+}
+
+/// Makes speakrs build its ONNX Runtime sessions in `environment`, an application's own
+///
+/// Call it before speakrs loads a model. Once speakrs has an environment, this hands
+/// `environment` back unused; [`ort_environment`] returns the one speakrs uses
+#[cfg(feature = "migraphx")]
+#[cfg_attr(docsrs, doc(cfg(feature = "migraphx")))]
+pub fn use_ort_environment(environment: Environment) -> Result<(), Environment> {
+    match ORT_ENVIRONMENT.set(Ok(environment)) {
+        Ok(()) => Ok(()),
+        Err(Ok(environment)) => Err(environment),
+        Err(Err(_)) => unreachable!("OnceLock::set hands back the value it was given"),
+    }
 }
 
 #[cfg(feature = "migraphx")]
@@ -359,7 +379,6 @@ fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 ))]
 mod tests {
     use super::{DynamicRuntimeError, OrtRuntimeError, ort_environment};
-    use crate::inference::ModelLoadError;
 
     #[test]
     fn dynamic_runtime_preflight_fails_instead_of_hanging() {
@@ -375,9 +394,7 @@ mod tests {
         };
         assert!(matches!(
             error,
-            ModelLoadError::Runtime(OrtRuntimeError::Dynamic(
-                DynamicRuntimeError::Missing { .. }
-            ))
+            OrtRuntimeError::Dynamic(DynamicRuntimeError::Missing { .. })
         ));
 
         // safety: this test restores the original process-global env var before returning
