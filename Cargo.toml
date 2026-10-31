@@ -123,7 +123,7 @@ tracing = "0.1.44"
 thiserror = "2.0.21"
 
 # model downloads
-hf-fetch = { version = "0.1.0", git = "https://github.com/avencera/hf-fetch", rev = "c25499dba7251db791e17812ab65391c1b44cd0b", default-features = false }
+hf-fetch = { version = "0.1.0", default-features = false }
 
 # concurrency
 crossbeam-channel = "0.5"
