@@ -378,7 +378,7 @@ fn dedup_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
     not(target_arch = "wasm32")
 ))]
 mod tests {
-    use super::{DynamicRuntimeError, OrtRuntimeError, ort_environment};
+    use super::{DynamicRuntimeError, OrtRuntimeError, OrtRuntimeLoader};
 
     #[test]
     fn dynamic_runtime_preflight_fails_instead_of_hanging() {
@@ -389,7 +389,9 @@ mod tests {
             std::env::set_var("ORT_DYLIB_PATH", &missing);
         }
 
-        let Err(error) = ort_environment() else {
+        // the loader rather than `ort_environment`, whose process-wide environment another
+        // test may already have created
+        let Err(error) = OrtRuntimeLoader::new().load() else {
             panic!("a missing runtime library must not create an environment");
         };
         assert!(matches!(
