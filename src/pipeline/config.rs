@@ -283,6 +283,8 @@ pub enum CoreMlShapeLadder {
 }
 
 /// Segmentation worker count used by metrics experiments
+///
+/// The batched CoreML segmentation path runs at most three of these workers at once
 #[cfg(feature = "_metrics")]
 #[cfg_attr(docsrs, doc(cfg(feature = "_metrics")))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
