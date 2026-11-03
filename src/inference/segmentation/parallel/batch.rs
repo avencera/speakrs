@@ -19,11 +19,11 @@ type QueuedBatch = (usize, Vec<Array2<f32>>);
 /// buffers and keeps each set for as long as the model is loaded. A batch-64 set is about
 /// 1 GiB and a batch-32 set about 0.5 GiB, so one worker per core made the footprint grow
 /// with file length until every worker had run a batch, reaching 13-15 GiB on 10-17 minute
-/// files. Concurrent predictions do run faster on the GPU, so this trades speed for memory:
-/// on an M4 Pro, three in flight held the peak at 7.2-7.6 GiB and ran 3-12% slower than
-/// eight, two held it near 6 GiB at 15-20% slower, and five were as fast as eight but
-/// peaked at 9-11 GiB. The batch-1 model's sets are about 20 MiB, so the single-window path
-/// keeps its full worker count
+/// files. Concurrent predictions do run faster on the GPU, so this trades speed for memory.
+/// On an M4 Pro with 10-17 minute files in `coreml`, three in flight held the peak at
+/// 7.2-7.6 GiB and ran 3-12% slower than eight, two held it near 6 GiB at 6-21% slower, and
+/// five stayed within 6% of eight but peaked at 9-11 GiB. The batch-1 model's sets are
+/// about 20 MiB, so the single-window path keeps its full worker count
 const MAX_BATCHED_PREDICTIONS_IN_FLIGHT: usize = 3;
 
 pub(super) struct ParallelBatchExecutor<'a> {
