@@ -241,7 +241,8 @@ impl<'ctx, 'a> BatchWorker<'ctx, 'a> {
 }
 
 impl<'a> ParallelBatchExecutor<'a> {
-    pub(super) fn run(self) -> Result<(), SegmentationError> {
+    /// Run every batch task and return how many workers ran them
+    pub(super) fn run(self) -> Result<usize, SegmentationError> {
         let Self {
             windows,
             tx,
@@ -250,6 +251,10 @@ impl<'a> ParallelBatchExecutor<'a> {
             window_samples,
             profile,
         } = self;
+        let worker_count = tasks
+            .len()
+            .min(num_workers.max(1))
+            .min(MAX_BATCHED_PREDICTIONS_IN_FLIGHT);
         let (batch_tx, batch_rx) = crossbeam_channel::unbounded::<QueuedBatch>();
 
         std::thread::scope(|scope| {
@@ -260,7 +265,7 @@ impl<'a> ParallelBatchExecutor<'a> {
                 &tasks,
                 windows,
                 &batch_tx,
-                num_workers,
+                worker_count,
                 window_samples,
                 profile,
                 &worker_error,
@@ -274,7 +279,7 @@ impl<'a> ParallelBatchExecutor<'a> {
             merge_handle
                 .join()
                 .map_err(|_| worker_panic("parallel segmentation merge"))??;
-            Ok::<(), SegmentationError>(())
+            Ok::<usize, SegmentationError>(worker_count)
         })
     }
 
@@ -282,17 +287,13 @@ impl<'a> ParallelBatchExecutor<'a> {
         tasks: &[BatchTask<'a>],
         windows: &SegmentationWindows<'a>,
         batch_tx: &Sender<QueuedBatch>,
-        num_workers: usize,
+        worker_count: usize,
         window_samples: usize,
         profile: &ParallelProfile,
         worker_error: &WorkerErrorSlot,
     ) {
         rayon::scope(|rscope| {
             let next_task = Arc::new(AtomicUsize::new(0));
-            let worker_count = tasks
-                .len()
-                .min(num_workers.max(1))
-                .min(MAX_BATCHED_PREDICTIONS_IN_FLIGHT);
 
             for _worker_idx in 0..worker_count {
                 let worker = BatchWorker {

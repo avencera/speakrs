@@ -250,7 +250,7 @@ impl SegmentationModel {
             && total_windows > PRIMARY_BATCH_SIZE
             && warm_start_small_windows > PRIMARY_BATCH_SIZE;
 
-        if batch_size > 1 {
+        let workers = if batch_size > 1 {
             let tasks = BatchTaskPlanner {
                 shared_model,
                 small_model: backend.batched_model(),
@@ -270,7 +270,7 @@ impl SegmentationModel {
                 window_samples: self.window_samples(),
                 profile: &profile,
             }
-            .run()?;
+            .run()?
         } else {
             ParallelSingleExecutor {
                 windows: &windows,
@@ -280,12 +280,12 @@ impl SegmentationModel {
                 window_samples: self.window_samples(),
                 profile: &profile,
             }
-            .run()?;
-        }
+            .run()?
+        };
 
         profile.log_completion(ParallelRunSummary {
             total_windows,
-            num_workers,
+            num_workers: workers,
             est_embed_chunks,
             use_warm_start_b32,
             warm_start_small_windows,
