@@ -1,14 +1,16 @@
 use crossbeam_channel::Receiver;
+use ndarray::{ArrayViewMut2, s};
 use tracing::{debug, trace};
 
 use super::collect::{CollectionPlan, FileCollector};
+use super::fbank_plan::{ChunkFbankRequest, FbankModel, THIRTY_SECOND_SAMPLES};
 use super::gpu::{ChunkEmbeddingResources, GpuWorker, chunk_embedding_resources};
 use super::prep::{ChunkJob, ChunkPrep, PrepScratch, PrepWorker, SpeakerMaskLayout};
 use super::{
-    ChunkParams, EmbeddingModel, EmbeddingSummary, FBANK_SEGMENT_SAMPLES, PipelineError,
-    SegmentationModel, chunk_session_for_windows, join_scoped_result,
+    ChunkParams, EmbeddingModel, EmbeddingSummary, PipelineError, SegmentationModel,
+    chunk_session_for_windows, join_scoped_result,
 };
-use crate::inference::embedding::FBANK_FRAMES;
+use crate::inference::embedding::FBANK_FEATURES;
 
 pub(super) enum ChunkExecution {
     Sequential,
@@ -201,50 +203,19 @@ pub(super) fn run_sequential_chunks(
         let sess_fbank_frames = session.fbank_frames;
         let sess_num_masks = session.num_masks;
 
-        let chunk_audio_start = window_start * params.step_samples;
-        debug_assert!(chunk_audio_start < audio.len());
-        let chunk_audio_len = params.window_samples + (wins - 1) * params.step_samples;
-        let chunk_audio_end = (chunk_audio_start + chunk_audio_len).min(audio.len());
-        let chunk_audio = &audio[chunk_audio_start..chunk_audio_end];
-
-        let mut fbank = vec![0.0f32; sess_fbank_frames * 80];
         let fbank_start = std::time::Instant::now();
-
-        let full_fbank = if params.fbank_normalization_scope.uses_chunk_scope() {
-            emb_model.compute_chunk_fbank_30s(chunk_audio)?
-        } else {
-            None
-        };
-        if let Some(full_fbank) = full_fbank {
-            let copy_frames = full_fbank.nrows().min(sess_fbank_frames);
-            for row_idx in 0..copy_frames {
-                let dst = row_idx * 80;
-                let row_view = full_fbank.row(row_idx);
-                let row = row_view.as_slice().ok_or_else(|| {
-                    super::invariant_error("30s chunk fbank row was not contiguous")
-                })?;
-                fbank[dst..dst + 80].copy_from_slice(row);
-            }
-        } else {
-            let mut fbank_offset = 0usize;
-            let mut audio_offset = 0usize;
-            while fbank_offset < sess_fbank_frames && audio_offset < chunk_audio.len() {
-                let segment_end = (audio_offset + params.window_samples).min(chunk_audio.len());
-                let seg_fbank =
-                    emb_model.compute_chunk_fbank(&chunk_audio[audio_offset..segment_end])?;
-                let copy = seg_fbank.nrows().min(sess_fbank_frames - fbank_offset);
-                for row_idx in 0..copy {
-                    let dst = (fbank_offset + row_idx) * 80;
-                    let row_view = seg_fbank.row(row_idx);
-                    let row = row_view.as_slice().ok_or_else(|| {
-                        super::invariant_error("10s chunk fbank row was not contiguous")
-                    })?;
-                    fbank[dst..dst + 80].copy_from_slice(row);
-                }
-                fbank_offset += FBANK_FRAMES;
-                audio_offset += FBANK_SEGMENT_SAMPLES;
-            }
-        }
+        let fbank = sequential_chunk_fbank(
+            emb_model,
+            ChunkFbankRequest {
+                chunk_start: window_start * params.step_samples,
+                frame_capacity: sess_fbank_frames,
+                audio_len: audio.len(),
+                ten_second_samples: params.window_samples,
+                allow_thirty_second: params.fbank_normalization_scope.uses_chunk_scope()
+                    && emb_model.has_chunk_fbank_30s(),
+            },
+            audio,
+        )?;
 
         seq_fbank_us += fbank_start.elapsed().as_micros() as u64;
         let mask_start = std::time::Instant::now();
@@ -299,4 +270,39 @@ pub(super) fn run_sequential_chunks(
         prep_fbank_us: seq_fbank_us,
         prep_mask_us: seq_mask_us,
     })
+}
+
+/// Stitched chunk filterbank from the embedding model's own filterbank models
+fn sequential_chunk_fbank(
+    emb_model: &mut EmbeddingModel,
+    request: ChunkFbankRequest,
+    audio: &[f32],
+) -> Result<Vec<f32>, PipelineError> {
+    let mut fbank = vec![0.0f32; request.frame_capacity * FBANK_FEATURES];
+
+    for call in request.plan() {
+        let output = match call.model {
+            FbankModel::ThirtySecond => emb_model
+                .compute_chunk_fbank_30s(call.audio(audio, THIRTY_SECOND_SAMPLES))?
+                .ok_or_else(|| super::invariant_error("chunk fbank plan needs the 30s model"))?,
+            FbankModel::TenSecond => {
+                emb_model.compute_chunk_fbank(call.audio(audio, request.ten_second_samples))?
+            }
+        };
+        if output.nrows() < call.skip_frames + call.frames || output.ncols() != FBANK_FEATURES {
+            return Err(super::invariant_error(format!(
+                "chunk fbank call returned {:?}, expected at least {} frames of {FBANK_FEATURES} features",
+                output.dim(),
+                call.skip_frames + call.frames
+            )));
+        }
+
+        let dest = &mut fbank
+            [call.dest_frame * FBANK_FEATURES..(call.dest_frame + call.frames) * FBANK_FEATURES];
+        ArrayViewMut2::from_shape((call.frames, FBANK_FEATURES), dest)
+            .map_err(|error| super::invariant_error(format!("chunk fbank layout: {error}")))?
+            .assign(&output.slice(s![call.skip_frames..call.skip_frames + call.frames, ..]));
+    }
+
+    Ok(fbank)
 }

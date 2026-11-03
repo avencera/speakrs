@@ -6,41 +6,18 @@ use crate::inference::coreml::{CachedInputShape, SharedCoreMlModel};
 use crate::inference::geometry::CoreMlTensor;
 use crate::pipeline::config::ChunkFbankNormalizationScope;
 
+use super::fbank_plan::{ChunkFbankRequest, FbankCall, FbankModel, THIRTY_SECOND_SAMPLES};
 use super::gpu::PreparedChunk;
 use super::{
-    FBANK_SEGMENT_SAMPLES, PipelineError, backend_error, chunk_audio_raw, invariant_error,
-    write_speaker_mask_to_slice,
+    PipelineError, backend_error, chunk_audio_raw, invariant_error, write_speaker_mask_to_slice,
 };
-use crate::inference::embedding::{FBANK_FEATURES, FBANK_FRAMES};
-
-#[derive(Debug, PartialEq, Eq)]
-enum SelectedFbankModel<'a, T> {
-    ThirtySecond(&'a T),
-    TenSecond(&'a T),
-}
-
-fn select_fbank_model<'a, T>(
-    chunk_len: usize,
-    normalization_scope: ChunkFbankNormalizationScope,
-    fbank_30s: Option<&'a T>,
-    fbank_10s: Option<&'a T>,
-) -> Option<SelectedFbankModel<'a, T>> {
-    if chunk_len <= 480_000
-        && normalization_scope.uses_chunk_scope()
-        && let Some(model) = fbank_30s
-    {
-        return Some(SelectedFbankModel::ThirtySecond(model));
-    }
-
-    fbank_10s.map(SelectedFbankModel::TenSecond)
-}
+use crate::inference::embedding::FBANK_FEATURES;
 
 fn copy_fbank_output(
     tensor: CoreMlTensor,
     context: &'static str,
     fbank: &mut [f32],
-    frame_offset: usize,
-    frame_capacity: usize,
+    call: FbankCall,
 ) -> Result<(), PipelineError> {
     let (batch, frames, features) = tensor
         .try_rank3(context)
@@ -57,20 +34,35 @@ fn copy_fbank_output(
             format!("expected {FBANK_FEATURES} filterbank features, got {features}"),
         ));
     }
+    if call.skip_frames + call.frames > frames {
+        return Err(backend_error(
+            context,
+            format!(
+                "expected at least {} filterbank frames, got {frames}",
+                call.skip_frames + call.frames
+            ),
+        ));
+    }
 
-    let value_count = frames.min(frame_capacity) * FBANK_FEATURES;
-    let output_offset = frame_offset * FBANK_FEATURES;
-    fbank[output_offset..output_offset + value_count]
-        .copy_from_slice(&tensor.into_data()[..value_count]);
+    let source = &tensor.into_data()
+        [call.skip_frames * FBANK_FEATURES..(call.skip_frames + call.frames) * FBANK_FEATURES];
+    let output_offset = call.dest_frame * FBANK_FEATURES;
+    fbank[output_offset..output_offset + source.len()].copy_from_slice(source);
     Ok(())
+}
+
+/// Copy `audio` into a fixed-size model input and zero the rest
+fn stage_input(buffer: &mut [f32], audio: &[f32]) {
+    buffer[..audio.len()].copy_from_slice(audio);
+    buffer[audio.len()..].fill(0.0);
 }
 
 impl PrepScratch {
     pub(super) fn new(window_samples: usize) -> Self {
         Self {
-            fbank_30s_buf: vec![0.0f32; 480_000],
+            fbank_30s_buf: vec![0.0f32; THIRTY_SECOND_SAMPLES],
             waveform_10s_buf: vec![0.0f32; window_samples],
-            fbank_30s_shape: CachedInputShape::new("waveform", &[1, 1, 480_000]),
+            fbank_30s_shape: CachedInputShape::new("waveform", &[1, 1, THIRTY_SECOND_SAMPLES]),
             fbank_10s_shape: CachedInputShape::new("waveform", &[1, 1, window_samples]),
         }
     }
@@ -80,67 +72,51 @@ impl ChunkPrep {
     fn compute_chunk_fbank(
         &self,
         global_start: usize,
-        num_windows: usize,
         audio: &[f32],
         scratch: &mut PrepScratch,
     ) -> Result<Vec<f32>, PipelineError> {
-        let chunk_audio_start = global_start * self.step_samples;
-        let chunk_audio_len = self.window_samples + (num_windows - 1) * self.step_samples;
-        let chunk_audio_end = (chunk_audio_start + chunk_audio_len).min(audio.len());
-        let chunk_audio = &audio[chunk_audio_start..chunk_audio_end];
-
-        let selected_model = select_fbank_model(
-            chunk_audio.len(),
-            self.fbank_normalization_scope,
-            self.fbank_30s.as_deref(),
-            self.fbank_10s.as_deref(),
-        )
-        .ok_or_else(|| invariant_error("no compatible chunk fbank model is available"))?;
-
+        let request = ChunkFbankRequest {
+            chunk_start: global_start * self.step_samples,
+            frame_capacity: self.largest_fbank_frames,
+            audio_len: audio.len(),
+            ten_second_samples: self.window_samples,
+            allow_thirty_second: self.fbank_normalization_scope.uses_chunk_scope()
+                && self.fbank_30s.is_some(),
+        };
         let mut fbank = vec![0.0f32; self.largest_fbank_frames * FBANK_FEATURES];
 
-        match selected_model {
-            SelectedFbankModel::ThirtySecond(fbank_model) => {
-                scratch.fbank_30s_buf[..chunk_audio.len()].copy_from_slice(chunk_audio);
-                scratch.fbank_30s_buf[chunk_audio.len()..].fill(0.0);
-                let tensor = fbank_model
-                    .predict_cached(&[(&scratch.fbank_30s_shape, &*scratch.fbank_30s_buf)])
-                    .map_err(|error| backend_error("chunk fbank 30s prediction failed", error))?;
-
-                copy_fbank_output(
-                    tensor,
-                    "chunk fbank 30s output",
-                    &mut fbank,
-                    0,
-                    self.largest_fbank_frames,
-                )?;
-            }
-            SelectedFbankModel::TenSecond(fbank_model) => {
-                let mut fbank_offset = 0usize;
-                let mut audio_offset = 0usize;
-                while fbank_offset < self.largest_fbank_frames && audio_offset < chunk_audio.len() {
-                    let segment_end = (audio_offset + self.window_samples).min(chunk_audio.len());
-                    let segment_len = segment_end - audio_offset;
-                    scratch.waveform_10s_buf[..segment_len]
-                        .copy_from_slice(&chunk_audio[audio_offset..segment_end]);
-                    if segment_len < self.window_samples {
-                        scratch.waveform_10s_buf[segment_len..].fill(0.0);
-                    }
-                    let tensor = fbank_model
+        for call in request.plan() {
+            match call.model {
+                FbankModel::ThirtySecond => {
+                    let model = self
+                        .fbank_30s
+                        .as_deref()
+                        .ok_or_else(|| invariant_error("chunk fbank plan needs the 30s model"))?;
+                    stage_input(
+                        &mut scratch.fbank_30s_buf,
+                        call.audio(audio, THIRTY_SECOND_SAMPLES),
+                    );
+                    let tensor = model
+                        .predict_cached(&[(&scratch.fbank_30s_shape, &*scratch.fbank_30s_buf)])
+                        .map_err(|error| {
+                            backend_error("chunk fbank 30s prediction failed", error)
+                        })?;
+                    copy_fbank_output(tensor, "chunk fbank 30s output", &mut fbank, call)?;
+                }
+                FbankModel::TenSecond => {
+                    let model = self.fbank_10s.as_deref().ok_or_else(|| {
+                        invariant_error("no compatible chunk fbank model is available")
+                    })?;
+                    stage_input(
+                        &mut scratch.waveform_10s_buf,
+                        call.audio(audio, self.window_samples),
+                    );
+                    let tensor = model
                         .predict_cached(&[(&scratch.fbank_10s_shape, &*scratch.waveform_10s_buf)])
                         .map_err(|error| {
                             backend_error("chunk fbank 10s prediction failed", error)
                         })?;
-
-                    copy_fbank_output(
-                        tensor,
-                        "chunk fbank 10s output",
-                        &mut fbank,
-                        fbank_offset,
-                        self.largest_fbank_frames - fbank_offset,
-                    )?;
-                    fbank_offset += FBANK_FRAMES;
-                    audio_offset += FBANK_SEGMENT_SAMPLES;
+                    copy_fbank_output(tensor, "chunk fbank 10s output", &mut fbank, call)?;
                 }
             }
         }
@@ -154,8 +130,7 @@ impl ChunkPrep {
         audio: &[f32],
         scratch: &mut PrepScratch,
     ) -> Result<PreparedChunk, PipelineError> {
-        let fbank =
-            self.compute_chunk_fbank(job.window_start, job.decoded.len(), audio, scratch)?;
+        let fbank = self.compute_chunk_fbank(job.window_start, audio, scratch)?;
         let (masks, active) = SpeakerMaskLayout {
             step_samples: self.step_samples,
             window_samples: self.window_samples,
@@ -320,90 +295,8 @@ impl ChunkJob {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChunkJob, SelectedFbankModel, audio_for, select_fbank_model};
-    use crate::pipeline::config::ChunkFbankNormalizationScope;
+    use super::{ChunkJob, audio_for};
     use ndarray::Array2;
-
-    #[test]
-    fn chunk_scope_prefers_30s_model_for_supported_audio() {
-        assert_eq!(
-            select_fbank_model(
-                480_000,
-                ChunkFbankNormalizationScope::Chunk,
-                Some(&30),
-                Some(&10),
-            ),
-            Some(SelectedFbankModel::ThirtySecond(&30))
-        );
-    }
-
-    #[test]
-    fn missing_30s_model_falls_back_to_10s_model() {
-        assert_eq!(
-            select_fbank_model(
-                480_000,
-                ChunkFbankNormalizationScope::Chunk,
-                None,
-                Some(&10),
-            ),
-            Some(SelectedFbankModel::TenSecond(&10))
-        );
-    }
-
-    #[test]
-    fn long_audio_uses_10s_model() {
-        assert_eq!(
-            select_fbank_model(
-                480_001,
-                ChunkFbankNormalizationScope::Chunk,
-                Some(&30),
-                Some(&10),
-            ),
-            Some(SelectedFbankModel::TenSecond(&10))
-        );
-    }
-
-    #[cfg(feature = "_metrics")]
-    #[test]
-    fn segment_scope_uses_10s_model() {
-        assert_eq!(
-            select_fbank_model(
-                480_000,
-                ChunkFbankNormalizationScope::TenSecondSegments,
-                Some(&30),
-                Some(&10),
-            ),
-            Some(SelectedFbankModel::TenSecond(&10))
-        );
-
-        assert_eq!(
-            select_fbank_model(
-                480_000,
-                ChunkFbankNormalizationScope::TenSecondSegments,
-                Some(&30),
-                None,
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn missing_compatible_model_has_no_selection() {
-        assert_eq!(
-            select_fbank_model::<u8>(480_000, ChunkFbankNormalizationScope::Chunk, None, None),
-            None
-        );
-
-        assert_eq!(
-            select_fbank_model(
-                480_001,
-                ChunkFbankNormalizationScope::Chunk,
-                Some(&30),
-                None,
-            ),
-            None
-        );
-    }
 
     #[test]
     fn chunk_job_rejects_empty_decoded_windows() {

@@ -21,7 +21,7 @@ use array::{
 fn noop_deallocator() -> RcBlock<dyn Fn(NonNull<c_void>)> {
     RcBlock::new(|_ptr: NonNull<c_void>| {})
 }
-pub(crate) use path::{coreml_model_path, coreml_w8a16_model_path};
+pub(crate) use path::coreml_model_path;
 use runtime::{build_feature_provider, insert_input_feature, load_model, predict_output};
 
 /// Errors returned by the native CoreML runtime

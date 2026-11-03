@@ -213,12 +213,6 @@ const COREML_COMMON_MODEL_STEMS: &[&str] = &[
     "wespeaker-voxceleb-resnet34-tail-b32.mlmodelc",
 ];
 
-const COREML_FAST_SEGMENTATION_MODEL_STEMS: &[&str] = &[
-    "segmentation-3.0-w8a16.mlmodelc",
-    "segmentation-3.0-b32-w8a16.mlmodelc",
-    "segmentation-3.0-b64-w8a16.mlmodelc",
-];
-
 /// Model family owned by the asset catalog
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ModelFamily {
@@ -242,13 +236,6 @@ pub(crate) enum ModelBackend {
     Cuda,
 }
 
-/// Weight precision recorded for a catalog asset
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ModelPrecision {
-    Fp32,
-    W8A16,
-}
-
 /// Whether a catalog asset must be downloaded for a mode
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AssetRequirement {
@@ -262,7 +249,6 @@ pub(crate) struct ModelAsset {
     file_name: Cow<'static, str>,
     family: ModelFamily,
     backend: ModelBackend,
-    precision: ModelPrecision,
     batch: Option<u32>,
     requirement: AssetRequirement,
 }
@@ -272,7 +258,6 @@ impl ModelAsset {
         file_name: impl Into<Cow<'static, str>>,
         family: ModelFamily,
         backend: ModelBackend,
-        precision: ModelPrecision,
         batch: Option<u32>,
         requirement: AssetRequirement,
     ) -> Self {
@@ -280,7 +265,6 @@ impl ModelAsset {
             file_name: file_name.into(),
             family,
             backend,
-            precision,
             batch,
             requirement,
         }
@@ -302,12 +286,6 @@ impl ModelAsset {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn backend(&self) -> ModelBackend {
         self.backend
-    }
-
-    /// Recorded weight precision
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn precision(&self) -> ModelPrecision {
-        self.precision
     }
 
     /// Batch dimension when the asset is a fixed-shape model
@@ -350,9 +328,7 @@ fn batch_from_name(name: &str) -> Option<u32> {
     let stem = name
         .trim_end_matches(".mlmodelc")
         .trim_end_matches(".onnx")
-        .trim_end_matches(".onnx.data")
-        // quantized bundles put the precision after the batch, as in `-b32-w8a16`
-        .trim_end_matches("-w8a16");
+        .trim_end_matches(".onnx.data");
     stem.rsplit_once("-b")
         .and_then(|(_, batch)| batch.parse().ok())
 }
@@ -362,7 +338,6 @@ fn onnx_asset(name: &'static str, family: ModelFamily) -> ModelAsset {
         name,
         family,
         ModelBackend::Onnx,
-        ModelPrecision::Fp32,
         batch_from_name(name),
         AssetRequirement::Required,
     )
@@ -374,7 +349,6 @@ fn chunk_assets(configs: &[ChunkSessionConfig]) -> impl Iterator<Item = ModelAss
             format!("{}.mlmodelc", config.model_stem()),
             ModelFamily::ChunkEmbedding,
             ModelBackend::CoreMl,
-            ModelPrecision::Fp32,
             None,
             AssetRequirement::Required,
         )
@@ -394,7 +368,6 @@ fn catalog_assets(mode: ExecutionMode) -> Vec<ModelAsset> {
                 name,
                 family,
                 ModelBackend::SharedData,
-                ModelPrecision::Fp32,
                 None,
                 AssetRequirement::Required,
             )
@@ -410,14 +383,7 @@ fn catalog_assets(mode: ExecutionMode) -> Vec<ModelAsset> {
                 ModelBackend::Cuda
             };
             assets.extend(NATIVE_WEIGHT_FILES.iter().map(|&(name, family)| {
-                ModelAsset::new(
-                    name,
-                    family,
-                    backend,
-                    ModelPrecision::Fp32,
-                    None,
-                    AssetRequirement::Required,
-                )
+                ModelAsset::new(name, family, backend, None, AssetRequirement::Required)
             }));
         }
         ExecutionMode::MiGraphX => {
@@ -462,7 +428,6 @@ fn catalog_assets(mode: ExecutionMode) -> Vec<ModelAsset> {
                     name,
                     family_for_stem(name),
                     ModelBackend::CoreMl,
-                    ModelPrecision::Fp32,
                     batch_from_name(name),
                     AssetRequirement::Required,
                 )
@@ -471,23 +436,12 @@ fn catalog_assets(mode: ExecutionMode) -> Vec<ModelAsset> {
                 assets.extend(chunk_assets(COREML_CHUNK_CONFIGS));
             }
             if matches!(mode, ExecutionMode::CoreMlFast) {
-                assets.extend(COREML_FAST_SEGMENTATION_MODEL_STEMS.iter().map(|&name| {
-                    ModelAsset::new(
-                        name,
-                        ModelFamily::Segmentation,
-                        ModelBackend::CoreMl,
-                        ModelPrecision::W8A16,
-                        batch_from_name(name),
-                        AssetRequirement::Required,
-                    )
-                }));
                 assets.extend(chunk_assets(COREML_FAST_CHUNK_CONFIGS));
             }
             assets.push(ModelAsset::new(
                 "wespeaker-voxceleb-resnet34-tail-b64.mlmodelc",
                 ModelFamily::EmbeddingTail,
                 ModelBackend::CoreMl,
-                ModelPrecision::Fp32,
                 Some(64),
                 AssetRequirement::Optional,
             ));
@@ -599,9 +553,13 @@ mod tests {
     #[test]
     fn coreml_fast_required_files_include_fast_assets() {
         let files = required_model_files(ExecutionMode::CoreMlFast);
-        assert!(files.contains(&"segmentation-3.0-w8a16.mlmodelc/model.mil".to_string()));
-        assert!(files.contains(&"segmentation-3.0-b64-w8a16.mlmodelc/model.mil".to_string()));
+        assert!(files.contains(&"segmentation-3.0.mlmodelc/model.mil".to_string()));
+        assert!(files.contains(&"segmentation-3.0-b64.mlmodelc/model.mil".to_string()));
         assert!(files.contains(&"wespeaker-chunk-emb-s25-w56.mlmodelc/model.mil".to_string()));
+        assert!(
+            !files.iter().any(|path| path.contains("w8a16")),
+            "coreml-fast downloads W8A16 bundles: {files:?}"
+        );
     }
 
     #[test]
@@ -611,7 +569,6 @@ mod tests {
             .find(|asset| asset.family() == ModelFamily::EmbeddingTail && asset.batch() == Some(32))
             .expect("required batch-32 CoreML tail");
         assert_eq!(tail.backend(), ModelBackend::CoreMl);
-        assert_eq!(tail.precision(), ModelPrecision::Fp32);
         assert_eq!(tail.requirement(), AssetRequirement::Required);
         assert_eq!(
             tail.file_name(),
@@ -632,23 +589,6 @@ mod tests {
         assert_eq!(optional.requirement(), AssetRequirement::Optional);
         let files = required_model_files(ExecutionMode::CoreMl);
         assert!(!files.iter().any(|path| path.contains("tail-b64")));
-    }
-
-    #[test]
-    fn coreml_fast_catalog_records_quantized_segmentation_batches() {
-        let batches: Vec<_> = catalog_assets(ExecutionMode::CoreMlFast)
-            .into_iter()
-            .filter(|asset| asset.precision() == ModelPrecision::W8A16)
-            .map(|asset| (asset.file_name().to_owned(), asset.batch()))
-            .collect();
-        assert_eq!(
-            batches,
-            [
-                ("segmentation-3.0-w8a16.mlmodelc".to_owned(), None),
-                ("segmentation-3.0-b32-w8a16.mlmodelc".to_owned(), Some(32)),
-                ("segmentation-3.0-b64-w8a16.mlmodelc".to_owned(), Some(64)),
-            ]
-        );
     }
 
     #[test]

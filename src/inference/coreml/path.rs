@@ -12,13 +12,3 @@ pub(crate) fn coreml_model_path(onnx_path: &Path) -> PathBuf {
     let stem = coreml_stem(onnx_path);
     onnx_path.with_file_name(format!("{stem}.mlmodelc"))
 }
-
-pub(crate) fn coreml_w8a16_model_path(onnx_path: &Path) -> PathBuf {
-    let stem = coreml_stem(onnx_path);
-    let w8a16_path = onnx_path.with_file_name(format!("{stem}-w8a16.mlmodelc"));
-    if w8a16_path.exists() {
-        w8a16_path
-    } else {
-        coreml_model_path(onnx_path)
-    }
-}

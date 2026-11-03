@@ -7,28 +7,11 @@ use ndarray::{Array2, Array3};
 use tracing::info;
 
 use crate::inference::coreml::{
-    CachedInputShape, CoreMlModel, SharedCoreMlModel, coreml_model_path, coreml_w8a16_model_path,
+    CachedInputShape, CoreMlModel, SharedCoreMlModel, coreml_model_path,
 };
 use crate::inference::{ExecutionMode, InferenceError, ModelLoadError};
 
 use super::{LARGE_BATCH_SIZE, PRIMARY_BATCH_SIZE, SegmentationError, batched_model_path};
-
-fn parse_env_flag(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on" | "y" | "t"
-    )
-}
-
-fn coreml_uses_w8a16_segmentation(mode: ExecutionMode) -> bool {
-    match mode {
-        ExecutionMode::CoreMlFast => true,
-        ExecutionMode::CoreMl => {
-            std::env::var("SPEAKRS_COREML_SEG_W8A16").is_ok_and(|value| parse_env_flag(&value))
-        }
-        _ => false,
-    }
-}
 
 /// Compiled CoreML bundle paths derived from the base `segmentation-3.0.onnx` path
 ///
@@ -41,21 +24,9 @@ struct SegmentationAssetPaths {
 
 impl SegmentationAssetPaths {
     fn resolve(model_path: &Path, mode: ExecutionMode) -> Result<Self, ModelLoadError> {
-        let use_w8a16 = coreml_uses_w8a16_segmentation(mode);
-        if matches!(mode, ExecutionMode::CoreMl) && use_w8a16 {
-            info!("SPEAKRS_COREML_SEG_W8A16: using W8A16 segmentation on standard CoreML");
-        }
-
-        let compiled_path = |onnx_path: &Path| {
-            if use_w8a16 {
-                coreml_w8a16_model_path(onnx_path)
-            } else {
-                coreml_model_path(onnx_path)
-            }
-        };
         let batched_path = |batch_size: usize| {
             batched_model_path(model_path, batch_size)
-                .map(|onnx_path| compiled_path(&onnx_path))
+                .map(|onnx_path| coreml_model_path(&onnx_path))
                 .ok_or_else(|| ModelLoadError::MissingNativeAsset {
                     mode,
                     path: model_path.to_path_buf(),
@@ -63,7 +34,7 @@ impl SegmentationAssetPaths {
         };
 
         Ok(Self {
-            single: compiled_path(model_path),
+            single: coreml_model_path(model_path),
             batched: batched_path(PRIMARY_BATCH_SIZE)?,
             large_batched: batched_path(LARGE_BATCH_SIZE)?,
         })
@@ -337,20 +308,6 @@ mod tests {
                 assert_eq!(path, dir.path().join("segmentation-3.0.mlmodelc"));
             }
             other => panic!("unexpected error: {other}"),
-        }
-    }
-
-    #[test]
-    fn parse_env_flag_accepts_true_like_values() {
-        for value in ["1", "true", "TRUE", " Yes ", "on", "Y", "t"] {
-            assert!(parse_env_flag(value), "{value}");
-        }
-    }
-
-    #[test]
-    fn parse_env_flag_rejects_false_like_and_unknown_values() {
-        for value in ["0", "false", "FALSE", " no ", "off", "n", "f", "", "w8a16"] {
-            assert!(!parse_env_flag(value), "{value}");
         }
     }
 }
