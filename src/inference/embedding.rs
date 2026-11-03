@@ -549,6 +549,19 @@ impl EmbeddingModel {
         }
     }
 
+    /// Whether the 30 second chunk filterbank model is available
+    pub(crate) fn has_chunk_fbank_30s(&self) -> bool {
+        match &self.backend {
+            EmbeddingBackend::CoreMl(backend) => backend.has_chunk_fbank_30s(),
+            #[cfg(feature = "cpu")]
+            EmbeddingBackend::Cpu(_) => false,
+            #[cfg(feature = "migraphx")]
+            EmbeddingBackend::Ort(_) => false,
+            #[cfg(feature = "_cuda")]
+            EmbeddingBackend::Cuda(_) => false,
+        }
+    }
+
     /// Compute fbank for up to 30s of audio in one call
     pub fn compute_chunk_fbank_30s(
         &mut self,

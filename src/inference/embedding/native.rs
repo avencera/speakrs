@@ -229,6 +229,11 @@ impl CoreMlEmbedding {
         Ok(true)
     }
 
+    /// Whether the 30 second chunk filterbank model is loaded
+    pub(super) fn has_chunk_fbank_30s(&self) -> bool {
+        self.fbank_30s.is_some()
+    }
+
     /// Compute fbank for up to 30s of audio in one call
     pub(super) fn compute_chunk_fbank_30s(
         &mut self,
