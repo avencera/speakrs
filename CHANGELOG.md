@@ -13,6 +13,7 @@
 - Fix `migraphx` choosing the multi-mask embedding path when the filterbank model is missing, which failed with `ModelUnavailable` instead of using the fused model
 - Fix CoreML Float16 outputs between `2^-14` and `1.0` panicking with an integer overflow in debug builds
 - Fix `scripts/cuda/make_reference.py` and `scripts/cuda/setup-gpu-box.sh` failing to read the model revision from `src/models.rs`
+- Fix CoreML memory growing with file length: CoreML keeps a set of GPU buffers, about 1 GiB at batch 64, for every concurrent prediction a model has served, and batched segmentation ran one per core. It now runs at most three at once, so on an M4 Pro the peak footprint stays at 7.2-7.6 GiB (`coreml`) and 6.4-6.8 GiB (`coreml-fast`) from 5 to 17.5 minutes, where it had grown to 12.9-14.8 GiB and 10.2-12.5 GiB. Output is byte-identical. Files over 4 minutes run 3-12% slower in `coreml` and up to 5% slower in `coreml-fast`
 - Fix `cuda-fast` and `coreml-fast` keeping hundreds of spurious speakers on recordings where AHC splits the embeddings into many small clusters: fast modes now drop speakers whose VBx prior is at most `1e-6` instead of `1e-7`, because three VBx iterations leave those clusters above the old threshold. On CHiME-6 S21, `cuda-fast` goes from 30.4 s to 2.2 s and from 10 speakers to 8, with DER at 54.7%. `cuda-fast` DER on AMI SDM drops from 20.58% to 20.31%; AMI IHM, Earnings-21, AISHELL-4, and ICSI drop by up to 0.03 points, VoxConverse dev and test are unchanged, and AVA-AVD rises from 48.93% to 48.98%
 
 ## [0.7.0] - 2026-10-26

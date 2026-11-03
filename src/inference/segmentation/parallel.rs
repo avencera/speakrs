@@ -200,9 +200,11 @@ impl<'a> BatchTaskPlanner<'a> {
 }
 
 impl SegmentationModel {
-    /// Run segmentation with N parallel workers, each with a fresh CoreML model
+    /// Run segmentation with up to `num_workers` workers sharing the loaded CoreML models
     ///
-    /// Workers use CPUOnly compute units to avoid GPU contention with embedding
+    /// The batched path runs at most three predictions at once, because CoreML keeps a set of
+    /// GPU buffers for every concurrent prediction a model has served
+    ///
     /// Results are sent through `tx` in chunk_idx order
     pub fn run_streaming_parallel(
         &mut self,
