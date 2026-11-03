@@ -210,7 +210,8 @@ impl<'ctx, 'a> SingleWorkerPool<'ctx, 'a> {
 }
 
 impl<'a> ParallelSingleExecutor<'a> {
-    pub(super) fn run(self) -> Result<(), SegmentationError> {
+    /// Run every window and return how many workers ran them
+    pub(super) fn run(self) -> Result<usize, SegmentationError> {
         let Self {
             windows,
             tx,
@@ -246,7 +247,7 @@ impl<'a> ParallelSingleExecutor<'a> {
             merge_handle
                 .join()
                 .map_err(|_| worker_panic("parallel segmentation merge"))??;
-            Ok::<(), SegmentationError>(())
+            Ok::<usize, SegmentationError>(actual_workers)
         })
     }
 }

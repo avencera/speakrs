@@ -13,6 +13,19 @@ use crate::inference::coreml::CachedInputShape;
 
 type QueuedBatch = (usize, Vec<Array2<f32>>);
 
+/// Most batched segmentation predictions in flight at once
+///
+/// CoreML gives every concurrent prediction on a model its own set of intermediate GPU
+/// buffers and keeps each set for as long as the model is loaded. A batch-64 set is about
+/// 1 GiB and a batch-32 set about 0.5 GiB, so one worker per core made the footprint grow
+/// with file length until every worker had run a batch, reaching 13-15 GiB on 10-17 minute
+/// files. Concurrent predictions do run faster on the GPU, so this trades speed for memory.
+/// On an M4 Pro with 10-17 minute files in `coreml`, three in flight held the peak at
+/// 7.2-7.6 GiB and ran 3-12% slower than eight, two held it near 6 GiB at 6-21% slower, and
+/// five stayed within 6% of eight but peaked at 9-11 GiB. The batch-1 model's sets are
+/// about 20 MiB, so the single-window path keeps its full worker count
+const MAX_BATCHED_PREDICTIONS_IN_FLIGHT: usize = 3;
+
 pub(super) struct ParallelBatchExecutor<'a> {
     pub(super) windows: &'a SegmentationWindows<'a>,
     pub(super) tx: Sender<Array2<f32>>,
@@ -228,7 +241,8 @@ impl<'ctx, 'a> BatchWorker<'ctx, 'a> {
 }
 
 impl<'a> ParallelBatchExecutor<'a> {
-    pub(super) fn run(self) -> Result<(), SegmentationError> {
+    /// Run every batch task and return how many workers ran them
+    pub(super) fn run(self) -> Result<usize, SegmentationError> {
         let Self {
             windows,
             tx,
@@ -237,6 +251,10 @@ impl<'a> ParallelBatchExecutor<'a> {
             window_samples,
             profile,
         } = self;
+        let worker_count = tasks
+            .len()
+            .min(num_workers.max(1))
+            .min(MAX_BATCHED_PREDICTIONS_IN_FLIGHT);
         let (batch_tx, batch_rx) = crossbeam_channel::unbounded::<QueuedBatch>();
 
         std::thread::scope(|scope| {
@@ -247,7 +265,7 @@ impl<'a> ParallelBatchExecutor<'a> {
                 &tasks,
                 windows,
                 &batch_tx,
-                num_workers,
+                worker_count,
                 window_samples,
                 profile,
                 &worker_error,
@@ -261,7 +279,7 @@ impl<'a> ParallelBatchExecutor<'a> {
             merge_handle
                 .join()
                 .map_err(|_| worker_panic("parallel segmentation merge"))??;
-            Ok::<(), SegmentationError>(())
+            Ok::<usize, SegmentationError>(worker_count)
         })
     }
 
@@ -269,14 +287,13 @@ impl<'a> ParallelBatchExecutor<'a> {
         tasks: &[BatchTask<'a>],
         windows: &SegmentationWindows<'a>,
         batch_tx: &Sender<QueuedBatch>,
-        num_workers: usize,
+        worker_count: usize,
         window_samples: usize,
         profile: &ParallelProfile,
         worker_error: &WorkerErrorSlot,
     ) {
         rayon::scope(|rscope| {
             let next_task = Arc::new(AtomicUsize::new(0));
-            let worker_count = tasks.len().min(num_workers.max(1));
 
             for _worker_idx in 0..worker_count {
                 let worker = BatchWorker {

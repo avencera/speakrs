@@ -200,9 +200,11 @@ impl<'a> BatchTaskPlanner<'a> {
 }
 
 impl SegmentationModel {
-    /// Run segmentation with N parallel workers, each with a fresh CoreML model
+    /// Run segmentation with up to `num_workers` workers sharing the loaded CoreML models
     ///
-    /// Workers use CPUOnly compute units to avoid GPU contention with embedding
+    /// The batched path runs at most three predictions at once, because CoreML keeps a set of
+    /// GPU buffers for every concurrent prediction a model has served
+    ///
     /// Results are sent through `tx` in chunk_idx order
     pub fn run_streaming_parallel(
         &mut self,
@@ -248,7 +250,7 @@ impl SegmentationModel {
             && total_windows > PRIMARY_BATCH_SIZE
             && warm_start_small_windows > PRIMARY_BATCH_SIZE;
 
-        if batch_size > 1 {
+        let workers = if batch_size > 1 {
             let tasks = BatchTaskPlanner {
                 shared_model,
                 small_model: backend.batched_model(),
@@ -268,7 +270,7 @@ impl SegmentationModel {
                 window_samples: self.window_samples(),
                 profile: &profile,
             }
-            .run()?;
+            .run()?
         } else {
             ParallelSingleExecutor {
                 windows: &windows,
@@ -278,12 +280,12 @@ impl SegmentationModel {
                 window_samples: self.window_samples(),
                 profile: &profile,
             }
-            .run()?;
-        }
+            .run()?
+        };
 
         profile.log_completion(ParallelRunSummary {
             total_windows,
-            num_workers,
+            num_workers: workers,
             est_embed_chunks,
             use_warm_start_b32,
             warm_start_small_windows,
