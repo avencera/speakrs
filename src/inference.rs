@@ -78,7 +78,7 @@ pub enum ExecutionMode {
     /// Native CoreML with FP32 precision and ~1s step
     #[cfg_attr(docsrs, doc(cfg(feature = "coreml")))]
     CoreMl,
-    /// Native CoreML with W8A16 segmentation and ~2s step
+    /// Native CoreML with FP32 precision and ~2s step
     #[cfg_attr(docsrs, doc(cfg(feature = "coreml")))]
     CoreMlFast,
     /// Native NVIDIA GPU backend (cuBLAS, cuDNN and custom kernels, no ONNX Runtime)

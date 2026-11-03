@@ -89,7 +89,7 @@ class ExecutionMode(str, Enum):
     CoreML = "CoreML"
     """Apple CoreML with FP32 models (macOS builds)."""
     CoreMLFast = "CoreMLFast"
-    """Apple CoreML with W8A16 segmentation and a 2 s step (macOS builds)."""
+    """Apple CoreML with FP32 models and a 2 s step (macOS builds)."""
     CUDA = "CUDA"
     """Native NVIDIA backend (Linux x86_64 builds, Turing or newer GPU)."""
     CUDAFast = "CUDAFast"

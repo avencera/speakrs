@@ -835,16 +835,11 @@ impl ValidatedExperiment {
 
     #[cfg(target_os = "macos")]
     pub(crate) fn profiled_model_paths(&self) -> Vec<PathBuf> {
-        let segmentation_suffix = match self.inference().mode {
-            CoreMlMode::CoreMl => "",
-            CoreMlMode::CoreMlFast => "-w8a16",
-        };
         let mut paths = ["", "-b32", "-b64"]
             .into_iter()
             .map(|batch| {
-                self.models_dir.join(format!(
-                    "segmentation-3.0{batch}{segmentation_suffix}.mlmodelc"
-                ))
+                self.models_dir
+                    .join(format!("segmentation-3.0{batch}.mlmodelc"))
             })
             .chain(
                 ["wespeaker-fbank.mlmodelc", "wespeaker-fbank-30s.mlmodelc"]
@@ -1095,20 +1090,12 @@ fn validate_layout_assets(models_dir: &Path, inference: &InferenceVariant) -> Re
         return Ok(());
     }
 
-    let segmentation_suffix = match inference.mode {
-        CoreMlMode::CoreMl => "",
-        CoreMlMode::CoreMlFast => "-w8a16",
-    };
-    for stem in [
-        "segmentation-3.0",
-        "segmentation-3.0-b32",
-        "segmentation-3.0-b64",
+    for name in [
+        "segmentation-3.0.mlmodelc",
+        "segmentation-3.0-b32.mlmodelc",
+        "segmentation-3.0-b64.mlmodelc",
     ] {
-        require_model_bundle(
-            models_dir,
-            &format!("{stem}{segmentation_suffix}.mlmodelc"),
-            inference.layout,
-        )?;
+        require_model_bundle(models_dir, name, inference.layout)?;
     }
 
     for name in [
