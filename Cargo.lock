@@ -1983,6 +1983,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "speakrs-cli"
+version = "0.7.0"
+dependencies = [
+ "clap",
+ "eyre",
+ "speakrs",
+ "speakrs-sdk",
+ "tempfile",
+]
+
+[[package]]
 name = "speakrs-ptx-sm120"
 version = "0.7.0"
 

@@ -15,6 +15,7 @@ If you want a small end-to-end app using it, see [avencera/smrze](https://github
   - [Background queue](#background-queue)
   - [Local models](#local-models)
   - [Python](#python)
+  - [Command line](#command-line)
 - [Choosing a mode](#choosing-a-mode)
 - [Benchmarks](#benchmarks)
 - [Why not pyannote-rs?](#why-not-pyannote-rs)
@@ -22,6 +23,7 @@ If you want a small end-to-end app using it, see [avencera/smrze](https://github
 - [Features and build notes](#features-and-build-notes)
   - [NVIDIA GPUs](#nvidia-gpus)
 - [Public API](#public-api)
+- [Releases](#releases)
 - [Contributing](#contributing)
 - [References](#references)
 
@@ -157,6 +159,32 @@ installs it in its own environment.
 The macOS arm64 wheel includes CPU and CoreML, and the Linux x86_64 wheel
 includes CPU and CUDA. See [the Python package](https://github.com/avencera/speakrs/blob/master/crates/speakrs-python/README.md)
 and its [API reference](https://github.com/avencera/speakrs/blob/master/crates/speakrs-python/API.md).
+
+### Command line
+
+The `speakrs` command diarizes audio files and prints RTTM, with no Python. Each
+GitHub release has it for Linux x86_64 with CPU and CUDA, Linux arm64 with CPU, and
+Apple silicon with CPU and CoreML. This installs the latest release into
+`~/.local/bin`:
+
+```sh
+curl -LSfs https://github.com/avencera/speakrs/releases/latest/download/install.sh | sh
+speakrs diarize meeting.wav --mode coreml > meeting.rttm
+```
+
+It reads WAV, FLAC, MP3, Ogg and M4A, and downloads the mode's models into the
+Hugging Face cache on first use. It takes the same options as the Python
+package's `speakrs diarize`: `--mode` (default `cpu`), `--model-dir`,
+`--cache-dir`, `--file-id` and `--exclusive`. Several files run as one overlapped
+batch. The Linux binaries need glibc 2.28 or newer, and the CUDA modes need an
+NVIDIA driver. To pick another release or install directory, end the first line
+with `sh -s -- --tag vX.Y.Z --to DIR`.
+
+To build it from source with the backends you want:
+
+```sh
+cargo install --git https://github.com/avencera/speakrs speakrs-cli --features coreml
+```
 
 ## Choosing a mode
 
@@ -400,20 +428,19 @@ GPUs without a built-in profile use good defaults. To get the best speed on
 yours, run the tuner once. It measures the kernels on your GPU and saves the
 fastest choices, which later runs load automatically. A tune file only applies
 to the speakrs version and CUDA feature that wrote it. For an application built
-with `cuda`, install the prebuilt tuner from the matching GitHub release (Linux
-x86_64, glibc 2.28 or newer) into `~/.local/bin`:
+with `cuda`, use the Linux x86_64 [`speakrs` command](#command-line) from the
+matching GitHub release, which is built with `cuda`:
 
 ```sh
-curl -LSfs https://github.com/avencera/speakrs/releases/latest/download/install.sh | sh
-speakrs cuda tune --models-dir /path/to/models
+speakrs cuda tune
 ```
 
-To pick another release or install directory, end the first line with
-`sh -s -- --tag vX.Y.Z --to DIR`. For a GPU-specific build, build the tuner with
-the same feature as your application:
+Without `--models-dir`, it tunes with the CUDA models from the download cache,
+downloading them first if needed. For a GPU-specific build, build the command
+with the same feature as your application:
 
 ```sh
-cargo build --release --no-default-features --features cuda-rtx40 --bin speakrs
+cargo build --release -p speakrs-cli --no-default-features --features cuda-rtx40
 ./target/release/speakrs cuda tune --models-dir /path/to/models
 ```
 
@@ -441,8 +468,9 @@ feature enables downloads; local model loading works without it.
 ## Releases
 
 A `v*` tag publishes the Python wheels to PyPI and creates a GitHub release; CI
-doesn't publish the crates to crates.io. The release holds the `speakrs` CUDA
-tuner for Linux x86_64 with a SHA-256 checksum, and the `install.sh` that
+doesn't publish the crates to crates.io. The release holds the
+[`speakrs` command](#command-line) for Linux x86_64, Linux arm64 and Apple
+silicon, each archive with a SHA-256 checksum, and the `install.sh` that
 installs it. To cut one:
 
 1. Bump `version` in `Cargo.toml` (the `[package]` and `[workspace.package]`
@@ -459,8 +487,9 @@ installs it. To cut one:
 
 The [Release workflow](.github/workflows/release.yml) fails before building if
 the tag doesn't match the crate version or `CHANGELOG.md` has no entry for it.
-It keeps the release a draft until the binary and `install.sh` upload, then
-publishes it as the latest release.
+Each archive's binary must diarize a test file before it uploads. The release
+stays a draft until every archive and `install.sh` upload, then it's published
+as the latest release.
 
 ## [Contributing](CONTRIBUTING.md)
 

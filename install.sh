@@ -1,11 +1,13 @@
 #!/bin/sh
-# Install the speakrs command, the CUDA tuner, from GitHub Releases.
+# Install the speakrs command from GitHub Releases.
 #
-# One-liner (Linux x86_64):
+# One-liner (Linux x86_64 or arm64, or Apple silicon on macOS):
 #   curl -LSfs https://github.com/avencera/speakrs/releases/latest/download/install.sh | sh
 #
 # Asset names match .github/workflows/release.yml:
 #   speakrs-<tag>-x86_64-unknown-linux-gnu.tar.gz
+#   speakrs-<tag>-aarch64-unknown-linux-gnu.tar.gz
+#   speakrs-<tag>-aarch64-apple-darwin.tar.gz
 #
 # Modified from avencera/sam3rs, avencera/homebased and avencera/rustywind, which
 # started from https://github.com/japaric/trust.
@@ -15,7 +17,7 @@ BIN="speakrs"
 
 help() {
     cat <<EOF
-Install a binary release of the speakrs CUDA tuner from GitHub.
+Install a binary release of the speakrs command from GitHub.
 
 Usage:
     install.sh [options]
@@ -72,12 +74,26 @@ expand_dest() {
     printf '%s\n' "$dest"
 }
 
-# the binary tunes the CUDA backend, which runs on Linux only, and opens libcuda with
-# dlopen, which a static musl build can't do, so the release ships glibc on x86_64
+# the x86_64 binary opens libcuda with dlopen, which a static musl build can't do, so
+# Linux ships glibc; Intel Macs and Windows have no release binary
 target_triple() {
     case "$(uname -s)/$(uname -m)" in
         Linux/x86_64 | Linux/amd64)
             printf 'x86_64-unknown-linux-gnu\n'
+            ;;
+        Linux/aarch64 | Linux/arm64)
+            printf 'aarch64-unknown-linux-gnu\n'
+            ;;
+        Darwin/arm64)
+            printf 'aarch64-apple-darwin\n'
+            ;;
+        Darwin/x86_64)
+            # a shell under Rosetta reports x86_64 on Apple silicon
+            if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ]; then
+                printf 'aarch64-apple-darwin\n'
+            else
+                return 1
+            fi
             ;;
         *)
             return 1
@@ -165,7 +181,7 @@ if [ -z "${HOME:-}" ]; then
 fi
 
 target=$(target_triple) \
-    || err "no release binary for $(uname -s)/$(uname -m); the release covers Linux x86_64 only, since the binary tunes the CUDA backend. Elsewhere, build with: cargo install speakrs --no-default-features --features cuda"
+    || err "no release binary for $(uname -s)/$(uname -m); the release covers Linux x86_64 and arm64, and Apple silicon. Elsewhere, build with: cargo install --git https://github.com/$DEFAULT_GIT speakrs-cli"
 
 if [ -z "$dest" ]; then
     dest=$HOME/.local/bin
@@ -232,10 +248,10 @@ case ":$PATH:" in
         ;;
 esac
 
-# the binary loads the driver at run time, so a missing one only fails when tuning starts;
-# cuDNN 9 and cuBLAS are optional, since the tuner times them only with --include-library
-if ! has_library libcuda.so.1; then
-    say "warning: libcuda.so.1 not found; speakrs needs an NVIDIA driver"
+# the CUDA modes load the driver at run time, so only the x86_64 build looks for it, and
+# a missing one fails only when a CUDA mode runs
+if [ "$target" = x86_64-unknown-linux-gnu ] && ! has_library libcuda.so.1; then
+    say "libcuda.so.1 not found; the cuda and cuda-fast modes need an NVIDIA driver, cpu works without one"
 fi
 
-say "run: $BIN cuda tune --models-dir /path/to/models"
+say "run: $BIN diarize meeting.wav > meeting.rttm"

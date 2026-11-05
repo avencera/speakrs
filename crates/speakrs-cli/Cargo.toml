@@ -1,0 +1,46 @@
+[package]
+name = "speakrs-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "The speakrs command: speaker diarization to RTTM, and CUDA tuning"
+# speakrs-sdk is not on crates.io, so the command ships through GitHub releases
+publish = false
+
+[[bin]]
+name = "speakrs"
+path = "src/main.rs"
+
+[features]
+default = ["online", "cpu"]
+# download models from Hugging Face on first use
+online = ["speakrs-sdk/online"]
+cpu = ["speakrs-sdk/cpu"]
+coreml = ["speakrs-sdk/coreml"]
+# every GPU tier plus the cuDNN/cuBLAS fallback, loaded at run time
+cuda = ["speakrs-sdk/cuda", "_cuda"]
+# driver-only GPU-specific builds, for a tuner that matches an application built with
+# the same speakrs feature; see the speakrs crate for what each one embeds
+cuda-sm75 = ["speakrs/cuda-sm75", "_cuda"]
+cuda-sm80 = ["speakrs/cuda-sm80", "_cuda"]
+cuda-sm90 = ["speakrs/cuda-sm90", "_cuda"]
+cuda-sm120 = ["speakrs/cuda-sm120", "_cuda"]
+cuda-rtx20 = ["cuda-sm75"]
+cuda-rtx30 = ["cuda-sm80"]
+cuda-rtx40 = ["cuda-sm80"]
+cuda-a100 = ["cuda-sm80"]
+cuda-rtx50 = ["cuda-sm120"]
+# internal: any CUDA backend, which adds the CUDA modes and `cuda tune`
+_cuda = []
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+eyre = "0.6"
+speakrs = { path = "../..", default-features = false }
+speakrs-sdk = { path = "../speakrs-sdk", default-features = false }
+
+[dev-dependencies]
+tempfile = "3.27.0"
