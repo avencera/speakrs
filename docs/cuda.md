@@ -101,7 +101,19 @@ some individual layers are slower.
 
 ## Tuning
 
-Build the opt-in command on Linux:
+Each GitHub release ships the command built with `cuda` for Linux x86_64 (glibc
+2.28 or newer), which writes tune files for applications built with `cuda` at
+the same speakrs version:
+
+```sh
+curl -LSfs https://github.com/avencera/speakrs/releases/latest/download/install.sh | sh
+speakrs cuda tune --models-dir /path/to/models --dry-run
+speakrs cuda tune --models-dir /path/to/models
+```
+
+End the first line with `sh -s -- --tag vX.Y.Z` to install another release's
+tuner. For a GPU-specific build, or Linux arm64, build the command with your
+application's CUDA feature:
 
 ```sh
 cargo build --release --no-default-features --features cuda --bin speakrs

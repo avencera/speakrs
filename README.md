@@ -398,9 +398,19 @@ for full results across all datasets.
 
 GPUs without a built-in profile use good defaults. To get the best speed on
 yours, run the tuner once. It measures the kernels on your GPU and saves the
-fastest choices, which later runs load automatically. Build the tuner with the
-same CUDA feature as your application, because a tune file only applies to the
-build that wrote it:
+fastest choices, which later runs load automatically. A tune file only applies
+to the speakrs version and CUDA feature that wrote it. For an application built
+with `cuda`, install the prebuilt tuner from the matching GitHub release (Linux
+x86_64, glibc 2.28 or newer) into `~/.local/bin`:
+
+```sh
+curl -LSfs https://github.com/avencera/speakrs/releases/latest/download/install.sh | sh
+speakrs cuda tune --models-dir /path/to/models
+```
+
+To pick another release or install directory, end the first line with
+`sh -s -- --tag vX.Y.Z --to DIR`. For a GPU-specific build, build the tuner with
+the same feature as your application:
 
 ```sh
 cargo build --release --no-default-features --features cuda-rtx40 --bin speakrs
@@ -427,6 +437,30 @@ Start here:
 Model downloads use [`hf-fetch`](https://github.com/avencera/hf-fetch), a small
 blocking client with rustls and the shared Python Hugging Face cache. The `online`
 feature enables downloads; local model loading works without it.
+
+## Releases
+
+A `v*` tag publishes the Python wheels to PyPI and creates a GitHub release; CI
+doesn't publish the crates to crates.io. The release holds the `speakrs` CUDA
+tuner for Linux x86_64 with a SHA-256 checksum, and the `install.sh` that
+installs it. To cut one:
+
+1. Bump `version` in `Cargo.toml` (the `[package]` and `[workspace.package]`
+   versions, and the exact `speakrs-ptx-*` pins), then run `cargo check` to
+   update `Cargo.lock`.
+2. Move the `CHANGELOG.md` entries under `## Unreleased` to a
+   `## [X.Y.Z] - YYYY-MM-DD` heading, which becomes the release notes.
+3. Merge to `master`, then tag that commit and push the tag:
+
+   ```sh
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+
+The [Release workflow](.github/workflows/release.yml) fails before building if
+the tag doesn't match the crate version or `CHANGELOG.md` has no entry for it.
+It keeps the release a draft until the binary and `install.sh` upload, then
+publishes it as the latest release.
 
 ## [Contributing](CONTRIBUTING.md)
 

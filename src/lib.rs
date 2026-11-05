@@ -380,9 +380,19 @@
 //!
 //! GPUs without a built-in profile use good defaults. To get the best speed on
 //! yours, run the tuner once. It measures the kernels on your GPU and saves the
-//! fastest choices, which later runs load automatically. Build the tuner with the
-//! same CUDA feature as your application, because a tune file only applies to the
-//! build that wrote it:
+//! fastest choices, which later runs load automatically. A tune file only applies
+//! to the speakrs version and CUDA feature that wrote it. For an application built
+//! with `cuda`, install the prebuilt tuner from the matching GitHub release (Linux
+//! x86_64, glibc 2.28 or newer) into `~/.local/bin`:
+//!
+//! ```sh
+//! curl -LSfs https://github.com/avencera/speakrs/releases/latest/download/install.sh | sh
+//! speakrs cuda tune --models-dir /path/to/models
+//! ```
+//!
+//! To pick another release or install directory, end the first line with
+//! `sh -s -- --tag vX.Y.Z --to DIR`. For a GPU-specific build, build the tuner with
+//! the same feature as your application:
 //!
 //! ```sh
 //! cargo build --release --no-default-features --features cuda-rtx40 --bin speakrs
