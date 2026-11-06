@@ -101,10 +101,24 @@ some individual layers are slower.
 
 ## Tuning
 
-Build the opt-in command on Linux:
+The `speakrs` command in each GitHub release's Linux x86_64 archive is built
+with `cuda` (glibc 2.28 or newer), so it writes tune files for applications
+built with `cuda` at the same speakrs version:
 
 ```sh
-cargo build --release --no-default-features --features cuda --bin speakrs
+curl -LSfs https://github.com/avencera/speakrs/releases/latest/download/install.sh | sh
+speakrs cuda tune --dry-run
+speakrs cuda tune
+```
+
+End the first line with `sh -s -- --tag vX.Y.Z` to install another release's
+command. Without `--models-dir PATH`, the tuner uses the CUDA models in the
+download cache, downloading them first if needed; `--cache-dir DIR` picks
+another cache. For a GPU-specific build, or Linux arm64, build the command with
+your application's CUDA feature:
+
+```sh
+cargo build --release -p speakrs-cli --no-default-features --features cuda-rtx40
 ./target/release/speakrs cuda tune --models-dir /path/to/models --dry-run
 ./target/release/speakrs cuda tune --models-dir /path/to/models
 ```

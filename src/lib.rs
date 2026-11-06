@@ -140,6 +140,35 @@
 //! includes CPU and CUDA. See [the Python package](https://github.com/avencera/speakrs/blob/master/crates/speakrs-python/README.md)
 //! and its [API reference](https://github.com/avencera/speakrs/blob/master/crates/speakrs-python/API.md).
 //!
+//! ## Command line
+//!
+//! The `speakrs` command diarizes audio files and prints RTTM, with no Python. Each
+//! GitHub release has it for Linux x86_64 with CPU and CUDA, Linux arm64 with CPU, and
+//! Apple silicon with CPU and CoreML. This installs the latest release into
+//! `~/.local/bin`:
+//!
+//! ```sh
+//! curl -LSfs https://github.com/avencera/speakrs/releases/latest/download/install.sh | sh
+//! speakrs diarize meeting.wav > meeting.rttm
+//! ```
+//!
+//! Add `--mode coreml` on a Mac or `--mode cuda` on an NVIDIA GPU.
+//!
+//! It reads WAV, FLAC, MP3, Ogg and M4A, and downloads the mode's models into the
+//! Hugging Face cache on first use. It takes the same options as the Python
+//! package's `speakrs diarize`: `--mode` (default `cpu`), `--model-dir`,
+//! `--cache-dir`, `--file-id` and `--exclusive`. Several files run as one overlapped
+//! batch. Each file's RTTM id is its name without the extension, with whitespace
+//! replaced by `_`, since RTTM fields are separated by spaces. The Linux binaries need glibc 2.28 or newer, and the CUDA modes need an
+//! NVIDIA driver. To pick another release or install directory, end the first line
+//! with `sh -s -- --tag vX.Y.Z --to DIR`.
+//!
+//! To build it from source with the backends you want:
+//!
+//! ```sh
+//! cargo install --git https://github.com/avencera/speakrs speakrs-cli --features coreml
+//! ```
+//!
 //! # Choosing a mode
 //!
 //! | Mode | Backend | Step | Use it for |
@@ -380,12 +409,21 @@
 //!
 //! GPUs without a built-in profile use good defaults. To get the best speed on
 //! yours, run the tuner once. It measures the kernels on your GPU and saves the
-//! fastest choices, which later runs load automatically. Build the tuner with the
-//! same CUDA feature as your application, because a tune file only applies to the
-//! build that wrote it:
+//! fastest choices, which later runs load automatically. A tune file only applies
+//! to the speakrs version and CUDA feature that wrote it. For an application built
+//! with `cuda`, use the Linux x86_64 [`speakrs` command](#command-line) from the
+//! matching GitHub release, which is built with `cuda`:
 //!
 //! ```sh
-//! cargo build --release --no-default-features --features cuda-rtx40 --bin speakrs
+//! speakrs cuda tune
+//! ```
+//!
+//! Without `--models-dir`, it tunes with the CUDA models from the download cache,
+//! downloading them first if needed. For a GPU-specific build, build the command
+//! with the same feature as your application:
+//!
+//! ```sh
+//! cargo build --release -p speakrs-cli --no-default-features --features cuda-rtx40
 //! ./target/release/speakrs cuda tune --models-dir /path/to/models
 //! ```
 //!

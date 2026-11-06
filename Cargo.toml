@@ -5,6 +5,7 @@ members = [
     "crates/speakrs-ptx-sm80",
     "crates/speakrs-ptx-sm120",
     "crates/speakrs-sdk",
+    "crates/speakrs-cli",
     "crates/speakrs-python",
 ]
 exclude = ["scripts/", "crates/speakrs-cuda-kernels"]
@@ -156,10 +157,6 @@ objc2-foundation = { version = "0.3", optional = true, features = [
     "NSEnumerator",
     "NSObjCRuntime",
 ] }
-
-[[bin]]
-name = "speakrs"
-required-features = ["_cuda"]
 
 # the examples load native model assets in `ExecutionMode::Cpu`
 [[example]]

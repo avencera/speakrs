@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add the `speakrs diarize` command, which decodes WAV, FLAC, MP3, Ogg and M4A files and prints RTTM, with the same options as the Python package's command. Each GitHub release ships it for Linux x86_64 with CPU and CUDA, Linux arm64 with CPU (both glibc 2.28 or newer), and Apple silicon with CPU and CoreML, with SHA-256 checksums and an `install.sh` that installs it into `~/.local/bin`: `curl -LSfs https://github.com/avencera/speakrs/releases/latest/download/install.sh | sh`
+- Move the `speakrs` binary out of the `speakrs` crate into `crates/speakrs-cli`: `speakrs cuda tune` is now built with `cargo build -p speakrs-cli --features cuda` (or a GPU-specific feature such as `cuda-rtx40`), and without `--models-dir` it uses the CUDA models in the download cache
 - Move the CUDA host stack (driver and library loading, module registry, device buffers, cuBLAS products, graph capture, the cuDNN convolution planner and the driver release reader) into the shared [`cudakit`](https://crates.io/crates/cudakit) crate, with the kernel toolchain in `cudakit-build`; CUDA modes run the same kernels and give the same results
 - Remove `PtxTier::{SHIPPED, native, feature, is_compiled_in, compiled_in, from_env, select}` (breaking): `PtxTier` and `ComputeCapability` are now cudakit's types, and parsing a tier returns `cudakit::Error`; `SPEAKRS_CUDA_PTX_TIER` and the GPU target features behave as before
 - `CudaMath` is no longer `#[non_exhaustive]`
