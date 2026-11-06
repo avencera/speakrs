@@ -29,6 +29,8 @@ Options:
     --git SLUG      GitHub repository (default ${DEFAULT_GIT})
     --tag TAG       Release tag (default latest)
     --to LOCATION   Install directory (default ~/.local/bin)
+    --force         Replace a speakrs there that this script didn't install,
+                    such as the Python package's command
 EOF
 }
 
@@ -39,6 +41,9 @@ say() {
 err() {
     if [ -n "${td:-}" ]; then
         rm -rf "$td"
+    fi
+    if [ -n "${staged:-}" ]; then
+        rm -f "$staged"
     fi
 
     say "ERROR $1"
@@ -135,6 +140,7 @@ has_library() {
 git=$DEFAULT_GIT
 tag=""
 dest=""
+force=false
 
 while test $# -gt 0; do
     case $1 in
@@ -142,6 +148,9 @@ while test $# -gt 0; do
             need_value "$1" "${2:-}"
             git=$2
             shift
+            ;;
+        --force)
+            force=true
             ;;
         --help | -h)
             help
@@ -169,7 +178,9 @@ need tar
 need mkdir
 need mktemp
 need install
+need mv
 need rm
+need dd
 need uname
 need awk
 if ! command -v sha256sum > /dev/null 2>&1 && ! command -v shasum > /dev/null 2>&1; then
@@ -212,7 +223,8 @@ archive="$base.tar.gz"
 download="$url/releases/download/$tag/$archive"
 say "Downloading: $download"
 
-td=$(mktemp -d 2>/dev/null || mktemp -d -t speakrs-install)
+td=$(mktemp -d 2>/dev/null || mktemp -d -t speakrs-install) \
+    || err "failed to create a temporary directory"
 curl -fsSL "$download" -o "$td/$archive" \
     || err "failed to download $download"
 curl -fsSL "$url/releases/download/$tag/$base.sha256" -o "$td/$base.sha256" \
@@ -230,21 +242,34 @@ if [ ! -f "$td/$BIN" ] || [ ! -x "$td/$BIN" ]; then
     err "$archive does not contain an executable $BIN"
 fi
 
+# `uv tool install speakrs` and pip put the Python package's command at the same path,
+# as a symlink or a script, and replacing it would break the user's Python install
+if [ -L "$dest/$BIN" ] || [ "$(dd if="$dest/$BIN" bs=2 count=1 2>/dev/null)" = "#!" ]; then
+    if [ "$force" != true ]; then
+        err "$dest/$BIN is another speakrs install, such as the Python package's command; pass --to DIR to install elsewhere, or --force to replace it"
+    fi
+fi
+
 say "Installing to: $dest"
 mkdir -p "$dest" || err "failed to create $dest"
-# unlink first so a running binary can be replaced
-rm -f "$dest/$BIN"
-install -m 0755 "$td/$BIN" "$dest/$BIN" || err "failed to install $BIN to $dest"
+# the copy goes beside the target and then renames over it, so a failed copy keeps the
+# old command, and a running binary can be replaced
+staged="$dest/.$BIN.install.$$"
+install -m 0755 "$td/$BIN" "$staged" || err "failed to install $BIN to $dest"
+mv -f "$staged" "$dest/$BIN" || err "failed to install $BIN to $dest"
+staged=""
 
 rm -rf "$td"
 td=""
 
 say "installed $BIN $tag to $dest/$BIN"
 
+run=$BIN
 case ":$PATH:" in
     *:"$dest":*) ;;
     *)
         say "warning: $dest is not on PATH"
+        run=$dest/$BIN
         ;;
 esac
 
@@ -254,4 +279,4 @@ if [ "$target" = x86_64-unknown-linux-gnu ] && ! has_library libcuda.so.1; then
     say "libcuda.so.1 not found; the cuda and cuda-fast modes need an NVIDIA driver, cpu works without one"
 fi
 
-say "run: $BIN diarize meeting.wav > meeting.rttm"
+say "run: $run diarize meeting.wav > meeting.rttm"

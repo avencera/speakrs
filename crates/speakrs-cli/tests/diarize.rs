@@ -111,6 +111,27 @@ fn rejects_file_id_for_several_files() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("--file-id needs exactly one"));
 }
 
+#[test]
+fn rejects_files_with_the_same_stem_before_downloading() {
+    let cache = tempfile::tempdir().unwrap();
+    let output = speakrs(&[
+        "diarize",
+        "--cache-dir",
+        cache.path().to_str().unwrap(),
+        "a/meeting.wav",
+        "b/meeting.flac",
+    ]);
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("b/meeting.flac has the same name, without its extension"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_dir(cache.path()).unwrap().count(), 0);
+}
+
 // a mode the build lacks must fail before preparing models, so it downloads nothing
 #[cfg(not(feature = "_cuda"))]
 #[test]

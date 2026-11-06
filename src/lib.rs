@@ -149,8 +149,10 @@
 //!
 //! ```sh
 //! curl -LSfs https://github.com/avencera/speakrs/releases/latest/download/install.sh | sh
-//! speakrs diarize meeting.wav --mode coreml > meeting.rttm
+//! speakrs diarize meeting.wav > meeting.rttm
 //! ```
+//!
+//! Add `--mode coreml` on a Mac or `--mode cuda` on an NVIDIA GPU.
 //!
 //! It reads WAV, FLAC, MP3, Ogg and M4A, and downloads the mode's models into the
 //! Hugging Face cache on first use. It takes the same options as the Python

@@ -73,6 +73,21 @@ jobs:
           echo "crate version: $version, tag: $GITHUB_REF_NAME"
           test "v$version" = "$GITHUB_REF_NAME"
 
+      # the action deletes any release the tag already has, assets and all, so a rerun
+      # of a finished tag would take the published release down while it rebuilds; a
+      # draft left by a failed run is still replaced
+      - name: Refuse to replace a published release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if draft="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)" \
+            && [ "$draft" = false ]; then
+            echo "$GITHUB_REF_NAME is already published; delete it by hand to rebuild it" >&2
+            exit 1
+          fi
+
       # stays a draft until every asset uploads, so install.sh never resolves a latest
       # release that is missing its archive
       - uses: taiki-e/create-gh-release-action@eba8ea96c86cca8a37f1b56e94b4d13301fba651 # v1.11.0

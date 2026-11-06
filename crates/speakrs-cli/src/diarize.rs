@@ -1,5 +1,6 @@
 //! `speakrs diarize`: decode audio files, run the pipeline and print RTTM
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -41,6 +42,21 @@ pub(crate) struct DiarizeArgs {
 pub(crate) fn run(args: DiarizeArgs) -> eyre::Result<()> {
     if args.file_id.is_some() && args.audio.len() != 1 {
         bail!("--file-id needs exactly one audio file");
+    }
+
+    // a batch names each file by its stem, so two with the same stem would print RTTM
+    // lines that can't be told apart
+    let mut file_ids = HashSet::new();
+    if args.audio.len() > 1
+        && let Some(path) = args
+            .audio
+            .iter()
+            .find(|path| !file_ids.insert(file_stem(path)))
+    {
+        bail!(
+            "{} has the same name, without its extension, as another input, so their RTTM file ids would match; run it separately with --file-id",
+            path.display()
+        );
     }
 
     let mode = parse_mode(&args.mode)?;
