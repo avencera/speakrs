@@ -105,6 +105,29 @@ fn file_id_and_exclusive_shape_the_rttm() {
 }
 
 #[test]
+fn whitespace_in_a_file_name_keeps_rttm_columns() {
+    let dir = tempfile::tempdir().unwrap();
+    let audio = dir.path().join("team meeting.wav");
+    std::fs::copy(repo_path("fixtures/test_short.wav"), &audio).unwrap();
+
+    let rttm = diarize(&[audio.to_str().unwrap()]);
+    assert!(!rttm.is_empty());
+    // `turns` asserts every line has the ten RTTM fields
+    assert!(
+        turns(&rttm)
+            .iter()
+            .all(|(file_id, ..)| file_id == "team_meeting")
+    );
+}
+
+#[test]
+fn rejects_a_file_id_with_whitespace() {
+    let output = speakrs(&["diarize", "--file-id", "team meeting", "a.wav"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("contain no whitespace"));
+}
+
+#[test]
 fn rejects_file_id_for_several_files() {
     let output = speakrs(&["diarize", "--file-id", "x", "a.wav", "b.wav"]);
     assert!(!output.status.success());

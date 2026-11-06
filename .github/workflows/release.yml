@@ -33,6 +33,12 @@ name: Release
 permissions:
   contents: read
 
+# one run per tag at a time, so a second run can't pass the published-release check
+# while the first is still publishing
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 on:
   push:
     tags:

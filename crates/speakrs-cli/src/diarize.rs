@@ -40,12 +40,18 @@ pub(crate) struct DiarizeArgs {
 }
 
 pub(crate) fn run(args: DiarizeArgs) -> eyre::Result<()> {
-    if args.file_id.is_some() && args.audio.len() != 1 {
-        bail!("--file-id needs exactly one audio file");
+    if let Some(file_id) = &args.file_id {
+        if args.audio.len() != 1 {
+            bail!("--file-id needs exactly one audio file");
+        }
+        // RTTM separates fields with spaces, so an id with whitespace shifts the columns
+        if file_id.is_empty() || file_id.chars().any(char::is_whitespace) {
+            bail!("--file-id must be non-empty and contain no whitespace, got `{file_id}`");
+        }
     }
 
-    // a batch names each file by its stem, so two with the same stem would print RTTM
-    // lines that can't be told apart
+    // a batch names each file by its stem, so two with the same stem, after whitespace
+    // becomes `_`, would print RTTM lines that can't be told apart
     let mut file_ids = HashSet::new();
     if args.audio.len() > 1
         && let Some(path) = args
@@ -129,9 +135,17 @@ fn mode_help() -> String {
     )
 }
 
-// same default as the Python command, which uses `Path.stem`
+/// The default RTTM file id: the file name without its extension, like the Python
+/// command's `Path.stem`, with each whitespace character replaced by `_`
+///
+/// RTTM separates fields with spaces, so `team meeting.wav` would otherwise shift
+/// every column after the id
 fn file_stem(path: &Path) -> String {
-    path.file_stem()
+    let stem = path
+        .file_stem()
         .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
+        .unwrap_or_else(|| path.display().to_string());
+    stem.chars()
+        .map(|c| if c.is_whitespace() { '_' } else { c })
+        .collect()
 }

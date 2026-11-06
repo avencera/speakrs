@@ -158,7 +158,8 @@
 //! Hugging Face cache on first use. It takes the same options as the Python
 //! package's `speakrs diarize`: `--mode` (default `cpu`), `--model-dir`,
 //! `--cache-dir`, `--file-id` and `--exclusive`. Several files run as one overlapped
-//! batch. The Linux binaries need glibc 2.28 or newer, and the CUDA modes need an
+//! batch. Each file's RTTM id is its name without the extension, with whitespace
+//! replaced by `_`, since RTTM fields are separated by spaces. The Linux binaries need glibc 2.28 or newer, and the CUDA modes need an
 //! NVIDIA driver. To pick another release or install directory, end the first line
 //! with `sh -s -- --tag vX.Y.Z --to DIR`.
 //!

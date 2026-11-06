@@ -177,7 +177,8 @@ need curl
 need tar
 need mkdir
 need mktemp
-need install
+need cp
+need chmod
 need mv
 need rm
 need dd
@@ -254,8 +255,10 @@ say "Installing to: $dest"
 mkdir -p "$dest" || err "failed to create $dest"
 # the copy goes beside the target and then renames over it, so a failed copy keeps the
 # old command, and a running binary can be replaced
-staged="$dest/.$BIN.install.$$"
-install -m 0755 "$td/$BIN" "$staged" || err "failed to install $BIN to $dest"
+# mktemp creates the file itself, with an unpredictable name, and cp writes into it
+staged=$(mktemp "$dest/.$BIN.XXXXXX") || err "failed to create a file in $dest"
+cp "$td/$BIN" "$staged" || err "failed to install $BIN to $dest"
+chmod 0755 "$staged" || err "failed to install $BIN to $dest"
 mv -f "$staged" "$dest/$BIN" || err "failed to install $BIN to $dest"
 staged=""
 
