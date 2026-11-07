@@ -80,7 +80,8 @@ expand_dest() {
 }
 
 # the x86_64 binary opens libcuda with dlopen, which a static musl build can't do, so
-# Linux ships glibc; Intel Macs and Windows have no release binary
+# Linux ships glibc; Intel Macs have no release binary, and the Windows zip is unpacked by
+# hand, since this script installs only tar.gz archives
 target_triple() {
     case "$(uname -s)/$(uname -m)" in
         Linux/x86_64 | Linux/amd64)
@@ -193,7 +194,7 @@ if [ -z "${HOME:-}" ]; then
 fi
 
 target=$(target_triple) \
-    || err "no release binary for $(uname -s)/$(uname -m); the release covers Linux x86_64 and arm64, and Apple silicon. Elsewhere, build with: cargo install --git https://github.com/$DEFAULT_GIT speakrs-cli"
+    || err "no release binary for $(uname -s)/$(uname -m); the release covers Linux x86_64 and arm64, and Apple silicon, plus a Windows x86_64 zip this script does not install. Elsewhere, build with: cargo install --git https://github.com/$DEFAULT_GIT speakrs-cli"
 
 if [ -z "$dest" ]; then
     dest=$HOME/.local/bin

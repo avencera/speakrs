@@ -136,8 +136,8 @@ jobs:
           done
           check_consumer cuda "{ path = \"$package_path\", default-features = false, features = [\"cuda\"] }" "$ptx_patch"
 
-  # one abi3 wheel per platform; the Linux wheel is also the CUDA wheel, and it
-  # builds without a GPU or CUDA toolkit because CUDA is loaded at run time
+  # one abi3 wheel per platform; the Linux and Windows wheels are also the CUDA wheels,
+  # and they build without a GPU or CUDA toolkit because CUDA is loaded at run time
   python-wheels:
     name: Python wheel (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
@@ -153,8 +153,22 @@ jobs:
             os: macos-15
             target: aarch64-apple-darwin
             manylinux: "off"
+          - name: Windows x86_64, CPU + CUDA
+            os: windows-2025
+            target: x86_64-pc-windows-msvc
+            manylinux: "off"
     steps:
       - uses: actions/checkout@v6
+
+      # Git for Windows checks a symlink out as a text file holding its target, so the
+      # wheel would ship that path as its license; rm first, since cp through a real
+      # symlink would copy the file onto itself
+      - name: Copy the license over its symlink
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          rm -f crates/speakrs-python/LICENSE
+          cp LICENSE crates/speakrs-python/LICENSE
 
       - name: Build wheel
         uses: PyO3/maturin-action@v1.51.0
@@ -238,6 +252,9 @@ jobs:
           - name: macOS arm64
             os: macos-15
             target: aarch64-apple-darwin
+          - name: Windows x86_64
+            os: windows-2025
+            target: x86_64-pc-windows-msvc
     env:
       SPEAKRS_MODEL_FIXTURE_REV: 67f963b6a1d94fcd4678948237b3cc8bd69bf1d8
     steps:
@@ -282,8 +299,14 @@ jobs:
           uv pip install --python .venv-wheel dist/*.whl pytest numpy
 
       - name: Run tests
+        shell: bash
         working-directory: crates/speakrs-python
-        run: ../../.venv-wheel/bin/python -m pytest -rA
+        run: |
+          set -euo pipefail
+          # Windows venvs keep the interpreter in Scripts, not bin
+          python=../../.venv-wheel/bin/python
+          if [ "$RUNNER_OS" = Windows ]; then python=../../.venv-wheel/Scripts/python.exe; fi
+          "$python" -m pytest -rA
 
   # a v* tag publishes to TestPyPI, installs that release, and only then publishes to
   # PyPI; each index trusts this workflow and environment, so no token is stored
@@ -311,7 +334,8 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           ls -la dist
-          test "$(find dist -type f | wc -l)" -eq 3
+          # the Linux, macOS and Windows wheels and the sdist
+          test "$(find dist -type f | wc -l)" -eq 4
           for file in dist/*; do
             case "$(basename "$file")" in
               "speakrs-${version}"-*.whl | "speakrs-${version}.tar.gz") ;;
@@ -336,6 +360,8 @@ jobs:
             os: ubuntu-24.04
           - name: macOS arm64
             os: macos-15
+          - name: Windows x86_64
+            os: windows-2025
     steps:
       - uses: actions/checkout@v6
 
@@ -347,6 +373,9 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
+          # Windows venvs keep their programs in Scripts, not bin
+          bin=.venv-release/bin
+          if [ "$RUNNER_OS" = Windows ]; then bin=.venv-release/Scripts; fi
           uv venv --python 3.12 .venv-release
           # a new release can take a few minutes to appear in the index
           for attempt in 1 2 3 4 5 6 7 8 9 10; do
@@ -357,8 +386,8 @@ jobs:
             test "$attempt" -lt 10
             sleep 30
           done
-          .venv-release/bin/python -c "import speakrs; print(speakrs.__version__, speakrs.available_modes())"
-          rttm="$(.venv-release/bin/speakrs diarize --mode cpu fixtures/test_short.wav)"
+          "$bin/python" -c "import speakrs; print(speakrs.__version__, speakrs.available_modes())"
+          rttm="$("$bin/speakrs" diarize --mode cpu fixtures/test_short.wav)"
           printf '%s\n' "$rttm"
           grep -q '^SPEAKER ' <<< "$rttm"
 

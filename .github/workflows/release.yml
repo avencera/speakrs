@@ -13,6 +13,7 @@
 #   speakrs-<tag>-x86_64-unknown-linux-gnu.tar.gz   (cpu, cuda)
 #   speakrs-<tag>-aarch64-unknown-linux-gnu.tar.gz  (cpu)
 #   speakrs-<tag>-aarch64-apple-darwin.tar.gz       (cpu, coreml)
+#   speakrs-<tag>-x86_64-pc-windows-msvc.zip        (cpu, cuda; not used by install.sh)
 #   install.sh
 #
 # The archives hold the speakrs command from crates/speakrs-cli (`speakrs diarize`, and
@@ -22,8 +23,11 @@
 # cargo-zigbuild links against glibc 2.28, the same floor as the manylinux_2_28 wheel,
 # instead of the runner's newer glibc. Its tuner is built with `cuda`, so it matches
 # applications built with `cuda`, since a tune file applies only to the speakrs version
-# and kernel set that wrote it. CUDA on Linux arm64 builds but hasn't run on a GPU, and
-# Intel Macs and Windows aren't tested in CI, so neither ships.
+# and kernel set that wrote it. The Windows binary loads nvcuda.dll, cuDNN and cuBLAS at
+# run time the same way, and links the C runtime statically so it runs without the
+# Visual C++ redistributable; CI builds and tests it, but it hasn't run on a GPU yet.
+# CUDA on Linux arm64 builds but hasn't run on a GPU, and Intel Macs aren't tested in
+# CI, so neither ships.
 #
 # Pull requests that touch the release files or the command build and check the archives
 # without uploading them.
@@ -120,17 +124,29 @@ jobs:
             build-target: x86_64-unknown-linux-gnu.2.28
             build-tool: cargo-zigbuild
             features: cpu,cuda
+            rustflags: -D warnings
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             build-target: aarch64-unknown-linux-gnu.2.28
             build-tool: cargo-zigbuild
             features: cpu
+            rustflags: -D warnings
           - os: macos-15
             target: aarch64-apple-darwin
             build-target: aarch64-apple-darwin
             build-tool: cargo
             features: cpu,coreml
+            rustflags: -D warnings
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            build-target: x86_64-pc-windows-msvc
+            build-tool: cargo
+            features: cpu,cuda
+            # RUSTFLAGS replaces the per-target flags rather than adding to them, so each
+            # target spells out its full set
+            rustflags: -D warnings -C target-feature=+crt-static
     env:
+      RUSTFLAGS: ${{ matrix.rustflags }}
       # maturin's default floor for the macOS arm64 wheel; other OSes ignore this
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:
@@ -169,6 +185,7 @@ jobs:
           build-tool: ${{ matrix.build-tool }}
           archive: $bin-$tag-$target
           tar: unix
+          zip: windows
           checksum: sha256
           locked: true
           dry-run: ${{ !startsWith(github.ref, 'refs/tags/v') }}
@@ -216,14 +233,40 @@ jobs:
             exit 1
           fi
 
+      # a static C runtime keeps vcruntime140.dll and the UCRT out of the imports, and
+      # CUDA must load at run time, so the binary may import only Windows system DLLs
+      - name: Check imports
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          ARCHIVE: ${{ steps.upload.outputs.zip }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/archive"
+          # 7-Zip ships on the runner image, which the action itself uses to make the zip
+          7z x -y "$ARCHIVE" -o"$RUNNER_TEMP/archive"
+          bin="$RUNNER_TEMP/archive/speakrs.exe"
+          rustup component add llvm-tools
+          readobj="$(cygpath -u "$(rustc --print sysroot)")/lib/rustlib/x86_64-pc-windows-msvc/bin/llvm-readobj.exe"
+          # a Windows tool's output ends lines with CRLF
+          imports="$("$readobj" --coff-imports "$bin" | tr -d '\r' | sed -n 's/^ *Name: //p' | sort -u)"
+          echo "$imports"
+          test -n "$imports"
+          if grep -Eiv '^(kernel32|ntdll|advapi32|bcrypt|bcryptprimitives|ws2_32|userenv|secur32|crypt32|ole32|oleaut32|shell32|user32|synchronization|api-ms-win-core-[a-z0-9-]+)\.dll$' <<< "$imports"; then
+            echo "the binary imports a DLL outside Windows itself" >&2
+            exit 1
+          fi
+
       # the archived binary downloads the CPU models and diarizes the short fixture, so a
       # release never ships a command that can't run its default mode
       - name: Diarize with the archived binary
         shell: bash
         run: |
           set -euo pipefail
-          "$RUNNER_TEMP/archive/speakrs" --version
-          "$RUNNER_TEMP/archive/speakrs" diarize fixtures/test_short.wav \
+          bin="$RUNNER_TEMP/archive/speakrs"
+          if [ "$RUNNER_OS" = Windows ]; then bin+=.exe; fi
+          "$bin" --version
+          "$bin" diarize fixtures/test_short.wav \
             --cache-dir "$RUNNER_TEMP/models" > "$RUNNER_TEMP/test_short.rttm"
           cat "$RUNNER_TEMP/test_short.rttm"
           grep -q '^SPEAKER test_short ' "$RUNNER_TEMP/test_short.rttm"

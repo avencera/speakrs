@@ -72,6 +72,10 @@ jobs:
           - name: macOS arm64
             os: macos-15
             features: cpu coreml cuda migraphx load-dynamic _metrics
+          # CUDA loads at run time, so the Windows build needs no toolkit
+          - name: Windows x86_64
+            os: windows-2025
+            features: cpu cuda migraphx load-dynamic _metrics
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -271,7 +275,8 @@ jobs:
         run: cargo clippy -p speakrs --all-targets --no-default-features --features "online coreml" -- -D warnings
 
   test:
-    timeout-minutes: 30
+    # the Windows leg builds a second, CUDA-only test binary, and MSVC links slower
+    timeout-minutes: ${{ matrix.os == 'windows-2025' && 45 || 30 }}
     name: Test (${{ matrix.name }})
     strategy:
       fail-fast: false
@@ -283,6 +288,8 @@ jobs:
             os: ubuntu-24.04-arm
           - name: macOS arm64
             os: macos-15
+          - name: Windows x86_64
+            os: windows-2025
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -336,6 +343,12 @@ jobs:
       # the package workflow, so leave it out of the CPU fixture test run
       - name: Run tests
         run: cargo test --workspace --exclude speakrs-python
+
+      # the cuda-only job covers Linux; this runs the same host-only CUDA tests, and
+      # builds the GPU ones, against the Windows loader and paths
+      - name: Run host-only CUDA tests
+        if: runner.os == 'Windows'
+        run: cargo test -p speakrs --no-default-features --features "online cuda"
 
       # hashes and PTX entry points only; the PTX itself is generated on a GPU box
       - name: Check committed CUDA PTX against the kernel sources
