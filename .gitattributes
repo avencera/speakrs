@@ -1,0 +1,9 @@
+# LF in every checkout, Windows included: the PTX and kernel manifests are embedded and
+# checked against pinned SHA-256 hashes, and cudakit-build hashes the kernel sources, so
+# CRLF would change what a build ships and fail those checks
+* text=auto eol=lf
+*.cubin binary
+*.npy binary
+*.wav binary
+*.safetensors binary
+*.png binary
