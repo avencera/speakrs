@@ -93,14 +93,20 @@ pub(super) fn digest_paths_cached(
     cache_dir: &Path,
 ) -> Result<String> {
     let files = files_for_paths(paths)?;
+    // size and mtime alone can't tell a file rewritten within one timestamp tick from
+    // the original, and only Unix has the inode and change time that can, so other
+    // platforms always hash
+    if cfg!(not(unix)) {
+        return digest_files(root, &files);
+    }
+
     let mut metadata_digest = Sha256::new();
     for path in &files {
         let metadata = fs::metadata(path)?;
         let relative = path.strip_prefix(root).unwrap_or(path);
         update_length_prefixed(&mut metadata_digest, relative.to_string_lossy().as_bytes());
         metadata_digest.update(metadata.len().to_le_bytes());
-        // the inode and change time catch a file replaced with the same size and mtime;
-        // Windows has no stable equivalent, so there the key is the size and mtime alone
+        // the inode and change time catch a file replaced with the same size and mtime
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -324,6 +330,8 @@ mod tests {
         let second = digest_paths_cached(temp.path(), &[model], &cache).unwrap();
 
         assert_ne!(first, second);
-        assert_eq!(fs::read_dir(cache).unwrap().count(), 2);
+        // other platforms always hash, so only Unix writes cache entries
+        let cached = fs::read_dir(&cache).map_or(0, |entries| entries.count());
+        assert_eq!(cached, if cfg!(unix) { 2 } else { 0 });
     }
 }
