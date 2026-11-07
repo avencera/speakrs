@@ -32,5 +32,5 @@ speakrs-sdk = { path = "../speakrs-sdk", default-features = false }
 [target.'cfg(target_os = "macos")'.dependencies]
 speakrs-sdk = { path = "../speakrs-sdk", default-features = false, features = ["coreml"] }
 
-[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+[target.'cfg(all(any(target_os = "linux", target_os = "windows"), target_arch = "x86_64"))'.dependencies]
 speakrs-sdk = { path = "../speakrs-sdk", default-features = false, features = ["cuda"] }

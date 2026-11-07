@@ -17,6 +17,7 @@ classifiers = [
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
@@ -32,10 +33,11 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-# cuDNN and cuBLAS for layers without a speakrs kernel; the driver alone runs the rest
+# cuDNN and cuBLAS for layers without a speakrs kernel; the driver alone runs the rest.
+# Windows wheels exist for most but not all releases, and pip takes the newest one there is
 cuda = [
-    "nvidia-cublas-cu12>=12.4; sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "nvidia-cudnn-cu12>=9,<10; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "nvidia-cublas-cu12>=12.4; (sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64')",
+    "nvidia-cudnn-cu12>=9,<10; (sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'win32' and platform_machine == 'AMD64')",
 ]
 
 [project.scripts]
