@@ -117,7 +117,8 @@ speakrs cuda tune
 ```
 
 End the first line with `sh -s -- --tag vX.Y.Z` to install another release's
-command. Without `--models-dir PATH`, the tuner uses the CUDA models in the
+command. `install.sh` doesn't install the Windows zip; unzip it and run
+`speakrs.exe cuda tune` instead. Without `--models-dir PATH`, the tuner uses the CUDA models in the
 download cache, downloading them first if needed; `--cache-dir DIR` picks
 another cache. For a GPU-specific build, or Linux arm64, build the command with
 your application's CUDA feature:
