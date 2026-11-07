@@ -2126,12 +2126,14 @@ fn temporary_path(path: &Path) -> PathBuf {
 }
 
 fn sync_parent(path: &Path) -> Result<()> {
+    // Windows can't open a directory as a file to flush it
     #[cfg(unix)]
-    {
-        if let Some(parent) = path.parent() {
-            File::open(parent)?.sync_all()?;
-        }
+    if let Some(parent) = path.parent() {
+        File::open(parent)?.sync_all()?;
     }
+
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 

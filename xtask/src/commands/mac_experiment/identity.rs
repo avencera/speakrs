@@ -1,6 +1,5 @@
 use std::fs;
 use std::io::{BufReader, Read};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Command;
@@ -100,10 +99,18 @@ pub(super) fn digest_paths_cached(
         let relative = path.strip_prefix(root).unwrap_or(path);
         update_length_prefixed(&mut metadata_digest, relative.to_string_lossy().as_bytes());
         metadata_digest.update(metadata.len().to_le_bytes());
-        metadata_digest.update(metadata.dev().to_le_bytes());
-        metadata_digest.update(metadata.ino().to_le_bytes());
-        metadata_digest.update(metadata.ctime().to_le_bytes());
-        metadata_digest.update(metadata.ctime_nsec().to_le_bytes());
+        // the inode and change time catch a file replaced with the same size and mtime;
+        // Windows has no stable equivalent, so there the key is the size and mtime alone
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+
+            metadata_digest.update(metadata.dev().to_le_bytes());
+            metadata_digest.update(metadata.ino().to_le_bytes());
+            metadata_digest.update(metadata.ctime().to_le_bytes());
+            metadata_digest.update(metadata.ctime_nsec().to_le_bytes());
+        }
+
         let modified = metadata
             .modified()?
             .duration_since(std::time::UNIX_EPOCH)

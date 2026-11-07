@@ -46,7 +46,7 @@ coreml = [
     "dep:objc2-foundation",
     "_backend",
 ]
-# Linux-only native NVIDIA backend; CUDA is never part of default
+# native NVIDIA backend for Linux and Windows; CUDA is never part of default
 # cuda defaults to speakrs kernels on every GPU, with cuDNN/cuBLAS fallback
 cuda = ["cuda-sm75", "cuda-sm80", "cuda-sm90", "cuda-sm120", "_cuda-libraries"]
 # internal: optional numerical libraries, added only by cuda

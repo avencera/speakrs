@@ -552,6 +552,10 @@ fn remove_refs_to(refs_dir: &Path, revision: &str) -> std::io::Result<()> {
 const BLOB_GRACE_PERIOD: Duration = Duration::from_secs(10 * 60);
 
 /// Snapshots link into `blobs/`, so a blob no remaining snapshot links to is garbage
+///
+/// On Windows hf-fetch copies each blob into its snapshot instead of linking it, so no
+/// blob counts as referenced there and a cleanup frees the duplicates; the snapshots
+/// keep their own copies
 fn remove_unreferenced_blobs(repo_dir: &Path) -> std::io::Result<()> {
     let mut referenced = HashSet::new();
     // any read error aborts, since a partial scan would make kept blobs look unused
