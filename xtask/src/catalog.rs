@@ -490,7 +490,11 @@ mod tests {
             assert!(error.to_string().contains("not available"));
         }
 
-        let spec = ImplementationCatalog::resolve_many(&[]).unwrap()[0];
+        // the catalog has no implementations for other platforms, such as Windows, so
+        // there is nothing there to select twice
+        let Some(&spec) = ImplementationCatalog::resolve_many(&[]).unwrap().first() else {
+            return;
+        };
         let error = ImplementationCatalog::resolve_many(&[
             spec.cli_name().to_owned(),
             spec.aliases[0].to_owned(),
