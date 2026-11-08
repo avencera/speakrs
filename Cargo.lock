@@ -464,11 +464,11 @@ dependencies = [
 
 [[package]]
 name = "cudakit"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87714d487777176f54c3a628bc75acd7a180146f2f809816983c08ee805e4548"
+checksum = "d5d091348c1aeffd3b1807f44eaac2f3a5d7ab04c2e7fad075f1e9e1315f0ab7"
 dependencies = [
- "cudarc",
+ "cudakit-cudarc",
  "libloading",
  "serde",
  "sha2 0.10.9",
@@ -478,9 +478,9 @@ dependencies = [
 
 [[package]]
 name = "cudakit-build"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ab4ba6d0bf3554121325dc24f1568e0562f0cb9fedd49096833343363bc2105"
+checksum = "e7debce5c4b93b4c9a885b4c2e75127a46342b4e682e64ae2ae5fdccc4ce2c96"
 dependencies = [
  "eyre",
  "sha2 0.10.9",
@@ -488,10 +488,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "cudarc"
+name = "cudakit-cudarc"
 version = "0.19.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7359bf1de037ddada72729c3acec9b040f3468400c6e9e740b01ba0cd2e89562"
+checksum = "374d375995d223cda2d64f1c3c84fff1323b594857d9aac801747cb07be53c62"
 dependencies = [
  "libloading",
 ]
@@ -1954,7 +1954,7 @@ dependencies = [
  "block2",
  "crossbeam-channel",
  "cudakit",
- "cudarc",
+ "cudakit-cudarc",
  "getrandom 0.4.3",
  "hf-fetch",
  "hound",

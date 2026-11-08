@@ -40,7 +40,7 @@ chrono = "0.4.45"
 clap = { version = "4", features = ["derive", "env"] }
 color-eyre = "0.6"
 crossbeam-channel = "0.5"
-cudakit-build = "0.1"
+cudakit-build = "0.3"
 hex = "0.4.3"
 hound = "3.5.1"
 libc = "0.2"
