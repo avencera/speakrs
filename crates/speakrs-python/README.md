@@ -104,7 +104,8 @@ pip install "speakrs[cuda]"
 
 The extra installs the `nvidia-cudnn-cu12` and `nvidia-cublas-cu12` wheels,
 which speakrs loads from site-packages on Linux and Windows. Leave it out if
-cuDNN 9 and cuBLAS 12 are already on the library path (`PATH` on Windows).
+cuDNN 9 and cuBLAS 12 are already on the library path (on Windows, an absolute
+`PATH` entry or `%CUDA_PATH%\bin`).
 
 ## Models
 

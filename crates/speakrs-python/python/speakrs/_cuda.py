@@ -5,9 +5,9 @@ falls back to them: ``libcudnn.so.9`` and ``libcublas.so.12`` on Linux,
 ``cudnn64_9.dll`` and ``cublas64_12.dll`` on Windows. The ``nvidia-cudnn-cu12``
 and ``nvidia-cublas-cu12`` wheels install those libraries inside site-packages,
 where neither loader looks, so they are loaded here first. On Linux glibc then
-resolves the backend's soname lookups to the already-loaded copies; Windows
-reuses a loaded DLL with the requested name, from whatever directory it came
-from.
+resolves the backend's soname lookups to the already-loaded copies; on Windows
+the backend reuses a loaded DLL with the requested name before it searches,
+from whatever directory it came from.
 """
 
 from __future__ import annotations

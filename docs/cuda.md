@@ -15,10 +15,12 @@ toolkit.
   `cuda-sm90`, `cuda-sm120`) load only the driver.
 - **The `cuda` build** also uses cuDNN 9 and cuBLAS when a selected plan uses
   them, and NVRTC for the `PersistDynamic` LSTM mode.
-- **On Windows** the driver is `nvcuda.dll`, and the libraries are
+- **On Windows** the driver is `nvcuda.dll` from System32, and the libraries are
   `cudnn64_9.dll`, `cublas64_12.dll` with `cublasLt64_12.dll`, and
-  `nvrtc64_120_0.dll`, found through `PATH`. CI builds the Windows backend and
-  runs its host-only tests, but it hasn't run on a GPU yet.
+  `nvrtc64_120_0.dll`, found beside the executable, in System32, in absolute
+  `PATH` entries or in `%CUDA_PATH%\bin`, never in the current directory. The
+  driver release in tune files comes from `nvml.dll`. CI builds the Windows
+  backend and runs its host-only tests, but it hasn't run on a GPU yet.
 
 The family features are aliases for the kernel tiers: `cuda-rtx20` is
 `cuda-sm75`, `cuda-rtx30`, `cuda-rtx40` and `cuda-a100` are `cuda-sm80`, and

@@ -388,9 +388,11 @@
 //! speakrs = { version = "0.7", features = ["cuda-rtx40"] }
 //! ```
 //!
-//! On Windows the driver is `nvcuda.dll`, and the `cuda` fallback opens
+//! On Windows the driver is `nvcuda.dll` from System32, and the `cuda` fallback opens
 //! `cudnn64_9.dll`, `cublas64_12.dll` (with `cublasLt64_12.dll` beside it) and
-//! `nvrtc64_120_0.dll`. Put the directories holding them on `PATH` (a CUDA 12 toolkit keeps cuBLAS in `%CUDA_PATH%\bin`), or
+//! `nvrtc64_120_0.dll`. It looks for them beside the executable, in System32, in each
+//! absolute `PATH` entry and in `%CUDA_PATH%\bin`, where a CUDA 12 toolkit keeps cuBLAS
+//! and NVRTC, but never in the current directory. Put cuDNN's directory on `PATH`, or
 //! use the Python package, whose `cuda` extra brings its own. CUDA on Windows builds
 //! and passes its host-only tests in CI, but it hasn't run on a GPU yet.
 //!
