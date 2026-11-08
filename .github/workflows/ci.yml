@@ -228,8 +228,8 @@ jobs:
             cargo check -p speakrs --no-default-features --features "$features"
             cargo test -p speakrs --no-default-features --features "$features" --lib inference::cuda::tier::tests
             cargo test -p speakrs --no-default-features --features "$features" --lib inference::cuda::kernels::tests
-            cargo tree -p speakrs --no-default-features --features "$features" -e features -i cudarc > cuda-features.log
-            if grep -E 'cudarc feature "(cublas|cudnn)"' cuda-features.log; then
+            cargo tree -p speakrs --no-default-features --features "$features" -e features -i cudakit-cudarc > cuda-features.log
+            if grep -E 'cudakit-cudarc feature "(cublas|cublaslt|cudnn)"' cuda-features.log; then
               echo "optional CUDA library feature in a minimal backend" >&2
               exit 1
             fi
