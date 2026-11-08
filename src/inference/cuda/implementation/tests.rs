@@ -1177,7 +1177,10 @@ fn default_production_loads_record_pinned_jit() -> Result<(), CudaError> {
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
-        .open("/workspace/gpu-bench.lock")
+        .open(
+            std::env::var_os("SPEAKRS_GPU_LOCK")
+                .unwrap_or_else(|| "/workspace/gpu-bench.lock".into()),
+        )
         .expect("shared GPU lock exists");
     assert!(matches!(lock.try_lock(), Err(TryLockError::WouldBlock)));
     let runtime = CudaRuntime::new(0)?;

@@ -11,6 +11,7 @@ pip install speakrs
 | --- | --- |
 | macOS arm64 | `CPU`, `CoreML`, `CoreMLFast` |
 | Linux x86_64 (glibc 2.28+) | `CPU`, `CUDA`, `CUDAFast` |
+| Windows x86_64 | `CPU`, `CUDA`, `CUDAFast` |
 
 The package needs Python 3.11 or newer. One wheel covers every Python version.
 
@@ -88,9 +89,10 @@ CPU when that GPU is older than Turing; `--mode` overrides that, and
 
 ## CUDA
 
-The Linux wheel includes the CUDA backend. It needs an NVIDIA driver and a
-Turing (RTX 20, T4) or newer GPU, but no CUDA toolkit. On a machine without a
-GPU, the wheel still imports and runs on the CPU.
+The Linux and Windows wheels include the CUDA backend. It needs an NVIDIA
+driver and a Turing (RTX 20, T4) or newer GPU, but no CUDA toolkit. On a
+machine without a GPU, the wheel still imports and runs on the CPU. The
+Windows wheel passes CI but hasn't run on a GPU yet.
 
 speakrs runs its own kernels for every layer. cuDNN 9 and cuBLAS are only a
 fallback for a layer that has no kernel for your GPU. If you want that
@@ -99,6 +101,11 @@ fallback, install it with:
 ```sh
 pip install "speakrs[cuda]"
 ```
+
+The extra installs the `nvidia-cudnn-cu12` and `nvidia-cublas-cu12` wheels,
+which speakrs loads from site-packages on Linux and Windows. Leave it out if
+cuDNN 9 and cuBLAS 12 are already on the library path (on Windows, an absolute
+`PATH` entry or `%CUDA_PATH%\bin`).
 
 ## Models
 

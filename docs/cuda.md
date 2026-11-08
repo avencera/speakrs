@@ -6,14 +6,24 @@ the settings for debugging. For choosing a build, see
 
 ## Requirements
 
-The CUDA backend runs on Linux. It needs an NVIDIA driver and a Turing
-(compute capability 7.5) or newer GPU, and it builds without a CUDA toolkit.
+The CUDA backend runs on Linux and Windows (x86_64). It needs an NVIDIA driver
+and a Turing (compute capability 7.5) or newer GPU, and it builds without a CUDA
+toolkit.
 
 - **GPU-specific builds** (`cuda-rtx20`, `cuda-rtx30`, `cuda-rtx40`,
   `cuda-a100`, `cuda-rtx50`, and the tier features `cuda-sm75`, `cuda-sm80`,
   `cuda-sm90`, `cuda-sm120`) load only the driver.
 - **The `cuda` build** also uses cuDNN 9 and cuBLAS when a selected plan uses
   them, and NVRTC for the `PersistDynamic` LSTM mode.
+- **On Windows** the driver is `nvcuda.dll` from System32, and the libraries are
+  `cudnn64_9.dll`, `cublas64_12.dll` with `cublasLt64_12.dll`, and
+  `nvrtc64_120_0.dll`, found beside the executable, in System32, in absolute
+  `PATH` entries or in `%CUDA_PATH%\bin`, never in the current directory. Tune
+  files need the driver release, which comes from the `nvml.dll` that DCH
+  drivers install in System32. A Standard driver keeps it under
+  `NVIDIA Corporation\NVSMI` instead, so there `speakrs cuda tune` fails and
+  models run with the built-in kernel choices. CI builds the Windows backend and
+  runs its host-only tests, but it hasn't run on a GPU yet.
 
 The family features are aliases for the kernel tiers: `cuda-rtx20` is
 `cuda-sm75`, `cuda-rtx30`, `cuda-rtx40` and `cuda-a100` are `cuda-sm80`, and
@@ -101,9 +111,9 @@ some individual layers are slower.
 
 ## Tuning
 
-The `speakrs` command in each GitHub release's Linux x86_64 archive is built
-with `cuda` (glibc 2.28 or newer), so it writes tune files for applications
-built with `cuda` at the same speakrs version:
+The `speakrs` command in each GitHub release's Linux x86_64 archive (glibc 2.28
+or newer) and Windows x86_64 zip is built with `cuda`, so it writes tune files
+for applications built with `cuda` at the same speakrs version:
 
 ```sh
 curl -LSfs https://github.com/avencera/speakrs/releases/latest/download/install.sh | sh
@@ -112,7 +122,9 @@ speakrs cuda tune
 ```
 
 End the first line with `sh -s -- --tag vX.Y.Z` to install another release's
-command. Without `--models-dir PATH`, the tuner uses the CUDA models in the
+command. `install.sh` doesn't install the Windows zip; unzip it, then run
+`.\speakrs.exe cuda tune` from the extracted directory, since PowerShell
+doesn't run programs from the current directory by bare name. Without `--models-dir PATH`, the tuner uses the CUDA models in the
 download cache, downloading them first if needed; `--cache-dir DIR` picks
 another cache. For a GPU-specific build, or Linux arm64, build the command with
 your application's CUDA feature:
@@ -167,7 +179,8 @@ Tuning doesn't change accuracy rules or precision.
 ### Tune files
 
 The file is saved under `$XDG_CONFIG_HOME/speakrs/`, or
-`$HOME/.config/speakrs/`, with a per-device name.
+`$HOME/.config/speakrs/` (`%LOCALAPPDATA%\speakrs\` on Windows), with a
+per-device name.
 
 - **Paths:** use `--output PATH` to change that location, then set
   `SPEAKRS_CUDA_TUNE_FILE=PATH` when loading a model. The same variable can set

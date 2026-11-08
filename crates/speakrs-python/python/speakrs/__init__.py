@@ -91,9 +91,9 @@ class ExecutionMode(str, Enum):
     CoreMLFast = "CoreMLFast"
     """Apple CoreML with FP32 models and a 2 s step (macOS builds)."""
     CUDA = "CUDA"
-    """Native NVIDIA backend (Linux x86_64 builds, Turing or newer GPU)."""
+    """Native NVIDIA backend (Linux and Windows x86_64 builds, Turing or newer GPU)."""
     CUDAFast = "CUDAFast"
-    """Native NVIDIA backend with a 2 s step (Linux x86_64 builds)."""
+    """Native NVIDIA backend with a 2 s step (Linux and Windows x86_64 builds)."""
 
 
 class ProgressKind(str, Enum):

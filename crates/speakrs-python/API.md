@@ -26,7 +26,7 @@ names `CUDAFast`.
 | --- | --- | --- |
 | `CPU` | native Rust | every wheel |
 | `CoreML`, `CoreMLFast` | Apple CoreML | macOS arm64 wheel |
-| `CUDA`, `CUDAFast` | native NVIDIA backend, Turing or newer | Linux x86_64 wheel |
+| `CUDA`, `CUDAFast` | native NVIDIA backend, Turing or newer | Linux x86_64 and Windows x86_64 wheels |
 
 `available_modes()` lists the modes compiled into the installed wheel. A CUDA
 mode can still fail at load time without an NVIDIA driver; that raises

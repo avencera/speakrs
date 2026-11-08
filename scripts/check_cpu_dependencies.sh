@@ -12,7 +12,7 @@ check_backend_dependencies() {
 
     local found
     found=$(printf '%s\n' "$dependencies" | awk '
-        $1 == "ort" || $1 == "ort-sys" || $1 == "cudarc" || $1 == "cudakit" { print $1 }
+        $1 == "ort" || $1 == "ort-sys" || $1 == "cudakit-cudarc" || $1 == "cudakit" { print $1 }
     ' | sort -u | tr '\n' ' ')
     if [[ -n "$found" ]]; then
         printf '%s features "%s" include %s\n' "$package" "$features" "$found" >&2

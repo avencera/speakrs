@@ -136,16 +136,16 @@
 //! For the `speakrs diarize` command line alone, `uv tool install speakrs`
 //! installs it in its own environment.
 //!
-//! The macOS arm64 wheel includes CPU and CoreML, and the Linux x86_64 wheel
-//! includes CPU and CUDA. See [the Python package](https://github.com/avencera/speakrs/blob/master/crates/speakrs-python/README.md)
+//! The macOS arm64 wheel includes CPU and CoreML, and the Linux x86_64 and Windows
+//! x86_64 wheels include CPU and CUDA. See [the Python package](https://github.com/avencera/speakrs/blob/master/crates/speakrs-python/README.md)
 //! and its [API reference](https://github.com/avencera/speakrs/blob/master/crates/speakrs-python/API.md).
 //!
 //! ## Command line
 //!
 //! The `speakrs` command diarizes audio files and prints RTTM, with no Python. Each
-//! GitHub release has it for Linux x86_64 with CPU and CUDA, Linux arm64 with CPU, and
-//! Apple silicon with CPU and CoreML. This installs the latest release into
-//! `~/.local/bin`:
+//! GitHub release has it for Linux x86_64 with CPU and CUDA, Linux arm64 with CPU,
+//! Apple silicon with CPU and CoreML, and Windows x86_64 with CPU and CUDA. On Linux
+//! and macOS, this installs the latest release into `~/.local/bin`:
 //!
 //! ```sh
 //! curl -LSfs https://github.com/avencera/speakrs/releases/latest/download/install.sh | sh
@@ -162,6 +162,11 @@
 //! replaced by `_`, since RTTM fields are separated by spaces. The Linux binaries need glibc 2.28 or newer, and the CUDA modes need an
 //! NVIDIA driver. To pick another release or install directory, end the first line
 //! with `sh -s -- --tag vX.Y.Z --to DIR`.
+//!
+//! On Windows, download `speakrs-<tag>-x86_64-pc-windows-msvc.zip` and its `.sha256`
+//! from the [latest release](https://github.com/avencera/speakrs/releases/latest), and
+//! put the `speakrs.exe` inside in a directory on `PATH`. It needs no Visual C++
+//! redistributable. The Windows build passes CI but hasn't run on a GPU yet.
 //!
 //! To build it from source with the backends you want:
 //!
@@ -340,7 +345,7 @@
 //! |---|---|---|
 //! | macOS | `coreml` | Native CoreML, no ONNX Runtime |
 //! | Any CPU | `cpu` | Native Rust, no ONNX Runtime |
-//! | Linux with an NVIDIA GPU | `cuda`, or a GPU-specific feature below | Native CUDA, no ONNX Runtime or CUDA toolkit |
+//! | Linux or Windows with an NVIDIA GPU | `cuda`, or a GPU-specific feature below | Native CUDA, no ONNX Runtime or CUDA toolkit |
 //! | Linux with an AMD GPU | `migraphx` | ONNX Runtime MIGraphX; add `load-dynamic` |
 //!
 //! The default `online` feature downloads models with `ModelManager`.
@@ -350,9 +355,9 @@
 //!
 //! ## NVIDIA GPUs
 //!
-//! The CUDA backend runs speakrs's own GPU kernels on Linux. It works on any NVIDIA
-//! GPU from the RTX 20 series and T4 onward, and you don't need the CUDA toolkit to
-//! build or run it.
+//! The CUDA backend runs speakrs's own GPU kernels on Linux and Windows (x86_64). It
+//! works on any NVIDIA GPU from the RTX 20 series and T4 onward, and you don't need
+//! the CUDA toolkit to build or run it.
 //!
 //! **Not sure which GPU you'll run on? Use `cuda`.** It includes kernels for every
 //! supported GPU generation. It can also fall back to cuDNN 9 and cuBLAS 12 for a
@@ -383,6 +388,14 @@
 //! speakrs = { version = "0.7", features = ["cuda-rtx40"] }
 //! ```
 //!
+//! On Windows the driver is `nvcuda.dll` from System32, and the `cuda` fallback opens
+//! `cudnn64_9.dll`, `cublas64_12.dll` (with `cublasLt64_12.dll` beside it) and
+//! `nvrtc64_120_0.dll`. It looks for them beside the executable, in System32, in each
+//! absolute `PATH` entry and in `%CUDA_PATH%\bin`, where a CUDA 12 toolkit keeps cuBLAS
+//! and NVRTC, but never in the current directory. Put cuDNN's directory on `PATH`, or
+//! use the Python package, whose `cuda` extra brings its own. CUDA on Windows builds
+//! and passes its host-only tests in CI, but it hasn't run on a GPU yet.
+//!
 //! ### Tested NVIDIA GPUs
 //!
 //! Real-time factor (RTFx) is audio length divided by processing time, so 1453x
@@ -411,8 +424,8 @@
 //! yours, run the tuner once. It measures the kernels on your GPU and saves the
 //! fastest choices, which later runs load automatically. A tune file only applies
 //! to the speakrs version and CUDA feature that wrote it. For an application built
-//! with `cuda`, use the Linux x86_64 [`speakrs` command](#command-line) from the
-//! matching GitHub release, which is built with `cuda`:
+//! with `cuda`, use the Linux x86_64 or Windows x86_64 [`speakrs` command](#command-line)
+//! from the matching GitHub release, which is built with `cuda`:
 //!
 //! ```sh
 //! speakrs cuda tune

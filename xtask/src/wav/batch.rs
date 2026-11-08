@@ -37,6 +37,11 @@ impl std::fmt::Display for InputChangedDuringLookahead {
 impl std::error::Error for InputChangedDuringLookahead {}
 
 enum ProbedInput {
+    // only the Unix probe opens inputs ahead of their turn
+    #[cfg_attr(
+        not(unix),
+        expect(dead_code, reason = "other platforms decode in order")
+    )]
     Regular(RegularInput),
     #[cfg(unix)]
     Changed(InputChangedDuringLookahead),

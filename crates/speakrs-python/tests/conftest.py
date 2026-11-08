@@ -46,7 +46,7 @@ def _reference_features() -> str:
     # the same backends as the wheel, so one cargo build serves every mode
     if sys.platform == "darwin":
         return "coreml"
-    if sys.platform.startswith("linux"):
+    if sys.platform.startswith("linux") or sys.platform == "win32":
         return "cuda"
     return "cpu"
 

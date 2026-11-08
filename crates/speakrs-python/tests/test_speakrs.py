@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -243,7 +244,9 @@ def test_pipeline_config_changes_results(cpu_pipeline):
 
 
 def test_cli_prints_rttm_and_clean_errors(cpu_models, cpu_pipeline, tmp_path):
-    speakrs_cli = shutil.which("speakrs", path=str(sys.prefix + "/bin"))
+    # Windows venvs keep their scripts in Scripts, not bin
+    scripts = Path(sys.prefix) / ("Scripts" if sys.platform == "win32" else "bin")
+    speakrs_cli = shutil.which("speakrs", path=str(scripts))
     assert speakrs_cli is not None
     run = subprocess.run(
         [speakrs_cli, "diarize", str(SHORT_WAV), "--model-dir", str(cpu_models.model_dir)],
