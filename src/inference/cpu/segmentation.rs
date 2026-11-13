@@ -147,14 +147,14 @@ impl CpuPyanNet {
             &mut scratch.recurrent[0],
             &mut scratch.lstm,
         )?;
-        for layer in 1..4 {
+        for (layer, lstm) in self.0.lstm.iter().enumerate().skip(1) {
             let (left, right) = scratch.recurrent.split_at_mut(1);
             let (input, output) = if layer % 2 == 1 {
                 (&left[0], &mut right[0])
             } else {
                 (&right[0], &mut left[0])
             };
-            self.0.lstm[layer].forward(input.view(), output, &mut scratch.lstm)?;
+            lstm.forward(input.view(), output, &mut scratch.lstm)?;
         }
         for stage in 0..3 {
             let (left, right) = scratch.head.split_at_mut(stage);

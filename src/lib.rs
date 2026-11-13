@@ -529,7 +529,7 @@ pub use hf_fetch::HubError;
 #[cfg(feature = "_backend")]
 pub use hf_fetch::default_hub_cache_dir;
 #[cfg(feature = "_backend")]
-pub use inference::{CoreMlComputeUnits, ExecutionMode};
+pub use inference::{CoreMlComputeUnits, CoreMlSegmentationBatch, ExecutionMode};
 #[cfg(feature = "_backend")]
 pub use models::ModelBundle;
 #[cfg(feature = "online")]

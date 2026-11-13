@@ -177,6 +177,7 @@ class RuntimeConfig:
         self,
         *,
         coreml_compute_units: str | None = None,
+        coreml_segmentation_batch: int | None = None,
         cuda_segmentation_math: str | None = None,
         cuda_embedding_math: str | None = None,
         cuda_graphs: bool | None = None,
@@ -184,6 +185,9 @@ class RuntimeConfig:
     @property
     def coreml_compute_units(self) -> str | None:
         """``"all"``, ``"cpu_and_neural_engine"``, or ``"cpu_only"``."""
+    @property
+    def coreml_segmentation_batch(self) -> int | None:
+        """``1``, ``32``, or ``64`` (default); a smaller batch lowers peak memory."""
     @property
     def cuda_segmentation_math(self) -> str | None:
         """``"fp32"`` (default) or ``"tf32"``."""

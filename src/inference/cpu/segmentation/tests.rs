@@ -182,16 +182,16 @@ fn all_pinned_raw_and_saved_rust_windows() {
             "segmentation raw={case} ms={:.3}",
             start.elapsed().as_secs_f64() * 1000.0
         );
-        for stage in 0..3 {
+        for (stage, pooled) in scratch.pooled.iter().enumerate() {
             let suffix = if stage == 0 {
                 String::new()
             } else {
                 format!("_{stage}")
             };
             let name = format!("tensor//sincnet/LeakyRelu{suffix}_output_0");
-            let dims = scratch.pooled[stage].dim();
+            let dims = pooled.dim();
             let expected_stage = reference.read_f32(&name, &[1, dims.0, dims.1]).unwrap();
-            let error = scratch.pooled[stage]
+            let error = pooled
                 .iter()
                 .zip(expected_stage)
                 .map(|(a, b)| (a - b).abs())

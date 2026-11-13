@@ -68,6 +68,47 @@ impl CoreMlComputeUnits {
     }
 }
 
+/// Largest batch the CoreML segmentation model runs per prediction
+///
+/// A smaller batch lowers peak memory, and the models for larger batches are not loaded. On
+/// three AMI meetings in [`ExecutionMode::CoreMl`] on an M2 Pro, peak RSS fell from
+/// 3.7–4.6 GB at [`Self::Batch64`] to 1.4–1.6 GB at [`Self::Single`], with about the same
+/// speed and the same DER
+///
+/// Recordings shorter than 192 windows, about three minutes in [`ExecutionMode::CoreMl`],
+/// run one window per prediction in the pipeline whichever batch is chosen
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CoreMlSegmentationBatch {
+    /// One window per prediction, which loads only the single-window model
+    Single,
+    /// Up to 32 windows per prediction
+    Batch32,
+    /// Up to 64 windows per prediction (default)
+    #[default]
+    Batch64,
+}
+
+impl CoreMlSegmentationBatch {
+    /// Windows per prediction for this choice
+    pub const fn size(self) -> usize {
+        match self {
+            Self::Single => 1,
+            Self::Batch32 => 32,
+            Self::Batch64 => 64,
+        }
+    }
+
+    /// The choice that runs `size` windows per prediction, if it is 1, 32 or 64
+    pub const fn from_size(size: usize) -> Option<Self> {
+        match size {
+            1 => Some(Self::Single),
+            32 => Some(Self::Batch32),
+            64 => Some(Self::Batch64),
+            _ => None,
+        }
+    }
+}
+
 /// Which backend and acceleration to use for inference
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]

@@ -373,9 +373,9 @@ impl SymmetricEigen {
                 continue;
             }
 
-            for k in 0..i {
-                self.diagonal[k] /= scale;
-                h += self.diagonal[k] * self.diagonal[k];
+            for value in &mut self.diagonal[..i] {
+                *value /= scale;
+                h += *value * *value;
             }
             let mut f = self.diagonal[i - 1];
             let mut g = if f > 0.0 { -h.sqrt() } else { h.sqrt() };
