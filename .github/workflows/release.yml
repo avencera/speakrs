@@ -7,7 +7,7 @@
 #
 # The tag must match the speakrs crate version and have a CHANGELOG.md entry, or the
 # release fails before anything is built. The Package workflow publishes the Python
-# wheels from the same tag; the crates go to crates.io separately.
+# wheels and then the crates from the same tag.
 #
 # Asset names match install.sh, each archive with a .sha256 beside it:
 #   speakrs-<tag>-x86_64-unknown-linux-gnu.tar.gz   (cpu, cuda)
