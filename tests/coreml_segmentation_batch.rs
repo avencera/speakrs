@@ -83,10 +83,21 @@ fn single_batch_loads_without_the_batched_bundles() {
         )
     };
 
-    let mut single = load(CoreMlSegmentationBatch::Single).unwrap();
+    // more windows than one batch-32 prediction, so both sequential paths would batch them if
+    // the single-window limit were ignored
     let (clip, _) = load_wav_samples(&fixture_path("test.wav"));
-    // 26 s at a 1 s step: 17 full windows plus the zero-padded tail window
-    assert_eq!(single.run(&clip).unwrap().len(), 18);
+    let audio: Vec<f32> = clip.iter().copied().cycle().take(60 * 16_000).collect();
+    let mut single = load(CoreMlSegmentationBatch::Single).unwrap();
+
+    let collected = single.run(&audio).unwrap();
+    // 60 s at a 1 s step: 51 full windows plus the zero-padded tail window
+    assert_eq!(collected.len(), 52);
+
+    let (tx, rx) = crossbeam_channel::unbounded();
+    let streamed_windows = single.run_streaming(&audio, tx).unwrap();
+    let streamed: Vec<_> = rx.into_iter().collect();
+    assert_eq!(streamed_windows, collected.len());
+    assert_eq!(streamed, collected);
 
     let error = match load(CoreMlSegmentationBatch::Batch32) {
         Ok(_) => panic!("Batch32 should need the batch-32 bundle"),
