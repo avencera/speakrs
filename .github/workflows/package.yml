@@ -423,13 +423,16 @@ jobs:
       url: https://crates.io/crates/speakrs
     permissions:
       id-token: write
+    # this job can mint a crates.io token, so every action in it is pinned to a commit
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
 
       # a rerun after a partial publish skips the crates already on crates.io, and a
       # crate whose version doesn't match the tag fails before anything is uploaded
