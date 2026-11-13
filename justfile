@@ -85,7 +85,8 @@ bump level:
     # updates speakrs and the shared [workspace.package] version of the artifact crates
     sed -i '' "s/^version = \"${CURRENT}\"/version = \"${NEW}\"/" Cargo.toml
     sed -i '' "s/version = \"=${CURRENT}\"/version = \"=${NEW}\"/" Cargo.toml
-    cargo generate-lockfile --quiet
+    # only the workspace crates change version; generate-lockfile would also upgrade every dependency
+    cargo update --workspace --quiet
     echo "Bumped ${CURRENT} → ${NEW}"
 
 # Publish speakrs and its CUDA artifact crates together: just publish [--dry-run]
