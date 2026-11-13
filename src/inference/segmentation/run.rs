@@ -109,7 +109,13 @@ impl SegmentationModel {
                 }
             }
             #[cfg(feature = "coreml")]
-            SegmentationBackend::CoreMl(_) => fixed,
+            SegmentationBackend::CoreMl(backend) => {
+                if backend.has_batched() {
+                    fixed
+                } else {
+                    Batching::Single
+                }
+            }
             #[cfg(feature = "_cuda")]
             SegmentationBackend::Cuda(_) => fixed,
         }

@@ -117,7 +117,9 @@ These are frozen value objects; omitted arguments keep the defaults.
 - `ClusteringConfig(ahc=None, vbx=None, speaker_keep_threshold=None)`
 - `AhcConfig(threshold=None)`
 - `VbxConfig(fa=None, fb=None, max_iters=None, epsilon=None, init_smoothing=None)`
-- `RuntimeConfig(*, coreml_compute_units=None, cuda_segmentation_math=None, cuda_embedding_math=None, cuda_graphs=None)`
+- `RuntimeConfig(*, coreml_compute_units=None, coreml_segmentation_batch=None, cuda_segmentation_math=None, cuda_embedding_math=None, cuda_graphs=None)`;
+  `coreml_segmentation_batch` is the largest CoreML segmentation batch, `1`, `32`, or
+  `64` (default), and a smaller batch lowers peak memory
 
 Out-of-range values raise `SpeakrsError` with category `configuration`. Setting
 a `RuntimeConfig` option whose backend the wheel lacks raises it with category

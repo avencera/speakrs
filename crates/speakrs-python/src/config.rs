@@ -417,15 +417,17 @@ pub(crate) struct PyRuntimeConfig(pub(crate) RuntimeOptions);
 #[pymethods]
 impl PyRuntimeConfig {
     #[new]
-    #[pyo3(signature = (*, coreml_compute_units=None, cuda_segmentation_math=None, cuda_embedding_math=None, cuda_graphs=None))]
+    #[pyo3(signature = (*, coreml_compute_units=None, coreml_segmentation_batch=None, cuda_segmentation_math=None, cuda_embedding_math=None, cuda_graphs=None))]
     fn new(
         coreml_compute_units: Option<String>,
+        coreml_segmentation_batch: Option<u32>,
         cuda_segmentation_math: Option<String>,
         cuda_embedding_math: Option<String>,
         cuda_graphs: Option<bool>,
     ) -> PyResult<Self> {
         RuntimeOptions {
             coreml_compute_units,
+            coreml_segmentation_batch,
             cuda_segmentation_math,
             cuda_embedding_math,
             cuda_graphs,
@@ -439,6 +441,14 @@ impl PyRuntimeConfig {
     #[getter]
     fn coreml_compute_units(&self) -> Option<String> {
         self.0.coreml_compute_units.clone()
+    }
+
+    /// Largest CoreML segmentation batch: `1`, `32`, or `64` (default)
+    ///
+    /// A smaller batch lowers peak memory
+    #[getter]
+    fn coreml_segmentation_batch(&self) -> Option<u32> {
+        self.0.coreml_segmentation_batch
     }
 
     /// CUDA segmentation precision, `"fp32"` (default) or `"tf32"`
@@ -461,8 +471,11 @@ impl PyRuntimeConfig {
 
     fn __repr__(&self) -> String {
         format!(
-            "RuntimeConfig(coreml_compute_units={}, cuda_segmentation_math={}, cuda_embedding_math={}, cuda_graphs={})",
+            "RuntimeConfig(coreml_compute_units={}, coreml_segmentation_batch={}, cuda_segmentation_math={}, cuda_embedding_math={}, cuda_graphs={})",
             py_opt_str(self.0.coreml_compute_units.as_deref()),
+            self.0
+                .coreml_segmentation_batch
+                .map_or_else(|| "None".to_owned(), |batch| batch.to_string()),
             py_opt_str(self.0.cuda_segmentation_math.as_deref()),
             py_opt_str(self.0.cuda_embedding_math.as_deref()),
             self.0.cuda_graphs.map_or("None", py_bool)
