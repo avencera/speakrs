@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.8.0] - 2026-11-13
 
 - Add the `speakrs diarize` command, which decodes WAV, FLAC, MP3, Ogg and M4A files and prints RTTM, with the same options as the Python package's command. Each GitHub release ships it for Linux x86_64 with CPU and CUDA, Linux arm64 with CPU (both glibc 2.28 or newer), and Apple silicon with CPU and CoreML, with SHA-256 checksums and an `install.sh` that installs it into `~/.local/bin`: `curl -LSfs https://github.com/avencera/speakrs/releases/latest/download/install.sh | sh`
 - Add Windows x86_64 support for the `cpu` and `cuda` backends. Each GitHub release adds `speakrs-<tag>-x86_64-pc-windows-msvc.zip` with CPU and CUDA, linked against a static C runtime so it needs no Visual C++ redistributable, and PyPI gets a Windows wheel with CPU and CUDA whose `cuda` extra installs the Windows `nvidia-cublas-cu12` and `nvidia-cudnn-cu12` wheels. The CUDA backend opens `nvcuda.dll`, and the `cuda` fallback opens `cudnn64_9.dll`, `cublas64_12.dll` (with `cublasLt64_12.dll` beside it) and `nvrtc64_120_0.dll` from the executable's directory, System32, absolute `PATH` entries or `%CUDA_PATH%\bin`, never from the current directory. CUDA tune files default to `%LOCALAPPDATA%\speakrs\` there, and need a DCH driver, which installs `nvml.dll` in System32. CI builds and tests Windows, but nothing has run on a Windows GPU yet

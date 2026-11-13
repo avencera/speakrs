@@ -1948,7 +1948,7 @@ checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
 
 [[package]]
 name = "speakrs"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "approx",
  "block2",
@@ -1984,7 +1984,7 @@ dependencies = [
 
 [[package]]
 name = "speakrs-cli"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "clap",
  "eyre",
@@ -1995,19 +1995,19 @@ dependencies = [
 
 [[package]]
 name = "speakrs-ptx-sm120"
-version = "0.7.0"
+version = "0.8.0"
 
 [[package]]
 name = "speakrs-ptx-sm75"
-version = "0.7.0"
+version = "0.8.0"
 
 [[package]]
 name = "speakrs-ptx-sm80"
-version = "0.7.0"
+version = "0.8.0"
 
 [[package]]
 name = "speakrs-python"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "pyo3",
  "speakrs-sdk",
@@ -2015,7 +2015,7 @@ dependencies = [
 
 [[package]]
 name = "speakrs-sdk"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "crossbeam-channel",
  "hound",
