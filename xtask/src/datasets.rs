@@ -215,14 +215,12 @@ impl Dataset {
 
 impl Source {
     fn try_tigris(&self) -> bool {
-        if matches!(self, Self::VoxConverseDev) {
-            return false;
-        }
         #[cfg(test)]
         if matches!(self, Self::Local { .. }) {
             return false;
         }
-        true
+
+        !matches!(self, Self::VoxConverseDev)
     }
 
     fn provenance(&self, dataset_id: &str) -> String {
