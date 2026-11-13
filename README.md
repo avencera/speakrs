@@ -483,15 +483,15 @@ feature enables downloads; local model loading works without it.
 
 ## Releases
 
-A `v*` tag publishes the Python wheels to PyPI and creates a GitHub release; CI
-doesn't publish the crates to crates.io. The release holds the
+A `v*` tag publishes the Python wheels to PyPI, the crates to crates.io, and a
+GitHub release. The release holds the
 [`speakrs` command](#command-line) for Linux x86_64, Linux arm64, Apple
 silicon and Windows x86_64, each archive with a SHA-256 checksum, and the
 `install.sh` that installs it on Linux and macOS. To cut one:
 
-1. Bump `version` in `Cargo.toml` (the `[package]` and `[workspace.package]`
-   versions, and the exact `speakrs-ptx-*` pins), then run `cargo check` to
-   update `Cargo.lock`.
+1. Run `just bump major|minor|patch`, which updates the `[package]` and
+   `[workspace.package]` versions, the exact `speakrs-ptx-*` pins, and the
+   workspace crates in `Cargo.lock`.
 2. Move the `CHANGELOG.md` entries under `## Unreleased` to a
    `## [X.Y.Z] - YYYY-MM-DD` heading, which becomes the release notes.
 3. Merge to `master`, then tag that commit and push the tag:
@@ -505,7 +505,10 @@ The [Release workflow](.github/workflows/release.yml) fails before building if
 the tag doesn't match the crate version or `CHANGELOG.md` has no entry for it.
 Each archive's binary must diarize a test file before it uploads. The release
 stays a draft until every archive and `install.sh` upload, then it's published
-as the latest release.
+as the latest release. Once every archive has passed, the workflow publishes
+`speakrs` and the `speakrs-ptx-*` crates to crates.io with trusted publishing,
+which each crate's crates.io settings must allow for `release.yml` in the
+`crates-io` environment.
 
 ## [Contributing](CONTRIBUTING.md)
 

@@ -90,7 +90,8 @@ bump level:
     echo "Bumped ${CURRENT} → ${NEW}"
 
 # Publish speakrs and its CUDA artifact crates together: just publish [--dry-run]
-# the artifact crates go first, and verification needs a backend feature
+# the artifact crates go first, and verification needs a backend feature; the Release
+# workflow runs this on a version tag with a trusted-publishing token
 publish *args:
     cargo publish --locked -p speakrs-ptx-sm75 -p speakrs-ptx-sm80 -p speakrs-ptx-sm120 -p speakrs --features speakrs/cpu {{args}}
 
