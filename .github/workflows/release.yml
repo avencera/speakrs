@@ -7,8 +7,7 @@
 #
 # The tag must match the speakrs crate version and have a CHANGELOG.md entry, or the
 # release fails before anything is built. The Package workflow publishes the Python
-# wheels from the same tag, and the publish-crates job below publishes the crates to
-# crates.io once every archive has built and passed its check.
+# wheels from the same tag; the crates go to crates.io separately.
 #
 # Asset names match install.sh, each archive with a .sha256 beside it:
 #   speakrs-<tag>-x86_64-unknown-linux-gnu.tar.gz   (cpu, cuda)
@@ -286,43 +285,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "$GITHUB_REF_NAME" install.sh --clobber --repo "$GITHUB_REPOSITORY"
-
-  # crates.io trusted publishing: each crate's settings trust this workflow and the
-  # crates-io environment, so the job trades its OIDC token for a short-lived publish token
-  # and no crates.io API token is stored. It waits for the archives, whose binaries must
-  # diarize a test file, because a published crate version can't be replaced
-  publish-crates:
-    needs: upload-assets
-    runs-on: ubuntu-24.04
-    environment:
-      name: crates-io
-      url: https://crates.io/crates/speakrs
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        with:
-          toolchain: stable
-
-      - name: Install just
-        uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
-        with:
-          tool: just
-
-      - name: Get a crates.io token
-        id: crates-io-auth
-        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
-
-      - name: Publish crates
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
-        run: just publish
 
   publish-release:
     needs: [upload-assets, upload-install-script]
