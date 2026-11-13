@@ -9,7 +9,7 @@ use tracing::info;
 use crate::inference::coreml::{
     CachedInputShape, CoreMlModel, SharedCoreMlModel, coreml_model_path,
 };
-use crate::inference::{ExecutionMode, InferenceError, ModelLoadError};
+use crate::inference::{CoreMlSegmentationBatch, ExecutionMode, InferenceError, ModelLoadError};
 
 use super::{LARGE_BATCH_SIZE, PRIMARY_BATCH_SIZE, SegmentationError, batched_model_path};
 
@@ -40,8 +40,19 @@ impl SegmentationAssetPaths {
         })
     }
 
-    fn require_all(&self, mode: ExecutionMode) -> Result<(), ModelLoadError> {
-        for path in [&self.single, &self.batched, &self.large_batched] {
+    /// Checks every bundle `batch` loads before loading any, so a missing one fails fast
+    fn require(
+        &self,
+        batch: CoreMlSegmentationBatch,
+        mode: ExecutionMode,
+    ) -> Result<(), ModelLoadError> {
+        let required: &[&Path] = match batch {
+            CoreMlSegmentationBatch::Single => &[&self.single],
+            CoreMlSegmentationBatch::Batch32 => &[&self.single, &self.batched],
+            CoreMlSegmentationBatch::Batch64 => &[&self.single, &self.batched, &self.large_batched],
+        };
+
+        for path in required {
             require_native_asset(path, mode)?;
         }
         Ok(())
@@ -75,15 +86,98 @@ fn load_native_model(
     )
 }
 
+/// Batch-32 model plus private input staging for the sequential path
+///
+/// The parallel path also uses it, for batch-32 runs and to warm-start batch-64 runs
+struct PrimaryBatchModel {
+    model: SharedCoreMlModel,
+    cached_input_shape: CachedInputShape,
+    input_buffer: Array3<f32>,
+}
+
+impl PrimaryBatchModel {
+    fn load(
+        path: &Path,
+        mode: ExecutionMode,
+        window_samples: usize,
+    ) -> Result<Self, ModelLoadError> {
+        Ok(Self {
+            model: load_native_model(
+                path,
+                mode,
+                "Failed to load native CoreML batched segmentation",
+            )?,
+            cached_input_shape: CachedInputShape::new(
+                "input",
+                &[PRIMARY_BATCH_SIZE, 1, window_samples],
+            ),
+            input_buffer: Array3::zeros((PRIMARY_BATCH_SIZE, 1, window_samples)),
+        })
+    }
+}
+
+/// Batched models loaded for the configured [`CoreMlSegmentationBatch`]
+enum BatchedModels {
+    /// [`CoreMlSegmentationBatch::Single`] loads no batched model
+    None,
+    Primary(PrimaryBatchModel),
+    Large {
+        primary: PrimaryBatchModel,
+        large: SharedCoreMlModel,
+    },
+}
+
+impl BatchedModels {
+    fn load(
+        paths: &SegmentationAssetPaths,
+        mode: ExecutionMode,
+        window_samples: usize,
+        batch: CoreMlSegmentationBatch,
+    ) -> Result<Self, ModelLoadError> {
+        let load_primary = || PrimaryBatchModel::load(&paths.batched, mode, window_samples);
+
+        match batch {
+            CoreMlSegmentationBatch::Single => Ok(Self::None),
+            CoreMlSegmentationBatch::Batch32 => Ok(Self::Primary(load_primary()?)),
+            CoreMlSegmentationBatch::Batch64 => {
+                let primary = load_primary()?;
+                let large = load_native_model(
+                    &paths.large_batched,
+                    mode,
+                    "Failed to load b64 segmentation",
+                )?;
+                info!("Loaded b64 segmentation model");
+                Ok(Self::Large { primary, large })
+            }
+        }
+    }
+
+    fn primary_mut(&mut self) -> Option<&mut PrimaryBatchModel> {
+        match self {
+            Self::None => None,
+            Self::Primary(primary) | Self::Large { primary, .. } => Some(primary),
+        }
+    }
+}
+
+/// Model the parallel streaming path runs, chosen from the recording length and batch limit
+#[derive(Clone, Copy)]
+pub(super) enum ParallelModel<'a> {
+    Single(&'a SharedCoreMlModel),
+    Batched {
+        model: &'a SharedCoreMlModel,
+        batch_size: usize,
+        /// Batch-32 model that runs the leading windows of a batch-64 run
+        warm_start: Option<&'a SharedCoreMlModel>,
+    },
+}
+
 /// Native CoreML segmentation models plus private input staging
 pub(super) struct CoreMlSegmentation {
     single: SharedCoreMlModel,
-    batched: SharedCoreMlModel,
-    large_batched: SharedCoreMlModel,
+    batched: BatchedModels,
     cached_single_input_shape: CachedInputShape,
-    cached_batch_input_shape: CachedInputShape,
     input_buffer: Array3<f32>,
-    primary_batch_input_buffer: Array3<f32>,
 }
 
 impl CoreMlSegmentation {
@@ -91,9 +185,10 @@ impl CoreMlSegmentation {
         model_path: &Path,
         mode: ExecutionMode,
         window_samples: usize,
+        batch: CoreMlSegmentationBatch,
     ) -> Result<Self, ModelLoadError> {
         let paths = SegmentationAssetPaths::resolve(model_path, mode)?;
-        paths.require_all(mode)?;
+        paths.require(batch, mode)?;
 
         let single_start = Instant::now();
         let single = load_native_model(
@@ -104,60 +199,50 @@ impl CoreMlSegmentation {
         let single_elapsed = single_start.elapsed();
 
         let batched_start = Instant::now();
-        let batched = load_native_model(
-            &paths.batched,
-            mode,
-            "Failed to load native CoreML batched segmentation",
-        )?;
+        let batched = BatchedModels::load(&paths, mode, window_samples, batch)?;
         let batched_elapsed = batched_start.elapsed();
 
-        let large_batched_start = Instant::now();
-        let large_batched = load_native_model(
-            &paths.large_batched,
-            mode,
-            "Failed to load b64 segmentation",
-        )?;
-        info!("Loaded b64 segmentation model");
-        let large_batched_elapsed = large_batched_start.elapsed();
-
         tracing::trace!(
+            max_batch = batch.size(),
             native_single_ms = single_elapsed.as_millis(),
-            native_b32_ms = batched_elapsed.as_millis(),
-            native_b64_ms = large_batched_elapsed.as_millis(),
-            total_ms = (single_elapsed + batched_elapsed + large_batched_elapsed).as_millis(),
+            native_batched_ms = batched_elapsed.as_millis(),
+            total_ms = (single_elapsed + batched_elapsed).as_millis(),
             "Segmentation model init",
         );
 
         Ok(Self {
             single,
             batched,
-            large_batched,
             cached_single_input_shape: CachedInputShape::new("input", &[1, 1, window_samples]),
-            cached_batch_input_shape: CachedInputShape::new(
-                "input",
-                &[PRIMARY_BATCH_SIZE, 1, window_samples],
-            ),
             input_buffer: Array3::zeros((1, 1, window_samples)),
-            primary_batch_input_buffer: Array3::zeros((PRIMARY_BATCH_SIZE, 1, window_samples)),
         })
     }
 
-    /// Model and batch size for the parallel streaming path
-    pub(super) fn select_parallel_model(
-        &self,
-        total_windows: usize,
-    ) -> (&SharedCoreMlModel, usize) {
-        let min_batch_windows = PRIMARY_BATCH_SIZE * 6;
-        if total_windows < min_batch_windows {
-            return (&self.single, 1);
-        }
-
-        (&self.large_batched, LARGE_BATCH_SIZE)
+    /// Whether the sequential path can run batch-32 predictions
+    pub(super) fn has_batched(&self) -> bool {
+        !matches!(self.batched, BatchedModels::None)
     }
 
-    /// Batch-32 model used to warm-start the parallel path
-    pub(super) fn batched_model(&self) -> &SharedCoreMlModel {
-        &self.batched
+    /// Model for the parallel streaming path
+    pub(super) fn select_parallel_model(&self, total_windows: usize) -> ParallelModel<'_> {
+        let min_batch_windows = PRIMARY_BATCH_SIZE * 6;
+        if total_windows < min_batch_windows {
+            return ParallelModel::Single(&self.single);
+        }
+
+        match &self.batched {
+            BatchedModels::None => ParallelModel::Single(&self.single),
+            BatchedModels::Primary(primary) => ParallelModel::Batched {
+                model: &primary.model,
+                batch_size: PRIMARY_BATCH_SIZE,
+                warm_start: None,
+            },
+            BatchedModels::Large { primary, large } => ParallelModel::Batched {
+                model: large,
+                batch_size: LARGE_BATCH_SIZE,
+                warm_start: Some(&primary.model),
+            },
+        }
     }
 
     pub(super) fn run_window(&mut self, window: &[f32]) -> Result<Array2<f32>, SegmentationError> {
@@ -191,7 +276,14 @@ impl CoreMlSegmentation {
         &mut self,
         windows: &[&[f32]],
     ) -> Result<Vec<Array2<f32>>, SegmentationError> {
-        let buffer = &mut self.primary_batch_input_buffer;
+        let primary = self
+            .batched
+            .primary_mut()
+            .ok_or_else(|| SegmentationError::Invariant {
+                context: "native segmentation batch",
+                message: "batched predictions need a batched model, which the single-window batch limit does not load".to_owned(),
+            })?;
+        let buffer = &mut primary.input_buffer;
         buffer.fill(0.0);
         for (batch_idx, window) in windows.iter().enumerate() {
             buffer
@@ -204,9 +296,9 @@ impl CoreMlSegmentation {
                 context: "native segmentation batch input",
             })?;
 
-        let tensor = self
-            .batched
-            .predict_cached(&[(&self.cached_batch_input_shape, input_data)])?;
+        let tensor = primary
+            .model
+            .predict_cached(&[(&primary.cached_input_shape, input_data)])?;
         let (batch, frames, classes) = tensor
             .try_rank3("native segmentation batch output")
             .map_err(InferenceError::from)?;
@@ -297,7 +389,12 @@ mod tests {
         let dir = TestDir::new("seg-coreml-missing");
         let model_path = dir.path().join("segmentation-3.0.onnx");
 
-        let error = match CoreMlSegmentation::load(&model_path, ExecutionMode::CoreMl, 160_000) {
+        let error = match CoreMlSegmentation::load(
+            &model_path,
+            ExecutionMode::CoreMl,
+            160_000,
+            CoreMlSegmentationBatch::default(),
+        ) {
             Ok(_) => panic!("missing bundles should error"),
             Err(error) => error,
         };

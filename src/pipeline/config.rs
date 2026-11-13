@@ -1,5 +1,7 @@
 #[cfg(any(feature = "coreml", feature = "_metrics"))]
 use crate::inference::CoreMlComputeUnits;
+#[cfg(feature = "coreml")]
+use crate::inference::CoreMlSegmentationBatch;
 #[cfg(feature = "_cuda-libraries")]
 use crate::inference::CudaLstmAlgorithm;
 use crate::inference::ExecutionMode;
@@ -755,6 +757,13 @@ pub struct RuntimeConfig {
     #[cfg(feature = "coreml")]
     #[cfg_attr(docsrs, doc(cfg(feature = "coreml")))]
     pub chunk_emb_compute_units: CoreMlComputeUnits,
+    /// Largest batch the segmentation model runs per prediction (CoreML modes only)
+    ///
+    /// [`CoreMlSegmentationBatch::Batch64`] by default. A smaller batch lowers peak memory,
+    /// which matters on 8 GB Macs; see [`CoreMlSegmentationBatch`] for measurements
+    #[cfg(feature = "coreml")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "coreml")))]
+    pub coreml_segmentation_batch: CoreMlSegmentationBatch,
     /// Precision of the segmentation model's cuBLAS GEMMs, cuDNN convolutions and cuDNN
     /// LSTM (CUDA modes only)
     ///
@@ -798,6 +807,8 @@ impl Default for RuntimeConfig {
             fbank_threads: OrtThreadCount::default(),
             #[cfg(feature = "coreml")]
             chunk_emb_compute_units: CoreMlComputeUnits::default(),
+            #[cfg(feature = "coreml")]
+            coreml_segmentation_batch: CoreMlSegmentationBatch::default(),
             // segmentation TF32 failed the per-file DER gate on VoxConverse-dev while
             // embedding TF32 and the persistent LSTM passed, see the CUDA DER report
             cuda_segmentation_math: CudaMath::Fp32,
@@ -821,6 +832,14 @@ impl RuntimeConfig {
     /// Select the thread count for each MIGraphX ONNX Runtime CPU filterbank session
     pub const fn with_fbank_threads(mut self, threads: OrtThreadCount) -> Self {
         self.fbank_threads = threads;
+        self
+    }
+
+    /// Select the largest batch the CoreML segmentation model runs per prediction
+    #[cfg(feature = "coreml")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "coreml")))]
+    pub const fn with_coreml_segmentation_batch(mut self, batch: CoreMlSegmentationBatch) -> Self {
+        self.coreml_segmentation_batch = batch;
         self
     }
 

@@ -68,6 +68,10 @@ pub fn available_modes() -> Vec<ExecutionMode> {
 pub struct RuntimeOptions {
     /// CoreML compute units: `all`, `cpu_and_neural_engine`, or `cpu_only`
     pub coreml_compute_units: Option<String>,
+    /// Largest CoreML segmentation batch: 1, 32, or 64 windows per prediction
+    ///
+    /// A smaller batch lowers peak memory
+    pub coreml_segmentation_batch: Option<u32>,
     /// CUDA segmentation precision: `fp32` or `tf32`
     pub cuda_segmentation_math: Option<String>,
     /// CUDA embedding precision: `fp32` or `tf32`
@@ -89,6 +93,19 @@ impl RuntimeOptions {
             }
             #[cfg(not(feature = "coreml"))]
             return Err(missing_backend("coreml_compute_units", "CoreML", units));
+        }
+
+        if let Some(batch) = self.coreml_segmentation_batch {
+            #[cfg(feature = "coreml")]
+            {
+                config.coreml_segmentation_batch = parse_segmentation_batch(batch)?;
+            }
+            #[cfg(not(feature = "coreml"))]
+            return Err(missing_backend(
+                "coreml_segmentation_batch",
+                "CoreML",
+                &batch.to_string(),
+            ));
         }
 
         let cuda_options = [
@@ -140,6 +157,12 @@ impl RuntimeOptions {
             coreml_compute_units: Some(compute_units_name(config.chunk_emb_compute_units).into()),
             #[cfg(not(feature = "coreml"))]
             coreml_compute_units: None,
+            #[cfg(feature = "coreml")]
+            coreml_segmentation_batch: Some(segmentation_batch_size(
+                config.coreml_segmentation_batch,
+            )),
+            #[cfg(not(feature = "coreml"))]
+            coreml_segmentation_batch: None,
             #[cfg(feature = "cuda")]
             cuda_segmentation_math: Some(cuda_math_name(config.cuda_segmentation_math).into()),
             #[cfg(feature = "cuda")]
@@ -176,6 +199,24 @@ fn parse_compute_units(value: &str) -> Result<speakrs::CoreMlComputeUnits, SdkEr
             "unknown coreml_compute_units `{value}`; expected all, cpu_and_neural_engine, or cpu_only"
         ))),
     }
+}
+
+#[cfg(feature = "coreml")]
+fn parse_segmentation_batch(value: u32) -> Result<speakrs::CoreMlSegmentationBatch, SdkError> {
+    usize::try_from(value)
+        .ok()
+        .and_then(speakrs::CoreMlSegmentationBatch::from_size)
+        .ok_or_else(|| {
+            SdkError::configuration(format!(
+                "unknown coreml_segmentation_batch `{value}`; expected 1, 32, or 64"
+            ))
+        })
+}
+
+#[cfg(feature = "coreml")]
+fn segmentation_batch_size(batch: speakrs::CoreMlSegmentationBatch) -> u32 {
+    // every batch choice is at most 64 windows
+    batch.size() as u32
 }
 
 #[cfg(feature = "coreml")]
@@ -249,12 +290,48 @@ mod tests {
             coreml_compute_units: Some("cpu_only".into()),
             ..RuntimeOptions::default()
         };
+        let coreml_batch = RuntimeOptions {
+            coreml_segmentation_batch: Some(1),
+            ..RuntimeOptions::default()
+        };
         let cuda = RuntimeOptions {
             cuda_embedding_math: Some("fp32".into()),
             ..RuntimeOptions::default()
         };
 
         assert_eq!(coreml.to_runtime_config().is_ok(), cfg!(feature = "coreml"));
+        assert_eq!(
+            coreml_batch.to_runtime_config().is_ok(),
+            cfg!(feature = "coreml")
+        );
         assert_eq!(cuda.to_runtime_config().is_ok(), cfg!(feature = "cuda"));
+    }
+
+    #[cfg(feature = "coreml")]
+    #[test]
+    fn coreml_segmentation_batch_accepts_only_exported_sizes() {
+        let options = |batch| RuntimeOptions {
+            coreml_segmentation_batch: Some(batch),
+            ..RuntimeOptions::default()
+        };
+
+        assert_eq!(
+            options(32)
+                .to_runtime_config()
+                .unwrap()
+                .coreml_segmentation_batch,
+            speakrs::CoreMlSegmentationBatch::Batch32
+        );
+        assert_eq!(
+            RuntimeOptions::default()
+                .resolved()
+                .unwrap()
+                .coreml_segmentation_batch,
+            Some(64)
+        );
+        assert_eq!(
+            options(16).to_runtime_config().unwrap_err().category,
+            SdkErrorCategory::Configuration
+        );
     }
 }

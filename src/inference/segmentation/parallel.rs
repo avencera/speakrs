@@ -8,7 +8,8 @@ use ndarray::Array2;
 use tracing::{debug, trace};
 
 use super::SegmentationError;
-use super::{LARGE_BATCH_SIZE, PRIMARY_BATCH_SIZE, SegmentationModel};
+use super::native::ParallelModel;
+use super::{PRIMARY_BATCH_SIZE, SegmentationModel};
 use crate::inference::coreml::SharedCoreMlModel;
 use crate::inference::segmentation::tensor::{
     SegmentationWindows, segmentation_array, segmentation_array_from_slice, worker_panic,
@@ -54,10 +55,49 @@ struct ParallelRunSummary {
     total_windows: usize,
     num_workers: usize,
     est_embed_chunks: Option<usize>,
-    use_warm_start_b32: bool,
-    warm_start_small_windows: usize,
-    warm_start_batch_capacity: usize,
+    warm_start: Option<WarmStart>,
     total_seg: std::time::Duration,
+}
+
+/// Leading batch-32 predictions that get the first windows of a batch-64 run to the
+/// embedding stage sooner
+#[derive(Clone, Copy)]
+struct WarmStart {
+    /// Windows the batch-32 model runs before the batch-64 model takes over
+    small_windows: usize,
+    /// Useful windows in each warm-start prediction
+    batch_capacity: usize,
+}
+
+impl WarmStart {
+    fn plan(
+        total_windows: usize,
+        warm_start_target_windows: Option<usize>,
+        est_embed_chunks: Option<usize>,
+    ) -> Option<Self> {
+        let upper_medium_warm_start = est_embed_chunks
+            .map(|chunks| chunks >= 12)
+            .unwrap_or(total_windows >= 640);
+        let default_small_windows = if upper_medium_warm_start {
+            PRIMARY_BATCH_SIZE * 2
+        } else {
+            140
+        };
+        let small_windows = warm_start_target_windows.unwrap_or(default_small_windows);
+        let batch_capacity = if upper_medium_warm_start {
+            PRIMARY_BATCH_SIZE / 2
+        } else {
+            28
+        };
+
+        let applies = total_windows < 1024
+            && total_windows > PRIMARY_BATCH_SIZE
+            && small_windows > PRIMARY_BATCH_SIZE;
+        applies.then_some(Self {
+            small_windows,
+            batch_capacity,
+        })
+    }
 }
 
 impl ParallelProfile {
@@ -106,17 +146,13 @@ impl ParallelProfile {
             windows = summary.total_windows,
             workers = summary.num_workers,
             seg_est_embed_chunks = summary.est_embed_chunks.unwrap_or(0),
-            seg_warm_start_b32 = summary.use_warm_start_b32,
-            seg_warm_start_windows = if summary.use_warm_start_b32 {
-                summary.total_windows.min(summary.warm_start_small_windows)
-            } else {
-                0
-            },
-            seg_warm_start_batch_capacity = if summary.use_warm_start_b32 {
-                summary.warm_start_batch_capacity
-            } else {
-                0
-            },
+            seg_warm_start_b32 = summary.warm_start.is_some(),
+            seg_warm_start_windows = summary.warm_start.map_or(0, |warm_start| {
+                summary.total_windows.min(warm_start.small_windows)
+            }),
+            seg_warm_start_batch_capacity = summary
+                .warm_start
+                .map_or(0, |warm_start| warm_start.batch_capacity),
             seg_batched_calls = self.batched_calls.load(Ordering::Relaxed),
             seg_batched_windows = self.batched_windows.load(Ordering::Relaxed),
             seg_single_calls = self.single_calls.load(Ordering::Relaxed),
@@ -136,63 +172,42 @@ pub(super) struct BatchTask<'a> {
 }
 
 struct BatchTaskPlanner<'a> {
-    shared_model: &'a SharedCoreMlModel,
-    small_model: &'a SharedCoreMlModel,
+    model: &'a SharedCoreMlModel,
     total_windows: usize,
     batch_size: usize,
-    use_warm_start_b32: bool,
-    warm_start_small_windows: usize,
-    warm_start_batch_capacity: usize,
+    warm_start: Option<(&'a SharedCoreMlModel, WarmStart)>,
 }
 
 impl<'a> BatchTaskPlanner<'a> {
     fn build(self) -> Vec<BatchTask<'a>> {
-        if !self.use_warm_start_b32 {
-            return (0..self.total_windows.div_ceil(self.batch_size))
-                .map(|batch_idx| {
-                    let start = batch_idx * self.batch_size;
-                    let end = (start + self.batch_size).min(self.total_windows);
-                    BatchTask {
-                        batch_idx,
-                        start,
-                        end,
-                        batch_capacity: self.batch_size,
-                        model: self.shared_model,
-                    }
-                })
-                .collect();
-        }
-
-        let small_model = self.small_model;
         let mut tasks = Vec::new();
         let mut start = 0usize;
-        let mut batch_idx = 0usize;
-        let warm_start_end = self.total_windows.min(self.warm_start_small_windows);
 
-        while start < warm_start_end {
-            let end = (start + self.warm_start_batch_capacity).min(self.total_windows);
-            tasks.push(BatchTask {
-                batch_idx,
-                start,
-                end,
-                batch_capacity: self.warm_start_batch_capacity,
-                model: small_model,
-            });
-            start = end;
-            batch_idx += 1;
+        if let Some((small_model, warm_start)) = self.warm_start {
+            let warm_start_end = self.total_windows.min(warm_start.small_windows);
+            while start < warm_start_end {
+                let end = (start + warm_start.batch_capacity).min(self.total_windows);
+                tasks.push(BatchTask {
+                    batch_idx: tasks.len(),
+                    start,
+                    end,
+                    batch_capacity: warm_start.batch_capacity,
+                    model: small_model,
+                });
+                start = end;
+            }
         }
 
         while start < self.total_windows {
-            let end = (start + LARGE_BATCH_SIZE).min(self.total_windows);
+            let end = (start + self.batch_size).min(self.total_windows);
             tasks.push(BatchTask {
-                batch_idx,
+                batch_idx: tasks.len(),
                 start,
                 end,
-                batch_capacity: LARGE_BATCH_SIZE,
-                model: self.shared_model,
+                batch_capacity: self.batch_size,
+                model: self.model,
             });
             start = end;
-            batch_idx += 1;
         }
 
         tasks
@@ -222,7 +237,7 @@ impl SegmentationModel {
         let Some(backend) = self.coreml_backend() else {
             return self.run_streaming(audio, tx);
         };
-        let (shared_model, batch_size) = backend.select_parallel_model(total_windows);
+        let parallel_model = backend.select_parallel_model(total_windows);
 
         let seg_start = std::time::Instant::now();
         let profile = ParallelProfile::new();
@@ -230,66 +245,56 @@ impl SegmentationModel {
             .and_then(|target| target.checked_div(2))
             .filter(|&chunk_windows| chunk_windows > 0)
             .map(|chunk_windows| total_windows.div_ceil(chunk_windows));
-        let upper_medium_warm_start = est_embed_chunks
-            .map(|chunks| chunks >= 12)
-            .unwrap_or(total_windows >= 640);
-        let default_warm_start_small_windows = if upper_medium_warm_start {
-            PRIMARY_BATCH_SIZE * 2
-        } else {
-            140
-        };
-        let warm_start_small_windows =
-            warm_start_target_windows.unwrap_or(default_warm_start_small_windows);
-        let warm_start_batch_capacity = if upper_medium_warm_start {
-            PRIMARY_BATCH_SIZE / 2
-        } else {
-            28
-        };
-        let use_warm_start_b32 = batch_size == LARGE_BATCH_SIZE
-            && total_windows < 1024
-            && total_windows > PRIMARY_BATCH_SIZE
-            && warm_start_small_windows > PRIMARY_BATCH_SIZE;
-
-        let workers = if batch_size > 1 {
-            let tasks = BatchTaskPlanner {
-                shared_model,
-                small_model: backend.batched_model(),
-                total_windows,
-                batch_size,
-                use_warm_start_b32,
-                warm_start_small_windows,
-                warm_start_batch_capacity,
+        let warm_start = match parallel_model {
+            ParallelModel::Batched {
+                warm_start: Some(small_model),
+                ..
+            } => WarmStart::plan(total_windows, warm_start_target_windows, est_embed_chunks)
+                .map(|warm_start| (small_model, warm_start)),
+            ParallelModel::Batched {
+                warm_start: None, ..
             }
-            .build();
+            | ParallelModel::Single(_) => None,
+        };
 
-            ParallelBatchExecutor {
+        let workers = match parallel_model {
+            ParallelModel::Batched {
+                model, batch_size, ..
+            } => {
+                let tasks = BatchTaskPlanner {
+                    model,
+                    total_windows,
+                    batch_size,
+                    warm_start,
+                }
+                .build();
+
+                ParallelBatchExecutor {
+                    windows: &windows,
+                    tx,
+                    tasks,
+                    num_workers,
+                    window_samples: self.window_samples(),
+                    profile: &profile,
+                }
+                .run()?
+            }
+            ParallelModel::Single(model) => ParallelSingleExecutor {
                 windows: &windows,
                 tx,
-                tasks,
-                num_workers,
-                window_samples: self.window_samples(),
-                profile: &profile,
-            }
-            .run()?
-        } else {
-            ParallelSingleExecutor {
-                windows: &windows,
-                tx,
-                model: shared_model,
+                model,
                 num_workers: num_workers.max(1),
                 window_samples: self.window_samples(),
                 profile: &profile,
             }
-            .run()?
+            .run()?,
         };
 
         profile.log_completion(ParallelRunSummary {
             total_windows,
             num_workers: workers,
             est_embed_chunks,
-            use_warm_start_b32,
-            warm_start_small_windows,
-            warm_start_batch_capacity,
+            warm_start: warm_start.map(|(_, warm_start)| warm_start),
             total_seg: seg_start.elapsed(),
         });
 

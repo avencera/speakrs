@@ -103,7 +103,7 @@ fn axis_len(input: usize, kernel: Kernel, padding: usize) -> Result<usize, Tenso
             actual: padded,
         });
     }
-    Ok((padded - kernel.kernel.get()) / kernel.stride.get() + 1)
+    Ok((padded - kernel.kernel.get()) / kernel.stride + 1)
 }
 
 /// Valid non-zero one-dimensional convolution geometry

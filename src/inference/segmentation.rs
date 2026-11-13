@@ -80,7 +80,8 @@ impl From<CoreMlError> for SegmentationError {
     }
 }
 
-// seg models exported with EnumeratedShapes for batch 1-32 and b64
+// seg models exported with EnumeratedShapes for batch 1-32 and b64; CoreML loads the
+// largest one `RuntimeConfig::coreml_segmentation_batch` allows
 #[cfg(any(feature = "migraphx", feature = "coreml", feature = "_cuda"))]
 const PRIMARY_BATCH_SIZE: usize = 32;
 #[cfg(feature = "coreml")]
@@ -131,13 +132,17 @@ impl SegmentationModel {
 
     /// Load a segmentation-3.0 model with the requested execution mode and runtime config
     ///
-    /// The runtime config selects the CUDA modes' precision, LSTM algorithm and CUDA
-    /// graphs; other modes ignore it
+    /// The runtime config selects the CoreML modes' largest segmentation batch and the CUDA
+    /// modes' precision, LSTM algorithm and CUDA graphs; other modes ignore it
     pub fn with_mode_and_config(
         model_path: impl AsRef<Path>,
         step_duration: f32,
         mode: ExecutionMode,
-        #[cfg_attr(not(feature = "_cuda"), allow(unused_variables))] config: &RuntimeConfig,
+        #[cfg_attr(
+            not(any(feature = "_cuda", feature = "coreml")),
+            allow(unused_variables)
+        )]
+        config: &RuntimeConfig,
     ) -> Result<Self, ModelLoadError> {
         let backend = mode.backend()?;
 
@@ -162,9 +167,14 @@ impl SegmentationModel {
                 window_samples,
             )?),
             #[cfg(feature = "coreml")]
-            InferenceBackend::CoreMl => SegmentationBackend::CoreMl(Box::new(
-                CoreMlSegmentation::load(model_path, mode, window_samples)?,
-            )),
+            InferenceBackend::CoreMl => {
+                SegmentationBackend::CoreMl(Box::new(CoreMlSegmentation::load(
+                    model_path,
+                    mode,
+                    window_samples,
+                    config.coreml_segmentation_batch,
+                )?))
+            }
             #[cfg(feature = "_cuda")]
             InferenceBackend::Cuda => SegmentationBackend::Cuda(Box::new(
                 CudaSegmentationBackend::load(model_path, mode, window_samples, config)?,

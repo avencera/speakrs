@@ -16,16 +16,16 @@
 //!
 //! ```toml
 //! # macOS (CoreML)
-//! speakrs = { version = "0.7", features = ["coreml"] }
+//! speakrs = { version = "0.8", features = ["coreml"] }
 //!
 //! # NVIDIA GPU
-//! speakrs = { version = "0.7", features = ["cuda"] }
+//! speakrs = { version = "0.8", features = ["cuda"] }
 //!
 //! # CPU
-//! speakrs = { version = "0.7", features = ["cpu"] }
+//! speakrs = { version = "0.8", features = ["cpu"] }
 //!
 //! # AMD GPU
-//! speakrs = { version = "0.7", features = ["migraphx"] }
+//! speakrs = { version = "0.8", features = ["migraphx"] }
 //! ```
 //!
 //! The `cpu`, `coreml` and `cuda` features run native backends, so a build with only those
@@ -365,7 +365,7 @@
 //! below every layer has a kernel, so the libraries aren't loaded.
 //!
 //! ```toml
-//! speakrs = { version = "0.7", features = ["cuda"] }
+//! speakrs = { version = "0.8", features = ["cuda"] }
 //! ```
 //!
 //! **Know your GPU? Use its feature for fewer dependencies and a smaller install.**
@@ -385,7 +385,7 @@
 //! | RTX 50 series | `cuda-rtx50` |
 //!
 //! ```toml
-//! speakrs = { version = "0.7", features = ["cuda-rtx40"] }
+//! speakrs = { version = "0.8", features = ["cuda-rtx40"] }
 //! ```
 //!
 //! On Windows the driver is `nvcuda.dll` from System32, and the `cuda` fallback opens
@@ -529,7 +529,7 @@ pub use hf_fetch::HubError;
 #[cfg(feature = "_backend")]
 pub use hf_fetch::default_hub_cache_dir;
 #[cfg(feature = "_backend")]
-pub use inference::{CoreMlComputeUnits, ExecutionMode};
+pub use inference::{CoreMlComputeUnits, CoreMlSegmentationBatch, ExecutionMode};
 #[cfg(feature = "_backend")]
 pub use models::ModelBundle;
 #[cfg(feature = "online")]

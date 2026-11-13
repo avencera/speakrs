@@ -3,7 +3,7 @@ use std::num::NonZeroUsize;
 /// Model batch sizes supported by a loaded segmentation backend
 #[derive(Clone, Copy)]
 pub(super) enum Batching {
-    #[cfg(any(feature = "migraphx", test))]
+    #[cfg(any(feature = "migraphx", feature = "coreml", test))]
     Single,
     #[cfg(any(feature = "cpu", test))]
     Useful(NonZeroUsize),
@@ -28,7 +28,7 @@ pub(super) struct BatchPlan {
 impl Batching {
     pub(super) fn plan(self, remaining: NonZeroUsize, _delivery: Delivery) -> BatchPlan {
         match self {
-            #[cfg(any(feature = "migraphx", test))]
+            #[cfg(any(feature = "migraphx", feature = "coreml", test))]
             Self::Single => BatchPlan {
                 useful: NonZeroUsize::MIN,
                 model: NonZeroUsize::MIN,
