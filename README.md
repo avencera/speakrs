@@ -483,10 +483,10 @@ feature enables downloads; local model loading works without it.
 
 ## Releases
 
-A `v*` tag publishes the Python wheels to PyPI and creates a GitHub release; CI
-doesn't publish the crates to crates.io. The release holds the
-[`speakrs` command](#command-line) for Linux x86_64, Linux arm64, Apple
-silicon and Windows x86_64, each archive with a SHA-256 checksum, and the
+A `v*` tag publishes the Python wheels to PyPI, then `speakrs` and its
+`speakrs-ptx-*` crates to crates.io, and creates a GitHub release. The release
+holds the [`speakrs` command](#command-line) for Linux x86_64, Linux arm64,
+Apple silicon and Windows x86_64, each archive with a SHA-256 checksum, and the
 `install.sh` that installs it on Linux and macOS. To cut one:
 
 1. Bump `version` in `Cargo.toml` (the `[package]` and `[workspace.package]`
@@ -506,6 +506,12 @@ the tag doesn't match the crate version or `CHANGELOG.md` has no entry for it.
 Each archive's binary must diarize a test file before it uploads. The release
 stays a draft until every archive and `install.sh` upload, then it's published
 as the latest release.
+
+The [Package workflow](.github/workflows/package.yml) publishes to TestPyPI and
+installs that release on each platform before the `pypi` environment's reviewer
+approves PyPI, and crates.io follows PyPI. PyPI, TestPyPI and crates.io trust
+the workflow through OIDC, so no token is stored. A crate version already on
+crates.io is skipped, so rerunning the failed jobs finishes a partial release.
 
 ## [Contributing](CONTRIBUTING.md)
 
