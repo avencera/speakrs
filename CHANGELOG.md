@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Add `DiarizationResult::speaker_centroids` and `SpeakerCentroid`, for matching speakers across recordings: each speaker label in `segments` and `exclusive_segments` gets the L2-normalised mean of the chunk embeddings clustered into it, skipping unassigned slots and non-finite embeddings, with the number of embeddings averaged and the speaker's speech seconds in `segments`. A label gets no centroid only when no finite embedding went into its cluster
+- Add `DiarizationResult::speaker_centroids` and `SpeakerCentroid`, for matching speakers across recordings: each speaker label in `segments` and `exclusive_segments` gets the L2-normalised mean of the chunk embeddings clustered into it, skipping unassigned slots and non-finite embeddings, with the number of embeddings averaged and the speaker's speech seconds in `segments`. Only labels in `segments` get a centroid, and one gets none when no finite embedding went into its cluster or its embeddings average to zero
 
 ## [0.8.0] - 2026-11-13
 

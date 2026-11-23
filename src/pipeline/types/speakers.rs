@@ -1,7 +1,7 @@
 use ndarray::Array2;
 
 use super::DiarizationResult;
-use crate::segment::speaker_label;
+use crate::segment::{Segment, speaker_label};
 
 /// One speaker's voice in a recording, for matching speakers across recordings
 #[derive(Debug, Clone, PartialEq)]
@@ -27,9 +27,11 @@ impl DiarizationResult {
     /// assigned to its cluster, skipping unassigned slots and non-finite embeddings,
     /// then L2-normalises the mean
     ///
-    /// A label in `segments` has no centroid when no finite embedding went into its
-    /// cluster, as with the empty column reconstruction adds when a frame holds more
-    /// speakers than clustering kept
+    /// Every centroid's label appears in `segments`. A cluster whose segments
+    /// activity cleanup removed has no centroid. A label in `segments` has no
+    /// centroid when no finite embedding went into its cluster, as with the empty
+    /// column reconstruction adds when a frame holds more speakers than clustering
+    /// kept, or when its embeddings average to zero
     pub fn speaker_centroids(&self) -> Vec<SpeakerCentroid> {
         let width = self.embeddings.shape()[2];
         let num_clusters = self
@@ -73,13 +75,17 @@ impl DiarizationResult {
                     return None;
                 }
 
+                // activity cleanup can remove every frame of a cluster, and a
+                // speaker with no segments is not in the diarization
                 let label = speaker_label(cluster);
-                let speech_seconds = self
+                let mut speaker_segments = self
                     .segments
                     .iter()
                     .filter(|segment| segment.speaker == label)
-                    .map(crate::segment::Segment::duration)
-                    .sum();
+                    .peekable();
+                speaker_segments.peek()?;
+
+                let speech_seconds = speaker_segments.map(Segment::duration).sum();
                 Some(SpeakerCentroid {
                     embedding: sum.iter().map(|value| (value / norm) as f32).collect(),
                     label,
@@ -157,6 +163,33 @@ mod tests {
                     speech_seconds: 1.0,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn skips_clusters_without_segments_or_direction() {
+        // activity cleanup removed every frame of cluster 1, and cluster 2's
+        // embeddings cancel out
+        let hard_clusters = array![[0, 1, 2], [0, 1, 2]];
+        let embeddings = array![
+            [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]],
+            [[1.0, 0.0], [0.0, 1.0], [-1.0, -1.0]],
+        ];
+        let segments = vec![
+            Segment::new(0.0, 1.0, "SPEAKER_00"),
+            Segment::new(1.0, 2.0, "SPEAKER_02"),
+        ];
+
+        let centroids = result(hard_clusters, embeddings, segments).speaker_centroids();
+
+        assert_eq!(
+            centroids,
+            [SpeakerCentroid {
+                label: "SPEAKER_00".to_owned(),
+                embedding: vec![1.0, 0.0],
+                chunk_count: 2,
+                speech_seconds: 1.0,
+            }]
         );
     }
 
