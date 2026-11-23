@@ -40,6 +40,11 @@ impl std::fmt::Display for Segment {
     }
 }
 
+/// The label of activation column and cluster `speaker_idx`, such as `SPEAKER_00`
+pub(crate) fn speaker_label(speaker_idx: usize) -> String {
+    format!("SPEAKER_{speaker_idx:02}")
+}
+
 /// Convert binary activation matrix to speaker segments
 pub fn to_segments(
     activations: &Array2<f32>,
@@ -50,7 +55,7 @@ pub fn to_segments(
     let mut segments = Vec::new();
 
     for speaker_idx in 0..num_speakers {
-        let label = format!("SPEAKER_{speaker_idx:02}");
+        let label = speaker_label(speaker_idx);
         let column = activations.column(speaker_idx);
 
         if column.is_empty() {

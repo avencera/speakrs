@@ -2,6 +2,7 @@ mod data;
 mod error;
 mod extract;
 mod layout;
+mod speakers;
 
 pub(crate) use data::FrameActivations;
 #[cfg(feature = "_metrics")]
@@ -23,3 +24,4 @@ pub(super) use extract::{
 pub(super) use layout::{ChunkLayout, chunk_audio_raw};
 #[cfg(test)]
 pub(super) use layout::{chunk_start_frames, total_output_frames};
+pub use speakers::SpeakerCentroid;

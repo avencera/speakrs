@@ -292,6 +292,80 @@ fn owned_pipeline_from_dir() {
     assert!(result.rttm("file1").contains("SPEAKER file1 1"));
 }
 
+/// The label a segment carries names the cluster whose centroid it gets: each
+/// label's own speech, cut out and embedded on its own, sits closest to that label's
+/// centroid
+#[cfg(feature = "cpu")]
+#[test]
+fn speaker_centroids_match_their_labels_speech() {
+    let models_dir = model_fixture_dir();
+    let mut pipeline = OwnedDiarizationPipeline::from_dir(&models_dir, ExecutionMode::Cpu).unwrap();
+    let mut emb_model =
+        EmbeddingModel::new(models_dir.join("wespeaker-voxceleb-resnet34.onnx")).unwrap();
+    let (samples, sr) = load_wav_samples(&fixture_path("test.wav"));
+    assert_eq!(sr, 16_000);
+
+    let result = pipeline.run(&samples).unwrap();
+    let centroids = result.speaker_centroids();
+    let labels: Vec<&str> = centroids
+        .iter()
+        .map(|centroid| centroid.label.as_str())
+        .collect();
+    assert!(labels.len() >= 2, "fixture has one speaker: {labels:?}");
+    for segment in &result.exclusive_segments {
+        assert!(
+            labels.contains(&segment.speaker.as_str()),
+            "{segment} has no centroid"
+        );
+    }
+
+    // the embedding model reads one 10 s window
+    let window = 10 * sr as usize;
+    for centroid in &centroids {
+        let norm: f32 = centroid.embedding.iter().map(|value| value * value).sum();
+        assert!((norm - 1.0).abs() < 1e-4, "{} norm² {norm}", centroid.label);
+        assert!(centroid.chunk_count > 0 && centroid.speech_seconds > 0.0);
+
+        // the label's exclusive speech, repeated to fill the window
+        let speech: Vec<f32> = result
+            .exclusive_segments
+            .iter()
+            .filter(|segment| segment.speaker == centroid.label)
+            .flat_map(|segment| {
+                let start = (segment.start * f64::from(sr)) as usize;
+                let end = ((segment.end * f64::from(sr)) as usize).min(samples.len());
+                &samples[start.min(end)..end]
+            })
+            .copied()
+            .collect();
+        assert!(
+            !speech.is_empty(),
+            "{} has no exclusive speech",
+            centroid.label
+        );
+        let audio: Vec<f32> = speech.iter().copied().cycle().take(window).collect();
+
+        let embedding = emb_model.embed(&audio).unwrap();
+        let similarity = |other: &speakrs::SpeakerCentroid| {
+            let dot: f32 = embedding
+                .iter()
+                .zip(&other.embedding)
+                .map(|(a, b)| a * b)
+                .sum();
+            dot / embedding.dot(&embedding).sqrt()
+        };
+        let scores: Vec<(&str, f32)> = centroids
+            .iter()
+            .map(|other| (other.label.as_str(), similarity(other)))
+            .collect();
+        let nearest = scores
+            .iter()
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+            .unwrap();
+        assert_eq!(nearest.0, centroid.label, "{scores:?}");
+    }
+}
+
 #[cfg(all(feature = "online", feature = "cpu"))]
 /// Requires models deployed to HF (`cargo xtask models deploy`)
 #[test]

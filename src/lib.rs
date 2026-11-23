@@ -450,7 +450,8 @@
 //! - [`OwnedDiarizationPipeline`]: pipeline entry point
 //! - [`QueueSender`] and [`QueueReceiver`]: background worker interface
 //! - [`QueueConfig`]: in-process queue capacity
-//! - [`DiarizationResult`]: frame-level activations, segments, clusters, embeddings, RTTM
+//! - [`DiarizationResult`]: frame-level activations, segments, clusters, embeddings, RTTM,
+//!   and speaker centroids for matching speakers across recordings ([`SpeakerCentroid`])
 //! - [`PipelineConfig`] and [`RuntimeConfig`]: tuning knobs
 //! - `ModelManager`: model download when `online` is enabled
 //! - [`Segment`]: a single speaker turn
@@ -545,7 +546,7 @@ pub use pipeline::{
     PipelineBuilder, PipelineConfig, PipelineError, QueueConfig, QueueError, QueueReceiver,
     QueueReceiverIter, QueueSender, QueuedDiarizationJobId, QueuedDiarizationRequest,
     QueuedDiarizationResult, ReconstructError, ResponsibilityInitialization, RuntimeConfig,
-    VbxConfig, VbxConfigError,
+    SpeakerCentroid, VbxConfig, VbxConfigError,
 };
 #[cfg(feature = "_backend")]
 pub use segment::Segment;
