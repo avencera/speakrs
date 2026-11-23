@@ -451,7 +451,7 @@
 //! - [`QueueSender`] and [`QueueReceiver`]: background worker interface
 //! - [`QueueConfig`]: in-process queue capacity
 //! - [`DiarizationResult`]: frame-level activations, segments, clusters, embeddings, RTTM,
-//!   and a centroid per speaker for matching speakers across recordings ([`SpeakerCentroid`])
+//!   and speaker centroids for matching speakers across recordings ([`SpeakerCentroid`])
 //! - [`PipelineConfig`] and [`RuntimeConfig`]: tuning knobs
 //! - `ModelManager`: model download when `online` is enabled
 //! - [`Segment`]: a single speaker turn
