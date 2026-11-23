@@ -35,7 +35,7 @@ pub(crate) use types::FrameActivations;
 pub use types::InferenceStageTimings;
 pub use types::{
     BatchInput, ChunkEmbeddings, ChunkSpeakerClusters, DecodedSegmentations, DiarizationResult,
-    DiscreteDiarization, InferenceArtifacts, PipelineError, SpeakerCountTrack,
+    DiscreteDiarization, InferenceArtifacts, PipelineError, SpeakerCentroid, SpeakerCountTrack,
 };
 use types::{ChunkLayout, EmbeddingPath, InferencePath, RawSegmentationWindows};
 #[cfg(test)]

@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- Add `DiarizationResult::speaker_centroids` and `SpeakerCentroid`, for matching speakers across recordings: each speaker label in `segments` and `exclusive_segments` gets the L2-normalised mean of the chunk embeddings clustered into it, skipping unassigned slots and non-finite embeddings, with the number of embeddings averaged and the speaker's speech seconds in `segments`. A label gets no centroid only when no finite embedding went into its cluster
+
 ## [0.8.0] - 2026-11-13
 
 - Add the `speakrs diarize` command, which decodes WAV, FLAC, MP3, Ogg and M4A files and prints RTTM, with the same options as the Python package's command. Each GitHub release ships it for Linux x86_64 with CPU and CUDA, Linux arm64 with CPU (both glibc 2.28 or newer), and Apple silicon with CPU and CoreML, with SHA-256 checksums and an `install.sh` that installs it into `~/.local/bin`: `curl -LSfs https://github.com/avencera/speakrs/releases/latest/download/install.sh | sh`
